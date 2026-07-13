@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<!DOCTYPE suppressions PUBLIC
+    "-//Checkstyle//DTD SuppressionFilter Configuration 1.2//EN"
+    "https://checkstyle.org/dtds/suppressions_1_2.dtd">
+<suppressions>
+    <!-- Codegen output (codegen/generate.py): dense machine-emitted math expressions that
+         exceed the 200-char line limit. These files are GENERATED — DO NOT EDIT / hand-wrap;
+         they are re-rendered from the residual specs, so the length is suppressed here rather
+         than by editing the generated Java. -->
+    <suppress files="[/\\](OpenBranchFormulas|OpenBranchCurrentMagnitudeFormulas|HvdcAcEmulationFormulas)\.java"
+              checks="LineLength"/>
+
+    <!-- GPU native-boundary code deliberately catches broad exceptions (RuntimeException /
+         Exception / Throwable) so a device/driver/cuDSS failure at runtime falls back to the
+         CPU path instead of aborting the load flow. A narrow catch cannot cover arbitrary JNI
+         failures, so IllegalCatch is suppressed for the GPU sources. -->
+    <suppress files="[/\\]ac[/\\]equations[/\\]vector[/\\]gpu[/\\].*\.java" checks="IllegalCatch.*"/>
+    <suppress files="[/\\]Gpu[^/\\]*\.java" checks="IllegalCatch.*"/>
+
+    <!-- GpuAcDataExtractor.extract is a single cohesive pass that builds every per-family flat
+         pack in one place; splitting it would scatter tightly-coupled index bookkeeping. -->
+    <suppress files="[/\\]GpuAcDataExtractor\.java" checks="MethodLength"/>
+</suppressions>

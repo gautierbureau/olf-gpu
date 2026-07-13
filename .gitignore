@@ -1,0 +1,9 @@
+target/
+native/build/
+native/cudss-cache/
+native/local-env.sh
+*.o
+*.class
+.idea/
+*.iml
+__pycache__/

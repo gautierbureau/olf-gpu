@@ -1,0 +1,71 @@
+# Copyright (c) 2026, RTE (http://www.rte-france.com) - SPDX-License-Identifier: MPL-2.0
+#
+# Guard for the java2cuda equation codegen. The hand-written OLF equation Java
+# (src/main/java, byte-identical to upstream) is the SINGLE SOURCE OF TRUTH; the
+# fused CUDA kernels + scatter tables in native/cuda are parsed and transpiled
+# from it (codegen/java2cuda, stdlib parser + one Jinja template — no SymPy:
+# OLF hand-writes both the values and the Jacobian, nothing is derived).
+#
+#   render-up-to-date  re-parses + re-renders and fails on any diff — catches a
+#                      hand-edit of a generated kernel, a stale render, AND an
+#                      upstream formula change that was not re-rendered (that is
+#                      the drift alert this architecture is built around).
+#   formulas-proven    numeric, formatting-robust: parsed exprs == the frozen
+#                      golden manifest (1e-12), a finite-difference audit of
+#                      OLF's own hand-written Jacobian, the rendered kernels ==
+#                      the committed ones, and the scatter stamps == the real
+#                      equation-system wiring.
+#
+# This is the ONLY place python touches the project; the normal Maven build and
+# every contributor stay python-free.
+name: codegen-check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  render-up-to-date:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install pinned Jinja
+        run: pip install -r codegen/requirements.txt
+
+      - name: Render the fused kernels + scatter tables from the OLF Java
+        run: python3 codegen/java2cuda/java2cuda.py
+
+      - name: Alert if generated kernels are stale or hand-edited
+        run: |
+          if ! git diff --quiet; then
+            echo "::warning::native/cuda kernels differ from a fresh render of the OLF Java."
+            echo "If you changed a formula method in src/main/java: run codegen/regenerate.sh and commit."
+            echo "If a kernel file was hand-edited: revert it — kernels are generated from the Java."
+            git --no-pager diff --stat
+            git --no-pager diff
+            exit 1
+          fi
+          echo "Generated kernels are up to date with the OLF Java."
+
+  formulas-proven:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install pinned Jinja
+        run: pip install -r codegen/requirements.txt
+
+      - name: Prove (parse==golden, FD audit, rendered==committed, rendered==golden)
+        run: python3 codegen/java2cuda/prove.py
+
+      - name: Check scatter stamps match OLF equation-system wiring
+        run: python3 codegen/check_scatter.py

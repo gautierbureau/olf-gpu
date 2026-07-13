@@ -1,0 +1,8 @@
+# Copyright (c) 2026, RTE (http://www.rte-france.com) - SPDX-License-Identifier: MPL-2.0
+#
+# Deps for the equation codegen (java2cuda). NOT needed for a normal Maven build —
+# only to regenerate the fused CUDA kernels and run the proof. The parser and the
+# proof are pure stdlib; Jinja renders the one kernel template. The pin is a
+# courtesy, not load-bearing (the CI git-diff guard is an alert, not a determinism
+# contract).
+jinja2==3.0.3

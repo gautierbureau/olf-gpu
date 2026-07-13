@@ -292,27 +292,12 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         return gen != null && gen.getBus() != null && !gen.getBus().isDisabled() ? gen : null;
     }
 
-    /** The shunt ids a contingency shifts. OLF keeps {@code PropagatedContingency.shuntIdsToShift}
-     *  private with no accessor — the fork-based prototype added a getter; as a non-invasive
-     *  extension we read the field reflectively instead. TODO upstream a getter
-     *  (a one-line powsybl-open-loadflow PR) and drop this. */
-    @SuppressWarnings("unchecked")
-    private static Set<String> shuntIdsToShift(PropagatedContingency pc) {
-        try {
-            java.lang.reflect.Field f = PropagatedContingency.class.getDeclaredField("shuntIdsToShift");
-            f.setAccessible(true);
-            return ((Map<String, ?>) f.get(pc)).keySet();
-        } catch (ReflectiveOperationException e) {
-            throw new IllegalStateException("PropagatedContingency.shuntIdsToShift not accessible — OLF version mismatch?", e);
-        }
-    }
-
     /** The single fixed shunt a contingency disconnects (which the GPU batch can mask off like a branch), or
      *  null if it is not a clean full disconnection of a packed fixed shunt — a multi-element contingency, a
      *  voltage-controlling/SVC shunt the GPU does not pack, or a multi-compensator aggregate the mask cannot
      *  partially remove (those fall through to the CPU). */
     private static LfShunt singleShuntOutage(LfNetwork net, PropagatedContingency pc) {
-        Set<String> shuntIds = shuntIdsToShift(pc);
+        Set<String> shuntIds = pc.getShuntIdsToShift().keySet();
         if (shuntIds.size() != 1 || !pc.getBranchIdsToOpen().isEmpty()
                 || !pc.getGeneratorIdsToLose().isEmpty() || !pc.getBusIdsToLose().isEmpty()
                 || !pc.getLoadIdsToLose().isEmpty()) {

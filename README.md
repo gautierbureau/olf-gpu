@@ -38,7 +38,9 @@ Regenerate the kernels after an OLF formula change (needs an OLF checkout at OLF
 
 - `powsybl-core` / `powsybl-math-native`: this extension builds against the cuDSS-enabled
   forks (`CuDssMatrixFactory` + the `libmathcudss` JNI) — see the pom version properties.
-- `PropagatedContingency.shuntIdsToShift` has no public accessor upstream; read
-  reflectively in `GpuBatchedAcSecurityAnalysis` (candidate one-line upstream PR).
-- OLF's test-jar does not export `CommonTestConfig`/`ServiceParameterResolver`; vendored
-  under `src/test` (candidate upstream PR: two `<include>` lines).
+- `powsybl-open-loadflow`: built from the `olf-local-patches` branch — upstream main plus
+  ONE 4-line commit adding `PropagatedContingency.getShuntIdsToShift()` (candidate
+  upstream PR; the equation formulas remain byte-identical to upstream).
+- `CommonTestConfig`/`ServiceParameterResolver` are vendored under `src/test` (OLF's
+  test-jar does not export them; the copies must stay signature-compatible with the
+  `AbstractOpenSecurityAnalysisTest` shipped in OLF's test-jar, which links against them).

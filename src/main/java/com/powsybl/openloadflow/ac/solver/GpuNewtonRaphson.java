@@ -123,6 +123,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         }
     }
 
+    /** System property: fall back to the CPU Newton-Raphson when the GPU path rejects the
+     *  network or fails at runtime (default true). Set to false to fail loudly instead. */
+    public static final String CPU_FALLBACK_PROPERTY = "olf.gpu.cpuFallback";
+
     private final NativeContext context = new NativeContext();
 
     private final Invalidation invalidation = new Invalidation();
@@ -236,11 +240,23 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             status = result.isStop() ? AcSolverStatus.CONVERGED : AcSolverStatus.MAX_ITERATION_REACHED;
             LOGGER.debug("GPU Newton-Raphson: {} iterations, |f(x)|={}, {}", iterations, result.getNorm(), status);
         } catch (RuntimeException e) {
-            LOGGER.error("GPU Newton-Raphson failed: {}", e.toString());
             // the native context may be mid-iteration inconsistent — rebuild next run
             GpuAcNewtonSolver.destroyContext(context.handle.getAndSet(0));
             cachedData = null;
             invalidation.structureDirty = true;
+            if (Boolean.parseBoolean(System.getProperty(CPU_FALLBACK_PROPERTY, "true"))) {
+                // Graceful degradation: anything the GPU path cannot handle — an extractor
+                // validation rejection (unsupported variable/equation/term, remote control,
+                // zero-impedance shapes) or a native/device error — is re-run on the standard
+                // CPU Newton-Raphson with the SAME equation system and parameters. This makes
+                // the GPU solver safe as a DEFAULT (e.g. the SA base load flow): never wrong,
+                // only un-accelerated.
+                LOGGER.warn("GPU Newton-Raphson unavailable for this run ({}); falling back to the CPU Newton-Raphson",
+                        e.toString());
+                return new NewtonRaphson(network, parameters, equationSystem, j, targetVector, equationVector,
+                        detailedReport).run(voltageInitializer, reportNode);
+            }
+            LOGGER.error("GPU Newton-Raphson failed: {}", e.toString());
             status = AcSolverStatus.SOLVER_FAILED;
         }
 

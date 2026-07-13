@@ -29,6 +29,7 @@ import com.powsybl.openloadflow.ac.solver.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.ac.solver.GpuBatchedSecurityAnalysisSolver.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.GpuBatchedSecurityAnalysisSolver.BatchScenarioResult;
 import com.powsybl.openloadflow.ac.solver.GpuNewtonRaphsonFactory;
+import com.powsybl.openloadflow.ac.solver.NewtonRaphsonFactory;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
@@ -130,6 +131,19 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                     List<OperatorStrategy> operatorStrategies, List<Action> actions,
                                                     List<LimitReduction> limitReductions,
                                                     ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution) {
+        // STRUCTURAL: run the base (pre-contingency) load flow on the GPU solver when the device
+        // is available and the user left the default CPU Newton-Raphson. This absorbs the one-time
+        // CUDA init into the base phase (so the batched contingency pass that follows is warm) and
+        // solves the base faster — the same base-on-GPU placement gpusim2grid has natively. An
+        // explicit non-default solver choice (e.g. FAST_DECOUPLED) is respected; a network the GPU
+        // extractor rejects degrades to the CPU solver inside GpuNewtonRaphson (cpuFallback).
+        if (GpuAcNewtonSolver.isAvailable()
+                && acParameters.getSolverFactory().getClass() == NewtonRaphsonFactory.class) {
+            LOGGER.info("GPU-batched SA: running the base load flow on the GPU Newton-Raphson "
+                    + "(absorbs CUDA init; CPU fallback inside the solver)");
+            acParameters.setSolverFactory(new GpuNewtonRaphsonFactory(),
+                    securityAnalysisParameters.getLoadFlowParameters());
+        }
         // Capture this component's network + contingencies; the batch is precomputed once the
         // pre-contingency load flow has converged (afterPreContingencySimulation hook).
         this.currentLfNetwork = lfNetwork;

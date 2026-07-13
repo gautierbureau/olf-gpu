@@ -69,3 +69,26 @@ above):
 K ≈ 10 to converge; the AC hot-start (production path) converges at K = 4, which is why
 the warm headline above is ~8.5 ms/scenario. Per-iteration cost scales linearly with K,
 confirming the cost is the device Newton loop, not per-pass overhead.
+
+## 2026-07-13 rerun — cuDSS 0.8.0, batch 500, vs gpusim2grid (renamed powerflow_gpu)
+
+Both sides on cuDSS **0.8.0**, UBATCH, FP64, K=4, **batch/chunk 500**, the SAME 500
+matched non-islanding contingencies, RTX A1000. Theirs = gpusim2grid built from source
+against the same 0.8.0 install, matched bench ported to it
+(`gpusim2grid/benchmarks/matched_contingency_bench.py`).
+
+|                                   | ours (this repo)                  | gpusim2grid                          |
+|-----------------------------------|-----------------------------------|--------------------------------------|
+| contingency phase (steady-state)  | **4.87 ms/ctg** (205 ctg/s)       | chunks **3.76** (total incl one-time preprocess/analysis 4.29, 233 ctg/s) |
+| TRUE cold end-to-end              | **11.41 ms/ctg** (5 705 ms = CPU base LF 979 + cold GPU SA 4 726, CUDA init inside) | **8.81 ms/ctg** (4 403 ms = base_case 2 256, GPU base + CUDA init, + total 2 147) |
+| convergence                       | 499/500 @1e-6, med ‖F‖∞ 3.6e-12   | 499/500 @1e-6, med ‖F‖∞ 8.6e-12      |
+
+- Cold gap **1.30×** (June 2026, cuDSS 0.7.1/batch 32: ours 16.05 vs theirs 11.93 =
+  1.35×) — both sides gained ~35–40% from 0.8.0 + large uniform batches; the RELATIVE
+  gap is structural and unchanged, per the June decomposition: base-solve placement
+  (our base LF on CPU ~1 s vs their ~0.4 s GPU base, which also absorbs CUDA init),
+  their smaller polar-formulation matrix (n = 17 036 vs our 18 482), host extraction.
+- The 0.8.0 batch-size cliff is CONFIRMED ON THEIR HARNESS TOO: at batch 32 on 0.8.0
+  their chunks are 16.28 ms/ctg (vs 6.56 on 0.7.1/June) — same per-launch fixed cost
+  we measured on our side (17.8 at MB=32). cuDSS 0.8.0 UBATCH demands large batches,
+  for everyone.

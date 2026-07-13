@@ -84,10 +84,14 @@ against the same 0.8.0 install, matched bench ported to it
 | convergence                       | 499/500 @1e-6, med ‖F‖∞ 3.6e-12   | 499/500 @1e-6, med ‖F‖∞ 8.6e-12      |
 
 - Cold gap **1.30×** (June 2026, cuDSS 0.7.1/batch 32: ours 16.05 vs theirs 11.93 =
-  1.35×) — both sides gained ~35–40% from 0.8.0 + large uniform batches; the RELATIVE
-  gap is structural and unchanged, per the June decomposition: base-solve placement
-  (our base LF on CPU ~1 s vs their ~0.4 s GPU base, which also absorbs CUDA init),
-  their smaller polar-formulation matrix (n = 17 036 vs our 18 482), host extraction.
+  1.35×) — both sides gained ~35–40% from 0.8.0 + large uniform batches. Measured
+  contributors on our side: base-solve placement (our base LF on CPU ~1 s vs their
+  ~0.4 s GPU base, which also absorbs CUDA init — since fixed: the SA base now runs
+  on the GPU solver) and host extraction; the residual chunk-speed difference is not
+  yet attributed and is our optimization backlog (fill kernels, per-iteration
+  readbacks, batching geometry). NB the two tools use DIFFERENT formulations (we run
+  OLF's own — that is the project; theirs is benchmark context, not a target): 1:1
+  parity is not required.
 - The 0.8.0 batch-size cliff is CONFIRMED ON THEIR HARNESS TOO: at batch 32 on 0.8.0
   their chunks are 16.28 ms/ctg (vs 6.56 on 0.7.1/June) — same per-launch fixed cost
   we measured on our side (17.8 at MB=32). cuDSS 0.8.0 UBATCH demands large batches,

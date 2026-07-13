@@ -35,7 +35,9 @@ two sides; phase-by-phase comparisons lie). Build the table: cold E2E ms/ctg, wa
 ms/ctg, convergence (n/500 @1e-6, med ‖F‖∞) — and diff against the recorded
 2026-07-13 rerun in `codegen/gpu_benchmark.md`:
 ours 11.41 vs theirs 8.81 cold (1.30×); warm 4.87 vs 3.76–4.29.
-The known structural gap: their GPU base solve (+CUDA-init placement), their smaller
-polar-formulation matrix (n=17036 vs 18482), our host extraction. A ratio drifting
-meaningfully above ~1.3× means WE regressed; below means we closed structural ground
-(report which lever moved).
+Measured contributors on our side: base placement (fixed — the SA base runs on the
+GPU solver since a94135a) and host extraction; the residual chunk-speed difference is
+OUR optimization backlog — do NOT attribute it to their formulation or matrix size
+(they run a different formulation by design; we keep OLF's — 1:1 parity not required).
+A ratio drifting meaningfully above the recorded one means WE regressed; below means
+we closed ground (report which lever moved).

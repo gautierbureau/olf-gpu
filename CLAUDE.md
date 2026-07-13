@@ -1,0 +1,138 @@
+# CLAUDE.md — powsybl-open-loadflow-gpu
+
+Context for sessions on this repo: a STANDALONE Maven extension for stock
+powsybl-open-loadflow — the GPU Newton-Raphson (AcSolver SPI `GPU_NEWTON_RAPHSON`),
+the GPU-batched N-1 security analysis (`OpenLoadFlowGpu` provider), and the
+**java2cuda equation codegen**. Full design: **`codegen/README.md`** +
+**`codegen/java2cuda/README.md`**; deltas vs stock dependencies: **`README.md`**.
+
+## Project split (history)
+
+This code lived on the `olf_gpu` branch of the OLF fork
+(`~/Projects/powsybl/powsybl-open-loadflow-3`, kept for history; that checkout is
+now on `main-3`, pristine upstream). The OLF DEPENDENCY is built from the
+`olf-local-patches` branch there (= upstream + ONE 4-line
+`PropagatedContingency.getShuntIdsToShift()` commit, candidate upstream PR) via the
+durable worktree `~/Projects/powsybl/tmp/olf-local-patches` (`mvn install` with
+`-s ~/Projects/powsybl/tmp/settings.xml`). Never build the dependency from
+`olf_gpu` — its jar would duplicate this project's classes. GPU classes live in
+`com.powsybl.openloadflow.*` SPLIT packages (classpath access to OLF internals);
+`CommonTestConfig`/`ServiceParameterResolver` are vendored under `src/test` (OLF's
+test-jar does not export them — keep them signature-compatible).
+
+## Architecture (current — java2cuda)
+
+**The hand-written OLF equation Java is the single source of truth.** The term
+classes in `src/main/java/.../ac/equations/` are BYTE-IDENTICAL to upstream main
+(never edit a formula there except as an upstream-able change); the fused CUDA
+kernels + scatter tables in `native/cuda/` are PARSED and TRANSPILED from them by
+`codegen/java2cuda/` (stdlib parser reusing `extract_golden.py`'s flattening +
+one Jinja template — **no SymPy**: OLF hand-writes values AND Jacobian, nothing
+is derived). Per-family specs `codegen/java2cuda/spec_<family>.py` are METADATA
+ONLY (files, trig params, hoisted helpers, CUDA identity, scatter stamp); the one
+declared formula exception is HVDC's `extern_methods` (powsybl-iidm's
+getHvdcLineLosses closed form, another repo).
+
+Families: closed_branch, open_branch, shunt, hvdc (the GPU fill kernels, with
+scatter) + closed_branch_i / open_branch_i (current magnitude — NEW GPU targets,
+no consumer yet; their derivatives are UNGUARDED at I=0 exactly like the CPU
+der() they replicate — upstream guards only calculateSensi).
+
+Parser mechanisms (all general, no special cases): local-decl + recursive
+helper/sibling inlining, per-file helper scope (defining file wins — HVDC's two
+isController, open-i's two gres/bres), alpha-equivalent cross-file dedup
+(open-branch shunt), overload selection by visibility (public i1 over private
+i1(...,theta)), helper hoisting to kernel locals with dependencies
+(shunt before reI/imI), Java `?:` ternaries pass through as C, abs→fabs.
+
+## Regenerate / verify
+
+```
+codegen/regenerate.sh      # prove -> check_scatter -> render into native/cuda
+mvn -o validate            # checkstyle — must be 0 violations
+```
+Proof (`codegen/java2cuda/prove.py`, stdlib): A parse == golden manifest
+(codegen/golden/, frozen from the ORIGINAL Java — a formula change fails loudly;
+update the golden deliberately with the re-render), B finite-difference audit of
+OLF's hand Jacobian (skipped for HVDC's intentional approximation), C rendered ==
+committed kernels (drift guard), D rendered == golden.
+`codegen/check_scatter.py` validates the stamps against the real term-class
+wiring. CI: `.github/workflows/codegen-check.yml` (render-up-to-date +
+formulas-proven). An upstream formula change ⇒ clean merge (files are upstream's
+own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
+
+## Conventions & gotchas
+
+- **Never hand-edit** `native/cuda/*.cuh` / scatter files — they are generated
+  from the Java (CI flags any diff).
+- The parser handles OLF's expression-only Java subset (locals + single return,
+  helper calls, boolean predicates, ternaries, Math/FastMath); anything else
+  fails the parse loudly.
+- Kernel bodies are the VERBATIM flattened Java text (last-ulp reassociation vs
+  the old SymPy kernels only; proven ≤2e-14 over 4M compiled points).
+- History: the first pipeline (Python residual specs + SymPy autodiff emitting
+  generated Java + CUDA) was retired at commits ac3eef3ea (Java reverted to
+  pristine upstream) + the step-2 commit; the goldens and extract_golden.py
+  survive from it. GPU NR returns the BEST visited iterate when maxIter is
+  exhausted (4c2b48cb9 — a plateau's last sample is a lottery; see
+  GpuLineSearchTest).
+
+## GPU runtime (native package + full Newton-Raphson)
+
+- Root `CMakeLists.txt` builds **libolfgpu** — the FULL GPU Newton-Raphson, the ONE
+  native library — into `target/classes/natives/<arch>/` (bundled in the jar, loaded
+  from the classpath via scijava `NativeLoader`, like powsybl-math-native). Static
+  cudart; cuDSS REQUIRED at build time and linked dynamically (never bundled — at
+  runtime `GpuAcNewtonSolver` preloads `libcublasLt/libcublas/libcudss` from
+  `olf.cudss.path`/`CUDSS_ROOT` + `olf.cuda.path`/`CUDA_HOME`; the bundled .so has NO
+  RPATH). `native/build-gpu.sh` builds it (cuDSS default `../cudss`); after `mvn clean`
+  just re-run it. `-Dolf.gpu.lib` overrides with an explicit path. (History: rung 1
+  was a separate fill-only dense closed-branch assembler — old `libolfgpu` +
+  `ClosedBranchGpuAssembler` — beside the full-NR `libolfgpunr`; the assembler was
+  removed and the full-NR lib renamed `libolfgpu` once rungs 2/3 subsumed it.)
+- `GpuAcNewtonSolver.solve(...)` = ONE JNI call for the whole NR loop: host builds the
+  fixed-pattern CSR (rows = equation columns, cols = variable rows — TRUE J, cuDSS solves
+  `J dx = -F` directly, no transpose games) from the generated scatter tables; the four
+  fused kernels fill J values + mismatch **in cuDSS's device arrays** each iteration;
+  per iteration only the n-double mismatch crosses PCIe. Scatter ROLE is folded into the
+  host-built dest arrays (`>=0` J slot, `-2-row` F row, `-1` skip) so kernels never index
+  the constexpr tables. Slack/PV `BUS_TARGET_V/PHI` rows are identity entries.
+- **AcSolver SPI**: `GpuNewtonRaphsonFactory` (`@AutoService`, name `GPU_NEWTON_RAPHSON`)
+  → a plain `LoadFlow.run` selects the GPU via
+  `OpenLoadFlowParameters.create(p).setAcSolverType(GpuNewtonRaphsonFactory.NAME)`.
+  `GpuNewtonRaphson` re-extracts per run (outer loops work: distributed slack, PV→PQ)
+  and CACHES the native solver context (fixed SUPERSET CSR pattern + device buffers +
+  cuDSS analysis, via `createContext`/`solveContext`/`destroyContext`, freed by a
+  `Cleaner`). Rows use the STABLE indexing (P row = the bus's `BUS_PHI` variable row,
+  Q row = `BUS_V` — OLF's renumbered equation columns are NOT in the GPU structure), so
+  PV→PQ switching is value-only: per solve, `extractRowMode` (power-eq vs slack/PV
+  identity mask, applied by the `applyRowMode` kernel after the fills: row zeroed,
+  diag 1, F = x−target) + `extractTargets` (stable order). ONE context build per
+  LoadFlow run, reruns solve in ~8–12 ms (PEGASE 9k); 13k ≈ 2.2× faster than KLU;
+  `GpuAcDataExtractor` VALIDATES the equation system and throws on anything uncovered
+  (non-BUS_V/PHI variables, unknown equation types/terms, disconnection-allowed
+  branches). The ENGINE's es is VECTORIZED (equation arrays for closed-branch terms;
+  `getEquation(bus,type)` resolves through arrays, inactive elements give column -1) —
+  validation allowlists the four `ac_{p,q}_array_closed_{1,2}` evaluators + per-element
+  scalar terms. GPU iterates to 1e-8 pu infnorm; final status judged by the CONFIGURED
+  stopping criteria CPU-side (so LoadFlow states differ from the CPU run only within
+  the criteria's slack, ~1e-5; no state-vector scaling / line search on device).
+- Tests: `GpuLoadFlowTest` (rung 3: plain LoadFlow.run GPU vs CPU per family network),
+  `GpuFullNewtonTest` (rung 2: one per family network; reference = OLF's own
+  `JacobianMatrix` Newton on the SAME equation system — any missed/duplicated term makes
+  states diverge). Both gated on `isAvailable()` → CUDA-free builds skip. Runner:
+  `native/cuda/run_gpu_tests.sh` (build + both suites).
+
+## Repo / git
+
+- THIS repo has no remote yet — commit locally.
+- The OLF fork checkout (`~/Projects/powsybl/powsybl-open-loadflow-3`): push only to
+  the `test6` remote (`gautierbureau/test6`), **never `origin`** (upstream powsybl);
+  explicit refspecs (`git push test6 <branch>:refs/heads/<branch>`).
+- powsybl-math-native (`~/Projects/powsybl/powsybl-math-native-1`, branch
+  `cudss_solver_1`) holds only the cuDSS JNI bindings (libmathcudss); powsybl-core
+  (`~/Projects/powsybl/powsybl-core-1`, branch `cudss_factory`) holds
+  CuDssMatrixFactory. Everything GPU/codegen lives HERE.
+- Builds use the isolated repo: `mvn -s ~/Projects/powsybl/tmp/settings.xml ...`
+  (never the shared ~/.m2; do not use `-o`).
+

@@ -12,6 +12,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -415,7 +416,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         // (transformer ratio distribution) and zero-impedance branches (bus couplers). A contingency that
         // outages a DISTR_RHO controller or a zero-impedance branch is routed to the CPU (below / via the
         // element mapper) because the fixed batch pattern cannot represent the resulting structural change.
-        GpuAcData gpuData = GpuAcDataExtractor.extract(network, equationSystem, distributedSlack, reactiveLimits);
+        GpuAcData gpuData = GpuAcDataCache.extract(network, equationSystem, distributedSlack, reactiveLimits);
         GpuAcActivation baseActivation = GpuAcActivation.fromEquationSystem(network, equationSystem);
         GpuBatchElementMapper elementMapper = new GpuBatchElementMapper(network);
 

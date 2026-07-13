@@ -96,3 +96,21 @@ against the same 0.8.0 install, matched bench ported to it
   their chunks are 16.28 ms/ctg (vs 6.56 on 0.7.1/June) — same per-launch fixed cost
   we measured on our side (17.8 at MB=32). cuDSS 0.8.0 UBATCH demands large batches,
   for everyone.
+
+## 2026-07-13 — base-on-GPU + shared extraction (cold-E2E levers, ours)
+
+Same setup as the rerun above (cuDSS 0.8.0, UBATCH, batch 500, K=4, 500 matched ctg):
+
+| ours, cold E2E                     | ms/ctg | total (base + SA)      |
+|------------------------------------|--------|------------------------|
+| CPU base (before)                  | 11.41  | 5 705 = 979 + 4 726    |
+| base on GPU (`a94135a`)            | 10.99  | 5 496 = 2 899 + 2 597  |
+| + shared extraction (GpuAcDataCache)| **10.78** | 5 391 = 2 843 + 2 548 |
+
+The base phase absorbs the ~2 s one-time CUDA init (so the SA phase is warm), and the
+batch reuses the base solver's host extraction through the invalidation-guarded
+GpuAcDataCache. Production (`GpuBatchedAcSecurityAnalysis`) does both automatically.
+vs gpusim2grid's 8.81: 1.22×. Remaining on our backlog: the residual chunk-speed
+difference (2 351 vs 1 881 ms — not yet attributed; profile fill kernels /
+per-iteration readbacks / batching geometry) and the duplicated NATIVE context
+(base solver vs batch contexts are separate device allocations/analyses; ~100 ms).

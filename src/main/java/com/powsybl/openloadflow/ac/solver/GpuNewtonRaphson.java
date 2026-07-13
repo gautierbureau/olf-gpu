@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.equations.EquationArray;
@@ -180,7 +181,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             long t0 = System.nanoTime();
             boolean rebuilt = false;
             if (invalidation.structureDirty) {
-                GpuAcData data = GpuAcDataExtractor.extract(network, equationSystem);   // validate + build
+                // validate + build, through the shared cache (the batched SA reuses this extraction)
+                GpuAcData data = GpuAcDataCache.extract(network, equationSystem, true, true);
                 // Three-level reconciliation, decided by the DATA not the event: a changed CSR pattern
                 // (index packs) is STRUCTURE -> rebuild + cuDSS re-analysis; an unchanged pattern with
                 // only changed element PARAMETERS (tap r1/a1, shunt b) is VALUES -> a cheap in-place

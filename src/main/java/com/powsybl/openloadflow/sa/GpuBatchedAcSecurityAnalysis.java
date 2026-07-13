@@ -70,10 +70,13 @@ import java.util.Set;
  * <p>This subclass intercepts at three seams: {@link #runSimulations} (capture the network +
  * contingency list), {@link #afterPreContingencySimulation} (precompute the batch from the
  * converged base state), and {@link #runPostContingencySimulation} (inject a precomputed
- * state, or delegate to the standard CPU path). Everything it cannot batch — multi-element
- * contingencies, outages that island buses, networks the GPU extractor rejects (zero
- * impedance / remote control), or scenarios that did not converge on the device — falls
- * through to {@code super}, so results are never wrong, only un-accelerated.
+ * state, or delegate to the standard CPU path). Islanding outages ARE batched: the
+ * islanded buses' rows are frozen to identity at 1&#8736;0 over the fixed superset pattern
+ * (per-scenario row mode), so the main component solves on the device and the islanded
+ * buses report a clean placeholder. Everything it cannot batch — multi-element
+ * contingencies, networks the GPU extractor rejects, or scenarios that did not converge
+ * on the device — falls through to {@code super}, so results are never wrong, only
+ * un-accelerated.
  *
  * <p>SCOPE (prototype): plain post-contingency power flow (no device-side outer loops —
  * distributed slack / reactive limits are not re-run on the GPU, so distributed active

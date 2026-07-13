@@ -25,10 +25,15 @@ import java.util.stream.Collectors;
  * contributions zeroed — this is only valid when the outage keeps the main synchronous
  * component intact (same buses, same slack/PV roles). A contingency that FRAGMENTS the
  * network (its branch is a bridge, so removing it islands buses from the main component)
- * cannot be represented as a value-only mask over the base pattern: the islanded buses
- * would be left with a structurally singular sub-block and a meaningless post-contingency
- * state. Those contingencies are REJECTED here (loudly), to be handled by the sequential
- * CPU security-analysis path instead of being silently mis-solved.
+ * cannot be represented as a mask ALONE: the islanded buses would be left with a
+ * structurally singular sub-block. With {@code handleIslanding} (the full-loadflow SA
+ * path) such an outage still QUALIFIES: the qualification carries its
+ * {@code islandedBuses}, whose variable rows the solver FREEZES to identity at a clean
+ * flat 1&#8736;0 (V=1 pu, phi=0) in that scenario's per-scenario row mode — the sub-block
+ * stays non-singular and the main component solves correctly (see
+ * GpuBatchedIslandingTest). Without it (the fixed-iteration benchmark mode) fragmenting
+ * outages are rejected (loudly) to the sequential CPU path instead of being silently
+ * mis-solved.
  *
  * <p>Qualification uses {@link LfNetwork#getConnectivity()}: for each closed-branch
  * contingency, a temporary edge removal reveals whether any vertex leaves the main

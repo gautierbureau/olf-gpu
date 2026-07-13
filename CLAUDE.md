@@ -9,13 +9,15 @@ the GPU-batched N-1 security analysis (`OpenLoadFlowGpu` provider), and the
 ## Project split (history)
 
 This code lived on the `olf_gpu` branch of the OLF fork
-(`~/Projects/powsybl/powsybl-open-loadflow-3`, kept for history; that checkout is
-now on `main-3`, pristine upstream). The OLF DEPENDENCY is built from the
-`olf-local-patches` branch there (= upstream + ONE 4-line
-`PropagatedContingency.getShuntIdsToShift()` commit, candidate upstream PR) via the
-durable worktree `~/Projects/powsybl/tmp/olf-local-patches` (`mvn install` with
-`-s ~/Projects/powsybl/tmp/settings.xml`). Never build the dependency from
-`olf_gpu` — its jar would duplicate this project's classes. GPU classes live in
+(`~/Projects/powsybl/powsybl-open-loadflow-3`, kept as a branch for history). That
+checkout is now THE working OLF worktree for this project: branch
+**`olf-local-patches`** = upstream main + the minimal OLF fixes the GPU extension
+needs (currently ONE 4-line `PropagatedContingency.getShuntIdsToShift()` commit,
+candidate upstream PR). Rebuild the dependency after changing it:
+`cd ../powsybl-open-loadflow-3 && mvn -s ~/Projects/powsybl/tmp/settings.xml
+-DskipTests -Dcheckstyle.skip -Dmaven.javadoc.skip -Dlicense.skip install`.
+It is also what `OLF_SRC` points at for the codegen parse. Never build the
+dependency from `olf_gpu` — its jar would duplicate this project's classes. GPU classes live in
 `com.powsybl.openloadflow.*` SPLIT packages (classpath access to OLF internals);
 `CommonTestConfig`/`ServiceParameterResolver` are vendored under `src/test` (OLF's
 test-jar does not export them — keep them signature-compatible).

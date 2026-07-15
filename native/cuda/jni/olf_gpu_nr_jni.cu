@@ -1220,6 +1220,53 @@ void refreshContextValues(SolverContext* ctx, int ncb, const double* cbIn, int n
 
 // Batched fill kernels: thread = element x scenario. Skip if the scenario has retired
 // (converged) or the element is outaged in that scenario. Values/mismatch are per-scenario.
+// ---------------------------------------------------------------------------------
+// Closed-branch PRECOMPUTED TRIG (OLF's own CPU optimization, on device): ksi and the
+// uncontrolled a1 are STATIC per element, so sin/cos(ksi) and sin/cos(ksi -/+ a1 -/+ A2)
+// are computed ONCE per element (initClosedBranchTrig, at context build). Per
+// (element, scenario) the fill then derives sinTheta1/2, cosTheta1/2 from ONE dynamic
+// sincos(dph) via the angle-addition identities:
+//   theta1 = (ksi - a1 + A2) + (ph2 - ph1) = C1 + d
+//   theta2 = (ksi + a1 - A2) - (ph2 - ph1) = C2 - d
+// — 1 dynamic sincos per branch-scenario instead of 3 (the fill kernel was
+// compute-bound on FP64 trig). A branch whose a1 IS a state variable (phase control,
+// a1col >= 0) falls back to direct sincos of theta1/theta2 (2 dynamic). The generated
+// evalClosedBranchPre/PreF routines take the six values as parameters — the same
+// precomputed-trig signature shape as OLF's Java methods.
+// ---------------------------------------------------------------------------------
+
+__global__ void initClosedBranchTrig(int ne, const double* in, double* trig) {
+    int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= ne) return;
+    const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
+    double ksi = p[5], a1 = p[7];
+    double* t = trig + e * 6;
+    sincos(ksi, t + 0, t + 1);                               // sinKsi, cosKsi
+    sincos(ksi - a1 + A2, t + 2, t + 3);                     // sinC1, cosC1
+    sincos(ksi + a1 - A2, t + 4, t + 5);                     // sinC2, cosC2
+}
+
+__device__ inline void closedBranchTrig(const double* t, bool a1FromState, double ksi, double a1,
+                                        double ph1, double ph2,
+                                        double& sinKsi, double& cosKsi,
+                                        double& sinTheta1, double& cosTheta1,
+                                        double& sinTheta2, double& cosTheta2) {
+    sinKsi = t[0];
+    cosKsi = t[1];
+    if (a1FromState) {                                       // controlled phase: C1/C2 statics invalid
+        sincos(ksi - a1 + A2 - ph1 + ph2, &sinTheta1, &cosTheta1);
+        sincos(ksi + a1 - A2 + ph1 - ph2, &sinTheta2, &cosTheta2);
+        return;
+    }
+    double sind;
+    double cosd;
+    sincos(ph2 - ph1, &sind, &cosd);
+    sinTheta1 = t[2] * cosd + t[3] * sind;                   // sin(C1 + d)
+    cosTheta1 = t[3] * cosd - t[2] * sind;
+    sinTheta2 = t[4] * cosd - t[5] * sind;                   // sin(C2 - d)
+    cosTheta2 = t[5] * cosd + t[4] * sind;
+}
+
 __global__ void fillClosedBranchBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                       const double* in, const int* ix, const int* dest,
                                       const double* x, double* vals, double* F,
@@ -1235,6 +1282,11 @@ __global__ void fillClosedBranchBatch(int ne, int nScenarios, int n, int nnz, in
     double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
     double r1 = q[9] >= 0 ? xs[q[9]] : p[6];                 // ratio/shift from state when controlled
     double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
+    // The FUSED fill is atomic/memory-bound on its 28 scattered outputs (measured:
+    // routing it through the precomputed-trig buffer made it SLOWER, 81 -> 100 ms —
+    // the extra static reads cost more than the saved FP64 trig), so it keeps the
+    // raw-angle assembler; the F-ONLY fill below IS compute-bound and uses the
+    // precomputed-trig path.
     double o[CB_NOUT];
     evalClosedBranch(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0,
                      o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
@@ -1332,7 +1384,7 @@ __device__ void scatterAddF(int nres, const int* dest, const int* pos, const dou
 }
 
 __global__ void fillClosedBranchBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
-                                       const double* in, const int* ix, const int* dest,
+                                       const double* in, const int* ix, const int* dest, const double* trig,
                                        const double* x, double* F,
                                        const char* disabled, const char* active) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1346,9 +1398,18 @@ __global__ void fillClosedBranchBatchF(int ne, int nScenarios, int n, int nnz, i
     double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
     double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
     double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
+    double sinKsi;
+    double cosKsi;
+    double sinTheta1;
+    double cosTheta1;
+    double sinTheta2;
+    double cosTheta2;
+    closedBranchTrig(trig + e * 6, q[8] >= 0, p[5], a1, ph1, ph2,
+                     sinKsi, cosKsi, sinTheta1, cosTheta1, sinTheta2, cosTheta2);
     double o[4];
-    evalClosedBranchF(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0,
-                      o + 0, o + 1, o + 2, o + 3);
+    evalClosedBranchPreF(p[0], p[1], p[2], p[3], p[4], v1, r1, v2,
+                         sinKsi, sinTheta1, cosTheta1, cosKsi, sinTheta2, cosTheta2, 0,
+                         o + 0, o + 1, o + 2, o + 3);
     const int pos[4] = {0, 7, 14, 21};
     scatterAddF(4, dest + e * CB_NOUT, pos, o, F + (size_t) s * n);
 }
@@ -1842,6 +1903,7 @@ struct BatchSolverContext {
     int cbOffset = 0, obOffset = 0, shOffset = 0, hvOffset = 0;   // element-mask offsets per family
     std::vector<int> rowMap;
     Family cb, ob, sh, hv;                                   // SHARED across scenarios (structure)
+    DeviceBuf cbTrig;                                        // per closed-branch STATIC trig (6 doubles: sinKsi cosKsi sinC1 cosC1 sinC2 cosC2)
     // DISTR_Q (remote/distributed generator voltage control): weighted reactive-sum rows assembled from
     // closed/open-branch and shunt q contributions. SHARED across scenarios (the controller structure is
     // fixed); the per-scenario disable mask drops an outaged contributor's term (kinds 0/2 = closed/open).
@@ -1999,6 +2061,10 @@ BatchSolverContext* createBatchContext(int n, int nScenarios, int mode,
     ctx->dRowPtr.upload(rowPtr.data(), (n + 1) * sizeof(int));
     ctx->dColIdx.upload(colIdx.data(), ctx->nnz * sizeof(int));
     setupFamily(ctx->cb, ncb, cbIn, 8, cbIdx, 10, CB_SCATTER, CB_NOUT, resolveCb, pos);
+    if (ncb) {                                               // per-element static trig (OLF's precomputed-trig shape)
+        ctx->cbTrig.alloc(static_cast<size_t>(ncb) * 6 * sizeof(double));
+        initClosedBranchTrig<<<grid(ncb), BLOCK>>>(ncb, ctx->cb.in.as<double>(), ctx->cbTrig.as<double>());
+    }
     setupFamily(ctx->ob, nob, obIn, 7, obIdx, 6, OB_SCATTER, OB_NOUT, resolveOb, pos);
     setupFamily(ctx->sh, nsh, shIn, 2, shIdx, 3, SH_SCATTER, SH_NOUT, resolveSh, pos);
     setupFamily(ctx->hv, nhv, hvIn, 5, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pos);
@@ -2375,7 +2441,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         initFBatch<<<grid(n * nS), BLOCK>>>(n, nS, ctx->dTarget.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (ctx->cb.ne) {
             if (fOnly) {
-                fillClosedBranchBatchF<<<grid(ctx->cb.ne * nS), BLOCK>>>(ctx->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->cb.in.as<double>(), ctx->cb.ix.as<int>(), ctx->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+                fillClosedBranchBatchF<<<grid(ctx->cb.ne * nS), BLOCK>>>(ctx->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->cb.in.as<double>(), ctx->cb.ix.as<int>(), ctx->cb.dest.as<int>(), ctx->cbTrig.as<double>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
             } else {
                 fillClosedBranchBatch<<<grid(ctx->cb.ne * nS), BLOCK>>>(ctx->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->cb.in.as<double>(), ctx->cb.ix.as<int>(), ctx->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
             }

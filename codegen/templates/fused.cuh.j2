@@ -14,22 +14,37 @@
 {{ ns_open }}
 
 {{ consts_block }}
+// One device function per OLF Java method — SAME name, SAME signature, SAME body
+// (the CPU methods are the optimized precomputed-trig form; the family namespace
+// mirrors the Java class scoping). The eval* routines below only assemble calls,
+// exactly like AcNetworkVector on the CPU.
+namespace {{ family }} {
+{% for m in methods %}
+{{ fn_macro }} inline double {{ m.name }}({{ m.sig }}) {
+    return {{ m.body }};
+}
+{% endfor %}
 {%- for r in routines %}
 {{ r.doc }}
-{{ fn_macro }} void {{ r.name }}(
-{%- for row in param_rows %}
+{{ fn_macro }} inline void {{ r.name }}(
+{%- for row in r.param_rows %}
         {{ row }}
 {%- endfor %}
         int i,
         {%- for nm in r.outputs %}
-        double* {{ nm }}{{ "," if not loop.last else ") {" }}
+        double* {{ nm }}_out{{ "," if not loop.last else ") {" }}
         {%- endfor %}
     {%- for t in r.temps %}
     double {{ t.sym }} = {{ t.expr }};
     {%- endfor %}
     {%- for nm in r.outputs %}
-    {{ nm }}[i] = {{ r.out[nm] }};
+    {{ nm }}_out[i] = {{ r.calls[nm] }};
     {%- endfor %}
 }
 {% endfor %}
+}  // namespace {{ family }}
+{% for r in routines %}
+using {{ family }}::{{ r.name }};
+{%- endfor %}
+
 {{ ns_close }}

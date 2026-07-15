@@ -14,43 +14,75 @@
 namespace powsybl { namespace openloadflow {
 
 
+// One device function per OLF Java method — SAME name, SAME signature, SAME body
+// (the CPU methods are the optimized precomputed-trig form; the family namespace
+// mirrors the Java class scoping). The eval* routines below only assemble calls,
+// exactly like AcNetworkVector on the CPU.
+namespace hvdc {
+
+HVDC_FN inline double p1(double p0, double k, double lossFactor1, double lossFactor2, double r, double ph1, double ph2) {
+    return ((p0 + k * (ph1 - ph2)) >= 0) ? (p0 + k * (ph1 - ph2)) : -((1 - lossFactor2) * (((1 - lossFactor1) * fabs(p0 + k * (ph1 - ph2))) - (r * ((1 - lossFactor1) * fabs(p0 + k * (ph1 - ph2))) * ((1 - lossFactor1) * fabs(p0 + k * (ph1 - ph2))) / (1 * 1))));
+}
+
+HVDC_FN inline double dp1dph1(double p0, double k, double lossFactor1, double lossFactor2, double ph1, double ph2) {
+    return ((p0 + k * (ph1 - ph2)) >= 0) ? k : k * ((1 - lossFactor1) * (1 - lossFactor2));
+}
+
+HVDC_FN inline double dp1dph2(double p0, double k, double lossFactor1, double lossFactor2, double ph1, double ph2) {
+    return -(((p0 + k * (ph1 - ph2)) >= 0) ? k : k * ((1 - lossFactor1) * (1 - lossFactor2)));
+}
+
+HVDC_FN inline double p2(double p0, double k, double lossFactor1, double lossFactor2, double r, double ph1, double ph2) {
+    return ((p0 + k * (ph1 - ph2)) < 0) ? -(p0 + k * (ph1 - ph2)) : -((1 - lossFactor1) * (((1 - lossFactor2) * fabs(p0 + k * (ph1 - ph2))) - (r * ((1 - lossFactor2) * fabs(p0 + k * (ph1 - ph2))) * ((1 - lossFactor2) * fabs(p0 + k * (ph1 - ph2))) / (1 * 1))));
+}
+
+HVDC_FN inline double dp2dph1(double p0, double k, double lossFactor1, double lossFactor2, double ph1, double ph2) {
+    return ((p0 + k * (ph1 - ph2)) < 0) ? -k : -k * ((1 - lossFactor1) * (1 - lossFactor2));
+}
+
+HVDC_FN inline double dp2dph2(double p0, double k, double lossFactor1, double lossFactor2, double ph1, double ph2) {
+    return -(((p0 + k * (ph1 - ph2)) < 0) ? -k : -k * ((1 - lossFactor1) * (1 - lossFactor2)));
+}
 
 // FUSED per-element kernel body: one routine computes the two HVDC AC-emulation
 // injections p1/p2 + their four (approximated, loss-derivative-neglecting) angle
 // derivatives for one hvdc, writing into Struct-of-Arrays at index i. The control
 // side is piecewise on the sign of rawP = p0 + k*(ph1 - ph2) — branchless ternaries,
 // no trig; rawP is shared as a kernel local.
-HVDC_FN void evalHvdc(
+HVDC_FN inline void evalHvdc(
         double p0, double k, double lossFactor1, double lossFactor2, double r,
         double ph1, double ph2,
         int i,
-        double* p1,
-        double* dp1dph1,
-        double* dp1dph2,
-        double* p2,
-        double* dp2dph1,
-        double* dp2dph2) {
-    double rawP = p0 + k * (ph1 - ph2);
-    p1[i] = (rawP >= 0) ? rawP : -((1 - lossFactor2) * (((1 - lossFactor1) * fabs(rawP)) - (r * ((1 - lossFactor1) * fabs(rawP)) * ((1 - lossFactor1) * fabs(rawP)) / (1 * 1))));
-    dp1dph1[i] = (rawP >= 0) ? k : k * ((1 - lossFactor1) * (1 - lossFactor2));
-    dp1dph2[i] = -((rawP >= 0) ? k : k * ((1 - lossFactor1) * (1 - lossFactor2)));
-    p2[i] = (rawP < 0) ? -rawP : -((1 - lossFactor1) * (((1 - lossFactor2) * fabs(rawP)) - (r * ((1 - lossFactor2) * fabs(rawP)) * ((1 - lossFactor2) * fabs(rawP)) / (1 * 1))));
-    dp2dph1[i] = (rawP < 0) ? -k : -k * ((1 - lossFactor1) * (1 - lossFactor2));
-    dp2dph2[i] = -((rawP < 0) ? -k : -k * ((1 - lossFactor1) * (1 - lossFactor2)));
+        double* p1_out,
+        double* dp1dph1_out,
+        double* dp1dph2_out,
+        double* p2_out,
+        double* dp2dph1_out,
+        double* dp2dph2_out) {
+    p1_out[i] = p1(p0, k, lossFactor1, lossFactor2, r, ph1, ph2);
+    dp1dph1_out[i] = dp1dph1(p0, k, lossFactor1, lossFactor2, ph1, ph2);
+    dp1dph2_out[i] = dp1dph2(p0, k, lossFactor1, lossFactor2, ph1, ph2);
+    p2_out[i] = p2(p0, k, lossFactor1, lossFactor2, r, ph1, ph2);
+    dp2dph1_out[i] = dp2dph1(p0, k, lossFactor1, lossFactor2, ph1, ph2);
+    dp2dph2_out[i] = dp2dph2(p0, k, lossFactor1, lossFactor2, ph1, ph2);
 }
 
 // F-ONLY variant: the residual values alone (no Jacobian outputs) — for fill
 // sites that never factorize: residual/convergence checks, line-search
-// backtracks, frozen-Jacobian iterations. Same parsed OLF formulas.
-HVDC_FN void evalHvdcF(
+// backtracks, frozen-Jacobian iterations.
+HVDC_FN inline void evalHvdcF(
         double p0, double k, double lossFactor1, double lossFactor2, double r,
         double ph1, double ph2,
         int i,
-        double* p1,
-        double* p2) {
-    double rawP = p0 + k * (ph1 - ph2);
-    p1[i] = (rawP >= 0) ? rawP : -((1 - lossFactor2) * (((1 - lossFactor1) * fabs(rawP)) - (r * ((1 - lossFactor1) * fabs(rawP)) * ((1 - lossFactor1) * fabs(rawP)) / (1 * 1))));
-    p2[i] = (rawP < 0) ? -rawP : -((1 - lossFactor1) * (((1 - lossFactor2) * fabs(rawP)) - (r * ((1 - lossFactor2) * fabs(rawP)) * ((1 - lossFactor2) * fabs(rawP)) / (1 * 1))));
+        double* p1_out,
+        double* p2_out) {
+    p1_out[i] = p1(p0, k, lossFactor1, lossFactor2, r, ph1, ph2);
+    p2_out[i] = p2(p0, k, lossFactor1, lossFactor2, r, ph1, ph2);
 }
+
+}  // namespace hvdc
+
+using hvdc::evalHvdc;
+using hvdc::evalHvdcF;
 
 }}  // namespace powsybl::openloadflow

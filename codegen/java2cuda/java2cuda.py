@@ -324,37 +324,95 @@ def _prune_temps(temps, out):
     return kept
 
 
-def render_fused(mod, temps, out):
-    """Render the family header with TWO routines from the same parsed outputs:
-    the fused J+F routine (<routine>: values + all derivatives — one Newton
-    iteration's fill) and the F-ONLY routine (<routine>F: the residual values
-    alone, with the kernel locals pruned to what they reference) for the fill
-    sites that never consume the Jacobian — residual/convergence checks,
-    line-search backtracks, frozen-Jacobian (iter0-only) iterations."""
+def render_fused(mod, temps, out, pool):
+    """Render the family header MIRRORING OLF's CPU structure: one device function per
+    Java method — SAME name, SAME signature (the golden-locked precomputed-trig form),
+    SAME body (the flattened parse) — inside a per-family namespace (the Java class
+    scoping), plus four thin ASSEMBLER routines that only call them, exactly like
+    AcNetworkVector on the CPU:
+      eval<X>       raw angles: computes theta/trig locals, calls the methods
+      eval<X>F      raw angles, residual values only
+      eval<X>Pre    precomputed-trig parameters (the caller supplies sinKsi/…)
+      eval<X>PreF   precomputed-trig, residual values only
+    Pre variants are emitted only when the family HAS precomputed-trig parameters."""
     env = Environment(loader=FileSystemLoader(os.path.join(CODEGEN, "templates")),
                       trim_blocks=False, lstrip_blocks=False, keep_trailing_newline=True)
     parts = mod["cuda_namespace"].split("::")
     ns_open = " ".join(f"namespace {p} {{" for p in parts)
     ns_close = "}" * len(parts) + "  // namespace " + mod["cuda_namespace"]
     param_rows = ["double " + ", double ".join(row) + "," for row in mod["cuda_params"]]
-    consts_block = _guarded_consts(mod["cuda_consts"]) + "\n"
+    consts_block = _guarded_consts(mod["cuda_consts"]) + "\n" if mod["cuda_consts"] else ""
+
+    # The per-method functions: golden signatures + fully-inlined bodies (helpers and
+    # sibling calls resolved), UN-substituted — they speak sinKsi/sinTheta natively.
+    methods = []
+    for name, _side, _b in out:
+        params, flat = flatten(pool, name)
+        methods.append({"name": name, "params": params,
+                        "sig": ", ".join("double " + p for p in params), "body": flat})
+
+    # Call-argument mapping: a precomputed-trig parameter binds to the SIDE's value
+    # (sinTheta -> sinTheta1 for a side-1 method) — like the Java call sites, which
+    # pass FastMath.sin(theta1) into the sinTheta parameter.
+    pre = mod.get("precomputed", {})
+
+    def call_of(name, side, params):
+        args = [f"{p}{side}" if p in pre and "theta" in pre[p] else p for p in params]
+        return f"{name}({', '.join(args)})"
+
+    calls = {}
+    for m, (name, side, _b) in zip(methods, out):
+        calls[name] = call_of(name, side, m["params"])
+
+    trig_syms = [t["sym"] for t in temps
+                 if any(t["sym"] == p or t["sym"].startswith(p) for p in pre)]
+    theta_syms = [t["sym"] for t in temps if re.fullmatch(r"theta\d+", t["sym"])]
+    raw_temps = [t for t in temps if t["sym"] in set(trig_syms) | set(theta_syms)]
+
     resid_names = {res for res, _side in mod["residuals"]}
-    f_out = [(n, s_, b) for n, s_, b in out if n in resid_names]
+    all_names = [n for n, _s, _e in out]
+    f_names = [n for n in all_names if n in resid_names]
+
+    def used_trig(names):
+        u = set()
+        for n in names:
+            u.update(re.findall(r"\b[A-Za-z_]\w*\b", calls[n]))
+        return u
+
     routines = [
         {"name": mod["cuda_routine"], "doc": mod["cuda_fused_doc"],
-         "outputs": [n for n, _s, _e in out], "temps": temps,
-         "out": {n: b for n, _s, b in out}},
+         "outputs": all_names, "temps": raw_temps, "calls": calls,
+         "param_rows": param_rows},
         {"name": mod["cuda_routine"] + "F", "doc":
          "// F-ONLY variant: the residual values alone (no Jacobian outputs) — for fill\n"
          "// sites that never factorize: residual/convergence checks, line-search\n"
-         "// backtracks, frozen-Jacobian iterations. Same parsed OLF formulas.",
-         "outputs": [n for n, _s, _e in f_out], "temps": _prune_temps(temps, f_out),
-         "out": {n: b for n, _s, b in f_out}},
+         "// backtracks, frozen-Jacobian iterations.",
+         "outputs": f_names, "temps": _prune_temps(raw_temps, [(n, None, calls[n]) for n in f_names]),
+         "calls": calls, "param_rows": param_rows},
     ]
+    if trig_syms:
+        for names, suffix, doc in (
+                (all_names, "Pre",
+                 "// PRECOMPUTED-TRIG variant — the caller supplies the trig (per-element\n"
+                 "// statics + one sincos via angle addition in the fill kernel), matching\n"
+                 "// how AcNetworkVector feeds the same methods on the CPU."),
+                (f_names, "PreF",
+                 "// PRECOMPUTED-TRIG + F-ONLY variant: residual values alone, trig supplied\n"
+                 "// by the caller.")):
+            u = used_trig(names)
+            pre_rows = []
+            for row in mod["cuda_params"]:
+                kept = [a for a in row if a in u]
+                if kept:
+                    pre_rows.append(kept)
+            pre_rows.append([tsym for tsym in trig_syms if tsym in u])
+            routines.append({"name": mod["cuda_routine"] + suffix, "doc": doc,
+                             "outputs": names, "temps": [], "calls": calls,
+                             "param_rows": ["double " + ", double ".join(r) + "," for r in pre_rows]})
     return env.get_template("fused.cuh.j2").render(
         doc=mod["doc"], regen=REGEN, ns_open=ns_open, ns_close=ns_close,
-        fn_macro=mod["cuda_fn_macro"], param_rows=param_rows,
-        consts_block=consts_block, routines=routines)
+        fn_macro=mod["cuda_fn_macro"], family=mod["family"],
+        consts_block=consts_block, methods=methods, routines=routines)
 
 
 # --------------------------------------------------------------------------------
@@ -487,7 +545,7 @@ def main():
         n_methods = sum(len(fm) for fm in pool["files"])
         print(f"{mod['family']}: parsed {n_methods} static methods -> {len(out)} fused outputs "
               f"+ {len(temps)} shared locals, straight from the OLF Java")
-        _write(mod["cuda_path"], render_fused(mod, temps, out))
+        _write(mod["cuda_path"], render_fused(mod, temps, out, pool))
         if "stamp" in mod:                             # GPU scatter descriptor (fill-kernel families)
             _write(mod["scatter_path"],
                    json.dumps(scatter_descriptor(mod, out), indent=2, ensure_ascii=False))

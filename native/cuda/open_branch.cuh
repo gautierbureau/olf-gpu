@@ -18,57 +18,141 @@ namespace powsybl { namespace openloadflow {
 constexpr double R2 = 1.0;
 #endif
 
+// One device function per OLF Java method — SAME name, SAME signature, SAME body
+// (the CPU methods are the optimized precomputed-trig form; the family namespace
+// mirrors the Java class scoping). The eval* routines below only assemble calls,
+// exactly like AcNetworkVector on the CPU.
+namespace open_branch {
+
+OB_FN inline double p2(double y, double cosKsi, double sinKsi, double g1, double b1, double g2, double v2) {
+    return R2 * R2 * v2 * v2 * (g2 + y * y * g1 / ((g1 + y * sinKsi) * (g1 + y * sinKsi) + (-b1 + y * cosKsi) * (-b1 + y * cosKsi)) + (b1 * b1 + g1 * g1) * y * sinKsi / ((g1 + y * sinKsi) * (g1 + y * sinKsi) + (-b1 + y * cosKsi) * (-b1 + y * cosKsi)));
+}
+
+OB_FN inline double dp2dv2(double y, double cosKsi, double sinKsi, double g1, double b1, double g2, double v2) {
+    return 2 * R2 * R2 * v2 * (g2 + y * y * g1 / ((g1 + y * sinKsi) * (g1 + y * sinKsi) + (-b1 + y * cosKsi) * (-b1 + y * cosKsi)) + (b1 * b1 + g1 * g1) * y * sinKsi / ((g1 + y * sinKsi) * (g1 + y * sinKsi) + (-b1 + y * cosKsi) * (-b1 + y * cosKsi)));
+}
+
+OB_FN inline double q2(double y, double cosKsi, double sinKsi, double g1, double b1, double b2, double v2) {
+    return -R2 * R2 * v2 * v2 * (b2 + y * y * b1 / ((g1 + y * sinKsi) * (g1 + y * sinKsi) + (-b1 + y * cosKsi) * (-b1 + y * cosKsi)) - (b1 * b1 + g1 * g1) * y * cosKsi / ((g1 + y * sinKsi) * (g1 + y * sinKsi) + (-b1 + y * cosKsi) * (-b1 + y * cosKsi)));
+}
+
+OB_FN inline double dq2dv2(double y, double cosKsi, double sinKsi, double g1, double b1, double b2, double v2) {
+    return -2 * v2 * R2 * R2 * (b2 + y * y * b1 / ((g1 + y * sinKsi) * (g1 + y * sinKsi) + (-b1 + y * cosKsi) * (-b1 + y * cosKsi)) - (b1 * b1 + g1 * g1) * y * cosKsi / ((g1 + y * sinKsi) * (g1 + y * sinKsi) + (-b1 + y * cosKsi) * (-b1 + y * cosKsi)));
+}
+
+OB_FN inline double p1(double y, double cosKsi, double sinKsi, double g1, double g2, double b2, double v1, double r1) {
+    return r1 * r1 * v1 * v1 * (g1 + y * y * g2 / ((g2 + y * sinKsi) * (g2 + y * sinKsi) + (-b2 + y * cosKsi) * (-b2 + y * cosKsi)) + (b2 * b2 + g2 * g2) * y * sinKsi / ((g2 + y * sinKsi) * (g2 + y * sinKsi) + (-b2 + y * cosKsi) * (-b2 + y * cosKsi)));
+}
+
+OB_FN inline double dp1dv1(double y, double cosKsi, double sinKsi, double g1, double g2, double b2, double v1, double r1) {
+    return 2 * r1 * r1 * v1 * (g1 + y * y * g2 / ((g2 + y * sinKsi) * (g2 + y * sinKsi) + (-b2 + y * cosKsi) * (-b2 + y * cosKsi)) + (b2 * b2 + g2 * g2) * y * sinKsi / ((g2 + y * sinKsi) * (g2 + y * sinKsi) + (-b2 + y * cosKsi) * (-b2 + y * cosKsi)));
+}
+
+OB_FN inline double q1(double y, double cosKsi, double sinKsi, double b1, double g2, double b2, double v1, double r1) {
+    return -r1 * r1 * v1 * v1 * (b1 + y * y * b2 / ((g2 + y * sinKsi) * (g2 + y * sinKsi) + (-b2 + y * cosKsi) * (-b2 + y * cosKsi)) - (b2 * b2 + g2 * g2) * y * cosKsi / ((g2 + y * sinKsi) * (g2 + y * sinKsi) + (-b2 + y * cosKsi) * (-b2 + y * cosKsi)));
+}
+
+OB_FN inline double dq1dv1(double y, double cosKsi, double sinKsi, double b1, double g2, double b2, double v1, double r1) {
+    return -2 * v1 * r1 * r1 * (b1 + y * y * b2 / ((g2 + y * sinKsi) * (g2 + y * sinKsi) + (-b2 + y * cosKsi) * (-b2 + y * cosKsi)) - (b2 * b2 + g2 * g2) * y * cosKsi / ((g2 + y * sinKsi) * (g2 + y * sinKsi) + (-b2 + y * cosKsi) * (-b2 + y * cosKsi)));
+}
+
 // FUSED per-element kernel body: one routine computes the four open-branch flows
 // (p2/q2 for a side-1-open branch, p1/q1 for a side-2-open one) + their four
 // voltage derivatives, writing into Struct-of-Arrays at index i. sin/cos of ksi
 // are computed once and shared. A real branch has only ONE side open: the host
 // stamps that side's pair and resolves the other pair's scatter rows to -1
 // (absent), exactly like the closed-branch fill.
-OB_FN void evalOpenBranch(
+OB_FN inline void evalOpenBranch(
         double y, double ksi, double g1, double b1, double g2, double b2,
         double v1, double r1, double v2,
         int i,
-        double* p2,
-        double* dp2dv2,
-        double* q2,
-        double* dq2dv2,
-        double* p1,
-        double* dp1dv1,
-        double* q1,
-        double* dq1dv1) {
+        double* p2_out,
+        double* dp2dv2_out,
+        double* q2_out,
+        double* dq2dv2_out,
+        double* p1_out,
+        double* dp1dv1_out,
+        double* q1_out,
+        double* dq1dv1_out) {
     double sinKsi = sin(ksi);
     double cosKsi = cos(ksi);
-    double shunt = (g1 + y * sinKsi) * (g1 + y * sinKsi) + (-b1 + y * cosKsi) * (-b1 + y * cosKsi);
-    double shunt2 = (g2 + y * sinKsi) * (g2 + y * sinKsi) + (-b2 + y * cosKsi) * (-b2 + y * cosKsi);
-    p2[i] = R2 * R2 * v2 * v2 * (g2 + y * y * g1 / shunt + (b1 * b1 + g1 * g1) * y * sinKsi / shunt);
-    dp2dv2[i] = 2 * R2 * R2 * v2 * (g2 + y * y * g1 / shunt + (b1 * b1 + g1 * g1) * y * sinKsi / shunt);
-    q2[i] = -R2 * R2 * v2 * v2 * (b2 + y * y * b1 / shunt - (b1 * b1 + g1 * g1) * y * cosKsi / shunt);
-    dq2dv2[i] = -2 * v2 * R2 * R2 * (b2 + y * y * b1 / shunt - (b1 * b1 + g1 * g1) * y * cosKsi / shunt);
-    p1[i] = r1 * r1 * v1 * v1 * (g1 + y * y * g2 / shunt2 + (b2 * b2 + g2 * g2) * y * sinKsi / shunt2);
-    dp1dv1[i] = 2 * r1 * r1 * v1 * (g1 + y * y * g2 / shunt2 + (b2 * b2 + g2 * g2) * y * sinKsi / shunt2);
-    q1[i] = -r1 * r1 * v1 * v1 * (b1 + y * y * b2 / shunt2 - (b2 * b2 + g2 * g2) * y * cosKsi / shunt2);
-    dq1dv1[i] = -2 * v1 * r1 * r1 * (b1 + y * y * b2 / shunt2 - (b2 * b2 + g2 * g2) * y * cosKsi / shunt2);
+    p2_out[i] = p2(y, cosKsi, sinKsi, g1, b1, g2, v2);
+    dp2dv2_out[i] = dp2dv2(y, cosKsi, sinKsi, g1, b1, g2, v2);
+    q2_out[i] = q2(y, cosKsi, sinKsi, g1, b1, b2, v2);
+    dq2dv2_out[i] = dq2dv2(y, cosKsi, sinKsi, g1, b1, b2, v2);
+    p1_out[i] = p1(y, cosKsi, sinKsi, g1, g2, b2, v1, r1);
+    dp1dv1_out[i] = dp1dv1(y, cosKsi, sinKsi, g1, g2, b2, v1, r1);
+    q1_out[i] = q1(y, cosKsi, sinKsi, b1, g2, b2, v1, r1);
+    dq1dv1_out[i] = dq1dv1(y, cosKsi, sinKsi, b1, g2, b2, v1, r1);
 }
 
 // F-ONLY variant: the residual values alone (no Jacobian outputs) — for fill
 // sites that never factorize: residual/convergence checks, line-search
-// backtracks, frozen-Jacobian iterations. Same parsed OLF formulas.
-OB_FN void evalOpenBranchF(
+// backtracks, frozen-Jacobian iterations.
+OB_FN inline void evalOpenBranchF(
         double y, double ksi, double g1, double b1, double g2, double b2,
         double v1, double r1, double v2,
         int i,
-        double* p2,
-        double* q2,
-        double* p1,
-        double* q1) {
+        double* p2_out,
+        double* q2_out,
+        double* p1_out,
+        double* q1_out) {
     double sinKsi = sin(ksi);
     double cosKsi = cos(ksi);
-    double shunt = (g1 + y * sinKsi) * (g1 + y * sinKsi) + (-b1 + y * cosKsi) * (-b1 + y * cosKsi);
-    double shunt2 = (g2 + y * sinKsi) * (g2 + y * sinKsi) + (-b2 + y * cosKsi) * (-b2 + y * cosKsi);
-    p2[i] = R2 * R2 * v2 * v2 * (g2 + y * y * g1 / shunt + (b1 * b1 + g1 * g1) * y * sinKsi / shunt);
-    q2[i] = -R2 * R2 * v2 * v2 * (b2 + y * y * b1 / shunt - (b1 * b1 + g1 * g1) * y * cosKsi / shunt);
-    p1[i] = r1 * r1 * v1 * v1 * (g1 + y * y * g2 / shunt2 + (b2 * b2 + g2 * g2) * y * sinKsi / shunt2);
-    q1[i] = -r1 * r1 * v1 * v1 * (b1 + y * y * b2 / shunt2 - (b2 * b2 + g2 * g2) * y * cosKsi / shunt2);
+    p2_out[i] = p2(y, cosKsi, sinKsi, g1, b1, g2, v2);
+    q2_out[i] = q2(y, cosKsi, sinKsi, g1, b1, b2, v2);
+    p1_out[i] = p1(y, cosKsi, sinKsi, g1, g2, b2, v1, r1);
+    q1_out[i] = q1(y, cosKsi, sinKsi, b1, g2, b2, v1, r1);
 }
+
+// PRECOMPUTED-TRIG variant — the caller supplies the trig (per-element
+// statics + one sincos via angle addition in the fill kernel), matching
+// how AcNetworkVector feeds the same methods on the CPU.
+OB_FN inline void evalOpenBranchPre(
+        double y, double g1, double b1, double g2, double b2,
+        double v1, double r1, double v2,
+        double sinKsi, double cosKsi,
+        int i,
+        double* p2_out,
+        double* dp2dv2_out,
+        double* q2_out,
+        double* dq2dv2_out,
+        double* p1_out,
+        double* dp1dv1_out,
+        double* q1_out,
+        double* dq1dv1_out) {
+    p2_out[i] = p2(y, cosKsi, sinKsi, g1, b1, g2, v2);
+    dp2dv2_out[i] = dp2dv2(y, cosKsi, sinKsi, g1, b1, g2, v2);
+    q2_out[i] = q2(y, cosKsi, sinKsi, g1, b1, b2, v2);
+    dq2dv2_out[i] = dq2dv2(y, cosKsi, sinKsi, g1, b1, b2, v2);
+    p1_out[i] = p1(y, cosKsi, sinKsi, g1, g2, b2, v1, r1);
+    dp1dv1_out[i] = dp1dv1(y, cosKsi, sinKsi, g1, g2, b2, v1, r1);
+    q1_out[i] = q1(y, cosKsi, sinKsi, b1, g2, b2, v1, r1);
+    dq1dv1_out[i] = dq1dv1(y, cosKsi, sinKsi, b1, g2, b2, v1, r1);
+}
+
+// PRECOMPUTED-TRIG + F-ONLY variant: residual values alone, trig supplied
+// by the caller.
+OB_FN inline void evalOpenBranchPreF(
+        double y, double g1, double b1, double g2, double b2,
+        double v1, double r1, double v2,
+        double sinKsi, double cosKsi,
+        int i,
+        double* p2_out,
+        double* q2_out,
+        double* p1_out,
+        double* q1_out) {
+    p2_out[i] = p2(y, cosKsi, sinKsi, g1, b1, g2, v2);
+    q2_out[i] = q2(y, cosKsi, sinKsi, g1, b1, b2, v2);
+    p1_out[i] = p1(y, cosKsi, sinKsi, g1, g2, b2, v1, r1);
+    q1_out[i] = q1(y, cosKsi, sinKsi, b1, g2, b2, v1, r1);
+}
+
+}  // namespace open_branch
+
+using open_branch::evalOpenBranch;
+using open_branch::evalOpenBranchF;
+using open_branch::evalOpenBranchPre;
+using open_branch::evalOpenBranchPreF;
 
 }}  // namespace powsybl::openloadflow

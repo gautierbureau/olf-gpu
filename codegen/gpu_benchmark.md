@@ -161,3 +161,22 @@ to the generated scatter tables by static_asserts).
   499/500 @ 2291 — the June "net wash" verdict stands; frozen-J is not the path.
 - Next per the attribution: the fused fill itself (81 ms — precomputed-trig
   variant via angle addition), cuDSS reordering knobs (+29 ms/iter factorize).
+
+## 2026-07-15 — CPU-mirrored emission + precomputed-trig (lever 2, measured verdict)
+
+java2cuda now emits ONE DEVICE FUNCTION PER OLF JAVA METHOD — same name, same
+signature (proof check E locks all 63 of them to the golden manifest), same body,
+in a per-family namespace mirroring the Java class scoping. The eval* routines are
+thin assemblers that only call them (AcNetworkVector's structure), in four forms:
+raw / F-only / Pre / PreF (precomputed-trig parameters, the CPU signature shape).
+
+Measured verdict on feeding the batch fills precomputed trig (per-element statics
++ one sincos(dph) via angle addition, controlled-a1 fallback):
+- FUSED fill: **slower** (81 → 100 ms/launch) — it is atomic/memory-bound on its
+  28 scattered outputs; the saved FP64 trig was hidden latency, the extra static
+  reads were not. Kept on the raw assembler.
+- F-ONLY fill: **faster** (~30 → 23.8 ms) — 4 outputs, genuinely compute-bound.
+  Kept on PreF.
+Net: mode 3 K=4 warm chunks 2291 → **2281 ms (4.56 ms/scn)**. The remaining
+per-iteration composition is cuDSS factorize 272 + fill 81 + fwd/bwd/copy 146 —
+the fill's floor is its atomics, not its math.

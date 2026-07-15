@@ -217,19 +217,43 @@ def check_fd(mod, out, parsed_eval):
 # --- kernel-text evaluation: parse a rendered .cuh's locals + SoA assignments ----
 
 _CUH_TEMP = re.compile(r"^\s*double (\w+) = (.*);$")
-_CUH_OUT = re.compile(r"^\s*(\w+)\[i\] = (.*);$")
+_CUH_OUT = re.compile(r"^\s*(\w+?)(?:_out)?\[i\] = (.*);$")
+_CUH_METHOD = re.compile(r"^\w+ inline double (\w+)\(([^)]*)\) \{$")
 
 
 def parse_cuh(text):
-    temps = [(m.group(1), m.group(2)) for m in map(_CUH_TEMP.match, text.splitlines()) if m]
-    outs = [(m.group(1), m.group(2)) for m in map(_CUH_OUT.match, text.splitlines()) if m]
+    """The rendered header now MIRRORS the CPU: per-method device functions (name,
+    Java-signature params, single return body) + assembler routines whose SoA
+    assignments are CALLS. Returns (methods, temps, outs) — outs deduped by name
+    (the raw and Pre assemblers emit the same calls)."""
+    lines = text.splitlines()
+    methods = []
+    for i, line in enumerate(lines):
+        m = _CUH_METHOD.match(line)
+        if m and i + 1 < len(lines) and lines[i + 1].strip().startswith("return "):
+            params = [p.split()[-1] for p in m.group(2).split(",") if p.strip()]
+            methods.append({"name": m.group(1), "params": params,
+                            "body": lines[i + 1].strip().removeprefix("return ").rstrip(";")})
+    temps = []
+    seen_t = set()
+    for m in map(_CUH_TEMP.match, lines):
+        if m and m.group(1) not in seen_t:
+            seen_t.add(m.group(1))
+            temps.append((m.group(1), m.group(2)))
+    outs = []
+    seen_o = set()
+    for m in map(_CUH_OUT.match, lines):
+        if m and m.group(1) not in seen_o:
+            seen_o.add(m.group(1))
+            outs.append((m.group(1), m.group(2)))
     if not outs:
         raise AssertionError("no SoA assignments found in kernel text")
-    return temps, outs
+    return methods, temps, outs
 
 
-def eval_cuh(temps, outs, pt):
-    ns = {**_MATH_NS, **pt}
+def eval_cuh(methods, temps, outs, pt):
+    ns = _make_funcs(methods)                          # the per-method functions
+    ns.update(pt)
     for sym, expr in temps:                            # HVDC bodies carry C ternaries
         ns[sym] = eval(_c_to_py(expr), {"__builtins__": {}}, ns)  # noqa: S307 — our own arithmetic
     return {name: eval(_c_to_py(expr), {"__builtins__": {}}, ns)  # noqa: S307
@@ -249,8 +273,8 @@ def check_dropin(mod, rendered_text):
         return
     with open(committed_path) as f:
         committed = f.read()
-    nt, no = parse_cuh(rendered_text)
-    ct, co = parse_cuh(committed)
+    nm_, nt, no = parse_cuh(rendered_text)
+    cm_, ct, co = parse_cuh(committed)
     if [n for n, _ in no] != [n for n, _ in co]:
         raise SystemExit(f"FAIL drop-in: output order differs\n  parsed: {[n for n, _ in no]}"
                          f"\n  committed: {[n for n, _ in co]}")
@@ -259,7 +283,7 @@ def check_dropin(mod, rendered_text):
     worst = 0.0
     for _ in range(SAMPLES):
         pt = _rand_point(rng, inputs)
-        a, b = eval_cuh(nt, no, pt), eval_cuh(ct, co, pt)
+        a, b = eval_cuh(nm_, nt, no, pt), eval_cuh(cm_, ct, co, pt)
         for name in a:
             err = abs(a[name] - b[name]) / (1.0 + abs(b[name]))
             worst = max(worst, err)
@@ -270,16 +294,36 @@ def check_dropin(mod, rendered_text):
           f"(worst relerr {worst:.2e} < {EQUIV_TOL:g}) — scatter tables reusable verbatim")
 
 
+def check_signature_lock(mod, rendered_text, golden):
+    """E. The rendered per-method device functions carry EXACTLY the CPU methods'
+    signatures: same names, same parameter lists as the golden manifest (OLF's own
+    optimized precomputed-trig form). This is the 'same methods as the CPU' contract."""
+    meths, _t, _o = parse_cuh(rendered_text)
+    rendered = {m["name"]: m["params"] for m in meths}
+    gold = {m["name"]: m["params"] for m in golden}
+    bad = []
+    for name, params in gold.items():
+        if name not in rendered:
+            continue                                   # helpers kept only in the golden namespace
+        if rendered[name] != params:
+            bad.append(f"{name}: rendered {rendered[name]} != golden {params}")
+    checked = [n for n in gold if n in rendered]
+    if bad:
+        raise SystemExit("FAIL signature-lock:\n  " + "\n  ".join(bad))
+    print(f"  E. signature lock: {len(checked)} device methods carry the exact CPU "
+          f"signatures (golden manifest)")
+
+
 def check_rendered_vs_golden(mod, rendered_text, out, golden_eval):
     """D. The rendered kernel also == the golden manifest (independent of the parser
     path A and C share)."""
-    temps, outs = parse_cuh(rendered_text)
+    meths, temps, outs = parse_cuh(rendered_text)
     side_of = {name: side for name, side, _b in out}
     rng = random.Random(20260710)
     worst = 0.0
     for _ in range(SAMPLES):
         pt = _rand_point(rng, mod["base_symbols"])
-        vals = eval_cuh(temps, outs, pt)
+        vals = eval_cuh(meths, temps, outs, pt)
         for name, v in vals.items():
             g = golden_eval(name, side_of[name], pt)
             err = abs(v - g) / (1.0 + abs(g))
@@ -294,7 +338,7 @@ def main():
     for mod, golden_file in FAMILIES:
         pool = java2cuda.parse_pool(mod)
         temps, out = java2cuda.outputs(mod, pool)
-        rendered = java2cuda.render_fused(mod, temps, out)
+        rendered = java2cuda.render_fused(mod, temps, out, pool)
         with open(os.path.join(CODEGEN, "golden", golden_file)) as f:
             gold = json.load(f)
         golden = gold["methods"] + gold.get("helpers", [])   # helpers: golden bodies may call them
@@ -308,6 +352,7 @@ def main():
         check_fd(mod, out, parsed_eval)
         check_dropin(mod, rendered)
         check_rendered_vs_golden(mod, rendered, out, golden_eval)
+        check_signature_lock(mod, rendered, golden)
     print("PROVEN — every Java-parsed fused kernel equals its golden manifest and the committed "
           "residual-pipeline kernel; OLF's hand Jacobians survive the FD audit.")
 

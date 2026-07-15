@@ -114,3 +114,32 @@ vs gpusim2grid's 8.81: 1.22×. Remaining on our backlog: the residual chunk-spee
 difference (2 351 vs 1 881 ms — not yet attributed; profile fill kernels /
 per-iteration readbacks / batching geometry) and the duplicated NATIVE context
 (base solver vs batch contexts are separate device allocations/analyses; ~100 ms).
+
+## 2026-07-15 — nsys attribution of the chunk-speed residual (ours 2351 vs theirs 1881 ms)
+
+Both sides profiled with nsys on the identical workload (0.8.0, UBATCH, batch 500, K=4,
+500 matched ctg). Per Newton iteration of the 500-chunk (ours 532 ms wall, theirs ~460):
+
+| per iteration            | ours          | gpusim2grid    | delta   |
+|--------------------------|---------------|----------------|---------|
+| cuDSS factorize (2 sub-batches) | 272 ms | 243 ms         | +29     |
+| cuDSS fwd / bwd / copy   | 78 / 48 / 20  | 77 / 48 / ~20  | ~0      |
+| J fill                   | **92** (81 CB + 7.5 shunt + misc) | ~55 (fill_J ~40 + Va/Vm updates ~15) | +37 |
+| host/launch gaps         | ~25           | tight          | ~+20    |
+
+Plus once per pass: our trailing residual check runs the FULL J fill (~90 ms) where
+they use a dedicated mismatch-only kernel (fill_FP, ~1.5 ms).
+
+Reconciliation: 1881 + 4×(29+37+20) + 90 ≈ 2315 ≈ our 2351. So the residual is:
+- ~120 ms/pass cuDSS factorize (their LU is slightly sparser; fwd/bwd/copy are parity),
+- ~150 ms/pass our J-fill cost (fillClosedBranchBatch at 81 ms/launch is compute-bound:
+  3 dynamic sincos per branch-scenario × 8M),
+- ~90 ms/pass full-J fill used for an F-only residual check,
+- ~100 ms/pass host gaps.
+
+Ranked levers (all ours): (1) mismatch-only residual kernel (~90 ms, easy);
+(2) fill trig reduction — precompute static sin/cos(ksi±a1) per scenario and derive
+sinTheta/cosTheta from one sincos(dph) per branch via angle addition, i.e. feed the
+PRECOMPUTED-TRIG form of the same OLF formulas (the Java's own signature shape —
+java2cuda can emit that variant from the same source); (3) cuDSS reordering-alg knobs
+for the factorize delta; (4) launch-gap batching.

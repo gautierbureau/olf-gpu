@@ -4,12 +4,6 @@
 // Closed-branch AC flow residuals and Jacobian entries, parsed from the hand-written OLF equation-term Java (the source of truth).
 //
 // GENERATED — DO NOT EDIT. Regenerate with: python3 codegen/java2cuda/java2cuda.py (parsed from the OLF Java).
-//
-// FUSED per-element kernel body: one routine computes p1/q1/p2/q2 + all 24 Jacobian
-// entries for one branch, writing into Struct-of-Arrays at index i. sin/cos of ksi,
-// theta1, theta2 are computed once and shared as kernel locals — the per-element
-// device routine the GPU assembly kernel calls (one thread = one branch, inline
-// trig, SoA output — a fused per-branch kernel).
 #pragma once
 #include <math.h>
 
@@ -28,6 +22,11 @@ constexpr double R2 = 1.0;
 constexpr double A2 = 0.0;
 #endif
 
+// FUSED per-element kernel body: one routine computes p1/q1/p2/q2 + all 24 Jacobian
+// entries for one branch, writing into Struct-of-Arrays at index i. sin/cos of ksi,
+// theta1, theta2 are computed once and shared as kernel locals — the per-element
+// device routine the GPU assembly kernel calls (one thread = one branch, inline
+// trig, SoA output — a fused per-branch kernel).
 CB_FN void evalClosedBranch(
         double y, double g1, double g2, double b1, double b2,
         double v1, double r1, double v2, double ksi, double a1, double ph1, double ph2,
@@ -96,6 +95,31 @@ CB_FN void evalClosedBranch(
     dq2dph2[i] = -(y * r1 * R2 * v1 * v2 * sinTheta2);
     dq2da1[i] = (y * r1 * R2 * v1 * v2 * sinTheta2);
     dq2dr1[i] = -y * R2 * v1 * v2 * cosTheta2;
+}
+
+// F-ONLY variant: the residual values alone (no Jacobian outputs) — for fill
+// sites that never factorize: residual/convergence checks, line-search
+// backtracks, frozen-Jacobian iterations. Same parsed OLF formulas.
+CB_FN void evalClosedBranchF(
+        double y, double g1, double g2, double b1, double b2,
+        double v1, double r1, double v2, double ksi, double a1, double ph1, double ph2,
+        int i,
+        double* p1,
+        double* q1,
+        double* p2,
+        double* q2) {
+    double theta1 = ksi - a1 + A2 - ph1 + ph2;
+    double theta2 = ksi + a1 - A2 + ph1 - ph2;
+    double sinKsi = sin(ksi);
+    double sinTheta1 = sin(theta1);
+    double cosTheta1 = cos(theta1);
+    double cosKsi = cos(ksi);
+    double sinTheta2 = sin(theta2);
+    double cosTheta2 = cos(theta2);
+    p1[i] = r1 * v1 * (g1 * r1 * v1 + y * r1 * v1 * sinKsi - y * R2 * v2 * sinTheta1);
+    q1[i] = r1 * v1 * (-b1 * r1 * v1 + y * r1 * v1 * cosKsi - y * R2 * v2 * cosTheta1);
+    p2[i] = R2 * v2 * (g2 * R2 * v2 - y * r1 * v1 * sinTheta2 + y * R2 * v2 * sinKsi);
+    q2[i] = R2 * v2 * (-b2 * R2 * v2 - y * r1 * v1 * cosTheta2 + y * R2 * v2 * cosKsi);
 }
 
 }}  // namespace powsybl::openloadflow

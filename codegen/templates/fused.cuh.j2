@@ -4,8 +4,6 @@
 // {{ doc }}
 //
 // GENERATED — DO NOT EDIT. {{ regen }}
-//
-{{ fused_doc }}
 #pragma once
 #include <math.h>
 
@@ -15,20 +13,23 @@
 
 {{ ns_open }}
 
-{{ consts_block }}{{ fn_macro }} void {{ routine }}(
+{{ consts_block }}
+{%- for r in routines %}
+{{ r.doc }}
+{{ fn_macro }} void {{ r.name }}(
 {%- for row in param_rows %}
         {{ row }}
 {%- endfor %}
         int i,
-        {%- for nm in outputs %}
+        {%- for nm in r.outputs %}
         double* {{ nm }}{{ "," if not loop.last else ") {" }}
         {%- endfor %}
-    {%- for t in temps %}
+    {%- for t in r.temps %}
     double {{ t.sym }} = {{ t.expr }};
     {%- endfor %}
-    {%- for nm in outputs %}
-    {{ nm }}[i] = {{ out[nm] }};
+    {%- for nm in r.outputs %}
+    {{ nm }}[i] = {{ r.out[nm] }};
     {%- endfor %}
 }
-
+{% endfor %}
 {{ ns_close }}

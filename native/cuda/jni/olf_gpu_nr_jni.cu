@@ -1302,6 +1302,113 @@ __global__ void fillHvdcBatch(int ne, int nScenarios, int n, int nnz, int nEleme
 // branch is outaged in this scenario — matching the CPU, which removes that branch's q from the controller's
 // reactive sum (the controller weight qPercent is unchanged, so only the term vanishes). kinds 1 (shunt) and
 // 3 (zero-imp dummy) cannot be a single-branch contingency in a qualified batched scenario, so no mask check.
+// ---------------------------------------------------------------------------------
+// F-ONLY batch fills: evaluate just the residual values (the generated eval<X>F
+// routines) and scatter only the F rows — for iterations that never consume the
+// Jacobian (the final residual/convergence fill, and mode 4's solve-only
+// iterations where the factors are frozen at iter 0). The residual positions in
+// each family's dest stride are pinned to the generated scatter tables by
+// static_asserts, so a codegen output-order change fails the build loudly.
+// ---------------------------------------------------------------------------------
+
+static_assert(CB_SCATTER[0].role == 0 && CB_SCATTER[7].role == 0
+           && CB_SCATTER[14].role == 0 && CB_SCATTER[21].role == 0,
+              "closed-branch residual outputs moved — update fillClosedBranchBatchF");
+static_assert(OB_SCATTER[0].role == 0 && OB_SCATTER[2].role == 0
+           && OB_SCATTER[4].role == 0 && OB_SCATTER[6].role == 0,
+              "open-branch residual outputs moved — update fillOpenBranchBatchF");
+static_assert(SH_SCATTER[0].role == 0 && SH_SCATTER[2].role == 0,
+              "shunt residual outputs moved — update fillShuntBatchF");
+static_assert(HVDC_SCATTER[0].role == 0 && HVDC_SCATTER[3].role == 0,
+              "hvdc residual outputs moved — update fillHvdcBatchF");
+
+__device__ void scatterAddF(int nres, const int* dest, const int* pos, const double* o, double* F) {
+    for (int k = 0; k < nres; k++) {
+        int d = dest[pos[k]];
+        if (d <= -2) {
+            atomicAdd(&F[-2 - d], o[k]);
+        }
+    }
+}
+
+__global__ void fillClosedBranchBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+                                       const double* in, const int* ix, const int* dest,
+                                       const double* x, double* F,
+                                       const char* disabled, const char* active) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= ne * nScenarios) return;
+    int e = tid % ne;
+    int s = tid / ne;
+    if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
+    const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
+    const int* q = ix + e * 10;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
+    const double* xs = x + s * n;
+    double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
+    double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
+    double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
+    double o[4];
+    evalClosedBranchF(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0,
+                      o + 0, o + 1, o + 2, o + 3);
+    const int pos[4] = {0, 7, 14, 21};
+    scatterAddF(4, dest + e * CB_NOUT, pos, o, F + (size_t) s * n);
+}
+
+__global__ void fillOpenBranchBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+                                     const double* in, const int* ix, const int* dest,
+                                     const double* x, double* F,
+                                     const char* disabled, const char* active) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= ne * nScenarios) return;
+    int e = tid % ne;
+    int s = tid / ne;
+    if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
+    const double* p = in + e * 7;                            // y ksi g1 b1 g2 b2 r1
+    const int* q = ix + e * 6;
+    const double* xs = x + s * n;
+    double v1 = q[4] >= 0 ? xs[q[4]] : 1.0;
+    double v2 = q[5] >= 0 ? xs[q[5]] : 1.0;
+    double o[4];
+    evalOpenBranchF(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0, o + 0, o + 1, o + 2, o + 3);
+    const int pos[4] = {0, 2, 4, 6};
+    scatterAddF(4, dest + e * OB_NOUT, pos, o, F + (size_t) s * n);
+}
+
+__global__ void fillShuntBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+                                const double* in, const int* ix, const int* dest,
+                                const double* x, double* F,
+                                const char* disabled, const char* active) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= ne * nScenarios) return;
+    int e = tid % ne;
+    int s = tid / ne;
+    if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
+    const double* p = in + e * 2;                            // g b
+    double v = x[(size_t) s * n + ix[e * 3 + 2]];
+    double o[2];
+    evalShuntF(v, p[0], p[1], 0, o + 0, o + 1);
+    const int pos[2] = {0, 2};
+    scatterAddF(2, dest + e * SH_NOUT, pos, o, F + (size_t) s * n);
+}
+
+__global__ void fillHvdcBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
+                               const double* in, const int* ix, const int* dest,
+                               const double* x, double* F,
+                               const char* disabled, const char* active) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= ne * nScenarios) return;
+    int e = tid % ne;
+    int s = tid / ne;
+    if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
+    const double* p = in + e * 5;                            // p0 k lf1 lf2 r
+    const int* q = ix + e * 4;
+    const double* xs = x + (size_t) s * n;
+    double ph1 = xs[q[2]], ph2 = xs[q[3]];
+    double o[2];
+    evalHvdcF(p[0], p[1], p[2], p[3], p[4], ph1, ph2, 0, o + 0, o + 1);
+    const int pos[2] = {0, 3};
+    scatterAddF(2, dest + e * HVDC_NOUT, pos, o, F + (size_t) s * n);
+}
+
 __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nElements,
                                 int cbOffset, int obOffset,
                                 const int* dqElem, const int* dqSide, const int* dqKind,
@@ -2255,13 +2362,45 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
 
     for (int it = 0; it <= maxIter && nActive > 0; it++) {
-        // ---- batched fill of J + F for all active scenarios ----
-        CUDA_CHECK(cudaMemset(ctx->dVals.p, 0, static_cast<size_t>(nnz) * nS * sizeof(double)));
+        // ---- batched fill for all active scenarios: J + F, or F-ONLY when this iteration
+        //      never consumes the Jacobian — the final residual/convergence fill
+        //      (it == maxIter breaks before the solve) and mode 4's solve-only iterations
+        //      (factors frozen at iter 0; only the RHS must be fresh). The F-only variants
+        //      evaluate just the residual values (eval<X>F) and skip the vals memset —
+        //      the J buffer is never read before the next full fill re-zeroes it. ----
+        bool fOnly = it == maxIter || (ctx->mode == 4 && it > 0);
+        if (!fOnly) {
+            CUDA_CHECK(cudaMemset(ctx->dVals.p, 0, static_cast<size_t>(nnz) * nS * sizeof(double)));
+        }
         initFBatch<<<grid(n * nS), BLOCK>>>(n, nS, ctx->dTarget.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
-        if (ctx->cb.ne) fillClosedBranchBatch<<<grid(ctx->cb.ne * nS), BLOCK>>>(ctx->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->cb.in.as<double>(), ctx->cb.ix.as<int>(), ctx->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
-        if (ctx->ob.ne) fillOpenBranchBatch<<<grid(ctx->ob.ne * nS), BLOCK>>>(ctx->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->ob.in.as<double>(), ctx->ob.ix.as<int>(), ctx->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
-        if (ctx->sh.ne) fillShuntBatch<<<grid(ctx->sh.ne * nS), BLOCK>>>(ctx->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->sh.in.as<double>(), ctx->sh.ix.as<int>(), ctx->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
-        if (ctx->hv.ne) fillHvdcBatch<<<grid(ctx->hv.ne * nS), BLOCK>>>(ctx->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->hv.in.as<double>(), ctx->hv.ix.as<int>(), ctx->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+        if (ctx->cb.ne) {
+            if (fOnly) {
+                fillClosedBranchBatchF<<<grid(ctx->cb.ne * nS), BLOCK>>>(ctx->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->cb.in.as<double>(), ctx->cb.ix.as<int>(), ctx->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+            } else {
+                fillClosedBranchBatch<<<grid(ctx->cb.ne * nS), BLOCK>>>(ctx->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->cb.in.as<double>(), ctx->cb.ix.as<int>(), ctx->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+            }
+        }
+        if (ctx->ob.ne) {
+            if (fOnly) {
+                fillOpenBranchBatchF<<<grid(ctx->ob.ne * nS), BLOCK>>>(ctx->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->ob.in.as<double>(), ctx->ob.ix.as<int>(), ctx->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+            } else {
+                fillOpenBranchBatch<<<grid(ctx->ob.ne * nS), BLOCK>>>(ctx->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->ob.in.as<double>(), ctx->ob.ix.as<int>(), ctx->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+            }
+        }
+        if (ctx->sh.ne) {
+            if (fOnly) {
+                fillShuntBatchF<<<grid(ctx->sh.ne * nS), BLOCK>>>(ctx->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->sh.in.as<double>(), ctx->sh.ix.as<int>(), ctx->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+            } else {
+                fillShuntBatch<<<grid(ctx->sh.ne * nS), BLOCK>>>(ctx->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->sh.in.as<double>(), ctx->sh.ix.as<int>(), ctx->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+            }
+        }
+        if (ctx->hv.ne) {
+            if (fOnly) {
+                fillHvdcBatchF<<<grid(ctx->hv.ne * nS), BLOCK>>>(ctx->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->hv.in.as<double>(), ctx->hv.ix.as<int>(), ctx->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+            } else {
+                fillHvdcBatch<<<grid(ctx->hv.ne * nS), BLOCK>>>(ctx->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->hv.in.as<double>(), ctx->hv.ix.as<int>(), ctx->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+            }
+        }
         if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->dDqElem.as<int>(), ctx->dDqSide.as<int>(), ctx->dDqKind.as<int>(), ctx->dDqWeight.as<double>(), ctx->dDqDest.as<int>(), ctx->cb.in.as<double>(), ctx->cb.ix.as<int>(), ctx->sh.in.as<double>(), ctx->sh.ix.as<int>(), ctx->ob.in.as<double>(), ctx->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
         if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK>>>(ctx->ndr, nS, n, nnz, ctx->dDrCol.as<int>(), ctx->dDrCoef.as<double>(), ctx->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK>>>(ctx->nzi, nS, n, nnz, ctx->dZiIn.as<double>(), ctx->dZiIdx.as<int>(), ctx->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());

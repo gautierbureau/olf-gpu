@@ -143,3 +143,21 @@ sinTheta/cosTheta from one sincos(dph) per branch via angle addition, i.e. feed 
 PRECOMPUTED-TRIG form of the same OLF formulas (the Java's own signature shape —
 java2cuda can emit that variant from the same source); (3) cuDSS reordering-alg knobs
 for the factorize delta; (4) launch-gap batching.
+
+## 2026-07-15 — F-only fill kernels (lever 1 from the attribution)
+
+java2cuda now emits a values-only routine per family (`eval<X>F` — the residual
+values alone, kernel locals pruned) next to the fused J+F routine, from the same
+parsed OLF Java. The JNI uses F-only batch fills wherever an iteration never
+consumes the Jacobian: the final residual/convergence fill of every pass, and
+mode 4's solve-only iterations (residual positions in the dest stride are pinned
+to the generated scatter tables by static_asserts).
+
+- mode 3 K=4 warm chunks: 2351 → **2291 ms (4.58 ms/scn)** — the trailing full-J
+  fill (~90 ms) became ~30 ms. Cold E2E ≈ 10.8–11.0 ms/ctg (CUDA-init run noise
+  exceeds the delta).
+- mode 4 re-checked with cheap F-iterations (K sweep 4/8/12 = 1143/1766/2393 ms,
+  313/476/495 of 500 converged): still convergence-limited vs mode 3 K=4's
+  499/500 @ 2291 — the June "net wash" verdict stands; frozen-J is not the path.
+- Next per the attribution: the fused fill itself (81 ms — precomputed-trig
+  variant via angle addition), cuDSS reordering knobs (+29 ms/iter factorize).

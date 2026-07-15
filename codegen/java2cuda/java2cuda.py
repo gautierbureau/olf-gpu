@@ -308,21 +308,53 @@ def _guarded_consts(consts):
     return "\n".join(out)
 
 
+def _prune_temps(temps, out):
+    """The subset of kernel locals a reduced output set actually references, keeping
+    declaration order and transitive references (a component local may use a hoisted
+    denominator declared before it)."""
+    needed = set()
+    for _name, _side, body in out:
+        needed.update(re.findall(r"\b[A-Za-z_]\w*\b", body))
+    kept = []
+    for t in reversed(temps):                          # reverse: keep deps of kept temps
+        if t["sym"] in needed:
+            kept.append(t)
+            needed.update(re.findall(r"\b[A-Za-z_]\w*\b", t["expr"]))
+    kept.reverse()
+    return kept
+
+
 def render_fused(mod, temps, out):
+    """Render the family header with TWO routines from the same parsed outputs:
+    the fused J+F routine (<routine>: values + all derivatives — one Newton
+    iteration's fill) and the F-ONLY routine (<routine>F: the residual values
+    alone, with the kernel locals pruned to what they reference) for the fill
+    sites that never consume the Jacobian — residual/convergence checks,
+    line-search backtracks, frozen-Jacobian (iter0-only) iterations."""
     env = Environment(loader=FileSystemLoader(os.path.join(CODEGEN, "templates")),
                       trim_blocks=False, lstrip_blocks=False, keep_trailing_newline=True)
-    names = [name for name, _side, _e in out]
-    body = {name: expr for name, _side, expr in out}
     parts = mod["cuda_namespace"].split("::")
     ns_open = " ".join(f"namespace {p} {{" for p in parts)
     ns_close = "}" * len(parts) + "  // namespace " + mod["cuda_namespace"]
     param_rows = ["double " + ", double ".join(row) + "," for row in mod["cuda_params"]]
-    consts_block = _guarded_consts(mod["cuda_consts"]) + "\n\n"
+    consts_block = _guarded_consts(mod["cuda_consts"]) + "\n"
+    resid_names = {res for res, _side in mod["residuals"]}
+    f_out = [(n, s_, b) for n, s_, b in out if n in resid_names]
+    routines = [
+        {"name": mod["cuda_routine"], "doc": mod["cuda_fused_doc"],
+         "outputs": [n for n, _s, _e in out], "temps": temps,
+         "out": {n: b for n, _s, b in out}},
+        {"name": mod["cuda_routine"] + "F", "doc":
+         "// F-ONLY variant: the residual values alone (no Jacobian outputs) — for fill\n"
+         "// sites that never factorize: residual/convergence checks, line-search\n"
+         "// backtracks, frozen-Jacobian iterations. Same parsed OLF formulas.",
+         "outputs": [n for n, _s, _e in f_out], "temps": _prune_temps(temps, f_out),
+         "out": {n: b for n, _s, b in f_out}},
+    ]
     return env.get_template("fused.cuh.j2").render(
         doc=mod["doc"], regen=REGEN, ns_open=ns_open, ns_close=ns_close,
-        fused_doc=mod["cuda_fused_doc"], fn_macro=mod["cuda_fn_macro"],
-        routine=mod["cuda_routine"], param_rows=param_rows,
-        consts_block=consts_block, outputs=names, temps=temps, out=body)
+        fn_macro=mod["cuda_fn_macro"], param_rows=param_rows,
+        consts_block=consts_block, routines=routines)
 
 
 # --------------------------------------------------------------------------------

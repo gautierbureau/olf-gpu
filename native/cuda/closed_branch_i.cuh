@@ -4,14 +4,6 @@
 // Closed-branch current magnitudes and their Jacobian entries, parsed from the hand-written OLF equation-term Java (the source of truth).
 //
 // GENERATED — DO NOT EDIT. Regenerate with: python3 codegen/java2cuda/java2cuda.py (parsed from the OLF Java).
-//
-// FUSED per-element kernel body: one routine computes the two closed-branch
-// current magnitudes i1/i2 + their ten chain-rule derivatives for one branch,
-// writing into Struct-of-Arrays at index i. The complex-current components
-// reI1/imI1/reI2/imI2 are computed once as kernel locals and every derivative is
-// (re*dred<var> + im*dimd<var>) / hypot(re, im) — OLF's own chain-rule shape.
-// NEW GPU target (the residual pipeline emitted no CUDA for current magnitude);
-// no derivative w.r.t. r1 exists, matching OLF (calculateSensi throws on dr1).
 #pragma once
 #include <math.h>
 
@@ -30,6 +22,13 @@ constexpr double R2 = 1.0;
 constexpr double A2 = 0.0;
 #endif
 
+// FUSED per-element kernel body: one routine computes the two closed-branch
+// current magnitudes i1/i2 + their ten chain-rule derivatives for one branch,
+// writing into Struct-of-Arrays at index i. The complex-current components
+// reI1/imI1/reI2/imI2 are computed once as kernel locals and every derivative is
+// (re*dred<var> + im*dimd<var>) / hypot(re, im) — OLF's own chain-rule shape.
+// NEW GPU target (the residual pipeline emitted no CUDA for current magnitude);
+// no derivative w.r.t. r1 exists, matching OLF (calculateSensi throws on dr1).
 CBI_FN void evalClosedBranchI(
         double y, double g1, double g2, double b1, double b2,
         double v1, double r1, double v2, double ksi, double a1, double ph1, double ph2,
@@ -62,6 +61,23 @@ CBI_FN void evalClosedBranchI(
     di2dph1[i] = (reI2 * (R2 * (-y * r1 * v1 * cos(ksi + a1 - A2 + ph1))) + imI2 * (R2 * (-y * r1 * v1 * sin(ksi + a1 - A2 + ph1)))) / (hypot(reI2, imI2));
     di2dph2[i] = (reI2 * (R2 * R2 * v2 * (-g2 * sin(ph2) - b2 * cos(ph2) + y * cos(ph2 + ksi))) + imI2 * (R2 * R2 * v2 * (g2 * cos(ph2) - b2 * sin(ph2) + y * sin(ph2 + ksi)))) / (hypot(reI2, imI2));
     di2da1[i] = ((reI2 * (R2 * (-y * r1 * v1 * cos(ksi + a1 - A2 + ph1))) + imI2 * (R2 * (-y * r1 * v1 * sin(ksi + a1 - A2 + ph1)))) / (hypot(reI2, imI2)));
+}
+
+// F-ONLY variant: the residual values alone (no Jacobian outputs) — for fill
+// sites that never factorize: residual/convergence checks, line-search
+// backtracks, frozen-Jacobian iterations. Same parsed OLF formulas.
+CBI_FN void evalClosedBranchIF(
+        double y, double g1, double g2, double b1, double b2,
+        double v1, double r1, double v2, double ksi, double a1, double ph1, double ph2,
+        int i,
+        double* i1,
+        double* i2) {
+    double reI1 = r1 * (r1 * v1 * (g1 * cos(ph1) - b1 * sin(ph1) + y * sin(ph1 + ksi)) - y * R2 * v2 * sin(ksi - a1 + A2 + ph2));
+    double imI1 = r1 * (r1 * v1 * (g1 * sin(ph1) + b1 * cos(ph1) - y * cos(ph1 + ksi)) + y * R2 * v2 * cos(ksi - a1 + A2 + ph2));
+    double reI2 = R2 * (R2 * v2 * (g2 * cos(ph2) - b2 * sin(ph2) + y * sin(ph2 + ksi)) - y * r1 * v1 * sin(ksi + a1 - A2 + ph1));
+    double imI2 = R2 * (R2 * v2 * (g2 * sin(ph2) + b2 * cos(ph2) - y * cos(ph2 + ksi)) + y * r1 * v1 * cos(ksi + a1 - A2 + ph1));
+    i1[i] = (hypot(reI1, imI1));
+    i2[i] = (hypot(reI2, imI2));
 }
 
 }}  // namespace powsybl::openloadflow

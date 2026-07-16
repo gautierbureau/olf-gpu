@@ -212,3 +212,30 @@ Note: structure sharing is per-`GpuAcData` instance; the base LF always extracts
 the DS_RL flavor, so an SA run with DS or RL disabled extracts a different flavor
 and builds its own structure (same cost as before — no regression, just no hit).
 Cross-flavor content matching is a possible follow-up if that case ever matters.
+
+## 2026-07-16 — Cross-flavor structure sharing + bench made production-faithful
+
+Two follow-ups to the shared-structure work:
+
+1. **The fixed-iter bench now shares ONE equation system** between the base load
+   flow and the batched sweep (one `AcLoadFlowContext` provides the es for both —
+   the production `GpuBatchedAcSecurityAnalysis` shape). Before, the bench's base
+   LF ran on the engine's own second es, so the base->batch extraction/structure
+   hand-off never engaged there — a bench artifact, not a GPU limitation (LF and
+   SA DO share the es in production, same as on CPU).
+2. **Cross-flavor content matching** (`GpuAcData.sameStructureInputsAs` +
+   refcounting holder in `GpuAcStructures`): the flavor flags (DS/RL) only select
+   the outer-loop packs, which are batch-CONTEXT inputs — so an SA run with DS or
+   RL disabled now aliases the base's structure instead of rebuilding it (the base
+   always extracts DS_RL). Values refresh re-keys via `GpuAcStructures.rebind`
+   (drops every stale alias) and now also re-uploads `ziIn` (latent gap: a
+   coupler-rho move previously survived a VALUES refresh stale on device).
+   Proven by `GpuAcStructuresTest` (same handle, no extra build, solve converges).
+
+Bench (RTX A1000, cuDSS 0.8.0, UBATCH, MAXBATCH=500, K=4, 500 matched ctg),
+base-on-GPU cold E2E: 10.89–10.95 → **10.68 ms/ctg** (5340 ms total = base 2808 +
+SA 2532) — the batch now reuses the base's extraction AND device structure in the
+bench, as in production. Warm unchanged: **2286 ms chunks (4.57 ms/scn)**, 499/500
+@ 1e-6, med ‖F‖∞ 3.7e-12. vs gpusim2grid cold 8.81 ms/ctg → gap 1.21×.
+Ladder recap (cold, base-on-GPU): 11.41 → 10.99 (base-on-GPU) → 10.78 (shared
+extraction) → 10.68 (shared device structure, es-faithful bench).

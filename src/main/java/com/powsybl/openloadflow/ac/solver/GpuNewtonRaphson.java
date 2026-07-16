@@ -198,7 +198,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     CONTEXT_REBUILDS.incrementAndGet();
                 } else if (!data.sameAs(cachedData)) {
                     GpuAcNewtonSolver.refreshContextValues(context.handle.get(),
-                            data.cbIn(), data.obIn(), data.shIn(), data.hvIn());
+                            data.cbIn(), data.obIn(), data.shIn(), data.hvIn(), data.ziIn());
+                    // the SHARED structure now holds the new values — re-key it to the new
+                    // extraction so content matching never aliases it under the old one
+                    GpuAcStructures.rebind(cachedData, data);
                     cachedData = data;
                     VALUE_REFRESHES.incrementAndGet();
                 }

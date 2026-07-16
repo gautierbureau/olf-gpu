@@ -14,9 +14,7 @@ import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
-import com.powsybl.openloadflow.ac.AcTargetVector;
 import com.powsybl.openloadflow.ac.AcloadFlowEngine;
-import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
@@ -26,6 +24,7 @@ import com.powsybl.openloadflow.ac.solver.GpuBatchedSecurityAnalysisSolver.Batch
 import com.powsybl.openloadflow.ac.solver.GpuNewtonRaphsonFactory;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.equations.EquationSystem;
+import com.powsybl.openloadflow.equations.TargetVector;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -120,10 +119,17 @@ class GpuBatchedN1FixedIterTest {
     }
 
     private record Problem(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                           AcTargetVector target, AcLoadFlowParameters acParameters) {
+                           TargetVector<AcVariableType, AcEquationType> target, AcLoadFlowContext context) {
     }
 
-    /** Load an LfNetwork + AC equation system with the GPU-scope parameters (the extractor's scope). */
+    /**
+     * Load an LfNetwork + AC equation system with the GPU-scope parameters (the extractor's scope).
+     * ONE {@link AcLoadFlowContext} provides the equation system for BOTH the base load flow and the
+     * batched contingency sweep — exactly the production SA shape ({@code GpuBatchedAcSecurityAnalysis}
+     * batches on the engine's own context), so with the base on the GPU the batch reuses the base's
+     * extraction ({@code GpuAcDataCache}) AND its device structure ({@code GpuAcStructures}). The caller
+     * closes the context.
+     */
     private static Problem loadGpuScope(Network iidm) {
         // DC_VALUES init for the network state vector; the caller then converges the base case to
         // AC before the contingency sweep (the hot start). Same scope as the GPU extractor.
@@ -143,18 +149,24 @@ class GpuBatchedN1FixedIterTest {
                 new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>(), false, false);
         acp.getNetworkParameters().setMaxSlackBusCount(1);
         LfNetwork network = LfNetwork.load(iidm, new LfNetworkLoaderImpl(), acp.getNetworkParameters(), ReportNode.NO_OP).get(0);
-        EquationSystem<AcVariableType, AcEquationType> es =
-                new AcEquationSystemCreator(network, acp.getEquationSystemCreationParameters()).create();
+        AcLoadFlowContext context = new AcLoadFlowContext(network, acp);
+        EquationSystem<AcVariableType, AcEquationType> es = context.getEquationSystem();
         AcSolverUtil.initStateVector(network, es, acp.getVoltageInitializer());
-        return new Problem(network, es, new AcTargetVector(network, es), acp);
+        return new Problem(network, es, context.getTargetVector(), context);
     }
 
     @Test
-    void pegase9241FixedIterations() {
+    void pegase9241FixedIterations() throws Exception {
         Problem p = loadGpuScope(Network.read(CASES.resolve(CASE)));
+        try (AcLoadFlowContext context = p.context()) {
+            runPegase9241FixedIterations(p, context);
+        }
+    }
+
+    private void runPegase9241FixedIterations(Problem p, AcLoadFlowContext context) {
         LfNetwork network = p.network();
         EquationSystem<AcVariableType, AcEquationType> es = p.es();
-        AcTargetVector target = p.target();
+        TargetVector<AcVariableType, AcEquationType> target = p.target();
 
         // Every contingency hot-starts from the CONVERGED base-case AC state — exactly what OLF's
         // CPU security analysis does (base load flow, then PreviousValue init per contingency) and
@@ -162,11 +174,11 @@ class GpuBatchedN1FixedIterTest {
         // converged base in afterPreContingencySimulation). A single-branch N-1 is a small
         // perturbation of the base case, so from this start it converges to 1e-12 in K=4. (DC-init
         // would need K=6+ — that gap is the START POINT, not the formulation.) Run a real AC load
-        // flow on the base case, then re-init the state vector from the converged buses.
+        // flow on the base case THROUGH THE SAME CONTEXT the batch then uses (the production SA
+        // shape) — with OLF_GPU_BASE_ON_GPU the batch reuses the base's extraction and device
+        // structure instead of rebuilding them.
         long baseLfT0 = System.nanoTime();
-        try (AcLoadFlowContext context = new AcLoadFlowContext(network, p.acParameters())) {
-            new AcloadFlowEngine(context).run();
-        }
+        new AcloadFlowEngine(context).run();
         long baseLfMs = (System.nanoTime() - baseLfT0) / 1_000_000;
         AcSolverUtil.initStateVector(network, es, new PreviousValueVoltageInitializer());
         double[] baseState = es.getStateVector().get().clone();

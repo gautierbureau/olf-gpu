@@ -1135,18 +1135,20 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
     return res;
 }
 
-// VALUES-level refresh: re-upload only the per-element PARAMETER packs (cbIn/obIn/shIn/hvIn) into the
-// SHARED structure, in place. The CSR pattern, the diagonal pairing, the index/dest packs and cuDSS's
-// symbolic ANALYSIS are UNCHANGED — they depend on the index packs and structure, not on these values
-// (a transformer tap or shunt-b move changes r1/a1/b only). The fill kernels read in[] every iteration,
-// so the next solveContext refactorizes on the fresh values. Element COUNTS must match the cached
-// structure (the Java side only takes this path when the index packs are identical), so we copy into
-// the EXISTING device buffers (no realloc — DeviceBuf::alloc would leak the old pointer). The static
-// trig is re-derived (a tap move can change ksi/a1). Mutating the shared structure is the correct
-// semantic — one extraction has ONE value set; any batch context sharing it must see the new values
-// (in practice the Java side rebuilds the batch context from the new extraction on any value drift).
+// VALUES-level refresh: re-upload only the per-element PARAMETER packs (cbIn/obIn/shIn/hvIn/ziIn)
+// into the SHARED structure, in place. The CSR pattern, the diagonal pairing, the index/dest packs and
+// cuDSS's symbolic ANALYSIS are UNCHANGED — they depend on the index packs and structure, not on these
+// values (a transformer tap or shunt-b move changes r1/a1/b — or a coupler's rho, ziIn — only). The
+// fill kernels read in[] every iteration, so the next solveContext refactorizes on the fresh values.
+// Element COUNTS must match the cached structure (the Java side only takes this path when the index
+// packs are identical), so we copy into the EXISTING device buffers (no realloc — DeviceBuf::alloc
+// would leak the old pointer). The static trig is re-derived (a tap move can change ksi/a1). Mutating
+// the shared structure is the correct semantic — one extraction has ONE value set; any context sharing
+// it must see the new values (the Java side then re-keys the structure cache to the new extraction,
+// GpuAcStructures.rebind, so content matching never aliases stale values).
 void refreshContextValues(SolverContext* ctx, int ncb, const double* cbIn, int nob, const double* obIn,
-                          int nsh, const double* shIn, int nhv, const double* hvIn) {
+                          int nsh, const double* shIn, int nhv, const double* hvIn,
+                          int nzi, const double* ziIn) {
     auto refresh = [](Family& f, int ne, const double* in) {
         if (ne != f.ne) {
             throw std::runtime_error("refreshContextValues: element count changed (not a VALUES event)");
@@ -1161,6 +1163,12 @@ void refreshContextValues(SolverContext* ctx, int ncb, const double* cbIn, int n
     refresh(st.ob, nob, obIn);
     refresh(st.sh, nsh, shIn);
     refresh(st.hv, nhv, hvIn);
+    if (nzi != st.nzi) {
+        throw std::runtime_error("refreshContextValues: zero-impedance count changed (not a VALUES event)");
+    }
+    if (nzi) {
+        CUDA_CHECK(cudaMemcpy(st.dZiIn.p, ziIn, static_cast<size_t>(nzi) * sizeof(double), cudaMemcpyHostToDevice));
+    }
     if (ncb) {
         initClosedBranchTrig<<<grid(ncb), BLOCK>>>(ncb, st.cb.in.as<double>(), st.cbTrig.as<double>());
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -2681,19 +2689,21 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_destroyC
 extern "C" JNIEXPORT void JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_refreshContextValues(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jcbIn, jdoubleArray jobIn,
-        jdoubleArray jshIn, jdoubleArray jhvIn) {
+        jdoubleArray jshIn, jdoubleArray jhvIn, jdoubleArray jziIn) {
     auto* ctx = reinterpret_cast<SolverContext*>(handle);
     jdouble* cbIn = env->GetDoubleArrayElements(jcbIn, nullptr);
     jdouble* obIn = env->GetDoubleArrayElements(jobIn, nullptr);
     jdouble* shIn = env->GetDoubleArrayElements(jshIn, nullptr);
     jdouble* hvIn = env->GetDoubleArrayElements(jhvIn, nullptr);
+    jdouble* ziIn = env->GetDoubleArrayElements(jziIn, nullptr);
     std::string error;
     try {
         if (ctx == nullptr) {
             throw std::runtime_error("invalid solver context");
         }
         refreshContextValues(ctx, env->GetArrayLength(jcbIn) / 8, cbIn, env->GetArrayLength(jobIn) / 7, obIn,
-                             env->GetArrayLength(jshIn) / 2, shIn, env->GetArrayLength(jhvIn) / 5, hvIn);
+                             env->GetArrayLength(jshIn) / 2, shIn, env->GetArrayLength(jhvIn) / 5, hvIn,
+                             env->GetArrayLength(jziIn), ziIn);
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {
@@ -2703,6 +2713,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_refreshC
     env->ReleaseDoubleArrayElements(jobIn, obIn, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jshIn, shIn, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jhvIn, hvIn, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jziIn, ziIn, JNI_ABORT);
     if (!error.empty()) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
                       ("GPU values refresh failed: " + error).c_str());

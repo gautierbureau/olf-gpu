@@ -90,6 +90,28 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
     }
 
     /**
+     * Content equality over the SHARED-STRUCTURE inputs only — the family packs (values AND indices),
+     * DISTR_Q, zero-impedance and DISTR_RHO — i.e. exactly what {@code GpuAcNewtonSolver.createStructure}
+     * consumes. The reactive-limits / distributed-slack packs are EXCLUDED: they are batch-CONTEXT
+     * inputs, not structure inputs, so two extraction FLAVORS of one equation-system state (the base
+     * load flow always extracts DS_RL; an SA run may extract with DS or RL disabled) compare equal here
+     * and can share one device-resident structure (see {@code GpuAcStructures}).
+     */
+    public boolean sameStructureInputsAs(GpuAcData other) {
+        return other != null
+                && java.util.Arrays.equals(cbIn, other.cbIn) && java.util.Arrays.equals(cbIdx, other.cbIdx)
+                && java.util.Arrays.equals(obIn, other.obIn) && java.util.Arrays.equals(obIdx, other.obIdx)
+                && java.util.Arrays.equals(shIn, other.shIn) && java.util.Arrays.equals(shIdx, other.shIdx)
+                && java.util.Arrays.equals(hvIn, other.hvIn) && java.util.Arrays.equals(hvIdx, other.hvIdx)
+                && java.util.Arrays.equals(dqElem, other.dqElem) && java.util.Arrays.equals(dqSide, other.dqSide)
+                && java.util.Arrays.equals(dqWeight, other.dqWeight) && java.util.Arrays.equals(dqRow, other.dqRow)
+                && java.util.Arrays.equals(dqKind, other.dqKind)
+                && java.util.Arrays.equals(ziIn, other.ziIn) && java.util.Arrays.equals(ziIdx, other.ziIdx)
+                && java.util.Arrays.equals(drRow, other.drRow) && java.util.Arrays.equals(drCol, other.drCol)
+                && java.util.Arrays.equals(drCoef, other.drCoef);
+    }
+
+    /**
      * Structural equality over the INDEX packs ONLY (the variable columns each element touches, hence
      * the CSR pattern + diagonal pairing). True means a cached context's pattern and cuDSS symbolic
      * analysis are still valid and only the element PARAMETER packs may differ — the VALUES invalidation

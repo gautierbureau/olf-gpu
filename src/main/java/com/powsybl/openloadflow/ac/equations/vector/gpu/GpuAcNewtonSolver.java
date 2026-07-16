@@ -209,14 +209,17 @@ public final class GpuAcNewtonSolver {
                                                double maxDv, double maxDphi, int[] varType);
 
     /**
-     * VALUES-level refresh: re-upload only the per-element parameter packs into the context's SHARED
-     * structure, keeping its CSR pattern and the context's cuDSS symbolic analysis; the per-element
-     * static trig is re-derived on device. Valid only when the element counts / index packs are
-     * unchanged (a transformer tap or shunt-susceptance move) — the caller guarantees this by taking
-     * this path only when {@link GpuAcData#sameStructureAs} holds. Far cheaper than a rebuild.
+     * VALUES-level refresh: re-upload only the per-element parameter packs (families + zero-impedance
+     * rho) into the context's SHARED structure, keeping its CSR pattern and the context's cuDSS
+     * symbolic analysis; the per-element static trig is re-derived on device. Valid only when the
+     * element counts / index packs are unchanged (a transformer tap or shunt-susceptance move) — the
+     * caller guarantees this by taking this path only when {@link GpuAcData#sameStructureAs} holds,
+     * and must then re-key the structure cache to the new extraction ({@link GpuAcStructures#rebind})
+     * so content matching never aliases the refreshed structure under its old values. Far cheaper
+     * than a rebuild.
      */
     public static native void refreshContextValues(long handle, double[] cbIn, double[] obIn,
-                                                   double[] shIn, double[] hvIn);
+                                                   double[] shIn, double[] hvIn, double[] ziIn);
 
     /** Release a context from {@link #createContext} (idempotent for handle 0). */
     public static native void destroyContext(long handle);

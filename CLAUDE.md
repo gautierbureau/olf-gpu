@@ -116,14 +116,19 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
   and `recommendBatchSize(structHandle, maxCap)` no longer rebuild the pattern, and
   the chunk-size LU probe result is cached ON the structure (one probe per
   extraction, not per SA run). `refreshContextValues` mutates the SHARED structure in
-  place and re-derives the static trig (correct: one extraction = one value set; the
-  batch context is rebuilt from the new extraction on any value drift anyway). The
-  hand-off is ASSERTED in
+  place (families + `ziIn` + re-derived static trig — one extraction = one value set)
+  and the refresher then calls `GpuAcStructures.rebind(old, new)`, which drops EVERY
+  key aliased to the refreshed structure and re-keys it to the new extraction, so
+  content matching never aliases stale values. The hand-off is ASSERTED in
   `GpuBatchedAcSecurityAnalysisTest#gpuBatchedEngagesAndMatchesCpuOnDevice` via
-  `GpuAcStructures.hitCount()`. Structure sharing is per-`GpuAcData` INSTANCE: a
-  flavor mismatch (base always extracts DS_RL; an SA run with DS or RL disabled
-  extracts another flavor) builds a second structure — same cost as before the
-  sharing, no correctness impact. Rows use the STABLE indexing (P row = the bus's `BUS_PHI` variable row,
+  `GpuAcStructures.hitCount()`. Sharing is instance-first with a CROSS-FLAVOR content
+  fallback: the base always extracts DS_RL while an SA run with DS or RL disabled
+  extracts another flavor (a different `GpuAcData` instance) — the flags only select
+  the RL/DS packs, which are batch-CONTEXT inputs, so on an instance miss the cache
+  content-matches the structure inputs (`GpuAcData.sameStructureInputsAs`) and
+  aliases the existing structure (refcounting `Structure` holder — Cleaner fires when
+  the last aliased key is collected; `GpuAcStructuresTest`). Rows use the STABLE
+  indexing (P row = the bus's `BUS_PHI` variable row,
   Q row = `BUS_V` — OLF's renumbered equation columns are NOT in the GPU structure), so
   PV→PQ switching is value-only: per solve, `extractRowMode` (power-eq vs slack/PV
   identity mask, applied by the `applyRowMode` kernel after the fills: row zeroed,

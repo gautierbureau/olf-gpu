@@ -38,11 +38,11 @@ for alg in $ALGS; do
     echo "########## OLF_GPU_REORDER_ALG=$alg ##########"
     LOG="$(mktemp)"
     if OLF_GPU_REORDER_ALG="$alg" native/cuda/run_bench.sh --no-build >"$LOG" 2>&1; then
-        grep -aE "OLF_GPU_CUDSS|E2E K=|K=[0-9]+ +:" "$LOG" || true
+        grep -aE "OLF_GPU_CUDSS|E2E[^ ]* K=|K=[0-9]+ +:" "$LOG" || true
         {
             echo "=== $alg ==="
             grep -a "OLF_GPU_CUDSS" "$LOG" | sort -u || true
-            grep -aE "E2E K=|K=[0-9]+ +:" "$LOG" || true
+            grep -aE "E2E[^ ]* K=|K=[0-9]+ +:" "$LOG" || true
         } >>"$SUMMARY"
     else
         echo "RUN FAILED for $alg (device memory? unsupported ordering?) — log: $LOG"

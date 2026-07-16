@@ -157,36 +157,65 @@ class GpuBatchedN1FixedIterTest {
 
     @Test
     void pegase9241FixedIterations() throws Exception {
-        Problem p = loadGpuScope(Network.read(CASES.resolve(CASE)));
+        Network iidm = Network.read(CASES.resolve(CASE));
+        Problem p = loadGpuScope(iidm);
         try (AcLoadFlowContext context = p.context()) {
             runPegase9241FixedIterations(p, context);
         }
+        // Warm-JIT cold-GPU end-to-end: a SECOND full pass in the same JVM on a freshly built
+        // problem (new LfNetwork/context/es; the Java-side GPU caches are cleared, so extraction,
+        // shared structure, LU probe, cuDSS analyses and solver contexts all rebuild — without the
+        // clear, content matching would alias the first pass's device structure and un-cold the
+        // measurement). JIT and the CUDA driver are warm; everything GPU-side is cold. This is the
+        // long-running-service scenario (a new network snapshot arriving at a warm process) and
+        // the closest structural analogue to gpusim2grid's repeated in-process runs (Python has no
+        // JIT ramp). The [E2E] line from the first pass stays the single-shot cold number.
+        if (System.getenv("OLF_GPU_E2E") != null && !"0".equals(System.getenv("OLF_GPU_E2E_WARMJIT"))) {
+            Problem p2 = loadGpuScope(iidm);
+            try (AcLoadFlowContext context = p2.context()) {
+                e2ePass(p2, context, "E2E-warmJIT");
+            }
+        }
     }
 
-    private void runPegase9241FixedIterations(Problem p, AcLoadFlowContext context) {
+    /**
+     * One end-to-end pass on a fresh problem: the Java-side GPU caches are cleared FIRST (so with
+     * the base on the GPU, the base pays the cold extraction + structure build like a real new
+     * snapshot and the SA then reuses them through the production hand-off), then the timed base
+     * load flow through {@code context}, then ONE timed contingency sweep at the E2E K.
+     */
+    private static void e2ePass(Problem p, AcLoadFlowContext context, String label) {
         LfNetwork network = p.network();
         EquationSystem<AcVariableType, AcEquationType> es = p.es();
         TargetVector<AcVariableType, AcEquationType> target = p.target();
-
-        // Every contingency hot-starts from the CONVERGED base-case AC state — exactly what OLF's
-        // CPU security analysis does (base load flow, then PreviousValue init per contingency) and
-        // what the production GPU path does (GpuBatchedAcSecurityAnalysis precomputes from the
-        // converged base in afterPreContingencySimulation). A single-branch N-1 is a small
-        // perturbation of the base case, so from this start it converges to 1e-12 in K=4. (DC-init
-        // would need K=6+ — that gap is the START POINT, not the formulation.) Run a real AC load
-        // flow on the base case THROUGH THE SAME CONTEXT the batch then uses (the production SA
-        // shape) — with OLF_GPU_BASE_ON_GPU the batch reuses the base's extraction and device
-        // structure instead of rebuilding them.
+        GpuBatchedSecurityAnalysisSolver.clearContextCache();
+        GpuAcStructures.clear();
         long baseLfT0 = System.nanoTime();
         new AcloadFlowEngine(context).run();
         long baseLfMs = (System.nanoTime() - baseLfT0) / 1_000_000;
         AcSolverUtil.initStateVector(network, es, new PreviousValueVoltageInitializer());
         double[] baseState = es.getStateVector().get().clone();
-        int n = baseState.length;
+        List<BatchContingency> contingencies = buildContingencies(network);
+        int kE2E = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_E2E_K", "4"));
+        NewtonRaphsonParameters params = new NewtonRaphsonParameters();
+        params.setMaxIterations(kE2E);
+        long g0 = System.nanoTime();
+        List<BatchScenarioResult> cold = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                network, baseState, contingencies, es, target, params, 0.0, ReportNode.NO_OP);
+        long gpuMs = (System.nanoTime() - g0) / 1_000_000;
+        long cb = cold.stream().filter(b -> !b.needsCpuFallback()).count();
+        String baseWhere = System.getenv("OLF_GPU_BASE_ON_GPU") != null ? "GPU" : "CPU";
+        System.out.printf("  [%s K=%d] base %s loadflow %d ms + cold GPU SA %d ms = %d ms total | %d ctg | %.2f ms/ctg%n",
+                label, kE2E, baseWhere, baseLfMs, gpuMs,
+                baseLfMs + gpuMs, cb, (baseLfMs + gpuMs) / (double) Math.max(1, cb));
+    }
 
-        // OLF_GPU_CONT_FILE (one IIDM branch id per line) selects an EXPLICIT contingency set in
-        // file order — used to run a fixed, reproducible physical set (e.g. the
-        // list from codegen/bench/gen_contingencies.py). Unset → the first MAX_CONTINGENCIES branches.
+    /**
+     * The bench contingency set: {@code OLF_GPU_CONT_FILE} (one IIDM branch id per line, file
+     * order — a fixed, reproducible physical set) or the first {@link #MAX_CONTINGENCIES}
+     * connected branches.
+     */
+    private static List<BatchContingency> buildContingencies(LfNetwork network) {
         List<BatchContingency> contingencies = new ArrayList<>();
         String contFile = System.getenv("OLF_GPU_CONT_FILE");
         if (contFile != null) {
@@ -216,6 +245,34 @@ class GpuBatchedN1FixedIterTest {
                 }
             }
         }
+        return contingencies;
+    }
+
+    private void runPegase9241FixedIterations(Problem p, AcLoadFlowContext context) {
+        LfNetwork network = p.network();
+        EquationSystem<AcVariableType, AcEquationType> es = p.es();
+        TargetVector<AcVariableType, AcEquationType> target = p.target();
+
+        // Every contingency hot-starts from the CONVERGED base-case AC state — exactly what OLF's
+        // CPU security analysis does (base load flow, then PreviousValue init per contingency) and
+        // what the production GPU path does (GpuBatchedAcSecurityAnalysis precomputes from the
+        // converged base in afterPreContingencySimulation). A single-branch N-1 is a small
+        // perturbation of the base case, so from this start it converges to 1e-12 in K=4. (DC-init
+        // would need K=6+ — that gap is the START POINT, not the formulation.) Run a real AC load
+        // flow on the base case THROUGH THE SAME CONTEXT the batch then uses (the production SA
+        // shape) — with OLF_GPU_BASE_ON_GPU the batch reuses the base's extraction and device
+        // structure instead of rebuilding them.
+        long baseLfT0 = System.nanoTime();
+        new AcloadFlowEngine(context).run();
+        long baseLfMs = (System.nanoTime() - baseLfT0) / 1_000_000;
+        AcSolverUtil.initStateVector(network, es, new PreviousValueVoltageInitializer());
+        double[] baseState = es.getStateVector().get().clone();
+        int n = baseState.length;
+
+        // OLF_GPU_CONT_FILE (one IIDM branch id per line) selects an EXPLICIT contingency set in
+        // file order — used to run a fixed, reproducible physical set (e.g. the
+        // list from codegen/bench/gen_contingencies.py). Unset → the first MAX_CONTINGENCIES branches.
+        List<BatchContingency> contingencies = buildContingencies(network);
 
         System.out.printf("BARE-FIXED-ITER %s (n=%d): %d single-branch contingencies (non-islanding subset "
                 + "qualified on-GPU; islanding outages routed to CPU)%n",

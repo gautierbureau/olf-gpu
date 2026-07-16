@@ -36,7 +36,7 @@ MVN_STATUS=0
 mvn -s "$HOME/Projects/powsybl/tmp/settings.xml" test -Dcheckstyle.skip -Dtest='GpuBatchedN1FixedIterTest#pegase9241FixedIterations' -DfailIfNoTests=false >"$LOG" 2>&1 || MVN_STATUS=$?
 
 echo "=================== RESULT ==================="
-grep -aE "OLF_GPU_CUDSS|BARE-FIXED-ITER|E2E K=|K=[0-9]+ +:|Tests run: [0-9]" "$LOG" || { echo "no result lines — full log:"; tail -40 "$LOG"; }
+grep -aE "OLF_GPU_CUDSS|BARE-FIXED-ITER|E2E[^ ]* K=|K=[0-9]+ +:|Tests run: [0-9]" "$LOG" || { echo "no result lines — full log:"; tail -40 "$LOG"; }
 echo "=============================================="
 echo "(full log: $LOG)"
 exit "$MVN_STATUS"

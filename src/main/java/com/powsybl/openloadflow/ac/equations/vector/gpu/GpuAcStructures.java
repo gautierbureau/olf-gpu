@@ -134,6 +134,18 @@ public final class GpuAcStructures {
      * describe the device state — leaving any would let a later content-equal extraction alias
      * wrong values) and {@code to} becomes its key (unless it already has its own structure).
      */
+    /**
+     * Test/bench hook: drop every cached mapping, so the next lookups rebuild instead of
+     * instance- or content-matching an earlier extraction. Java-side only — a structure still
+     * referenced by a live context keeps its native ownership until that context is destroyed.
+     * Mirrors {@code GpuBatchedSecurityAnalysisSolver#clearContextCache} for cold-path
+     * measurements (without it, content matching would alias a previous pass's device structure
+     * and silently skip the rebuild being measured).
+     */
+    public static synchronized void clear() {
+        CACHE.clear();
+    }
+
     public static synchronized void rebind(GpuAcData from, GpuAcData to) {
         Structure structure = CACHE.remove(from);
         if (structure != null) {

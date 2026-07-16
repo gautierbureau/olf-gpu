@@ -340,3 +340,35 @@ real SA run, invisible to this bench).
 Machine-state caution again: the same afternoon the identical no-stream AMD lib
 benched 2615 → 2405 ms warm chunks hours apart — only interleaved pairs are
 comparable, never cross-session absolutes.
+
+## 2026-07-16 — Warm-JIT cold-GPU E2E variant + SAME-DAY comparison vs gpusim2grid
+
+The bench now prints [E2E-warmJIT K=..]: a second full pass in the same JVM on a
+freshly built problem (new LfNetwork/context/es; GpuAcStructures.clear() +
+clearContextCache() first — without the new clear() hook, content matching would
+alias pass 1's device structure and un-cold the measurement). Warm JIT + warm
+CUDA driver, cold everything GPU-side: the long-running-service scenario. The
+single-shot [E2E] line is unchanged (OLF_GPU_E2E_WARMJIT=0 disables the pass).
+
+Same-day paired numbers (RTX A1000, both sides cuDSS 0.8.0/UBATCH/FP64/K=4/
+batch 500, same 500 matched ctg; ours = AMD ordering + dedicated stream):
+
+| cold-first                    | ours              | gpusim2grid          | ratio |
+|-------------------------------|-------------------|----------------------|-------|
+| process-cold E2E              | 17.30 ms/ctg (5442 base + 3206 SA) | 11.94 ms/ctg (3096 base_case + 2874 total) | 1.45x |
+| in-process repeat E2E         | **9.12 ms/ctg** (1712 base + 2846 cold SA) | not measured (their bench has no repeat mode; est. ~7.9 with the ~2 s CUDA init removed) | ~1.15x est. |
+| warm chunk                    | 4.68 ms/scn       | 3.77 ms/scn          | 1.24x |
+| convergence (both)            | 499/500 @ 1e-6, med ||F|| 3.6e-12 | 499/500 @ 1e-6, med ||F|| 8.34e-12 | we converge deeper |
+
+Readings:
+- ~4.1 s (~47%) of OUR process-cold E2E is JVM JIT warm-up, not GPU work: the
+  warm-JIT pass drops base 5442 -> 1712 ms and SA 3206 -> 2846 ms. The
+  process-cold ratio (1.45x today vs 1.30x recorded 2026-07-13) is therefore
+  mostly a JVM-vs-Python runtime comparison, not a GPU-engineering gap.
+- BOTH sides are host-slower today than their recorded numbers (theirs: base_case
+  2256 -> 3096, contingency total 2147 -> 2874) while their warm chunks are
+  IDENTICAL (3.76 -> 3.77) — confirming the machine drift is host-side and warm
+  GPU numbers are the stable cross-day reference.
+- The structurally comparable service-scenario pair needs a repeat mode in THEIR
+  bench for a measured (not estimated) ratio — candidate follow-up if the ~1.15x
+  estimate matters.

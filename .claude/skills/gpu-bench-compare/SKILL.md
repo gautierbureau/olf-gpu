@@ -14,6 +14,14 @@ cd ~/Projects/powsybl/powsybl-open-loadflow-gpu && native/cuda/run_bench.sh
 ```
 Take `[E2E K=4] base CPU loadflow B + cold GPU SA S = T total | N ms/ctg`
 → ours cold E2E = T (CUDA init sits inside S), warm = the `K=4 :` line.
+The bench also prints `[E2E-warmJIT K=4] ...` — a second same-JVM pass on a fresh
+problem (warm JIT + warm CUDA, cold extraction/structure/analyses/contexts): the
+long-running-service number. Compare it to THEIR process-cold only with the caveat
+that their bench has no in-process repeat mode (their repeat ≈ base_case minus the
+~2 s CUDA init — an estimate, label it as such). ~half of our process-cold E2E is
+JVM JIT (measured 2026-07-16: 17.30 vs 9.12 ms/ctg), so process-cold ratio drift
+can be pure host/JIT drift — check their warm chunks: if unchanged, the machine's
+GPU state is comparable and host drift explains the rest.
 
 **2. Theirs (gpusim2grid):**
 ```bash

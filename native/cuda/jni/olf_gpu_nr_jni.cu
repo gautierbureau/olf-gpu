@@ -1035,6 +1035,13 @@ struct SolverContext {
     DeviceBuf dXprev;                                        // state before the last full step (line search)
     CudssCtx ds;
     bool analyzed = false;                                   // ANALYSIS+first FACTORIZATION done
+    // Dedicated BLOCKING stream for the solve (kernels/memsets/D2D + cuDSS via cudssSetStream),
+    // same rationale as BatchSolverContext::stream: keep the iteration off the legacy default
+    // stream's implicit device-wide serialization; missed ops still order correctly.
+    cudaStream_t stream = nullptr;
+    ~SolverContext() {
+        if (stream) cudaStreamDestroy(stream);
+    }
 };
 
 SolverContext* createContext(const SharedStructurePtr& st) {
@@ -1059,7 +1066,9 @@ SolverContext* createContext(const SharedStructurePtr& st) {
     ctx->dMode.alloc(n * sizeof(int));
 
     // ---- cuDSS objects: J as true CSR; kernels fill d_ax in place; ANALYSIS lazy ----
+    CUDA_CHECK(cudaStreamCreate(&ctx->stream));
     CUDSS_CHECK(cudssCreate(&ctx->ds.handle));
+    CUDSS_CHECK(cudssSetStream(ctx->ds.handle, ctx->stream));
     CUDSS_CHECK(cudssConfigCreate(&ctx->ds.config));
     int ir = irSteps();
     CUDSS_CHECK(cudssConfigSet(ctx->ds.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
@@ -1089,17 +1098,17 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
     // stalls. Both norms are set to HUGE_VAL when any mismatch entry is non-finite.
     double curNorm2 = 0.0;
     auto fillAndNorm = [&]() -> double {
-        CUDA_CHECK(cudaMemset(ctx->dVals.p, 0, ctx->nnz * sizeof(double)));
-        initF<<<grid(n), BLOCK>>>(n, ctx->dTarget.as<double>(), ctx->dF.as<double>());
-        if (ctx->st->cb.ne) fillClosedBranch<<<grid(ctx->st->cb.ne), BLOCK>>>(ctx->st->cb.ne, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
-        if (ctx->st->ob.ne) fillOpenBranch<<<grid(ctx->st->ob.ne), BLOCK>>>(ctx->st->ob.ne, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
-        if (ctx->st->sh.ne) fillShunt<<<grid(ctx->st->sh.ne), BLOCK>>>(ctx->st->sh.ne, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
-        if (ctx->st->hv.ne) fillHvdc<<<grid(ctx->st->hv.ne), BLOCK>>>(ctx->st->hv.ne, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
-        if (ctx->ndq) fillDistrQ<<<grid(ctx->ndq), BLOCK>>>(ctx->ndq, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
-        if (ctx->nzi) fillZeroImp<<<grid(ctx->nzi), BLOCK>>>(ctx->nzi, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
-        if (ctx->ndr) fillDistrRho<<<grid(ctx->ndr), BLOCK>>>(ctx->ndr, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
-        applyRowMode<<<grid(n), BLOCK>>>(n, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
-        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemsetAsync(ctx->dVals.p, 0, ctx->nnz * sizeof(double), ctx->stream));
+        initF<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dTarget.as<double>(), ctx->dF.as<double>());
+        if (ctx->st->cb.ne) fillClosedBranch<<<grid(ctx->st->cb.ne), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        if (ctx->st->ob.ne) fillOpenBranch<<<grid(ctx->st->ob.ne), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        if (ctx->st->sh.ne) fillShunt<<<grid(ctx->st->sh.ne), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        if (ctx->st->hv.ne) fillHvdc<<<grid(ctx->st->hv.ne), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        if (ctx->ndq) fillDistrQ<<<grid(ctx->ndq), BLOCK, 0, ctx->stream>>>(ctx->ndq, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        if (ctx->nzi) fillZeroImp<<<grid(ctx->nzi), BLOCK, 0, ctx->stream>>>(ctx->nzi, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        if (ctx->ndr) fillDistrRho<<<grid(ctx->ndr), BLOCK, 0, ctx->stream>>>(ctx->ndr, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        applyRowMode<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         CUDA_CHECK(cudaMemcpy(ctx->hF.data(), ctx->dF.p, n * sizeof(double), cudaMemcpyDeviceToHost));
         double infn = 0.0;
         double sumsq = 0.0;
@@ -1147,8 +1156,8 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
         if (lsMode == 1 && haveLast && norm2 >= lastNorm2) {
             for (int k = 1; k <= lsMaxIter && norm2 >= lastNorm2; k++) {
                 double mu = 1.0 / std::pow(lsStepFold, k);
-                stepFromPrev<<<grid(n), BLOCK>>>(n, ctx->dXprev.as<double>(), ctx->dDx.as<double>(), mu, ctx->dX.as<double>());
-                CUDA_CHECK(cudaDeviceSynchronize());
+                stepFromPrev<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dXprev.as<double>(), ctx->dDx.as<double>(), mu, ctx->dX.as<double>());
+                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
                 res.norm = fillAndNorm();
                 norm2 = curNorm2;
             }
@@ -1171,17 +1180,18 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
 
         // J dx = -F on the device (analyze ONCE per structure, refactorize after —
         // including across solver runs reusing this context)
-        negateInto<<<grid(n), BLOCK>>>(n, ctx->dF.as<double>(), ctx->dB.as<double>());
+        negateInto<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dB.as<double>());
         if (!ctx->analyzed) {
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
             traceLuNnz(ctx->ds.handle, ctx->ds.data, "base");
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
-            ctx->analyzed = true;
-        } else {
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_REFACTORIZATION, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
         }
-        CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_SOLVE, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
-        CUDA_CHECK(cudaMemcpy(ctx->dXprev.p, ctx->dX.p, n * sizeof(double), cudaMemcpyDeviceToDevice));
+        // ONE cudssExecute per iteration (phases are OR-able bit flags): first pass factorizes,
+        // later ones refactorize reusing the pivot order — fused with the solve either way.
+        CUDSS_CHECK(cudssExecute(ctx->ds.handle,
+                (ctx->analyzed ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION) | CUDSS_PHASE_SOLVE,
+                ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
+        ctx->analyzed = true;
+        CUDA_CHECK(cudaMemcpyAsync(ctx->dXprev.p, ctx->dX.p, n * sizeof(double), cudaMemcpyDeviceToDevice, ctx->stream));
         if (lsMode == 2) {
             // MAX_VOLTAGE_CHANGE: one global step factor so the largest |Δv| / |Δφ| stays within
             // maxDv / maxDphi (mirrors MaxVoltageChangeStateVectorScaling). Read dx back (same per-iter
@@ -1197,11 +1207,11 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
                     if (a > maxDphi) stepSize = std::min(stepSize, maxDphi / a);
                 }
             }
-            stepFromPrev<<<grid(n), BLOCK>>>(n, ctx->dXprev.as<double>(), ctx->dDx.as<double>(), stepSize, ctx->dX.as<double>());
+            stepFromPrev<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dXprev.as<double>(), ctx->dDx.as<double>(), stepSize, ctx->dX.as<double>());
         } else {
-            axpy1<<<grid(n), BLOCK>>>(n, ctx->dDx.as<double>(), ctx->dX.as<double>());
+            axpy1<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dX.as<double>());
         }
-        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     }
     res.iters = it;
     if (res.norm >= tol && !hXbest.empty()) {
@@ -2465,8 +2475,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             traceLuNnz(ctx->ds.handle, ctx->ds.data, "batch-api");
             ctx->analyzed = true;
         }
-        CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION, ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch));
-        CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_SOLVE, ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch));
+        CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
+                ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch));
         axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDx.as<double>(), ctx->dX.as<double>());
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync (final readback syncs)
         } else if (ctx->mode == 2) {
@@ -2481,10 +2491,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             traceLuNnz(ctx->ds.handle, ctx->ds.data, "blkdiag");
             ctx->analyzed = true;
         }
-        CUDSS_CHECK(cudssExecute(ctx->ds.handle, ctx->factored ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION,
+        CUDSS_CHECK(cudssExecute(ctx->ds.handle,
+                (ctx->factored ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION) | CUDSS_PHASE_SOLVE,
                 ctx->ds.config, ctx->ds.data, ctx->matBig, ctx->matBigX, ctx->matBigB));
         ctx->factored = true;
-        CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_SOLVE, ctx->ds.config, ctx->ds.data, ctx->matBig, ctx->matBigX, ctx->matBigB));
         axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDx.as<double>(), ctx->dX.as<double>());
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync (final readback syncs)
         } else if (ctx->mode == 3 || ctx->mode == 4 || ctx->mode == 5) {
@@ -2503,14 +2513,16 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             traceLuNnz(ctx->ds.handle, ctx->ds.data, "ubatch");
             ctx->analyzed = true;
         }
+        // ONE cudssExecute per iteration (phases are OR-able bit flags): halves the per-iteration
+        // host-side phase overhead vs separate FACTORIZATION + SOLVE calls.
+        int ubPhase = CUDSS_PHASE_SOLVE;
         if (ctx->mode == 5) {
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, ctx->factored ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION,
-                    ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            ubPhase |= ctx->factored ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION;
             ctx->factored = true;
         } else if (ctx->mode == 3 || it == 0) {              // mode 3 every iter; mode 4 only at chunk iter 0
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            ubPhase |= CUDSS_PHASE_FACTORIZATION;
         }
-        CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_SOLVE, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+        CUDSS_CHECK(cudssExecute(ctx->ds.handle, ubPhase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
         axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDx.as<double>(), ctx->dX.as<double>());
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync (final readback syncs)
         } else {
@@ -2530,8 +2542,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 traceLuNnz(ctx->ds.handle, ctx->ds.data, "per-scenario");
                 ctx->analyzed = true;
             }
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_SOLVE, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
+            CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
+                    ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
             double* xS = ctx->dX.as<double>() + (size_t) s * n;
             axpy1One<<<grid(n), BLOCK, 0, ctx->stream>>>(n, dxS, xS);
         }

@@ -372,3 +372,29 @@ Readings:
 - The structurally comparable service-scenario pair needs a repeat mode in THEIR
   bench for a measured (not estimated) ratio — candidate follow-up if the ~1.15x
   estimate matters.
+
+## 2026-07-16 — Fused cudssExecute(FACTORIZATION|SOLVE) + base-context stream (lever 2 step 2: measured WASH)
+
+All five per-iteration cuDSS sites now issue ONE cudssExecute (phases are OR-able
+bit flags; each mode keeps its factorize policy — mode 4 still solves-only after
+iter 0, mode 5/blkdiag still REFACTORIZE, base fuses FACT-or-REFACT with SOLVE;
+ANALYSIS stays separate for traceLuNnz). The base SolverContext also moved to its
+own BLOCKING stream + cudssSetStream (same design as the batch context; in-loop
+kernels/memset/D2D on it, per-iter sync narrowed to cudaStreamSynchronize — the
+per-iteration mismatch readback stays, it IS the base convergence loop).
+
+Interleaved A/B (3 pairs, base-on-GPU): a WASH on every metric. COLD-FIRST,
+warm-JIT cold-GPU E2E: 8.65/8.77/8.68 (basestream) vs 8.47/8.91/8.64 ms/ctg
+(fused) — split pairs, mean −13 ms = noise. Warm chunk 2377 vs 2360 ms mean =
+noise. Convergence identical. NB the pair ORDER slightly biased against fused
+(always second on a within-session warming machine — the cold SA column drifts up
+monotonically across all six runs); still a wash.
+
+Why (and why kept): gpusim2grid does NOT fuse — factor()/solve() are two separate
+cudssExecute calls, async on their bound stream — and stays tight anyway: once a
+stream is bound (step 1), the second call's host overhead is negligible. KEPT as
+strictly neutral (fewer host round-trips, same numerics, base-context stream
+consistency). The remaining chunk-speed residual vs their 1881-ms chunks is NOT
+in the cuDSS phase calls: next suspects are the per-iteration dVals cudaMemset
+(nnz x nS doubles of device bandwidth every full fill) and the fill scatter
+itself (the known atomic-bound floor).

@@ -151,6 +151,68 @@ inline int irSteps() {
 }
 
 // ---------------------------------------------------------------------------------
+// cuDSS fill-reducing ordering knob (the reordering-alg SWEEP): factorize cost is
+// LU-fill-bound, and the fill is decided by the ordering cuDSS picks at ANALYSIS.
+// OLF_GPU_REORDER_ALG selects it explicitly on EVERY cuDSS config we create (base
+// context, batch context, chunk-size probe — one run = one ordering everywhere):
+//   default | btf_colamd | colamd | amd | nd | none
+// Unset = library default (bit-identical to before the knob existed). "none" is the
+// natural order — expect pathological fill on grid patterns; sweep it only with a
+// small OLF_GPU_MAXBATCH. Driver: native/cuda/sweep_reorder.sh, which compares the
+// reported LU_NNZ (see traceLuNnz) and the warm bench line per algorithm. cuDSS 0.7
+// names the same ordinals CUDSS_ALG_1..5 (its docs map 1/2 to BTF_COLAMD/COLAMD).
+// ---------------------------------------------------------------------------------
+
+#if CUDSS_VERSION >= 800
+using OlfReorderAlg = cudssReorderingAlg_t;
+constexpr OlfReorderAlg REORDER_ALGS[] = {CUDSS_REORDERING_ALG_DEFAULT, CUDSS_REORDERING_ALG_BTF_COLAMD,
+                                          CUDSS_REORDERING_ALG_COLAMD, CUDSS_REORDERING_ALG_AMD,
+                                          CUDSS_REORDERING_ALG_NESTED_DISSECTION, CUDSS_REORDERING_ALG_NONE};
+#else
+using OlfReorderAlg = cudssAlgType_t;
+constexpr OlfReorderAlg REORDER_ALGS[] = {CUDSS_ALG_DEFAULT, CUDSS_ALG_1, CUDSS_ALG_2,
+                                          CUDSS_ALG_3, CUDSS_ALG_4, CUDSS_ALG_5};
+#endif
+
+inline void applyReorderAlg(cudssConfig_t config) {
+    const char* e = std::getenv("OLF_GPU_REORDER_ALG");
+    if (e == nullptr || *e == '\0') {
+        return;                                              // library default, untouched
+    }
+    static const char* const NAMES[] = {"default", "btf_colamd", "colamd", "amd", "nd", "none"};
+    for (size_t i = 0; i < sizeof(NAMES) / sizeof(NAMES[0]); i++) {
+        if (std::string(e) == NAMES[i]) {
+            OlfReorderAlg alg = REORDER_ALGS[i];
+            CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_REORDERING_ALG, &alg, sizeof(alg)));
+            return;
+        }
+    }
+    throw std::runtime_error(std::string("OLF_GPU_REORDER_ALG: unknown value '") + e
+                             + "' (default|btf_colamd|colamd|amd|nd|none)");
+}
+
+// Report the LU fill after an ANALYSIS when sweeping (or tracing): one stderr line the
+// sweep driver greps. Non-fatal — some (version, ordering) combinations may not expose
+// CUDSS_DATA_LU_NNZ; the sweep then judges on the bench timing alone.
+inline void traceLuNnz(cudssHandle_t handle, cudssData_t data, const char* where) {
+    if (std::getenv("OLF_GPU_REORDER_ALG") == nullptr && std::getenv("OLF_GPU_TRACE") == nullptr) {
+        return;
+    }
+#if OLF_GPU_CUDSS_LU_NNZ
+    int64_t luNnz = 0;
+    size_t written = 0;
+    if (cudssDataGet(handle, data, CUDSS_DATA_LU_NNZ, &luNnz, sizeof(luNnz), &written) == CUDSS_STATUS_SUCCESS
+            && luNnz > 0) {
+        const char* alg = std::getenv("OLF_GPU_REORDER_ALG");
+        std::fprintf(stderr, "OLF_GPU_CUDSS reorder=%s %s LU_NNZ=%lld\n",
+                     alg != nullptr ? alg : "default", where, static_cast<long long>(luNnz));
+        return;
+    }
+#endif
+    std::fprintf(stderr, "OLF_GPU_CUDSS %s LU_NNZ=unavailable\n", where);
+}
+
+// ---------------------------------------------------------------------------------
 // Host: resolve each scatter-table row to (equation row, variable col) from one
 // element's packed index array. Role 2 (skip) resolves to absent.
 // ---------------------------------------------------------------------------------
@@ -915,6 +977,7 @@ double luBytesPerScenario(SharedStructure& st) {
         CudssCtx ds;
         CUDSS_CHECK(cudssCreate(&ds.handle));
         CUDSS_CHECK(cudssConfigCreate(&ds.config));
+        applyReorderAlg(ds.config);
         CUDSS_CHECK(cudssDataCreate(ds.handle, &ds.data));
         CUDSS_CHECK(cudssMatrixCreateCsr(&ds.matA, n, n, st.nnz, st.dRowPtr.as<int>(), nullptr,
                                          st.dColIdx.as<int>(), dVals.as<double>(), OLF_CUDSS_CSR_TYPES,
@@ -986,6 +1049,7 @@ SolverContext* createContext(const SharedStructurePtr& st) {
     CUDSS_CHECK(cudssConfigCreate(&ctx->ds.config));
     int ir = irSteps();
     CUDSS_CHECK(cudssConfigSet(ctx->ds.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
+    applyReorderAlg(ctx->ds.config);
     CUDSS_CHECK(cudssDataCreate(ctx->ds.handle, &ctx->ds.data));
     CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->ds.matA, n, n, ctx->nnz,
                                      st->dRowPtr.as<int>(), nullptr, st->dColIdx.as<int>(), ctx->dVals.as<double>(),
@@ -1096,6 +1160,7 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
         negateInto<<<grid(n), BLOCK>>>(n, ctx->dF.as<double>(), ctx->dB.as<double>());
         if (!ctx->analyzed) {
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
+            traceLuNnz(ctx->ds.handle, ctx->ds.data, "base");
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
             ctx->analyzed = true;
         } else {
@@ -2013,6 +2078,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     CUDSS_CHECK(cudssConfigCreate(&ctx->ds.config));
     int ir = irSteps();
     CUDSS_CHECK(cudssConfigSet(ctx->ds.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
+    applyReorderAlg(ctx->ds.config);
     CUDSS_CHECK(cudssDataCreate(ctx->ds.handle, &ctx->ds.data));
 
     if (mode == 1) {
@@ -2371,6 +2437,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         negateIntoBatch<<<grid(n * nS), BLOCK>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
         if (!ctx->analyzed) {
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch));
+            traceLuNnz(ctx->ds.handle, ctx->ds.data, "batch-api");
             ctx->analyzed = true;
         }
         CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION, ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch));
@@ -2386,6 +2453,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         negateIntoBatch<<<grid(n * nS), BLOCK>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
         if (!ctx->analyzed) {
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matBig, ctx->matBigX, ctx->matBigB));
+            traceLuNnz(ctx->ds.handle, ctx->ds.data, "blkdiag");
             ctx->analyzed = true;
         }
         CUDSS_CHECK(cudssExecute(ctx->ds.handle, ctx->factored ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION,
@@ -2407,6 +2475,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         negateIntoBatch<<<grid(n * nS), BLOCK>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
         if (!ctx->analyzed) {
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            traceLuNnz(ctx->ds.handle, ctx->ds.data, "ubatch");
             ctx->analyzed = true;
         }
         if (ctx->mode == 5) {
@@ -2433,6 +2502,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matX, dxS));
             if (!ctx->analyzed) {
                 CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
+                traceLuNnz(ctx->ds.handle, ctx->ds.data, "per-scenario");
                 ctx->analyzed = true;
             }
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));

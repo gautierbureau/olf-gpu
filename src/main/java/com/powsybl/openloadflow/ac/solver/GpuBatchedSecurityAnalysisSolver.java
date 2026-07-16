@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;
 import com.powsybl.openloadflow.equations.Variable;
@@ -123,14 +124,12 @@ public final class GpuBatchedSecurityAnalysisSolver {
             GpuAcNewtonSolver.destroyBatchContext(cachedContext.handle);
             cachedContext = null;
         }
-        long handle = GpuAcNewtonSolver.createBatchContext(n, chunkSize, mode,
-                data.cbIn(), data.cbIdx(), data.obIn(), data.obIdx(),
-                data.shIn(), data.shIdx(), data.hvIn(), data.hvIdx(),
+        // the shared structure comes from the per-extraction cache — when the base load flow ran
+        // on the GPU with the same extraction (GpuAcDataCache hand-off), this is a device-side hit
+        long handle = GpuAcNewtonSolver.createBatchContext(GpuAcStructures.handle(n, data), chunkSize, mode,
                 data.rlVrow(), data.rlMinQ(), data.rlMaxQ(), data.rlLoadQ(), data.rlVtarget(),
                 data.dsPhiRow(), data.dsFactor(), data.dsSlackPhiRow(), data.dsSlackTargetP(),
-                data.dsBaseTargetP(), data.dsMaxDelta(), data.dsMinDelta(),
-                data.dqElem(), data.dqSide(), data.dqWeight(), data.dqRow(), data.dqKind(),
-                data.drRow(), data.drCol(), data.drCoef(), data.ziIn(), data.ziIdx());
+                data.dsBaseTargetP(), data.dsMaxDelta(), data.dsMinDelta());
         cachedContext = new CachedBatchContext(handle, data, chunkSize, mode);
         return handle;
     }
@@ -833,10 +832,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
             return Math.min(nb, explicit);
         }
         try {
-            int rec = GpuAcNewtonSolver.recommendBatchSize(n, gpuData.cbIdx(), gpuData.obIdx(),
-                    gpuData.shIdx(), gpuData.hvIdx(),
-                    gpuData.dqElem(), gpuData.dqSide(), gpuData.dqKind(), gpuData.dqRow(),
-                    gpuData.drRow(), gpuData.drCol(), gpuData.ziIdx(), Math.min(nb, AUTO_MAX_CHUNK));
+            // sized on the shared structure (its exact nnz + a cuDSS LU probe cached there, so
+            // only the first query per extraction pays the probe analysis)
+            int rec = GpuAcNewtonSolver.recommendBatchSize(GpuAcStructures.handle(n, gpuData),
+                    Math.min(nb, AUTO_MAX_CHUNK));
             return Math.min(nb, Math.max(1, rec));
         } catch (Throwable t) {
             LOGGER.debug("GPU batch auto-size unavailable ({}); using default chunk {}", t.toString(), DEFAULT_MAX_BATCH);

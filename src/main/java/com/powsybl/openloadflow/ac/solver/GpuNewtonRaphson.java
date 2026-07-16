@@ -17,6 +17,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.equations.EquationArray;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationSystemIndex;
@@ -189,12 +190,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // pack re-upload reusing the analysis; an unchanged data is a no-op (context reused).
                 if (!data.sameStructureAs(cachedData)) {
                     GpuAcNewtonSolver.destroyContext(context.handle.getAndSet(0));
-                    context.handle.set(GpuAcNewtonSolver.createContext(n,
-                            data.cbIn(), data.cbIdx(), data.obIn(), data.obIdx(),
-                            data.shIn(), data.shIdx(), data.hvIn(), data.hvIdx(),
-                            data.dqElem(), data.dqSide(), data.dqWeight(), data.dqRow(), data.dqKind(),
-                            data.ziIn(), data.ziIdx(),
-                            data.drRow(), data.drCol(), data.drCoef()));
+                    // the shared structure comes from the per-extraction cache — the batched SA
+                    // building its context from the SAME extraction reuses it device-side
+                    context.handle.set(GpuAcNewtonSolver.createContext(GpuAcStructures.handle(n, data)));
                     cachedData = data;
                     rebuilt = true;
                     CONTEXT_REBUILDS.incrementAndGet();

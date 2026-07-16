@@ -13,7 +13,9 @@ import com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuTestPaths;
+import com.powsybl.openloadflow.ac.solver.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.results.PostContingencyResult;
@@ -102,6 +104,9 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         SecurityAnalysisResult standard = runSecurityAnalysis(network, contingencies);
 
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        // start from a cold batch context so this run exercises the base->batch structure hand-off
+        GpuBatchedSecurityAnalysisSolver.clearContextCache();
+        long structureHits0 = GpuAcStructures.hitCount();
         SecurityAnalysisResult batched;
         try {
             batched = runSecurityAnalysis(network, contingencies);
@@ -114,6 +119,12 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         int precomputed = GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get();
         assertTrue(precomputed > 0, "expected the GPU batch to precompute at least one contingency on the device "
                 + "(count = " + precomputed + " — negative/zero means it fell back to the CPU)");
+
+        // The base->batch DEVICE hand-off engaged: the base load flow (base-on-GPU swap) built the shared
+        // native structure from the cached extraction, and the batch (its chunk sizing and context build)
+        // then REUSED it instead of rebuilding the pattern/families on device (GpuAcStructures cache hit).
+        assertTrue(GpuAcStructures.hitCount() > structureHits0,
+                "expected the batched SA to reuse the base load flow's shared GPU structure");
 
         // ... and the GPU-engaged results are identical to the CPU security analysis (the safety contract).
         assertEquals(standard.getPreContingencyResult().getStatus(), batched.getPreContingencyResult().getStatus());

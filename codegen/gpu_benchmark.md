@@ -180,3 +180,35 @@ Measured verdict on feeding the batch fills precomputed trig (per-element static
 Net: mode 3 K=4 warm chunks 2291 → **2281 ms (4.56 ms/scn)**. The remaining
 per-iteration composition is cuDSS factorize 272 + fill 81 + fwd/bwd/copy 146 —
 the fill's floor is its atomics, not its math.
+
+## 2026-07-15 — Shared native structure between base LF and batched SA (lever: context unification)
+
+The duplicated NATIVE context construction is gone: everything both solvers derive
+from one extraction — row permutation, superset CSR pattern (host + device), the
+four family packs with role-folded dest arrays, DISTR_Q/RHO + zero-impedance packs,
+per-element static trig — now lives in ONE `SharedStructure` (built by
+`createStructure`, held by `shared_ptr` in both `SolverContext` and
+`BatchSolverContext`, cached per `GpuAcData` by the weak-keyed `GpuAcStructures`).
+`createBatchContext`/`recommendBatchSize` take the structure handle; the chunk-size
+LU probe (a full cuDSS ANALYSIS on the pattern) is cached ON the structure — one
+probe per extraction instead of one per SA run. ~230 lines of duplicated native
+build code deleted alongside (`computePattern` retired; net -678 lines).
+
+Where the sharing engages: the PRODUCTION SA path (`GpuBatchedAcSecurityAnalysis`),
+where the base GPU LF and the batch run on the same engine equation system — now
+asserted by `GpuBatchedAcSecurityAnalysisTest#gpuBatchedEngagesAndMatchesCpuOnDevice`
+(`GpuAcStructures.hitCount()` increases across the SA run). In the FIXED-ITER bench
+the base phase solves a different equation-system instance, so there the gain is
+"one structure build + one probe" inside the cold SA pass only.
+
+Bench (RTX A1000, cuDSS 0.8.0, UBATCH, MAXBATCH=500, K=4, 500 matched ctg):
+- CPU-base cold E2E: 11.41 → **11.08 ms/ctg** (cold SA phase 4726 → 4583 ms).
+- Base-on-GPU E2E: **10.89–10.95 ms/ctg** (SA phase 2597 → 2556 ms).
+- Warm steady state unchanged: **2278–2287 ms chunks (4.56 ms/scn)**, 499/500 @
+  1e-6, med ‖F‖∞ 3.5e-12 — numerically identical path, structural change only.
+Suite 69/0, checkstyle 0.
+
+Note: structure sharing is per-`GpuAcData` instance; the base LF always extracts
+the DS_RL flavor, so an SA run with DS or RL disabled extracts a different flavor
+and builds its own structure (same cost as before — no regression, just no hit).
+Cross-flavor content matching is a possible follow-up if that case ever matters.

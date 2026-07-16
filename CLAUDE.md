@@ -103,9 +103,27 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
   → a plain `LoadFlow.run` selects the GPU via
   `OpenLoadFlowParameters.create(p).setAcSolverType(GpuNewtonRaphsonFactory.NAME)`.
   `GpuNewtonRaphson` re-extracts per run (outer loops work: distributed slack, PV→PQ)
-  and CACHES the native solver context (fixed SUPERSET CSR pattern + device buffers +
-  cuDSS analysis, via `createContext`/`solveContext`/`destroyContext`, freed by a
-  `Cleaner`). Rows use the STABLE indexing (P row = the bus's `BUS_PHI` variable row,
+  and CACHES the native solver context (per-solve device buffers + cuDSS analysis, via
+  `createContext(structHandle)`/`solveContext`/`destroyContext`, freed by a `Cleaner`).
+  The STRUCTURE (row permutation, superset CSR pattern host+device, per-family device
+  data + role-folded dest arrays, DISTR_Q/RHO + zero-impedance packs, per-element
+  static trig) is a SEPARATE native object — `SharedStructure`, built by
+  `createStructure`/freed by `destroyStructure`, held by `shared_ptr` in BOTH context
+  kinds — cached per extraction Java-side (`GpuAcStructures`, weak-keyed by
+  `GpuAcData` + Cleaner; destroy only drops the Java ref, contexts keep it alive). So
+  the base LF and the batched SA sharing one `GpuAcDataCache` extraction share ONE
+  device-resident structure: `createBatchContext(structHandle, nS, mode, rl/ds packs)`
+  and `recommendBatchSize(structHandle, maxCap)` no longer rebuild the pattern, and
+  the chunk-size LU probe result is cached ON the structure (one probe per
+  extraction, not per SA run). `refreshContextValues` mutates the SHARED structure in
+  place and re-derives the static trig (correct: one extraction = one value set; the
+  batch context is rebuilt from the new extraction on any value drift anyway). The
+  hand-off is ASSERTED in
+  `GpuBatchedAcSecurityAnalysisTest#gpuBatchedEngagesAndMatchesCpuOnDevice` via
+  `GpuAcStructures.hitCount()`. Structure sharing is per-`GpuAcData` INSTANCE: a
+  flavor mismatch (base always extracts DS_RL; an SA run with DS or RL disabled
+  extracts another flavor) builds a second structure — same cost as before the
+  sharing, no correctness impact. Rows use the STABLE indexing (P row = the bus's `BUS_PHI` variable row,
   Q row = `BUS_V` — OLF's renumbered equation columns are NOT in the GPU structure), so
   PV→PQ switching is value-only: per solve, `extractRowMode` (power-eq vs slack/PV
   identity mask, applied by the `applyRowMode` kernel after the fills: row zeroed,

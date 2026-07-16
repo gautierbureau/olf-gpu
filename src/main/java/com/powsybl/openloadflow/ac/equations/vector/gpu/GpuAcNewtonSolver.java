@@ -134,14 +134,17 @@ public final class GpuAcNewtonSolver {
     }
 
     /**
-     * Build a CACHED solver context for one equation-system STRUCTURE: the fixed SUPERSET
-     * CSR pattern (every row carries its full power-equation entries + a guaranteed
-     * diagonal), the destination arrays, the device buffers and the cuDSS objects all
-     * persist in it, and cuDSS's symbolic ANALYSIS is done once — subsequent
-     * {@link #solveContext} calls only refactorize. Rows use the STABLE indexing (the
-     * diagonal-paired variable row, see GpuAcDataExtractor), so the context survives
-     * activation switching; element counts are implied by the index array lengths and
-     * -1 marks an absent branch side.
+     * Build the SHARED STRUCTURE for one equation-system extraction: the diagonal-pairing row
+     * permutation, the fixed SUPERSET CSR pattern (every row carries its full power-equation
+     * entries + a guaranteed diagonal), the per-family device data with role-folded destination
+     * arrays, the DISTR_Q / DISTR_RHO / zero-impedance packs and the per-element static trig.
+     * This is everything BOTH solver contexts (single-solve and batched N-1) derive from one
+     * {@link GpuAcData} — build it once and pass the handle to {@link #createContext} and
+     * {@link #createBatchContext}, so the base load flow and the batched security analysis
+     * sharing one extraction share one device-resident structure (see {@link GpuAcStructures}
+     * for the per-extraction cache). Rows use the STABLE indexing (the diagonal-paired variable
+     * row, see GpuAcDataExtractor), so the structure survives activation switching; element
+     * counts are implied by the index array lengths and -1 marks an absent branch side.
      *
      * @param n     number of variables / equations
      * @param cbIn  closed branches, {@code ncb*8}: (y g1 g2 b1 b2 ksi r1 a1)
@@ -152,14 +155,34 @@ public final class GpuAcNewtonSolver {
      * @param shIdx shunts, {@code nsh*3}: (Prow Qrow vcol)
      * @param hvIn  HVDC AC emulation, {@code nhv*5}: (p0 k lossFactor1 lossFactor2 r)
      * @param hvIdx HVDC AC emulation, {@code nhv*4}: (Prow1 Prow2 ph1col ph2col)
+     * @return an opaque native handle; release it with {@link #destroyStructure}
+     */
+    public static native long createStructure(int n,
+                                              double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
+                                              double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
+                                              int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
+                                              double[] ziIn, int[] ziIdx,
+                                              int[] drRow, int[] drCol, double[] drCoef);
+
+    /**
+     * Release a structure handle from {@link #createStructure} (idempotent for handle 0). Contexts
+     * built from it keep the device-resident structure alive natively (shared ownership) — this only
+     * drops the Java-side reference, so it is always safe to call once the handle is no longer used
+     * to create new contexts.
+     */
+    public static native void destroyStructure(long handle);
+
+    /**
+     * Build a CACHED solver context on a shared structure: the per-solve device buffers and the
+     * cuDSS objects persist in it, and cuDSS's symbolic ANALYSIS is done once — subsequent
+     * {@link #solveContext} calls only refactorize. The pattern / families / destination arrays
+     * are NOT duplicated: they live in the structure, shared with any batched context built from
+     * the same handle.
+     *
+     * @param structureHandle a structure from {@link #createStructure}
      * @return an opaque native handle; release it with {@link #destroyContext}
      */
-    public static native long createContext(int n,
-                                            double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
-                                            double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
-                                            int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
-                                            double[] ziIn, int[] ziIdx,
-                                            int[] drRow, int[] drCol, double[] drCoef);
+    public static native long createContext(long structureHandle);
 
     /**
      * Run a full Newton-Raphson AC power flow on the GPU against a cached context — only
@@ -186,10 +209,11 @@ public final class GpuAcNewtonSolver {
                                                double maxDv, double maxDphi, int[] varType);
 
     /**
-     * VALUES-level refresh: re-upload only the per-element parameter packs into an existing context,
-     * keeping its CSR pattern and cuDSS symbolic analysis. Valid only when the element counts / index
-     * packs are unchanged (a transformer tap or shunt-susceptance move) — the caller guarantees this by
-     * taking this path only when {@link GpuAcData#sameStructureAs} holds. Far cheaper than a rebuild.
+     * VALUES-level refresh: re-upload only the per-element parameter packs into the context's SHARED
+     * structure, keeping its CSR pattern and the context's cuDSS symbolic analysis; the per-element
+     * static trig is re-derived on device. Valid only when the element counts / index packs are
+     * unchanged (a transformer tap or shunt-susceptance move) — the caller guarantees this by taking
+     * this path only when {@link GpuAcData#sameStructureAs} holds. Far cheaper than a rebuild.
      */
     public static native void refreshContextValues(long handle, double[] cbIn, double[] obIn,
                                                    double[] shIn, double[] hvIn);
@@ -201,28 +225,22 @@ public final class GpuAcNewtonSolver {
      * Recommend how many scenarios fit in one GPU batch chunk for this structure, from the
      * free device memory ({@code cudaMemGetInfo}) and the per-scenario footprint. The
      * dominant term, cuDSS's LU numeric factors, is sized from a cheap single-matrix probe
-     * ANALYSIS on the shared pattern that reads cuDSS's reported {@code CUDSS_DATA_LU_NNZ}
-     * (the exact fill-in), falling back to a heuristic multiplier over the Jacobian nnz only
-     * if that query is unavailable. The value/state arrays are added and a safety margin
-     * applied; the result is clamped to {@code [1, maxCap]}. Index packs only — the pattern
-     * (hence nnz and the LU fill) depends on structure, not values.
+     * ANALYSIS on the structure's device pattern that reads cuDSS's reported
+     * {@code CUDSS_DATA_LU_NNZ} (the exact fill-in), falling back to a heuristic multiplier
+     * over the Jacobian nnz only if that query is unavailable — and CACHED on the structure,
+     * so only the first query per extraction pays the probe. The value/state arrays are added
+     * and a safety margin applied; the result is clamped to {@code [1, maxCap]}.
      *
-     * @param n      number of variables / equations
-     * @param cbIdx  closed-branch index pack ({@code ncb*10})
-     * @param obIdx  open-branch index pack ({@code nob*6})
-     * @param shIdx  shunt index pack ({@code nsh*3})
-     * @param hvIdx  HVDC index pack ({@code nhv*4})
-     * @param maxCap absolute upper bound on the returned chunk size
+     * @param structureHandle a structure from {@link #createStructure}
+     * @param maxCap          absolute upper bound on the returned chunk size
      * @return a recommended chunk size in {@code [1, maxCap]}
      */
-    public static native int recommendBatchSize(int n, int[] cbIdx, int[] obIdx, int[] shIdx, int[] hvIdx,
-                                                 int[] dqElem, int[] dqSide, int[] dqKind, int[] dqRow,
-                                                 int[] drRow, int[] drCol, int[] ziIdx, int maxCap);
+    public static native int recommendBatchSize(long structureHandle, int maxCap);
 
     /**
-     * One-shot convenience: {@link #createContext} + {@link #solveContext} +
-     * {@link #destroyContext}. For repeated solves on the same structure (outer loops),
-     * cache the context instead — see GpuNewtonRaphson.
+     * One-shot convenience: {@link #createStructure} + {@link #createContext} + {@link #solveContext}
+     * + destroy both. For repeated solves on the same structure (outer loops), cache the context
+     * instead — see GpuNewtonRaphson.
      */
     public static double[] solve(double[] x0, double[] target, int[] rowMode, int maxIter, double tol,
                                  double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
@@ -230,44 +248,40 @@ public final class GpuAcNewtonSolver {
                                  int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                                  double[] ziIn, int[] ziIdx,
                                  int[] drRow, int[] drCol, double[] drCoef) {
-        long handle = createContext(x0.length, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
+        long structure = createStructure(x0.length, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
                 dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef);
         try {
-            // undamped (no device step scaling): lsMode 0 ignores maxDv/maxDphi/varType
-            return solveContext(handle, x0, target, rowMode, maxIter, tol, 0, 0, 0.0, 0.0, 0.0, new int[x0.length]);
+            long handle = createContext(structure);
+            try {
+                // undamped (no device step scaling): lsMode 0 ignores maxDv/maxDphi/varType
+                return solveContext(handle, x0, target, rowMode, maxIter, tol, 0, 0, 0.0, 0.0, 0.0, new int[x0.length]);
+            } finally {
+                destroyContext(handle);
+            }
         } finally {
-            destroyContext(handle);
+            destroyStructure(structure);
         }
     }
 
     /**
-     * Build a CACHED solver context for BATCHED N-1 security analysis: multiple scenarios
-     * (post-contingency states) against the same network STRUCTURE and superset pattern.
-     * Per-scenario element disablement is encoded as device masks; converged scenarios
-     * can stop early. cuDSS's symbolic analysis is done once over the superset pattern.
+     * Build a CACHED solver context for BATCHED N-1 security analysis on a shared structure:
+     * multiple scenarios (post-contingency states) against the same network STRUCTURE and
+     * superset pattern. Per-scenario element disablement is encoded as device masks; converged
+     * scenarios can stop early. cuDSS's symbolic analysis is done once over the superset
+     * pattern. The pattern / families / destination arrays are NOT duplicated: they live in
+     * the structure, shared with any single-solve context built from the same handle (the
+     * base-case load flow) — only the per-scenario state and the reactive-limits /
+     * distributed-slack outer-loop packs are owned here.
      *
-     * @param n           number of variables / equations
-     * @param nScenarios  number of contingency scenarios to solve in parallel
-     * @param cbIn        closed branches, {@code ncb*8}: (y g1 g2 b1 b2 ksi r1 a1)
-     * @param cbIdx       closed branches, {@code ncb*10}: (Prow1 Qrow1 Prow2 Qrow2 ph1col v1col ph2col v2col a1col r1col)
-     * @param obIn        open branches, {@code nob*7}: (y ksi g1 b1 g2 b2 r1)
-     * @param obIdx       open branches, {@code nob*6}: (Prow1 Qrow1 Prow2 Qrow2 v1col v2col)
-     * @param shIn        shunts, {@code nsh*2}: (g b)
-     * @param shIdx       shunts, {@code nsh*3}: (Prow Qrow vcol)
-     * @param hvIn        HVDC AC emulation, {@code nhv*5}: (p0 k lossFactor1 lossFactor2 r)
-     * @param hvIdx       HVDC AC emulation, {@code nhv*4}: (Prow1 Prow2 ph1col ph2col)
+     * @param structureHandle a structure from {@link #createStructure}
+     * @param nScenarios      number of contingency scenarios to solve in parallel
      * @return an opaque native handle for batched solves; release with {@link #destroyBatchContext}
      */
-    public static native long createBatchContext(int n, int nScenarios, int mode,
-                                                  double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
-                                                  double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
+    public static native long createBatchContext(long structureHandle, int nScenarios, int mode,
                                                   int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ,
                                                   double[] rlVtarget, int[] dsPhiRow, double[] dsFactor,
                                                   int dsSlackPhiRow, double dsSlackTargetP,
-                                                  double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
-                                                  int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
-                                                  int[] drRow, int[] drCol, double[] drCoef,
-                                                  double[] ziIn, int[] ziIdx);
+                                                  double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta);
 
     /**
      * Run batched Newton-Raphson AC power flow on the GPU: one iteration loop over all
@@ -311,8 +325,8 @@ public final class GpuAcNewtonSolver {
     public static native void destroyBatchContext(long handle);
 
     /**
-     * One-shot batch convenience: {@link #createBatchContext} + {@link #solveBatchContext} +
-     * {@link #destroyBatchContext}. For repeated batches on the same structure,
+     * One-shot batch convenience: {@link #createStructure} + {@link #createBatchContext} +
+     * {@link #solveBatchContext} + destroy both. For repeated batches on the same structure,
      * cache the context instead. The base state/targets/row-mode are shared by every scenario
      * (tiled on-device); {@code nScenarios} is {@code disabledElementMask.length}.
      */
@@ -329,17 +343,22 @@ public final class GpuAcNewtonSolver {
                                          int[] drRow, int[] drCol, double[] drCoef, double[] ziIn, int[] ziIdx) {
         int n = x0Base.length;
         int nScenarios = disabledElementMask.length;
-        long handle = createBatchContext(n, nScenarios, mode, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
-                rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, dsPhiRow, dsFactor, dsSlackPhiRow, dsSlackTargetP,
-                dsBaseTargetP, dsMaxDelta, dsMinDelta, dqElem, dqSide, dqWeight, dqRow, dqKind,
-                drRow, drCol, drCoef, ziIn, ziIdx);
+        long structure = createStructure(n, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
+                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef);
         try {
-            // one-shot: no per-scenario gen-override flips, so any scenario's row mode IS the base row mode
-            return solveBatchContext(handle, x0Base, targetBase, rowMode, rowMode[0], disabledElementMask,
-                    new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0],
-                    maxIter, tol, reactiveLimitTol, slackDistTol, 0.0);
+            long handle = createBatchContext(structure, nScenarios, mode,
+                    rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, dsPhiRow, dsFactor, dsSlackPhiRow, dsSlackTargetP,
+                    dsBaseTargetP, dsMaxDelta, dsMinDelta);
+            try {
+                // one-shot: no per-scenario gen-override flips, so any scenario's row mode IS the base row mode
+                return solveBatchContext(handle, x0Base, targetBase, rowMode, rowMode[0], disabledElementMask,
+                        new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0],
+                        maxIter, tol, reactiveLimitTol, slackDistTol, 0.0);
+            } finally {
+                destroyBatchContext(handle);
+            }
         } finally {
-            destroyBatchContext(handle);
+            destroyStructure(structure);
         }
     }
 }

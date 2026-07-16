@@ -239,3 +239,43 @@ bench, as in production. Warm unchanged: **2286 ms chunks (4.57 ms/scn)**, 499/5
 @ 1e-6, med ‖F‖∞ 3.7e-12. vs gpusim2grid cold 8.81 ms/ctg → gap 1.21×.
 Ladder recap (cold, base-on-GPU): 11.41 → 10.99 (base-on-GPU) → 10.78 (shared
 extraction) → 10.68 (shared device structure, es-faithful bench).
+
+## 2026-07-16 — cuDSS reordering sweep: AMD adopted as default (lever 1: factorize fill)
+
+Sweep of `CUDSS_CONFIG_REORDERING_ALG` on the standard bench
+(`native/cuda/sweep_reorder.sh`, per-run LU_NNZ via `traceLuNnz`):
+
+| alg        | LU_NNZ (base & ubatch)  | warm K=4 chunk | convergence      |
+|------------|-------------------------|----------------|------------------|
+| default    | 304772                  | 2675 ms        | 499/500 @ 1e-6   |
+| nd         | 304772 (= default)      | 2671 ms        | 499/500          |
+| **amd**    | **260076 (−14.7%)**     | **2575 ms**    | 499/500, same ‖F‖∞ |
+| btf_colamd | NOT_SUPPORTED (status 4) at the UBATCH ANALYSIS | — | — |
+| colamd     | NOT_SUPPORTED (status 4) at the UBATCH ANALYSIS | — | — |
+
+So cuDSS 0.8.0's library default on this pattern IS nested dissection, and the
+COLAMD family is rejected on the uniform-batch path. AMD gives 15% sparser LU
+factors — and since ANALYSIS (where the ordering is computed) is a cold-path,
+once-per-context cost, AMD (cheap to compute) also helps cold, the metric that
+matters.
+
+Interleaved cold A/B (3 pairs, base-on-GPU, idle machine): AMD won the GPU-SA
+phase in ALL pairs (mean 3854 → 3418 ms, −11%) and the warm chunk in ALL pairs
+(mean 2706 → 2615 ms, −3.4%); E2E totals favored AMD 2/3 with the one reversal
+fully explained by base-LF JVM/CUDA-init noise (3.6–6.5 s swing, algorithm-blind).
+NOTE: the machine ran ~15% slower than the 10.68 ms/ctg session (default's warm
+chunk 2675–2730 vs the recorded 2286 ms) — absolute ladder numbers from this day
+are not comparable; the paired deltas are.
+
+Validation: full suite 70/0 under `OLF_GPU_REORDER_ALG=amd` (the GpuLineSearchTest
+knife-edge survived the elimination-order rounding change), run_gpu_tests.sh 8/0
+on the adopted lib, confirmation bench traces `reorder=amd(default)` LU_NNZ=260076,
+warm 2595 ms, 499/500, med ‖F‖∞ 3.7e-12.
+
+Adoption: env unset now applies AMD on cuDSS >= 0.8.0 (`applyReorderAlg`);
+`OLF_GPU_REORDER_ALG=default` restores the library default; 0.7.1 untouched
+(unmeasured there). Tooling fixes alongside: run_bench.sh now propagates the mvn
+exit status (was `|| true` — a failed run looked green to sweep drivers) and
+includes the `OLF_GPU_CUDSS` trace lines in its RESULT block; sweep_reorder.sh
+surfaces the cuDSS error line for failed algorithms; run_gpu_tests.sh was stale
+(`mvn -o`, shared ~/.m2) and now uses the isolated settings.

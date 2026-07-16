@@ -156,11 +156,16 @@ inline int irSteps() {
 // OLF_GPU_REORDER_ALG selects it explicitly on EVERY cuDSS config we create (base
 // context, batch context, chunk-size probe — one run = one ordering everywhere):
 //   default | btf_colamd | colamd | amd | nd | none
-// Unset = library default (bit-identical to before the knob existed). "none" is the
-// natural order — expect pathological fill on grid patterns; sweep it only with a
-// small OLF_GPU_MAXBATCH. Driver: native/cuda/sweep_reorder.sh, which compares the
-// reported LU_NNZ (see traceLuNnz) and the warm bench line per algorithm. cuDSS 0.7
-// names the same ordinals CUDSS_ALG_1..5 (its docs map 1/2 to BTF_COLAMD/COLAMD).
+// Unset on cuDSS >= 0.8.0 = AMD, the 2026-07-16 sweep winner on case9241pegase:
+// LU_NNZ 260076 vs 304772 for the library default (which measured identical to nd,
+// so the default IS nested dissection there), warm chunk -3.4% and warm SA -11% in
+// every interleaved A/B pair, convergence and the full suite unchanged; btf_colamd
+// and colamd are NOT_SUPPORTED (status 4) at the UBATCH ANALYSIS. Unset on 0.7.1 =
+// library default (unmeasured there). "none" is the natural order — expect
+// pathological fill on grid patterns; sweep it only with a small OLF_GPU_MAXBATCH.
+// Driver: native/cuda/sweep_reorder.sh, which compares the reported LU_NNZ (see
+// traceLuNnz) and the warm bench line per algorithm. cuDSS 0.7 names the same
+// ordinals CUDSS_ALG_1..5 (its docs map 1/2 to BTF_COLAMD/COLAMD).
 // ---------------------------------------------------------------------------------
 
 #if CUDSS_VERSION >= 800
@@ -177,7 +182,11 @@ constexpr OlfReorderAlg REORDER_ALGS[] = {CUDSS_ALG_DEFAULT, CUDSS_ALG_1, CUDSS_
 inline void applyReorderAlg(cudssConfig_t config) {
     const char* e = std::getenv("OLF_GPU_REORDER_ALG");
     if (e == nullptr || *e == '\0') {
-        return;                                              // library default, untouched
+#if CUDSS_VERSION >= 800
+        OlfReorderAlg amd = CUDSS_REORDERING_ALG_AMD;        // sweep winner (see block comment)
+        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_REORDERING_ALG, &amd, sizeof(amd)));
+#endif
+        return;                                              // 0.7.1: library default, untouched
     }
     static const char* const NAMES[] = {"default", "btf_colamd", "colamd", "amd", "nd", "none"};
     for (size_t i = 0; i < sizeof(NAMES) / sizeof(NAMES[0]); i++) {
@@ -204,8 +213,13 @@ inline void traceLuNnz(cudssHandle_t handle, cudssData_t data, const char* where
     if (cudssDataGet(handle, data, CUDSS_DATA_LU_NNZ, &luNnz, sizeof(luNnz), &written) == CUDSS_STATUS_SUCCESS
             && luNnz > 0) {
         const char* alg = std::getenv("OLF_GPU_REORDER_ALG");
+#if CUDSS_VERSION >= 800
+        const char* unsetName = "amd(default)";
+#else
+        const char* unsetName = "default";
+#endif
         std::fprintf(stderr, "OLF_GPU_CUDSS reorder=%s %s LU_NNZ=%lld\n",
-                     alg != nullptr ? alg : "default", where, static_cast<long long>(luNnz));
+                     alg != nullptr ? alg : unsetName, where, static_cast<long long>(luNnz));
         return;
     }
 #endif

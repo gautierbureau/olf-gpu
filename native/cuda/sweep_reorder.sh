@@ -46,7 +46,11 @@ for alg in $ALGS; do
         } >>"$SUMMARY"
     else
         echo "RUN FAILED for $alg (device memory? unsupported ordering?) — log: $LOG"
-        echo "=== $alg === RUN FAILED (log: $LOG)" >>"$SUMMARY"
+        grep -am1 "cuDSS error" "$LOG" || true
+        {
+            echo "=== $alg === RUN FAILED (log: $LOG)"
+            grep -am1 "cuDSS error" "$LOG" || true
+        } >>"$SUMMARY"
         continue
     fi
     rm -f "$LOG"

@@ -88,7 +88,10 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
   runtime `GpuAcNewtonSolver` preloads `libcublasLt/libcublas/libcudss` from
   `olf.cudss.path`/`CUDSS_ROOT` + `olf.cuda.path`/`CUDA_HOME`; the bundled .so has NO
   RPATH). `native/build-gpu.sh` builds it (cuDSS default `../cudss`); after `mvn clean`
-  just re-run it. `-Dolf.gpu.lib` overrides with an explicit path. (History: rung 1
+  just re-run it. `-Dolf.gpu.lib` overrides with an explicit path. cuDSS fill-reducing
+  ordering: AMD by default on >= 0.8.0 (2026-07-16 sweep: −15% LU fill vs the library
+  default, which is ND there; COLAMD family NOT_SUPPORTED on UBATCH) —
+  `OLF_GPU_REORDER_ALG` overrides, `native/cuda/sweep_reorder.sh` re-sweeps. (History: rung 1
   was a separate fill-only dense closed-branch assembler — old `libolfgpu` +
   `ClosedBranchGpuAssembler` — beside the full-NR `libolfgpunr`; the assembler was
   removed and the full-NR lib renamed `libolfgpu` once rungs 2/3 subsumed it.)

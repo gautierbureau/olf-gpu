@@ -23,6 +23,6 @@ echo "[1/2] build libolfgpu.so (CMake, static cudart, dynamic cuDSS)"
 "$ROOT/native/build-gpu.sh"
 
 echo "[2/2] run the in-process GPU tests (classpath-loaded)"
-( cd "$ROOT" && mvn -o test -Dtest='GpuFullNewtonTest,GpuLoadFlowTest' \
+( cd "$ROOT" && mvn -s "$HOME/Projects/powsybl/tmp/settings.xml" test -Dtest='GpuFullNewtonTest,GpuLoadFlowTest' \
     -DfailIfNoTests=false 2>&1 \
     | grep -iE "GPU full Newton|LoadFlow.run GPU|Tests run:|BUILD" | grep -v "Version:" | tail -12 )

@@ -279,3 +279,64 @@ exit status (was `|| true` — a failed run looked green to sweep drivers) and
 includes the `OLF_GPU_CUDSS` trace lines in its RESULT block; sweep_reorder.sh
 surfaces the cuDSS error line for failed algorithms; run_gpu_tests.sh was stale
 (`mvn -o`, shared ~/.m2) and now uses the isolated settings.
+
+## 2026-07-16 — Launch-gap analysis (lever 2): it's stream semantics, not launch count
+
+Source-level comparison for the ~25 ms/iter host/launch gaps from the 2026-07-15
+nsys attribution, before implementing:
+
+- Launch COUNT is comparable and cannot explain the gap: gpusim2grid launches
+  ~7–10 kernels/iter (fill_FP, fill_FQ, one whole-J fill_J, update_Va/Vm +
+  slack/mask adjusters; nr_iter_step.cuh) vs our ~11–12 (initF, 3 family fills on
+  pegase, dq/rho/zi packs, identity/negate/rowMode, axpy) + one LARGE per-iter
+  cudaMemset of the J values buffer (nnz x nS doubles). Per-launch overhead is
+  microseconds; 1.5–2x more launches is noise.
+- The structural difference: THEY put every kernel AND cuDSS on one explicit
+  CUDA stream (`cs`) with ZERO host syncs inside the loop. WE launch everything
+  on the LEGACY DEFAULT stream, which implicitly serializes against every other
+  stream in the process — including cuDSS's internal streams — stitching the
+  timeline with implicit sync points even though our explicit per-iter syncs are
+  already skipped in fixed-iter mode (June b94a86a02, carried over).
+- CUDA graphs: NEVER tried — no experiment in either repo's history; the only
+  mention is gpu_roadmap.md P3 "mostly subsumed by batching". Not ruled out
+  empirically; stays last, likely unnecessary if the stream fix lands.
+- PRODUCTION-only finding: the sync-skip is fixed-iter-only. The production SA
+  path (tol > 0) still does cudaDeviceSynchronize + a FULL batched-mismatch D->H
+  copy EVERY iteration — a cost the bench never sees. Stream + lagged/async
+  convergence check fixes that too (follow-up).
+
+Plan (cheapest first): (1) dedicated stream per batch context + cudssSetStream;
+(2) one cudssExecute(FACTORIZATION|SOLVE) call instead of two (phases can be
+OR-ed) to halve per-iter host phase overhead; (3) epilogue fusion only if 1–2
+leave a measurable gap; (4) graphs last resort.
+
+## 2026-07-16 — Batch solve on a dedicated stream (lever 2 step 1, measured)
+
+Implementation: one `cudaStream_t` per `BatchSolverContext` (BLOCKING flags — any
+op this conversion missed still orders correctly against the legacy stream),
+`cudssSetStream` on the batch cuDSS handle, every in-loop kernel/memset in
+`solveBatchContext` launched on the stream (memsets → `cudaMemsetAsync`), the
+per-iteration and per-pass `cudaDeviceSynchronize` narrowed to
+`cudaStreamSynchronize`. No arithmetic change.
+
+Interleaved cold A/B (3 pairs, base-on-GPU, both libs AMD-default; lib swapped in
+target/classes between runs). COLD FIRST (the decisive metric): E2E
+**17.18 → 16.93 ms/ctg mean** (8591 → 8463 ms), stream wins 2/3 pairs — but the
+cold SA phase itself was FLAT (3140 → 3146 ms mean; the chunk gain is inside its
+±50 ms ANALYSIS/first-factorize noise) and the E2E delta mostly landed in the
+base-LF term the stream doesn't touch. Honest cold claim at 500 ctg / 1 chunk:
+no cold cost, noise-floor cold gain; the gain COMPOUNDS into cold with more
+chunks (every chunk collects −55 ms → real at 2000+ ctg). Warm K=4 chunk:
+2434/2373/2409 → 2356/2349/2345 ms — wins ALL pairs, mean **−55 ms/chunk (−2.3%,
+4.80 → 4.70 ms/scn)**, and the run-to-run spread collapses 61 → 11 ms (the
+implicit serialization was also the jitter — future cold A/Bs get sharper).
+Convergence identical (499/500 @ 1e-6, same ‖F‖∞). Recovered ~half of the
+~100 ms/chunk gap budget; the rest is cudssExecute host phase overhead → next is
+step 2, one cudssExecute(FACTORIZATION|SOLVE) per iteration (runs INSIDE the cold
+chunk too, unlike this step it helps the very first factorize+solve), and the
+PRODUCTION tol>0 per-iteration sync+full-mismatch copy (pure cold cost in every
+real SA run, invisible to this bench).
+
+Machine-state caution again: the same afternoon the identical no-stream AMD lib
+benched 2615 → 2405 ms warm chunks hours apart — only interleaved pairs are
+comparable, never cross-session absolutes.

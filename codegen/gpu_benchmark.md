@@ -435,3 +435,38 @@ hide). Total memset footprint is 12.8 ms/iter (~3%) even counting those.
 The real remaining chunk lever is unchanged: the fill scatter (81 ms/iter,
 atomic-bound) via the owner-store redesign — which would eliminate the dVals
 memset as a side effect anyway.
+
+## 2026-07-17 — Fill-scatter owner-store Gate A + ownership census: GO
+
+Two throwaway probes (hack build, reverted after; never committed) to bound the
+owner-store redesign BEFORE building it:
+
+**Gate A (atomic-cost ceiling)**: scatterAdd's vals writes swapped for plain
+stores (numerically wrong on shared slots — probe only). On sane inputs the
+closed-branch fill drops **80.8 → 34.3 ms/launch (−58%)**, reproduced in two
+runs (K=4 and K=1 profiles, first instance each — identical inputs to the
+baseline's). fillShuntBatch 7.49 → 6.12 ms. CAVEAT for anyone re-running this
+hack: only the FIRST instance is valid — the wrong Jacobian diverges x to ~1e55
+and sincos falls into Payne-Hanek argument reduction, inflating later instances
+to ~91 ms (also why chunk totals under the hack mean nothing). So ~47 ms/iter
+of the 81 is atomic-write cost, NOT eval compute — consistent with the
+2026-07-15 finding that cheaper trig made the kernel SLOWER.
+
+**Ownership census** (case9241pegase scope, all vals writers counted: cb, ob,
+sh, hv, DISTR_Q, zero-imp, DISTR_RHO — only cb+sh are non-empty in this case):
+nnz=150,620, all written; **69.4% single-owner slots** (104,600), 30.6% shared
+(46,020; avg 3.3 contributors, max 47 — bus-degree diagonals). Closed-branch:
+256,784 J writes/scenario, **40.7% land in single-owner slots** (become plain
+stores). Shunt: 14,654 writes, 100% shared (bus diagonals) — owner-store wins
+nothing there.
+
+Verdict: GO, expected win between ~19 ms/iter (if cost ∝ writes converted) and
+~47 (ceiling), i.e. 75–190 ms/chunk (3.5–9%) against the +37 ms/iter fill delta
+vs gpusim2grid. If the contended 59.3% keeps the kernel slow, the escalation is
+staging+reduce for the shared slots only (contributor CSR from the same census
+pass — zero atomics, ~10 ms staging bandwidth, near-full ceiling) — decided by
+measurement, not upfront. Design notes in the session record: ownership bit
+per dest slot from ONE collection pass (miss a writer = silent corruption),
+disabled elements/inactive scenarios store 0 instead of early-returning, shared
+slots keep atomicAdd + compact zero list (full dVals memset dies as a side
+effect).

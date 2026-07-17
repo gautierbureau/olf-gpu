@@ -707,3 +707,24 @@ the shared stopping criterion. The GPU batched SA is PRODUCTION-EQUIVALENT to th
 CPU AcSecurityAnalysis under the RTE parameters, up to the convergence tolerance
 both sides are configured to. Remaining perf lever unchanged: straggler early-exit
 (GPU warm 21.4 s vs CPU-4t 15.1 s).
+
+## 2026-07-17 — Straggler early-exit LANDED (native-only, status -2 reuses the fallback routing)
+
+tol>0 solves now exit the batched loop when nActive <= max(1, 2% of nS) AND it >= maxIter/2
+(both gates needed: someone is always last to retire in a healthy pass at it~5-8; only
+cap-bound stragglers offload). Offloaded scenarios get STATUS_REJECTED (-2) — the EXISTING
+Java routing sends them to the sequential CPU fallback, zero Java changes. Env:
+OLF_GPU_STRAGGLER_FRAC (default 0.02, 0 disables). Fixed-iter mode untouched.
+
+Measured (all parity checks green: statuses identical incl. the offloaded straggler's
+MAX_ITERATION on CPU; violation diff unchanged at the 22/6 threshold-edge tail; canary engages):
+- tol=1e-6 bench (maxIter 15): 18,066 -> 15,236 ms (-16%); "499 batched" confirms offload.
+- Production SA bench (RTE params, maxNR 30): GPU warm 21.4 -> 18.4 s (0.82x vs CPU-4t 15.1 s),
+  cold 25.3 -> 22.1 s.
+
+HONEST verdict vs the ~8-10 s projection: the straggler was only PART of the story — the exit
+saves ~3 s, and the rest of the wall is (a) the pre-offload iterations each outer pass still
+pays (exit depth maxIter/2; tunable earlier via a fixed OLF_GPU_STRAGGLER_MIN_IT if profiling
+justifies), and (b) legitimate FULL-WIDTH outer-pass re-solves after RL/DS reactivation —
+cuDSS UBATCH width never shrinks (the batch-compaction escalation in the task list is the
+structural fix). Next: #11 device-side norms (~1.3-2 s more), then re-profile.

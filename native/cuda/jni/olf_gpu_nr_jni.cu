@@ -2351,6 +2351,22 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // on the device with NO per-iteration host sync and NO convergence retirement" (the
     // a fixed-iteration NR loop). tol > 0 keeps the per-iteration retirement loop.
     bool deviceFixedIter = (tol <= 0.0);
+    // STRAGGLER EARLY-EXIT (tol > 0 only): once the active count falls to <= frac*nS (min 1),
+    // stop the batched loop and mark the remainder STATUS_REJECTED (-2) so the Java side routes
+    // them to the per-contingency fallback. Rationale (2026-07-17 tol>0 profile): retirement does
+    // NOT shrink cuDSS UBATCH cost — 499 retired identity systems still factorize at the full
+    // ~233 ms/iteration — so one never-converging scenario makes the whole chunk pay maxIter
+    // full-width iterations per outer pass. OLF_GPU_STRAGGLER_FRAC overrides (0 disables).
+    int stragglerExit = 0;
+    if (!deviceFixedIter) {
+        double stragglerFrac = 0.02;
+        if (const char* e = std::getenv("OLF_GPU_STRAGGLER_FRAC")) {
+            stragglerFrac = std::atof(e);
+        }
+        if (stragglerFrac > 0.0) {
+            stragglerExit = std::max(1, static_cast<int>(stragglerFrac * nS));
+        }
+    }
 
     // Full-loadflow mode (tol > 0) with local PV controllers runs the reactive-limits (PV→PQ) OUTER loop:
     // converge the inner Newton, switch any generator over its Q limit, re-converge the switched scenarios,
@@ -2520,6 +2536,23 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 break;                                       // final residual recorded; done
             }
         } else if (nActive == 0) {
+            break;
+        } else if (stragglerExit > 0 && nActive <= stragglerExit && it * 2 >= maxIter) {
+            // The few remaining unconverged scenarios would keep the FULL-width batch iterating;
+            // hand them to the sequential fallback instead (status -2 = STATUS_REJECTED on the
+            // Java side, same routing as an extractor rejection). Their outer loops stop here.
+            // BOTH gates matter: few actives AND deep into the iteration budget — someone is
+            // always last to retire in a healthy pass (it ~5-8), only cap-bound stragglers
+            // (it >= maxIter/2) get offloaded.
+            for (int s = 0; s < nS; s++) {
+                if (active[s]) {
+                    res.status[s] = -2;
+                    res.iters[s] = it;
+                    active[s] = 0;
+                    live[s] = 0;
+                    nActive--;
+                }
+            }
             break;
         }
 

@@ -821,3 +821,25 @@ NUMBERS (case9241pegase, 500 matched ctg, RTE production params, CPU-4t = 13.5 s
 - **GPU warm 12,637 ms = 1.06x FASTER than CPU-4t** (cold 14,687 ms = 0.92x). This morning: 21.4 s.
 - tol=1e-6 bench ladder today: 18,066 -> 15,236 (straggler exit) -> 14,734 (device norms)
   -> **12,141 ms** (compaction) = -33% total; 499/499 @ 1e-6, med ||F||inf 4.0e-12.
+
+## 2026-07-17 — Transformer voltage-control port (#16) STAGED: architecture + warm-restart enabler landed
+
+Architecture decision (after reading TransformerVoltageControlOuterLoop, the AFTER_GENERATOR
+mode RTE uses): the per-scenario port is a JAVA ORCHESTRATOR around REPEATED batched solves —
+decisions mirror OLF's CPU code verbatim (INITIAL: per-control deadband check on the controlled
+bus V -> enable out-of-band controls + disable generator controls under
+maxControlledNominalVoltage with FROZEN-Q targets; CONTROL: clamp out-of-range continuous r1 to
+extreme taps, iterate; then round r1 to the closest DISCRETE tap, re-enable gens, final solve).
+Per-scenario mechanics reuse what exists: rowModePerScenario flips the rho rows identity<->
+controlled, targetOverrides carry frozen values, tap tables/deadbands/r1 ranges read from
+LfNetwork at precompute (Java side, no extraction change), controlled-bus V and r1 read from the
+returned states between calls.
+
+ENABLER LANDED: solveBatchContext now accepts an optional PER-SCENARIO x0 (n*nS, null = tile
+base) so orchestrator calls re-solve scenarios from their previous states instead of the tiled
+base. All 6 SA tests green, violation diff 0/0 (debug ctg), no regression.
+
+REMAINING (next session): the orchestrator itself (transformer pack + the 3-step state machine +
+frozen-Q via per-scenario Q readback or es evaluation), relax the detect-and-fallback guard for
+TransformerVoltageControl once landed, acceptance = GPU-vs-CPU bench with
+transformerVoltageControlOn=true (a params variant — the RTE JSON does not enable the loop).

@@ -813,7 +813,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
                         parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                         batchLsMode, batchMaxDv, batchMaxDphi,
-                        batchLsMode == 2 ? varType : null);
+                        batchLsMode == 2 ? varType : null, null);
                 for (int s = 0; s < realCount; s++) {
                     resultsByIndex[batchedIndices.get(chunkStart + s)] = chunkResults[s];
                 }

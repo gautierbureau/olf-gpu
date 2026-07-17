@@ -2360,7 +2360,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
                               const double* dsOvMaxDelta, const double* dsOvMinDelta, int maxIter, double tol,
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
-                              int lsMode, double maxDv, double maxDphi, const int* varType) {
+                              int lsMode, double maxDv, double maxDphi, const int* varType,
+                              const double* x0Full) {
     int n = ctx->n;
     int nnz = ctx->nnz;
     int nS = ctx->nScenarios;
@@ -2387,11 +2388,20 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // nS on-device. rowMode is PER-SCENARIO (length n*nS): a contingency can freeze islanded buses
     // (Phase 0b) or flip PV↔PQ via reactive limits (Phase 1), so it is NOT tiled — uploaded as-is and
     // mutated in place on-device by the outer-loop kernels. Only the disabled mask is also per-scenario.
-    CUDA_CHECK(cudaMemcpy(ctx->dX.p, x0, n * sizeof(double), cudaMemcpyHostToDevice));
+    // x0: either the BASE row tiled across nS (default), or a FULL per-scenario n*nS state
+    // (x0Full != null) — the warm-restart hook for multi-call outer sequencing (e.g. the
+    // transformer voltage-control orchestrator re-solving scenarios from their previous states).
+    if (x0Full != nullptr) {
+        CUDA_CHECK(cudaMemcpy(ctx->dX.p, x0Full, (size_t) nTot * sizeof(double), cudaMemcpyHostToDevice));
+    } else {
+        CUDA_CHECK(cudaMemcpy(ctx->dX.p, x0, n * sizeof(double), cudaMemcpyHostToDevice));
+    }
     CUDA_CHECK(cudaMemcpy(ctx->dTarget.p, target, n * sizeof(double), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(ctx->dMode.p, rowMode, nTot * sizeof(int), cudaMemcpyHostToDevice));
     dBaseMode.upload(baseRowMode, n * sizeof(int));         // base (contingency-free) row mode for the RL limit-type seed
-    tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dX.as<double>());
+    if (x0Full == nullptr) {
+        tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dX.as<double>());
+    }
     tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dTarget.as<double>());
     if (nOv > 0) {                                           // per-scenario target overrides (generator loss)
         dOvIndex.upload(ovIndex, nOv * sizeof(int));
@@ -3149,8 +3159,14 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jintArray jdsOverrideBus, jdoubleArray jdsOverrideFactorDelta, jdoubleArray jdsOverrideBaseDelta,
         jdoubleArray jdsOverrideMaxDelta, jdoubleArray jdsOverrideMinDelta, jint maxIter, jdouble tol,
         jdouble reactiveLimitTol, jdouble slackDistTol, jdouble convEpsPerEq,
-        jint lsMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType) {
+        jint lsMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType, jdoubleArray jx0Full) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    std::vector<double> x0FullVec;
+    if (jx0Full != nullptr) {
+        jsize fn = env->GetArrayLength(jx0Full);
+        x0FullVec.resize(fn);
+        env->GetDoubleArrayRegion(jx0Full, 0, fn, x0FullVec.data());
+    }
     std::vector<int> varTypeVec;
     if (jvarType != nullptr) {
         jsize vn = env->GetArrayLength(jvarType);
@@ -3234,7 +3250,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
                                 nDsOv > 0 ? dsOvBus.data() : nullptr, dsOvFactorDelta.data(),
                                 dsOvBaseDelta.data(), dsOvMaxDelta.data(), dsOvMinDelta.data(), maxIter, tol,
                                 reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                lsMode, maxDv, maxDphi, varTypeVec.empty() ? nullptr : varTypeVec.data());
+                                lsMode, maxDv, maxDphi, varTypeVec.empty() ? nullptr : varTypeVec.data(),
+                                x0FullVec.empty() ? nullptr : x0FullVec.data());
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {

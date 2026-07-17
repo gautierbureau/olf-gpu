@@ -78,6 +78,11 @@ class GpuBatchedN1FixedIterTest {
     // (run after every batched-path change). Override with OLF_GPU_FIXED_ITERS="4,6,10" to see the margin.
     private static final int[] FIXED_ITERS = parseFixedIters(System.getenv("OLF_GPU_FIXED_ITERS"), new int[] {4});
     private static final double ACCURACY_TOL = 1e-6;            // the reference mismatch tolerance
+    // OLF_GPU_TOL > 0 switches every solve in this bench to the PRODUCTION path: per-iteration
+    // convergence check + retirement (host sync + full-mismatch D->H copy each iteration) instead
+    // of device fixed-iteration mode. Use with a generous OLF_GPU_FIXED_ITERS (e.g. 15) so the
+    // iteration cap never bites; K then only bounds maxIterations. Default 0 = bench as before.
+    private static final double TOL = Double.parseDouble(System.getenv().getOrDefault("OLF_GPU_TOL", "0"));
 
     private static int[] parseFixedIters(String env, int[] fallback) {
         if (env == null || env.isBlank()) {
@@ -201,7 +206,7 @@ class GpuBatchedN1FixedIterTest {
         params.setMaxIterations(kE2E);
         long g0 = System.nanoTime();
         List<BatchScenarioResult> cold = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                network, baseState, contingencies, es, target, params, 0.0, ReportNode.NO_OP);
+                network, baseState, contingencies, es, target, params, TOL, ReportNode.NO_OP);
         long gpuMs = (System.nanoTime() - g0) / 1_000_000;
         long cb = cold.stream().filter(b -> !b.needsCpuFallback()).count();
         String baseWhere = System.getenv("OLF_GPU_BASE_ON_GPU") != null ? "GPU" : "CPU";
@@ -288,7 +293,7 @@ class GpuBatchedN1FixedIterTest {
             GpuBatchedSecurityAnalysisSolver.clearContextCache();
             long g0 = System.nanoTime();
             List<BatchScenarioResult> cold = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                    network, baseState, contingencies, es, target, params, 0.0, ReportNode.NO_OP);
+                    network, baseState, contingencies, es, target, params, TOL, ReportNode.NO_OP);
             long gpuMs = (System.nanoTime() - g0) / 1_000_000;
             long cb = cold.stream().filter(b -> !b.needsCpuFallback()).count();
             String baseWhere = System.getenv("OLF_GPU_BASE_ON_GPU") != null ? "GPU" : "CPU";
@@ -303,11 +308,11 @@ class GpuBatchedN1FixedIterTest {
             params.setMaxIterations(k);
 
             // Warm-up (CUDA context + cuDSS analysis) so the timed run measures steady-state throughput.
-            GpuBatchedSecurityAnalysisSolver.solveBatchN1(network, baseState, contingencies, es, target, params, 0.0, ReportNode.NO_OP);
+            GpuBatchedSecurityAnalysisSolver.solveBatchN1(network, baseState, contingencies, es, target, params, TOL, ReportNode.NO_OP);
 
             long t0 = System.nanoTime();
             List<BatchScenarioResult> batch = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                    network, baseState, contingencies, es, target, params, 0.0, ReportNode.NO_OP);
+                    network, baseState, contingencies, es, target, params, TOL, ReportNode.NO_OP);
             long ms = (System.nanoTime() - t0) / 1_000_000;
 
             long batched = batch.stream().filter(b -> !b.needsCpuFallback()).count();

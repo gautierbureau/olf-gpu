@@ -511,3 +511,38 @@ Remaining performance backlog is elsewhere: production tol>0 per-iteration
 sync + FULL mismatch D->H copy (lagged/async convergence check — invisible to
 the fixed-iter bench, paid by every real SA run), and cuDSS factorize (+29
 ms/iter pre-AMD; partially recovered by AMD reordering).
+
+## 2026-07-17 — Production (tol>0) path profiled: the STRAGGLER, not the sync, is the cost
+
+The bench gained OLF_GPU_TOL (default 0 = unchanged): tol>0 runs every solve on
+the PRODUCTION path — per-iteration host sync + full-mismatch D->H copy +
+convergence retirement. Measured (case9241pegase, 500 ctg, UBATCH 500, AMD,
+tol=1e-6, maxIter=15, nsys):
+
+- **Wall: 18,066 ms vs 2,131 ms fixed-iter K=4 — 8.4x** — same final quality
+  (499/500 @ 1e-6, med ||F||inf 4.1e-12).
+- Attribution: **114 FULL-WIDTH cuDSS factorizations** (~57 iterations/solve
+  vs 16 total in the K=4 run) at 219-244 ms EACH. The ONE never-converging
+  scenario (the known 1/500) stays active, so every outer pass runs the inner
+  loop to the maxIter=15 cap — and cuDSS UBATCH charges full 500-wide price
+  per iteration regardless of retirement: factorize/fwd/bwd on 499 identity
+  systems cost the same 233/79/39 ms as real ones. Our OWN fills DO scale with
+  retirement (fillClosedBranchBatch instances drop to 0.3 ms once 499 retire).
+- The originally-suspected sync+copy cost is real but SECONDARY: ~1.3 s of
+  70-MB pageable D->H mismatch copies (~5.5 GB/s) + host norm loops, ~7-10%
+  of the wall.
+
+Production levers, now correctly ranked:
+1. **Straggler early-exit + offload** (dominant): when nActive falls below a
+   small threshold, BREAK the batched loop and route leftovers to the existing
+   CPU fallback (or per-scenario GPU mode 0). The 499 converge in ~6-8
+   iterations; today the last straggler makes the full batch pay 15 per outer
+   pass. Expected: 18.1 s -> roughly 6-8 s wall.
+2. Device-side per-scenario norms (+ optionally lagged check): shrinks the
+   74-MB/iter copy to ~12 KB and kills the host 9.2M-element loop (~1.3-2 s).
+3. Batch compaction (repack actives into a narrower UBATCH mid-run): largest
+   theoretical win but needs a re-ANALYSIS per width — heavy; only worth it
+   after 1+2 are measured.
+
+NB fixed-iter benchmarking (ours AND gpusim2grid's nb_iter) structurally hides
+all of this — it is a THROUGHPUT methodology, not a production-latency one.

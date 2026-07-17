@@ -744,3 +744,17 @@ Measured: tol bench 15,236 -> 14,734 ms (-3.3%); SA bench warm 19.3 s / cold 22.
 Per the plan, #12 (lagged/async check) needs an nsys profile FIRST showing a remaining stall;
 the bigger structural lever for the production wall stays batch compaction (full-width outer
 passes) per the straggler-exit entry.
+
+## 2026-07-17 — Lagged/async convergence check: NOT NEEDED (measured), lever closed
+
+nsys gate for the stage-2 lagged check, tol=1e-6 bench after the straggler exit + device
+norms: within the 15.25-s timed window the GPU idles a TOTAL of 1,360 ms — and 1,351 ms of it
+sits in just SIX gaps (~225 ms each), with zero per-iteration gaps above 1 ms. The per-iteration
+convergence check is already free (device norms did their job); the six big gaps are OUTER-PASS
+boundaries (host-side Q-eval/RL/DS decisioning + re-uploads between passes), which a lagged
+per-iteration check cannot address. The wall is ~91% GPU-busy, dominated by full-width cuDSS
+factorize (96 x ~237 ms across the run). Verdict: do NOT build the lagged check — the remaining
+production-wall levers are (1) batch COMPACTION (shrink UBATCH width after retirement /
+between outer passes — the structural fix, needs re-ANALYSIS per width) and (2) a small
+~1.4 s outer-pass-boundary lever (device-side or overlapped outer-loop decisioning) — both
+attack GPU-busy or pass-boundary time, not iteration stalls.

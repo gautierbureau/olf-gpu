@@ -605,3 +605,23 @@ implement the missing loops in the batch or DETECT unsupported outer loops and f
 back to CPU (correct-first), with the batch reserved for parameter sets it fully
 covers. Same-day numbers (this run): CPU-1t 38.1 s, CPU-4t 12.0 s, GPU cold 23.8 s
 (1.60x vs 1t, 0.51x vs 4t), GPU warm 20.9 s (1.82x vs 1t, 0.58x vs 4t).
+
+## 2026-07-17 — Outer-loop guard landed; RTE-params divergence REATTRIBUTED
+
+Detect-and-fallback is in GpuBatchedAcSecurityAnalysis.runSimulations: unsupported
+resolved outer loops → no batch AND no solver swap (provider == stock CPU SA; proven
+by a 0/0 violation diff when it fires). Tolerated as structural no-ops: the two HVDC
+AC-emulation loops when the network has no HVDC, VoltageMonitoring when no SVCs.
+Canary (gpuBatchedEngagesAndMatchesCpuOnDevice) green — defaults still engage.
+
+CORRECTED DIAGNOSIS: with the guard in place the batch legitimately ENGAGES under the
+RTE params on pegase (no transformer loop resolves — the JSON never sets
+transformerVoltageControlOn; only DS+RL+no-op loops are in the list) and the 6,137
+one-sided violation diff RETURNS. So the divergence is NOT a dropped outer loop — it
+is inside the batched DS/RL solve semantics themselves. Prime suspects, in order:
+(1) MAX_VOLTAGE_CHANGE state-vector scaling (RTE param) — implemented for the BASE
+GPU solver, likely NOT applied per scenario in the batch loop; (2) RL switching
+detail differences vs ReactiveLimitsOuterLoop; (3) realistic-voltage checks absent
+device-side. Next: check solveBatchContext for per-scenario scaling, then re-diff.
+Also fixed en route: the fallback previously crashed with a CME (GPU inner solver +
+outer-loop switching on the sequential path) — fallback now skips the solver swap too.

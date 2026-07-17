@@ -137,7 +137,31 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // solves the base faster — the same base-on-GPU placement gpusim2grid has natively. An
         // explicit non-default solver choice (e.g. FAST_DECOUPLED) is respected; a network the GPU
         // extractor rejects degrades to the CPU solver inside GpuNewtonRaphson (cpuFallback).
-        if (GpuAcNewtonSolver.isAvailable()
+        // DETECT-AND-FALLBACK (the provider's safety contract: enabling it must never change results).
+        // The batched device path implements ONLY distributed slack + reactive limits; any OTHER loop
+        // in the resolved list (e.g. transformer voltage control under the RTE production parameters)
+        // would be silently dropped per scenario — measured 2026-07-17 as thousands of non-border
+        // violation diffs vs the CPU. The HVDC-emulation loops are tolerated when the network has no
+        // HVDC (structural no-ops). On fallback the provider behaves EXACTLY like the stock CPU
+        // AcSecurityAnalysis — no batch AND no solver swap (the sequential GPU-inner-solver path has
+        // an open CME bug under outer-loop switching).
+        boolean noHvdc = lfNetwork.getHvdcs().isEmpty();
+        boolean noSvc = lfNetwork.getBuses().stream()
+                .flatMap(b -> b.getGenerators().stream())
+                .noneMatch(g -> g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator);
+        List<String> unsupportedOuterLoops = acParameters.getOuterLoops().stream()
+                .map(ol -> ol.getName())
+                .filter(name -> !DistributedSlackOuterLoop.NAME.equals(name)
+                        && !ReactiveLimitsOuterLoop.NAME.equals(name)
+                        && !(noHvdc && ("AcHvdcAcEmulationLimits".equals(name) || "FreezingHvdcACEmulation".equals(name)))
+                        && !(noSvc && "VoltageMonitoring".equals(name)))
+                .toList();
+        boolean batchDisabled = !unsupportedOuterLoops.isEmpty();
+        if (batchDisabled) {
+            LOGGER.info("GPU batched SA: outer loops {} are not implemented in the batched device path — "
+                    + "falling back to the sequential CPU path for all contingencies", unsupportedOuterLoops);
+        }
+        if (!batchDisabled && GpuAcNewtonSolver.isAvailable()
                 && acParameters.getSolverFactory().getClass() == NewtonRaphsonFactory.class) {
             LOGGER.info("GPU-batched SA: running the base load flow on the GPU Newton-Raphson "
                     + "(absorbs CUDA init; CPU fallback inside the solver)");
@@ -157,6 +181,18 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 .anyMatch(ol -> DistributedSlackOuterLoop.NAME.equals(ol.getName()));
         this.batchReactiveLimits = acParameters.getOuterLoops().stream()
                 .anyMatch(ol -> ReactiveLimitsOuterLoop.NAME.equals(ol.getName()));
+        // DETECT-AND-FALLBACK (the provider's safety contract: enabling it must never change results).
+        // The batched device path implements ONLY the two outer loops above; any OTHER loop in the
+        // resolved list (e.g. transformer voltage control under the RTE production parameters) would be
+        // silently dropped per scenario — measured 2026-07-17 as thousands of non-border violation
+        // diffs vs the CPU (a controlled bus held at 1.154 pu across unrelated outages). Until those
+        // loops are ported, such a run stays entirely on the sequential CPU path (the base +
+        // fall-through load flows still run on the GPU inner Newton below, where the Java engine
+        // applies every outer loop unchanged).
+        if (batchDisabled) {                                 // outer-loop guard (computed above, before the solver swap)
+            this.currentLfNetwork = null;
+            this.currentContingencies = null;
+        }
         // Align the device outer-loop tolerances to the CPU loadflow's (per-unit on the 100 MVA base). The
         // reactive-limits PV→PQ switch threshold is NOT always maxReactivePowerMismatch: OLF derives it from the
         // stopping-criteria type exactly as AbstractAcOuterLoopConfig.createReactiveLimitsOuterLoop does —
@@ -181,7 +217,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // is absorbed into the base phase, so the cold batch becomes warm — the base-case warm-up
         // strategy). Guarded by a GPU-support probe so an unsupported network degrades gracefully to the CPU
         // solver. Toggle with -Dolf.gpu.sa.gpuBaseLoadFlow=false.
-        if (gpuBaseLoadFlowEnabled() && GpuAcNewtonSolver.isAvailable() && gpuSupports(lfNetwork, acParameters)) {
+        // When the batch is disabled by the outer-loop guard, ALSO skip the solver swap: the provider then
+        // behaves exactly like the stock CPU AcSecurityAnalysis (the safety contract), and the sequential
+        // per-contingency runs avoid the GPU-inner-solver + outer-loop-switching path (open CME bug there).
+        if (!batchDisabled && gpuBaseLoadFlowEnabled() && GpuAcNewtonSolver.isAvailable() && gpuSupports(lfNetwork, acParameters)) {
             acParameters.setSolverFactory(new GpuNewtonRaphsonFactory(), securityAnalysisParameters.getLoadFlowParameters());
             LOGGER.info("GPU batched SA: base + fall-through load flows run on the GPU Newton-Raphson (CUDA pre-warm)");
         }

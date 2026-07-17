@@ -470,3 +470,44 @@ per dest slot from ONE collection pass (miss a writer = silent corruption),
 disabled elements/inactive scenarios store 0 instead of early-returning, shared
 slots keep atomicAdd + compact zero list (full dVals memset dies as a side
 effect).
+
+## 2026-07-17 — Fill-scatter de-atomization: BOTH variants measured a LOSS, lever CLOSED
+
+Both designs were implemented in full, verified numerically EXACT (499/500 @
+1e-6, med ||F||inf 3.6e-12 — identical to baseline), measured, and REVERTED
+(back to 8e09574's all-atomic scatterAdd). Ranking of the CORRECT variants,
+closed-branch fill ms/launch (same day, machine-parity checked via factorize
+and fwd kernels):
+
+| variant                                  | fill        | notes |
+|------------------------------------------|-------------|-------|
+| all-atomic (baseline, KEPT)              | **80.8**    | chunk ~2135 ms |
+| owner-store hybrid (40.7% plain stores)  | 84.7        | store/atomic warp divergence; shunt control byte-identical (its 100% shared writes take one path) |
+| staged zero-atomic + reduceSharedSlots   | 112.3 + 9.7 | slot-grouped staging, deterministic sums; chunk 2305 ms |
+
+WHY Gate A misled: the all-stores hack (34.3 ms) let the hardware MERGE the up
+to 47-way colliding writes to each bus-diagonal address — i.e. it silently
+dropped most of the shared-slot traffic (the same reason its numerics were
+garbage). A CORRECT zero-atomic scheme must materialize all 166,838 staged
+contributions at DISTINCT addresses and re-read them in a reduce — MORE traffic
+than the atomic version. On Ampere, contended FP64 atomicAdd through the L2
+atomic unit is the EFFICIENT path for this access pattern: same-address updates
+coalesce in place. Lesson for the next Gate A: an all-stores probe measures
+"atomics + traffic that same-address merging can drop", not the atomic cost
+alone — pair it with a stores-to-DISTINCT-addresses probe before trusting it
+as a ceiling.
+
+Consequence for the gpusim2grid fill comparison: their ~40 ms fill_J is NOT
+explained by "no atomics" (our zero-atomic build is 112 ms); it comes from
+their rectangular-complex formulation doing far less math+writes per entry (no
+sincos at all, 4 stores per Ybus nnz) — formulation context, not a to-do (see
+comparison framing). OUR fill at 81 ms with 28 scattered outputs x 8M
+element-scenarios is at its hardware floor for this write pattern; the
+remaining fill delta vs theirs is structural. Fill levers exhausted:
+F-only kernels (DONE, kept), precomputed-trig (SLOWER, dropped), owner-store
+(SLOWER, dropped), zero-atomic staging (SLOWER, dropped).
+
+Remaining performance backlog is elsewhere: production tol>0 per-iteration
+sync + FULL mismatch D->H copy (lagged/async convergence check — invisible to
+the fixed-iter bench, paid by every real SA run), and cuDSS factorize (+29
+ms/iter pre-AMD; partially recovered by AMD reordering).

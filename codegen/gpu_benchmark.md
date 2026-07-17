@@ -779,3 +779,18 @@ NOT a violation: the GPU arm's base genuinely converged (GpuNewtonRaphson does n
 matrix factory) while the CPU arm's dense base failed — each side honest about its own base.
 Real bug-let fixed en route: the EARLY solver-swap block ignored olf.gpu.sa.gpuBaseLoadFlow;
 both swaps now honor the property.
+
+## 2026-07-17 — CME (#15): repro attempt + exposure narrowed; still open at pegase scale
+
+New regression test sequentialFallThroughOnGpuSolverWithReactiveLimits (multi-element ctg ->
+sequential path on the swapped GPU solver, RL on, statuses vs stock CPU): GREEN at ieee14
+scale — the small-case interleaving does not trigger the historical CME. The ORIGINAL crash
+config (guard-v1 fallback with the solver swap still active, all 500 pegase ctg sequential on
+the GPU solver under RTE params) is now STRUCTURALLY IMPOSSIBLE: fallback skips the swap, and
+so does threadCount>1. Remaining exposure, still open: an ENGAGED pegase-scale run whose
+fall-through contingencies (multi-element/islanding-rejected) solve sequentially on the GPU
+solver with heavy RL switching. Next repro recipe: pegase + RTE params + engaged batch + one
+multi-element contingency (needs a bench hook for multi-element ids). Suspected mechanism
+unchanged: re-entrant mutation during LfNetwork listener dispatch (GpuAcDataCache Entry clears
+are self-contained, so the suspect list now points at index-listener registration timing or
+lazy es.getIndex() creation during dispatch).

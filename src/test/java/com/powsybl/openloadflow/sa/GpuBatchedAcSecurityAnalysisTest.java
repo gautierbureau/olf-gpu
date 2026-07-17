@@ -48,6 +48,38 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     @Test
+    void sequentialFallThroughOnGpuSolverWithReactiveLimits() {
+        // Repro for the open CME (#15): a MULTI-ELEMENT contingency falls through to the
+        // SEQUENTIAL path, which runs on the swapped GPU solver when the batch is engaged; with
+        // reactive limits on, the PV->PQ switch dispatches LfNetwork listener events while the
+        // equation updater iterates — the historical ConcurrentModificationException site.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        List<String> lines = network.getLineStream().limit(2).map(l -> l.getId()).toList();
+        List<Contingency> contingencies = List.of(
+                new Contingency("multi", new BranchContingency(lines.get(0)), new BranchContingency(lines.get(1))),
+                new Contingency(lines.get(0), new BranchContingency(lines.get(0))));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setUseReactiveLimits(true).setDistributedSlack(true);
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, java.util.Collections.emptyList(), sap);
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, java.util.Collections.emptyList(), sap);
+            assertEquals(cpu.getPostContingencyResults().size(), gpu.getPostContingencyResults().size());
+            for (int i = 0; i < cpu.getPostContingencyResults().size(); i++) {
+                assertEquals(cpu.getPostContingencyResults().get(i).getStatus(),
+                        gpu.getPostContingencyResults().get(i).getStatus(),
+                        "status mismatch for " + cpu.getPostContingencyResults().get(i).getContingency().getId());
+            }
+        } finally {
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
+    @Test
     void failedBaseLoadFlowYieldsNoPostContingencyResults() {
         // Contract check for the FAILED-base question (2026-07-17): the parent only calls
         // afterPreContingencySimulation (hence precomputeBatch) and the post-contingency loop when

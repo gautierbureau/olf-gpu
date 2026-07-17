@@ -48,6 +48,36 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     @Test
+    void failedBaseLoadFlowYieldsNoPostContingencyResults() {
+        // Contract check for the FAILED-base question (2026-07-17): the parent only calls
+        // afterPreContingencySimulation (hence precomputeBatch) and the post-contingency loop when
+        // the base LF SUCCEEDED — so a failed base must yield zero post results on the GPU
+        // provider, exactly like AcSecurityAnalysis. CPU base forced (property) so the failure is
+        // deterministic on device machines too.
+        Network network = IeeeCdfNetworkFactory.create14();
+        List<Contingency> contingencies = network.getLineStream().limit(3)
+                .map(l -> new Contingency(l.getId(), new BranchContingency(l.getId()))).toList();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setMaxNewtonRaphsonIterations(1);
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        String old = System.getProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY);
+        System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY, "false");
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            SecurityAnalysisResult r = runSecurityAnalysis(network, contingencies, java.util.Collections.emptyList(), sap);
+            assertTrue(r.getPostContingencyResults().isEmpty(), "failed base must yield NO post-contingency results");
+        } finally {
+            if (old == null) {
+                System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY);
+            } else {
+                System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY, old);
+            }
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
+    @Test
     void gpuBatchedFallsBackToStandardWhenNoGpu() {
         Network network = IeeeCdfNetworkFactory.create14();
         List<Contingency> contingencies = network.getLineStream()

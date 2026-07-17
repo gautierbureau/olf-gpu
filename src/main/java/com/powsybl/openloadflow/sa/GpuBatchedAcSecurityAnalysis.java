@@ -169,7 +169,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             LOGGER.info("GPU batched SA: outer loops {} are not implemented in the batched device path — "
                     + "falling back to the sequential CPU path for all contingencies", unsupportedOuterLoops);
         }
-        if (!batchDisabled && !multiThread && GpuAcNewtonSolver.isAvailable()
+        if (!batchDisabled && !multiThread && gpuBaseLoadFlowEnabled() && GpuAcNewtonSolver.isAvailable()
                 && acParameters.getSolverFactory().getClass() == NewtonRaphsonFactory.class) {
             LOGGER.info("GPU-batched SA: running the base load flow on the GPU Newton-Raphson "
                     + "(absorbs CUDA init; CPU fallback inside the solver)");

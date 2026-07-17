@@ -768,3 +768,14 @@ is skipped (concurrent sequential GPU solves would race; also sidesteps the open
 config), and the CPU-side per-contingency fallback work parallelizes normally. Test:
 threadCountAboveOneRunsSafelyOnGpuProvider (RTE params, 20 ctg, threadCount=2, statuses == stock
 CPU). All parity gates green.
+
+## 2026-07-17 — FAILED-base contract verified: honored by construction (no bug); property gate fixed
+
+AbstractSecurityAnalysis only calls afterPreContingencySimulation (-> precomputeBatch) and the
+post-contingency loop when the base LF SUCCEEDED — a failed base yields zero post results on the
+GPU provider exactly like AcSecurityAnalysis. New test failedBaseLoadFlowYieldsNoPostContingencyResults
+(CPU base forced, maxNR=1) proves it. The dense-factory observation that raised the question was
+NOT a violation: the GPU arm's base genuinely converged (GpuNewtonRaphson does not use the dense
+matrix factory) while the CPU arm's dense base failed — each side honest about its own base.
+Real bug-let fixed en route: the EARLY solver-swap block ignored olf.gpu.sa.gpuBaseLoadFlow;
+both swaps now honor the property.

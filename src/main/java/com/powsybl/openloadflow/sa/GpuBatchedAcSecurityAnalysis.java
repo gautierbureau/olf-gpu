@@ -358,9 +358,13 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 List<GpuBatchedSecurityAnalysisSolver.LoadLoss> loads =
                         pc.getLoadIdsToLose().isEmpty() ? List.of() : (loadsBatchable ? loadOutages(net, pc) : null);
                 List<LfBranch> branches = pc.getBranchIdsToOpen().isEmpty() ? List.of() : closedBranchOutages(net, pc);
-                if (branches != null && gens != null && loads != null
-                        && (!branches.isEmpty() || !gens.isEmpty() || !loads.isEmpty())) {
-                    batch.add(BatchContingency.branchesAndInjections(pc.getContingency().getId(), branches, gens, loads));
+                // Shunt section shifts (both directions; full disconnection of any aggregate = minus the
+                // section admittance): per-scenario admittance overrides, combinable with everything.
+                List<GpuBatchedSecurityAnalysisSolver.ShuntShift> shifts =
+                        pc.getShuntIdsToShift().isEmpty() ? List.of() : shuntShifts(net, pc);
+                if (branches != null && gens != null && loads != null && shifts != null
+                        && (!branches.isEmpty() || !gens.isEmpty() || !loads.isEmpty() || !shifts.isEmpty())) {
+                    batch.add(BatchContingency.branchesAndInjections(pc.getContingency().getId(), branches, gens, loads, shifts));
                     continue;
                 }
                 LfShunt shunt = singleShuntOutage(net, pc);
@@ -435,6 +439,23 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 return null;
             }
             out.add(new GpuBatchedSecurityAnalysisSolver.LoadLoss(bus, e.getValue().getActive(), e.getValue().getReactive()));
+        }
+        return out;
+    }
+
+    /** The contingency's shunt admittance shifts (pu deltas, negated: the propagation's shift is the
+     *  admittance REMOVED), or null when a shunt is unresolvable. */
+    private static List<GpuBatchedSecurityAnalysisSolver.ShuntShift> shuntShifts(LfNetwork net, PropagatedContingency pc) {
+        if (!pc.getBusIdsToLose().isEmpty()) {
+            return null;
+        }
+        List<GpuBatchedSecurityAnalysisSolver.ShuntShift> out = new java.util.ArrayList<>();
+        for (Map.Entry<String, com.powsybl.openloadflow.network.AdmittanceShift> e : pc.getShuntIdsToShift().entrySet()) {
+            LfShunt shunt = net.getShuntById(e.getKey());
+            if (shunt == null || shunt.isDisabled()) {
+                return null;
+            }
+            out.add(new GpuBatchedSecurityAnalysisSolver.ShuntShift(shunt, -e.getValue().getG(), -e.getValue().getB()));
         }
         return out;
     }

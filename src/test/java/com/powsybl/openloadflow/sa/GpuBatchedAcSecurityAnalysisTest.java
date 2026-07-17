@@ -258,6 +258,37 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     @Test
+    void shuntShiftBatchMatchesCpu() {
+        // #23: shunt disconnection now batches as a per-scenario ADMITTANCE OVERRIDE (the general
+        // section-shift mechanism, both directions). ieee14's B9 shunt, state-level 0.05 kV.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        String shuntId = network.getShuntCompensatorStream().findFirst().orElseThrow().getId();
+        assertGpuMatchesCpu(network,
+                List.of(new Contingency(shuntId, new com.powsybl.contingency.ShuntCompensatorContingency(shuntId))), 0.05, true);
+    }
+
+    @Test
+    void shuntBranchLoadComboBatchMatchesCpu() {
+        // #23 combo: shunt shift + branch + load in ONE contingency.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        String shuntId = network.getShuntCompensatorStream().findFirst().orElseThrow().getId();
+        String loadId = network.getLoadStream()
+                .filter(l -> "B12".equals(l.getTerminal().getBusBreakerView().getBus().getId()))
+                .findFirst().orElseThrow().getId();
+        String lineId = network.getLineStream()
+                .filter(l -> !l.getId().contains("7") && !l.getId().contains("8"))
+                .skip(3).findFirst().orElseThrow().getId();
+        assertGpuMatchesCpu(network,
+                List.of(new Contingency("combo23", new BranchContingency(lineId),
+                        new com.powsybl.contingency.ShuntCompensatorContingency(shuntId),
+                        new com.powsybl.contingency.LoadContingency(loadId))), 0.05, true);
+    }
+
+    @Test
     void multiGeneratorOutageBatchMatchesCpu() {
         // #20 stage 1: one contingency losing TWO generators on the same bus (one DS-participant
         // bus -> in batch scope), plus a plain single-gen one as control.

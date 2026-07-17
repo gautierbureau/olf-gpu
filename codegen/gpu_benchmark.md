@@ -928,3 +928,19 @@ per-scenario coefficient change is not a target override), load at a voltage-CON
 0.05 kV on ieee14): loadLossBatchMatchesCpu (DS ON — the device slack pass absorbs the
 imbalance exactly like the CPU) and branchGenAndLoadComboBatchMatchesCpu (triple combo).
 Production bench parity unchanged (22/6; GPU 1.21x vs CPU-4t warm this run).
+
+## 2026-07-17 — Shunt section shifts batched (#23): per-scenario admittance overrides
+
+The GENERAL mechanism landed instead of binary-only reconnection: a flat per-scenario override
+list (slot, PACK elem) -> (dG, dB) added onto the static shunt g/b in fillShuntBatch/-F (linear
+scan per thread — a handful of entries per run; dummy upload keeps kernel pointers valid when
+empty). Provider maps PropagatedContingency.shuntIdsToShift (AdmittanceShift, NEGATED: the shift
+is the admittance removed) — this SUBSUMES the old single-original mask path, REMOVES the
+multi-section/multi-original fallback restriction, covers section shifts in BOTH directions
+(reconnection = shift up), and composes with branches/generators/loads in one contingency.
+Guards kept: unpacked (SVC/controller) shunts and DISTR_Q-contributing shunts -> CPU (the
+existing canBatchShuntOutage check, reused for shifts). TRUE terminal reconnection of a
+base-DISCONNECTED shunt still needs the extractor to pack disconnected elements — deferred
+(noted for the operator-strategy work). Tests (12/12 SA green, state-level 0.05 kV, ieee14):
+shuntShiftBatchMatchesCpu + shuntBranchLoadComboBatchMatchesCpu. Production bench parity
+unchanged (22/6; GPU 1.52x vs CPU-4t warm this run).

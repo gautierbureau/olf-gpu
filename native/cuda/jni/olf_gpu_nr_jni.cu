@@ -1372,19 +1372,36 @@ __global__ void fillOpenBranchBatch(int ne, int nScenarios, int n, int nnz, int 
     scatterAdd(OB_NOUT, dest + e * OB_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
 }
 
+// Per-scenario shunt admittance override (section shifts / reconnection): entries are
+// (slot, PACK elem) pairs with (dG, dB) deltas added onto the static per-element g/b. Linear
+// scan per thread — the list is a handful of entries per run.
+__device__ inline void applyShuntOverride(int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                                          int s, int e, double& g, double& b) {
+    for (int k = 0; k < nShOv; k++) {
+        if (shOvSlotElem[2 * k] == s && shOvSlotElem[2 * k + 1] == e) {
+            g += shOvGb[2 * k];
+            b += shOvGb[2 * k + 1];
+        }
+    }
+}
+
 __global__ void fillShuntBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                const double* in, const int* ix, const int* dest,
                                const double* x, double* vals, double* F,
-                               const char* disabled, const char* active) {
+                               const char* disabled, const char* active,
+                               int nShOv, const int* shOvSlotElem, const double* shOvGb) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ne * nScenarios) return;
     int e = tid % ne;
     int s = tid / ne;
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
     const double* p = in + e * 2;                            // g b
+    double g = p[0];
+    double b = p[1];
+    applyShuntOverride(nShOv, shOvSlotElem, shOvGb, s, e, g, b);
     double v = x[(size_t) s * n + ix[e * 3 + 2]];
     double o[SH_NOUT];
-    evalShunt(v, p[0], p[1], 0, o + 0, o + 1, o + 2, o + 3, o + 4);
+    evalShunt(v, g, b, 0, o + 0, o + 1, o + 2, o + 3, o + 4);
     scatterAdd(SH_NOUT, dest + e * SH_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
 }
 
@@ -1494,16 +1511,20 @@ __global__ void fillOpenBranchBatchF(int ne, int nScenarios, int n, int nnz, int
 __global__ void fillShuntBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                 const double* in, const int* ix, const int* dest,
                                 const double* x, double* F,
-                                const char* disabled, const char* active) {
+                                const char* disabled, const char* active,
+                                int nShOv, const int* shOvSlotElem, const double* shOvGb) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ne * nScenarios) return;
     int e = tid % ne;
     int s = tid / ne;
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
     const double* p = in + e * 2;                            // g b
+    double g = p[0];
+    double b = p[1];
+    applyShuntOverride(nShOv, shOvSlotElem, shOvGb, s, e, g, b);
     double v = x[(size_t) s * n + ix[e * 3 + 2]];
     double o[2];
-    evalShuntF(v, p[0], p[1], 0, o + 0, o + 1);
+    evalShuntF(v, g, b, 0, o + 0, o + 1);
     const int pos[2] = {0, 2};
     scatterAddF(2, dest + e * SH_NOUT, pos, o, F + (size_t) s * n);
 }
@@ -2079,6 +2100,8 @@ struct BatchSolverContext {
     double maxDv = 0.0, maxDphi = 0.0;
     DeviceBuf dVarType, dStepFactor;                         // n ints / nS factors (lazy, first clamped solve)
     DeviceBuf dNorms;                                        // nS*3 device-side convergence norms (see residualNormsBatch)
+    int nShOv = 0;                                           // per-scenario shunt admittance overrides (set per solve)
+    DeviceBuf dShOvSlotElem, dShOvGb;                        // nShOv*2 ints (slot, PACK elem) / nShOv*2 doubles (dG, dB)
     // ---- solve-only batch compaction (mode 3, tol > 0): lazily allocated on first engage ----
     DeviceBuf dValsC, dBC, dDxC, dMapC;                      // nnz*cap / n*cap / n*cap / cap ints
     CudssCtx dsC;                                            // dedicated handle/config/data for the compact width
@@ -2361,7 +2384,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               const double* dsOvMaxDelta, const double* dsOvMinDelta, int maxIter, double tol,
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                               int lsMode, double maxDv, double maxDphi, const int* varType,
-                              const double* x0Full) {
+                              const double* x0Full, int nShOv, const int* shOvSlotElem, const double* shOvGb) {
     int n = ctx->n;
     int nnz = ctx->nnz;
     int nS = ctx->nScenarios;
@@ -2375,6 +2398,19 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     ctx->clampStep = clampStep;
     ctx->maxDv = maxDv;
     ctx->maxDphi = maxDphi;
+    // Per-scenario shunt admittance overrides (section shifts / reconnection). PACK-indexed
+    // elements (shunt family index, not the global element index). Empty = a 1-entry dummy
+    // upload so the kernels' pointers are always valid.
+    ctx->nShOv = nShOv;
+    if (nShOv > 0) {
+        ctx->dShOvSlotElem.upload(shOvSlotElem, static_cast<size_t>(nShOv) * 2 * sizeof(int));
+        ctx->dShOvGb.upload(shOvGb, static_cast<size_t>(nShOv) * 2 * sizeof(double));
+    } else if (!ctx->dShOvSlotElem.p) {
+        int dummyI[2] = {-1, -1};
+        double dummyD[2] = {0, 0};
+        ctx->dShOvSlotElem.upload(dummyI, sizeof(dummyI));
+        ctx->dShOvGb.upload(dummyD, sizeof(dummyD));
+    }
     size_t nTot = static_cast<size_t>(n) * nS;
     DeviceBuf dOvIndex, dOvValue;                            // function-scoped: outlive the async override kernel
     DeviceBuf dBaseMode;                                     // the contingency-free base row mode (length n)
@@ -2532,9 +2568,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
         if (ctx->st->sh.ne) {
             if (fOnly) {
-                fillShuntBatchF<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+                fillShuntBatchF<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>());
             } else {
-                fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+                fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>());
             }
         }
         if (ctx->st->hv.ne) {
@@ -2835,7 +2871,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     CUDA_CHECK(cudaMemsetAsync(ctx->dQbuf.p, 0, nTot * sizeof(double), ctx->stream));
     if (ctx->st->cb.ne) fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>());
     if (ctx->st->ob.ne) fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>());
-    if (ctx->st->sh.ne) fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>());
+    if (ctx->st->sh.ne) fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>());
     CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitched.p, 0, nS * sizeof(char), ctx->stream));
     // Apply ONLY the current phase's outer loop this pass (sequential, like OLF) — never both at once.
     bool inDsPhase = (phase == 0);
@@ -3159,8 +3195,18 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jintArray jdsOverrideBus, jdoubleArray jdsOverrideFactorDelta, jdoubleArray jdsOverrideBaseDelta,
         jdoubleArray jdsOverrideMaxDelta, jdoubleArray jdsOverrideMinDelta, jint maxIter, jdouble tol,
         jdouble reactiveLimitTol, jdouble slackDistTol, jdouble convEpsPerEq,
-        jint lsMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType, jdoubleArray jx0Full) {
+        jint lsMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType, jdoubleArray jx0Full,
+        jintArray jShuntOvSlotElem, jdoubleArray jShuntOvGb) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    std::vector<int> shOvSlotElemVec;
+    std::vector<double> shOvGbVec;
+    if (jShuntOvSlotElem != nullptr) {
+        jsize sn = env->GetArrayLength(jShuntOvSlotElem);
+        shOvSlotElemVec.resize(sn);
+        env->GetIntArrayRegion(jShuntOvSlotElem, 0, sn, shOvSlotElemVec.data());
+        shOvGbVec.resize(sn);
+        env->GetDoubleArrayRegion(jShuntOvGb, 0, sn, shOvGbVec.data());
+    }
     std::vector<double> x0FullVec;
     if (jx0Full != nullptr) {
         jsize fn = env->GetArrayLength(jx0Full);
@@ -3251,7 +3297,10 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
                                 dsOvBaseDelta.data(), dsOvMaxDelta.data(), dsOvMinDelta.data(), maxIter, tol,
                                 reactiveLimitTol, slackDistTol, convEpsPerEq,
                                 lsMode, maxDv, maxDphi, varTypeVec.empty() ? nullptr : varTypeVec.data(),
-                                x0FullVec.empty() ? nullptr : x0FullVec.data());
+                                x0FullVec.empty() ? nullptr : x0FullVec.data(),
+                                static_cast<int>(shOvSlotElemVec.size() / 2),
+                                shOvSlotElemVec.empty() ? nullptr : shOvSlotElemVec.data(),
+                                shOvGbVec.empty() ? nullptr : shOvGbVec.data());
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {

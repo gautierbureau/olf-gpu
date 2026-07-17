@@ -295,15 +295,21 @@ public final class GpuBatchedSecurityAnalysisSolver {
     public record LoadLoss(LfBus bus, double p, double q) {
     }
 
+    /** A per-scenario shunt admittance change (pu deltas ADDED to the packed g/b): section shifts
+     *  in either direction; full disconnection = minus the section admittance; reconnection = plus. */
+    public record ShuntShift(LfShunt shunt, double dg, double db) {
+    }
+
     public record BatchContingency(String contingencyId, List<LfBranch> outagedBranches, List<LfGenerator> lostGenerators,
-                                   List<LoadLoss> lostLoads, List<LfShunt> outagedShunts) {
+                                   List<LoadLoss> lostLoads, List<ShuntShift> shuntShifts, List<LfShunt> outagedShunts) {
         public BatchContingency {
             Objects.requireNonNull(contingencyId);
             Objects.requireNonNull(outagedBranches);
             Objects.requireNonNull(lostGenerators);
             Objects.requireNonNull(lostLoads);
+            Objects.requireNonNull(shuntShifts);
             Objects.requireNonNull(outagedShunts);
-            boolean isInjection = !lostGenerators.isEmpty() || !lostLoads.isEmpty();
+            boolean isInjection = !lostGenerators.isEmpty() || !lostLoads.isEmpty() || !shuntShifts.isEmpty();
             boolean isShunt = !outagedShunts.isEmpty();
             boolean isBranch = !outagedBranches.isEmpty();
             // Batchable shapes: 1-2 branches, N generators, N loads, and branch+injection COMBOS
@@ -317,33 +323,35 @@ public final class GpuBatchedSecurityAnalysisSolver {
             outagedBranches = List.copyOf(outagedBranches);
             lostGenerators = List.copyOf(lostGenerators);
             lostLoads = List.copyOf(lostLoads);
+            shuntShifts = List.copyOf(shuntShifts);
             outagedShunts = List.copyOf(outagedShunts);
         }
 
         /** A branch outage (N-1 or N-2). */
         public BatchContingency(String contingencyId, List<LfBranch> outagedBranches) {
-            this(contingencyId, outagedBranches, List.of(), List.of(), List.of());
+            this(contingencyId, outagedBranches, List.of(), List.of(), List.of(), List.of());
         }
 
         /** Convenience for the common single-branch (N-1) case. */
         public BatchContingency(String contingencyId, LfBranch outagedBranch) {
-            this(contingencyId, List.of(Objects.requireNonNull(outagedBranch)), List.of(), List.of(), List.of());
+            this(contingencyId, List.of(Objects.requireNonNull(outagedBranch)), List.of(), List.of(), List.of(), List.of());
         }
 
         /** A combined branch + generator/load contingency. */
         public static BatchContingency branchesAndInjections(String contingencyId, List<LfBranch> branches,
-                                                             List<LfGenerator> gens, List<LoadLoss> loads) {
-            return new BatchContingency(contingencyId, branches, gens, loads, List.of());
+                                                             List<LfGenerator> gens, List<LoadLoss> loads,
+                                                             List<ShuntShift> shifts) {
+            return new BatchContingency(contingencyId, branches, gens, loads, shifts, List.of());
         }
 
         /** A generator loss. */
         public static BatchContingency generator(String contingencyId, LfGenerator lostGenerator) {
-            return new BatchContingency(contingencyId, List.of(), List.of(Objects.requireNonNull(lostGenerator)), List.of(), List.of());
+            return new BatchContingency(contingencyId, List.of(), List.of(Objects.requireNonNull(lostGenerator)), List.of(), List.of(), List.of());
         }
 
         /** A fixed-shunt disconnection (the shunt element is masked off, like a branch outage). */
         public static BatchContingency shunt(String contingencyId, LfShunt outagedShunt) {
-            return new BatchContingency(contingencyId, List.of(), List.of(), List.of(), List.of(Objects.requireNonNull(outagedShunt)));
+            return new BatchContingency(contingencyId, List.of(), List.of(), List.of(), List.of(), List.of(Objects.requireNonNull(outagedShunt)));
         }
     }
 
@@ -623,7 +631,11 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 continue;
             }
             BatchContingency c = contingencies.get(i);
-            if (!c.lostGenerators().isEmpty() || !c.lostLoads().isEmpty()) {   // injection (or branch+injection) contingency
+            if (!c.lostGenerators().isEmpty() || !c.lostLoads().isEmpty() || !c.shuntShifts().isEmpty()) {   // injection/shift (or branch+) contingency
+                if (!c.shuntShifts().isEmpty()
+                        && !canBatchShuntOutage(c.shuntShifts().stream().map(ShuntShift::shunt).toList(), elementMapper, gpuData)) {
+                    continue;                                // unpacked / DISTR_Q-contributing shunt — CPU
+                }
                 GenOutage[] gos = computeInjectionOutages(equationSystem, gpuData, dsSum, slackParticipates,
                         c.lostGenerators(), c.lostLoads());
                 if (gos == null) {                           // slack / >1 DS bus / remote gen — route to CPU
@@ -1017,7 +1029,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
                     parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                     batchLsMode, batchMaxDv, batchMaxDphi,
-                    batchLsMode == 2 ? varType : null, x0Full);
+                    batchLsMode == 2 ? varType : null, x0Full, null, null);
             for (int slot : affected) {
                 chunkResults[slot] = r2[slot];
             }
@@ -1095,6 +1107,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
         // lists rebuilt per chunk. Empty when no generator outage is in the chunk.
         List<Integer> ovIndexList = new ArrayList<>();
         List<Double> ovValueList = new ArrayList<>();
+        List<Integer> shOvSlotElemList = new ArrayList<>();  // per-scenario shunt admittance overrides
+        List<Double> shOvGbList = new ArrayList<>();
+        int shPackOffset = elementMapper.getClosedBranchCount() + elementMapper.getOpenBranchCount();
         // Per-scenario distributed-slack reweight (a generator loss at a DS-participant bus): one affected DS
         // bus per slot (dsOvBus[s] = its DS-pack index, -1 = none) whose factor/base/headroom/footroom and the
         // factor sum shrink by the lost gen's share. Only allocated when the network has distributed slack.
@@ -1110,6 +1125,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 int realCount = Math.min(chunkSize, nb - chunkStart);
                 ovIndexList.clear();
                 ovValueList.clear();
+                shOvSlotElemList.clear();
+                shOvGbList.clear();
                 if (hasDs) {
                     java.util.Arrays.fill(dsOvBus, -1);
                     java.util.Arrays.fill(dsOvFactorDelta, 0);
@@ -1155,6 +1172,12 @@ public final class GpuBatchedSecurityAnalysisSolver {
                             }
                             rowModePerScenario[s] = row;
                         }
+                        for (ShuntShift sh : contingencies.get(ci).shuntShifts()) {
+                            shOvSlotElemList.add(s);
+                            shOvSlotElemList.add(elementMapper.getElementIndex(sh.shunt()) - shPackOffset);
+                            shOvGbList.add(sh.dg());
+                            shOvGbList.add(sh.db());
+                        }
                         GenOutage[] gos = genOutagesByIndex[ci];
                         if (gos != null) {               // generator loss(es): per-BUS target overrides (merged by bus;
                             for (GenOutage go : gos) {   // at most one DS-participant bus per contingency by construction)
@@ -1188,7 +1211,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
                         parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                         batchLsMode, batchMaxDv, batchMaxDphi,
-                        batchLsMode == 2 ? varType : null, null);
+                        batchLsMode == 2 ? varType : null, null,
+                        shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                        shOvGbList.stream().mapToDouble(Double::doubleValue).toArray());
                 if (transformerControllers != null && !transformerControllers.isEmpty()) {
                     chunkResults = orchestrateTransformerControl(handle, chunkSize, realCount, n,
                             chunkResults, transformerControllers, rowModePerScenario, baseRowMode, disabledMask,

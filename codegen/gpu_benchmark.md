@@ -655,3 +655,28 @@ pinned at a wrong voltage across all scenarios (VL-3632 @ 1.1540) fits exactly.
 NEXT: confirm VL-3632 is remotely controlled (ndq > 0 under RTE params), then either
 port remote-controller RL switching to the batch or add remote-control presence to the
 detect-and-fallback guard (correct-first).
+
+## 2026-07-17 — The 6,137 diff SOLVED: zero-threshold reporting flicker; real tail = 22 in 6 ctg
+
+Single-contingency debugging (new bench mode OLF_GPU_SA_DEBUG_CTG=<id>, ~9 s/iteration)
+cracked it in four probes: (1) monitored states IDENTICAL both sides (BUS-5883 1.15401
+pre AND post, 5 decimals); (2) same diff with the GPU base forced onto the CPU solver
+(OLF_GPU_SA_GPU_BASE=0) — base-solver hypothesis dead; (3) pre-contingency baselines
+IDENTICAL (60=60, values to ~1e-8); (4) root cause in OLF's LimitViolationManager
+suppression: the effective voltage threshold is Math.min(absoluteThreshold,
+value*proportionalThreshold) — powsybl's DEFAULTS are all zero, and setting only the
+absolute leg still yields min(abs, 0) = 0. With a zero effective threshold, every
+pre-existing violation whose value moved by ±1 ulp vs the run's own baseline is
+re-reported — both sides flicker independently at solver tolerance (~1e-6), producing
+the 6,137 disjoint one-sided reports on IDENTICAL physics. This affects ANY two
+solvers, CPU-vs-CPU included.
+
+Bench now sets both legs (0.5 abs + 0.001 proportional, both voltage directions +
+0.1% flow). Result on the full 500 (RTE params, batch engaged, GPU base on GPU):
+statuses identical, violations 305 vs 297, **diff 22 one-sided in 6 contingencies**
+(LINE-4985-165: 5 GPU-only HIGH_V; TWT-4990-37: CPU-only LOW_V cluster; TWT-14-2925;
+margins 1.5-4.9% = genuine state differences). Timings: CPU-4t 15.1 s, GPU cold
+25.3 s (0.60x), warm 21.4 s (0.71x). NEXT: drill the 6 contingencies one at a time
+with OLF_GPU_SA_DEBUG_CTG — likely RL switch decisions on genuinely bistable
+scenarios; also note this reopens the increased-violations defaults question for
+production (zero thresholds re-report ulp-flicker there too).

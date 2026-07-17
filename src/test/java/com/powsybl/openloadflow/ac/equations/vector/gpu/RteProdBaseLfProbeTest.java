@@ -35,6 +35,26 @@ class RteProdBaseLfProbeTest {
         GpuTestPaths.init();
     }
 
+    /** Is VL-3632 (the dominant violation-diff bus) remotely voltage-controlled, and how much remote control
+     *  does the case carry at all? (The batch RL pass covers LOCAL controllers only — DISTR_Q rows carry the
+     *  remote ones and their reactive limits are not re-evaluated device-side.) */
+    @Test
+    void probeRemoteControl() {
+        assumeTrue(Files.exists(CASES.resolve(CASE)), CASE + " not found");
+        Network network = Network.read(CASES.resolve(CASE));
+        long remote = network.getGeneratorStream()
+                .filter(g -> g.getRegulatingTerminal() != null
+                        && g.getRegulatingTerminal().getVoltageLevel() != g.getTerminal().getVoltageLevel())
+                .count();
+        System.out.println("PROBE remote-controlling generators: " + remote);
+        network.getGeneratorStream()
+                .filter(g -> g.getRegulatingTerminal() != null
+                        && "VL-3632".equals(g.getRegulatingTerminal().getVoltageLevel().getId()))
+                .forEach(g -> System.out.printf("PROBE VL-3632 regulated by %s (own VL %s, regulatorOn=%s, minQ=%.1f maxQ=%.1f)%n",
+                        g.getId(), g.getTerminal().getVoltageLevel().getId(), g.isVoltageRegulatorOn(),
+                        g.getReactiveLimits().getMinQ(g.getTargetP()), g.getReactiveLimits().getMaxQ(g.getTargetP())));
+    }
+
     @Test
     void probeBaseLoadFlow() {
         assumeTrue(Files.exists(CASES.resolve(CASE)), CASE + " not found");

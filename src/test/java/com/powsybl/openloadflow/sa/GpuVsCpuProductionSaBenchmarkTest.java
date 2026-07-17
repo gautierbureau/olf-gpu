@@ -81,6 +81,11 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
             System.setProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY,
                     System.getenv().getOrDefault("OLF_GPU_BATCHMODE", "0"));
         }
+        // OLF_GPU_SA_GPU_BASE=0: force the GPU arm's BASE load flow onto the CPU solver too (isolates
+        // base-trajectory differences from the batched contingency path in A/B debugging).
+        if ("0".equals(System.getenv("OLF_GPU_SA_GPU_BASE"))) {
+            System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY, "false");
+        }
         // SPARSE on both arms — the harness default (commonTestConfig.matrixFactory()) can be DENSE,
         // which at 9241 buses makes the base LF thrash for ~200 s and FAIL (measured), while the same
         // case + parameters converge in ~2 s / 10 iterations with a sparse factory.
@@ -116,6 +121,14 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
     void productionSaGpuVsCpu() throws Exception {
         Network network = Network.read(CASES.resolve(CASE));
         List<Contingency> contingencies = loadContingencies(network);
+        // OLF_GPU_SA_DEBUG_CTG=<id>: single-contingency drill-down — run ONLY that contingency on both
+        // arms and print every violation at full precision (see the debug print below). Minutes, not a
+        // full 500-contingency run, for one-problem-at-a-time debugging.
+        String debugCtg = System.getenv("OLF_GPU_SA_DEBUG_CTG");
+        if (debugCtg != null && !debugCtg.isBlank()) {
+            contingencies = contingencies.stream().filter(c -> c.getId().equals(debugCtg)).toList();
+            assumeTrue(!contingencies.isEmpty(), "contingency " + debugCtg + " not in the file");
+        }
         // THE RTE production parameters, loaded from the JSON checked in at the repo root
         // (rte-loadflow-default-parameters.json): DC init, reactive limits, twt split shunt
         // admittance, HVDC AC emulation, transformer voltage control AFTER_GENERATOR_VOLTAGE_CONTROL,
@@ -130,6 +143,12 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
         int threads = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_CPU_THREADS", "4"));
         SecurityAnalysisParameters sap = new SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
+        // Non-zero increased-violations thresholds (0.5 kV / 0.1 %): with powsybl's ZERO defaults, a
+        // pre-existing violation is re-reported whenever the post value exceeds the run's own pre value
+        // by a single ulp — solver-tolerance flicker (~1e-6 pu), not physics. Measured 2026-07-17: the
+        // 6,137 one-sided violation diff at identical monitored states was exactly this artifact.
+        sap.setIncreasedViolationsParameters(new SecurityAnalysisParameters.IncreasedViolationsParameters(
+                0.5, 0.001, 0.5, 0.001, 0.001));
         sap.addExtension(OpenSecurityAnalysisParameters.class, new OpenSecurityAnalysisParameters().setThreadCount(threads));
 
         long cpu1Ms = -1;
@@ -139,7 +158,11 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
             cpu1Ms = (System.nanoTime() - c1) / 1_000_000;
         }
         long cpuT0 = System.nanoTime();
-        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, Collections.emptyList(), sap);
+        // Diagnostic monitor on the dominant violation-diff bus (VL-3632): report its per-contingency
+        // voltage on both sides so control-state divergences are visible directly, not only via violations.
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), java.util.Set.of("VL-3632"), java.util.Set.of()));
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, monitors, sap);
         long cpuMs = (System.nanoTime() - cpuT0) / 1_000_000;
 
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(new SparseMatrixFactory(),
@@ -155,8 +178,9 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
             // batch; provider-side serialization is the product fix to make threadCount safe.
             SecurityAnalysisParameters sapGpu = new SecurityAnalysisParameters();
             sapGpu.setLoadFlowParameters(lfp);
+            sapGpu.setIncreasedViolationsParameters(sap.getIncreasedViolationsParameters());
             long g0 = System.nanoTime();
-            gpuCold = runSecurityAnalysis(network, contingencies, Collections.emptyList(), sapGpu);
+            gpuCold = runSecurityAnalysis(network, contingencies, monitors, sapGpu);
             gpuColdMs = (System.nanoTime() - g0) / 1_000_000;
             long g1 = System.nanoTime();
             gpuWarm = runSecurityAnalysis(network, contingencies, Collections.emptyList(), sapGpu);
@@ -192,8 +216,38 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
                     mismatched.subList(0, Math.min(10, mismatched.size())));
         }
         diffViolations(cpu, gpuCold);
+        printMonitoredBus(cpu, "CPU");
+        printMonitoredBus(gpuCold, "GPU");
+        if (debugCtg != null && !debugCtg.isBlank()) {
+            dumpAllViolations(cpu, "CPU", debugCtg);
+            dumpAllViolations(gpuCold, "GPU", debugCtg);
+            System.out.printf("  DEBUG pre-ctg violation counts: CPU=%d GPU=%d%n",
+                    cpu.getPreContingencyResult().getLimitViolationsResult().getLimitViolations().size(),
+                    gpuCold.getPreContingencyResult().getLimitViolationsResult().getLimitViolations().size());
+            cpu.getPreContingencyResult().getLimitViolationsResult().getLimitViolations().stream().limit(5)
+                    .forEach(v -> System.out.printf("  DEBUG CPU-pre | %s %s | value=%.9f%n", v.getSubjectId(), v.getLimitType(), v.getValue()));
+            gpuCold.getPreContingencyResult().getLimitViolationsResult().getLimitViolations().stream().limit(5)
+                    .forEach(v -> System.out.printf("  DEBUG GPU-pre | %s %s | value=%.9f%n", v.getSubjectId(), v.getLimitType(), v.getValue()));
+        }
         Objects.requireNonNull(gpuWarm);
         assertEquals(statusCounts(cpu), statusCounts(gpuCold), "post-contingency status counts must match CPU");
+    }
+
+    /** Full-precision violation dump for the single-contingency debug mode. */
+    private static void dumpAllViolations(SecurityAnalysisResult r, String tag, String ctgId) {
+        r.getPostContingencyResults().stream()
+                .filter(p -> p.getContingency().getId().equals(ctgId))
+                .flatMap(p -> p.getLimitViolationsResult().getLimitViolations().stream())
+                .forEach(v -> System.out.printf("  DEBUG %s | %s %s %s | value=%.9f limit=%.9f%n",
+                        tag, v.getSubjectId(), v.getLimitType(), v.getSide(), v.getValue(), v.getLimit()));
+    }
+
+    private static void printMonitoredBus(SecurityAnalysisResult r, String tag) {
+        r.getPreContingencyResult().getNetworkResult().getBusResults()
+                .forEach(b -> System.out.printf("  MONITOR %s pre-ctg %s v=%.5f%n", tag, b.getBusId(), b.getV()));
+        r.getPostContingencyResults().stream().limit(3)
+                .forEach(p -> p.getNetworkResult().getBusResults()
+                        .forEach(b -> System.out.printf("  MONITOR %s post %s %s v=%.5f%n", tag, p.getContingency().getId(), b.getBusId(), b.getV())));
     }
 
     /**

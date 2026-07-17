@@ -350,7 +350,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
      *  bus's participation factor, base target P, headroom and footroom each shrink by the lost gen's share,
      *  and the per-scenario factor sum drops by {@code dsFactorDelta} so the other buses absorb that share.
      *  This is only valid when the slack itself does not participate (otherwise the loss is rejected). */
-    public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, boolean toPq,
+    public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, boolean toPq, boolean qOverride,
                             int dsBus, double dsFactorDelta, double dsBaseDelta, double dsMaxDelta, double dsMinDelta) {
     }
 
@@ -822,13 +822,19 @@ public final class GpuBatchedSecurityAnalysisSolver {
         }
         double lostP = lost.stream().mapToDouble(LfGenerator::getTargetP).sum();
         double pTarget = bus.getTargetP() - lostP;
+        boolean busPv = bus.isGeneratorVoltageControlEnabled();
         boolean lostControls = lost.stream()
                 .anyMatch(g -> g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
         boolean otherController = bus.getGenerators().stream()
                 .anyMatch(g -> !lostSet.contains(g) && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
-        boolean toPq = lostControls && !otherController;
+        boolean toPq = busPv && lostControls && !otherController;
+        // The bus Q TARGET must shed the lost gens' targetQ whenever the V row solves the reactive
+        // equation in the scenario: on the PV->PQ flip AND on an ALREADY-PQ bus losing fixed-Q
+        // generation (task #21 — the flip-only version silently kept the lost Q injected; measured
+        // 0.27 kV voltage divergence on ieee14 for a 15-MVAr fixed-Q gen loss).
+        boolean qOverride = toPq || !busPv;
         double qTarget = 0;
-        if (toPq) {
+        if (qOverride) {
             double remainingGenQ = bus.getGenerators().stream().filter(g -> !lostSet.contains(g))
                     .mapToDouble(LfGenerator::getTargetQ).sum();
             qTarget = remainingGenQ - bus.getLoadTargetQ();
@@ -858,7 +864,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 }
             }
         }
-        return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, dsBus, dsFactorDelta, dsBaseDelta, dsMaxDelta, dsMinDelta);
+        return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta, dsMaxDelta, dsMinDelta);
     }
 
     /**
@@ -1133,9 +1139,11 @@ public final class GpuBatchedSecurityAnalysisSolver {
                             for (GenOutage go : gos) {   // at most one DS-participant bus per contingency by construction)
                                 ovIndexList.add(s * n + go.pRow());
                                 ovValueList.add(go.pTarget());
-                                if (go.toPq()) {
-                                    ovIndexList.add(s * n + go.vRow());
+                                if (go.qOverride()) {    // Q target sheds the lost gens' Q: on the PV->PQ flip AND
+                                    ovIndexList.add(s * n + go.vRow());   // on an ALREADY-PQ bus losing fixed-Q gens (#21)
                                     ovValueList.add(go.qTarget());
+                                }
+                                if (go.toPq()) {
                                     int[] row = rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rowModePerScenario[s];
                                     row[go.vRow()] = 1;  // BUS_V row becomes the reactive-power equation (PV→PQ)
                                     rowModePerScenario[s] = row;

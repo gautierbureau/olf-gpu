@@ -898,3 +898,19 @@ baseline unchanged — COLD E2E 11.56 ms/ctg (CPU base drifted, GPU side steady)
 warm chunk 2155 ms / 4.31 ms/scn, 499/500 @ 1e-6, min/med ||F||inf 2.2e-12/3.7e-12 (identical
 to the recorded reference). The !deviceFixedIter gating held everywhere claimed; the
 gpusim2grid-comparable methodology is untouched.
+
+## 2026-07-17 — #21 CONFIRMED AND FIXED: Q-target override for fixed-Q generator loss on PQ buses
+
+The suspected gap was REAL: a lost fixed-Q generator on an already-PQ bus kept its targetQ
+injected on the device (the Q override only fired on the PV->PQ flip). Invisible to
+status/violation-count tests on limit-free networks AND to state tests on the near-zero-impedance
+DS factory grid (80 MVAr moved voltages < 0.05 kV there); measured 0.27 kV divergence on ieee14
+(realistic impedances, 15-MVAr fixed-Q gen loss). FIX: GenOutage gains qOverride (toPq OR
+already-PQ bus); the chunk apply sheds the lost gens' Q from the bus Q target in both cases.
+Verification chain that caught everything: state-level bus-voltage assertions in the SA tests
+(all VLs monitored, 0.5 kV default / 0.05 kV on the dedicated ieee14 test) + a JNI-boundary
+override dump that exposed the FIRST fix attempt as a silent no-op (python replace anchored on
+an ascii arrow where the source has a unicode one — the failing test was the only guard that
+mattered). All 10 SA tests green; production bench parity unchanged (22/6 threshold-edge diff).
+LESSON (recorded for #22/#23): state-level assertions need realistic impedances; and never trust
+a fix whose test did not fail first.

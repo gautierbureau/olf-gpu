@@ -156,14 +156,28 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     private void assertGpuMatchesCpu(Network network, List<Contingency> contingencies) {
+        assertGpuMatchesCpu(network, contingencies, 0.5);
+    }
+
+    private void assertGpuMatchesCpu(Network network, List<Contingency> contingencies, double vToleranceKv) {
+        assertGpuMatchesCpu(network, contingencies, vToleranceKv, true);
+    }
+
+    private void assertGpuMatchesCpu(Network network, List<Contingency> contingencies, double vToleranceKv, boolean distributedSlack) {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
-                .setDistributedSlack(true).setUseReactiveLimits(true);
+                .setDistributedSlack(distributedSlack).setUseReactiveLimits(true);
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
-        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, java.util.Collections.emptyList(), sap);
+        // STATE-LEVEL comparison (task #21): monitor every voltage level — status/violation-count
+        // equality is blind on limit-free test networks (a wrong Q injection still "matches").
+        java.util.Set<String> allVls = network.getVoltageLevelStream().map(vl -> vl.getId())
+                .collect(java.util.stream.Collectors.toSet());
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), allVls, java.util.Set.of()));
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, monitors, sap);
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         try {
-            SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, java.util.Collections.emptyList(), sap);
+            SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, monitors, sap);
             assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() > 0,
                     "the batch must ENGAGE (fallen-back run proves nothing)");
             assertEquals(cpu.getPostContingencyResults().size(), gpu.getPostContingencyResults().size());
@@ -173,10 +187,37 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 assertEquals(cpu.getPostContingencyResults().get(i).getLimitViolationsResult().getLimitViolations().size(),
                         gpu.getPostContingencyResults().get(i).getLimitViolationsResult().getLimitViolations().size(),
                         "violation count for " + cpu.getPostContingencyResults().get(i).getContingency().getId());
+                var cpuBuses = cpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                var gpuBuses = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                assertEquals(cpuBuses.size(), gpuBuses.size());
+                for (int b = 0; b < cpuBuses.size(); b++) {
+                    org.junit.jupiter.api.Assertions.assertEquals(cpuBuses.get(b).getV(), gpuBuses.get(b).getV(), vToleranceKv,
+                            "bus voltage " + cpuBuses.get(b).getBusId() + " for "
+                                    + cpu.getPostContingencyResults().get(i).getContingency().getId()
+                                    + " (0.5 kV tolerance: criterion slack is far below, a Q-injection error far above)");
+                }
             }
         } finally {
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         }
+    }
+
+    @Test
+    void fixedQGeneratorLossAdjustsQTarget() {
+        // #21: a lost FIXED-Q generator on an already-PQ bus must remove its targetQ from the bus
+        // Q target (the CPU does via LfContingency). ieee14 has realistic impedances, so a wrong
+        // Q injection moves voltages by ~0.4 kV — far above the 0.05 kV assertion tolerance,
+        // while the convergence-slack noise is ~1e-3 kV.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        com.powsybl.iidm.network.Bus b10 = network.getBusBreakerView().getBus("B10");
+        b10.getVoltageLevel().newGenerator().setId("gq").setBus("B10").setConnectableBus("B10")
+                .setMinP(0).setMaxP(50).setTargetP(10).setTargetQ(15).setVoltageRegulatorOn(false).add();
+        // distributed slack OFF: gq would participate (PROPORTIONAL_TO_GENERATION_P_MAX includes
+        // all gens) alongside a participating slack — the known DS fallback combo, orthogonal here.
+        assertGpuMatchesCpu(network,
+                List.of(new Contingency("gq", new com.powsybl.contingency.GeneratorContingency("gq"))), 0.05, false);
     }
 
     @Test

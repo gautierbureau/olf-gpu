@@ -322,7 +322,8 @@ public final class GpuAcNewtonSolver {
                                                        int[] dsOverrideBus, double[] dsOverrideFactorDelta,
                                                        double[] dsOverrideBaseDelta, double[] dsOverrideMaxDelta,
                                                        double[] dsOverrideMinDelta, int maxIter, double tol,
-                                                       double reactiveLimitTol, double slackDistTol, double convEpsPerEq);
+                                                       double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
+                                                       int lsMode, double maxDv, double maxDphi, int[] varType);
 
     /** Release a batch context from {@link #createBatchContext} (idempotent for handle 0). */
     public static native void destroyBatchContext(long handle);
@@ -356,7 +357,7 @@ public final class GpuAcNewtonSolver {
                 // one-shot: no per-scenario gen-override flips, so any scenario's row mode IS the base row mode
                 return solveBatchContext(handle, x0Base, targetBase, rowMode, rowMode[0], disabledElementMask,
                         new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0],
-                        maxIter, tol, reactiveLimitTol, slackDistTol, 0.0);
+                        maxIter, tol, reactiveLimitTol, slackDistTol, 0.0, 0, 0.0, 0.0, null);
             } finally {
                 destroyBatchContext(handle);
             }

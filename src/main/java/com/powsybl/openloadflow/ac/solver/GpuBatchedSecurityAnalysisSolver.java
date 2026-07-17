@@ -52,6 +52,19 @@ public final class GpuBatchedSecurityAnalysisSolver {
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchedSecurityAnalysisSolver.class);
 
     /** System property: an explicit GPU batch chunk size (scenarios). When unset, the chunk is auto-sized from free device memory. */
+    // MAX_VOLTAGE_CHANGE state-vector scaling for the batched device solve (mirrors the CPU's
+    // MaxVoltageChangeStateVectorScaling PER SCENARIO). Set by GpuBatchedAcSecurityAnalysis from the
+    // resolved OLF parameters before each run; 0 = raw full Newton steps (the historical behavior).
+    private static volatile int batchLsMode;
+    private static volatile double batchMaxDv;
+    private static volatile double batchMaxDphi;
+
+    public static void setStateVectorScaling(int lsMode, double maxDv, double maxDphi) {
+        batchLsMode = lsMode;
+        batchMaxDv = maxDv;
+        batchMaxDphi = maxDphi;
+    }
+
     public static final String MAX_BATCH_PROPERTY = "olf.gpu.sa.maxBatch";
     /** Fallback chunk size used when auto-sizing is unavailable (no GPU / memory-query failure). */
     public static final int DEFAULT_MAX_BATCH = 256;
@@ -499,7 +512,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
         if (!batchedIndices.isEmpty()) {
             solveQualifiedInChunks(batchedIndices, contingencies, elementMapper, gpuData, baseState,
                     baseTargets, baseActivation.rowMode(), frozenRowsByIndex, frozenTargetsByIndex, genOutageByIndex,
-                    n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex);
+                    n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
+                    batchLsMode == 2 ? GpuAcDataExtractor.extractVarType(equationSystem, n) : null);
         }
 
         // Assemble results in the original contingency order: batched scenarios carry their
@@ -689,7 +703,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                                                GenOutage[] genOutageByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
-                                               double convEpsPerEq, double[][] resultsByIndex) {
+                                               double convEpsPerEq, double[][] resultsByIndex, int[] varType) {
         int nb = batchedIndices.size();
         int chunkSize = resolveChunkSize(nb, n, gpuData);
         int nChunks = (nb + chunkSize - 1) / chunkSize;
@@ -797,7 +811,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                         rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
                         dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                        parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq);
+                        parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                        batchLsMode, batchMaxDv, batchMaxDphi,
+                        batchLsMode == 2 ? varType : null);
                 for (int s = 0; s < realCount; s++) {
                     resultsByIndex[batchedIndices.get(chunkStart + s)] = chunkResults[s];
                 }

@@ -625,3 +625,19 @@ detail differences vs ReactiveLimitsOuterLoop; (3) realistic-voltage checks abse
 device-side. Next: check solveBatchContext for per-scenario scaling, then re-diff.
 Also fixed en route: the fallback previously crashed with a CME (GPU inner solver +
 outer-loop switching on the sequential path) — fallback now skips the solver swap too.
+
+## 2026-07-17 — MAX_VOLTAGE_CHANGE ported to the batch (per scenario); suspect FALSIFIED
+
+The batched solve now applies the CPU's MaxVoltageChangeStateVectorScaling PER SCENARIO
+(maxVoltageChangeFactorBatch block-reduction of |dv|/|dphi| + whole-step scale; provider
+captures mode/maxDv/maxDphi from OLF params; varType via GpuAcDataExtractor). All 3
+tests green, timings unchanged. BUT the RTE-params violation diff is IDENTICAL
+(6,137 / 101 border): hot-started scenarios never take steps near 0.4 pu / 1 rad, so
+the clamp never binds on either side — scaling was NOT the differentiator. Kept as
+parity hardening (matters for cold/stressed scenarios).
+
+NEW prime suspect for the 6,137 diff: the batch RL pass may implement only PV->PQ
+switching without the CPU ReactiveLimitsOuterLoop's PQ->PV switch-BACK (voltage-control
+recovery). Signature fits exactly: VL-3632 pinned at 1.1540 (its controller stuck PQ on
+the device) vs CPU pulling it back to <=1.10 across unrelated contingencies. Next:
+check the batch RL switch logic for PQ->PV recovery, then re-diff.

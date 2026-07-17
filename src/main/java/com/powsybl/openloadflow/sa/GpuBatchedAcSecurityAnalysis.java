@@ -211,6 +211,17 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             case UNIFORM_CRITERIA -> olfParams.getNewtonRaphsonConvEpsPerEq();
             case PER_EQUATION_TYPE_CRITERIA -> 0.0;
         };
+        // MAX_VOLTAGE_CHANGE state-vector scaling: apply the SAME per-step clamp in the batched device
+        // solve as the CPU per-contingency Newton (per scenario). Without this the batch takes raw full
+        // steps, PV/PQ switch decisions read different intermediate states, and converged states drift
+        // (measured 2026-07-17 under the RTE parameters: 6,137 one-sided violation diffs).
+        if (olfParams.getStateVectorScalingMode() == com.powsybl.openloadflow.ac.solver.StateVectorScalingMode.MAX_VOLTAGE_CHANGE) {
+            GpuBatchedSecurityAnalysisSolver.setStateVectorScaling(2,
+                    olfParams.getMaxVoltageChangeStateVectorScalingMaxDv(),
+                    olfParams.getMaxVoltageChangeStateVectorScalingMaxDphi());
+        } else {
+            GpuBatchedSecurityAnalysisSolver.setStateVectorScaling(0, 0.0, 0.0);
+        }
         // Run the engine's load flows — the pre-contingency BASE and any contingency that falls through to
         // the sequential path — on the FULL GPU Newton-Raphson when the device + network support it. The base
         // then solves on-device and PRE-WARMS CUDA for the batched contingency pass (the one-time device init

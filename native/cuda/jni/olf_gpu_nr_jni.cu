@@ -1919,6 +1919,52 @@ __global__ void axpy1Batch(int total, const double* dx, double* x) {      // x +
     if (i < total) x[i] += dx[i];
 }
 
+// Per-scenario MAX_VOLTAGE_CHANGE step factor (mirrors MaxVoltageChangeStateVectorScaling, exactly
+// like the base solver's host-side clamp but one factor PER SCENARIO): the largest |Δv| (varType 1)
+// stays within maxDv and the largest |Δφ| (varType 0) within maxDphi; the WHOLE step is scaled.
+// One block per scenario, block-stride column loop, shared-memory max reduction.
+__global__ void maxVoltageChangeFactorBatch(int n, const double* dx, const int* varType,
+                                            const char* active, double maxDv, double maxDphi,
+                                            double* factor) {
+    int s = blockIdx.x;
+    __shared__ double smDv[BLOCK];
+    __shared__ double smDphi[BLOCK];
+    double mdv = 0.0;
+    double mdphi = 0.0;
+    if (active == nullptr || active[s]) {
+        const double* d = dx + (size_t) s * n;
+        for (int i = threadIdx.x; i < n; i += blockDim.x) {
+            double a = fabs(d[i]);
+            if (varType[i] == 1) {
+                mdv = fmax(mdv, a);
+            } else if (varType[i] == 0) {
+                mdphi = fmax(mdphi, a);
+            }
+        }
+    }
+    smDv[threadIdx.x] = mdv;
+    smDphi[threadIdx.x] = mdphi;
+    __syncthreads();
+    for (int off = blockDim.x / 2; off > 0; off >>= 1) {
+        if (threadIdx.x < off) {
+            smDv[threadIdx.x] = fmax(smDv[threadIdx.x], smDv[threadIdx.x + off]);
+            smDphi[threadIdx.x] = fmax(smDphi[threadIdx.x], smDphi[threadIdx.x + off]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        double f = 1.0;
+        if (smDv[0] > maxDv) f = fmin(f, maxDv / smDv[0]);
+        if (smDphi[0] > maxDphi) f = fmin(f, maxDphi / smDphi[0]);
+        factor[s] = f;
+    }
+}
+
+__global__ void axpy1BatchScaled(int n, int total, const double* dx, const double* factor, double* x) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < total) x[i] += factor[i / n] * dx[i];
+}
+
 // Tile the base row (row 0, already in d[0..n)) across all nS scenarios: d[s*n+i] = d[i] for
 // s in 1..nS-1. The base state/targets/row-mode are identical for every contingency, so the host
 // uploads ONE n-row and this replicates it on-device — no 32x JNI marshalling / H2D of the base.
@@ -1969,6 +2015,9 @@ struct BatchSolverContext {
     int cbOffset = 0, obOffset = 0, shOffset = 0, hvOffset = 0;   // element-mask offsets per family
     int ndq = 0, ndr = 0, nzi = 0;                           // copies of the structure counts
     DeviceBuf dX, dTarget, dF, dB, dDx, dVals, dMode;        // per-scenario (n or nnz strided)
+    bool clampStep = false;                                  // MAX_VOLTAGE_CHANGE per-scenario step clamp (set per solve)
+    double maxDv = 0.0, maxDphi = 0.0;
+    DeviceBuf dVarType, dStepFactor;                         // n ints / nS factors (lazy, first clamped solve)
     DeviceBuf dDisabled, dActive;                            // per-scenario masks
     // Reactive limits (full-loadflow PV→PQ outer loop): per local-PV controller bus, its (rowMap-mapped)
     // BUS_V row + reactive limits + load Q. dQbuf holds Σ branch q at every row (a fill into a zeroed
@@ -2239,10 +2288,21 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               int nOv, const int* ovIndex, const double* ovValue,
                               const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
                               const double* dsOvMaxDelta, const double* dsOvMinDelta, int maxIter, double tol,
-                              double reactiveLimitTol, double slackDistTol, double convEpsPerEq) {
+                              double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
+                              int lsMode, double maxDv, double maxDphi, const int* varType) {
     int n = ctx->n;
     int nnz = ctx->nnz;
     int nS = ctx->nScenarios;
+    // MAX_VOLTAGE_CHANGE (lsMode 2): per-scenario step clamp, same rule as the base solver's
+    // (varType 1 = V vs maxDv, 0 = PHI vs maxDphi; whole step scaled). Buffers allocated lazily.
+    bool clampStep = lsMode == 2 && varType != nullptr;
+    if (clampStep && !ctx->dVarType.p) {
+        ctx->dVarType.upload(varType, static_cast<size_t>(n) * sizeof(int));
+        ctx->dStepFactor.alloc(static_cast<size_t>(nS) * sizeof(double));
+    }
+    ctx->clampStep = clampStep;
+    ctx->maxDv = maxDv;
+    ctx->maxDphi = maxDphi;
     size_t nTot = static_cast<size_t>(n) * nS;
     DeviceBuf dOvIndex, dOvValue;                            // function-scoped: outlive the async override kernel
     DeviceBuf dBaseMode;                                     // the contingency-free base row mode (length n)
@@ -2477,7 +2537,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
         CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
                 ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch));
-        axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDx.as<double>(), ctx->dX.as<double>());
+        if (ctx->clampStep) {
+            maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dVarType.as<int>(), ctx->dActive.as<char>(), ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>());
+            axpy1BatchScaled<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS, ctx->dDx.as<double>(), ctx->dStepFactor.as<double>(), ctx->dX.as<double>());
+        } else {
+            axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDx.as<double>(), ctx->dX.as<double>());
+        }
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync (final readback syncs)
         } else if (ctx->mode == 2) {
         // ---- BLOCK-DIAGONAL solve: one big blkdiag matrix; ANALYZE+FACTORIZE once (ever, across
@@ -2495,7 +2560,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 (ctx->factored ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION) | CUDSS_PHASE_SOLVE,
                 ctx->ds.config, ctx->ds.data, ctx->matBig, ctx->matBigX, ctx->matBigB));
         ctx->factored = true;
-        axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDx.as<double>(), ctx->dX.as<double>());
+        if (ctx->clampStep) {
+            maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dVarType.as<int>(), ctx->dActive.as<char>(), ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>());
+            axpy1BatchScaled<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS, ctx->dDx.as<double>(), ctx->dStepFactor.as<double>(), ctx->dX.as<double>());
+        } else {
+            axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDx.as<double>(), ctx->dX.as<double>());
+        }
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync (final readback syncs)
         } else if (ctx->mode == 3 || ctx->mode == 4 || ctx->mode == 5) {
         // ---- UBATCH solve: ANALYZE one block once (cheap), then a linear solve over all nS systems
@@ -2523,7 +2593,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             ubPhase |= CUDSS_PHASE_FACTORIZATION;
         }
         CUDSS_CHECK(cudssExecute(ctx->ds.handle, ubPhase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
-        axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDx.as<double>(), ctx->dX.as<double>());
+        if (ctx->clampStep) {
+            maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dVarType.as<int>(), ctx->dActive.as<char>(), ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>());
+            axpy1BatchScaled<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS, ctx->dDx.as<double>(), ctx->dStepFactor.as<double>(), ctx->dX.as<double>());
+        } else {
+            axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDx.as<double>(), ctx->dX.as<double>());
+        }
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync (final readback syncs)
         } else {
         // ---- fallback: analyze once (shared pattern), refactorize + solve per scenario ----
@@ -2891,8 +2966,15 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jintArray jtargetOverrideIndex, jdoubleArray jtargetOverrideValue,
         jintArray jdsOverrideBus, jdoubleArray jdsOverrideFactorDelta, jdoubleArray jdsOverrideBaseDelta,
         jdoubleArray jdsOverrideMaxDelta, jdoubleArray jdsOverrideMinDelta, jint maxIter, jdouble tol,
-        jdouble reactiveLimitTol, jdouble slackDistTol, jdouble convEpsPerEq) {
+        jdouble reactiveLimitTol, jdouble slackDistTol, jdouble convEpsPerEq,
+        jint lsMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    std::vector<int> varTypeVec;
+    if (jvarType != nullptr) {
+        jsize vn = env->GetArrayLength(jvarType);
+        varTypeVec.resize(vn);
+        env->GetIntArrayRegion(jvarType, 0, vn, varTypeVec.data());
+    }
 
     std::string error;
     BatchResult res;
@@ -2969,7 +3051,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
                                 nOv, ovIndex.data(), ovValue.data(),
                                 nDsOv > 0 ? dsOvBus.data() : nullptr, dsOvFactorDelta.data(),
                                 dsOvBaseDelta.data(), dsOvMaxDelta.data(), dsOvMinDelta.data(), maxIter, tol,
-                                reactiveLimitTol, slackDistTol, convEpsPerEq);
+                                reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                lsMode, maxDv, maxDphi, varTypeVec.empty() ? nullptr : varTypeVec.data());
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {

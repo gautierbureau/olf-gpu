@@ -74,10 +74,12 @@ import java.util.Set;
  * state, or delegate to the standard CPU path). Islanding outages ARE batched: the
  * islanded buses' rows are frozen to identity at 1&#8736;0 over the fixed superset pattern
  * (per-scenario row mode), so the main component solves on the device and the islanded
- * buses report a clean placeholder. Everything it cannot batch — multi-element
- * contingencies, networks the GPU extractor rejects, or scenarios that did not converge
- * on the device — falls through to {@code super}, so results are never wrong, only
- * un-accelerated.
+ * buses report a clean placeholder. The batch covers MULTI-BRANCH outages (the disabled
+ * mask is per element), single-generator outages (with slack-distribution overrides) and
+ * shunt outages. Everything it cannot batch — contingency shapes beyond those mapped
+ * kinds (e.g. mixed branch+generator), elements outside the GPU model, slack-islanding
+ * outages, or scenarios that diverged / were straggler-offloaded on the device — falls
+ * through to {@code super}, so results are never wrong, only un-accelerated.
  *
  * <p>SCOPE (prototype): plain post-contingency power flow (no device-side outer loops —
  * distributed slack / reactive limits are not re-run on the GPU, so distributed active

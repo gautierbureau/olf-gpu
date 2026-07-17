@@ -49,10 +49,10 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
 
     @Test
     void sequentialFallThroughOnGpuSolverWithReactiveLimits() {
-        // Repro for the open CME (#15): a MULTI-ELEMENT contingency falls through to the
-        // SEQUENTIAL path, which runs on the swapped GPU solver when the batch is engaged; with
-        // reactive limits on, the PV->PQ switch dispatches LfNetwork listener events while the
-        // equation updater iterates — the historical ConcurrentModificationException site.
+        // Regression guard around the historical CME (#15, root-caused since: cleaner-thread
+        // listener removal, fixed). NB the 2-branch contingency here is BATCHED (multi-branch IS
+        // in batch scope) — the test's value is the GPU-provider-vs-CPU status parity under
+        // reactive limits, not sequential-path coverage.
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = IeeeCdfNetworkFactory.create14();

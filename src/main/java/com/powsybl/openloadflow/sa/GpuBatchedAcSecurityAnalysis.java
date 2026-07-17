@@ -352,14 +352,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
 
             List<BatchContingency> batch = new ArrayList<>();
             for (PropagatedContingency pc : currentContingencies) {
-                List<LfBranch> branches = closedBranchOutages(net, pc);
-                if (branches != null) {
-                    batch.add(new BatchContingency(pc.getContingency().getId(), branches));
-                    continue;
-                }
-                LfGenerator gen = singleGeneratorOutage(net, pc);
-                if (gen != null) {
-                    batch.add(BatchContingency.generator(pc.getContingency().getId(), gen));
+                List<LfGenerator> gens = pc.getGeneratorIdsToLose().isEmpty() ? List.of() : generatorOutages(net, pc);
+                List<LfBranch> branches = pc.getBranchIdsToOpen().isEmpty() ? List.of() : closedBranchOutages(net, pc);
+                if (branches != null && gens != null && (!branches.isEmpty() || !gens.isEmpty())) {
+                    batch.add(BatchContingency.branchesAndGenerators(pc.getContingency().getId(), branches, gens));
                     continue;
                 }
                 LfShunt shunt = singleShuntOutage(net, pc);
@@ -399,13 +395,22 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     /** The single generator a contingency loses (and that the GPU batch can represent via a per-scenario
      *  target override), or null if it is not a clean single-generator outage (multi-element, bus loss, or a
      *  generator absent from the LF network). */
-    private static LfGenerator singleGeneratorOutage(LfNetwork net, PropagatedContingency pc) {
-        if (pc.getGeneratorIdsToLose().size() != 1 || !pc.getBranchIdsToOpen().isEmpty()
-                || !pc.getBusIdsToLose().isEmpty()) {
+    /** The contingency's lost generators (any count, possibly alongside branches), or null when any of
+     *  them is unresolvable. Also guards bus/LOAD losses (the load check fixes a latent gap: a
+     *  generator+load contingency used to map as a pure generator loss). */
+    private static List<LfGenerator> generatorOutages(LfNetwork net, PropagatedContingency pc) {
+        if (pc.getGeneratorIdsToLose().isEmpty() || !pc.getBusIdsToLose().isEmpty() || !pc.getLoadIdsToLose().isEmpty()) {
             return null;
         }
-        LfGenerator gen = net.getGeneratorById(pc.getGeneratorIdsToLose().iterator().next());
-        return gen != null && gen.getBus() != null && !gen.getBus().isDisabled() ? gen : null;
+        List<LfGenerator> gens = new java.util.ArrayList<>();
+        for (String id : pc.getGeneratorIdsToLose()) {
+            LfGenerator gen = net.getGeneratorById(id);
+            if (gen == null || gen.getBus() == null || gen.getBus().isDisabled()) {
+                return null;
+            }
+            gens.add(gen);
+        }
+        return gens;
     }
 
     /** The single fixed shunt a contingency disconnects (which the GPU batch can mask off like a branch), or
@@ -424,9 +429,12 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         return shunt != null && !shunt.isDisabled() && shunt.getOriginalIds().size() == 1 ? shunt : null;
     }
 
+    /** The contingency's closed-branch outages (0-2, BOTH_SIDES only), or null when the branch part is
+     *  out of batch scope. Generators are allowed alongside (branch+generator combos batch since 2026-07-17);
+     *  buses and loads are not. */
     private static List<LfBranch> closedBranchOutages(LfNetwork net, PropagatedContingency pc) {
         int n = pc.getBranchIdsToOpen().size();
-        if (n < 1 || n > 2 || !pc.getBusIdsToLose().isEmpty() || !pc.getGeneratorIdsToLose().isEmpty()) {
+        if (n > 2 || !pc.getBusIdsToLose().isEmpty() || !pc.getLoadIdsToLose().isEmpty()) {
             return null;
         }
         List<LfBranch> branches = new ArrayList<>(n);

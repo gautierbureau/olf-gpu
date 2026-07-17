@@ -868,3 +868,24 @@ nothing), statuses AND violation counts equal to stock CPU SA. Lesson from the t
 radial factory network fragments on ANY outage — batch acceptance tests need a mesh.
 Production bench regression: unchanged (GPU warm 12.4 s = 1.12x vs CPU-4t, diff 22/6), the
 RTE JSON does not resolve this loop.
+
+## 2026-07-17 — Batch scope widened (#20): MULTI-generator outages + BRANCH+GENERATOR combos
+
+BatchContingency now carries List<LfGenerator> lostGenerators and allows branches+generators
+COMBINED (shunts stay exclusive; branches capped at 2). Generator outages are merged PER BUS
+(computeGenOutages: target deltas and DS factor/base/headroom deltas SUM over the bus's lost
+gens; PV->PQ only when the bus loses its LAST controller). STAGE-1 CONSTRAINT: at most one
+DS-participant bus per contingency (the native DS override carries one entry per scenario) —
+more routes to CPU; lifting it means a flat per-scenario DS-override list native-side. Combos
+compose the two independent mechanisms (element mask + target/row-mode overrides); the branch
+part still runs connectivity qualification, and a lost generator on an ISLANDED bus falls back
+(conservative). LATENT BUG FIXED: the old singleGeneratorOutage never checked loadIdsToLose —
+a generator+load contingency would have mapped as a pure gen loss; both mapping helpers now
+guard buses AND loads.
+
+Tests (all 7 SA green): multiGeneratorOutageBatchMatchesCpu (2 gens lost on one DS-participant
+bus + single-gen control; statuses+violations == CPU, engagement asserted) and
+branchPlusGeneratorComboBatchMatchesCpu (parallel-circuit branch + DS-participant gen in ONE
+contingency). Test-sizing lesson: losing 250 of 600 MW made the CPU itself diverge (FAILED) —
+scope-widening tests must keep outages physically survivable. Production bench regression
+unchanged: GPU warm 12.9 s (1.07x vs CPU-4t), diff 22/6.

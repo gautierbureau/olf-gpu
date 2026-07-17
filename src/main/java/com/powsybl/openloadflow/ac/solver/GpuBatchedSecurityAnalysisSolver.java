@@ -291,37 +291,47 @@ public final class GpuBatchedSecurityAnalysisSolver {
      *  the per-scenario element mask), a single generator loss ({@code lostGenerator}, applied as a per-scenario
      *  target override), or one+ fixed-shunt disconnections ({@code outagedShunts}, disabled in the element
      *  mask like branches). */
-    public record BatchContingency(String contingencyId, List<LfBranch> outagedBranches, LfGenerator lostGenerator,
+    public record BatchContingency(String contingencyId, List<LfBranch> outagedBranches, List<LfGenerator> lostGenerators,
                                    List<LfShunt> outagedShunts) {
         public BatchContingency {
             Objects.requireNonNull(contingencyId);
             Objects.requireNonNull(outagedBranches);
+            Objects.requireNonNull(lostGenerators);
             Objects.requireNonNull(outagedShunts);
-            boolean isGen = lostGenerator != null;
+            boolean isGen = !lostGenerators.isEmpty();
             boolean isShunt = !outagedShunts.isEmpty();
             boolean isBranch = !outagedBranches.isEmpty();
-            int kinds = (isGen ? 1 : 0) + (isShunt ? 1 : 0) + (isBranch ? 1 : 0);
-            if (kinds != 1 || outagedBranches.size() > 2) {
+            // Batchable shapes: 1-2 branches, N generators, branches+generators COMBINED
+            // (independent mechanisms: element mask vs target/row-mode overrides); fixed shunts
+            // stay exclusive (their DISTR_Q interplay is validated separately).
+            if ((!isGen && !isShunt && !isBranch) || outagedBranches.size() > 2
+                    || (isShunt && (isGen || isBranch))) {
                 throw new IllegalArgumentException(
-                        "a batched contingency is exactly one of: 1-2 branches, one generator, or fixed shunt(s)");
+                        "a batched contingency is 1-2 branches and/or generator(s), or fixed shunt(s) alone");
             }
             outagedBranches = List.copyOf(outagedBranches);
+            lostGenerators = List.copyOf(lostGenerators);
             outagedShunts = List.copyOf(outagedShunts);
         }
 
         /** A branch outage (N-1 or N-2). */
         public BatchContingency(String contingencyId, List<LfBranch> outagedBranches) {
-            this(contingencyId, outagedBranches, null, List.of());
+            this(contingencyId, outagedBranches, List.of(), List.of());
         }
 
         /** Convenience for the common single-branch (N-1) case. */
         public BatchContingency(String contingencyId, LfBranch outagedBranch) {
-            this(contingencyId, List.of(Objects.requireNonNull(outagedBranch)), null, List.of());
+            this(contingencyId, List.of(Objects.requireNonNull(outagedBranch)), List.of(), List.of());
+        }
+
+        /** A combined branch + generator contingency. */
+        public static BatchContingency branchesAndGenerators(String contingencyId, List<LfBranch> branches, List<LfGenerator> gens) {
+            return new BatchContingency(contingencyId, branches, gens, List.of());
         }
 
         /** A generator loss. */
         public static BatchContingency generator(String contingencyId, LfGenerator lostGenerator) {
-            return new BatchContingency(contingencyId, List.of(), Objects.requireNonNull(lostGenerator), List.of());
+            return new BatchContingency(contingencyId, List.of(), List.of(Objects.requireNonNull(lostGenerator)), List.of());
         }
 
         /** A fixed-shunt disconnection (the shunt element is masked off, like a branch outage). */
@@ -598,7 +608,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         List<Integer> batchedIndices = new ArrayList<>();
         int[][] frozenRowsByIndex = new int[contingencies.size()][];     // islanded buses' variable rows, per contingency
         double[][] frozenTargetsByIndex = new double[contingencies.size()][];   // the clean value each frozen row holds (V=1, phi=0)
-        GenOutage[] genOutageByIndex = new GenOutage[contingencies.size()];   // per generator contingency, else null
+        GenOutage[][] genOutagesByIndex = new GenOutage[contingencies.size()][];   // per-bus merged outages, else null
         int islandingCount = 0;
         for (int i = 0; i < qualifications.size(); i++) {
             GpuBatchContingencyValidator.Qualification q = qualifications.get(i);
@@ -606,15 +616,39 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 continue;
             }
             BatchContingency c = contingencies.get(i);
-            if (c.lostGenerator() != null) {                 // generator contingency: per-scenario target override
-                GenOutage go = computeGenOutage(equationSystem, gpuData, dsSum, slackParticipates, c.lostGenerator());
-                if (go == null) {                            // slack / participating-slack DS / remote gen — route to CPU
+            if (!c.lostGenerators().isEmpty()) {             // generator (or branch+generator) contingency
+                GenOutage[] gos = computeGenOutages(equationSystem, gpuData, dsSum, slackParticipates, c.lostGenerators());
+                if (gos == null) {                           // slack / >1 DS bus / remote gen — route to CPU
                     continue;
                 }
-                genOutageByIndex[i] = go;
+                if (!c.outagedBranches().isEmpty()) {        // COMBO: the branch part must also qualify
+                    if (c.outagedBranches().stream().anyMatch(distrRhoControllers::contains)) {
+                        continue;
+                    }
+                    // conservative: a lost generator on an ISLANDED bus is out of combo scope
+                    FrozenIsland fi = islandedFrozen(equationSystem, q.islandedBuses());
+                    boolean genOnIsland = false;
+                    for (GenOutage go : gos) {
+                        for (int fr : fi.rows()) {
+                            if (fr == go.pRow() || fr == go.vRow()) {
+                                genOnIsland = true;
+                            }
+                        }
+                    }
+                    if (genOnIsland) {
+                        continue;
+                    }
+                    frozenRowsByIndex[i] = fi.rows();
+                    frozenTargetsByIndex[i] = fi.targets();
+                    if (fi.rows().length > 0) {
+                        islandingCount++;
+                    }
+                } else {
+                    frozenRowsByIndex[i] = NO_FROZEN_ROWS;
+                    frozenTargetsByIndex[i] = NO_FROZEN_TARGETS;
+                }
+                genOutagesByIndex[i] = gos;
                 batchedIndices.add(i);
-                frozenRowsByIndex[i] = NO_FROZEN_ROWS;
-                frozenTargetsByIndex[i] = NO_FROZEN_TARGETS;
             } else if (!c.outagedShunts().isEmpty()) {       // fixed-shunt disconnection: mask the shunt element
                 if (canBatchShuntOutage(c.outagedShunts(), elementMapper, gpuData)) {
                     batchedIndices.add(i);
@@ -643,7 +677,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         double[][] resultsByIndex = new double[contingencies.size()][];
         if (!batchedIndices.isEmpty()) {
             solveQualifiedInChunks(batchedIndices, contingencies, elementMapper, gpuData, baseState,
-                    baseTargets, baseActivation.rowMode(), frozenRowsByIndex, frozenTargetsByIndex, genOutageByIndex,
+                    baseTargets, baseActivation.rowMode(), frozenRowsByIndex, frozenTargetsByIndex, genOutagesByIndex,
                     n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                     batchLsMode == 2 ? GpuAcDataExtractor.extractVarType(equationSystem, n) : null,
                     batchTransformerControl
@@ -727,17 +761,44 @@ public final class GpuBatchedSecurityAnalysisSolver {
      *                          un-normalized factor denominator, to normalize the lost gen's factor delta
      * @param slackParticipates whether the slack bus itself has participating generators (then DS gens reject)
      */
-    private static GenOutage computeGenOutage(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,
-                                              double dsSum, boolean slackParticipates, LfGenerator gen) {
-        LfBus bus = gen.getBus();
-        if (bus == null) {
-            return null;
+    /** Merged per-BUS outages for a MULTI-generator contingency: gens grouped by bus, each bus's
+     *  targets/DS deltas summed. Stage-1 constraint: at most ONE distributed-slack-participant bus
+     *  per contingency (the native DS override carries one entry per scenario) — more, or any
+     *  per-bus disqualification, returns null and the contingency routes to the CPU. */
+    private static GenOutage[] computeGenOutages(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,
+                                                 double dsSum, boolean slackParticipates, List<LfGenerator> gens) {
+        java.util.Map<LfBus, List<LfGenerator>> byBus = new java.util.LinkedHashMap<>();
+        for (LfGenerator g : gens) {
+            if (g.getBus() == null) {
+                return null;
+            }
+            byBus.computeIfAbsent(g.getBus(), b -> new ArrayList<>()).add(g);
         }
+        GenOutage[] out = new GenOutage[byBus.size()];
+        int k = 0;
+        int dsBuses = 0;
+        for (java.util.Map.Entry<LfBus, List<LfGenerator>> e : byBus.entrySet()) {
+            GenOutage go = computeBusGenOutage(es, gpuData, dsSum, slackParticipates, e.getKey(), e.getValue());
+            if (go == null) {
+                return null;
+            }
+            if (go.dsBus() >= 0 && ++dsBuses > 1) {
+                LOGGER.debug("Multi-generator contingency touches several DS-participant buses — CPU fallback");
+                return null;
+            }
+            out[k++] = go;
+        }
+        return out;
+    }
+
+    private static GenOutage computeBusGenOutage(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,
+                                                 double dsSum, boolean slackParticipates, LfBus bus, List<LfGenerator> lost) {
         int busNum = bus.getNum();
         if (es.getEquation(busNum, AcEquationType.BUS_TARGET_PHI).isPresent()        // slack/reference: P is free
                 || es.getEquation(busNum, AcEquationType.DISTR_Q).isPresent()) {     // remote/distributed VC controller
             return null;
         }
+        java.util.Set<LfGenerator> lostSet = new java.util.HashSet<>(lost);
         int pRow = es.getVariableSet().getVariable(busNum, AcVariableType.BUS_PHI).getRow();
         int vRow = es.getVariableSet().getVariable(busNum, AcVariableType.BUS_V).getRow();
         if (pRow < 0 || vRow < 0) {
@@ -759,14 +820,16 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 && vc.getControlledBus().getNum() != busNum).orElse(false)) {
             return null;                                                            // remote voltage control
         }
-        double pTarget = bus.getTargetP() - gen.getTargetP();
-        boolean genControls = gen.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE;
+        double lostP = lost.stream().mapToDouble(LfGenerator::getTargetP).sum();
+        double pTarget = bus.getTargetP() - lostP;
+        boolean lostControls = lost.stream()
+                .anyMatch(g -> g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
         boolean otherController = bus.getGenerators().stream()
-                .anyMatch(g -> g != gen && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
-        boolean toPq = genControls && !otherController;
+                .anyMatch(g -> !lostSet.contains(g) && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
+        boolean toPq = lostControls && !otherController;
         double qTarget = 0;
         if (toPq) {
-            double remainingGenQ = bus.getGenerators().stream().filter(g -> g != gen)
+            double remainingGenQ = bus.getGenerators().stream().filter(g -> !lostSet.contains(g))
                     .mapToDouble(LfGenerator::getTargetQ).sum();
             qTarget = remainingGenQ - bus.getLoadTargetQ();
         }
@@ -778,19 +841,21 @@ public final class GpuBatchedSecurityAnalysisSolver {
         double dsMaxDelta = 0;
         double dsMinDelta = 0;
         if (dsBus >= 0) {
-            dsBaseDelta = gen.getTargetP();
-            if (gen.isParticipating() && gen.getDroop() != 0) {
-                dsFactorDelta = (gen.getMaxP() / gen.getDroop()) / dsSum;
-                double minTp = gen.getMinTargetP();
-                double maxTp = gen.getMaxTargetP();
-                double tp = gen.getTargetP();
-                if (tp < 0) {
-                    maxTp = Math.min(maxTp, 0);
-                } else {
-                    minTp = Math.max(minTp, 0);
+            dsBaseDelta = lostP;
+            for (LfGenerator gen : lost) {                   // per-gen deltas compose additively
+                if (gen.isParticipating() && gen.getDroop() != 0) {
+                    dsFactorDelta += (gen.getMaxP() / gen.getDroop()) / dsSum;
+                    double minTp = gen.getMinTargetP();
+                    double maxTp = gen.getMaxTargetP();
+                    double tp = gen.getTargetP();
+                    if (tp < 0) {
+                        maxTp = Math.min(maxTp, 0);
+                    } else {
+                        minTp = Math.max(minTp, 0);
+                    }
+                    dsMaxDelta += maxTp - tp;
+                    dsMinDelta += minTp - tp;
                 }
-                dsMaxDelta = maxTp - tp;
-                dsMinDelta = minTp - tp;
             }
         }
         return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, dsBus, dsFactorDelta, dsBaseDelta, dsMaxDelta, dsMinDelta);
@@ -978,7 +1043,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                                                GpuBatchElementMapper elementMapper, GpuAcData gpuData,
                                                double[] baseState, double[] baseTargets, int[] baseRowMode,
                                                int[][] frozenRowsByIndex, double[][] frozenTargetsByIndex,
-                                               GenOutage[] genOutageByIndex,
+                                               GenOutage[][] genOutagesByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
@@ -1063,23 +1128,25 @@ public final class GpuBatchedSecurityAnalysisSolver {
                             }
                             rowModePerScenario[s] = row;
                         }
-                        GenOutage go = genOutageByIndex[ci];
-                        if (go != null) {                // generator loss: per-scenario P (and PV→PQ Q) target override
-                            ovIndexList.add(s * n + go.pRow());
-                            ovValueList.add(go.pTarget());
-                            if (go.toPq()) {
-                                ovIndexList.add(s * n + go.vRow());
-                                ovValueList.add(go.qTarget());
-                                int[] row = rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rowModePerScenario[s];
-                                row[go.vRow()] = 1;      // BUS_V row becomes the reactive-power equation (PV→PQ)
-                                rowModePerScenario[s] = row;
-                            }
-                            if (hasDs && go.dsBus() >= 0) {   // lost gen on a DS-participant bus: per-scenario reweight
-                                dsOvBus[s] = go.dsBus();
-                                dsOvFactorDelta[s] = go.dsFactorDelta();
-                                dsOvBaseDelta[s] = go.dsBaseDelta();
-                                dsOvMaxDelta[s] = go.dsMaxDelta();
-                                dsOvMinDelta[s] = go.dsMinDelta();
+                        GenOutage[] gos = genOutagesByIndex[ci];
+                        if (gos != null) {               // generator loss(es): per-BUS target overrides (merged by bus;
+                            for (GenOutage go : gos) {   // at most one DS-participant bus per contingency by construction)
+                                ovIndexList.add(s * n + go.pRow());
+                                ovValueList.add(go.pTarget());
+                                if (go.toPq()) {
+                                    ovIndexList.add(s * n + go.vRow());
+                                    ovValueList.add(go.qTarget());
+                                    int[] row = rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rowModePerScenario[s];
+                                    row[go.vRow()] = 1;  // BUS_V row becomes the reactive-power equation (PV→PQ)
+                                    rowModePerScenario[s] = row;
+                                }
+                                if (hasDs && go.dsBus() >= 0) {   // lost gen(s) on a DS-participant bus: per-scenario reweight
+                                    dsOvBus[s] = go.dsBus();
+                                    dsOvFactorDelta[s] = go.dsFactorDelta();
+                                    dsOvBaseDelta[s] = go.dsBaseDelta();
+                                    dsOvMaxDelta[s] = go.dsMaxDelta();
+                                    dsOvMinDelta[s] = go.dsMinDelta();
+                                }
                             }
                         }
                     }

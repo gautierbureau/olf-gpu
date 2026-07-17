@@ -133,6 +133,74 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         }
     }
 
+    private static Network distributedSlackNetworkWithExtras() {
+        Network network = com.powsybl.openloadflow.network.DistributedSlackNetworkFactory.create();
+        // Second generator on b2 (same-bus multi-gen loss) — participating like g2.
+        com.powsybl.iidm.network.Generator g2b = network.getVoltageLevel(network.getGenerator("g2").getTerminal().getVoltageLevel().getId())
+                .newGenerator().setId("g2b").setBus("b2").setConnectableBus("b2")
+                .setMinP(0).setMaxP(100).setTargetP(30).setTargetQ(50).setVoltageRegulatorOn(false).add();
+        g2b.newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                .withParticipate(true).withDroop(2).add();
+        com.powsybl.iidm.network.Generator g2c = network.getVoltageLevel(network.getGenerator("g2").getTerminal().getVoltageLevel().getId())
+                .newGenerator().setId("g2c").setBus("b2").setConnectableBus("b2")
+                .setMinP(0).setMaxP(50).setTargetP(20).setTargetQ(30).setVoltageRegulatorOn(false).add();
+        g2c.newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                .withParticipate(true).withDroop(2).add();
+        // Parallel circuit to l24 so a branch outage keeps the star grid connected (batch validator).
+        com.powsybl.iidm.network.Line l24 = network.getLine("l24");
+        network.newLine().setId("l24_bis")
+                .setVoltageLevel1(l24.getTerminal1().getVoltageLevel().getId()).setBus1(l24.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l24.getTerminal2().getVoltageLevel().getId()).setBus2(l24.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l24.getR() * 2).setX(l24.getX() * 2).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        return network;
+    }
+
+    private void assertGpuMatchesCpu(Network network, List<Contingency> contingencies) {
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, java.util.Collections.emptyList(), sap);
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, java.util.Collections.emptyList(), sap);
+            assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() > 0,
+                    "the batch must ENGAGE (fallen-back run proves nothing)");
+            assertEquals(cpu.getPostContingencyResults().size(), gpu.getPostContingencyResults().size());
+            for (int i = 0; i < cpu.getPostContingencyResults().size(); i++) {
+                assertEquals(cpu.getPostContingencyResults().get(i).getStatus(),
+                        gpu.getPostContingencyResults().get(i).getStatus());
+                assertEquals(cpu.getPostContingencyResults().get(i).getLimitViolationsResult().getLimitViolations().size(),
+                        gpu.getPostContingencyResults().get(i).getLimitViolationsResult().getLimitViolations().size(),
+                        "violation count for " + cpu.getPostContingencyResults().get(i).getContingency().getId());
+            }
+        } finally {
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
+    @Test
+    void multiGeneratorOutageBatchMatchesCpu() {
+        // #20 stage 1: one contingency losing TWO generators on the same bus (one DS-participant
+        // bus -> in batch scope), plus a plain single-gen one as control.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = distributedSlackNetworkWithExtras();
+        assertGpuMatchesCpu(network, List.of(
+                new Contingency("g2b+g2c", new com.powsybl.contingency.GeneratorContingency("g2b"), new com.powsybl.contingency.GeneratorContingency("g2c")),
+                new Contingency("g3", new com.powsybl.contingency.GeneratorContingency("g3"))));
+    }
+
+    @Test
+    void branchPlusGeneratorComboBatchMatchesCpu() {
+        // #20 stage 2: one contingency losing a BRANCH and a GENERATOR together.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = distributedSlackNetworkWithExtras();
+        assertGpuMatchesCpu(network, List.of(
+                new Contingency("l24bis+g3", new BranchContingency("l24_bis"), new com.powsybl.contingency.GeneratorContingency("g3"))));
+    }
+
     @Test
     void failedBaseLoadFlowYieldsNoPostContingencyResults() {
         // Contract check for the FAILED-base question (2026-07-17): the parent only calls

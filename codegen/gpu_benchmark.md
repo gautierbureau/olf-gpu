@@ -398,3 +398,40 @@ consistency). The remaining chunk-speed residual vs their 1881-ms chunks is NOT
 in the cuDSS phase calls: next suspects are the per-iteration dVals cudaMemset
 (nnz x nS doubles of device bandwidth every full fill) and the fill scatter
 itself (the known atomic-bound floor).
+
+## 2026-07-17 — dVals memset-hiding: REVERTED on nsys evidence (lever closed)
+
+Tried: side memsetStream + evFactDone/evValsCleared events; on full-fill
+iterations the ubatch call un-fuses (FACTORIZATION, record event, side-stream
+memset of dVals for iter k+1, SOLVE), so the zeroing overlaps SOLVE — the J
+values are dead after FACTORIZATION. Gated on IR_N_STEPS == 0 (IR re-reads
+matrix values during SOLVE), post-loop event drain for early-retirement exits,
+valsPreCleared reset per outer pass (Q-eval block dirties dVals as scratch).
+
+Interleaved alternating-order A/B: WASH (warm chunk 2263 vs 2279 ms, warm-JIT
+cold E2E 3949 vs 3966 ms excluding one ~10% machine-hiccup outlier; pairs split).
+
+nsys profile (preclear lib, warm chunks only, `-t cuda`) settled it:
+- dVals memset = 602.5 MB (150,620 nnz x 500 scn x 8 B), **4.68 ms avg**, once
+  per full-fill iteration.
+- Per-iteration GPU work is ~440 ms: factorize_batch 239.5 ms, fillClosedBranch
+  81 ms, fwd 79 ms + bwd 39 ms, copy_matrix 2x10 ms. The memset is ~1% of the
+  iteration → hiding it caps the win at ~19 ms per 2154-ms chunk (0.9%), below
+  bench noise. The wash was structural, not bad luck.
+- The overlap DID engage (each side-stream memset sat inside exactly one
+  concurrent main-stream kernel) — the machinery worked; there was just nothing
+  worth hiding.
+
+REVERTED (git checkout, back to fused single-execute at 8e09574): 4.7 ms/iter
+does not pay for a side stream + two events + conditional un-fusing + an IR
+race gate + an early-exit drain in the hottest function. Bench at reverted HEAD
+confirms baseline.
+
+Profile side-findings: two OTHER per-iteration memsets of similar size run on
+the MAIN stream (613.4 MB @ 4.77 ms and 426.9 MB @ 3.32 ms, 16 instances each)
+— sizes match no host-issued buffer, so they are cuDSS-internal (not ours to
+hide). Total memset footprint is 12.8 ms/iter (~3%) even counting those.
+
+The real remaining chunk lever is unchanged: the fill scatter (81 ms/iter,
+atomic-bound) via the owner-store redesign — which would eliminate the dVals
+memset as a side effect anyway.

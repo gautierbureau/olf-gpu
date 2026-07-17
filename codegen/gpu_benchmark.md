@@ -914,3 +914,17 @@ an ascii arrow where the source has a unicode one — the failing test was the o
 mattered). All 10 SA tests green; production bench parity unchanged (22/6 threshold-edge diff).
 LESSON (recorded for #22/#23): state-level assertions need realistic impedances; and never trust
 a fix whose test did not fail first.
+
+## 2026-07-17 — Load contingencies batched (#22): per-scenario injection overrides
+
+BatchContingency gains List<LoadLoss> (bus, dP, dQ in pu — straight from the propagation's
+PowerShift); computeInjectionOutages merges GENS AND LOADS per bus into one GenOutage
+(shedding load RAISES the P target: pTarget = busP - lostGenP + lostLoadP; the Q target sheds
+lost-load Q on PQ buses via the #21 qOverride path). No DS reweight for loads (they do not
+participate under generation-based balance). Combos now cover branch + generator + load in one
+contingency. GUARDS (CPU fallback): ZIP/voltage-dependent load model (isUseLoadModel — a
+per-scenario coefficient change is not a target override), load at a voltage-CONTROLLING bus
+(the RL pack's static loadQ would go stale), bus losses. Tests (all 10 SA green, state-level
+0.05 kV on ieee14): loadLossBatchMatchesCpu (DS ON — the device slack pass absorbs the
+imbalance exactly like the CPU) and branchGenAndLoadComboBatchMatchesCpu (triple combo).
+Production bench parity unchanged (22/6; GPU 1.21x vs CPU-4t warm this run).

@@ -221,6 +221,43 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     @Test
+    void loadLossBatchMatchesCpu() {
+        // #22: a lost load = per-scenario injection override (P and Q targets RAISED); the DS pass
+        // absorbs the imbalance exactly like the CPU (loads do not participate). ieee14 impedances
+        // make any unit/sign error in the PowerShift deltas fail the 0.05 kV state assertions.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        String loadId = network.getLoadStream()
+                .filter(l -> "B9".equals(l.getTerminal().getBusBreakerView().getBus().getId()))
+                .findFirst().orElseThrow().getId();
+        assertGpuMatchesCpu(network,
+                List.of(new Contingency(loadId, new com.powsybl.contingency.LoadContingency(loadId))), 0.05, true);
+    }
+
+    @Test
+    void branchGenAndLoadComboBatchMatchesCpu() {
+        // #22 combo: branch + fixed-Q generator + load in ONE contingency (DS off: the added gen
+        // would participate alongside a participating slack — the known DS fallback combo).
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getVoltageLevel(network.getBusBreakerView().getBus("B10").getVoltageLevel().getId())
+                .newGenerator().setId("gq").setBus("B10").setConnectableBus("B10")
+                .setMinP(0).setMaxP(50).setTargetP(10).setTargetQ(15).setVoltageRegulatorOn(false).add();
+        String loadId = network.getLoadStream()
+                .filter(l -> "B9".equals(l.getTerminal().getBusBreakerView().getBus().getId()))
+                .findFirst().orElseThrow().getId();
+        String lineId = network.getLineStream()
+                .filter(l -> !l.getId().contains("7") && !l.getId().contains("8"))
+                .skip(2).findFirst().orElseThrow().getId();
+        assertGpuMatchesCpu(network,
+                List.of(new Contingency("combo", new BranchContingency(lineId),
+                        new com.powsybl.contingency.GeneratorContingency("gq"),
+                        new com.powsybl.contingency.LoadContingency(loadId))), 0.05, false);
+    }
+
+    @Test
     void multiGeneratorOutageBatchMatchesCpu() {
         // #20 stage 1: one contingency losing TWO generators on the same bus (one DS-participant
         // bus -> in batch scope), plus a plain single-gen one as control.

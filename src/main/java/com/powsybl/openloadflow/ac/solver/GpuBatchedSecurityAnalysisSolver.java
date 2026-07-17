@@ -291,52 +291,59 @@ public final class GpuBatchedSecurityAnalysisSolver {
      *  the per-scenario element mask), a single generator loss ({@code lostGenerator}, applied as a per-scenario
      *  target override), or one+ fixed-shunt disconnections ({@code outagedShunts}, disabled in the element
      *  mask like branches). */
+    /** A lost load's per-bus injection deltas (pu): removing it RAISES the bus P/Q targets. */
+    public record LoadLoss(LfBus bus, double p, double q) {
+    }
+
     public record BatchContingency(String contingencyId, List<LfBranch> outagedBranches, List<LfGenerator> lostGenerators,
-                                   List<LfShunt> outagedShunts) {
+                                   List<LoadLoss> lostLoads, List<LfShunt> outagedShunts) {
         public BatchContingency {
             Objects.requireNonNull(contingencyId);
             Objects.requireNonNull(outagedBranches);
             Objects.requireNonNull(lostGenerators);
+            Objects.requireNonNull(lostLoads);
             Objects.requireNonNull(outagedShunts);
-            boolean isGen = !lostGenerators.isEmpty();
+            boolean isInjection = !lostGenerators.isEmpty() || !lostLoads.isEmpty();
             boolean isShunt = !outagedShunts.isEmpty();
             boolean isBranch = !outagedBranches.isEmpty();
-            // Batchable shapes: 1-2 branches, N generators, branches+generators COMBINED
+            // Batchable shapes: 1-2 branches, N generators, N loads, and branch+injection COMBOS
             // (independent mechanisms: element mask vs target/row-mode overrides); fixed shunts
             // stay exclusive (their DISTR_Q interplay is validated separately).
-            if ((!isGen && !isShunt && !isBranch) || outagedBranches.size() > 2
-                    || (isShunt && (isGen || isBranch))) {
+            if ((!isInjection && !isShunt && !isBranch) || outagedBranches.size() > 2
+                    || (isShunt && (isInjection || isBranch))) {
                 throw new IllegalArgumentException(
-                        "a batched contingency is 1-2 branches and/or generator(s), or fixed shunt(s) alone");
+                        "a batched contingency is 1-2 branches and/or injection loss(es), or fixed shunt(s) alone");
             }
             outagedBranches = List.copyOf(outagedBranches);
             lostGenerators = List.copyOf(lostGenerators);
+            lostLoads = List.copyOf(lostLoads);
             outagedShunts = List.copyOf(outagedShunts);
         }
 
         /** A branch outage (N-1 or N-2). */
         public BatchContingency(String contingencyId, List<LfBranch> outagedBranches) {
-            this(contingencyId, outagedBranches, List.of(), List.of());
+            this(contingencyId, outagedBranches, List.of(), List.of(), List.of());
         }
 
         /** Convenience for the common single-branch (N-1) case. */
         public BatchContingency(String contingencyId, LfBranch outagedBranch) {
-            this(contingencyId, List.of(Objects.requireNonNull(outagedBranch)), List.of(), List.of());
+            this(contingencyId, List.of(Objects.requireNonNull(outagedBranch)), List.of(), List.of(), List.of());
         }
 
-        /** A combined branch + generator contingency. */
-        public static BatchContingency branchesAndGenerators(String contingencyId, List<LfBranch> branches, List<LfGenerator> gens) {
-            return new BatchContingency(contingencyId, branches, gens, List.of());
+        /** A combined branch + generator/load contingency. */
+        public static BatchContingency branchesAndInjections(String contingencyId, List<LfBranch> branches,
+                                                             List<LfGenerator> gens, List<LoadLoss> loads) {
+            return new BatchContingency(contingencyId, branches, gens, loads, List.of());
         }
 
         /** A generator loss. */
         public static BatchContingency generator(String contingencyId, LfGenerator lostGenerator) {
-            return new BatchContingency(contingencyId, List.of(), List.of(Objects.requireNonNull(lostGenerator)), List.of());
+            return new BatchContingency(contingencyId, List.of(), List.of(Objects.requireNonNull(lostGenerator)), List.of(), List.of());
         }
 
         /** A fixed-shunt disconnection (the shunt element is masked off, like a branch outage). */
         public static BatchContingency shunt(String contingencyId, LfShunt outagedShunt) {
-            return new BatchContingency(contingencyId, List.of(), null, List.of(Objects.requireNonNull(outagedShunt)));
+            return new BatchContingency(contingencyId, List.of(), List.of(), List.of(), List.of(Objects.requireNonNull(outagedShunt)));
         }
     }
 
@@ -616,8 +623,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 continue;
             }
             BatchContingency c = contingencies.get(i);
-            if (!c.lostGenerators().isEmpty()) {             // generator (or branch+generator) contingency
-                GenOutage[] gos = computeGenOutages(equationSystem, gpuData, dsSum, slackParticipates, c.lostGenerators());
+            if (!c.lostGenerators().isEmpty() || !c.lostLoads().isEmpty()) {   // injection (or branch+injection) contingency
+                GenOutage[] gos = computeInjectionOutages(equationSystem, gpuData, dsSum, slackParticipates,
+                        c.lostGenerators(), c.lostLoads());
                 if (gos == null) {                           // slack / >1 DS bus / remote gen — route to CPU
                     continue;
                 }
@@ -765,25 +773,32 @@ public final class GpuBatchedSecurityAnalysisSolver {
      *  targets/DS deltas summed. Stage-1 constraint: at most ONE distributed-slack-participant bus
      *  per contingency (the native DS override carries one entry per scenario) — more, or any
      *  per-bus disqualification, returns null and the contingency routes to the CPU. */
-    private static GenOutage[] computeGenOutages(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,
-                                                 double dsSum, boolean slackParticipates, List<LfGenerator> gens) {
+    private static GenOutage[] computeInjectionOutages(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,
+                                                       double dsSum, boolean slackParticipates,
+                                                       List<LfGenerator> gens, List<LoadLoss> loads) {
         java.util.Map<LfBus, List<LfGenerator>> byBus = new java.util.LinkedHashMap<>();
+        java.util.Map<LfBus, List<LoadLoss>> loadsByBus = new java.util.LinkedHashMap<>();
         for (LfGenerator g : gens) {
             if (g.getBus() == null) {
                 return null;
             }
             byBus.computeIfAbsent(g.getBus(), b -> new ArrayList<>()).add(g);
         }
+        for (LoadLoss l : loads) {
+            loadsByBus.computeIfAbsent(l.bus(), b -> new ArrayList<>()).add(l);
+            byBus.computeIfAbsent(l.bus(), b -> new ArrayList<>());   // load-only bus: empty gen list
+        }
         GenOutage[] out = new GenOutage[byBus.size()];
         int k = 0;
         int dsBuses = 0;
         for (java.util.Map.Entry<LfBus, List<LfGenerator>> e : byBus.entrySet()) {
-            GenOutage go = computeBusGenOutage(es, gpuData, dsSum, slackParticipates, e.getKey(), e.getValue());
+            GenOutage go = computeBusGenOutage(es, gpuData, dsSum, slackParticipates, e.getKey(), e.getValue(),
+                    loadsByBus.getOrDefault(e.getKey(), List.of()));
             if (go == null) {
                 return null;
             }
             if (go.dsBus() >= 0 && ++dsBuses > 1) {
-                LOGGER.debug("Multi-generator contingency touches several DS-participant buses — CPU fallback");
+                LOGGER.debug("Multi-injection contingency touches several DS-participant buses — CPU fallback");
                 return null;
             }
             out[k++] = go;
@@ -792,7 +807,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
     }
 
     private static GenOutage computeBusGenOutage(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,
-                                                 double dsSum, boolean slackParticipates, LfBus bus, List<LfGenerator> lost) {
+                                                 double dsSum, boolean slackParticipates, LfBus bus,
+                                                 List<LfGenerator> lost, List<LoadLoss> lostLoads) {
         int busNum = bus.getNum();
         if (es.getEquation(busNum, AcEquationType.BUS_TARGET_PHI).isPresent()        // slack/reference: P is free
                 || es.getEquation(busNum, AcEquationType.DISTR_Q).isPresent()) {     // remote/distributed VC controller
@@ -821,8 +837,13 @@ public final class GpuBatchedSecurityAnalysisSolver {
             return null;                                                            // remote voltage control
         }
         double lostP = lost.stream().mapToDouble(LfGenerator::getTargetP).sum();
-        double pTarget = bus.getTargetP() - lostP;
+        double lostLoadP = lostLoads.stream().mapToDouble(LoadLoss::p).sum();
+        double lostLoadQ = lostLoads.stream().mapToDouble(LoadLoss::q).sum();
+        double pTarget = bus.getTargetP() - lostP + lostLoadP;   // shedding load RAISES the P target
         boolean busPv = bus.isGeneratorVoltageControlEnabled();
+        if (!lostLoads.isEmpty() && busPv) {
+            return null;                                     // load loss at a voltage-controlling bus: the RL pack's
+        }                                                    // static loadQ would go stale per scenario — CPU fallback
         boolean lostControls = lost.stream()
                 .anyMatch(g -> g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
         boolean otherController = bus.getGenerators().stream()
@@ -837,7 +858,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         if (qOverride) {
             double remainingGenQ = bus.getGenerators().stream().filter(g -> !lostSet.contains(g))
                     .mapToDouble(LfGenerator::getTargetQ).sum();
-            qTarget = remainingGenQ - bus.getLoadTargetQ();
+            qTarget = remainingGenQ - (bus.getLoadTargetQ() - lostLoadQ);
         }
         // Distributed-slack reweight for the affected bus. The bus's base target P always drops by the lost
         // gen's P. The participation factor / headroom / footroom drop only if the LOST gen itself participated

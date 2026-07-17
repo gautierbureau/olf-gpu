@@ -353,9 +353,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             List<BatchContingency> batch = new ArrayList<>();
             for (PropagatedContingency pc : currentContingencies) {
                 List<LfGenerator> gens = pc.getGeneratorIdsToLose().isEmpty() ? List.of() : generatorOutages(net, pc);
+                // ZIP/voltage-dependent load model: per-scenario load removal is not a target override — CPU.
+                boolean loadsBatchable = !currentContext.getParameters().getNetworkParameters().isUseLoadModel();
+                List<GpuBatchedSecurityAnalysisSolver.LoadLoss> loads =
+                        pc.getLoadIdsToLose().isEmpty() ? List.of() : (loadsBatchable ? loadOutages(net, pc) : null);
                 List<LfBranch> branches = pc.getBranchIdsToOpen().isEmpty() ? List.of() : closedBranchOutages(net, pc);
-                if (branches != null && gens != null && (!branches.isEmpty() || !gens.isEmpty())) {
-                    batch.add(BatchContingency.branchesAndGenerators(pc.getContingency().getId(), branches, gens));
+                if (branches != null && gens != null && loads != null
+                        && (!branches.isEmpty() || !gens.isEmpty() || !loads.isEmpty())) {
+                    batch.add(BatchContingency.branchesAndInjections(pc.getContingency().getId(), branches, gens, loads));
                     continue;
                 }
                 LfShunt shunt = singleShuntOutage(net, pc);
@@ -395,11 +400,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     /** The single generator a contingency loses (and that the GPU batch can represent via a per-scenario
      *  target override), or null if it is not a clean single-generator outage (multi-element, bus loss, or a
      *  generator absent from the LF network). */
-    /** The contingency's lost generators (any count, possibly alongside branches), or null when any of
-     *  them is unresolvable. Also guards bus/LOAD losses (the load check fixes a latent gap: a
-     *  generator+load contingency used to map as a pure generator loss). */
+    /** The contingency's lost generators (any count, possibly alongside branches and loads), or null
+     *  when any of them is unresolvable. Bus losses stay out of scope. */
     private static List<LfGenerator> generatorOutages(LfNetwork net, PropagatedContingency pc) {
-        if (pc.getGeneratorIdsToLose().isEmpty() || !pc.getBusIdsToLose().isEmpty() || !pc.getLoadIdsToLose().isEmpty()) {
+        if (pc.getGeneratorIdsToLose().isEmpty() || !pc.getBusIdsToLose().isEmpty()) {
             return null;
         }
         List<LfGenerator> gens = new java.util.ArrayList<>();
@@ -411,6 +415,28 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             gens.add(gen);
         }
         return gens;
+    }
+
+    /** The contingency's lost loads as per-bus injection deltas (pu, from the propagation's PowerShift),
+     *  or null when unresolvable. Guards: bus losses out of scope; the ZIP/voltage-dependent load model
+     *  makes per-scenario load removal unrepresentable as a target override (checked by the caller). */
+    private List<GpuBatchedSecurityAnalysisSolver.LoadLoss> loadOutages(LfNetwork net, PropagatedContingency pc) {
+        if (pc.getLoadIdsToLose().isEmpty() || !pc.getBusIdsToLose().isEmpty()) {
+            return null;
+        }
+        List<GpuBatchedSecurityAnalysisSolver.LoadLoss> out = new java.util.ArrayList<>();
+        for (Map.Entry<String, com.powsybl.openloadflow.network.PowerShift> e : pc.getLoadIdsToLose().entrySet()) {
+            com.powsybl.iidm.network.Load load = network.getLoad(e.getKey());
+            if (load == null || load.getTerminal().getBusView().getBus() == null) {
+                return null;
+            }
+            LfBus bus = net.getBusById(load.getTerminal().getBusView().getBus().getId());
+            if (bus == null || bus.isDisabled()) {
+                return null;
+            }
+            out.add(new GpuBatchedSecurityAnalysisSolver.LoadLoss(bus, e.getValue().getActive(), e.getValue().getReactive()));
+        }
+        return out;
     }
 
     /** The single fixed shunt a contingency disconnects (which the GPU batch can mask off like a branch), or
@@ -434,7 +460,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      *  buses and loads are not. */
     private static List<LfBranch> closedBranchOutages(LfNetwork net, PropagatedContingency pc) {
         int n = pc.getBranchIdsToOpen().size();
-        if (n > 2 || !pc.getBusIdsToLose().isEmpty() || !pc.getLoadIdsToLose().isEmpty()) {
+        if (n > 2 || !pc.getBusIdsToLose().isEmpty()) {
             return null;
         }
         List<LfBranch> branches = new ArrayList<>(n);

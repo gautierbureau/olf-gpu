@@ -164,3 +164,24 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
 - Builds use the isolated repo: `mvn -s ~/Projects/powsybl/tmp/settings.xml ...`
   (never the shared ~/.m2; do not use `-o`).
 
+
+## Benchmarks (two tracks — keep both)
+
+- **Fixed-iter throughput vs gpusim2grid**: `native/cuda/run_bench.sh`
+  (`GpuBatchedN1FixedIterTest`, tol=0, K=4, 500 matched ctg) + the
+  `/gpu-bench-compare` skill. Report COLD FIRST. `OLF_GPU_TOL=1e-6` switches the same
+  bench to the production path (per-iteration convergence + retirement) — see the
+  2026-07-17 tol>0 entry in `codegen/gpu_benchmark.md` (straggler dominates, 8.4x).
+- **Production SA vs CPU OLF**: `GpuVsCpuProductionSaBenchmarkTest` (sa package) —
+  real AcSecurityAnalysis both sides, RTE params from `rte-loadflow-default-parameters.json`
+  (repo root), same 500 ctg, violations included. SPARSE factory forced (the harness
+  dense default makes the 9241 base FAIL after ~200 s). CPU arm multithreaded
+  (`OLF_GPU_SA_CPU_THREADS`, default 4; `OLF_GPU_SA_CPU_SINGLE=1` adds the 1-thread
+  reference); GPU arm host-single-threaded (threadCount>1 SIGSEGVs — open bug below).
+  2026-07-17 numbers: CPU-4t 13.2 s vs GPU warm 22.2 s (GPU 0.59x — loses today; the
+  straggler early-exit + device-norm levers are what flip it).
+- OPEN PRODUCT BUGS (found 2026-07-17): (1) GPU provider + threadCount>1 → concurrent
+  precomputeBatch → SIGSEGV in cuLaunchKernel (needs provider-side serialization);
+  (2) on a FAILED base LF the GPU provider reported pre-contingency CONVERGED and
+  still produced post-contingency results; (3) violation-count drift vs CPU (~2.8%,
+  13,412 vs 13,791) to investigate.

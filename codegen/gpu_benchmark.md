@@ -843,3 +843,28 @@ REMAINING (next session): the orchestrator itself (transformer pack + the 3-step
 frozen-Q via per-scenario Q readback or es evaluation), relax the detect-and-fallback guard for
 TransformerVoltageControl once landed, acceptance = GPU-vs-CPU bench with
 transformerVoltageControlOn=true (a params variant — the RTE JSON does not enable the loop).
+
+## 2026-07-17 — Transformer voltage-control outer loop PORTED to the batch (#16 complete)
+
+The per-scenario orchestrator is live: after the chunk's first solve, a Java state machine
+mirroring TransformerVoltageControlOuterLoop (AFTER_GENERATOR mode) runs PER SCENARIO around
+repeated warm-restarted batched solves — INITIAL (deadband check |targetV−v| on each scenario's
+converged state; out-of-band controls enabled via activation-DIFFED row/target deltas: the ON
+recipe is computed by toggling the control on the shared es at precompute and diffing
+GpuAcActivation, never hand-crafted), CONTROL (continuous r1 read per scenario; out-of-range
+clamped to the extreme and fixed, iterate), then rounding to the closest DISCRETE tap (tap
+tables snapshotted read-only from PiModelArray via reflection; inaccessible table = keep
+continuous) and a final solve. Re-solves start from each scenario's previous state
+(x0PerScenario). Outaged controller transformers are skipped per scenario (disabled mask).
+
+Guard relaxed: TransformerVoltageControl is batchable when mode == AFTER_GENERATOR and the
+STAGE-1 SCOPE holds (no generator voltage controls at/under the max transformer-controlled
+nominal voltage — transformerControlSupported; the frozen-Q GeneratorVoltageControlManager
+port is stage 2, such runs keep the CPU fallback).
+
+Acceptance: transformerVoltageControlBatchMatchesCpu — meshed T2wt network (parallel-circuit
+clone outaged so the validator accepts), batch ENGAGEMENT asserted (a fallen-back run proves
+nothing), statuses AND violation counts equal to stock CPU SA. Lesson from the test: the
+radial factory network fragments on ANY outage — batch acceptance tests need a mesh.
+Production bench regression: unchanged (GPU warm 12.4 s = 1.12x vs CPU-4t, diff 22/6), the
+RTE JSON does not resolve this loop.

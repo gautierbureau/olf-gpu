@@ -158,6 +158,13 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // AcSecurityAnalysis — no batch AND no solver swap (the sequential GPU-inner-solver path has
         // an open CME bug under outer-loop switching).
         boolean noHvdc = lfNetwork.getHvdcs().isEmpty();
+        // TransformerVoltageControl is BATCHABLE since the per-scenario orchestrator port
+        // (AFTER_GENERATOR mode only; stage-1 scope = no generator voltage controls under the
+        // transformer-controlled level — the solver checks). Anything else falls back.
+        OpenLoadFlowParameters olfGuardParams = OpenLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters());
+        boolean transformerControlBatchable =
+                olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL
+                && GpuBatchedSecurityAnalysisSolver.transformerControlSupported(lfNetwork);
         boolean noSvc = lfNetwork.getBuses().stream()
                 .flatMap(b -> b.getGenerators().stream())
                 .noneMatch(g -> g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator);
@@ -165,6 +172,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 .map(ol -> ol.getName())
                 .filter(name -> !DistributedSlackOuterLoop.NAME.equals(name)
                         && !ReactiveLimitsOuterLoop.NAME.equals(name)
+                        && !(transformerControlBatchable && "TransformerVoltageControl".equals(name))
                         && !(noHvdc && ("AcHvdcAcEmulationLimits".equals(name) || "FreezingHvdcACEmulation".equals(name)))
                         && !(noSvc && "VoltageMonitoring".equals(name)))
                 .toList();
@@ -193,6 +201,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 .anyMatch(ol -> DistributedSlackOuterLoop.NAME.equals(ol.getName()));
         this.batchReactiveLimits = acParameters.getOuterLoops().stream()
                 .anyMatch(ol -> ReactiveLimitsOuterLoop.NAME.equals(ol.getName()));
+        GpuBatchedSecurityAnalysisSolver.setTransformerControl(transformerControlBatchable
+                && acParameters.getOuterLoops().stream().anyMatch(ol -> "TransformerVoltageControl".equals(ol.getName())));
         // DETECT-AND-FALLBACK (the provider's safety contract: enabling it must never change results).
         // The batched device path implements ONLY the two outer loops above; any OTHER loop in the
         // resolved list (e.g. transformer voltage control under the RTE production parameters) would be

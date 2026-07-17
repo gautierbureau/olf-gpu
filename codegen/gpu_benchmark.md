@@ -641,3 +641,17 @@ switching without the CPU ReactiveLimitsOuterLoop's PQ->PV switch-BACK (voltage-
 recovery). Signature fits exactly: VL-3632 pinned at 1.1540 (its controller stuck PQ on
 the device) vs CPU pulling it back to <=1.10 across unrelated contingencies. Next:
 check the batch RL switch logic for PQ->PV recovery, then re-diff.
+
+## 2026-07-17 — RL switch-back EXISTS in the batch; next suspect: REMOTE-control RL coverage
+
+Read-through of reactiveLimitsBatch/initRlLimitTypeBatch: PV->PQ AND PQ->PV switch-back
+are both implemented and mirror ReactiveLimitsOuterLoop (pinned limit types from the
+base mode, switch-count cap, v-vs-target recovery conditions). So the 6,137 diff is not
+a missing switch-back either. SHARPER SUSPECT: rlVrow covers LOCAL controllers only —
+under the RTE params voltageRemoteControl is ON (unlike the GPU-scope benches that
+disabled it), remote controllers' reactive limits live on DISTR_Q rows, and the batch
+RL pass never re-evaluates THOSE (the CPU outer loop does). A remotely-controlled bus
+pinned at a wrong voltage across all scenarios (VL-3632 @ 1.1540) fits exactly.
+NEXT: confirm VL-3632 is remotely controlled (ndq > 0 under RTE params), then either
+port remote-controller RL switching to the batch or add remote-control presence to the
+detect-and-fallback guard (correct-first).

@@ -889,3 +889,12 @@ branchPlusGeneratorComboBatchMatchesCpu (parallel-circuit branch + DS-participan
 contingency). Test-sizing lesson: losing 250 of 600 MW made the CPU itself diverge (FAILED) —
 scope-widening tests must keep outages physically survivable. Production bench regression
 unchanged: GPU warm 12.9 s (1.07x vs CPU-4t), diff 22/6.
+
+## 2026-07-17 — End-of-day fixed-iter regression: BASELINE INTACT
+
+After the full day (straggler exit, device norms, compaction, MAX_VOLTAGE_CHANGE, x0PerScenario,
+transformer orchestrator, multi-gen/combo scope, threadCount/CME fixes): run_bench.sh tol=0
+baseline unchanged — COLD E2E 11.56 ms/ctg (CPU base drifted, GPU side steady), warm-JIT 6.07,
+warm chunk 2155 ms / 4.31 ms/scn, 499/500 @ 1e-6, min/med ||F||inf 2.2e-12/3.7e-12 (identical
+to the recorded reference). The !deviceFixedIter gating held everywhere claimed; the
+gpusim2grid-comparable methodology is untouched.

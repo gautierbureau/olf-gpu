@@ -1965,6 +1965,48 @@ __global__ void axpy1BatchScaled(int n, int total, const double* dx, const doubl
     if (i < total) x[i] += factor[i / n] * dx[i];
 }
 
+// Per-scenario convergence norms on DEVICE: out[s*3] = ||F||inf, out[s*3+1] = sum(F^2),
+// out[s*3+2] = finite flag — so the per-iteration readback is nS*3 doubles instead of the full
+// nS*n mismatch (70 MB at 500 x 18k, pageable ~5.5 GB/s + a 9.2M-element host loop). infnorm is
+// exact vs the host loop; the ssq PARALLEL summation order differs from the host's sequential
+// sum by last-ulp amounts — borderline ||F||2 stopping decisions can flip at ulp level (same
+// class of effect as any reduction-order change; the criterion itself is unchanged).
+__global__ void residualNormsBatch(int n, const double* F, const char* active, double* out) {
+    int s = blockIdx.x;
+    __shared__ double smInf[BLOCK];
+    __shared__ double smSsq[BLOCK];
+    __shared__ int smFin[BLOCK];
+    double mInf = 0.0;
+    double ssq = 0.0;
+    int fin = 1;
+    if (active == nullptr || active[s]) {
+        const double* f = F + (size_t) s * n;
+        for (int i = threadIdx.x; i < n; i += blockDim.x) {
+            double v = f[i];
+            if (!isfinite(v)) fin = 0;
+            mInf = fmax(mInf, fabs(v));
+            ssq += v * v;
+        }
+    }
+    smInf[threadIdx.x] = mInf;
+    smSsq[threadIdx.x] = ssq;
+    smFin[threadIdx.x] = fin;
+    __syncthreads();
+    for (int off = blockDim.x / 2; off > 0; off >>= 1) {
+        if (threadIdx.x < off) {
+            smInf[threadIdx.x] = fmax(smInf[threadIdx.x], smInf[threadIdx.x + off]);
+            smSsq[threadIdx.x] += smSsq[threadIdx.x + off];
+            smFin[threadIdx.x] &= smFin[threadIdx.x + off];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        out[s * 3 + 0] = smInf[0];
+        out[s * 3 + 1] = smSsq[0];
+        out[s * 3 + 2] = smFin[0] ? 1.0 : 0.0;
+    }
+}
+
 // Tile the base row (row 0, already in d[0..n)) across all nS scenarios: d[s*n+i] = d[i] for
 // s in 1..nS-1. The base state/targets/row-mode are identical for every contingency, so the host
 // uploads ONE n-row and this replicates it on-device — no 32x JNI marshalling / H2D of the base.
@@ -2018,6 +2060,7 @@ struct BatchSolverContext {
     bool clampStep = false;                                  // MAX_VOLTAGE_CHANGE per-scenario step clamp (set per solve)
     double maxDv = 0.0, maxDphi = 0.0;
     DeviceBuf dVarType, dStepFactor;                         // n ints / nS factors (lazy, first clamped solve)
+    DeviceBuf dNorms;                                        // nS*3 device-side convergence norms (see residualNormsBatch)
     DeviceBuf dDisabled, dActive;                            // per-scenario masks
     // Reactive limits (full-loadflow PV→PQ outer loop): per local-PV controller bus, its (rowMap-mapped)
     // BUS_V row + reactive limits + load Q. dQbuf holds Σ branch q at every row (a fill into a zeroed
@@ -2111,6 +2154,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     ctx->dB.alloc(nS * sizeof(double));
     ctx->dDx.alloc(nS * sizeof(double));
     ctx->dVals.alloc(nnzS * sizeof(double));
+    ctx->dNorms.alloc(static_cast<size_t>(nScenarios) * 3 * sizeof(double));
     ctx->dMode.alloc(nS * sizeof(int));
     ctx->dDisabled.alloc(static_cast<size_t>(ctx->nElements) * nScenarios * sizeof(char));
     ctx->dActive.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
@@ -2479,7 +2523,15 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         // isolated, so it can poison a uniform-batched factorization — use tol > 0 if
         // scenarios may diverge.
         if (!deviceFixedIter || it == maxIter) {
-            CUDA_CHECK(cudaMemcpy(hF.data(), ctx->dF.p, nTot * sizeof(double), cudaMemcpyDeviceToHost));
+            std::vector<double> hNorms;
+            if (!deviceFixedIter) {
+                // Device-side reduction: read back nS*3 norms, not the 70-MB mismatch.
+                residualNormsBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dNorms.as<double>());
+                hNorms.resize(static_cast<size_t>(nS) * 3);
+                CUDA_CHECK(cudaMemcpy(hNorms.data(), ctx->dNorms.p, hNorms.size() * sizeof(double), cudaMemcpyDeviceToHost));
+            } else {
+                CUDA_CHECK(cudaMemcpy(hF.data(), ctx->dF.p, nTot * sizeof(double), cudaMemcpyDeviceToHost));
+            }
             bool anyChanged = false;
             // Inner-Newton convergence test. Default (convEpsPerEq <= 0): the device infinity-norm floor
             // ‖F‖∞ < tol (stricter than OLF's usual criterion). When convEpsPerEq > 0: OLF's EXACT criterion
@@ -2494,14 +2546,20 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 double norm = 0.0;
                 double ssq = 0.0;
                 bool finite = true;
-                for (int i = 0; i < n; i++) {
-                    double v = hF[(size_t) s * n + i];
-                    if (!std::isfinite(v)) {
-                        finite = false;
-                        break;
+                if (!deviceFixedIter) {
+                    norm = hNorms[(size_t) s * 3];
+                    ssq = hNorms[(size_t) s * 3 + 1];
+                    finite = hNorms[(size_t) s * 3 + 2] != 0.0;
+                } else {
+                    for (int i = 0; i < n; i++) {
+                        double v = hF[(size_t) s * n + i];
+                        if (!std::isfinite(v)) {
+                            finite = false;
+                            break;
+                        }
+                        norm = std::max(norm, std::fabs(v));
+                        ssq += v * v;
                     }
-                    norm = std::max(norm, std::fabs(v));
-                    ssq += v * v;
                 }
                 bool converged = convEpsPerEq > 0.0 ? (std::sqrt(ssq) < olf2NormThreshold) : (norm < tol);
                 res.iters[s] = it;

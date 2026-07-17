@@ -728,3 +728,19 @@ pays (exit depth maxIter/2; tunable earlier via a fixed OLF_GPU_STRAGGLER_MIN_IT
 justifies), and (b) legitimate FULL-WIDTH outer-pass re-solves after RL/DS reactivation —
 cuDSS UBATCH width never shrinks (the batch-compaction escalation in the task list is the
 structural fix). Next: #11 device-side norms (~1.3-2 s more), then re-profile.
+
+## 2026-07-17 — Device-side per-scenario norms LANDED (70 MB/iter readback -> 12 KB)
+
+residualNormsBatch (one block/scenario: ||F||inf exact, sum(F^2) parallel-reduced, finite flag)
+replaces the tol>0 per-iteration full-mismatch copy + 9.2M-element host loop; readback is now
+nS*3 doubles. Fixed-iter final readback unchanged. Known ulp effect: parallel ssq summation
+order can flip borderline ||F||2 stopping decisions by an ulp (med ||F||inf 4.1e-12 -> 4.2e-12
+— exactly that class); criterion itself unchanged.
+
+Measured: tol bench 15,236 -> 14,734 ms (-3.3%); SA bench warm 19.3 s / cold 22.5 s (vs 18.4 /
+22.1 previous run — within same-session machine drift; CPU-4t 15.1 s both). All parity green
+(statuses identical, violation diff unchanged 22/6, canary engages). HONEST verdict: the win is
+~0.5 s, below the 1.3-2 s estimate — the loop is more GPU-bound than the stall model assumed.
+Per the plan, #12 (lagged/async check) needs an nsys profile FIRST showing a remaining stall;
+the bigger structural lever for the production wall stays batch compaction (full-width outer
+passes) per the straggler-exit entry.

@@ -585,3 +585,23 @@ Traps/bugs found by building this bench:
 - PRODUCT BUG (open): with a FAILED base LF (dense-factory runs), the GPU provider
   reported pre-contingency CONVERGED and produced 500 post-contingency results — it
   must honor a failed base exactly like AcSecurityAnalysis.
+
+## 2026-07-17 — Violation diff: NOT epsilon drift — the batch drops unimplemented outer loops
+
+Criterion was ALREADY aligned (batchConvEpsPerEq = CPU's convEpsPerEq for
+UNIFORM_CRITERIA, RL threshold derived identically) — so the diff is pure signal.
+Margin-annotated diff (bench now prints it): **6,137 one-sided violations**
+(2,899 CPU-only + 3,238 GPU-only; the "379" was the net), of which only **101 are
+border flips** (rel margin < 1e-3); 263 contingencies affected. Worst offenders are a
+SINGLE bus repeated across unrelated outages: VL-3632 HIGH_VOLTAGE at value 1.1540 vs
+limit 1.10, GPU-only, identical value across many contingencies — a systematic
+control-modeling difference, not contingency physics.
+
+DIAGNOSIS: runSimulations captures ONLY DistributedSlack + ReactiveLimits from the
+resolved outer-loop list; with the RTE params the CPU also runs transformer voltage
+control (AFTER_GENERATOR_VOLTAGE_CONTROL) and friends per post-contingency solve —
+the batched device path silently DROPS them. Fix direction: the provider must either
+implement the missing loops in the batch or DETECT unsupported outer loops and fall
+back to CPU (correct-first), with the batch reserved for parameter sets it fully
+covers. Same-day numbers (this run): CPU-1t 38.1 s, CPU-4t 12.0 s, GPU cold 23.8 s
+(1.60x vs 1t, 0.51x vs 4t), GPU warm 20.9 s (1.82x vs 1t, 0.58x vs 4t).

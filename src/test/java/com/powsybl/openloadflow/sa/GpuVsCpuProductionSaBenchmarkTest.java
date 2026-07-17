@@ -191,7 +191,75 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
             System.out.printf("  STATUS MISMATCHES (%d): %s%n", mismatched.size(),
                     mismatched.subList(0, Math.min(10, mismatched.size())));
         }
+        diffViolations(cpu, gpuCold);
         Objects.requireNonNull(gpuWarm);
         assertEquals(statusCounts(cpu), statusCounts(gpuCold), "post-contingency status counts must match CPU");
+    }
+
+    /**
+     * Margin-annotated per-contingency violation diff. With the device stopping on OLF's exact
+     * criterion, states agree within the criterion's slack — so a violation present on one side
+     * only is EXPECTED only when its value sits within epsilon of the limit (border flip). Any
+     * one-sided violation with a LARGE relative margin is a genuine functional divergence.
+     */
+    private static void diffViolations(SecurityAnalysisResult cpu, SecurityAnalysisResult gpu) {
+        Map<String, Map<String, com.powsybl.contingency.violations.LimitViolation>> cpuV = violationsByCtg(cpu);
+        Map<String, Map<String, com.powsybl.contingency.violations.LimitViolation>> gpuV = violationsByCtg(gpu);
+        int onlyCpu = 0;
+        int onlyGpu = 0;
+        int border = 0;                                      // relative margin < 1e-3: epsilon flip
+        Map<String, Integer> ctgHisto = new TreeMap<>();
+        List<String> worst = new java.util.ArrayList<>();
+        for (String ctg : cpuV.keySet()) {
+            Map<String, com.powsybl.contingency.violations.LimitViolation> c = cpuV.get(ctg);
+            Map<String, com.powsybl.contingency.violations.LimitViolation> g = gpuV.getOrDefault(ctg, Map.of());
+            for (Map.Entry<String, com.powsybl.contingency.violations.LimitViolation> e : c.entrySet()) {
+                if (!g.containsKey(e.getKey())) {
+                    onlyCpu++;
+                    if (tally(e.getValue(), ctg, ctgHisto, worst, "CPU-only")) {
+                        border++;
+                    }
+                }
+            }
+        }
+        for (String ctg : gpuV.keySet()) {
+            Map<String, com.powsybl.contingency.violations.LimitViolation> g = gpuV.get(ctg);
+            Map<String, com.powsybl.contingency.violations.LimitViolation> c = cpuV.getOrDefault(ctg, Map.of());
+            for (Map.Entry<String, com.powsybl.contingency.violations.LimitViolation> e : g.entrySet()) {
+                if (!c.containsKey(e.getKey())) {
+                    onlyGpu++;
+                    if (tally(e.getValue(), ctg, ctgHisto, worst, "GPU-only")) {
+                        border++;
+                    }
+                }
+            }
+        }
+        worst.sort(java.util.Comparator.reverseOrder());
+        System.out.printf("  VIOLATION DIFF: onlyCPU=%d onlyGPU=%d | border (rel margin < 1e-3) = %d of %d | contingencies affected=%d%n",
+                onlyCpu, onlyGpu, border, onlyCpu + onlyGpu, ctgHisto.size());
+        System.out.printf("  worst margins:%n");
+        worst.stream().limit(10).forEach(w -> System.out.println("    " + w));
+    }
+
+    /** @return true when the violation is a border flip (relative margin under 1e-3). */
+    private static boolean tally(com.powsybl.contingency.violations.LimitViolation v, String ctg,
+                                 Map<String, Integer> ctgHisto, List<String> worst, String sideTag) {
+        double margin = Math.abs(v.getValue() - v.getLimit() * v.getLimitReduction()) / Math.max(1e-9, Math.abs(v.getLimit()));
+        ctgHisto.merge(ctg, 1, Integer::sum);
+        worst.add(String.format("%.6f rel | %s | %s %s %s | value=%.4f limit=%.4f | ctg=%s",
+                margin, sideTag, v.getSubjectId(), v.getLimitType(), v.getSide(), v.getValue(), v.getLimit(), ctg));
+        return margin < 1e-3;
+    }
+
+    private static Map<String, Map<String, com.powsybl.contingency.violations.LimitViolation>> violationsByCtg(SecurityAnalysisResult r) {
+        Map<String, Map<String, com.powsybl.contingency.violations.LimitViolation>> out = new TreeMap<>();
+        for (PostContingencyResult p : r.getPostContingencyResults()) {
+            Map<String, com.powsybl.contingency.violations.LimitViolation> m = new TreeMap<>();
+            for (com.powsybl.contingency.violations.LimitViolation v : p.getLimitViolationsResult().getLimitViolations()) {
+                m.put(v.getSubjectId() + "|" + v.getLimitType() + "|" + v.getSide(), v);
+            }
+            out.put(p.getContingency().getId(), m);
+        }
+        return out;
     }
 }

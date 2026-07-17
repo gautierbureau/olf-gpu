@@ -546,3 +546,42 @@ Production levers, now correctly ranked:
 
 NB fixed-iter benchmarking (ours AND gpusim2grid's nb_iter) structurally hides
 all of this — it is a THROUGHPUT methodology, not a production-latency one.
+
+## 2026-07-17 — PRODUCTION SA benchmark: RTE parameters, full outer loops, GPU vs CPU (both real products)
+
+New committable bench `GpuVsCpuProductionSaBenchmarkTest`: the real AcSecurityAnalysis
+on both sides — OpenSecurityAnalysisProvider vs GpuSecurityAnalysisProvider — on
+case9241pegase, the same 500 matched contingencies, parameters loaded from
+`rte-loadflow-default-parameters.json` (repo root: DC init, reactive limits, twt split
+shunt, HVDC AC emulation, transformer V-control AFTER_GENERATOR, MAX_VOLTAGE_CHANGE
+scaling, maxNR/maxOuterLoop 30, realistic-V checks), violations included. SPARSE matrix
+factory forced on both arms. CPU arm multithreaded (4 threads on this machine,
+OLF_GPU_SA_CPU_THREADS); GPU arm host-single-threaded.
+
+| arm                          | wall     | ms/ctg | vs CPU-4t |
+|------------------------------|----------|--------|-----------|
+| CPU 1 thread                 | 40,491   | 80.98  | —         |
+| **CPU 4 threads**            | **13,168** | **26.34** | 1.00    |
+| GPU batched (COLD, run 1)    | 24,240   | 48.48  | 0.54x     |
+| GPU batched (warm, run 2)    | 22,162   | 44.32  | 0.59x     |
+
+Parity: pre-contingency CONVERGED both; statuses IDENTICAL (499 CONVERGED + 1
+MAX_ITERATION_REACHED both sides — asserted); violations 13,412 (CPU) vs 13,791 (GPU),
+~2.8% border-case drift to investigate.
+
+VERDICT: at RTE production parameters the GPU SA today LOSES to 4-thread CPU (0.54-0.59x)
+while beating 1-thread (1.7-1.8x). This is exactly the tol>0 straggler finding at product
+level: the GPU pays full-width cuDSS iterations until the last scenario caps out. The
+straggler early-exit + device-side norms levers (see the tol>0 profile entry) are what
+turn this around (~8-10 s projected -> ~1.5x AHEAD of CPU-4t).
+
+Traps/bugs found by building this bench:
+- AbstractOpenSecurityAnalysisTest's default (dense) matrix factory silently makes the
+  9241-bus base LF thrash ~200 s and FAIL — the same case+params converge in 2 s /10
+  iters sparse. Force SparseMatrixFactory in any large-case SA bench.
+- PRODUCT BUG (open): threadCount>1 on the GPU provider SIGSEGVs in cuLaunchKernel —
+  the SA harness calls precomputeBatch from several ForkJoinPool workers concurrently;
+  the batched native path needs provider-side serialization.
+- PRODUCT BUG (open): with a FAILED base LF (dense-factory runs), the GPU provider
+  reported pre-contingency CONVERGED and produced 500 post-contingency results — it
+  must honor a failed base exactly like AcSecurityAnalysis.

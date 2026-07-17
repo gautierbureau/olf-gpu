@@ -794,3 +794,30 @@ multi-element contingency (needs a bench hook for multi-element ids). Suspected 
 unchanged: re-entrant mutation during LfNetwork listener dispatch (GpuAcDataCache Entry clears
 are self-contained, so the suspect list now points at index-listener registration timing or
 lazy es.getIndex() creation during dispatch).
+
+## 2026-07-17 — BATCH COMPACTION LANDED + CME ROOT-CAUSED AND FIXED: GPU BEATS CPU-4t AT RTE PARAMS
+
+Three changes, validated together (all 6 SA tests green, statuses identical, violation diff
+unchanged at the 22/6 threshold-edge tail):
+
+1. **Solve-only batch compaction** (mode 3, tol>0): when nActive*2 <= nS, gather the active
+   scenarios' vals/B into compact buffers (gatherScenarios), solve a NARROWER ubatch on a
+   dedicated cuDSS context (width quantized to power-of-2 tiers; the cheap single-block ANALYSIS
+   re-runs only on tier change; pad slots duplicate the first active scenario and are discarded),
+   scatter dx back (dDx zeroed first so retired scenarios' frozen states are untouched). Fills/
+   norms/updates stay full-width — they already scale with retirement; cuDSS width was the cost.
+2. **Sequential fall-through routing is now an OPTION** (olf.gpu.sa.gpuSequentialLoadFlow,
+   default false): after the base LF (GPU when enabled — absorbs CUDA init) the engine's solver
+   reverts to the stock CPU Newton-Raphson; =true keeps the GPU solver for sequential solves.
+3. **The CME (#15) REPRODUCED and ROOT-CAUSED**: not listener re-entrancy — GpuNewtonRaphson's
+   CLEANER deregistered its LfNetwork/index listeners from the cleaner THREAD while the solve
+   thread iterated the (plain ArrayList) listener list in notifyDisable during NetworkState
+   .restore. Cross-thread race: nondeterministic, GC-pressure-dependent — why ieee14 never
+   reproduced and pegase sometimes did. FIX: the cleaner only dead-flags the listener; the next
+   solver's constructor purges dead listeners synchronously on the solve thread. Listener lists
+   are never touched cross-thread.
+
+NUMBERS (case9241pegase, 500 matched ctg, RTE production params, CPU-4t = 13.5 s):
+- **GPU warm 12,637 ms = 1.06x FASTER than CPU-4t** (cold 14,687 ms = 0.92x). This morning: 21.4 s.
+- tol=1e-6 bench ladder today: 18,066 -> 15,236 (straggler exit) -> 14,734 (device norms)
+  -> **12,141 ms** (compaction) = -33% total; 499/499 @ 1e-6, med ||F||inf 4.0e-12.

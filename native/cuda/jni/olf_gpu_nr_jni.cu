@@ -2007,6 +2007,24 @@ __global__ void residualNormsBatch(int n, const double* F, const char* active, d
     }
 }
 
+// Batch COMPACTION (solve-only): gather the active scenarios' per-scenario blocks into a
+// contiguous compact buffer (dst[c*per+i] = src[map[c]*per+i]) so cuDSS runs a NARROWER ubatch,
+// then scatter the solution back to the full-width slots. Everything else (fills, norms,
+// updates) stays full-width — retirement already makes those cheap; cuDSS width was the cost.
+__global__ void gatherScenarios(long per, int nC, const int* map, const double* src, double* dst) {
+    long i = (long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= per * nC) return;
+    int c = (int) (i / per);
+    dst[i] = src[(long) map[c] * per + i % per];
+}
+
+__global__ void scatterScenarios(long per, int nReal, const int* map, const double* srcC, double* dst) {
+    long i = (long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= per * nReal) return;                             // pad slots (c >= nReal) are DISCARDED
+    int c = (int) (i / per);
+    dst[(long) map[c] * per + i % per] = srcC[i];
+}
+
 // Tile the base row (row 0, already in d[0..n)) across all nS scenarios: d[s*n+i] = d[i] for
 // s in 1..nS-1. The base state/targets/row-mode are identical for every contingency, so the host
 // uploads ONE n-row and this replicates it on-device — no 32x JNI marshalling / H2D of the base.
@@ -2061,6 +2079,12 @@ struct BatchSolverContext {
     double maxDv = 0.0, maxDphi = 0.0;
     DeviceBuf dVarType, dStepFactor;                         // n ints / nS factors (lazy, first clamped solve)
     DeviceBuf dNorms;                                        // nS*3 device-side convergence norms (see residualNormsBatch)
+    // ---- solve-only batch compaction (mode 3, tol > 0): lazily allocated on first engage ----
+    DeviceBuf dValsC, dBC, dDxC, dMapC;                      // nnz*cap / n*cap / n*cap / cap ints
+    CudssCtx dsC;                                            // dedicated handle/config/data for the compact width
+    cudssMatrix_t matUbC = nullptr, matUbCB = nullptr, matUbCX = nullptr;
+    int compactCap = 0;                                      // buffer capacity (nS/2)
+    int compactWidth = 0;                                    // currently ANALYZED ubatch width (0 = none)
     DeviceBuf dDisabled, dActive;                            // per-scenario masks
     // Reactive limits (full-loadflow PV→PQ outer loop): per local-PV controller bus, its (rowMap-mapped)
     // BUS_V row + reactive limits + load Q. dQbuf holds Σ branch q at every row (a fill into a zeroed
@@ -2117,6 +2141,9 @@ struct BatchSolverContext {
         if (matUb) cudssMatrixDestroy(matUb);
         if (matUbB) cudssMatrixDestroy(matUbB);
         if (matUbX) cudssMatrixDestroy(matUbX);
+        if (matUbC) cudssMatrixDestroy(matUbC);
+        if (matUbCB) cudssMatrixDestroy(matUbCB);
+        if (matUbCX) cudssMatrixDestroy(matUbCX);
     }
 };
 
@@ -2683,7 +2710,71 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         } else if (ctx->mode == 3 || it == 0) {              // mode 3 every iter; mode 4 only at chunk iter 0
             ubPhase |= CUDSS_PHASE_FACTORIZATION;
         }
-        CUDSS_CHECK(cudssExecute(ctx->ds.handle, ubPhase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+        // ---- solve-only COMPACTION: when few scenarios remain active, gather their vals/B into
+        //      compact buffers and solve a NARROWER ubatch on the dedicated dsC context, then
+        //      scatter dx back. mode 3 only (factorizes every iteration — stateless across width
+        //      changes); width quantized to power-of-2 tiers so the cheap single-block re-ANALYSIS
+        //      runs only on tier change. Pad slots duplicate the first active scenario (keeps the
+        //      batch non-singular) and are discarded by the scatter. dDx is zeroed first so
+        //      inactive scenarios' frozen states are not perturbed by stale solutions (the
+        //      full-width update kernel adds dx over ALL scenarios). ----
+        bool compactSolve = !deviceFixedIter && ctx->mode == 3 && nActive > 0 && nActive * 2 <= nS;
+        if (compactSolve) {
+            if (ctx->compactCap == 0) {                       // lazy first-engage setup
+                ctx->compactCap = nS / 2;
+                ctx->dValsC.alloc(static_cast<size_t>(nnz) * ctx->compactCap * sizeof(double));
+                ctx->dBC.alloc(static_cast<size_t>(n) * ctx->compactCap * sizeof(double));
+                ctx->dDxC.alloc(static_cast<size_t>(n) * ctx->compactCap * sizeof(double));
+                ctx->dMapC.alloc(static_cast<size_t>(ctx->compactCap) * sizeof(int));
+                CUDSS_CHECK(cudssCreate(&ctx->dsC.handle));
+                CUDSS_CHECK(cudssSetStream(ctx->dsC.handle, ctx->stream));
+                CUDSS_CHECK(cudssConfigCreate(&ctx->dsC.config));
+                applyReorderAlg(ctx->dsC.config);
+                int irC = irSteps();
+                CUDSS_CHECK(cudssConfigSet(ctx->dsC.config, CUDSS_CONFIG_IR_N_STEPS, &irC, sizeof(irC)));
+                CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->matUbC, n, n, nnz,
+                        ctx->st->dRowPtr.as<int>(), nullptr, ctx->st->dColIdx.as<int>(), ctx->dValsC.as<double>(),
+                        OLF_CUDSS_CSR_TYPES, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
+                CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matUbCB, n, 1, n, ctx->dBC.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+                CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matUbCX, n, 1, n, ctx->dDxC.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+            }
+            std::vector<int> cmap;
+            cmap.reserve(ctx->compactCap);
+            for (int cs = 0; cs < nS; cs++) {
+                if (active[cs]) {
+                    cmap.push_back(cs);
+                }
+            }
+            int nReal = static_cast<int>(cmap.size());
+            int w = 1;
+            while (w < nReal) {
+                w <<= 1;
+            }
+            if (w > ctx->compactCap) {
+                w = ctx->compactCap;
+            }
+            while (static_cast<int>(cmap.size()) < w) {
+                cmap.push_back(cmap[0]);
+            }
+            CUDA_CHECK(cudaMemcpyAsync(ctx->dMapC.p, cmap.data(), w * sizeof(int), cudaMemcpyHostToDevice, ctx->stream));
+            gatherScenarios<<<grid(nnz * w), BLOCK, 0, ctx->stream>>>(nnz, w, ctx->dMapC.as<int>(), ctx->dVals.as<double>(), ctx->dValsC.as<double>());
+            gatherScenarios<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n, w, ctx->dMapC.as<int>(), ctx->dB.as<double>(), ctx->dBC.as<double>());
+            if (w != ctx->compactWidth) {                     // tier change: fresh data + single-block ANALYSIS
+                if (ctx->dsC.data) {
+                    CUDSS_CHECK(cudssDataDestroy(ctx->dsC.handle, ctx->dsC.data));
+                    ctx->dsC.data = nullptr;
+                }
+                CUDSS_CHECK(cudssDataCreate(ctx->dsC.handle, &ctx->dsC.data));
+                CUDSS_CHECK(cudssConfigSet(ctx->dsC.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
+                CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_ANALYSIS, ctx->dsC.config, ctx->dsC.data, ctx->matUbC, ctx->matUbCX, ctx->matUbCB));
+                ctx->compactWidth = w;
+            }
+            CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE, ctx->dsC.config, ctx->dsC.data, ctx->matUbC, ctx->matUbCX, ctx->matUbCB));
+            CUDA_CHECK(cudaMemsetAsync(ctx->dDx.p, 0, static_cast<size_t>(n) * nS * sizeof(double), ctx->stream));
+            scatterScenarios<<<grid(n * nReal), BLOCK, 0, ctx->stream>>>(n, nReal, ctx->dMapC.as<int>(), ctx->dDxC.as<double>(), ctx->dDx.as<double>());
+        } else {
+            CUDSS_CHECK(cudssExecute(ctx->ds.handle, ubPhase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+        }
         if (ctx->clampStep) {
             maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dVarType.as<int>(), ctx->dActive.as<char>(), ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>());
             axpy1BatchScaled<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS, ctx->dDx.as<double>(), ctx->dStepFactor.as<double>(), ctx->dX.as<double>());

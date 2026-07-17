@@ -120,7 +120,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         public void run() {
             GpuAcNewtonSolver.destroyContext(handle.getAndSet(0));
             if (removeListeners != null) {
-                removeListeners.run();
+                removeListeners.run();                       // dead-flags only — never mutates listener lists
             }
         }
     }
@@ -150,15 +150,21 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         super(network, equationSystem, j, targetVector, equationVector, detailedReport);
         this.parameters = Objects.requireNonNull(parameters);
         EquationSystemIndex<AcVariableType, AcEquationType> index = equationSystem.getIndex();
+        // Purge listeners of ALREADY-COLLECTED solvers synchronously (we are on the solve thread,
+        // no dispatch in flight) — this caps accumulation on a long-lived LfNetwork at ~1 while
+        // keeping the cleaner thread away from the (non-thread-safe) listener lists.
+        for (LfNetworkListener l : List.copyOf(network.getListeners())) {
+            if (l instanceof Invalidation inv && inv.dead) {
+                network.removeListener(l);
+            }
+        }
         index.addListener(invalidation);
         network.addListener(invalidation);
         // the cleaning action must not reference the solver itself (it would never become
-        // phantom-reachable); the Invalidation listener object is referenced instead
+        // phantom-reachable); the Invalidation listener object is referenced instead. It only
+        // dead-flags: the index-side listener stays registered (no-op) for the es lifetime.
         Invalidation listener = invalidation;
-        context.removeListeners = () -> {
-            index.removeListener(listener);
-            network.removeListener(listener);
-        };
+        context.removeListeners = () -> listener.dead = true;
         CLEANER.register(this, context);
     }
 
@@ -281,6 +287,14 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      */
     private static final class Invalidation
             implements EquationSystemIndexListener<AcVariableType, AcEquationType>, LfNetworkListener {
+
+        /** Set by the CLEANER THREAD when the owning solver is collected. The listener then
+         *  no-ops and is PURGED SYNCHRONOUSLY by the next solver's constructor — the cleaner
+         *  itself must NEVER call removeListener: LfNetwork's listener list is a plain
+         *  ArrayList iterated during event dispatch on the solve thread, and a cross-thread
+         *  removal is a ConcurrentModificationException (measured 2026-07-17: NetworkState
+         *  .restore -> notifyDisable iterating while a collected solver's cleaner removed). */
+        private volatile boolean dead = false;
 
         private boolean structureDirty = true;
 

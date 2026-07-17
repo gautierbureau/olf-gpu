@@ -118,6 +118,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     // buses vs the CPU. 0 = the device infinity-norm floor (kept for PER_EQUATION_TYPE, whose per-eq criteria
     // are not ported to the device).
     private double batchConvEpsPerEq;
+    private com.powsybl.loadflow.LoadFlowParameters currentLoadFlowParameters;
 
     protected GpuBatchedAcSecurityAnalysis(Network network, MatrixFactory matrixFactory,
                                            GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory,
@@ -139,6 +140,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // the single-device sequential solver would race in native code (SIGSEGV in cuLaunchKernel,
         // measured 2026-07-17).
         boolean multiThread = OpenSecurityAnalysisParameters.getOrDefault(securityAnalysisParameters).getThreadCount() > 1;
+        this.currentLoadFlowParameters = securityAnalysisParameters.getLoadFlowParameters();
         // STRUCTURAL: run the base (pre-contingency) load flow on the GPU solver when the device
         // is available and the user left the default CPU Newton-Raphson. This absorbs the one-time
         // CUDA init into the base phase (so the batched contingency pass that follows is warm) and
@@ -250,6 +252,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     /** System property toggle for the GPU base/fall-through load flow (default on). */
     public static final String GPU_BASE_LOADFLOW_PROPERTY = "olf.gpu.sa.gpuBaseLoadFlow";
 
+    /** System property: keep the GPU solver for SEQUENTIAL fall-through contingency solves
+     *  (default off = revert to the CPU Newton-Raphson after the base LF). */
+    public static final String GPU_SEQUENTIAL_LOADFLOW_PROPERTY = "olf.gpu.sa.gpuSequentialLoadFlow";
+
+    private static boolean gpuSequentialLoadFlowEnabled() {
+        return Boolean.parseBoolean(System.getProperty(GPU_SEQUENTIAL_LOADFLOW_PROPERTY, "false"));
+    }
+
     private static boolean gpuBaseLoadFlowEnabled() {
         return Boolean.parseBoolean(System.getProperty(GPU_BASE_LOADFLOW_PROPERTY, "true"));
     }
@@ -285,6 +295,16 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     protected void afterPreContingencySimulation(AcLoadFlowParameters parameters) {
         super.afterPreContingencySimulation(parameters);
         precomputeBatch();
+        // Sequential fall-through routing is an OPTION (2026-07-17): by DEFAULT the engine's
+        // solver reverts to the stock CPU Newton-Raphson after the base LF — single-system GPU
+        // solves are not where the device wins (its parallelism is the batch), and the CPU path
+        // parallelizes under threadCount. Set -Dolf.gpu.sa.gpuSequentialLoadFlow=true to keep
+        // the GPU solver for the sequential fall-through solves instead. The base LF has already
+        // run at this point (on the GPU when enabled, absorbing CUDA init).
+        if (!gpuSequentialLoadFlowEnabled()
+                && parameters.getSolverFactory() instanceof GpuNewtonRaphsonFactory && currentLoadFlowParameters != null) {
+            parameters.setSolverFactory(new NewtonRaphsonFactory(), currentLoadFlowParameters);
+        }
     }
 
     /**

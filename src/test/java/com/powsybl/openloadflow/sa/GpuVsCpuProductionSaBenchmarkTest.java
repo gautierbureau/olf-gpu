@@ -160,8 +160,10 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
         long cpuT0 = System.nanoTime();
         // Diagnostic monitor on the dominant violation-diff bus (VL-3632): report its per-contingency
         // voltage on both sides so control-state divergences are visible directly, not only via violations.
+        java.util.Set<String> monitoredVls = java.util.Set.of(
+                System.getenv().getOrDefault("OLF_GPU_SA_MONITOR_VL", "VL-3632").split(","));
         List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
-                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), java.util.Set.of("VL-3632"), java.util.Set.of()));
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), monitoredVls, java.util.Set.of()));
         SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, monitors, sap);
         long cpuMs = (System.nanoTime() - cpuT0) / 1_000_000;
 
@@ -292,7 +294,8 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
         System.out.printf("  VIOLATION DIFF: onlyCPU=%d onlyGPU=%d | border (rel margin < 1e-3) = %d of %d | contingencies affected=%d%n",
                 onlyCpu, onlyGpu, border, onlyCpu + onlyGpu, ctgHisto.size());
         System.out.printf("  worst margins:%n");
-        worst.stream().limit(10).forEach(w -> System.out.println("    " + w));
+        worst.stream().limit(25).forEach(w -> System.out.println("    " + w));
+        ctgHisto.forEach((c, k) -> System.out.printf("  DIFF-CTG %s: %d%n", c, k));
     }
 
     /** @return true when the violation is a border flip (relative margin under 1e-3). */

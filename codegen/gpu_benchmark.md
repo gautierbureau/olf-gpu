@@ -680,3 +680,30 @@ margins 1.5-4.9% = genuine state differences). Timings: CPU-4t 15.1 s, GPU cold
 with OLF_GPU_SA_DEBUG_CTG — likely RL switch decisions on genuinely bistable
 scenarios; also note this reopens the increased-violations defaults question for
 production (zero thresholds re-report ulp-flicker there too).
+
+## 2026-07-17 — The last 6 contingencies drilled one by one: NO functional divergence
+
+Per-contingency drill (drill.sh pattern: full pass enumerates DIFF-CTG ids, then one
+OLF_GPU_SA_DEBUG_CTG run each, monitors auto-set to the diffing VLs):
+- LINE-12-2378 (4 CPU-only): pre-existing APPARENT_POWER flows 0.13-0.2% over limit,
+  straddling the 0.1% suppression threshold; states differ 2e-5 pu.
+- LINE-4023-92 (2 CPU-only): pre-existing flow increased +0.105% vs the 0.1%
+  threshold — CPU just above, GPU just below. Monitored states identical.
+- LINE-4320-76: 0/0 IN ISOLATION (full-run entries were the same borderline family).
+- LINE-4985-165 (4 GPU-only): pre-existing HIGH_V increased ~+0.001 pu around the
+  0.001 proportional threshold; largest genuine state gap observed anywhere:
+  2.3e-4 pu (BUS-106) — inside the shared convEpsPerEq=1e-4 criterion slack.
+- TWT-14-2925 (1 GPU-only): 6e-5 pu apart; increase 0.00117 vs 0.00111 around the
+  0.00113 threshold.
+- TWT-4990-37 (severe case, voltages to 0.885): 0/0 IN ISOLATION — both sides agree
+  fully; the full-run entries flip because chunk-wide outer-pass composition shifts
+  states within tolerance (a scenario's RL/DS passes follow the CHUNK's pass
+  schedule), moving threshold-edge values across the line.
+
+CONCLUSION: zero control-state divergences, zero PV/PQ flips, zero missing features.
+Every residual diff is a PRE-EXISTING violation whose post value straddles the
+increased-violations threshold, decided by <= 2.3e-4 pu state differences — within
+the shared stopping criterion. The GPU batched SA is PRODUCTION-EQUIVALENT to the
+CPU AcSecurityAnalysis under the RTE parameters, up to the convergence tolerance
+both sides are configured to. Remaining perf lever unchanged: straggler early-exit
+(GPU warm 21.4 s vs CPU-4t 15.1 s).

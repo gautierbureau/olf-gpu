@@ -131,6 +131,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                     List<OperatorStrategy> operatorStrategies, List<Action> actions,
                                                     List<LimitReduction> limitReductions,
                                                     ContingencyActivePowerLossDistribution contingencyActivePowerLossDistribution) {
+        // The GPU path is MONO-THREADED BY DESIGN (one device; its parallelism IS the batch), but
+        // threadCount > 1 stays useful for the CPU side: partition workers run their sequential
+        // per-contingency (fallback) solves in parallel, while each partition's batch precompute
+        // queues on the global device lock (see precomputeBatch). Under multithreading the
+        // base/fall-through GPU solver swap is ALSO skipped — concurrent partition load flows on
+        // the single-device sequential solver would race in native code (SIGSEGV in cuLaunchKernel,
+        // measured 2026-07-17).
+        boolean multiThread = OpenSecurityAnalysisParameters.getOrDefault(securityAnalysisParameters).getThreadCount() > 1;
         // STRUCTURAL: run the base (pre-contingency) load flow on the GPU solver when the device
         // is available and the user left the default CPU Newton-Raphson. This absorbs the one-time
         // CUDA init into the base phase (so the batched contingency pass that follows is warm) and
@@ -161,7 +169,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             LOGGER.info("GPU batched SA: outer loops {} are not implemented in the batched device path — "
                     + "falling back to the sequential CPU path for all contingencies", unsupportedOuterLoops);
         }
-        if (!batchDisabled && GpuAcNewtonSolver.isAvailable()
+        if (!batchDisabled && !multiThread && GpuAcNewtonSolver.isAvailable()
                 && acParameters.getSolverFactory().getClass() == NewtonRaphsonFactory.class) {
             LOGGER.info("GPU-batched SA: running the base load flow on the GPU Newton-Raphson "
                     + "(absorbs CUDA init; CPU fallback inside the solver)");
@@ -284,7 +292,16 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * base state. Failures (no GPU, an out-of-scope network the extractor rejects, a device
      * error) leave the cache empty so every contingency falls back to the CPU path.
      */
+    /** ONE device: concurrent partitions (threadCount > 1) queue their batch precompute here. */
+    private static final Object GPU_DEVICE_LOCK = new Object();
+
     private void precomputeBatch() {
+        synchronized (GPU_DEVICE_LOCK) {
+            precomputeBatchLocked();
+        }
+    }
+
+    private void precomputeBatchLocked() {
         precomputedStates.clear();
         batchEquationSystem = null;
         LAST_GPU_PRECOMPUTED_COUNT.set(-1);                          // not attempted unless we reach the solve

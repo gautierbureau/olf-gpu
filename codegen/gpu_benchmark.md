@@ -758,3 +758,13 @@ production-wall levers are (1) batch COMPACTION (shrink UBATCH width after retir
 between outer passes — the structural fix, needs re-ANALYSIS per width) and (2) a small
 ~1.4 s outer-pass-boundary lever (device-side or overlapped outer-loop decisioning) — both
 attack GPU-busy or pass-boundary time, not iteration stalls.
+
+## 2026-07-17 — threadCount>1 crash fixed: device serialized, CPU fallback parallelizes
+
+Design (user ruling): the GPU path is MONO-THREADED BY DESIGN — one device, its parallelism IS
+the batch. Under threadCount>1: each partition's precomputeBatch queues on a global device lock
+(no concurrent native calls -> no cuLaunchKernel SIGSEGV), the base/fall-through GPU solver swap
+is skipped (concurrent sequential GPU solves would race; also sidesteps the open CME in that
+config), and the CPU-side per-contingency fallback work parallelizes normally. Test:
+threadCountAboveOneRunsSafelyOnGpuProvider (RTE params, 20 ctg, threadCount=2, statuses == stock
+CPU). All parity gates green.

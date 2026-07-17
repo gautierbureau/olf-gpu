@@ -118,6 +118,30 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
     }
 
     @Test
+    void threadCountAboveOneRunsSafelyOnGpuProvider() throws Exception {
+        // The GPU path is mono-threaded by design (device lock serializes each partition's batch;
+        // no solver swap under multithreading), while CPU fallback work parallelizes — so
+        // threadCount=2 must COMPLETE, not crash, with the same statuses as the stock CPU run.
+        Network network = Network.read(CASES.resolve(CASE));
+        List<Contingency> contingencies = loadContingencies(network).subList(0, 20);
+        Path paramsFile = Path.of("rte-loadflow-default-parameters.json");
+        assumeTrue(Files.exists(paramsFile));
+        SecurityAnalysisParameters sap = new SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(JsonLoadFlowParameters.read(paramsFile));
+        sap.addExtension(OpenSecurityAnalysisParameters.class, new OpenSecurityAnalysisParameters().setThreadCount(2));
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, Collections.emptyList(), sap);
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(new SparseMatrixFactory(),
+                new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, Collections.emptyList(), sap);
+            assertEquals(statusCounts(cpu), statusCounts(gpu), "threadCount=2: statuses must match stock CPU");
+        } finally {
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(new SparseMatrixFactory(),
+                    new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
+    @Test
     void productionSaGpuVsCpu() throws Exception {
         Network network = Network.read(CASES.resolve(CASE));
         List<Contingency> contingencies = loadContingencies(network);

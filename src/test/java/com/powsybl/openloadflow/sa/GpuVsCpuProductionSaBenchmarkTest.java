@@ -72,14 +72,17 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");
         assumeTrue(Files.exists(CASES.resolve(CASE)), CASE + " not found");
         assumeTrue(System.getenv("OLF_GPU_CONT_FILE") != null, "OLF_GPU_CONT_FILE not set");
-        // Same env-to-property plumbing as the fixed-iter bench (env is inherited by the surefire fork).
-        if (System.getProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY) == null) {
-            System.setProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY,
-                    System.getenv().getOrDefault("OLF_GPU_MAXBATCH", "32"));
+        // Env-to-property plumbing (env is inherited by the surefire fork). Only override when the
+        // env var IS set: a bare run must measure the PRODUCTION defaults (mode 3 UBATCH, memory
+        // auto-sized chunk) — the old hardcoded 0/32 fallbacks made it read ~2x slower than what
+        // any real provider user gets.
+        if (System.getProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY) == null
+                && System.getenv("OLF_GPU_MAXBATCH") != null) {
+            System.setProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY, System.getenv("OLF_GPU_MAXBATCH"));
         }
-        if (System.getProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY) == null) {
-            System.setProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY,
-                    System.getenv().getOrDefault("OLF_GPU_BATCHMODE", "0"));
+        if (System.getProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY) == null
+                && System.getenv("OLF_GPU_BATCHMODE") != null) {
+            System.setProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY, System.getenv("OLF_GPU_BATCHMODE"));
         }
         // OLF_GPU_SA_GPU_BASE=0: force the GPU arm's BASE load flow onto the CPU solver too (isolates
         // base-trajectory differences from the batched contingency path in A/B debugging).

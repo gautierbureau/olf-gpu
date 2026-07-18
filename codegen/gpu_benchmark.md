@@ -1042,3 +1042,18 @@ production bench parity unchanged (22/6; GPU warm 12.2 s ≈ CPU-4t).
   canonical cold-first number from today's first run stands at 11.71 ms/ctg).
 - Override cost: entries are 8 doubles instead of 1; list is a handful of entries, scan
   unchanged — no measurable impact on either bench.
+
+## 2026-07-18 (3) — bench harnesses no longer mask the production defaults
+- Supersedes yesterday's "production bench MUST export OLF_GPU_BATCHMODE=3 OLF_GPU_MAXBATCH=500"
+  note: the slow bare run was the TEST HARNESSES' doing, not the production code's. The solver's
+  defaults are already right (mode 3 UBATCH via `Integer.getInteger(..., 3)`, memory auto-sized
+  chunk, fallback 256) — but three harnesses force-set the system properties from env with stale
+  hardcoded fallbacks (mode 0 / chunk 32, predating the 0.8.0 UBATCH findings), overriding the
+  good defaults whenever the env vars were absent.
+- Fix: production bench, fixed-iter bench, and Pegase full-LF harnesses now set a property ONLY
+  when its env var is present — a bare `mvn test` measures exactly what a provider user gets.
+  Verified bare: production cold 13.3 s (26.7 ms/ctg, x0.92), warm 11.8 s (x1.04) — vs 27.4/25.8 s
+  with the old fallbacks; fixed-iter 4.27 ms/scn, 499/500 @1e-6, auto-sized chunk green on the
+  6 GB card. `GpuBatchedN1CrossCheckTest` keeps its deliberate mode-0 default (serial cross-check
+  is its point). Caveat preserved in-comment: explicit OLF_GPU_BATCHMODE=1 without a chunk cap
+  can still over-commit device memory at 9241 (mode 1's memory model is not auto-size-aware).

@@ -96,13 +96,15 @@ class GpuBatchedPegaseFullLoadflowTest {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");
         assumeTrue(Files.isDirectory(CASES), "benchmark cases not found at " + CASES);
         assumeTrue(Files.exists(CASES.resolve(CASE)), CASE + " not found");
-        if (System.getProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY) == null) {
-            System.setProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY,
-                    System.getenv().getOrDefault("OLF_GPU_MAXBATCH", "32"));
+        // Only override when the env var IS set — a bare run measures the production defaults
+        // (mode 3 UBATCH, memory auto-sized chunk).
+        if (System.getProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY) == null
+                && System.getenv("OLF_GPU_MAXBATCH") != null) {
+            System.setProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY, System.getenv("OLF_GPU_MAXBATCH"));
         }
-        if (System.getProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY) == null) {
-            System.setProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY,
-                    System.getenv().getOrDefault("OLF_GPU_BATCHMODE", "3"));
+        if (System.getProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY) == null
+                && System.getenv("OLF_GPU_BATCHMODE") != null) {
+            System.setProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY, System.getenv("OLF_GPU_BATCHMODE"));
         }
     }
 

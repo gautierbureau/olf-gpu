@@ -107,19 +107,18 @@ class GpuBatchedN1FixedIterTest {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");
         assumeTrue(Files.isDirectory(CASES), "benchmark cases not found at " + CASES);
         assumeTrue(Files.exists(CASES.resolve(CASE)), CASE + " not found");
-        // The uniform batched (mode 1) chunk auto-size over-commits device memory at PEGASE-9241 on
-        // a small card (the known batched-mode memory-model follow-up), so cap the chunk here.
-        // Overridable from the shell: OLF_GPU_MAXBATCH=<n> (env is inherited by the surefire fork,
-        // unlike -D). A conservative default keeps the test green on a 6 GB card.
-        if (System.getProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY) == null) {
-            String cap = System.getenv().getOrDefault("OLF_GPU_MAXBATCH", "32");
-            System.setProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY, cap);
+        // Env-to-property plumbing (env is inherited by the surefire fork, unlike -D). Only override
+        // when the env var IS set: a bare run measures the PRODUCTION defaults (mode 3 UBATCH,
+        // memory auto-sized chunk). Caveat kept from the old hardcoded cap: selecting mode 1
+        // (OLF_GPU_BATCHMODE=1) without an explicit OLF_GPU_MAXBATCH cap can over-commit device
+        // memory at PEGASE-9241 on a small card — mode 1's memory model is not auto-size-aware.
+        if (System.getProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY) == null
+                && System.getenv("OLF_GPU_MAXBATCH") != null) {
+            System.setProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY, System.getenv("OLF_GPU_MAXBATCH"));
         }
-        // Native batched-solve mode (0 per-scenario / 1 uniform batched), runtime-selected.
-        // Overridable from the shell: OLF_GPU_BATCHMODE=<0|1> (env is inherited by the fork).
-        if (System.getProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY) == null) {
-            System.setProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY,
-                    System.getenv().getOrDefault("OLF_GPU_BATCHMODE", "0"));
+        if (System.getProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY) == null
+                && System.getenv("OLF_GPU_BATCHMODE") != null) {
+            System.setProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY, System.getenv("OLF_GPU_BATCHMODE"));
         }
     }
 

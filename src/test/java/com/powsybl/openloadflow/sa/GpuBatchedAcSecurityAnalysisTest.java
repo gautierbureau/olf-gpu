@@ -313,6 +313,90 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         }
     }
 
+    private void assertStrategyMatchesCpu(Network network, List<Contingency> contingencies,
+                                          List<com.powsybl.contingency.strategy.OperatorStrategy> strategies,
+                                          List<com.powsybl.action.Action> actions, int expectedPrecomputed) {
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        java.util.Set<String> allVls = network.getVoltageLevelStream().map(vl -> vl.getId())
+                .collect(java.util.stream.Collectors.toSet());
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), allVls, java.util.Set.of()));
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, monitors, sap, strategies, actions,
+                com.powsybl.commons.report.ReportNode.NO_OP);
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, monitors, sap, strategies, actions,
+                    com.powsybl.commons.report.ReportNode.NO_OP);
+            assertEquals(expectedPrecomputed, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                    "contingencies AND (ctg, strategy) pairs must precompute on the device");
+            assertEquals(cpu.getOperatorStrategyResults().size(), gpu.getOperatorStrategyResults().size());
+            for (int r = 0; r < cpu.getOperatorStrategyResults().size(); r++) {
+                var cpuS = cpu.getOperatorStrategyResults().get(r).getConditionalActionsResults().get(0);
+                var gpuS = gpu.getOperatorStrategyResults().get(r).getConditionalActionsResults().get(0);
+                assertEquals(cpuS.getStatus(), gpuS.getStatus());
+                assertEquals(cpuS.getLimitViolationsResult().getLimitViolations().size(),
+                        gpuS.getLimitViolationsResult().getLimitViolations().size(), "strategy violation count");
+                var cb = cpuS.getNetworkResult().getBusResults();
+                var gb = gpuS.getNetworkResult().getBusResults();
+                assertEquals(cb.size(), gb.size());
+                for (int b = 0; b < cb.size(); b++) {
+                    org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 0.05,
+                            "strategy bus voltage " + cb.get(b).getBusId());
+                }
+            }
+        } finally {
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
+    @Test
+    void tapPositionActionStrategyBatchMatchesCpu() {
+        // #24 stage 2b: RatioTapChanger tap action on a FIXED-tap transformer = per-scenario r1
+        // override on the packed branch inputs.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.TwoWindingsTransformer t2wt = network.getTwoWindingsTransformer("T2wT");
+        t2wt.getRatioTapChanger().setTapPosition(0).setRegulating(false);
+        com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+        network.newLine().setId(l0.getId() + "_BIS")
+                .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        List<Contingency> contingencies = List.of(new Contingency(l0.getId() + "_BIS", new BranchContingency(l0.getId() + "_BIS")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.RatioTapChangerTapPositionAction("tapUp", "T2wT", false, 2));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sTap",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("tapUp")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
+    @Test
+    void shuntPositionActionStrategyBatchMatchesCpu() {
+        // #24 stage 2b: ShuntCompensatorPositionAction = per-scenario admittance shift (linear model).
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        String shuntId = network.getShuntCompensatorStream().findFirst().orElseThrow().getId();
+        String lineId = network.getLineStream()
+                .filter(l -> !l.getId().contains("7") && !l.getId().contains("8"))
+                .skip(4).findFirst().orElseThrow().getId();
+        List<Contingency> contingencies = List.of(new Contingency(lineId, new BranchContingency(lineId)));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.ShuntCompensatorPositionActionBuilder().withId("shOff")
+                        .withShuntCompensatorId(shuntId).withSectionCount(0).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sShunt",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("shOff")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
     @Test
     void shuntShiftBatchMatchesCpu() {
         // #23: shunt disconnection now batches as a per-scenario ADMITTANCE OVERRIDE (the general

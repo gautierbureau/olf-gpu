@@ -178,7 +178,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
 
     /** Discrete tap r1 values, snapshotted read-only (reflection on PiModelArray.models; an
      *  inaccessible or non-array model yields an empty table = keep the continuous ratio). */
-    private static double[] tapR1Values(Object piModel) {
+    public static double[] tapR1Values(Object piModel) {
         try {
             if (!"PiModelArray".equals(piModel.getClass().getSimpleName())) {
                 return new double[0];
@@ -304,16 +304,25 @@ public final class GpuBatchedSecurityAnalysisSolver {
     public record ShuntShift(LfShunt shunt, double dg, double db) {
     }
 
+    /** A per-scenario RATIO override for a FIXED-tap transformer (tap-position actions): the
+     *  ABSOLUTE r1 replacing the packed static ratio. Guarded to branches whose ratio is NOT a
+     *  state variable (voltage-controlled transformers route their tap changes elsewhere). */
+    public record TapR1Override(LfBranch branch, double r1) {
+    }
+
     public record BatchContingency(String contingencyId, List<LfBranch> outagedBranches, List<LfGenerator> lostGenerators,
-                                   List<LoadLoss> lostLoads, List<ShuntShift> shuntShifts, List<LfShunt> outagedShunts) {
+                                   List<LoadLoss> lostLoads, List<ShuntShift> shuntShifts, List<TapR1Override> tapOverrides,
+                                   List<LfShunt> outagedShunts) {
         public BatchContingency {
             Objects.requireNonNull(contingencyId);
             Objects.requireNonNull(outagedBranches);
             Objects.requireNonNull(lostGenerators);
             Objects.requireNonNull(lostLoads);
             Objects.requireNonNull(shuntShifts);
+            Objects.requireNonNull(tapOverrides);
             Objects.requireNonNull(outagedShunts);
-            boolean isInjection = !lostGenerators.isEmpty() || !lostLoads.isEmpty() || !shuntShifts.isEmpty();
+            boolean isInjection = !lostGenerators.isEmpty() || !lostLoads.isEmpty() || !shuntShifts.isEmpty()
+                    || !tapOverrides.isEmpty();
             boolean isShunt = !outagedShunts.isEmpty();
             boolean isBranch = !outagedBranches.isEmpty();
             // Batchable shapes: 1-2 branches, N generators, N loads, and branch+injection COMBOS
@@ -328,34 +337,35 @@ public final class GpuBatchedSecurityAnalysisSolver {
             lostGenerators = List.copyOf(lostGenerators);
             lostLoads = List.copyOf(lostLoads);
             shuntShifts = List.copyOf(shuntShifts);
+            tapOverrides = List.copyOf(tapOverrides);
             outagedShunts = List.copyOf(outagedShunts);
         }
 
         /** A branch outage (N-1 or N-2). */
         public BatchContingency(String contingencyId, List<LfBranch> outagedBranches) {
-            this(contingencyId, outagedBranches, List.of(), List.of(), List.of(), List.of());
+            this(contingencyId, outagedBranches, List.of(), List.of(), List.of(), List.of(), List.of());
         }
 
         /** Convenience for the common single-branch (N-1) case. */
         public BatchContingency(String contingencyId, LfBranch outagedBranch) {
-            this(contingencyId, List.of(Objects.requireNonNull(outagedBranch)), List.of(), List.of(), List.of(), List.of());
+            this(contingencyId, List.of(Objects.requireNonNull(outagedBranch)), List.of(), List.of(), List.of(), List.of(), List.of());
         }
 
         /** A combined branch + generator/load contingency. */
         public static BatchContingency branchesAndInjections(String contingencyId, List<LfBranch> branches,
                                                              List<LfGenerator> gens, List<LoadLoss> loads,
-                                                             List<ShuntShift> shifts) {
-            return new BatchContingency(contingencyId, branches, gens, loads, shifts, List.of());
+                                                             List<ShuntShift> shifts, List<TapR1Override> taps) {
+            return new BatchContingency(contingencyId, branches, gens, loads, shifts, taps, List.of());
         }
 
         /** A generator loss. */
         public static BatchContingency generator(String contingencyId, LfGenerator lostGenerator) {
-            return new BatchContingency(contingencyId, List.of(), List.of(Objects.requireNonNull(lostGenerator)), List.of(), List.of(), List.of());
+            return new BatchContingency(contingencyId, List.of(), List.of(Objects.requireNonNull(lostGenerator)), List.of(), List.of(), List.of(), List.of());
         }
 
         /** A fixed-shunt disconnection (the shunt element is masked off, like a branch outage). */
         public static BatchContingency shunt(String contingencyId, LfShunt outagedShunt) {
-            return new BatchContingency(contingencyId, List.of(), List.of(), List.of(), List.of(), List.of(Objects.requireNonNull(outagedShunt)));
+            return new BatchContingency(contingencyId, List.of(), List.of(), List.of(), List.of(), List.of(), List.of(Objects.requireNonNull(outagedShunt)));
         }
     }
 
@@ -635,7 +645,19 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 continue;
             }
             BatchContingency c = contingencies.get(i);
-            if (!c.lostGenerators().isEmpty() || !c.lostLoads().isEmpty() || !c.shuntShifts().isEmpty()) {   // injection/shift (or branch+) contingency
+            if (!c.lostGenerators().isEmpty() || !c.lostLoads().isEmpty() || !c.shuntShifts().isEmpty()
+                    || !c.tapOverrides().isEmpty()) {        // injection/shift/tap (or branch+) contingency
+                boolean tapOk = true;
+                for (TapR1Override tap : c.tapOverrides()) { // packed CLOSED branch with a FIXED ratio only
+                    int ei = elementMapper.getElementIndex(tap.branch());
+                    if (ei < 0 || ei >= elementMapper.getClosedBranchCount()
+                            || gpuData.cbIdx()[ei * 10 + 9] >= 0) {
+                        tapOk = false;
+                    }
+                }
+                if (!tapOk) {
+                    continue;                                // controlled/unpacked transformer tap — CPU
+                }
                 if (!c.shuntShifts().isEmpty()
                         && !canBatchShuntOutage(c.shuntShifts().stream().map(ShuntShift::shunt).toList(), elementMapper, gpuData)) {
                     continue;                                // unpacked / DISTR_Q-contributing shunt — CPU
@@ -1038,7 +1060,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
                     parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                     batchLsMode, batchMaxDv, batchMaxDphi,
-                    batchLsMode == 2 ? varType : null, x0Full, null, null, null, null);
+                    batchLsMode == 2 ? varType : null, x0Full, null, null, null, null, null, null);
             for (int slot : affected) {
                 chunkResults[slot] = r2[slot];
             }
@@ -1118,6 +1140,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
         List<Double> ovValueList = new ArrayList<>();
         List<Integer> shOvSlotElemList = new ArrayList<>();  // per-scenario shunt admittance overrides
         List<Double> shOvGbList = new ArrayList<>();
+        List<Integer> r1OvSlotElemList = new ArrayList<>();  // per-scenario fixed-ratio tap overrides
+        List<Double> r1OvValList = new ArrayList<>();
         int shPackOffset = elementMapper.getClosedBranchCount() + elementMapper.getOpenBranchCount();
         // Per-scenario distributed-slack reweight (a generator loss at a DS-participant bus): one affected DS
         // bus per slot (dsOvBus[s] = its DS-pack index, -1 = none) whose factor/base/headroom/footroom and the
@@ -1161,6 +1185,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 ovValueList.clear();
                 shOvSlotElemList.clear();
                 shOvGbList.clear();
+                r1OvSlotElemList.clear();
+                r1OvValList.clear();
                 if (hasDs) {
                     java.util.Arrays.fill(dsOvBus, -1);
                     java.util.Arrays.fill(dsOvFactorDelta, 0);
@@ -1205,6 +1231,11 @@ public final class GpuBatchedSecurityAnalysisSolver {
                                 ovValueList.add(frozenTargets[k]);
                             }
                             rowModePerScenario[s] = row;
+                        }
+                        for (TapR1Override tap : contingencies.get(ci).tapOverrides()) {
+                            r1OvSlotElemList.add(s);
+                            r1OvSlotElemList.add(elementMapper.getElementIndex(tap.branch()));   // cb pack index == element index
+                            r1OvValList.add(tap.r1());
                         }
                         for (ShuntShift sh : contingencies.get(ci).shuntShifts()) {
                             shOvSlotElemList.add(s);
@@ -1275,7 +1306,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         batchLsMode == 2 ? varType : null, x0Full,
                         shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                         shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                        rlStateIn, rlStateOut);
+                        rlStateIn, rlStateOut,
+                        r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                        r1OvValList.stream().mapToDouble(Double::doubleValue).toArray());
                 if (rlStateOut != null) {                    // capture each ctg's final RL pinning for its pairs
                     for (int s = 0; s < realCount; s++) {
                         int[] slice = new int[nrl];

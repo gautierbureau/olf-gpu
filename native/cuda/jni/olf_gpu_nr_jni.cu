@@ -1324,10 +1324,24 @@ __device__ inline void closedBranchTrig(const double* t, bool a1FromState, doubl
     cosTheta2 = t[5] * cosd + t[4] * sind;
 }
 
+// Per-scenario closed-branch RATIO override (tap actions on FIXED-ratio transformers): entries
+// are (slot, cb elem) with an ABSOLUTE r1 replacing the static input p[6]. Java guards that the
+// branch's ratio is NOT a state variable (r1col == -1), so the state path never conflicts.
+__device__ inline double applyR1Override(int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                                         int s, int e, double r1) {
+    for (int k = 0; k < nR1Ov; k++) {
+        if (r1OvSlotElem[2 * k] == s && r1OvSlotElem[2 * k + 1] == e) {
+            return r1OvVal[k];
+        }
+    }
+    return r1;
+}
+
 __global__ void fillClosedBranchBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                       const double* in, const int* ix, const int* dest,
                                       const double* x, double* vals, double* F,
-                                      const char* disabled, const char* active) {
+                                      const char* disabled, const char* active,
+                                      int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ne * nScenarios) return;
     int e = tid % ne;
@@ -1337,7 +1351,7 @@ __global__ void fillClosedBranchBatch(int ne, int nScenarios, int n, int nnz, in
     const int* q = ix + e * 10;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     const double* xs = x + s * n;
     double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
-    double r1 = q[9] >= 0 ? xs[q[9]] : p[6];                 // ratio/shift from state when controlled
+    double r1 = q[9] >= 0 ? xs[q[9]] : applyR1Override(nR1Ov, r1OvSlotElem, r1OvVal, s, e, p[6]);
     double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
     // The FUSED fill is atomic/memory-bound on its 28 scattered outputs (measured:
     // routing it through the precomputed-trig buffer made it SLOWER, 81 -> 100 ms —
@@ -1460,7 +1474,8 @@ __device__ void scatterAddF(int nres, const int* dest, const int* pos, const dou
 __global__ void fillClosedBranchBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                        const double* in, const int* ix, const int* dest, const double* trig,
                                        const double* x, double* F,
-                                       const char* disabled, const char* active) {
+                                       const char* disabled, const char* active,
+                                       int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ne * nScenarios) return;
     int e = tid % ne;
@@ -1470,7 +1485,7 @@ __global__ void fillClosedBranchBatchF(int ne, int nScenarios, int n, int nnz, i
     const int* q = ix + e * 10;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     const double* xs = x + s * n;
     double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
-    double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
+    double r1 = q[9] >= 0 ? xs[q[9]] : applyR1Override(nR1Ov, r1OvSlotElem, r1OvVal, s, e, p[6]);
     double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
     double sinKsi;
     double cosKsi;
@@ -2120,6 +2135,8 @@ struct BatchSolverContext {
     DeviceBuf dNorms;                                        // nS*3 device-side convergence norms (see residualNormsBatch)
     int nShOv = 0;                                           // per-scenario shunt admittance overrides (set per solve)
     DeviceBuf dShOvSlotElem, dShOvGb;                        // nShOv*2 ints (slot, PACK elem) / nShOv*2 doubles (dG, dB)
+    int nR1Ov = 0;                                           // per-scenario closed-branch ratio overrides (tap actions)
+    DeviceBuf dR1OvSlotElem, dR1OvVal;                       // nR1Ov*2 ints / nR1Ov doubles (absolute r1)
     // ---- solve-only batch compaction (mode 3, tol > 0): lazily allocated on first engage ----
     DeviceBuf dValsC, dBC, dDxC, dMapC;                      // nnz*cap / n*cap / n*cap / cap ints
     CudssCtx dsC;                                            // dedicated handle/config/data for the compact width
@@ -2403,7 +2420,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                               int lsMode, double maxDv, double maxDphi, const int* varType,
                               const double* x0Full, int nShOv, const int* shOvSlotElem, const double* shOvGb,
-                              const int* rlStateIn, int* rlStateOut) {
+                              const int* rlStateIn, int* rlStateOut,
+                              int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal) {
     int n = ctx->n;
     int nnz = ctx->nnz;
     int nS = ctx->nScenarios;
@@ -2429,6 +2447,16 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         double dummyD[2] = {0, 0};
         ctx->dShOvSlotElem.upload(dummyI, sizeof(dummyI));
         ctx->dShOvGb.upload(dummyD, sizeof(dummyD));
+    }
+    ctx->nR1Ov = nR1Ov;
+    if (nR1Ov > 0) {
+        ctx->dR1OvSlotElem.upload(r1OvSlotElem, static_cast<size_t>(nR1Ov) * 2 * sizeof(int));
+        ctx->dR1OvVal.upload(r1OvVal, static_cast<size_t>(nR1Ov) * sizeof(double));
+    } else if (!ctx->dR1OvSlotElem.p) {
+        int dummyI[2] = {-1, -1};
+        double dummyD[1] = {0};
+        ctx->dR1OvSlotElem.upload(dummyI, sizeof(dummyI));
+        ctx->dR1OvVal.upload(dummyD, sizeof(dummyD));
     }
     size_t nTot = static_cast<size_t>(n) * nS;
     DeviceBuf dOvIndex, dOvValue;                            // function-scoped: outlive the async override kernel
@@ -2591,9 +2619,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         initFBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dTarget.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (ctx->st->cb.ne) {
             if (fOnly) {
-                fillClosedBranchBatchF<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->st->cbTrig.as<double>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+                fillClosedBranchBatchF<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->st->cbTrig.as<double>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>());
             } else {
-                fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+                fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>());
             }
         }
         if (ctx->st->ob.ne) {
@@ -2906,7 +2934,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // bus reactive balance. Disabled branches are skipped (outage); dVals is scratch (the next inner
     // iteration memsets and refills it).
     CUDA_CHECK(cudaMemsetAsync(ctx->dQbuf.p, 0, nTot * sizeof(double), ctx->stream));
-    if (ctx->st->cb.ne) fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>());
+    if (ctx->st->cb.ne) fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>());
     if (ctx->st->ob.ne) fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>());
     if (ctx->st->sh.ne) fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>());
     CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitched.p, 0, nS * sizeof(char), ctx->stream));
@@ -3242,8 +3270,18 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jdouble reactiveLimitTol, jdouble slackDistTol, jdouble convEpsPerEq,
         jint lsMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType, jdoubleArray jx0Full,
         jintArray jShuntOvSlotElem, jdoubleArray jShuntOvGb,
-        jintArray jRlStateIn, jintArray jRlStateOut) {
+        jintArray jRlStateIn, jintArray jRlStateOut,
+        jintArray jR1OvSlotElem, jdoubleArray jR1OvVal) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    std::vector<int> r1OvSlotElemVec;
+    std::vector<double> r1OvValVec;
+    if (jR1OvSlotElem != nullptr) {
+        jsize rn = env->GetArrayLength(jR1OvSlotElem);
+        r1OvSlotElemVec.resize(rn);
+        env->GetIntArrayRegion(jR1OvSlotElem, 0, rn, r1OvSlotElemVec.data());
+        r1OvValVec.resize(rn / 2);
+        env->GetDoubleArrayRegion(jR1OvVal, 0, rn / 2, r1OvValVec.data());
+    }
     std::vector<int> rlStateInVec;
     if (jRlStateIn != nullptr) {
         jsize rn = env->GetArrayLength(jRlStateIn);
@@ -3358,7 +3396,10 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
                                 shOvSlotElemVec.empty() ? nullptr : shOvSlotElemVec.data(),
                                 shOvGbVec.empty() ? nullptr : shOvGbVec.data(),
                                 rlStateInVec.empty() ? nullptr : rlStateInVec.data(),
-                                rlStateOutVec.empty() ? nullptr : rlStateOutVec.data());
+                                rlStateOutVec.empty() ? nullptr : rlStateOutVec.data(),
+                                static_cast<int>(r1OvSlotElemVec.size() / 2),
+                                r1OvSlotElemVec.empty() ? nullptr : r1OvSlotElemVec.data(),
+                                r1OvValVec.empty() ? nullptr : r1OvValVec.data());
         if (jRlStateOut != nullptr && !rlStateOutVec.empty()) {
             env->SetIntArrayRegion(jRlStateOut, 0, static_cast<jsize>(rlStateOutVec.size()), rlStateOutVec.data());
         }

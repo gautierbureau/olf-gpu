@@ -373,7 +373,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                         pc.getShuntIdsToShift().isEmpty() ? List.of() : shuntShifts(net, pc);
                 if (branches != null && gens != null && loads != null && shifts != null
                         && (!branches.isEmpty() || !gens.isEmpty() || !loads.isEmpty() || !shifts.isEmpty())) {
-                    batch.add(BatchContingency.branchesAndInjections(pc.getContingency().getId(), branches, gens, loads, shifts));
+                    batch.add(BatchContingency.branchesAndInjections(pc.getContingency().getId(), branches, gens, loads, shifts, List.of()));
                     // Batched OPERATOR STRATEGIES stage 1: TrueCondition (always-applied) strategies
                     // matching this contingency become EXTRA batch scenarios — the (ctg, strategy)
                     // pair is just another BatchContingency with the actions COMPOSED onto the
@@ -541,6 +541,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                      List<GpuBatchedSecurityAnalysisSolver.ShuntShift> ctgShifts) {
         List<LfBranch> branches = new java.util.ArrayList<>(ctgBranches);
         List<GpuBatchedSecurityAnalysisSolver.LoadLoss> loads = new java.util.ArrayList<>(ctgLoads);
+        List<GpuBatchedSecurityAnalysisSolver.ShuntShift> shifts = new java.util.ArrayList<>(ctgShifts);
+        List<GpuBatchedSecurityAnalysisSolver.TapR1Override> taps = new java.util.ArrayList<>();
         Map<String, Action> actionById = new java.util.HashMap<>();
         for (Action a : currentActions) {
             actionById.put(a.getId(), a);
@@ -585,6 +587,34 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 }
                 double dP = la.isRelativeValue() ? -newP : load.getP0() - newP;   // LoadLoss.p = load REMOVED (pu)
                 loads.add(new GpuBatchedSecurityAnalysisSolver.LoadLoss(bus, dP / PerUnit.SB, 0));
+            } else if (a instanceof com.powsybl.action.RatioTapChangerTapPositionAction rtca) {
+                LfBranch b = net.getBranchById(rtca.getTransformerId());
+                com.powsybl.iidm.network.TwoWindingsTransformer twt = network.getTwoWindingsTransformer(rtca.getTransformerId());
+                if (b == null || twt == null || twt.getRatioTapChanger() == null) {
+                    return null;
+                }
+                double[] table = GpuBatchedSecurityAnalysisSolver.tapR1Values(b.getPiModel());
+                int low = twt.getRatioTapChanger().getLowTapPosition();
+                int newPos = rtca.isRelativeValue() ? twt.getRatioTapChanger().getTapPosition() + rtca.getTapPosition()
+                                                    : rtca.getTapPosition();
+                int idx = newPos - low;
+                if (table.length == 0 || idx < 0 || idx >= table.length) {
+                    return null;                             // no tap table / out-of-range position — CPU
+                }
+                taps.add(new GpuBatchedSecurityAnalysisSolver.TapR1Override(b, table[idx]));
+            } else if (a instanceof com.powsybl.action.ShuntCompensatorPositionAction spa) {
+                com.powsybl.iidm.network.ShuntCompensator sc = network.getShuntCompensator(spa.getShuntCompensatorId());
+                LfShunt shunt = net.getShuntById(spa.getShuntCompensatorId());
+                if (sc == null || shunt == null
+                        || !(sc.getModel() instanceof com.powsybl.iidm.network.ShuntCompensatorLinearModel lin)) {
+                        return null;                             // unpacked / non-linear model — CPU
+                }
+                double dSections = spa.getSectionCount() - sc.getSectionCount();
+                double zb = sc.getTerminal().getVoltageLevel().getNominalV()
+                        * sc.getTerminal().getVoltageLevel().getNominalV() / PerUnit.SB;
+                double gPerSection = Double.isNaN(lin.getGPerSection()) ? 0 : lin.getGPerSection();   // optional in iidm
+                shifts.add(new GpuBatchedSecurityAnalysisSolver.ShuntShift(shunt,
+                        gPerSection * dSections * zb, lin.getBPerSection() * dSections * zb));
             } else if (a instanceof com.powsybl.action.GeneratorAction) {
                 // STILL out of scope after stage 2a (warm continuation): B2 parity narrowed the
                 // cause to the RL PIN-TARGET semantics — the CPU freezes the switched bus's Q at
@@ -600,7 +630,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             return null;
         }
         return new BatchContingency(contingencyId + STRATEGY_KEY_SEP + strategy.getId(),
-                branches, ctgGens, loads, ctgShifts, List.of());
+                branches, ctgGens, loads, shifts, taps, List.of());
     }
 
     /** The contingency's shunt admittance shifts (pu deltas, negated: the propagation's shift is the

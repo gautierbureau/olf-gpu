@@ -990,3 +990,31 @@ the engine loop -> deferred warm batch — ALL plumbing for it now exists).
 
 All 15 SA tests green (strategy result == CPU at 0.05 kV, pair precompute asserted);
 production bench parity unchanged (22/6; GPU warm 12.2 s ≈ CPU-4t).
+
+## 2026-07-18 — #24 stage 2b: tap-position + shunt-position actions in the batch
+- RatioTapChangerTapPositionAction → per-scenario r1 override on the packed closed-branch
+  inputs: `fillClosedBranchBatch`/`F` gained `(nR1Ov, r1OvSlotElem, r1OvVal)`; fallback read is
+  `q[9] >= 0 ? xs[q[9]] : applyR1Override(...)` so CONTROLLED transformers are untouched and
+  only fixed-ratio branches can be overridden (qualification also rejects `cbIdx[e*10+9] >= 0`).
+  PST (a1) stays deferred: a1 enters the precomputed `closedBranchTrig` statics used by the
+  F-only kernel — needs a raw-trig fallback for overridden pairs.
+- ShuntCompensatorPositionAction → composed `ShuntShift` (linear model only):
+  `Δsections × g/bPerSection × nominalV²/SB`. BUG found by the acceptance test:
+  `ShuntCompensatorLinearModel.getGPerSection()` is OPTIONAL in iidm and returns **NaN** when
+  unset (ieee14 factory shunt does not set it) → the composed dg poisoned F at it=0 and the
+  pair died with status −1 (0 iterations, finalMismatch = exactly the shunt's ΔQ ≈ 0.211 —
+  the norms kernel's fmax skips NaN, only the finite flag caught it). Fix: NaN → 0 at
+  composition. Debug path that found it: result-status probe (pair NOT converged, it=0)
+  → RL-seed toggle (innocent) → native non-finite-F dump (`eq=17 F=nan`) → composer value
+  probe (`gPerSection=NaN`).
+- Tests: `tapPositionActionStrategyBatchMatchesCpu` (T2wt mesh + BIS line, RTC regulation OFF,
+  absolute tap action, pair precomputes + 0.05 kV state match) and
+  `shuntPositionActionStrategyBatchMatchesCpu` (ieee14 shunt 1→0 sections). 15/15 green.
+- Regressions clean: production bench cold 13.19 s (26.4 ms/ctg, ×0.95 vs CPU-4t 12.5 s),
+  warm 12.12 s (24.3 ms/ctg, ×1.03), violation diff UNCHANGED (onlyCPU=15 onlyGPU=7, 6 ctg);
+  fixed-iter bench cold E2E 11.71 ms/ctg, warm 4.37 ms/scn, 499/500 @1e-6 — the r1-override
+  parameters cost nothing measurable (empty-list scan short-circuits).
+- NOTE: production bench MUST run with `OLF_GPU_BATCHMODE=3 OLF_GPU_MAXBATCH=500` exported —
+  bare `mvn test` defaults to mode 0/32 and reads ~2× slower (26→52 ms/ctg), which is env,
+  not a regression. `native/run_bench.sh` is a stale copy whose REPO resolution is broken;
+  the canonical script is `native/cuda/run_bench.sh` (delete or symlink the stray one).

@@ -258,6 +258,62 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     @Test
+    void operatorStrategyBatchMatchesCpu() {
+        // #24 stage 1: a TrueCondition strategy (load shed + generator redispatch) becomes an EXTRA
+        // batch scenario composed onto its contingency; the injected OperatorStrategyResult must
+        // match the CPU's at state level.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        String lineId = network.getLineStream()
+                .filter(l -> !l.getId().contains("7") && !l.getId().contains("8"))
+                .skip(1).findFirst().orElseThrow().getId();
+        com.powsybl.iidm.network.Load load12 = network.getLoadStream()
+                .filter(l -> "B12".equals(l.getTerminal().getBusBreakerView().getBus().getId()))
+                .findFirst().orElseThrow();
+        List<Contingency> contingencies = List.of(new Contingency(lineId, new BranchContingency(lineId)));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.LoadActionBuilder().withId("shed12").withLoadId(load12.getId())
+                        .withRelativeValue(false).withActivePowerValue(load12.getP0() / 2).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("s1",
+                        com.powsybl.contingency.ContingencyContext.specificContingency(lineId),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("shed12")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        java.util.Set<String> allVls = network.getVoltageLevelStream().map(vl -> vl.getId())
+                .collect(java.util.stream.Collectors.toSet());
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), allVls, java.util.Set.of()));
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, monitors, sap, strategies, actions,
+                com.powsybl.commons.report.ReportNode.NO_OP);
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, monitors, sap, strategies, actions,
+                    com.powsybl.commons.report.ReportNode.NO_OP);
+            assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                    "contingency AND the (ctg, strategy) pair must both precompute on the device");
+            assertEquals(1, gpu.getOperatorStrategyResults().size());
+            var cpuS = cpu.getOperatorStrategyResults().get(0).getConditionalActionsResults().get(0);
+            var gpuS = gpu.getOperatorStrategyResults().get(0).getConditionalActionsResults().get(0);
+            assertEquals(cpuS.getStatus(), gpuS.getStatus());
+            assertEquals(cpuS.getLimitViolationsResult().getLimitViolations().size(),
+                    gpuS.getLimitViolationsResult().getLimitViolations().size(), "strategy violation count");
+            var cb = cpuS.getNetworkResult().getBusResults();
+            var gb = gpuS.getNetworkResult().getBusResults();
+            assertEquals(cb.size(), gb.size());
+            for (int b = 0; b < cb.size(); b++) {
+                org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 0.05,
+                        "strategy bus voltage " + cb.get(b).getBusId());
+            }
+        } finally {
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
+    @Test
     void shuntShiftBatchMatchesCpu() {
         // #23: shunt disconnection now batches as a per-scenario ADMITTANCE OVERRIDE (the general
         // section-shift mechanism, both directions). ieee14's B9 shunt, state-level 0.05 kV.

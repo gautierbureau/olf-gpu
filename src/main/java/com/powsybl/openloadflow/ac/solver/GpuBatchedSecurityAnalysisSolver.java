@@ -832,13 +832,17 @@ public final class GpuBatchedSecurityAnalysisSolver {
         if (pRow < 0 || vRow < 0) {
             return null;
         }
-        // Is this bus a distributed-slack participant? (its BUS_PHI row appears in the DS pack)
+        // Is this bus a distributed-slack participant? Only relevant when GENERATORS are lost here
+        // (their participation leaves the DS pack); pure injection deltas (load losses, redispatch
+        // actions) change targets but NOT participation, so they carry no DS reweight/constraint.
         int dsBus = -1;
-        int[] dsPhiRow = gpuData.dsPhiRow();
-        for (int i = 0; i < dsPhiRow.length; i++) {
-            if (dsPhiRow[i] == pRow) {
-                dsBus = i;
-                break;
+        if (!lost.isEmpty()) {
+            int[] dsPhiRow = gpuData.dsPhiRow();
+            for (int i = 0; i < dsPhiRow.length; i++) {
+                if (dsPhiRow[i] == pRow) {
+                    dsBus = i;
+                    break;
+                }
             }
         }
         if (dsBus >= 0 && slackParticipates) {
@@ -853,9 +857,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
         double lostLoadQ = lostLoads.stream().mapToDouble(LoadLoss::q).sum();
         double pTarget = bus.getTargetP() - lostP + lostLoadP;   // shedding load RAISES the P target
         boolean busPv = bus.isGeneratorVoltageControlEnabled();
-        if (!lostLoads.isEmpty() && busPv) {
-            return null;                                     // load loss at a voltage-controlling bus: the RL pack's
-        }                                                    // static loadQ would go stale per scenario — CPU fallback
+        if (busPv && lostLoads.stream().anyMatch(l -> l.q() != 0)) {
+            return null;                                     // Q-carrying load delta at a voltage-controlling bus: the
+        }                                                    // RL pack's static loadQ would go stale — CPU fallback
+                                                             // (P-only deltas, e.g. redispatch actions, are safe: PV Q is free)
         boolean lostControls = lost.stream()
                 .anyMatch(g -> g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
         boolean otherController = bus.getGenerators().stream()

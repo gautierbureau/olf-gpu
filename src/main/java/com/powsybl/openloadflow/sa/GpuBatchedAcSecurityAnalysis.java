@@ -51,6 +51,8 @@ import com.powsybl.security.limitreduction.LimitReduction;
 import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.results.ConnectivityResult;
 import com.powsybl.security.results.NetworkResult;
+import com.powsybl.security.results.OperatorStrategyResult;
+import java.util.Objects;
 import com.powsybl.security.results.PostContingencyResult;
 
 import java.util.ArrayList;
@@ -99,6 +101,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             new java.util.concurrent.atomic.AtomicInteger(-1);
 
     private List<PropagatedContingency> currentContingencies = List.of();
+    private List<OperatorStrategy> currentOperatorStrategies = List.of();
+    private List<Action> currentActions = List.of();
+    /** Separator inside the precomputed-state key of a (contingency, strategy) pair. */
+    private static final char STRATEGY_KEY_SEP = '\u0001';
     private LfNetwork currentLfNetwork;
     private AcLoadFlowContext currentContext;
     private EquationSystem<AcVariableType, AcEquationType> batchEquationSystem;
@@ -192,6 +198,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // pre-contingency load flow has converged (afterPreContingencySimulation hook).
         this.currentLfNetwork = lfNetwork;
         this.currentContingencies = propagatedContingencies;
+        this.currentOperatorStrategies = operatorStrategies != null ? operatorStrategies : List.of();
+        this.currentActions = actions != null ? actions : List.of();
         this.precomputedStates.clear();
         this.batchEquationSystem = null;
         // Capture which outer loops this run actually applies, so the batched device solver runs the
@@ -365,6 +373,22 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 if (branches != null && gens != null && loads != null && shifts != null
                         && (!branches.isEmpty() || !gens.isEmpty() || !loads.isEmpty() || !shifts.isEmpty())) {
                     batch.add(BatchContingency.branchesAndInjections(pc.getContingency().getId(), branches, gens, loads, shifts));
+                    // Batched OPERATOR STRATEGIES stage 1: TrueCondition (always-applied) strategies
+                    // matching this contingency become EXTRA batch scenarios — the (ctg, strategy)
+                    // pair is just another BatchContingency with the actions COMPOSED onto the
+                    // contingency's deltas (reclose = drop the branch from the outage list;
+                    // extra open = extend it; load/gen actions = injection deltas). Unsupported
+                    // action types or shapes leave the pair to the CPU path (super).
+                    for (OperatorStrategy strategy : currentOperatorStrategies) {
+                        if (!strategyApplies(strategy, pc.getContingency().getId())) {
+                            continue;
+                        }
+                        BatchContingency pair = composeStrategyScenario(net, pc.getContingency().getId(), strategy,
+                                branches, gens, loads, shifts);
+                        if (pair != null) {
+                            batch.add(pair);
+                        }
+                    }
                     continue;
                 }
                 LfShunt shunt = singleShuntOutage(net, pc);
@@ -441,6 +465,139 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             out.add(new GpuBatchedSecurityAnalysisSolver.LoadLoss(bus, e.getValue().getActive(), e.getValue().getReactive()));
         }
         return out;
+    }
+
+    @Override
+    protected OperatorStrategyResult runActionSimulation(LfNetwork network, AcLoadFlowContext context, OperatorStrategy operatorStrategy,
+                                                         java.util.List<String> actionsIds,
+                                                         LimitViolationManager preContingencyLimitViolationManager,
+                                                         SecurityAnalysisParameters securityAnalysisParameters,
+                                                         Map<String, com.powsybl.openloadflow.network.action.LfAction> lfActionById,
+                                                         boolean createResultExtension, LfContingency lfContingency,
+                                                         Contingency contingency, PreContingencyNetworkResult preContingencyNetworkResult,
+                                                         com.powsybl.openloadflow.network.LfNetworkParameters networkParameters,
+                                                         List<LimitReduction> limitReductions) {
+        double[] state = precomputedStates.get(contingency.getId() + STRATEGY_KEY_SEP + operatorStrategy.getId());
+        if (state == null || batchEquationSystem == null) {
+            // pair not precomputed (condition not TrueCondition / out-of-scope action / diverged) — CPU path
+            return super.runActionSimulation(network, context, operatorStrategy, actionsIds, preContingencyLimitViolationManager,
+                    securityAnalysisParameters, lfActionById, createResultExtension, lfContingency, contingency,
+                    preContingencyNetworkResult, networkParameters, limitReductions);
+        }
+        // Apply the actions' NETWORK effects (topology/limits bookkeeping — no solve), inject the
+        // precomputed post-action state, and reuse the engine's result building — the same pattern
+        // as the post-contingency injection.
+        List<com.powsybl.openloadflow.network.action.LfAction> lfActions = actionsIds.stream()
+                .map(lfActionById::get)
+                .filter(Objects::nonNull)
+                .toList();
+        com.powsybl.openloadflow.network.action.LfActionUtils.applyListOfActions(lfActions, network, lfContingency, networkParameters);
+        batchEquationSystem.getStateVector().set(state.clone());
+        AcSolverUtil.updateNetwork(network, batchEquationSystem);
+        var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions,
+                securityAnalysisParameters.getIncreasedViolationsParameters());
+        LoadFlowModel loadFlowModel = securityAnalysisParameters.getLoadFlowParameters().isDc() ? LoadFlowModel.DC : LoadFlowModel.AC;
+        var postActionsNetworkResult = new PostContingencyNetworkResult(network,
+                new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex), createResultExtension,
+                preContingencyNetworkResult, contingency, loadFlowModel, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor(),
+                securityAnalysisParameters.getModifiedMonitoredElementsParameters());
+        postActionsNetworkResult.update();
+        postActionsViolationManager.detectViolations(network);
+        // Stage 1 reports no ADDITIONAL distributed power for the action solve (the batch already ran
+        // its device-side DS within the scenario) — mirrors the post-contingency injection convention.
+        return new OperatorStrategyResult(operatorStrategy,
+                List.of(new OperatorStrategyResult.ConditionalActionsResult(operatorStrategy.getId(),
+                        PostContingencyComputationStatus.CONVERGED,
+                        new LimitViolationsResult(postActionsViolationManager.getLimitViolations()),
+                        new NetworkResult(postActionsNetworkResult.getBranchResults(), postActionsNetworkResult.getBusResults(),
+                                postActionsNetworkResult.getThreeWindingsTransformerResults()),
+                        0.0)));
+    }
+
+    /** Stage-1 applicability: single-stage strategy with a TrueCondition whose contingency context
+     *  covers this contingency. Anything else stays on the CPU per-strategy path. */
+    private static boolean strategyApplies(OperatorStrategy strategy, String contingencyId) {
+        List<com.powsybl.contingency.strategy.ConditionalActions> stages = strategy.getConditionalActions();
+        if (stages.size() != 1
+                || !(stages.get(0).getCondition() instanceof com.powsybl.contingency.strategy.condition.TrueCondition)) {
+            return false;                                    // stage 1: single-stage, always-applied only
+        }
+        var ctx = strategy.getContingencyContext();
+        return switch (ctx.getContextType()) {
+            case ALL, ONLY_CONTINGENCIES -> true;
+            case SPECIFIC -> contingencyId.equals(ctx.getContingencyId());
+            case NONE -> false;
+        };
+    }
+
+    /** Compile the strategy's actions onto the contingency's deltas into ONE extra batch scenario,
+     *  or null when any action is out of stage-1 scope (branch open/RECLOSE, LoadAction,
+     *  GeneratorAction — absolute or relative active power). */
+    private BatchContingency composeStrategyScenario(LfNetwork net, String contingencyId, OperatorStrategy strategy,
+                                                     List<LfBranch> ctgBranches,
+                                                     List<LfGenerator> ctgGens,
+                                                     List<GpuBatchedSecurityAnalysisSolver.LoadLoss> ctgLoads,
+                                                     List<GpuBatchedSecurityAnalysisSolver.ShuntShift> ctgShifts) {
+        List<LfBranch> branches = new java.util.ArrayList<>(ctgBranches);
+        List<GpuBatchedSecurityAnalysisSolver.LoadLoss> loads = new java.util.ArrayList<>(ctgLoads);
+        Map<String, Action> actionById = new java.util.HashMap<>();
+        for (Action a : currentActions) {
+            actionById.put(a.getId(), a);
+        }
+        for (String actionId : strategy.getConditionalActions().get(0).getActionIds()) {
+            Action a = actionById.get(actionId);
+            if (a instanceof com.powsybl.action.TerminalsConnectionAction tca) {
+                LfBranch b = net.getBranchById(tca.getElementId());
+                if (b == null) {
+                    return null;
+                }
+                if (tca.isOpen()) {
+                    if (!branches.contains(b)) {
+                        branches.add(b);
+                    }
+                } else {
+                    if (!branches.remove(b)) {
+                        return null;                         // close of a BASE-OPEN branch: not packed — CPU
+                    }
+                }
+            } else if (a instanceof com.powsybl.action.SwitchAction sw) {
+                LfBranch b = net.getBranchById(sw.getSwitchId());
+                if (b == null || (sw.isOpen() ? branches.contains(b) : !branches.remove(b))) {
+                    if (b != null && sw.isOpen()) {
+                        branches.add(b);
+                    } else {
+                        return null;
+                    }
+                }
+            } else if (a instanceof com.powsybl.action.LoadAction la) {
+                com.powsybl.iidm.network.Load load = network.getLoad(la.getLoadId());
+                if (load == null || load.getTerminal().getBusView().getBus() == null) {
+                    return null;
+                }
+                LfBus bus = net.getBusById(load.getTerminal().getBusView().getBus().getId());
+                if (bus == null) {
+                    return null;
+                }
+                double newP = la.getActivePowerValue().orElse(Double.NaN);
+                if (Double.isNaN(newP)) {
+                    return null;
+                }
+                double dP = la.isRelativeValue() ? -newP : load.getP0() - newP;   // LoadLoss.p = load REMOVED (pu)
+                loads.add(new GpuBatchedSecurityAnalysisSolver.LoadLoss(bus, dP / PerUnit.SB, 0));
+            } else if (a instanceof com.powsybl.action.GeneratorAction) {
+                // OUT of stage-1 scope: the redispatch-as-injection-delta encoding showed a B2
+                // voltage divergence vs the CPU on ieee14 (device state near-insensitive to the
+                // delta — under investigation); such strategies stay on the CPU path.
+                return null;
+            } else {
+                return null;                                 // out of stage-1 scope — CPU per-strategy path
+            }
+        }
+        if (branches.size() > 2) {
+            return null;
+        }
+        return new BatchContingency(contingencyId + STRATEGY_KEY_SEP + strategy.getId(),
+                branches, ctgGens, loads, ctgShifts, List.of());
     }
 
     /** The contingency's shunt admittance shifts (pu deltas, negated: the propagation's shift is the

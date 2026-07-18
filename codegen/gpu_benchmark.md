@@ -944,3 +944,27 @@ base-DISCONNECTED shunt still needs the extractor to pack disconnected elements 
 (noted for the operator-strategy work). Tests (12/12 SA green, state-level 0.05 kV, ieee14):
 shuntShiftBatchMatchesCpu + shuntBranchLoadComboBatchMatchesCpu. Production bench parity
 unchanged (22/6; GPU 1.52x vs CPU-4t warm this run).
+
+## 2026-07-18 — Batched operator strategies STAGE 1 (#24): TrueCondition pairs as extra scenarios
+
+The capstone's first landing: a (contingency, strategy) pair is composed into ONE EXTRA
+BatchContingency (actions compiled onto the contingency's deltas) and precomputed in the SAME
+batch; a runActionSimulation override injects the state and reuses the engine's result building
+(same pattern as the post-contingency injection). Stage-1 scope, all correct-first:
+- CONDITIONS: single-stage TrueCondition only (always-applied — triggering known at precompute).
+  Violation-conditioned strategies stay CPU (they need the two-phase engine restructure).
+- ACTIONS validated: LoadAction (absolute/relative P; reactive shift 0 unless explicit — matches
+  LfLoadAction semantics exactly), TerminalsConnection/SwitchAction open AND RECLOSE of a
+  contingency-opened branch (mask composition; base-open closes need the extractor extension).
+- GeneratorAction SCOPED OUT after an honest failure: the redispatch-as-injection-delta encoding
+  diverged ~0.06-0.17 kV at the redispatched PV bus vs the CPU (device state near-insensitive to
+  the delta) — under investigation; such strategies fall back to CPU.
+- FIX en route: dsBus detection scoped to actual GENERATOR losses — pure injection deltas
+  (loads, actions) change targets, not participation, and must not trip the DS-participant
+  constraints.
+Tests: operatorStrategyBatchMatchesCpu (ieee14, ctg + TrueCondition shed strategy: precompute
+count asserts BOTH the ctg and the pair batched; strategy result status/violations/bus voltages
+== CPU at 0.05 kV). All 13 SA tests green; production bench parity unchanged (22/6).
+REMAINDER for stage 2: GeneratorAction parity investigation, violation-conditioned strategies
+(two-phase: collect triggered pairs in the engine loop -> one deferred batch -> results),
+tap/PST/shunt-position actions, base-open closes (extractor packs disconnected elements).

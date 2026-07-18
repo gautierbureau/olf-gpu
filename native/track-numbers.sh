@@ -29,8 +29,9 @@ CTG=$(grep -aoE 'contingencies affected=[0-9]+' "$LOG_P" | head -1 | grep -oE '[
 FX_COLD=$(num 'E2E K=4\][^|]*\|[^|]*\|[ ]*[0-9.]+ ms/ctg' "$LOG_F")
 FX_WARM=$(num '[0-9.]+ ms/scenario' "$LOG_F")
 FX_CONV=$(grep -aoE '[0-9]+/500 reached' "$LOG_F" | head -1 | cut -d' ' -f1)
+CAPS=$(python3 codegen/capability_count.py | grep -oE 'GPU-covered.*: [0-9]+/[0-9]+ \([0-9]+%\)' | grep -oE '[0-9]+/[0-9]+ \([0-9]+%\)')
 
-ROW="| $(date +%F) | ${COMMIT} | ${PROD_COLD:-—} | ${PROD_WARM:-—} | ${CPU_MT:-—} | ${RATIO:-—} | ${DIFF:-—}/${CTG:-—} | ${FX_COLD:-—} | ${FX_WARM:-—} | ${FX_CONV:-—} | ${NOTE} |"
+ROW="| $(date +%F) | ${COMMIT} | ${PROD_COLD:-—} | ${PROD_WARM:-—} | ${CPU_MT:-—} | ${RATIO:-—} | ${DIFF:-—}/${CTG:-—} | ${FX_COLD:-—} | ${FX_WARM:-—} | ${FX_CONV:-—} | ${CAPS:-—} | ${NOTE} |"
 echo "$ROW" >> docs/numbers.md
 echo "appended to docs/numbers.md:"
 echo "$ROW"

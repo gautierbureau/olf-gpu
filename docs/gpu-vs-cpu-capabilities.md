@@ -146,7 +146,7 @@ Full predicate list in Part II §F.
 | Limit-violation detection / IncreasedViolations filtering | ✅ | shared CPU code — identical by construction (`docs/increased-violations-thresholds.md`) |
 | State monitors (bus results) | ✅ | shared CPU code on the restored per-scenario states |
 | threadCount > 1 | 🔶 | GPU batch mono-device **by design**: device work serialized, no solver swap; CPU-fallback contingencies parallelize |
-| Production-parameter equivalence | ✅ | case9241pegase × 500 ctg × RTE JSON params: statuses identical, 20 threshold-edge re-reports in 5 ctg (was 22/6 before the maxOuterLoopIterations wiring; states ≤2.3e-4 pu apart, drilled 2026-07-17) |
+| Production-parameter equivalence | 🔶 | case9241pegase × 500 ctg × RTE JSON params: statuses identical; 20 violation-report diffs in 5 ctg remain (was 22/6 before the maxOuterLoopIterations wiring — that shift PROVES the residual is a systematic decision-path difference, not numeric noise: single-modelisation parts match at ~1e-13, so the target is a ZERO diff). Root-cause drill open |
 
 ## 3. Operator strategies & remedial actions
 

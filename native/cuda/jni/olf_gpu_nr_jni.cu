@@ -1935,6 +1935,24 @@ __global__ void negateIntoBatch(int total, const double* F, double* b) {  // b =
     if (i < total) b[i] = -F[i];
 }
 
+// Warm-continuation reconcile: a SEEDED pinned controller (limitType != 0) must also carry its
+// consequences — the BUS_V row flips to the reactive equation (mode 1) with the pinned Q target —
+// else the solve holds the PV setpoint while the RL bookkeeping thinks the bus is at a limit.
+__global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* rlVrow,
+                                    const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
+                                    const char* limitType, int* mode, double* target) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nrl * nScenarios) return;
+    int i = tid % nrl;
+    int s = tid / nrl;
+    char lt = limitType[(size_t) s * nrl + i];
+    if (lt != 0) {
+        size_t idx = (size_t) s * n + rlVrow[i];
+        mode[idx] = 1;
+        target[idx] = (lt == 1 ? rlMinQ[i] : rlMaxQ[i]) - rlLoadQ[i];
+    }
+}
+
 __global__ void axpy1Batch(int total, const double* dx, double* x) {      // x += dx over all scenarios
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < total) x[i] += dx[i];
@@ -2384,7 +2402,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               const double* dsOvMaxDelta, const double* dsOvMinDelta, int maxIter, double tol,
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                               int lsMode, double maxDv, double maxDphi, const int* varType,
-                              const double* x0Full, int nShOv, const int* shOvSlotElem, const double* shOvGb) {
+                              const double* x0Full, int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                              const int* rlStateIn, int* rlStateOut) {
     int n = ctx->n;
     int nnz = ctx->nnz;
     int nS = ctx->nScenarios;
@@ -2508,11 +2527,29 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     int maxOuter = fullLoadflow ? 8 * RL_MAX_OUTER : 1;
     std::vector<char> rlActive(nS), rlSwitched(nS), wasActive(nS);
     if (fullLoadflow) {                                      // per-solve PV↔PQ state: 0 switches, limitType from base
-        CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitchCount.p, 0, static_cast<size_t>(ctx->nrl) * nS * sizeof(char), ctx->stream));
-        if (ctx->nrl > 0) {                                  // seed the pinned limit for base-PQ controllers (else all PV)
-            initRlLimitTypeBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n, ctx->dRlVrow.as<int>(),
-                    ctx->dRlVtarget.as<double>(), dBaseMode.as<int>(), ctx->dX.as<double>(),
-                    ctx->dRlLimitType.as<char>());
+        if (rlStateIn != nullptr && ctx->nrl > 0) {
+            // WARM CONTINUATION (operator strategies stage 2): seed each (controller, scenario)'s
+            // pinned limit type AND switch count from a previous solve's exported state, so the
+            // strategy scenario continues the contingency scenario's outer-loop trajectory exactly
+            // like the CPU's per-contingency action solve does.
+            std::vector<char> lt(static_cast<size_t>(ctx->nrl) * nS), sc(static_cast<size_t>(ctx->nrl) * nS);
+            for (size_t k = 0; k < lt.size(); k++) {
+                lt[k] = static_cast<char>(rlStateIn[k] & 3);
+                sc[k] = static_cast<char>(rlStateIn[k] >> 2);
+            }
+            CUDA_CHECK(cudaMemcpyAsync(ctx->dRlLimitType.p, lt.data(), lt.size(), cudaMemcpyHostToDevice, ctx->stream));
+            CUDA_CHECK(cudaMemcpy(ctx->dRlSwitchCount.p, sc.data(), sc.size(), cudaMemcpyHostToDevice));
+            seedRlModeFromState<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n,
+                    ctx->dRlVrow.as<int>(), ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(),
+                    ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(),
+                    ctx->dMode.as<int>(), ctx->dTarget.as<double>());
+        } else {
+            CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitchCount.p, 0, static_cast<size_t>(ctx->nrl) * nS * sizeof(char), ctx->stream));
+            if (ctx->nrl > 0) {                              // seed the pinned limit for base-PQ controllers (else all PV)
+                initRlLimitTypeBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n, ctx->dRlVrow.as<int>(),
+                        ctx->dRlVtarget.as<double>(), dBaseMode.as<int>(), ctx->dX.as<double>(),
+                        ctx->dRlLimitType.as<char>());
+            }
         }
         if (ctx->nds > 0) {                                  // slack-retained share: 0 until frozen at the first pass
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsRetain.p, 0, nS * sizeof(double), ctx->stream));
@@ -2933,6 +2970,14 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     }   // ---- end sequential outer-loop driver ----
 
+    if (rlStateOut != nullptr && ctx->nrl > 0) {             // export per-(controller, scenario) RL state
+        std::vector<char> lt(static_cast<size_t>(ctx->nrl) * nS), sc(static_cast<size_t>(ctx->nrl) * nS);
+        CUDA_CHECK(cudaMemcpy(lt.data(), ctx->dRlLimitType.p, lt.size(), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(sc.data(), ctx->dRlSwitchCount.p, sc.size(), cudaMemcpyDeviceToHost));
+        for (size_t k = 0; k < lt.size(); k++) {
+            rlStateOut[k] = (lt[k] & 3) | (sc[k] << 2);
+        }
+    }
     CUDA_CHECK(cudaMemcpy(res.x.data(), ctx->dX.p, nTot * sizeof(double), cudaMemcpyDeviceToHost));
     return res;
 }
@@ -3196,8 +3241,19 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jdoubleArray jdsOverrideMaxDelta, jdoubleArray jdsOverrideMinDelta, jint maxIter, jdouble tol,
         jdouble reactiveLimitTol, jdouble slackDistTol, jdouble convEpsPerEq,
         jint lsMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType, jdoubleArray jx0Full,
-        jintArray jShuntOvSlotElem, jdoubleArray jShuntOvGb) {
+        jintArray jShuntOvSlotElem, jdoubleArray jShuntOvGb,
+        jintArray jRlStateIn, jintArray jRlStateOut) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    std::vector<int> rlStateInVec;
+    if (jRlStateIn != nullptr) {
+        jsize rn = env->GetArrayLength(jRlStateIn);
+        rlStateInVec.resize(rn);
+        env->GetIntArrayRegion(jRlStateIn, 0, rn, rlStateInVec.data());
+    }
+    std::vector<int> rlStateOutVec;
+    if (jRlStateOut != nullptr) {
+        rlStateOutVec.resize(env->GetArrayLength(jRlStateOut));
+    }
     std::vector<int> shOvSlotElemVec;
     std::vector<double> shOvGbVec;
     if (jShuntOvSlotElem != nullptr) {
@@ -3300,7 +3356,12 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
                                 x0FullVec.empty() ? nullptr : x0FullVec.data(),
                                 static_cast<int>(shOvSlotElemVec.size() / 2),
                                 shOvSlotElemVec.empty() ? nullptr : shOvSlotElemVec.data(),
-                                shOvGbVec.empty() ? nullptr : shOvGbVec.data());
+                                shOvGbVec.empty() ? nullptr : shOvGbVec.data(),
+                                rlStateInVec.empty() ? nullptr : rlStateInVec.data(),
+                                rlStateOutVec.empty() ? nullptr : rlStateOutVec.data());
+        if (jRlStateOut != nullptr && !rlStateOutVec.empty()) {
+            env->SetIntArrayRegion(jRlStateOut, 0, static_cast<jsize>(rlStateOutVec.size()), rlStateOutVec.data());
+        }
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {

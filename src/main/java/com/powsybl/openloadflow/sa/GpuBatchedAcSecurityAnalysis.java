@@ -103,8 +103,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     private List<PropagatedContingency> currentContingencies = List.of();
     private List<OperatorStrategy> currentOperatorStrategies = List.of();
     private List<Action> currentActions = List.of();
-    /** Separator inside the precomputed-state key of a (contingency, strategy) pair. */
-    private static final char STRATEGY_KEY_SEP = '\u0001';
+    /** Separator inside the precomputed-state key of a (contingency, strategy) pair — the SOLVER's
+     *  constant, which also drives its two-phase warm-continuation ordering. */
+    private static final char STRATEGY_KEY_SEP = GpuBatchedSecurityAnalysisSolver.STRATEGY_KEY_SEP;
     private LfNetwork currentLfNetwork;
     private AcLoadFlowContext currentContext;
     private EquationSystem<AcVariableType, AcEquationType> batchEquationSystem;
@@ -585,9 +586,11 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 double dP = la.isRelativeValue() ? -newP : load.getP0() - newP;   // LoadLoss.p = load REMOVED (pu)
                 loads.add(new GpuBatchedSecurityAnalysisSolver.LoadLoss(bus, dP / PerUnit.SB, 0));
             } else if (a instanceof com.powsybl.action.GeneratorAction) {
-                // OUT of stage-1 scope: the redispatch-as-injection-delta encoding showed a B2
-                // voltage divergence vs the CPU on ieee14 (device state near-insensitive to the
-                // delta — under investigation); such strategies stay on the CPU path.
+                // STILL out of scope after stage 2a (warm continuation): B2 parity narrowed the
+                // cause to the RL PIN-TARGET semantics — the CPU freezes the switched bus's Q at
+                // its switch-time value, the device pins exactly at the limit; the redispatch
+                // perturbs a pinned controller and exposes the difference (~0.17 kV). Needs the
+                // device RL pass to freeze at the evaluated q (or export/import pinned targets).
                 return null;
             } else {
                 return null;                                 // out of stage-1 scope — CPU per-strategy path

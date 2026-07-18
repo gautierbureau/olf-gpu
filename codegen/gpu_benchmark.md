@@ -968,3 +968,25 @@ count asserts BOTH the ctg and the pair batched; strategy result status/violatio
 REMAINDER for stage 2: GeneratorAction parity investigation, violation-conditioned strategies
 (two-phase: collect triggered pairs in the engine loop -> one deferred batch -> results),
 tap/PST/shunt-position actions, base-open closes (extractor packs disconnected elements).
+
+## 2026-07-18 — Operator strategies STAGE 2a: WARM CONTINUATION (two-phase pairs + RL state transfer)
+
+The execution model now matches the CPU's semantics: solveQualifiedInChunks runs TWO PHASES —
+plain contingencies first (exporting each scenario's reactive-limits state: limitType +
+switchCount packed per (controller, scenario)), then (ctg, strategy) PAIR chunks seeded with
+x0PerScenario = the PARENT contingency's solved state AND rlStateIn = its final RL pinning.
+A reconcile kernel (seedRlModeFromState) applies the seeded pinning's CONSEQUENCES — BUS_V row
+to mode 1 with the pinned Q target — without which the solve holds the PV setpoint while the RL
+bookkeeping thinks the bus is pinned (measured: B2 at exactly 141.075 = its setpoint).
+Pairs whose parent did not converge are dropped to the CPU path. Padding slots seed from a
+host-computed base RL state (mirrors initRlLimitTypeBatch).
+
+GeneratorAction: still CPU — but the warm continuation NARROWED the root cause to the RL
+PIN-TARGET semantics: the CPU freezes a switched bus's Q at its SWITCH-TIME value, the device
+pins exactly AT THE LIMIT; a redispatch perturbing a pinned controller exposes the ~0.17 kV
+difference. Fix identified for stage 2b: device RL freeze-at-evaluated-q (or pinned-target
+export/import). Violation-conditioned strategies remain stage 2b (collect triggered pairs in
+the engine loop -> deferred warm batch — ALL plumbing for it now exists).
+
+All 15 SA tests green (strategy result == CPU at 0.05 kV, pair precompute asserted);
+production bench parity unchanged (22/6; GPU warm 12.2 s ≈ CPU-4t).

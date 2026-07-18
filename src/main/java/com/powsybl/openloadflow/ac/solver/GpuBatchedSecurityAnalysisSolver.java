@@ -291,6 +291,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
      *  the per-scenario element mask), a single generator loss ({@code lostGenerator}, applied as a per-scenario
      *  target override), or one+ fixed-shunt disconnections ({@code outagedShunts}, disabled in the element
      *  mask like branches). */
+    /** Separator inside a (contingency, strategy) pair's BatchContingency id — pairs are solved in a
+     *  SECOND phase, WARM-CONTINUED from their parent contingency's state and reactive-limits pinning. */
+    public static final char STRATEGY_KEY_SEP = '\u0001';
+
     /** A lost load's per-bus injection deltas (pu): removing it RAISES the bus P/Q targets. */
     public record LoadLoss(LfBus bus, double p, double q) {
     }
@@ -1034,7 +1038,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
                     parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                     batchLsMode, batchMaxDv, batchMaxDphi,
-                    batchLsMode == 2 ? varType : null, x0Full, null, null);
+                    batchLsMode == 2 ? varType : null, x0Full, null, null, null, null);
             for (int slot : affected) {
                 chunkResults[slot] = r2[slot];
             }
@@ -1124,10 +1128,35 @@ public final class GpuBatchedSecurityAnalysisSolver {
         double[] dsOvBaseDelta = hasDs ? new double[chunkSize] : new double[0];
         double[] dsOvMaxDelta = hasDs ? new double[chunkSize] : new double[0];
         double[] dsOvMinDelta = hasDs ? new double[chunkSize] : new double[0];
+        // TWO-PHASE ordering (operator strategies, warm continuation): plain contingencies first,
+        // then (ctg, strategy) PAIRS — each pair chunk is seeded with its PARENT contingency's
+        // solved state (x0PerScenario) and reactive-limits pinning (rlStateIn), so the strategy
+        // solve continues the contingency's outer-loop trajectory exactly like the CPU's
+        // per-contingency action solve. Pair whose parent did not converge is dropped (CPU path).
+        List<Integer> ctgIdxList = new ArrayList<>();
+        List<Integer> pairIdxList = new ArrayList<>();
+        for (int idx : batchedIndices) {
+            (contingencies.get(idx).contingencyId().indexOf(STRATEGY_KEY_SEP) >= 0 ? pairIdxList : ctgIdxList).add(idx);
+        }
+        java.util.Map<String, Integer> indexById = new java.util.HashMap<>();
+        for (int i = 0; i < contingencies.size(); i++) {
+            indexById.put(contingencies.get(i).contingencyId(), i);
+        }
+        int nrl = gpuData.rlVrow().length;
+        java.util.Map<Integer, int[]> rlByIndex = new java.util.HashMap<>();    // ctg index -> its nrl RL-state slice
+        // Host-side base RL seed (mirrors initRlLimitTypeBatch) for PADDING slots of pair chunks.
+        int[] baseRlSeed = new int[nrl];
+        for (int i = 0; i < nrl; i++) {
+            int vrow = gpuData.rlVrow()[i];
+            baseRlSeed[i] = baseRowMode[vrow] == 1 ? (baseState[vrow] < gpuData.rlVtarget()[i] ? 2 : 1) : 0;
+        }
         try {
             long startTime = System.currentTimeMillis();
-            for (int chunkStart = 0; chunkStart < nb; chunkStart += chunkSize) {
-                int realCount = Math.min(chunkSize, nb - chunkStart);
+            for (List<Integer> group : List.of(ctgIdxList, pairIdxList)) {
+            boolean pairPhase = group == pairIdxList;
+            int nbg = group.size();
+            for (int chunkStart = 0; chunkStart < nbg; chunkStart += chunkSize) {
+                int realCount = Math.min(chunkSize, nbg - chunkStart);
                 ovIndexList.clear();
                 ovValueList.clear();
                 shOvSlotElemList.clear();
@@ -1148,7 +1177,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     }
                     rowModePerScenario[s] = baseRowMode;     // default: base layout (padding + non-fragmenting)
                     if (s < realCount) {                 // real scenario: disable its outaged branch(es)
-                        int ci = batchedIndices.get(chunkStart + s);
+                        int ci = group.get(chunkStart + s);
                         List<LfBranch> branches = contingencies.get(ci).outagedBranches();
                         List<LfShunt> shunts = contingencies.get(ci).outagedShunts();
                         int[] eis = new int[branches.size() + shunts.size()];
@@ -1211,14 +1240,49 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 }
                 int[] targetOverrideIndex = ovIndexList.stream().mapToInt(Integer::intValue).toArray();
                 double[] targetOverrideValue = ovValueList.stream().mapToDouble(Double::doubleValue).toArray();
+                // Pair phase: warm continuation from each parent contingency's state + RL pinning.
+                double[] x0Full = null;
+                int[] rlStateIn = null;
+                if (pairPhase) {
+                    x0Full = new double[chunkSize * n];
+                    rlStateIn = nrl > 0 ? new int[chunkSize * nrl] : null;
+                    for (int s = 0; s < chunkSize; s++) {
+                        double[] parent = null;
+                        int[] parentRl = null;
+                        if (s < realCount) {
+                            String pairId = contingencies.get(group.get(chunkStart + s)).contingencyId();
+                            Integer pIdx = indexById.get(pairId.substring(0, pairId.indexOf(STRATEGY_KEY_SEP)));
+                            if (pIdx != null && resultsByIndex[pIdx] != null
+                                    && (int) resultsByIndex[pIdx][n + 2] == STATUS_CONVERGED) {
+                                parent = resultsByIndex[pIdx];
+                                parentRl = rlByIndex.get(pIdx);
+                            }
+                        }
+                        for (int i = 0; i < n; i++) {
+                            x0Full[s * n + i] = parent != null ? parent[i] : baseState[i];
+                        }
+                        if (rlStateIn != null) {
+                            System.arraycopy(parentRl != null ? parentRl : baseRlSeed, 0, rlStateIn, s * nrl, nrl);
+                        }
+                    }
+                }
+                int[] rlStateOut = !pairPhase && !pairIdxList.isEmpty() && nrl > 0 ? new int[chunkSize * nrl] : null;
                 double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                         rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
                         dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
                         parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                         batchLsMode, batchMaxDv, batchMaxDphi,
-                        batchLsMode == 2 ? varType : null, null,
+                        batchLsMode == 2 ? varType : null, x0Full,
                         shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                        shOvGbList.stream().mapToDouble(Double::doubleValue).toArray());
+                        shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                        rlStateIn, rlStateOut);
+                if (rlStateOut != null) {                    // capture each ctg's final RL pinning for its pairs
+                    for (int s = 0; s < realCount; s++) {
+                        int[] slice = new int[nrl];
+                        System.arraycopy(rlStateOut, s * nrl, slice, 0, nrl);
+                        rlByIndex.put(group.get(chunkStart + s), slice);
+                    }
+                }
                 if (transformerControllers != null && !transformerControllers.isEmpty()) {
                     chunkResults = orchestrateTransformerControl(handle, chunkSize, realCount, n,
                             chunkResults, transformerControllers, rowModePerScenario, baseRowMode, disabledMask,
@@ -1227,8 +1291,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
                             baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, varType);
                 }
                 for (int s = 0; s < realCount; s++) {
-                    resultsByIndex[batchedIndices.get(chunkStart + s)] = chunkResults[s];
+                    resultsByIndex[group.get(chunkStart + s)] = chunkResults[s];
                 }
+            }
             }
             long elapsed = System.currentTimeMillis() - startTime;
             LOGGER.info("Batched N-1: {} GPU scenarios in {} chunk(s) of <= {} solved in {} ms ({} ms/scenario)",

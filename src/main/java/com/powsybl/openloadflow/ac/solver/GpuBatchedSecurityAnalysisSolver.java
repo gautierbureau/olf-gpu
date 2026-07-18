@@ -76,6 +76,21 @@ public final class GpuBatchedSecurityAnalysisSolver {
         batchTransformerControl = enabled;
     }
 
+    private static volatile int batchMaxOuterIterations;     // 0 = device default (20, OLF's default)
+    private static volatile int batchMaxPqPvSwitch;          // 0 = device default (3)
+    private static volatile int batchDsRejectResidual;       // 1 = saturated-DS residual rejects the scenario to CPU
+
+    /** Wires the run's outer-loop parameterization into the device loops (the provider calls this
+     *  from the resolved parameters): OLF's maxOuterLoopIterations and reactiveLimitsMaxPqPvSwitch
+     *  replace the device constants, and a slackDistributionFailureBehavior other than
+     *  LEAVE_ON_SLACK_BUS makes a saturated distribution REJECT the scenario (CPU fallback replays
+     *  it with the real behavior) instead of silently leaving the residual at the slack. */
+    public static void setOuterLoopParams(int maxOuterIterations, int maxPqPvSwitch, boolean dsRejectResidual) {
+        batchMaxOuterIterations = maxOuterIterations;
+        batchMaxPqPvSwitch = maxPqPvSwitch;
+        batchDsRejectResidual = dsRejectResidual ? 1 : 0;
+    }
+
     /** One voltage-controlling transformer, precomputed for the per-scenario orchestrator:
      *  rho row (== r1 col, self-paired), controlled-bus V col, target/deadband, continuous r1
      *  range, discrete tap r1 values, its element index (per-scenario outage check), and the
@@ -1080,7 +1095,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
                     parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                     batchLsMode, batchMaxDv, batchMaxDphi,
-                    batchLsMode == 2 ? varType : null, x0Full, null, null, null, null, null, null);
+                    batchLsMode == 2 ? varType : null, x0Full, null, null, null, null, null, null,
+                    batchMaxOuterIterations, batchMaxPqPvSwitch, batchDsRejectResidual);
             for (int slot : affected) {
                 chunkResults[slot] = r2[slot];
             }
@@ -1330,7 +1346,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
                         rlStateIn, rlStateOut,
                         r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                        r1OvValList.stream().mapToDouble(Double::doubleValue).toArray());
+                        r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                        batchMaxOuterIterations, batchMaxPqPvSwitch, batchDsRejectResidual);
                 if (rlStateOut != null) {                    // capture each ctg's final RL pinning for its pairs
                     for (int s = 0; s < realCount; s++) {
                         int[] slice = new int[nrl];

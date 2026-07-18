@@ -1901,7 +1901,7 @@ __global__ void distributeSlackWaterfillBatch(int nds, int nScenarios, int n, do
                                               const double* qBuf, const char* rlActive,
                                               const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
                                               const double* dsOvMaxDelta, const double* dsOvMinDelta,
-                                              double* target, char* switched) {
+                                              double* target, char* switched, char* dsResidual) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     if (!rlActive[s]) return;
@@ -1949,6 +1949,9 @@ __global__ void distributeSlackWaterfillBatch(int nds, int nScenarios, int n, do
     if (changed) {
         switched[s] = 1;
     }
+    if (fabs(rem) > slackDistTol) {
+        dsResidual[s] = 1;                                   // saturated: residual stays at the slack — the host
+    }                                                        // decides per the run's slackDistributionFailureBehavior
 }
 
 __global__ void negateIntoOne(int n, const double* F, double* b) {       // single scenario slice
@@ -2175,7 +2178,8 @@ struct BatchSolverContext {
     DeviceBuf dDsPhiRow, dDsFactor;                        // per participating bus (nds)
     DeviceBuf dDsBaseTargetP, dDsMaxDelta, dDsMinDelta;   // per participating bus (nds): base P target + headroom/footroom
     double dsFactorSum = 1.0;                              // Σ emitted factors (< 1 ⇒ slack participates, keeps 1−Σ)
-    DeviceBuf dDsRetain;                                   // per scenario (nS): frozen slack-retained mismatch share
+    DeviceBuf dDsRetain;
+    DeviceBuf dDsResidual;                                   // nS chars: waterfill left an out-of-tolerance residual                                   // per scenario (nS): frozen slack-retained mismatch share
     CudssCtx ds;
     bool analyzed = false;
     bool factored = false;                                   // first FACTORIZATION done (mode 2: then REFACTORIZE)
@@ -2437,7 +2441,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               int lsMode, double maxDv, double maxDphi, const int* varType,
                               const double* x0Full, int nShOv, const int* shOvSlotElem, const double* shOvGb,
                               const int* rlStateIn, int* rlStateOut,
-                              int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal) {
+                              int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                              int maxOuterProductive, int rlMaxSwitch, int dsRejectResidual) {
     int n = ctx->n;
     int nnz = ctx->nnz;
     int nS = ctx->nScenarios;
@@ -2553,8 +2558,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // repeat until a pass switches nothing. Fixed-iter mode (tol <= 0, the throughput benchmark) and
     // family-free networks with no controllers do ONE pass (no outer loop) — byte-identical to before.
     bool fullLoadflow = !deviceFixedIter && (ctx->nrl > 0 || ctx->nds > 0);
-    const int RL_MAX_OUTER = 20;
-    const int RL_MAX_SWITCH = 3;                            // per-bus PV→PQ count cap (OLF maxPqPvSwitch)
+    const int RL_MAX_OUTER = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
+    const int RL_MAX_SWITCH = rlMaxSwitch > 0 ? rlMaxSwitch : 3;   // per-bus PV→PQ count cap (OLF maxPqPvSwitch)
     // Outer-loop convergence tolerances (pu) — passed in so the device uses the SAME criteria as the CPU
     // loadflow that built the base case (maxReactivePowerMismatch / slackBusPMaxMismatch, per-unitized), NOT
     // hardcoded constants. With matching parameters and the same equations the GPU outer-loop fixed point
@@ -2964,6 +2969,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     1.0 - ctx->dsFactorSum, ctx->dDsPhiRow.as<int>(), ctx->dDsBaseTargetP.as<double>(),
                     ctx->dTarget.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
                     ctx->dDsRetain.as<double>());
+            if (!ctx->dDsResidual.p) ctx->dDsResidual.alloc(nS * sizeof(char));
+            CUDA_CHECK(cudaMemsetAsync(ctx->dDsResidual.p, 0, nS * sizeof(char), ctx->stream));
             distributeSlackWaterfillBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nds, nS, n, SLACK_DIST_TOL, P_RESIDUE_EPS,
                     ctx->dsSlackPhiRow, ctx->dsSlackTargetP, ctx->dDsPhiRow.as<int>(),
                     ctx->dDsFactor.as<double>(), ctx->dDsBaseTargetP.as<double>(),
@@ -2971,7 +2978,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
                     hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvFactorDelta.as<double>(),
                     dDsOvBaseDelta.as<double>(), dDsOvMaxDelta.as<double>(), dDsOvMinDelta.as<double>(),
-                    ctx->dTarget.as<double>(), ctx->dRlSwitched.as<char>());
+                    ctx->dTarget.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>());
         }
     } else {                                               // reactive-limits outer loop: switch PV->PQ over Q limit
         if (ctx->nrl > 0) {
@@ -2984,6 +2991,21 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     CUDA_CHECK(cudaMemcpy(rlSwitched.data(), ctx->dRlSwitched.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
+    if (inDsPhase && ctx->nds > 0 && dsRejectResidual) {
+        // slackDistributionFailureBehavior != LEAVE_ON_SLACK_BUS: a scenario whose participants all
+        // saturated must NOT be reported converged with the residual absorbed at the slack — route it
+        // to the CPU fallback (status -2), which replays it with the run's real failure behavior.
+        std::vector<char> dsResidual(nS);
+        CUDA_CHECK(cudaMemcpy(dsResidual.data(), ctx->dDsResidual.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
+        for (int s = 0; s < nS; s++) {
+            if (dsResidual[s] && live[s]) {
+                res.status[s] = -2;
+                active[s] = 0;
+                live[s] = 0;
+                rlSwitched[s] = 0;
+            }
+        }
+    }
     int nChanged = 0;
     for (int s = 0; s < nS; s++) {
         if (rlSwitched[s]) {
@@ -3287,7 +3309,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jint lsMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType, jdoubleArray jx0Full,
         jintArray jShuntOvSlotElem, jdoubleArray jShuntOvGb,
         jintArray jRlStateIn, jintArray jRlStateOut,
-        jintArray jR1OvSlotElem, jdoubleArray jR1OvVal) {
+        jintArray jR1OvSlotElem, jdoubleArray jR1OvVal,
+        jint maxOuterProductive, jint rlMaxSwitch, jint dsRejectResidual) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     std::vector<int> r1OvSlotElemVec;
     std::vector<double> r1OvValVec;
@@ -3415,7 +3438,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
                                 rlStateOutVec.empty() ? nullptr : rlStateOutVec.data(),
                                 static_cast<int>(r1OvSlotElemVec.size() / 2),
                                 r1OvSlotElemVec.empty() ? nullptr : r1OvSlotElemVec.data(),
-                                r1OvValVec.empty() ? nullptr : r1OvValVec.data());
+                                r1OvValVec.empty() ? nullptr : r1OvValVec.data(),
+                                maxOuterProductive, rlMaxSwitch, dsRejectResidual);
         if (jRlStateOut != nullptr && !rlStateOutVec.empty()) {
             env->SetIntArrayRegion(jRlStateOut, 0, static_cast<jsize>(rlStateOutVec.size()), rlStateOutVec.data());
         }

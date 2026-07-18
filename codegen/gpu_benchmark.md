@@ -1057,3 +1057,22 @@ production bench parity unchanged (22/6; GPU warm 12.2 s ≈ CPU-4t).
   6 GB card. `GpuBatchedN1CrossCheckTest` keeps its deliberate mode-0 default (serial cross-check
   is its point). Caveat preserved in-comment: explicit OLF_GPU_BATCHMODE=1 without a chunk cap
   can still over-commit device memory at 9241 (mode 1's memory model is not auto-size-aware).
+
+## 2026-07-18 (4) — corner-case mine → guard + parameter wiring (violation diff 22→20)
+- Deep mine for docs/gpu-vs-cpu-capabilities.md Part II (3 parallel line-level reads:
+  extractor envelope, stock OLF outer-loop semantics, device ports) surfaced safety-contract
+  gaps: the device DS loop hardcoded P_MAX weights, LEAVE_ON_SLACK_BUS-only failure handling,
+  RL_MAX_SWITCH=3, RL_MAX_OUTER=20 — regardless of the run's parameters. The RTE production
+  JSON actually uses slackDistributionFailureBehavior=FAIL and maxOuterLoopIterations=30.
+- Fixes: (a) guard — balanceType ≠ P_MAX or useActiveLimits=false (with DS active) now
+  fall back whole-run; (b) wiring — maxOuterLoopIterations and reactiveLimitsMaxPqPvSwitch
+  passed through solveBatchContext (3 new trailing ints) into the device caps; (c) DS
+  saturation — waterfill exports a per-scenario residual flag; when the failure behavior is
+  not LEAVE_ON_SLACK_BUS the host rejects the scenario (status −2 → CPU fallback replays
+  with the real FAIL/THROW semantics) instead of silently absorbing at the slack.
+- Effect at RTE params (9241×500): wiring 30 outer iterations (was 20) shrank the violation
+  diff 22 (6 ctg) → 20 (5 ctg) — two more contingencies now match CPU exactly. Cost: warm
+  12.1 s → 13.4–13.9 s (x0.85 vs CPU-4t; stragglers churn longer before their caps).
+  Correctness-first per the project contract; straggler exit still bounds the tail.
+  Cold 15.2–15.3 s. Fixed-iter bench unaffected (4.25 ms/scn, 499/500, cold E2E 7.2 warm-driver).
+- 17/17 SA tests green. Numbers now also tracked in docs/numbers.md (global tracker).

@@ -175,14 +175,36 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         boolean noSvc = lfNetwork.getBuses().stream()
                 .flatMap(b -> b.getGenerators().stream())
                 .noneMatch(g -> g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator);
-        List<String> unsupportedOuterLoops = acParameters.getOuterLoops().stream()
+        List<String> unsupportedOuterLoops = new java.util.ArrayList<>(acParameters.getOuterLoops().stream()
                 .map(ol -> ol.getName())
                 .filter(name -> !DistributedSlackOuterLoop.NAME.equals(name)
                         && !ReactiveLimitsOuterLoop.NAME.equals(name)
                         && !(transformerControlBatchable && "TransformerVoltageControl".equals(name))
                         && !(noHvdc && ("AcHvdcAcEmulationLimits".equals(name) || "FreezingHvdcACEmulation".equals(name)))
                         && !(noSvc && "VoltageMonitoring".equals(name)))
-                .toList();
+                .toList());
+        // Parameterization corner cases the device DS loop does not model (see
+        // docs/gpu-vs-cpu-capabilities.md Part II §A): the device weights are always maxP/droop with
+        // active limits — any other balance type or unlimited distribution must fall back whole-run.
+        boolean dsLoopActive = acParameters.getOuterLoops().stream()
+                .anyMatch(ol -> DistributedSlackOuterLoop.NAME.equals(ol.getName()));
+        com.powsybl.loadflow.LoadFlowParameters lfGuardParams = securityAnalysisParameters.getLoadFlowParameters();
+        if (dsLoopActive && lfGuardParams.getBalanceType()
+                != com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P_MAX) {
+            unsupportedOuterLoops.add("DistributedSlack[balanceType=" + lfGuardParams.getBalanceType() + "]");
+        }
+        if (dsLoopActive && !olfGuardParams.isUseActiveLimits()) {
+            unsupportedOuterLoops.add("DistributedSlack[useActiveLimits=false]");
+        }
+        // Parameterization the device loops DO model — wire the run's values in place of the
+        // device defaults (maxOuterLoopIterations, reactiveLimitsMaxPqPvSwitch), and make a
+        // saturated slack distribution reject its scenario to the CPU fallback whenever the
+        // failure behavior is not LEAVE_ON_SLACK_BUS (e.g. RTE production uses FAIL).
+        GpuBatchedSecurityAnalysisSolver.setOuterLoopParams(
+                olfGuardParams.getMaxOuterLoopIterations(),
+                olfGuardParams.getReactiveLimitsMaxPqPvSwitch(),
+                olfGuardParams.getSlackDistributionFailureBehavior()
+                        != com.powsybl.openloadflow.OpenLoadFlowParameters.SlackDistributionFailureBehavior.LEAVE_ON_SLACK_BUS);
         boolean batchDisabled = !unsupportedOuterLoops.isEmpty();
         if (batchDisabled) {
             LOGGER.info("GPU batched SA: outer loops {} are not implemented in the batched device path — "

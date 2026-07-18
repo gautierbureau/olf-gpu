@@ -106,8 +106,8 @@ the stock CPU path (base + contingencies + strategies), logged.
 
 | Outer loop (CPU OLF name) | Batched | Notes |
 |---|---|---|
-| DistributedSlack | 🔶 | P_MAX balance type only; water-filling with saturation + re-normalization matches CPU; residual-at-slack ≈ LEAVE_ON_SLACK_BUS only. §A |
-| ReactiveLimits | 🔶 | PV→PQ + PQ→PV back-switch + 3-switch cap match CPU; deltas: no keep-strongest-PV guard, curve limits frozen at base P, no robust-mode realistic-V forcing. §B |
+| DistributedSlack | 🔶 | P_MAX balance type only (others guarded → ⏩); water-filling with saturation + re-normalization matches CPU; failure behavior ≠ LEAVE_ON_SLACK_BUS handled via scenario rejection → CPU. §A |
+| ReactiveLimits | 🔶 | PV→PQ + PQ→PV back-switch + run's maxPqPvSwitch cap match CPU; deltas: no keep-strongest-PV guard, curve limits frozen at base P, no robust-mode realistic-V forcing. §B |
 | TransformerVoltageControl | 🔶 | AFTER_GENERATOR mode, only when the generator-freeze stage is structurally unnecessary (`transformerControlSupported`); per-controller (no shared-group ratio manager). §C |
 | AcHvdcAcEmulationLimits, FreezingHvdcACEmulation | 🔶 | tolerated as structural no-ops when the network has **no HVDC**; otherwise ⏩ |
 | VoltageMonitoring | 🔶 | tolerated when **no SVC**; otherwise ⏩ |

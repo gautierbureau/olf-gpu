@@ -185,3 +185,8 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
   (2) on a FAILED base LF the GPU provider reported pre-contingency CONVERGED and
   still produced post-contingency results; (3) violation-count drift vs CPU (~2.8%,
   13,412 vs 13,791) to investigate.
+
+- Violation-reporting flicker: powsybl's ZERO-default voltage thresholds + OLF's
+  `min(abs, value*prop)` semantics re-report pre-existing violations on ulp-level drift —
+  see `docs/increased-violations-thresholds.md` (upstream question + the thresholds every
+  SA comparison here must set). Measured: 6,137 phantom diffs on identical states.

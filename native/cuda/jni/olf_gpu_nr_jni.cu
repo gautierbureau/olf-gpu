@@ -1324,17 +1324,24 @@ __device__ inline void closedBranchTrig(const double* t, bool a1FromState, doubl
     cosTheta2 = t[5] * cosd + t[4] * sind;
 }
 
-// Per-scenario closed-branch RATIO override (tap actions on FIXED-ratio transformers): entries
-// are (slot, cb elem) with an ABSOLUTE r1 replacing the static input p[6]. Java guards that the
-// branch's ratio is NOT a state variable (r1col == -1), so the state path never conflicts.
-__device__ inline double applyR1Override(int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                                         int s, int e, double r1) {
-    for (int k = 0; k < nR1Ov; k++) {
-        if (r1OvSlotElem[2 * k] == s && r1OvSlotElem[2 * k + 1] == e) {
-            return r1OvVal[k];
+// Per-scenario closed-branch TAP override (tap/PST actions on FIXED-tap transformers): entries
+// are (slot, cb elem) with the target tap's FULL static row (y g1 g2 b1 b2 ksi r1 a1)
+// replacing the element's cbIn row — per-tap r/x/g/b changes are first-class (y/ksi move).
+// Java guards that the branch's ratio/phase are NOT state variables (r1col/a1col == -1), so
+// the state path never conflicts. An override invalidates the element's precomputed trig
+// statics (ksi/a1 may differ) — the caller must take the raw-sincos path (same fallback as
+// a state-variable a1). Returns true when out8 holds the replacement row.
+__device__ inline bool findTapOverride(int nTapOv, const int* tapOvSlotElem, const double* tapOvVal,
+                                       int s, int e, double* out8) {
+    for (int k = 0; k < nTapOv; k++) {
+        if (tapOvSlotElem[2 * k] == s && tapOvSlotElem[2 * k + 1] == e) {
+            for (int c = 0; c < 8; c++) {
+                out8[c] = tapOvVal[8 * k + c];
+            }
+            return true;
         }
     }
-    return r1;
+    return false;
 }
 
 __global__ void fillClosedBranchBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
@@ -1349,9 +1356,13 @@ __global__ void fillClosedBranchBatch(int ne, int nScenarios, int n, int nnz, in
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
     const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
     const int* q = ix + e * 10;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
+    double pOv[8];
+    if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) {
+        p = pOv;
+    }
     const double* xs = x + s * n;
     double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
-    double r1 = q[9] >= 0 ? xs[q[9]] : applyR1Override(nR1Ov, r1OvSlotElem, r1OvVal, s, e, p[6]);
+    double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
     double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
     // The FUSED fill is atomic/memory-bound on its 28 scattered outputs (measured:
     // routing it through the precomputed-trig buffer made it SLOWER, 81 -> 100 ms —
@@ -1483,9 +1494,14 @@ __global__ void fillClosedBranchBatchF(int ne, int nScenarios, int n, int nnz, i
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
     const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
     const int* q = ix + e * 10;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
+    double pOv[8];
+    bool tapOv = findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv);
+    if (tapOv) {
+        p = pOv;
+    }
     const double* xs = x + s * n;
     double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
-    double r1 = q[9] >= 0 ? xs[q[9]] : applyR1Override(nR1Ov, r1OvSlotElem, r1OvVal, s, e, p[6]);
+    double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
     double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
     double sinKsi;
     double cosKsi;
@@ -1493,7 +1509,7 @@ __global__ void fillClosedBranchBatchF(int ne, int nScenarios, int n, int nnz, i
     double cosTheta1;
     double sinTheta2;
     double cosTheta2;
-    closedBranchTrig(trig + e * 6, q[8] >= 0, p[5], a1, ph1, ph2,
+    closedBranchTrig(trig + e * 6, q[8] >= 0 || tapOv, p[5], a1, ph1, ph2,
                      sinKsi, cosKsi, sinTheta1, cosTheta1, sinTheta2, cosTheta2);
     double o[4];
     evalClosedBranchPreF(p[0], p[1], p[2], p[3], p[4], v1, r1, v2,
@@ -2135,8 +2151,8 @@ struct BatchSolverContext {
     DeviceBuf dNorms;                                        // nS*3 device-side convergence norms (see residualNormsBatch)
     int nShOv = 0;                                           // per-scenario shunt admittance overrides (set per solve)
     DeviceBuf dShOvSlotElem, dShOvGb;                        // nShOv*2 ints (slot, PACK elem) / nShOv*2 doubles (dG, dB)
-    int nR1Ov = 0;                                           // per-scenario closed-branch ratio overrides (tap actions)
-    DeviceBuf dR1OvSlotElem, dR1OvVal;                       // nR1Ov*2 ints / nR1Ov doubles (absolute r1)
+    int nR1Ov = 0;                                           // per-scenario closed-branch tap overrides (tap/PST actions)
+    DeviceBuf dR1OvSlotElem, dR1OvVal;                       // nR1Ov*2 ints / nR1Ov*8 doubles (full cbIn row per entry)
     // ---- solve-only batch compaction (mode 3, tol > 0): lazily allocated on first engage ----
     DeviceBuf dValsC, dBC, dDxC, dMapC;                      // nnz*cap / n*cap / n*cap / cap ints
     CudssCtx dsC;                                            // dedicated handle/config/data for the compact width
@@ -2451,7 +2467,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     ctx->nR1Ov = nR1Ov;
     if (nR1Ov > 0) {
         ctx->dR1OvSlotElem.upload(r1OvSlotElem, static_cast<size_t>(nR1Ov) * 2 * sizeof(int));
-        ctx->dR1OvVal.upload(r1OvVal, static_cast<size_t>(nR1Ov) * sizeof(double));
+        ctx->dR1OvVal.upload(r1OvVal, static_cast<size_t>(nR1Ov) * 8 * sizeof(double));
     } else if (!ctx->dR1OvSlotElem.p) {
         int dummyI[2] = {-1, -1};
         double dummyD[1] = {0};
@@ -3279,8 +3295,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jsize rn = env->GetArrayLength(jR1OvSlotElem);
         r1OvSlotElemVec.resize(rn);
         env->GetIntArrayRegion(jR1OvSlotElem, 0, rn, r1OvSlotElemVec.data());
-        r1OvValVec.resize(rn / 2);
-        env->GetDoubleArrayRegion(jR1OvVal, 0, rn / 2, r1OvValVec.data());
+        r1OvValVec.resize(static_cast<size_t>(rn) * 4);      // full 8-double cbIn row per (slot, elem) entry
+        env->GetDoubleArrayRegion(jR1OvVal, 0, rn * 4, r1OvValVec.data());
     }
     std::vector<int> rlStateInVec;
     if (jRlStateIn != nullptr) {

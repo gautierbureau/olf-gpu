@@ -588,20 +588,23 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 double dP = la.isRelativeValue() ? -newP : load.getP0() - newP;   // LoadLoss.p = load REMOVED (pu)
                 loads.add(new GpuBatchedSecurityAnalysisSolver.LoadLoss(bus, dP / PerUnit.SB, 0));
             } else if (a instanceof com.powsybl.action.RatioTapChangerTapPositionAction rtca) {
-                LfBranch b = net.getBranchById(rtca.getTransformerId());
-                com.powsybl.iidm.network.TwoWindingsTransformer twt = network.getTwoWindingsTransformer(rtca.getTransformerId());
-                if (b == null || twt == null || twt.getRatioTapChanger() == null) {
+                var tapChanger = network.getTwoWindingsTransformer(rtca.getTransformerId()) != null
+                        ? network.getTwoWindingsTransformer(rtca.getTransformerId()).getRatioTapChanger() : null;
+                GpuBatchedSecurityAnalysisSolver.TapR1Override ov = tapOverride(net, rtca.getTransformerId(),
+                        tapChanger, rtca.isRelativeValue(), rtca.getTapPosition());
+                if (ov == null) {
                     return null;
                 }
-                double[] table = GpuBatchedSecurityAnalysisSolver.tapR1Values(b.getPiModel());
-                int low = twt.getRatioTapChanger().getLowTapPosition();
-                int newPos = rtca.isRelativeValue() ? twt.getRatioTapChanger().getTapPosition() + rtca.getTapPosition()
-                                                    : rtca.getTapPosition();
-                int idx = newPos - low;
-                if (table.length == 0 || idx < 0 || idx >= table.length) {
-                    return null;                             // no tap table / out-of-range position — CPU
+                taps.add(ov);
+            } else if (a instanceof com.powsybl.action.PhaseTapChangerTapPositionAction ptca) {
+                var tapChanger = network.getTwoWindingsTransformer(ptca.getTransformerId()) != null
+                        ? network.getTwoWindingsTransformer(ptca.getTransformerId()).getPhaseTapChanger() : null;
+                GpuBatchedSecurityAnalysisSolver.TapR1Override ov = tapOverride(net, ptca.getTransformerId(),
+                        tapChanger, ptca.isRelativeValue(), ptca.getTapPosition());
+                if (ov == null) {
+                    return null;
                 }
-                taps.add(new GpuBatchedSecurityAnalysisSolver.TapR1Override(b, table[idx]));
+                taps.add(ov);
             } else if (a instanceof com.powsybl.action.ShuntCompensatorPositionAction spa) {
                 com.powsybl.iidm.network.ShuntCompensator sc = network.getShuntCompensator(spa.getShuntCompensatorId());
                 LfShunt shunt = net.getShuntById(spa.getShuntCompensatorId());
@@ -631,6 +634,27 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         }
         return new BatchContingency(contingencyId + STRATEGY_KEY_SEP + strategy.getId(),
                 branches, ctgGens, loads, shifts, taps, List.of());
+    }
+
+
+    /** Compiles a tap-position action (RTC or PST) into a per-scenario full-row override — the
+     *  target tap's [y, g1, g2, b1, b2, ksi, r1, a1] replaces the branch's static inputs, so
+     *  per-tap impedance changes are covered. Null when out of batch scope: unknown transformer /
+     *  tap changer, no tap table, or out-of-range position. */
+    private static GpuBatchedSecurityAnalysisSolver.TapR1Override tapOverride(LfNetwork net, String transformerId,
+                                                                              com.powsybl.iidm.network.TapChanger<?, ?, ?, ?> tapChanger,
+                                                                              boolean relative, int tapPosition) {
+        LfBranch b = net.getBranchById(transformerId);
+        if (b == null || tapChanger == null) {
+            return null;
+        }
+        double[][] table = GpuBatchedSecurityAnalysisSolver.tapModels(b.getPiModel());
+        int low = tapChanger.getLowTapPosition();
+        int idx = (relative ? tapChanger.getTapPosition() + tapPosition : tapPosition) - low;
+        if (table.length == 0 || idx < 0 || idx >= table.length) {
+            return null;                                     // no tap table / out-of-range position — CPU
+        }
+        return new GpuBatchedSecurityAnalysisSolver.TapR1Override(b, table[idx]);
     }
 
     /** The contingency's shunt admittance shifts (pu deltas, negated: the propagation's shift is the

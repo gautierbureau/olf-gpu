@@ -179,21 +179,37 @@ public final class GpuBatchedSecurityAnalysisSolver {
     /** Discrete tap r1 values, snapshotted read-only (reflection on PiModelArray.models; an
      *  inaccessible or non-array model yields an empty table = keep the continuous ratio). */
     public static double[] tapR1Values(Object piModel) {
+        double[][] models = tapModels(piModel);
+        double[] taps = new double[models.length];
+        for (int i = 0; i < models.length; i++) {
+            taps[i] = models[i][6];
+        }
+        return taps;
+    }
+
+    /** Full per-tap static branch rows, snapshotted read-only via reflection on
+     *  PiModelArray.models: one row [y, g1, g2, b1, b2, ksi, r1, a1] per tap position — the
+     *  EXACT cbIn packing, so a tap/PST action's override is the target row verbatim (empty
+     *  when not a tap array or inaccessible). */
+    public static double[][] tapModels(Object piModel) {
         try {
             if (!"PiModelArray".equals(piModel.getClass().getSimpleName())) {
-                return new double[0];
+                return new double[0][];
             }
             java.lang.reflect.Field f = piModel.getClass().getDeclaredField("models");
             f.setAccessible(true);
             List<?> models = (List<?>) f.get(piModel);
-            double[] taps = new double[models.size()];
+            String[] getters = {"getY", "getG1", "getG2", "getB1", "getB2", "getKsi", "getR1", "getA1"};
+            double[][] taps = new double[models.size()][getters.length];
             for (int i = 0; i < models.size(); i++) {
-                taps[i] = (double) models.get(i).getClass().getMethod("getR1").invoke(models.get(i));
+                for (int g = 0; g < getters.length; g++) {
+                    taps[i][g] = (double) models.get(i).getClass().getMethod(getters[g]).invoke(models.get(i));
+                }
             }
             return taps;
         } catch (ReflectiveOperationException | RuntimeException e) {
             LOGGER.info("Transformer tap table not accessible ({}) — continuous ratios will not be rounded", e.toString());
-            return new double[0];
+            return new double[0][];
         }
     }
 
@@ -307,7 +323,11 @@ public final class GpuBatchedSecurityAnalysisSolver {
     /** A per-scenario RATIO override for a FIXED-tap transformer (tap-position actions): the
      *  ABSOLUTE r1 replacing the packed static ratio. Guarded to branches whose ratio is NOT a
      *  state variable (voltage-controlled transformers route their tap changes elsewhere). */
-    public record TapR1Override(LfBranch branch, double r1) {
+    /** The target tap's full static branch row [y, g1, g2, b1, b2, ksi, r1, a1] (cbIn packing),
+     *  replacing the element's row for one scenario — per-tap impedance changes included. The
+     *  branch's ratio and phase must be FIXED (not state variables): the batch qualification
+     *  rejects controlled transformers. */
+    public record TapR1Override(LfBranch branch, double[] cbRow) {
     }
 
     public record BatchContingency(String contingencyId, List<LfBranch> outagedBranches, List<LfGenerator> lostGenerators,
@@ -648,10 +668,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
             if (!c.lostGenerators().isEmpty() || !c.lostLoads().isEmpty() || !c.shuntShifts().isEmpty()
                     || !c.tapOverrides().isEmpty()) {        // injection/shift/tap (or branch+) contingency
                 boolean tapOk = true;
-                for (TapR1Override tap : c.tapOverrides()) { // packed CLOSED branch with a FIXED ratio only
-                    int ei = elementMapper.getElementIndex(tap.branch());
+                for (TapR1Override tap : c.tapOverrides()) { // packed CLOSED branch with FIXED ratio AND
+                    int ei = elementMapper.getElementIndex(tap.branch());   // phase (neither is a state variable)
                     if (ei < 0 || ei >= elementMapper.getClosedBranchCount()
-                            || gpuData.cbIdx()[ei * 10 + 9] >= 0) {
+                            || gpuData.cbIdx()[ei * 10 + 9] >= 0 || gpuData.cbIdx()[ei * 10 + 8] >= 0) {
                         tapOk = false;
                     }
                 }
@@ -1235,7 +1255,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         for (TapR1Override tap : contingencies.get(ci).tapOverrides()) {
                             r1OvSlotElemList.add(s);
                             r1OvSlotElemList.add(elementMapper.getElementIndex(tap.branch()));   // cb pack index == element index
-                            r1OvValList.add(tap.r1());
+                            for (double v : tap.cbRow()) {
+                                r1OvValList.add(v);
+                            }
                         }
                         for (ShuntShift sh : contingencies.get(ci).shuntShifts()) {
                             shOvSlotElemList.add(s);

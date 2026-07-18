@@ -1018,3 +1018,27 @@ production bench parity unchanged (22/6; GPU warm 12.2 s ≈ CPU-4t).
   bare `mvn test` defaults to mode 0/32 and reads ~2× slower (26→52 ms/ctg), which is env,
   not a regression. `native/run_bench.sh` is a stale copy whose REPO resolution is broken;
   the canonical script is `native/cuda/run_bench.sh` (delete or symlink the stray one).
+
+## 2026-07-18 (2) — #24 stage 2b bis: PST actions + FULL-ROW tap override (RTC r1-only was subtly wrong)
+- Upgrading the tap override to the target tap's FULL static row [y g1 g2 b1 b2 ksi r1 a1]
+  (exact cbIn packing, `tapModels()` now returns it verbatim) uncovered a LATENT BUG in
+  yesterday's r1-only RTC override: the T2wt factory's RTC steps change r per tap
+  (1.56277 → 1.56314); r1-only silently absorbed the impedance change and passed only
+  because the error sat under the 0.05 kV tolerance. An interim strict guard (reject steps
+  whose r/x/g/b differ) caught it; the full-row override then made the guard unnecessary —
+  per-tap impedance changes are now first-class (y/ksi move with the row; an override
+  forces the raw-sincos trig path exactly like a state-variable a1).
+- PhaseTapChangerTapPositionAction lands through the same `tapOverride()` compiler as RTC
+  (one code path, no phase/ratio split). Controlled transformers (r1col/a1col >= 0) are
+  rejected at qualification → CPU.
+- Tests 17/17: `pstTapPositionActionStrategyBatchMatchesCpu` (PhaseControlFactory T2wt,
+  alpha −5/0/5) and `pstTapActionWithPerStepImpedanceBatchMatchesCpu`
+  (createNetworkWithT2wtExaggerateRxgbTable: per-step r/x/g/b swings up to ±100% — the
+  case r1/a1-only provably cannot represent) both match CPU at 0.05 kV with the pair
+  precomputed on device.
+- Regressions clean: production bench cold 12.92 s (25.8 ms/ctg, ×1.00 vs CPU-4t 12.9 s),
+  warm 11.54 s (23.1 ms/ctg, ×1.12), violation diff UNCHANGED (15/7, 6 ctg); fixed-iter
+  warm 4.23 ms/scn, 499/500 @1e-6 (cold E2E reading 7.25 ms/ctg on a warm driver; the
+  canonical cold-first number from today's first run stands at 11.71 ms/ctg).
+- Override cost: entries are 8 doubles instead of 1; list is a handful of entries, scan
+  unchanged — no measurable impact on either bench.

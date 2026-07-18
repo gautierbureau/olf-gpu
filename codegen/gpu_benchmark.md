@@ -1076,3 +1076,30 @@ production bench parity unchanged (22/6; GPU warm 12.2 s ≈ CPU-4t).
   Correctness-first per the project contract; straggler exit still bounds the tail.
   Cold 15.2–15.3 s. Fixed-iter bench unaffected (4.25 ms/scn, 499/500, cold E2E 7.2 warm-driver).
 - 17/17 SA tests green. Numbers now also tracked in docs/numbers.md (global tracker).
+
+## 2026-07-18 (5) — violation diff root-caused to ZERO: per-scenario outer budget + criterion slack
+- User ruling: 22→20 under the outer-budget wiring proves the diff is systematic, not noise.
+  Two distinct root causes found by drilling:
+- ROOT CAUSE 1 — the device outer-loop budget was a GLOBAL per-chunk counter (prodIters),
+  but OLF's maxOuterLoopIterations is a per-RUN budget: in a busy 500-chunk the collective
+  churn exhausted the shared budget and froze some scenarios' outer loops mid-sequence —
+  reported CONVERGED on a half-finished RL/DS fixpoint. Proof: TWT-4990-37 solo = 0 diff,
+  in-chunk = 9 diffs. FIX: per-scenario prodIters[]; a scenario exhausting ITS budget is
+  rejected (status −2) to the CPU fallback (OLF's own UNSTABLE handling). Diff 20 (5 ctg)
+  → 5 (2 ctg), onlyCPU=0.
+- ROOT CAUSE 2 — the last 5: pre-existing HIGH_VOLTAGE violations whose post-contingency
+  INCREASE straddles the proportional increased-violations threshold (≈0.44 kV): CPU's
+  increase lands just under, GPU's just over, because at the production criterion
+  (convEpsPerEq=1e-4) two different linear-algebra engines legitimately stop ~2e-4 pu
+  apart. Proof: at OLF_GPU_SA_CONV_EPS=1e-7 (both arms) the FULL 500-ctg diff is ZERO —
+  onlyCPU=0 onlyGPU=0, statuses identical (499 CONVERGED + 1 MAX_ITERATION on both),
+  305=305 violations. (First 1e-7 attempt was a false negative: the env override had
+  landed in the threadCount test, not the bench — identical-to-6-digits output was the
+  tell.)
+- PERF SURPRISE: at 1e-7 the GPU is FASTER than at 1e-4 — warm 10.5 s (20.9 ms/ctg,
+  x1.38 vs CPU-4t 14.4 s), cold 11.7 s (x1.23). Loose convergence leaves marginal states
+  whose borderline RL/DS decisions flip across passes (outer churn = the expensive part);
+  at 1e-7 decisions stabilize immediately. At the RTE 1e-4 the per-scenario budget costs:
+  warm 20.6 s (x0.66) — open perf item. The candidate production operating point is
+  GPU@1e-7: exact CPU@1e-7 equivalence AND faster than CPU@1e-4.
+- Regressions: 17/17 SA tests, fixed-iter 4.26 ms/scn 499/500 unchanged.

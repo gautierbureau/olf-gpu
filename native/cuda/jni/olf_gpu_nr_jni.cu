@@ -2617,7 +2617,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // Newton diverges on — DS must stabilize first.)
     int phase = (ctx->nds > 0) ? 0 : 1;                      // start with distributed slack if present, else reactive limits
     bool seqChanged = false;                                 // did any outer loop re-solve during the current RL->DS sequence
-    int prodIters = 0;                                       // productive outer iterations (OLF's outerLoopTotalIterations)
+    std::vector<int> prodIters(nS, 0);                       // PER-SCENARIO productive outer iterations: OLF's
+                                                             // maxOuterLoopIterations is a per-RUN budget — a global
+                                                             // counter capped busy chunks collectively (violation-diff
+                                                             // root cause: a scenario solved solo matched the CPU
+                                                             // exactly but diverged inside a full 500-chunk)
     for (int outer = 0; outer < maxOuter; outer++) {
     std::copy(active.begin(), active.end(), wasActive.begin());   // scenarios (re)solved in this inner pass
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
@@ -3014,12 +3018,17 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     if (nChanged > 0) {                                     // this outer loop is still unstable
         for (int s = 0; s < nS; s++) {
+            if (rlSwitched[s] && ++prodIters[s] >= RL_MAX_OUTER) {
+                // This scenario exhausted ITS outer-iteration budget mid-sequence. Never report it
+                // converged on a half-finished RL/DS fixpoint — reject to the CPU fallback, which
+                // replays it under OLF's own maxOuterLoopIterations/UNSTABLE handling.
+                res.status[s] = -2;
+                rlSwitched[s] = 0;
+                live[s] = 0;
+            }
             active[s] = rlSwitched[s];                      // re-solve only the scenarios it changed, stay in this phase
         }
         seqChanged = true;
-        if (++prodIters >= RL_MAX_OUTER) {
-            break;                                          // OLF's max-outer-loop-iterations budget reached
-        }
     } else {                                               // this outer loop stabilized
         if (inDsPhase && ctx->nrl > 0) {
             phase = 1;                                      // distributed slack done -> move to reactive limits

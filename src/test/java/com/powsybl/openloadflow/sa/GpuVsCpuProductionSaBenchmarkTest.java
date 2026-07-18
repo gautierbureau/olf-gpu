@@ -163,6 +163,12 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
         Path paramsFile = Path.of("rte-loadflow-default-parameters.json");
         assumeTrue(Files.exists(paramsFile), "rte-loadflow-default-parameters.json not found in module dir");
         LoadFlowParameters lfp = JsonLoadFlowParameters.read(paramsFile);
+        // OLF_GPU_SA_CONV_EPS: override newtonRaphsonConvEpsPerEq on BOTH arms (root-cause experiments).
+        String convEpsEnv = System.getenv("OLF_GPU_SA_CONV_EPS");
+        if (convEpsEnv != null) {
+            com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp)
+                    .setNewtonRaphsonConvEpsPerEq(Double.parseDouble(convEpsEnv));
+        }
 
         // The FAIR production CPU arm is multithreaded — OLF SA parallelizes contingencies across
         // threads in production. The single-thread arm is an optional reference (OLF_GPU_SA_CPU_SINGLE=1).

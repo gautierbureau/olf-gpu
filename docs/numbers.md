@@ -26,3 +26,5 @@ root-cause, not noise (the 22→20 shift from wiring maxOuterLoopIterations prov
 | 2026-07-18 | a082092 | 26.7 | 23.6 | 24.6 | ×1.04 | 15/7/6 | — | 4.27 | 499/500 | — | bare-run = production defaults (harness fix) |
 | 2026-07-18 | 955017a | 30.4–30.6 | 26.9–27.8 | 23.1–23.5 | ×0.85 | 13/7/5 | — | 4.25 | 499/500 | — | outer-loop param wiring: RTE maxOuterLoopIterations=30 on device — diff 22→20, warm +1.5 s |
 | 2026-07-18 | 26fb178 | 29.92 | 27.24 | 26.72 | x0.98 | 13/7/5 | 7.31 | 4.30 | 499/500 | — | tracker validation run |
+| 2026-07-18 | (per-scn budget) | 43.83 | 41.22 | 27.19 | x0.66 | 0/5/2 | — | 4.26 | 499/500 | 91/124 | per-scenario outer budget fix: diff 20→5, onlyCPU=0; warm cost = open perf item |
+| 2026-07-18 | (eps=1e-7) | 23.32 | 20.92 | 28.78 | x1.38 | **0/0/0** | — | — | — | 91/124 | ZERO diff, statuses identical — full-path equivalence proven; GPU faster at tight eps (outer churn gone) |

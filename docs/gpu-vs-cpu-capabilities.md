@@ -146,7 +146,7 @@ Full predicate list in Part II §F.
 | Limit-violation detection / IncreasedViolations filtering | ✅ | shared CPU code — identical by construction (`docs/increased-violations-thresholds.md`) |
 | State monitors (bus results) | ✅ | shared CPU code on the restored per-scenario states |
 | threadCount > 1 | 🔶 | GPU batch mono-device **by design**: device work serialized, no solver swap; CPU-fallback contingencies parallelize |
-| Production-parameter equivalence | 🔶 | case9241pegase × 500 ctg × RTE JSON params: statuses identical; 20 violation-report diffs in 5 ctg remain (was 22/6 before the maxOuterLoopIterations wiring — that shift PROVES the residual is a systematic decision-path difference, not numeric noise: single-modelisation parts match at ~1e-13, so the target is a ZERO diff). Root-cause drill open |
+| Production-parameter equivalence | ✅ | case9241pegase × 500 ctg × RTE JSON params: **ZERO violation diff at convEpsPerEq=1e-7** (statuses identical incl. the one MAX_ITERATION, 305=305 violations). At the production 1e-4 criterion a ~5-report residual remains whose mechanism is fully characterized: pre-existing violations whose post-ctg increase straddles the increased-violations threshold within the ~2e-4 pu state band two different linear engines legitimately occupy at that criterion. Root causes closed 2026-07-18: per-scenario outer budget (was global per-chunk) + criterion slack |
 
 ## 3. Operator strategies & remedial actions
 

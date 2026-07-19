@@ -176,7 +176,7 @@ element falls back to the stock per-strategy CPU path individually.
 | RatioTapChangerTapPositionAction | ✅ | full static-row override [y g1 g2 b1 b2 ksi r1 a1] from the target tap — per-tap impedance changes covered; controlled transformer → ⏩ |
 | PhaseTapChangerTapPositionAction | ✅ | same compiler (validated incl. ±100% per-step r/x/g/b swings); PST under active phase control → ⏩ |
 | ShuntCompensatorPositionAction | ✅ | linear model only; non-linear → ⏩ |
-| GeneratorAction | ⏩ | traced to the freeze-semantics divergence: the CPU path freezes a switched bus's Q at its evaluated (switch-time) value in the manager/robust paths, the device pins at the limit; redispatch perturbs a pinned controller (~0.17 kV). Needs device freeze-at-evaluated-q or pinned-target export/import. See §B corner rows |
+| GeneratorAction (active-power redispatch) | ✅ | composed as a net-injection delta on the warm-continued pair (2026-07-19; DS base-shift accounting fixed — see §A); targetV/targetQ/voltageRegulatorOn changes → ⏩. Validated across every ieee14 contingency incl. islanding |
 | PercentChangeLoadAction | ⏩ | trivially compilable to LoadLoss — not yet wired |
 | RatioTapChangerRegulationAction / PhaseTapChangerRegulationAction | ⏩ | changes control MODE, not position |
 | HvdcAction / StaticVarCompensatorAction / AreaInterchangeTargetAction / BoundaryLineAction | ⏩ | element not packed / loop not batched |
@@ -198,19 +198,18 @@ element falls back to the stock per-strategy CPU path individually.
 
 ## 5. The gap list to full CPU replacement (ranked)
 
-1. **GeneratorAction** — device freeze-at-evaluated-q semantics (#24; root cause isolated).
-2. **Remaining SA outer loops** — shunt voltage control and incremental transformer/phase
+1. **Remaining SA outer loops** — shunt voltage control and incremental transformer/phase
    controls first (present in RTE parameter sets); the §D catalogue is the port checklist.
-3. **HVDC + SVC packing** — extractor term/variable work; unblocks plain-LF coverage on
+2. **HVDC + SVC packing** — extractor term/variable work; unblocks plain-LF coverage on
    those networks and their SA/action rows.
-4. **Base-open element closes** — extractor packs disconnected elements into the superset.
-5. **Bus/busbar contingencies, ≥3-branch outages, single-side openings.**
-6. **⚠️ corner-case deltas inside supported scope** (Part II): keep-strongest-PV guard,
+3. **Base-open element closes** — extractor packs disconnected elements into the superset.
+4. **Bus/busbar contingencies, ≥3-branch outages, single-side openings.**
+5. **⚠️ corner-case deltas inside supported scope** (Part II): keep-strongest-PV guard,
    curve-limits-at-runtime-P, shared-control transformer groups (`useInitialTapPosition`),
    multi-slack components, realistic-voltage post-check on batched states. (DS balance
    types, useActiveLimits, failure behaviors, maxPqPvSwitch, maxOuterLoopIterations —
    closed 2026-07-18 by guard + parameter wiring.)
-7. **PerEquationTypeStoppingCriteria**; ZIP/exponential loads; ZI shapes without dummies.
+6. **PerEquationTypeStoppingCriteria**; ZIP/exponential loads; ZI shapes without dummies.
 
 ---
 
@@ -242,7 +241,9 @@ Device: extraction `EXT:299-380`, kernels `computeSlackRetain` `CU:1831-1843` an
 | Failure behaviors THROW / FAIL / DISTRIBUTE_ON_REFERENCE_GENERATOR | exception / FAILED result (reverted power) / dump on reference gen, no limits | **wired** (2026-07-18): behavior ≠ LEAVE_ON_SLACK_BUS ⇒ a saturated waterfill flags the scenario, host rejects it (status −2) → CPU fallback replays with the real behavior (RTE production uses FAIL) | ✅ |
 | Multiple synchronous components / multiple slack buses | per-SC mismatch map, per-SC sub-reports; maxSlackBusCount>1 | single slack per pack (active BUS_TARGET_PHI); batch runs per LfNetwork component | 🔶 one slack per component only; multi-slack not representable |
 | movedBuses epsilon | Σ\|targetP moves\| > 0.9·P_RESIDUE_EPS aggregated | `switched[s]` set if any bus moved at all (`CU:1949-1951`) | ✅ (stricter; only affects when an extra no-op re-solve happens) |
-| Per-scenario generator loss at a DS bus | N/A (CPU rebuilds network per contingency) | dsOv override shrinks that bus's factor/base/bounds (`CU:1914,1920,1933`); ≤1 DS bus per contingency, slack-participates case → contingency ⏩ | ✅ within scope |
+| Per-scenario generator loss at a DS bus | N/A (CPU rebuilds network per contingency) | dsOv override shrinks that bus's factor/base/bounds (`CU:1914,1920,1933`); ≤1 DS bus per contingency; slack-participates now rejects only actual FACTOR changes | ✅ within scope |
+| Injection override (load delta / redispatch action) at a DS-participant bus | targetP change is a real target move, not distributed power | dsOvBaseDelta shifts the effective dsBaseTargetP in BOTH retain and waterfill (2026-07-19 — before this, the accounting misread the override as absorbed slack and CANCELLED it) | ✅ |
+| DS stopping-band ambiguity | both engines stop anywhere inside slackBusPMaxMismatch (1 MW default) | same band; on ill-conditioned all-pinned networks ~0.1 kV of legitimate between-engines state ambiguity (scales linearly with the band; match at 0.01 MW) — can seed RL back-switch bifurcations in strategy replays | 🔶 inherent to the parameterization, not a defect |
 | AreaInterchangeControl replacing DistributedSlack | `filterInconsistentOuterLoops` drops DS when AIC present | AIC in the loop list → whole-run ⏩ by the guard | ✅ safe |
 
 ## §B. Reactive limits — CPU semantics vs device port
@@ -336,6 +337,7 @@ doesn't rediscover them.
 | Loop ordering | fixed nesting order (innermost DistributedSlack → … → AutomationSystem outermost); each loop re-run to stability before moving on; full-list sweeps until `lastUnstableOuterLoop` fixpoint | two-phase machine: DS phase stabilizes first, then RL, restart at DS if RL changed anything (`CU:2609-3014`); TVC orchestrated outside around whole batched solves | ✅ same DS-before-RL relative order; equivalence validated empirically at 9241×500 |
 | Global iteration budget | maxOuterLoopIterations (default 20), reached ⇒ result forced UNSTABLE | run's `maxOuterLoopIterations` **wired** to the device (2026-07-18; RTE production = 30); exhausted ⇒ scenario unconverged → CPU fallback. Wiring 30 shrank the production violation diff 22→20 (6→5 ctg) for ~1.5 s warm | ✅ |
 | Warm restart between outer iterations | PreviousValueVoltageInitializer | device state persists in place; only changed scenarios re-solved (`active[s]=rlSwitched[s]`) | ✅ |
+| State injection under contingency-mutated es (islanding) | CPU solves in the mutated es directly | device states use the BASE row layout; injection remaps per-variable through a base row snapshot (2026-07-19 — raw-index injection shifted every bus after a disabled island) | ✅ |
 | Unrealistic-state check (min/maxRealisticVoltage, deferred in robust mode until the fixing loop stabilizes) | engine-level check → UNREALISTIC_STATE | **not implemented on device**; a wildly unrealistic scenario either diverges (status −1) or converges and is accepted | ⚠️ no realistic-voltage post-check on batched states — worth a cheap device-side min/max V scan |
 | No-generator-voltage-control network ⇒ immediate SOLVER_FAILED | engine pre-condition | base solve is CPU-orchestrated → inherited | ✅ |
 | Per-loop reports / distributedActivePower accounting | reportNode tree + context data | not reproduced per scenario (batch reports totals; fallback scenarios get full CPU reports) | 🔶 reporting granularity, not results |
@@ -453,6 +455,6 @@ shunt models — all route the contingency to CPU (Part I §2 table).
 Update this file whenever a row changes state (the PR that lands a capability flips its
 mark), and re-run the two benches plus `GpuBatchedAcSecurityAnalysisTest` before flipping
 anything to ✅. ⚠️ rows are standing corner-case debts INSIDE supported scope — each
-needs either a device fix or a guard extension (they are enumerated in gap-list item 6).
+needs either a device fix or a guard extension (they are enumerated in gap-list item 5).
 Numbers and dated evidence live in `codegen/gpu_benchmark.md`; this file holds only the
 current truth.

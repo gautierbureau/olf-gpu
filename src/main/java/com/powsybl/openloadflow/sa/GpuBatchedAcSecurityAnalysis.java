@@ -110,6 +110,18 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     private AcLoadFlowContext currentContext;
     private EquationSystem<AcVariableType, AcEquationType> batchEquationSystem;
     private final Map<String, double[]> precomputedStates = new HashMap<>();
+    /** Islanded LfBus nums per precomputed scenario id: the CPU path disables these buses through the
+     *  SOLVE's connectivity processing, which the injection path skips — result building must exclude
+     *  them explicitly or bus results misalign (an islanded bus reported at its frozen flat state
+     *  shifts every following bus in the list — measured on ieee14 L7-8-1). The engine's per-
+     *  contingency NetworkState restore reverts the disabled flags afterwards. */
+    private final Map<String, int[]> precomputedIslandedBuses = new HashMap<>();
+    /** Variable -> row snapshot of the BASE equation-system layout (taken at precompute). The engine's
+     *  lfContingency.apply() on an ISLANDING contingency disables the islanded bus, deactivating its
+     *  variables and RENUMBERING the rows — a device state (base layout) injected by raw index would
+     *  shift every variable after the disabled bus (measured: the bus after the island read the
+     *  island's frozen 1-pu slot). Injection remaps through this snapshot instead. */
+    private Map<com.powsybl.openloadflow.equations.Variable<com.powsybl.openloadflow.ac.equations.AcVariableType>, Integer> baseVariableRows;
     // The run's actual outer loops, captured in runSimulations: the device must run the distributed-slack /
     // reactive-limits passes ONLY when OLF would (i.e. when the outer loop is in the configured list), never
     // unconditionally from network capability. Default to OLF's defaults until runSimulations sets them.
@@ -224,6 +236,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         this.currentOperatorStrategies = operatorStrategies != null ? operatorStrategies : List.of();
         this.currentActions = actions != null ? actions : List.of();
         this.precomputedStates.clear();
+        this.precomputedIslandedBuses.clear();
         this.batchEquationSystem = null;
         // Capture which outer loops this run actually applies, so the batched device solver runs the
         // distributed-slack / reactive-limits passes only when OLF does (presence in the resolved outer-loop
@@ -430,9 +443,16 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             for (BatchScenarioResult r : results) {
                 if (r.hasConverged()) {
                     precomputedStates.put(r.contingencyId(), r.state());
+                    if (r.islandedBusNums().length > 0) {
+                        precomputedIslandedBuses.put(r.contingencyId(), r.islandedBusNums());
+                    }
                 }
             }
             batchEquationSystem = es;
+            baseVariableRows = new HashMap<>();
+            for (var v : es.getIndex().getSortedVariablesToFind()) {
+                baseVariableRows.put(v, v.getRow());
+            }
             LAST_GPU_PRECOMPUTED_COUNT.set(precomputedStates.size());
             LOGGER.info("GPU batched SA: precomputed {} of {} branch (N-1/N-2) contingencies on the device",
                     precomputedStates.size(), batch.size());
@@ -515,7 +535,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 .filter(Objects::nonNull)
                 .toList();
         com.powsybl.openloadflow.network.action.LfActionUtils.applyListOfActions(lfActions, network, lfContingency, networkParameters);
-        batchEquationSystem.getStateVector().set(state.clone());
+        injectState(state);
         AcSolverUtil.updateNetwork(network, batchEquationSystem);
         var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions,
                 securityAnalysisParameters.getIncreasedViolationsParameters());
@@ -532,9 +552,49 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 List.of(new OperatorStrategyResult.ConditionalActionsResult(operatorStrategy.getId(),
                         PostContingencyComputationStatus.CONVERGED,
                         new LimitViolationsResult(postActionsViolationManager.getLimitViolations()),
-                        new NetworkResult(postActionsNetworkResult.getBranchResults(), postActionsNetworkResult.getBusResults(),
-                                postActionsNetworkResult.getThreeWindingsTransformerResults()),
+                        filterIslanded(network, contingency.getId() + STRATEGY_KEY_SEP + operatorStrategy.getId(),
+                                new NetworkResult(postActionsNetworkResult.getBranchResults(), postActionsNetworkResult.getBusResults(),
+                                        postActionsNetworkResult.getThreeWindingsTransformerResults())),
                         0.0)));
+    }
+
+    /** Injects a device state (BASE row layout) into the possibly contingency-mutated equation
+     *  system: rows are remapped variable-by-variable through the base snapshot, so a disabled
+     *  islanded bus's deactivated variables cannot shift its neighbors. */
+    private void injectState(double[] deviceState) {
+        var vars = batchEquationSystem.getIndex().getSortedVariablesToFind();
+        double[] mapped = new double[vars.size()];
+        for (var v : vars) {
+            Integer baseRow = baseVariableRows.get(v);
+            mapped[v.getRow()] = baseRow != null ? deviceState[baseRow] : 0;
+        }
+        batchEquationSystem.getStateVector().set(mapped);
+    }
+
+    /** Mirrors the CPU solve's connectivity processing for an injected state: islanded buses (frozen
+     *  to a clean flat state on the device) must be EXCLUDED from the results the way the CPU's
+     *  connectivity-driven disabling excludes them. NEVER by LfBus.setDisabled on the live network —
+     *  that fires the equation-system listeners, deactivates rows and shifts the state mapping for
+     *  every subsequent injection (measured: the NEXT scenario's bus read its neighbor's slot).
+     *  Pure result-space filtering instead. */
+    private NetworkResult filterIslanded(LfNetwork network, String scenarioId, NetworkResult result) {
+        int[] nums = precomputedIslandedBuses.get(scenarioId);
+        if (nums == null) {
+            return result;
+        }
+        java.util.Set<String> islandedBusIds = new java.util.HashSet<>();
+        boolean dbg = "1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"));
+        for (int num : nums) {
+            LfBus b = network.getBuses().get(num);
+            b.createBusResults().forEach(br -> islandedBusIds.add(br.getBusId()));
+        }
+        var filtered = result.getBusResults().stream().filter(br -> !islandedBusIds.contains(br.getBusId())).toList();
+        if (dbg) {
+            System.err.println("FILTER-ISLANDED '" + scenarioId.replace(GpuBatchedSecurityAnalysisSolver.STRATEGY_KEY_SEP, '|')
+                    + "' ids=" + islandedBusIds + " " + result.getBusResults().size() + "->" + filtered.size());
+        }
+        return new NetworkResult(result.getBranchResults(), filtered,
+                result.getThreeWindingsTransformerResults());
     }
 
     /** Stage-1 applicability: single-stage strategy with a TrueCondition whose contingency context
@@ -644,13 +704,30 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 double gPerSection = Double.isNaN(lin.getGPerSection()) ? 0 : lin.getGPerSection();   // optional in iidm
                 shifts.add(new GpuBatchedSecurityAnalysisSolver.ShuntShift(shunt,
                         gPerSection * dSections * zb, lin.getBPerSection() * dSections * zb));
-            } else if (a instanceof com.powsybl.action.GeneratorAction) {
-                // STILL out of scope after stage 2a (warm continuation): B2 parity narrowed the
-                // cause to the RL PIN-TARGET semantics — the CPU freezes the switched bus's Q at
-                // its switch-time value, the device pins exactly at the limit; the redispatch
-                // perturbs a pinned controller and exposes the difference (~0.17 kV). Needs the
-                // device RL pass to freeze at the evaluated q (or export/import pinned targets).
-                return null;
+            } else if (a instanceof com.powsybl.action.GeneratorAction ga) {
+                // Pure ACTIVE-POWER redispatch only: a targetV/targetQ/regulator change alters the
+                // voltage-control problem itself — CPU path. The P delta is composed exactly like a
+                // load delta with q=0 (net injection at the bus; the device DS reweight machinery is
+                // NOT touched: participation factors are unchanged by a redispatch, and the headroom
+                // shift only matters if this generator saturates during redistribution — CPU handles
+                // any such contingency via the DS-residual rejection).
+                if (ga.getTargetV().isPresent() || ga.getTargetQ().isPresent()
+                        || ga.isVoltageRegulatorOn().isPresent() || ga.getActivePowerValue().isEmpty()) {
+                    return null;
+                }
+                com.powsybl.iidm.network.Generator gen = network.getGenerator(ga.getGeneratorId());
+                if (gen == null) {
+                    return null;
+                }
+                LfBus bus = net.getBusById(gen.getTerminal().getBusView().getBus() != null
+                        ? gen.getTerminal().getBusView().getBus().getId() : "");
+                if (bus == null) {
+                    return null;
+                }
+                boolean relative = ga.isActivePowerRelativeValue().orElse(false);
+                double deltaP = relative ? ga.getActivePowerValue().getAsDouble()
+                                         : ga.getActivePowerValue().getAsDouble() - gen.getTargetP();
+                loads.add(new GpuBatchedSecurityAnalysisSolver.LoadLoss(bus, deltaP / PerUnit.SB, 0));
             } else {
                 return null;                                 // out of stage-1 scope — CPU per-strategy path
             }
@@ -756,7 +833,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         logPostContingencyStart(network, lfContingency);
         Stopwatch stopwatch = Stopwatch.createStarted();
 
-        batchEquationSystem.getStateVector().set(state.clone());
+        injectState(state);
         AcSolverUtil.updateNetwork(network, batchEquationSystem);
 
         PostContingencyComputationStatus status = PostContingencyComputationStatus.CONVERGED;
@@ -781,8 +858,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // No device-side slack distribution in the prototype: only the pre-distribution counts.
         return new PostContingencyResult(contingency, status,
                 new LimitViolationsResult(postContingencyLimitViolationManager.getLimitViolations()),
-                new NetworkResult(postContingencyNetworkResult.getBranchResults(), postContingencyNetworkResult.getBusResults(),
-                        postContingencyNetworkResult.getThreeWindingsTransformerResults()),
+                filterIslanded(network, contingency.getId(),
+                        new NetworkResult(postContingencyNetworkResult.getBranchResults(), postContingencyNetworkResult.getBusResults(),
+                                postContingencyNetworkResult.getThreeWindingsTransformerResults())),
                 connectivityResult, preDistributedActivePower * PerUnit.SB);
     }
 }

@@ -28,3 +28,4 @@ root-cause, not noise (the 22→20 shift from wiring maxOuterLoopIterations prov
 | 2026-07-18 | 26fb178 | 29.92 | 27.24 | 26.72 | x0.98 | 13/7/5 | 7.31 | 4.30 | 499/500 | — | tracker validation run |
 | 2026-07-18 | (per-scn budget) | 43.83 | 41.22 | 27.19 | x0.66 | 0/5/2 | — | 4.26 | 499/500 | 91/124 | per-scenario outer budget fix: diff 20→5, onlyCPU=0; warm cost = open perf item |
 | 2026-07-18 | (eps=1e-7) | 23.32 | 20.92 | 28.78 | x1.38 | **0/0/0** | — | — | — | 91/124 | ZERO diff, statuses identical — full-path equivalence proven; GPU faster at tight eps (outer churn gone) |
+| 2026-07-19 | (#28 GenAction) | 27.01 | 22.04 | 30.27 | x1.37 | **0/0/0** | — | 4.32 | 499/500 | — | eps=1e-7 arms; GeneratorAction batched + DS base-shift + islanding injection remap |

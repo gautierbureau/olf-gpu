@@ -1831,13 +1831,23 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
 __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiRow, double slackTargetP,
                                    double oneMinusFactorSum, const int* dsPhiRow, const double* dsBaseTargetP,
                                    const double* target, const double* qBuf, const char* rlActive,
-                                   double* retain) {
+                                   double* retain,
+                                   const int* dsOvBus, const double* dsOvBaseDelta) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     if (!rlActive[s]) return;
     double absorbed = 0.0;
+    int ov = dsOvBus != nullptr ? dsOvBus[s] : -1;
     for (int i = 0; i < nds; i++) {
-        absorbed += target[(size_t) s * n + dsPhiRow[i]] - dsBaseTargetP[i];
+        // A composed injection override on a participant bus (redispatch action, load delta) shifts
+        // the row target WITHOUT being distributed power — the effective base must shift with it,
+        // or the retain math counts the override as absorbed slack and the waterfill CANCELS it
+        // (measured: a +60 MW redispatch read back as a no-op, GeneratorAction drill 2026-07-19).
+        double base = dsBaseTargetP[i];
+        if (ov == i) {
+            base -= dsOvBaseDelta[s];
+        }
+        absorbed += target[(size_t) s * n + dsPhiRow[i]] - base;
     }
     retain[s] = oneMinusFactorSum * ((qBuf[(size_t) s * n + slackPhiRow] - slackTargetP) + absorbed);
 }
@@ -2972,7 +2982,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             computeSlackRetain<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->nds, ctx->dsSlackPhiRow, ctx->dsSlackTargetP,
                     1.0 - ctx->dsFactorSum, ctx->dDsPhiRow.as<int>(), ctx->dDsBaseTargetP.as<double>(),
                     ctx->dTarget.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
-                    ctx->dDsRetain.as<double>());
+                    ctx->dDsRetain.as<double>(),
+                    hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvBaseDelta.as<double>());
             if (!ctx->dDsResidual.p) ctx->dDsResidual.alloc(nS * sizeof(char));
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsResidual.p, 0, nS * sizeof(char), ctx->stream));
             distributeSlackWaterfillBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nds, nS, n, SLACK_DIST_TOL, P_RESIDUE_EPS,
@@ -3045,6 +3056,30 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     }   // ---- end sequential outer-loop driver ----
 
+    if (getenv("OLF_GPU_DBG_DS") && ctx->nds > 0) {
+        std::vector<double> tFinal(static_cast<size_t>(n) * nS);
+        CUDA_CHECK(cudaMemcpy(tFinal.data(), ctx->dTarget.p, tFinal.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        std::vector<char> ltDump(static_cast<size_t>(std::max(ctx->nrl, 1)) * nS, 0);
+        if (ctx->nrl > 0) {
+            CUDA_CHECK(cudaMemcpy(ltDump.data(), ctx->dRlLimitType.p, static_cast<size_t>(ctx->nrl) * nS, cudaMemcpyDeviceToHost));
+        }
+        std::vector<int> dsRows(ctx->nds);
+        std::vector<double> dsBase(ctx->nds);
+        CUDA_CHECK(cudaMemcpy(dsRows.data(), ctx->dDsPhiRow.p, ctx->nds * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(dsBase.data(), ctx->dDsBaseTargetP.p, ctx->nds * sizeof(double), cudaMemcpyDeviceToHost));
+        for (int s = 0; s < nS; s++) {
+            double tot = 0;
+            fprintf(stderr, "GPU-DS s=%d", s);
+            for (int i = 0; i < ctx->nds; i++) {
+                double d = tFinal[(size_t) s * n + dsRows[i]] - dsBase[i];
+                tot += d;
+                fprintf(stderr, " row%d=%+.4f", dsRows[i], d * 100.0);
+            }
+            fprintf(stderr, " | totMW=%+.4f | lt:", tot * 100.0);
+            for (int i = 0; i < ctx->nrl; i++) fprintf(stderr, "%d", ltDump[(size_t) i * nS + s]);
+            fprintf(stderr, " status=%d\n", res.status[s]);
+        }
+    }
     if (rlStateOut != nullptr && ctx->nrl > 0) {             // export per-(controller, scenario) RL state
         std::vector<char> lt(static_cast<size_t>(ctx->nrl) * nS), sc(static_cast<size_t>(ctx->nrl) * nS);
         CUDA_CHECK(cudaMemcpy(lt.data(), ctx->dRlLimitType.p, lt.size(), cudaMemcpyDeviceToHost));

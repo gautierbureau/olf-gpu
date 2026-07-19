@@ -1120,3 +1120,35 @@ production bench parity unchanged (22/6; GPU warm 12.2 s ≈ CPU-4t).
   injection overrides are unbatchable by design — the shed target had to be a local
   extra load on b2.
 - Production bench sanity @1e-7: ZERO diff held, cold 12.7 s (x1.43), warm 10.9 s (x1.67).
+
+## 2026-07-19 (2) — GeneratorAction batched: THREE root causes closed (#28)
+- GeneratorAction (pure active-power redispatch) now batches: composed as a net-injection
+  delta (LoadLoss with q=0) on the warm-continued pair; targetV/targetQ/regulator changes
+  stay CPU. The historical "~0.17 kV freeze-semantics" theory was SUPERSEDED — the drill
+  (all-ieee14-contingencies stress + per-bus dumps + CPU report trees) found three real,
+  distinct causes:
+- (1) DS BASE-SHIFT CANCEL: a composed injection override on a DS-PARTICIPANT bus was
+  misread by computeSlackRetain/waterfill as already-distributed slack power (dsBaseTargetP
+  stayed at base) — the accounting CANCELLED a +60 MW redispatch to a no-op. Fix: dsBus is
+  now set for load/redispatch deltas too with dsBaseDelta = lostGenP − lostLoadP, and
+  computeSlackRetain honors dsOvBaseDelta. Also fixes latent #22-class load deltas at
+  participant buses (previously invisible: test loads sat at gen-free buses). The
+  slackParticipates guard narrowed to actual FACTOR changes (participating gen losses).
+- (2) ISLANDING INJECTION ROW-SHIFT (latent, affected ALL islanding contingency results
+  with monitors): lfContingency.apply() disables the islanded bus, deactivating its
+  variables and RENUMBERING equation-system rows — the device state (BASE layout) injected
+  by raw index shifted every variable after the island (the next bus read the island's
+  frozen 1-pu slot). Fix: base variable→row snapshot at precompute + per-variable remap at
+  injection. Result-space islanded-bus filter kept as defense (never mutate the live
+  LfNetwork for result building — setDisabled fires equation listeners, measured).
+- (3) already fixed in #26: the global-per-chunk outer budget (the historical
+  "reconcile needed / PV-setpoint" symptom was almost certainly this).
+- DS stopping-band finding (documented §A): on an ill-conditioned all-pinned network
+  (ieee14 L1-2-1) the slackBusPMaxMismatch band (1 MW default) leaves ~0.1 kV of legitimate
+  between-engines ambiguity (0.105 kV @1 MW → 0.055 @0.1 → match @0.01 — scales with the
+  band); strategy replays can amplify it into an RL back-switch bifurcation. Machinery
+  parity is asserted at a narrowed band in tests; production runs share whatever the
+  parameters grant BOTH engines.
+- Validation: 22/22 SA tests incl. generatorActionStressAcrossContingencies (every ieee14
+  line ctg × +60 MW redispatch, islanding included); production bench @1e-7 ZERO diff
+  (cold 13.5 s x1.12, warm 11.0 s x1.37); fixed-iter 4.32 ms/scn 499/500.

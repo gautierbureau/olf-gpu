@@ -436,7 +436,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
      * the convergence status (see the {@code STATUS_*} constants).
      */
     public record BatchScenarioResult(String contingencyId, double[] state, int iterations,
-                                      double finalMismatch, int convergenceStatus) {
+                                      double finalMismatch, int convergenceStatus, int[] islandedBusNums) {
         public BatchScenarioResult {
             Objects.requireNonNull(contingencyId);
             Objects.requireNonNull(state);
@@ -671,6 +671,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         boolean slackParticipates = java.util.Arrays.stream(gpuData.dsFactor()).sum() < 1 - 1e-9;
         List<Integer> batchedIndices = new ArrayList<>();
         int[][] frozenRowsByIndex = new int[contingencies.size()][];     // islanded buses' variable rows, per contingency
+        int[][] islandedNumsByIndex = new int[contingencies.size()][];   // islanded LfBus nums (result-building excludes them)
         double[][] frozenTargetsByIndex = new double[contingencies.size()][];   // the clean value each frozen row holds (V=1, phi=0)
         GenOutage[][] genOutagesByIndex = new GenOutage[contingencies.size()][];   // per-bus merged outages, else null
         int islandingCount = 0;
@@ -708,6 +709,12 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     }
                     // conservative: a lost generator on an ISLANDED bus is out of combo scope
                     FrozenIsland fi = islandedFrozen(equationSystem, q.islandedBuses());
+                    islandedNumsByIndex[i] = q.islandedBuses().stream().mapToInt(LfBus::getNum).toArray();
+                    if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"))) {
+                        System.err.println("FROZEN-ISLAND(combo) '" + c.contingencyId().replace(STRATEGY_KEY_SEP, '|') + "' buses="
+                                + q.islandedBuses().stream().map(b -> b.getId() + "#" + b.getNum()).toList()
+                                + " rows=" + java.util.Arrays.toString(fi.rows()));
+                    }
                     boolean genOnIsland = false;
                     for (GenOutage go : gos) {
                         for (int fr : fi.rows()) {
@@ -739,6 +746,12 @@ public final class GpuBatchedSecurityAnalysisSolver {
             } else if (c.outagedBranches().stream().noneMatch(distrRhoControllers::contains)) {
                 batchedIndices.add(i);
                 FrozenIsland fi = islandedFrozen(equationSystem, q.islandedBuses());
+                islandedNumsByIndex[i] = q.islandedBuses().stream().mapToInt(LfBus::getNum).toArray();
+                if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"))) {
+                    System.err.println("FROZEN-ISLAND '" + c.contingencyId().replace(STRATEGY_KEY_SEP, '|') + "' buses="
+                            + q.islandedBuses().stream().map(b -> b.getId() + "#" + b.getNum()).toList()
+                            + " rows=" + java.util.Arrays.toString(fi.rows()));
+                }
                 frozenRowsByIndex[i] = fi.rows();
                 frozenTargetsByIndex[i] = fi.targets();
                 if (frozenRowsByIndex[i].length > 0) {
@@ -776,9 +789,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
             if (result != null) {
                 double[] state = new double[n];
                 System.arraycopy(result, 0, state, 0, n);
-                results.add(new BatchScenarioResult(id, state, (int) result[n], result[n + 1], (int) result[n + 2]));
+                results.add(new BatchScenarioResult(id, state, (int) result[n], result[n + 1], (int) result[n + 2],
+                        islandedNumsByIndex[i] != null ? islandedNumsByIndex[i] : new int[0]));
             } else {
-                results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, STATUS_REJECTED));
+                results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, STATUS_REJECTED, new int[0]));
             }
         }
         return results;
@@ -893,11 +907,14 @@ public final class GpuBatchedSecurityAnalysisSolver {
         if (pRow < 0 || vRow < 0) {
             return null;
         }
-        // Is this bus a distributed-slack participant? Only relevant when GENERATORS are lost here
-        // (their participation leaves the DS pack); pure injection deltas (load losses, redispatch
-        // actions) change targets but NOT participation, so they carry no DS reweight/constraint.
+        // Is this bus a distributed-slack participant? Matters for BOTH shapes: lost generators
+        // leave the participation (factor/headroom reweight), AND pure injection deltas (load
+        // losses, redispatch actions) shift the row target — which the retain/waterfill accounting
+        // would misread as already-distributed slack power unless dsBaseTargetP shifts with it
+        // (measured: a +60 MW redispatch cancelled to a no-op before the base-shift fix).
+        double preLostLoadP = lostLoads.stream().mapToDouble(LoadLoss::p).sum();
         int dsBus = -1;
-        if (!lost.isEmpty()) {
+        if (!lost.isEmpty() || preLostLoadP != 0) {
             int[] dsPhiRow = gpuData.dsPhiRow();
             for (int i = 0; i < dsPhiRow.length; i++) {
                 if (dsPhiRow[i] == pRow) {
@@ -906,9 +923,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 }
             }
         }
-        if (dsBus >= 0 && slackParticipates) {
-            return null;                            // DS reweight + participating slack: retain math doesn't hold
-        }
+        boolean lostParticipation = lost.stream().anyMatch(g -> g.isParticipating() && g.getDroop() != 0);
+        if (dsBus >= 0 && lostParticipation && slackParticipates) {
+            return null;                            // FACTOR reweight + participating slack: retain math doesn't hold
+        }                                           // (a pure base shift keeps the factors — retain stays exact)
         if (bus.getGeneratorVoltageControl().map(vc -> vc.getControlledBus() != null
                 && vc.getControlledBus().getNum() != busNum).orElse(false)) {
             return null;                                                            // remote voltage control
@@ -946,7 +964,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         double dsMaxDelta = 0;
         double dsMinDelta = 0;
         if (dsBus >= 0) {
-            dsBaseDelta = lostP;
+            dsBaseDelta = lostP - lostLoadP;                 // net DROP of the row target (load shed RAISES it)
             for (LfGenerator gen : lost) {                   // per-gen deltas compose additively
                 if (gen.isParticipating() && gen.getDroop() != 0) {
                     dsFactorDelta += (gen.getMaxP() / gen.getDroop()) / dsSum;
@@ -1309,6 +1327,19 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 }
                 int[] targetOverrideIndex = ovIndexList.stream().mapToInt(Integer::intValue).toArray();
                 double[] targetOverrideValue = ovValueList.stream().mapToDouble(Double::doubleValue).toArray();
+                if (pairPhase && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_OV"))) {
+                    for (int s2 = 0; s2 < realCount; s2++) {
+                        StringBuilder sb = new StringBuilder("GPU-PAIR-OV "
+                                + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(STRATEGY_KEY_SEP, '|'));
+                        for (int k2 = 0; k2 < targetOverrideIndex.length; k2++) {
+                            if (targetOverrideIndex[k2] / n == s2) {
+                                int row = targetOverrideIndex[k2] % n;
+                                sb.append(String.format(" row%d=%.4f(base %.4f)", row, targetOverrideValue[k2], baseTargets[row]));
+                            }
+                        }
+                        System.err.println(sb);
+                    }
+                }
                 // Pair phase: warm continuation from each parent contingency's state + RL pinning.
                 double[] x0Full = null;
                 int[] rlStateIn = null;
@@ -1335,7 +1366,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         }
                     }
                 }
-                int[] rlStateOut = !pairPhase && !pairIdxList.isEmpty() && nrl > 0 ? new int[chunkSize * nrl] : null;
+                boolean dbgPairRl = pairPhase && nrl > 0 && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_RL"));
+                int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl) && nrl > 0 ? new int[chunkSize * nrl] : null;
                 double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                         rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
                         dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
@@ -1348,7 +1380,19 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                         r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
                         batchMaxOuterIterations, batchMaxPqPvSwitch, batchDsRejectResidual);
-                if (rlStateOut != null) {                    // capture each ctg's final RL pinning for its pairs
+                if (dbgPairRl) {
+                    for (int s2 = 0; s2 < realCount; s2++) {
+                        StringBuilder sb = new StringBuilder("GPU-PAIR-RL " + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(STRATEGY_KEY_SEP, '|'));
+                        for (int i2 = 0; i2 < nrl; i2++) {
+                            int v = rlStateOut[s2 * nrl + i2];
+                            if ((v & 3) != 0) {
+                                sb.append(" ctl").append(i2).append("=lt").append(v & 3).append("/sc").append(v >> 2);
+                            }
+                        }
+                        System.err.println(sb);
+                    }
+                }
+                if (rlStateOut != null && !pairPhase) {      // capture each ctg's final RL pinning for its pairs
                     for (int s = 0; s < realCount; s++) {
                         int[] slice = new int[nrl];
                         System.arraycopy(rlStateOut, s * nrl, slice, 0, nrl);

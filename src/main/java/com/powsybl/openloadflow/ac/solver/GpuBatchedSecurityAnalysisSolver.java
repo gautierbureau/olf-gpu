@@ -1357,6 +1357,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         }
                         System.err.println(sb);
                     }
+                    System.err.println("GPU-PAIR-SHOV slotElem=" + shOvSlotElemList + " gb=" + shOvGbList
+                            + " shPackOffset=" + shPackOffset);
                 }
                 // Pair phase: warm continuation from each parent contingency's state + RL pinning.
                 double[] x0Full = null;

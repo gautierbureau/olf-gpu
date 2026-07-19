@@ -639,7 +639,31 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             if (a instanceof com.powsybl.action.TerminalsConnectionAction tca) {
                 LfBranch b = net.getBranchById(tca.getElementId());
                 if (b == null) {
-                    return null;
+                    // Not a branch: a SHUNT compensator's terminals (OLF supports (re)connection since
+                    // the olf-local-patches shuntIdsToClose retention) — composed as a per-scenario
+                    // admittance shift: the retained base-open compensator contributes 0 at base, so
+                    // close = +its full section admittance; open of a connected one = -it. LINEAR only.
+                    com.powsybl.iidm.network.ShuntCompensator sc = network.getShuntCompensator(tca.getElementId());
+                    LfShunt lfShunt = sc != null ? net.getShuntById(tca.getElementId()) : null;
+                    if (sc == null || lfShunt == null
+                            || !(sc.getModel() instanceof com.powsybl.iidm.network.ShuntCompensatorLinearModel lin)) {
+                        return null;
+                    }
+                    // NEVER from the iidm terminal: during the SA the working variant is the TEMPORARY
+                    // one where the retention machinery already connected the closable shunt — ask the
+                    // LF model, which tracks the compensator's true base state.
+                    boolean connectedAtBase = !lfShunt.isCompensatorInitiallyDisconnected(tca.getElementId());
+                    if (tca.isOpen() == !connectedAtBase) {
+                        continue;                            // open-of-disconnected / close-of-connected: no-op
+                    }
+                    double gPerSection = Double.isNaN(lin.getGPerSection()) ? 0 : lin.getGPerSection();
+                    double zb = sc.getTerminal().getVoltageLevel().getNominalV()
+                            * sc.getTerminal().getVoltageLevel().getNominalV() / PerUnit.SB;
+                    double sign = tca.isOpen() ? -1 : 1;
+                    double n = sc.getSectionCount();
+                    shifts.add(new GpuBatchedSecurityAnalysisSolver.ShuntShift(lfShunt,
+                            sign * gPerSection * n * zb, sign * lin.getBPerSection() * n * zb));
+                    continue;
                 }
                 if (tca.isOpen()) {
                     if (!branches.contains(b)) {

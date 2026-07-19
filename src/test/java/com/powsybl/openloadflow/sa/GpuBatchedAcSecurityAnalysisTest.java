@@ -380,8 +380,16 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .collect(java.util.stream.Collectors.toSet());
         List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
                 com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), allVls, java.util.Set.of()));
+        com.powsybl.commons.report.ReportNode helperReport = "1".equals(System.getenv("OLF_GPU_DBG_REPORT"))
+                ? com.powsybl.commons.report.ReportNode.newRootReportNode()
+                        .withResourceBundles(com.powsybl.openloadflow.util.report.PowsyblOpenLoadFlowReportResourceBundle.BASE_NAME)
+                        .withMessageTemplate("olf.saReport").build()
+                : com.powsybl.commons.report.ReportNode.NO_OP;
         SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, monitors, sap, strategies, actions,
-                com.powsybl.commons.report.ReportNode.NO_OP);
+                helperReport);
+        if (helperReport != com.powsybl.commons.report.ReportNode.NO_OP) {
+            printReport(helperReport, 0);
+        }
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         try {
             SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, monitors, sap, strategies, actions,
@@ -481,12 +489,11 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     @Test
-    void shuntTargetingConnectionActionRejectedIdenticallyOnBothArms() {
-        // #29 finding: CPU OLF cannot reconnect a base-open SHUNT via actions — a shunt-targeting
-        // TerminalsConnectionAction is REJECTED loudly by Actions.checkValidity/LfAction creation
-        // ("Branch or three windings transformer ... not found"). The GPU provider runs the same
-        // shared validation BEFORE any device work, so both arms throw identically — nothing to
-        // batch, and the capability row is N/A (CPU-unsupported), not a GPU gap.
+    void baseOpenShuntReconnectionStrategyBatchMatchesCpu() {
+        // #32: reconnecting a BASE-OPEN shunt via TerminalsConnectionAction — supported by the
+        // olf-local-patches upstream patch (shuntIdsToClose retention: the compensator joins the
+        // aggregate at section 0, the action restores its section count). Batched as a per-scenario
+        // admittance shift of the compensator's full section admittance.
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = IeeeCdfNetworkFactory.create14();
@@ -502,29 +509,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 new com.powsybl.contingency.strategy.OperatorStrategy("sShuntRe",
                         com.powsybl.contingency.ContingencyContext.all(),
                         new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("reconnectShunt")));
-        String cpuMessage = assertThrowsRootMessage(network, contingencies, strategies, actions);
-        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
-        try {
-            String gpuMessage = assertThrowsRootMessage(network, contingencies, strategies, actions);
-            assertEquals(cpuMessage, gpuMessage, "both arms must reject a shunt-targeting connection action identically");
-        } finally {
-            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
-        }
-    }
-
-    private String assertThrowsRootMessage(Network network, List<Contingency> contingencies,
-                                           List<com.powsybl.contingency.strategy.OperatorStrategy> strategies,
-                                           List<com.powsybl.action.Action> actions) {
-        Throwable t = org.junit.jupiter.api.Assertions.assertThrows(Throwable.class, () ->
-                runSecurityAnalysis(network, contingencies,
-                        List.of(new com.powsybl.security.monitor.StateMonitor(
-                                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), java.util.Set.of(), java.util.Set.of())),
-                        new com.powsybl.security.SecurityAnalysisParameters(), strategies, actions,
-                        com.powsybl.commons.report.ReportNode.NO_OP));
-        while (t.getCause() != null) {
-            t = t.getCause();
-        }
-        return t.getMessage();
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
     }
 
     @Test

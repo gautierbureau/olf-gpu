@@ -1191,3 +1191,28 @@ production bench parity unchanged (22/6; GPU warm 12.2 s ≈ CPU-4t).
   recorded in task #31; busbar-coupler closes (the classic RTE topology remedial) are the
   payoff. RTE production params keep switches zero-impedance (default
   REPLACE_BY_ZERO_IMPEDANCE_LINE), so the min-impedance shortcut is not the production path.
+
+## 2026-07-19 (5) — base-open SHUNT reconnection: upstream OLF patch + batched (#32)
+- The N/A verdict is overturned by doing the upstream work: olf-local-patches commit
+  59565edb6 teaches CPU OLF to reconnect a base-open LINEAR shunt via
+  TerminalsConnectionAction. Design rides the EXISTING per-compensator section-controller
+  machinery: LfTopoConfig.shuntIdsToClose retains the compensator (connected in the temp
+  loading variant, so it joins the bus aggregate), the loader initializes it at section 0
+  (electrically identical to disconnected), and the action restores its section count
+  (LfShunt.setCompensatorConnected). Verified in OLF: reconnect-by-strategy == connected-
+  at-base to 1e-6 (new testReconnectBaseOpenShuntAction), 241/241 non-regression.
+- Three traps found on the way, all now guarded/documented:
+  (1) the SA replay dispatches AbstractLfBranchAction subclasses through the BULK
+  connectivity path — apply() is never called; the shunt flavor hooks applyOnConnectivity;
+  (2) the iidm NaN-gPerSection struck AGAIN, this time in OLF's own section tables
+  (initShuntCompensator) — a NaN section conductance made the replay's Jacobian singular
+  ("Matrix is singular"); latent in stock OLF for any operated compensator with unset g;
+  (3) during the SA the working variant is the TEMPORARY one where the closable shunt's
+  terminal is already connected — base-state detection must ask the LF model
+  (LfShunt.isCompensatorInitiallyDisconnected), never the iidm terminal.
+- GPU side: composer maps TerminalsConnectionAction-on-shunt to the existing per-scenario
+  ShuntShift override (+full section admittance on close of base-open, − on open of
+  connected; LINEAR only). Tests 24/24 incl. baseOpenShuntReconnectionStrategyBatchMatchesCpu
+  (ieee14 B9 shunt disconnected, reconnected by strategy, 0.05 kV state match, pair on
+  device). Bench @1e-7 zero-diff (cold 12.6 s x1.31, warm 11.7 s x1.41); fixed-iter
+  4.32 ms/scn 499/500.

@@ -541,10 +541,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      *  covers this contingency. Anything else stays on the CPU per-strategy path. */
     private static boolean strategyApplies(OperatorStrategy strategy, String contingencyId) {
         List<com.powsybl.contingency.strategy.ConditionalActions> stages = strategy.getConditionalActions();
-        if (stages.size() != 1
-                || !(stages.get(0).getCondition() instanceof com.powsybl.contingency.strategy.condition.TrueCondition)) {
-            return false;                                    // stage 1: single-stage, always-applied only
-        }
+        if (stages.size() != 1) {
+            return false;                                    // multi-stage stays on the CPU path (stage-on-stage
+        }                                                    // semantics need intermediate-state evaluation)
+        // ANY single-stage condition qualifies — including the violation/threshold conditions: the
+        // ENGINE evaluates the condition (AbstractSecurityAnalysis.checkCondition, on the CPU-detected
+        // post-contingency violations) BEFORE our runActionSimulation override is invoked, so the pair
+        // state is precomputed SPECULATIVELY and simply goes unused when the condition does not pass.
+        // Condition semantics therefore stay 100% stock — the batch only accelerates the solve.
         var ctx = strategy.getContingencyContext();
         return switch (ctx.getContextType()) {
             case ALL, ONLY_CONTINGENCIES -> true;

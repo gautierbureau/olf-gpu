@@ -1103,3 +1103,20 @@ production bench parity unchanged (22/6; GPU warm 12.2 s ≈ CPU-4t).
   warm 20.6 s (x0.66) — open perf item. The candidate production operating point is
   GPU@1e-7: exact CPU@1e-7 equivalence AND faster than CPU@1e-4.
 - Regressions: 17/17 SA tests, fixed-iter 4.26 ms/scn 499/500 unchanged.
+
+## 2026-07-19 — #24: violation- and threshold-conditioned operator strategies batched
+- The engine's structure made this a GATE RELAXATION, not new machinery:
+  `AbstractSecurityAnalysis` evaluates the strategy condition (checkCondition, on the
+  CPU-detected post-contingency violations) BEFORE calling the `runActionSimulation`
+  we override — so the (ctg, strategy) pair is precomputed SPECULATIVELY as a warm-
+  continuation batch scenario and simply goes unused when the condition does not pass.
+  Condition semantics stay 100% stock for ALL single-stage condition types (True,
+  Any/AtLeastOne/AllViolation, and the threshold conditions). Multi-stage remains CPU
+  (stage-on-stage needs intermediate-state evaluation).
+- Tests 19/19: positive (tight current limit on l24 arms an AnyViolationCondition; pair
+  served from the device, 0.05 kV state match) and negative (no limits → condition never
+  fires → NO strategy result on either arm, speculative pair still precomputed).
+  Test-writing traps: the star factory's only load sits on b4 = the SLACK bus, where
+  injection overrides are unbatchable by design — the shed target had to be a local
+  extra load on b2.
+- Production bench sanity @1e-7: ZERO diff held, cold 12.7 s (x1.43), warm 10.9 s (x1.67).

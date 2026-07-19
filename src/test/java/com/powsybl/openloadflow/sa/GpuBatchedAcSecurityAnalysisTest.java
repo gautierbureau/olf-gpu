@@ -411,6 +411,50 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     @Test
+    void violationConditionStrategyBatchMatchesCpu() {
+        // #24: violation-conditioned strategy — the pair is precomputed SPECULATIVELY; the engine's
+        // CPU-side condition check (on the post-contingency violations) decides whether it is used.
+        // A tight current limit on l12 guarantees the post-contingency violation that arms the condition.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = distributedSlackNetworkWithExtras();
+        // shed target on b2, NOT b4: b4 is the star center = slack bus, where injection overrides
+        // are unbatchable by design (the pair would silently fall back and defeat the test)
+        network.getBusBreakerView().getBus("b2").getVoltageLevel().newLoad()
+                .setId("extraLoad2").setBus("b2").setConnectableBus("b2").setP0(40).setQ0(20).add();
+        network.getLine("l24").newCurrentLimits1().setPermanentLimit(50).add();
+        List<Contingency> contingencies = List.of(new Contingency("l24_bis", new BranchContingency("l24_bis")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.LoadActionBuilder().withId("shed4").withLoadId("extraLoad2")
+                        .withRelativeValue(false).withActivePowerValue(10).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sViol",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.AnyViolationCondition(), List.of("shed4")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
+    @Test
+    void violationConditionNotTriggeredMatchesCpu() {
+        // Negative case: no limits => no violations => the condition never passes. The speculative
+        // pair still precomputes (count 2) but NEITHER arm produces an operator strategy result.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = distributedSlackNetworkWithExtras();
+        network.getBusBreakerView().getBus("b2").getVoltageLevel().newLoad()
+                .setId("extraLoad2").setBus("b2").setConnectableBus("b2").setP0(40).setQ0(20).add();
+        List<Contingency> contingencies = List.of(new Contingency("l24_bis", new BranchContingency("l24_bis")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.LoadActionBuilder().withId("shed4").withLoadId("extraLoad2")
+                        .withRelativeValue(false).withActivePowerValue(10).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sViolNone",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.AnyViolationCondition(), List.of("shed4")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
+    @Test
     void shuntPositionActionStrategyBatchMatchesCpu() {
         // #24 stage 2b: ShuntCompensatorPositionAction = per-scenario admittance shift (linear model).
         org.junit.jupiter.api.Assumptions.assumeTrue(

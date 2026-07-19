@@ -161,8 +161,9 @@ element falls back to the stock per-strategy CPU path individually.
 | Condition | Batched | Notes |
 |---|---|---|
 | TrueCondition (single-stage) | ✅ | contexts ALL / ONLY_CONTINGENCIES / SPECIFIC |
-| Any/AtLeastOne/AllViolationCondition | ⏩ | needs engine-loop collection → deferred warm batch (plumbing exists — next in #24) |
-| Multi-stage conditional actions | ⏩ | |
+| Any/AtLeastOne/AllViolationCondition (single-stage) | ✅ | speculative precompute: the ENGINE evaluates the condition on CPU-detected violations before our runActionSimulation override is invoked — unused pair states are simply dropped (2026-07-19) |
+| Threshold conditions (Branch/Injection/AcDcConverter/T3wt, single-stage) | ✅ | same mechanism — any single-stage condition qualifies |
+| Multi-stage conditional actions | ⏩ | stage-on-stage semantics need intermediate-state evaluation |
 
 ### Action types (powsybl action-api 7.3.0, complete list)
 
@@ -197,20 +198,19 @@ element falls back to the stock per-strategy CPU path individually.
 
 ## 5. The gap list to full CPU replacement (ranked)
 
-1. **Violation-conditioned operator strategies** — engine-loop collection + deferred warm batch (#24).
-2. **GeneratorAction** — device freeze-at-evaluated-q semantics (#24; root cause isolated).
-3. **Remaining SA outer loops** — shunt voltage control and incremental transformer/phase
+1. **GeneratorAction** — device freeze-at-evaluated-q semantics (#24; root cause isolated).
+2. **Remaining SA outer loops** — shunt voltage control and incremental transformer/phase
    controls first (present in RTE parameter sets); the §D catalogue is the port checklist.
-4. **HVDC + SVC packing** — extractor term/variable work; unblocks plain-LF coverage on
+3. **HVDC + SVC packing** — extractor term/variable work; unblocks plain-LF coverage on
    those networks and their SA/action rows.
-5. **Base-open element closes** — extractor packs disconnected elements into the superset.
-6. **Bus/busbar contingencies, ≥3-branch outages, single-side openings.**
-7. **⚠️ corner-case deltas inside supported scope** (Part II): keep-strongest-PV guard,
+4. **Base-open element closes** — extractor packs disconnected elements into the superset.
+5. **Bus/busbar contingencies, ≥3-branch outages, single-side openings.**
+6. **⚠️ corner-case deltas inside supported scope** (Part II): keep-strongest-PV guard,
    curve-limits-at-runtime-P, shared-control transformer groups (`useInitialTapPosition`),
    multi-slack components, realistic-voltage post-check on batched states. (DS balance
    types, useActiveLimits, failure behaviors, maxPqPvSwitch, maxOuterLoopIterations —
    closed 2026-07-18 by guard + parameter wiring.)
-8. **PerEquationTypeStoppingCriteria**; ZIP/exponential loads; ZI shapes without dummies.
+7. **PerEquationTypeStoppingCriteria**; ZIP/exponential loads; ZI shapes without dummies.
 
 ---
 
@@ -453,6 +453,6 @@ shunt models — all route the contingency to CPU (Part I §2 table).
 Update this file whenever a row changes state (the PR that lands a capability flips its
 mark), and re-run the two benches plus `GpuBatchedAcSecurityAnalysisTest` before flipping
 anything to ✅. ⚠️ rows are standing corner-case debts INSIDE supported scope — each
-needs either a device fix or a guard extension (they are enumerated in gap-list item 7).
+needs either a device fix or a guard extension (they are enumerated in gap-list item 6).
 Numbers and dated evidence live in `codegen/gpu_benchmark.md`; this file holds only the
 current truth.

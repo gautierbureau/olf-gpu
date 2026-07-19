@@ -1174,3 +1174,20 @@ production bench parity unchanged (22/6; GPU warm 12.2 s ≈ CPU-4t).
   precomputed on device, 0.05 kV state match — a silent no-op close would have mismatched
   the CPU's genuinely-closed state). Bench @1e-7 zero-diff (cold 12.7 s x1.16, warm 11.5 s
   x1.28); fixed-iter 4.27 ms/scn 499/500.
+
+## 2026-07-19 (4) — #29 follow-up: shunt reconnection is N/A; switch closes designed and tasked
+- Base-open SHUNT reconnection: **CPU OLF itself cannot do it** — LfTerminalsConnectionAction
+  resolves branches/3wt only, and the shared Actions validation THROWS ("Branch or three
+  windings transformer 'B9-SH' not found") before any solving. Both arms reject identically
+  (new parity test pins the behavior — the row is N/A, not a GPU gap). No electrically
+  meaningful alternative exists CPU-side either (a section action on a disconnected shunt
+  injects nothing).
+- SwitchAction close of a base-open switch: feasibility established — a retained closable
+  switch is an LfSwitch = ZERO-IMPEDANCE branch whose DUMMY_P/Q variables are row-less while
+  disabled (the ZI spanning-tree machinery only activates coupling/DUMMY_TARGET equations
+  for enabled edges), so the device state vector excludes them: per-scenario close is a
+  STRUCTURAL feature (dummy pre-activation + rowMode flip of the identity rows to the
+  ZERO_V/ZERO_PHI coupling — same machinery class as PV<->PQ), not a mask patch. Full design
+  recorded in task #31; busbar-coupler closes (the classic RTE topology remedial) are the
+  payoff. RTE production params keep switches zero-impedance (default
+  REPLACE_BY_ZERO_IMPEDANCE_LINE), so the min-impedance shortcut is not the production path.

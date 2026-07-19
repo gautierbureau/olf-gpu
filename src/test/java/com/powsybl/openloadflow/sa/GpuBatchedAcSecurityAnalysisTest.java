@@ -481,6 +481,53 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     @Test
+    void shuntTargetingConnectionActionRejectedIdenticallyOnBothArms() {
+        // #29 finding: CPU OLF cannot reconnect a base-open SHUNT via actions — a shunt-targeting
+        // TerminalsConnectionAction is REJECTED loudly by Actions.checkValidity/LfAction creation
+        // ("Branch or three windings transformer ... not found"). The GPU provider runs the same
+        // shared validation BEFORE any device work, so both arms throw identically — nothing to
+        // batch, and the capability row is N/A (CPU-unsupported), not a GPU gap.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        String shuntId = network.getShuntCompensatorStream().findFirst().orElseThrow().getId();
+        network.getShuntCompensator(shuntId).getTerminal().disconnect();
+        String lineId = network.getLineStream()
+                .filter(l -> !l.getId().contains("7") && !l.getId().contains("8"))
+                .skip(4).findFirst().orElseThrow().getId();
+        List<Contingency> contingencies = List.of(new Contingency(lineId, new BranchContingency(lineId)));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.TerminalsConnectionAction("reconnectShunt", shuntId, false));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sShuntRe",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("reconnectShunt")));
+        String cpuMessage = assertThrowsRootMessage(network, contingencies, strategies, actions);
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            String gpuMessage = assertThrowsRootMessage(network, contingencies, strategies, actions);
+            assertEquals(cpuMessage, gpuMessage, "both arms must reject a shunt-targeting connection action identically");
+        } finally {
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
+    private String assertThrowsRootMessage(Network network, List<Contingency> contingencies,
+                                           List<com.powsybl.contingency.strategy.OperatorStrategy> strategies,
+                                           List<com.powsybl.action.Action> actions) {
+        Throwable t = org.junit.jupiter.api.Assertions.assertThrows(Throwable.class, () ->
+                runSecurityAnalysis(network, contingencies,
+                        List.of(new com.powsybl.security.monitor.StateMonitor(
+                                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), java.util.Set.of(), java.util.Set.of())),
+                        new com.powsybl.security.SecurityAnalysisParameters(), strategies, actions,
+                        com.powsybl.commons.report.ReportNode.NO_OP));
+        while (t.getCause() != null) {
+            t = t.getCause();
+        }
+        return t.getMessage();
+    }
+
+    @Test
     void baseOpenBranchRecloseStrategyBatchMatchesCpu() {
         // #29: TerminalsConnectionAction CLOSING a BASE-OPEN branch. The SA retains it via
         // LfTopoConfig (loaded closed in a temp variant, re-opened by connectivity), so the LfBranch

@@ -40,6 +40,12 @@ public class GpuBatchElementMapper {
      * as GpuAcDataExtractor: first all closed branches, then all open branches.
      */
     public GpuBatchElementMapper(LfNetwork network) {
+        this(network, java.util.Set.of());
+    }
+
+    /** Batch-SA flavor: BASE-OPEN closable branches (see the extractor's matching overload) are
+     *  appended AFTER the normal closed branches — identical enumeration on both sides. */
+    public GpuBatchElementMapper(LfNetwork network, java.util.Set<String> baseOpenBranchIds) {
         Objects.requireNonNull(network);
         this.branchToElementIndex = new HashMap<>();
         List<LfBranch> closedBranches = new ArrayList<>();
@@ -61,6 +67,16 @@ public class GpuBatchElementMapper {
             }
         }
 
+        if (!baseOpenBranchIds.isEmpty()) {
+            for (LfBranch branch : network.getBranches()) {
+                if (branch.isDisabled() && baseOpenBranchIds.contains(branch.getId())
+                        && !branch.isZeroImpedance(LoadFlowModel.AC)
+                        && branch.getBus1() != null && branch.getBus2() != null
+                        && !branch.getBus1().isDisabled() && !branch.getBus2().isDisabled()) {
+                    closedBranches.add(branch);
+                }
+            }
+        }
         this.closedBranchCount = closedBranches.size();
         this.openBranchCount = openBranches.size();
 

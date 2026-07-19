@@ -1152,3 +1152,25 @@ production bench parity unchanged (22/6; GPU warm 12.2 s ≈ CPU-4t).
 - Validation: 22/22 SA tests incl. generatorActionStressAcrossContingencies (every ieee14
   line ctg × +60 MW redispatch, islanding included); production bench @1e-7 ZERO diff
   (cold 13.5 s x1.12, warm 11.0 s x1.37); fixed-iter 4.32 ms/scn 499/500.
+
+## 2026-07-19 (3) — base-open branch RECLOSE batched (#29)
+- TerminalsConnectionAction CLOSING a base-open branch now batches. Key insight: OLF's own
+  SA machinery (`Actions.addAllBranchesToClose` → `Networks.loadWithReconnectableElements`)
+  loads closable branches CLOSED in a temp variant and re-opens them via connectivity — so
+  the LfBranch exists in the LfNetwork, disabled, with BOTH buses and a valid pi model.
+- Mechanism: extractor gains an opt-in base-open pack (appended AFTER the normal closed
+  branches — normal element indices unchanged; mapper mirrors the enumeration; the id set is
+  derived from the composed batch itself, so plain LF never packs them and the data cache is
+  bypassed only when a reclose is present). The solver default-DISABLES base-open elements
+  in every scenario's mask at slot init; a scenario's reclosedBranches clears its bit. The
+  superset CSR pattern absorbs the extra elements; a new structure cache entry is created
+  (baseOpenCbElements is part of structural equality).
+- Scope guard: both endpoint buses must be ENERGIZED at base (mesh reinforcement, parallel-
+  line reclose — the common remedial case); dead-island re-energization is rejected at
+  qualification → CPU. SwitchAction closes and base-open SHUNT reconnection remain CPU
+  (switch retention goes through different machinery; assess on demand).
+- Tests 23/23 SA (+3 solver): baseOpenBranchRecloseStrategyBatchMatchesCpu (l24_ter created
+  disconnected, reclosed by a TrueCondition strategy after the l24_bis outage; pair
+  precomputed on device, 0.05 kV state match — a silent no-op close would have mismatched
+  the CPU's genuinely-closed state). Bench @1e-7 zero-diff (cold 12.7 s x1.16, warm 11.5 s
+  x1.28); fixed-iter 4.27 ms/scn 499/500.

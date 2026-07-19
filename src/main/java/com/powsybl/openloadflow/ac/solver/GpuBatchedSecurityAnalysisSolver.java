@@ -347,7 +347,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
 
     public record BatchContingency(String contingencyId, List<LfBranch> outagedBranches, List<LfGenerator> lostGenerators,
                                    List<LoadLoss> lostLoads, List<ShuntShift> shuntShifts, List<TapR1Override> tapOverrides,
-                                   List<LfShunt> outagedShunts) {
+                                   List<LfShunt> outagedShunts, List<LfBranch> reclosedBranches) {
         public BatchContingency {
             Objects.requireNonNull(contingencyId);
             Objects.requireNonNull(outagedBranches);
@@ -378,29 +378,29 @@ public final class GpuBatchedSecurityAnalysisSolver {
 
         /** A branch outage (N-1 or N-2). */
         public BatchContingency(String contingencyId, List<LfBranch> outagedBranches) {
-            this(contingencyId, outagedBranches, List.of(), List.of(), List.of(), List.of(), List.of());
+            this(contingencyId, outagedBranches, List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
         }
 
         /** Convenience for the common single-branch (N-1) case. */
         public BatchContingency(String contingencyId, LfBranch outagedBranch) {
-            this(contingencyId, List.of(Objects.requireNonNull(outagedBranch)), List.of(), List.of(), List.of(), List.of(), List.of());
+            this(contingencyId, List.of(Objects.requireNonNull(outagedBranch)), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
         }
 
         /** A combined branch + generator/load contingency. */
         public static BatchContingency branchesAndInjections(String contingencyId, List<LfBranch> branches,
                                                              List<LfGenerator> gens, List<LoadLoss> loads,
                                                              List<ShuntShift> shifts, List<TapR1Override> taps) {
-            return new BatchContingency(contingencyId, branches, gens, loads, shifts, taps, List.of());
+            return new BatchContingency(contingencyId, branches, gens, loads, shifts, taps, List.of(), List.of());
         }
 
         /** A generator loss. */
         public static BatchContingency generator(String contingencyId, LfGenerator lostGenerator) {
-            return new BatchContingency(contingencyId, List.of(), List.of(Objects.requireNonNull(lostGenerator)), List.of(), List.of(), List.of(), List.of());
+            return new BatchContingency(contingencyId, List.of(), List.of(Objects.requireNonNull(lostGenerator)), List.of(), List.of(), List.of(), List.of(), List.of());
         }
 
         /** A fixed-shunt disconnection (the shunt element is masked off, like a branch outage). */
         public static BatchContingency shunt(String contingencyId, LfShunt outagedShunt) {
-            return new BatchContingency(contingencyId, List.of(), List.of(), List.of(), List.of(), List.of(), List.of(Objects.requireNonNull(outagedShunt)));
+            return new BatchContingency(contingencyId, List.of(), List.of(), List.of(), List.of(), List.of(), List.of(Objects.requireNonNull(outagedShunt)), List.of());
         }
     }
 
@@ -634,9 +634,14 @@ public final class GpuBatchedSecurityAnalysisSolver {
         // (transformer ratio distribution) and zero-impedance branches (bus couplers). A contingency that
         // outages a DISTR_RHO controller or a zero-impedance branch is routed to the CPU (below / via the
         // element mapper) because the fixed batch pattern cannot represent the resulting structural change.
-        GpuAcData gpuData = GpuAcDataCache.extract(network, equationSystem, distributedSlack, reactiveLimits);
+        java.util.Set<String> baseOpenIds = contingencies.stream()
+                .flatMap(c -> c.reclosedBranches().stream()).map(LfBranch::getId)
+                .collect(java.util.stream.Collectors.toSet());
+        GpuAcData gpuData = baseOpenIds.isEmpty()
+                ? GpuAcDataCache.extract(network, equationSystem, distributedSlack, reactiveLimits)
+                : GpuAcDataExtractor.extract(network, equationSystem, distributedSlack, reactiveLimits, baseOpenIds);
         GpuAcActivation baseActivation = GpuAcActivation.fromEquationSystem(network, equationSystem);
-        GpuBatchElementMapper elementMapper = new GpuBatchElementMapper(network);
+        GpuBatchElementMapper elementMapper = new GpuBatchElementMapper(network, baseOpenIds);
 
         int n = baseState.length;
         int nElements = gpuData.getTotalElementCount();
@@ -682,7 +687,14 @@ public final class GpuBatchedSecurityAnalysisSolver {
             }
             BatchContingency c = contingencies.get(i);
             if (!c.lostGenerators().isEmpty() || !c.lostLoads().isEmpty() || !c.shuntShifts().isEmpty()
-                    || !c.tapOverrides().isEmpty()) {        // injection/shift/tap (or branch+) contingency
+                    || !c.tapOverrides().isEmpty() || !c.reclosedBranches().isEmpty()) {   // injection/shift/tap/reclose (or branch+)
+                java.util.Set<Integer> baseOpenSet = java.util.Arrays.stream(gpuData.baseOpenCbElements())
+                        .boxed().collect(java.util.stream.Collectors.toSet());
+                boolean recloseOk = c.reclosedBranches().stream()
+                        .allMatch(b -> baseOpenSet.contains(elementMapper.getElementIndex(b)));
+                if (!recloseOk) {
+                    continue;                                // reclose of an unpacked base-open branch — CPU
+                }
                 boolean tapOk = true;
                 for (TapR1Override tap : c.tapOverrides()) { // packed CLOSED branch with FIXED ratio AND
                     int ei = elementMapper.getElementIndex(tap.branch());   // phase (neither is a state variable)
@@ -1255,6 +1267,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         }
                         disabledIdx[s] = null;
                     }
+                    for (int e : gpuData.baseOpenCbElements()) {
+                        disabledMask[s][e] = true;           // base-open elements stay OUT unless this scenario recloses them
+                    }
                     rowModePerScenario[s] = baseRowMode;     // default: base layout (padding + non-fragmenting)
                     if (s < realCount) {                 // real scenario: disable its outaged branch(es)
                         int ci = group.get(chunkStart + s);
@@ -1285,6 +1300,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
                                 ovValueList.add(frozenTargets[k]);
                             }
                             rowModePerScenario[s] = row;
+                        }
+                        for (LfBranch reclosed : contingencies.get(ci).reclosedBranches()) {
+                            disabledMask[s][elementMapper.getElementIndex(reclosed)] = false;
                         }
                         for (TapR1Override tap : contingencies.get(ci).tapOverrides()) {
                             r1OvSlotElemList.add(s);

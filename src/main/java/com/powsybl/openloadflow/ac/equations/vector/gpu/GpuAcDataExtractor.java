@@ -105,6 +105,20 @@ public final class GpuAcDataExtractor {
      */
     public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                     boolean distributedSlack, boolean reactiveLimits) {
+        return extract(network, es, distributedSlack, reactiveLimits, java.util.Set.of());
+    }
+
+    /**
+     * Batch-SA flavor: additionally packs the given BASE-OPEN branches (disabled at base, both buses
+     * present and energized — the shape {@code Networks.loadWithReconnectableElements} produces for
+     * branches closable by an action: loaded CLOSED in a temp variant, then re-opened by connectivity,
+     * so the pi model and both buses are valid). They are appended to the closed-branch pack and
+     * reported in {@code baseOpenCbElements}; the batch solver DISABLES them in every scenario's mask
+     * by default — a reclose action clears the bit. The plain-LF path never packs them (empty set).
+     */
+    public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+                                    boolean distributedSlack, boolean reactiveLimits,
+                                    java.util.Set<String> baseOpenBranchIds) {
         validate(network, es);
 
         // Cache each bus's BUS_PHI/BUS_V column once: a bus appears in several branches (degree ~3),
@@ -200,6 +214,33 @@ public final class GpuAcDataExtractor {
                     phiCol[b1.getNum()], qRow[b1.getNum()],
                     -1, -1,
                     vCol[b1.getNum()], -1});
+            }
+        }
+
+        // BASE-OPEN closable branches (batch SA only): appended AFTER the normal closed branches so
+        // every normal element index is unchanged; the element mapper mirrors this enumeration.
+        List<Integer> baseOpenCb = new ArrayList<>();
+        if (!baseOpenBranchIds.isEmpty()) {
+            for (LfBranch br : network.getBranches()) {
+                if (!br.isDisabled() || !baseOpenBranchIds.contains(br.getId())
+                        || br.isZeroImpedance(LoadFlowModel.AC)) {
+                    continue;
+                }
+                LfBus b1 = br.getBus1();
+                LfBus b2 = br.getBus2();
+                if (b1 == null || b2 == null || b1.isDisabled() || b2.isDisabled()) {
+                    continue;                                // dead-island reconnection — CPU scope
+                }
+                PiModel pi = br.getPiModel();
+                int ph1 = phiCol[b1.getNum()];
+                int v1 = vCol[b1.getNum()];
+                int ph2 = phiCol[b2.getNum()];
+                int v2 = vCol[b2.getNum()];
+                baseOpenCb.add(cbIn.size());
+                cbIn.add(new double[] {pi.getY(), pi.getG1(), pi.getG2(), pi.getB1(), pi.getB2(),
+                    pi.getKsi(), pi.getR1(), pi.getA1()});
+                cbIdx.add(new int[] {ph1, qRow[b1.getNum()], ph2, qRow[b2.getNum()],
+                    ph1, v1, ph2, v2, -1, -1});              // no control columns on a disabled branch
             }
         }
 
@@ -386,7 +427,8 @@ public final class GpuAcDataExtractor {
                 toIntArray(rlVrow), toDoubleArray(rlMinQ), toDoubleArray(rlMaxQ), toDoubleArray(rlLoadQ),
                 toDoubleArray(rlVtarget),
                 toIntArray(dsPhiRow), dsFactor, dsSlackPhiRow, dsSlackTargetP,
-                toDoubleArray(dsBaseTargetP), toDoubleArray(dsMaxDelta), toDoubleArray(dsMinDelta));
+                toDoubleArray(dsBaseTargetP), toDoubleArray(dsMaxDelta), toDoubleArray(dsMinDelta),
+                baseOpenCb.stream().mapToInt(Integer::intValue).toArray());
     }
 
     /**

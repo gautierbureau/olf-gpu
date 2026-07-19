@@ -629,6 +629,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         List<GpuBatchedSecurityAnalysisSolver.LoadLoss> loads = new java.util.ArrayList<>(ctgLoads);
         List<GpuBatchedSecurityAnalysisSolver.ShuntShift> shifts = new java.util.ArrayList<>(ctgShifts);
         List<GpuBatchedSecurityAnalysisSolver.TapR1Override> taps = new java.util.ArrayList<>();
+        List<LfBranch> reclosed = new java.util.ArrayList<>();
         Map<String, Action> actionById = new java.util.HashMap<>();
         for (Action a : currentActions) {
             actionById.put(a.getId(), a);
@@ -646,7 +647,13 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     }
                 } else {
                     if (!branches.remove(b)) {
-                        return null;                         // close of a BASE-OPEN branch: not packed — CPU
+                        // close of a BASE-OPEN branch (retained disabled by LfTopoConfig): batched as a
+                        // per-scenario mask CLEAR on the base-open packed element — dead-island
+                        // reconnection (a disabled endpoint bus) is rejected at qualification.
+                        if (!b.isDisabled()) {
+                            return null;                     // closing an already-closed branch — CPU decides
+                        }
+                        reclosed.add(b);
                     }
                 }
             } else if (a instanceof com.powsybl.action.SwitchAction sw) {
@@ -736,7 +743,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             return null;
         }
         return new BatchContingency(contingencyId + STRATEGY_KEY_SEP + strategy.getId(),
-                branches, ctgGens, loads, shifts, taps, List.of());
+                branches, ctgGens, loads, shifts, taps, List.of(), reclosed);
     }
 
 

@@ -170,8 +170,8 @@ element falls back to the stock per-strategy CPU path individually.
 | Action | Batched | Notes |
 |---|---|---|
 | TerminalsConnectionAction (open) | ✅ | adds the branch to the pair's outage mask |
-| TerminalsConnectionAction (close) | 🔶 | only re-closing a branch opened by the contingency; closing a base-open branch ⏩ (extractor packs disconnected elements — shared deferral) |
-| SwitchAction | 🔶 | same open/close semantics, switch-mapped |
+| TerminalsConnectionAction (close) | ✅ | re-closing a ctg-opened branch AND closing a BASE-OPEN branch (2026-07-19: opt-in base-open pack, default-disabled mask, reclose clears the bit); dead-island re-energization (disabled endpoint) → ⏩ |
+| SwitchAction | 🔶 | open + reclose-of-ctg-opened; closing a base-open switch → ⏩ (switch retention machinery not wired to the base-open pack) |
 | LoadAction | ✅ | absolute / relative P shed as injection delta |
 | RatioTapChangerTapPositionAction | ✅ | full static-row override [y g1 g2 b1 b2 ksi r1 a1] from the target tap — per-tap impedance changes covered; controlled transformer → ⏩ |
 | PhaseTapChangerTapPositionAction | ✅ | same compiler (validated incl. ±100% per-step r/x/g/b swings); PST under active phase control → ⏩ |
@@ -202,7 +202,7 @@ element falls back to the stock per-strategy CPU path individually.
    controls first (present in RTE parameter sets); the §D catalogue is the port checklist.
 2. **HVDC + SVC packing** — extractor term/variable work; unblocks plain-LF coverage on
    those networks and their SA/action rows.
-3. **Base-open element closes** — extractor packs disconnected elements into the superset.
+3. **Base-open SHUNT reconnection + SwitchAction closes** — branch recloses landed 2026-07-19; the shunt/switch flavors remain CPU.
 4. **Bus/busbar contingencies, ≥3-branch outages, single-side openings.**
 5. **⚠️ corner-case deltas inside supported scope** (Part II): keep-strongest-PV guard,
    curve-limits-at-runtime-P, shared-control transformer groups (`useInitialTapPosition`),
@@ -414,8 +414,10 @@ Remote-controller (non-pilot) bus: own Q scatter suppressed, qRow −1 (EXT:609-
 
 ### E.6 Branch/shunt/HVDC packing (EXT:146-232)
 
-Disabled branches skipped; closed/side-1-open/side-2-open packed; **fully-disconnected
-non-ZI branches silently not packed** (this is why base-open reclose actions are deferred).
+Disabled branches skipped by default; closed/side-1-open/side-2-open packed. Base-open
+CLOSABLE branches (disabled, both buses present and energized) are packed opt-in for the
+batch (appended after the normal closed branches, default-disabled per scenario) — the
+plain-LF path never packs them.
 Shunts packed per bus. HVDC packed only with both buses present AND AC-emulation mode;
 otherwise the converters appear only as bus P injections.
 
@@ -443,6 +445,8 @@ Solver qualification level (`SOLVER:642-701`):
    DS-participant-bus generator loss.
 7. Combo with a branch part outaging a DISTR_RHO controller (§E.4).
 8. Combo where a lost generator sits on an islanded bus.
+9. Reclose of a branch not in the base-open pack (unknown id, zero-impedance, or a disabled
+   endpoint bus — dead-island re-energization).
 
 Provider mapping level (before qualification): >2 branches, single-side openings,
 bus/busbar losses, HVDC contingencies, Q-carrying load delta at a PV bus, non-linear

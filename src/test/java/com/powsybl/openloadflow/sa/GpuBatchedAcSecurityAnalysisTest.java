@@ -481,6 +481,32 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     @Test
+    void baseOpenBranchRecloseStrategyBatchMatchesCpu() {
+        // #29: TerminalsConnectionAction CLOSING a BASE-OPEN branch. The SA retains it via
+        // LfTopoConfig (loaded closed in a temp variant, re-opened by connectivity), so the LfBranch
+        // exists disabled with both buses — packed as a base-open element, default-disabled in every
+        // scenario's mask, and ENABLED only in the (ctg, strategy) pair that recloses it.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = distributedSlackNetworkWithExtras();
+        com.powsybl.iidm.network.Line l24 = network.getLine("l24");
+        com.powsybl.iidm.network.Line ter = network.newLine().setId("l24_ter")
+                .setVoltageLevel1(l24.getTerminal1().getVoltageLevel().getId()).setBus1(l24.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l24.getTerminal2().getVoltageLevel().getId()).setBus2(l24.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l24.getR() * 3).setX(l24.getX() * 3).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        ter.getTerminal1().disconnect();
+        ter.getTerminal2().disconnect();
+        List<Contingency> contingencies = List.of(new Contingency("l24_bis", new BranchContingency("l24_bis")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.TerminalsConnectionAction("closeTer", "l24_ter", false));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sReclose",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeTer")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
+    @Test
     void generatorActionStrategyBatchMatchesCpu() {
         // #28: pure active-power redispatch GeneratorAction — composed as a net-injection delta on
         // the warm-continued pair. The B2 saga's ~0.17 kV freeze-semantics delta must NOT reappear.

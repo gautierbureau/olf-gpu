@@ -103,11 +103,11 @@ public final class GpuBatchContingencyValidator {
                 .flatMap(sn -> sn.getSlackBuses().stream())
                 .collect(Collectors.toSet());
         return contingencies.stream()
-                .map(c -> qualifyOne(connectivity, slackBuses, c, elementMapper, handleIslanding))
+                .map(c -> qualifyOne(network, connectivity, slackBuses, c, elementMapper, handleIslanding))
                 .toList();
     }
 
-    private static Qualification qualifyOne(GraphConnectivity<LfBus, LfBranch> connectivity,
+    private static Qualification qualifyOne(LfNetwork network, GraphConnectivity<LfBus, LfBranch> connectivity,
                                            Set<LfBus> slackBuses,
                                            GpuBatchedSecurityAnalysisSolver.BatchContingency contingency,
                                            GpuBatchElementMapper elementMapper,
@@ -125,8 +125,14 @@ public final class GpuBatchContingencyValidator {
         // Only the closed branches (both sides) are connectivity edges; an open-ended branch carries no flow
         // on its open side and cannot fragment the network. Remove every closed outaged branch as a temporary
         // edge (N-2 removes both at once) and check whether any vertex leaves the main component.
-        List<LfBranch> closed = branches.stream()
-                .filter(b -> b.getBus1() != null && b.getBus2() != null).toList();
+        List<LfBranch> closed = new java.util.ArrayList<>(branches.stream()
+                .filter(b -> b.getBus1() != null && b.getBus2() != null).toList());
+        // Outaged ZERO-IMPEDANCE branches (node-breaker propagation opens the target's breakers
+        // alongside it) are connectivity edges too: they must take part in the islanding analysis,
+        // and the DEAD-STUB shape (one side left islanded) is the one the frozen-rows machinery
+        // reproduces exactly. A switch whose two sides BOTH stay in the main component would
+        // require re-picking the zero-impedance group's spanning tree per scenario — CPU.
+        closed.addAll(contingency.outagedZiBranches());
         if (closed.isEmpty()) {
             return Qualification.ok(contingency);
         }
@@ -135,7 +141,32 @@ public final class GpuBatchContingencyValidator {
             for (LfBranch branch : closed) {
                 connectivity.removeEdge(branch);
             }
+            // When the outage isolates the slack itself, CPU does NOT keep the slack's component as the
+            // main one: PropagatedContingency RELOCATES the slack ("leads to an isolated slack bus:
+            // relocate slack bus inside main component"), excluding every bus outside the largest
+            // connected component from slack eligibility and re-picking a slack there. The batched pack
+            // anchors its targets and the distributed-slack participation on the BASE slack row, so a
+            // relocated slack is not representable as a per-scenario mask — route it to CPU. Detecting it
+            // here is what stops the dead-stub case from being silently mis-solved: anchoring on the
+            // isolated slack reports the LIVE side as removed (measured: {BBS2, BBS3}), which would
+            // freeze the whole energized network instead of the stub.
+            LfBus slack = network.getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
+            if (!connectivity.getLargestConnectedComponent().contains(slack)) {
+                LOGGER.debug("Contingency {} rejected: outage isolates the slack bus (CPU relocates the slack)",
+                        contingency.contingencyId());
+                return Qualification.rejected(contingency, Disqualification.ISLANDS_SLACK);
+            }
+            // The main component must be ANCHORED on the slack before querying, exactly as
+            // PropagatedContingency does (setMainComponentVertex + getVerticesRemovedFromMainComponent).
+            connectivity.setMainComponentVertex(slack);
             Set<LfBus> islanded = connectivity.getVerticesRemovedFromMainComponent();
+            for (LfBranch zi : contingency.outagedZiBranches()) {
+                if (!islanded.contains(zi.getBus1()) && !islanded.contains(zi.getBus2())) {
+                    LOGGER.debug("Contingency {} rejected: switch outage {} leaves both sides energized "
+                            + "(zero-impedance spanning tree would change)", contingency.contingencyId(), zi.getId());
+                    return Qualification.rejected(contingency, Disqualification.NOT_IN_GPU_MODEL);
+                }
+            }
             if (islanded.isEmpty()) {
                 return Qualification.ok(contingency);
             }

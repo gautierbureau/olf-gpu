@@ -33,7 +33,7 @@ class GpuBatchedSecurityAnalysisSolverTest {
             new int[0], new int[0], new double[0],
             new int[0], new double[0], new double[0], new double[0], new double[0],
             new int[0], new double[0], -1, 0.0,
-            new double[0], new double[0], new double[0], new int[0], new int[0], new int[0]);
+            new double[0], new double[0], new double[0], new int[0], new int[0], new int[0], new int[0]);
 
     @Test
     void explicitCapIsHonouredAndClampedToCount() {

@@ -347,7 +347,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
 
     public record BatchContingency(String contingencyId, List<LfBranch> outagedBranches, List<LfGenerator> lostGenerators,
                                    List<LoadLoss> lostLoads, List<ShuntShift> shuntShifts, List<TapR1Override> tapOverrides,
-                                   List<LfShunt> outagedShunts, List<LfBranch> reclosedBranches) {
+                                   List<LfShunt> outagedShunts, List<LfBranch> reclosedBranches,
+                                   List<LfBranch> outagedZiBranches) {
         public BatchContingency {
             Objects.requireNonNull(contingencyId);
             Objects.requireNonNull(outagedBranches);
@@ -363,8 +364,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
             // Batchable shapes: 1-2 branches, N generators, N loads, and branch+injection COMBOS
             // (independent mechanisms: element mask vs target/row-mode overrides); fixed shunts
             // stay exclusive (their DISTR_Q interplay is validated separately).
-            if ((!isInjection && !isShunt && !isBranch) || outagedBranches.size() > 2
-                    || (isShunt && (isInjection || isBranch))) {
+            if (!isInjection && !isShunt && !isBranch || outagedBranches.size() > 2
+                    || isShunt && (isInjection || isBranch)) {
                 throw new IllegalArgumentException(
                         "a batched contingency is 1-2 branches and/or injection loss(es), or fixed shunt(s) alone");
             }
@@ -378,29 +379,36 @@ public final class GpuBatchedSecurityAnalysisSolver {
 
         /** A branch outage (N-1 or N-2). */
         public BatchContingency(String contingencyId, List<LfBranch> outagedBranches) {
-            this(contingencyId, outagedBranches, List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
+            this(contingencyId, outagedBranches, List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
         }
 
         /** Convenience for the common single-branch (N-1) case. */
         public BatchContingency(String contingencyId, LfBranch outagedBranch) {
-            this(contingencyId, List.of(Objects.requireNonNull(outagedBranch)), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
+            this(contingencyId, List.of(Objects.requireNonNull(outagedBranch)), List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
         }
 
         /** A combined branch + generator/load contingency. */
         public static BatchContingency branchesAndInjections(String contingencyId, List<LfBranch> branches,
+                                                            List<LfGenerator> gens, List<LoadLoss> loads,
+                                                            List<ShuntShift> shifts, List<TapR1Override> taps,
+                                                            List<LfBranch> outagedZi) {
+            return new BatchContingency(contingencyId, branches, gens, loads, shifts, taps, List.of(), List.of(), outagedZi);
+        }
+
+        public static BatchContingency branchesAndInjections(String contingencyId, List<LfBranch> branches,
                                                              List<LfGenerator> gens, List<LoadLoss> loads,
                                                              List<ShuntShift> shifts, List<TapR1Override> taps) {
-            return new BatchContingency(contingencyId, branches, gens, loads, shifts, taps, List.of(), List.of());
+            return new BatchContingency(contingencyId, branches, gens, loads, shifts, taps, List.of(), List.of(), List.of());
         }
 
         /** A generator loss. */
         public static BatchContingency generator(String contingencyId, LfGenerator lostGenerator) {
-            return new BatchContingency(contingencyId, List.of(), List.of(Objects.requireNonNull(lostGenerator)), List.of(), List.of(), List.of(), List.of(), List.of());
+            return new BatchContingency(contingencyId, List.of(), List.of(Objects.requireNonNull(lostGenerator)), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
         }
 
         /** A fixed-shunt disconnection (the shunt element is masked off, like a branch outage). */
         public static BatchContingency shunt(String contingencyId, LfShunt outagedShunt) {
-            return new BatchContingency(contingencyId, List.of(), List.of(), List.of(), List.of(), List.of(), List.of(Objects.requireNonNull(outagedShunt)), List.of());
+            return new BatchContingency(contingencyId, List.of(), List.of(), List.of(), List.of(), List.of(), List.of(Objects.requireNonNull(outagedShunt)), List.of(), List.of());
         }
     }
 
@@ -694,7 +702,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
             }
             BatchContingency c = contingencies.get(i);
             if (!c.lostGenerators().isEmpty() || !c.lostLoads().isEmpty() || !c.shuntShifts().isEmpty()
-                    || !c.tapOverrides().isEmpty() || !c.reclosedBranches().isEmpty()) {   // injection/shift/tap/reclose (or branch+)
+                    || !c.tapOverrides().isEmpty() || !c.reclosedBranches().isEmpty()
+                    || !c.outagedZiBranches().isEmpty()) {   // injection/shift/tap/reclose/switch-outage (or branch+)
                 java.util.Set<Integer> baseOpenSet = java.util.Arrays.stream(gpuData.baseOpenCbElements())
                         .boxed().collect(java.util.stream.Collectors.toSet());
                 java.util.Map<Integer, Integer> ziElemByBranchNum = new java.util.HashMap<>();
@@ -970,10 +979,11 @@ public final class GpuBatchedSecurityAnalysisSolver {
         double lostLoadQ = lostLoads.stream().mapToDouble(LoadLoss::q).sum();
         double pTarget = bus.getTargetP() - lostP + lostLoadP;   // shedding load RAISES the P target
         boolean busPv = bus.isGeneratorVoltageControlEnabled();
+        // A Q-carrying load delta at a voltage-controlling bus would make the RL pack's static
+        // loadQ go stale — CPU fallback. P-only deltas (e.g. redispatch actions) are safe: PV Q is free.
         if (busPv && lostLoads.stream().anyMatch(l -> l.q() != 0)) {
-            return null;                                     // Q-carrying load delta at a voltage-controlling bus: the
-        }                                                    // RL pack's static loadQ would go stale — CPU fallback
-                                                             // (P-only deltas, e.g. redispatch actions, are safe: PV Q is free)
+            return null;
+        }
         boolean lostControls = lost.stream()
                 .anyMatch(g -> g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
         boolean otherController = bus.getGenerators().stream()
@@ -1148,7 +1158,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                     batchLsMode, batchMaxDv, batchMaxDphi,
                     batchLsMode == 2 ? varType : null, x0Full, null, null, null, null, null, null,
-                    batchMaxOuterIterations, batchMaxPqPvSwitch, batchDsRejectResidual, 0, null);
+                    batchMaxOuterIterations, batchMaxPqPvSwitch, batchDsRejectResidual, 0, null, null);
             for (int slot : affected) {
                 chunkResults[slot] = r2[slot];
             }
@@ -1231,6 +1241,11 @@ public final class GpuBatchedSecurityAnalysisSolver {
             ziElemByBranchNumChunk.put(gpuData.baseOpenZiBranchNums()[z], gpuData.baseOpenZiElements()[z]);
         }
         int nziBase = gpuData.ziIdx().length / 11 - gpuData.baseOpenZiElements().length;
+        java.util.Map<Integer, Integer> ziElemByNumAll = new java.util.HashMap<>();
+        for (int z = 0; z < gpuData.ziIdx().length / 11; z++) {
+            ziElemByNumAll.put(gpuData.ziBranchNums()[z], z);
+        }
+        List<Integer> ziOffSlotElemList = new ArrayList<>(); // per-scenario zi-element outages (switch opens)
         List<Integer> ziOnSlotElemList = new ArrayList<>(); // per-scenario zi-element enables (switch closes)
         List<Integer> shOvSlotElemList = new ArrayList<>();  // per-scenario shunt admittance overrides
         List<Double> shOvGbList = new ArrayList<>();
@@ -1271,209 +1286,228 @@ public final class GpuBatchedSecurityAnalysisSolver {
         try {
             long startTime = System.currentTimeMillis();
             for (List<Integer> group : List.of(ctgIdxList, pairIdxList)) {
-            boolean pairPhase = group == pairIdxList;
-            int nbg = group.size();
-            for (int chunkStart = 0; chunkStart < nbg; chunkStart += chunkSize) {
-                int realCount = Math.min(chunkSize, nbg - chunkStart);
-                ovIndexList.clear();
-                ovValueList.clear();
-                ziOnSlotElemList.clear();
-                shOvSlotElemList.clear();
-                shOvGbList.clear();
-                r1OvSlotElemList.clear();
-                r1OvValList.clear();
-                if (hasDs) {
-                    java.util.Arrays.fill(dsOvBus, -1);
-                    java.util.Arrays.fill(dsOvFactorDelta, 0);
-                    java.util.Arrays.fill(dsOvBaseDelta, 0);
-                    java.util.Arrays.fill(dsOvMaxDelta, 0);
-                    java.util.Arrays.fill(dsOvMinDelta, 0);
-                }
-                for (int s = 0; s < chunkSize; s++) {
-                    if (disabledIdx[s] != null) {        // clear this slot's outage(s) from the previous chunk
-                        for (int ei : disabledIdx[s]) {
-                            disabledMask[s][ei] = false;
-                        }
-                        disabledIdx[s] = null;
+                boolean pairPhase = group == pairIdxList;
+                int nbg = group.size();
+                for (int chunkStart = 0; chunkStart < nbg; chunkStart += chunkSize) {
+                    int realCount = Math.min(chunkSize, nbg - chunkStart);
+                    ovIndexList.clear();
+                    ovValueList.clear();
+                    ziOffSlotElemList.clear();
+                    ziOnSlotElemList.clear();
+                    shOvSlotElemList.clear();
+                    shOvGbList.clear();
+                    r1OvSlotElemList.clear();
+                    r1OvValList.clear();
+                    if (hasDs) {
+                        java.util.Arrays.fill(dsOvBus, -1);
+                        java.util.Arrays.fill(dsOvFactorDelta, 0);
+                        java.util.Arrays.fill(dsOvBaseDelta, 0);
+                        java.util.Arrays.fill(dsOvMaxDelta, 0);
+                        java.util.Arrays.fill(dsOvMinDelta, 0);
                     }
-                    for (int e : gpuData.baseOpenCbElements()) {
-                        disabledMask[s][e] = true;           // base-open elements stay OUT unless this scenario recloses them
-                    }
-                    rowModePerScenario[s] = baseRowMode;     // default: base layout (padding + non-fragmenting)
-                    if (s < realCount) {                 // real scenario: disable its outaged branch(es)
-                        int ci = group.get(chunkStart + s);
-                        List<LfBranch> branches = contingencies.get(ci).outagedBranches();
-                        List<LfShunt> shunts = contingencies.get(ci).outagedShunts();
-                        int[] eis = new int[branches.size() + shunts.size()];
-                        int ei = 0;
-                        for (LfBranch branch : branches) {
-                            int idx = elementMapper.getElementIndex(branch);          // qualification guarantees >= 0
-                            disabledMask[s][idx] = true;
-                            eis[ei++] = idx;
-                        }
-                        for (LfShunt shunt : shunts) {                                // fixed-shunt disconnection
-                            int idx = elementMapper.getElementIndex(shunt);          // qualification guarantees >= 0
-                            disabledMask[s][idx] = true;
-                            eis[ei++] = idx;
-                        }
-                        disabledIdx[s] = eis;
-                        int[] frozen = frozenRowsByIndex[ci];
-                        if (frozen.length > 0) {         // fragmenting outage: freeze the islanded buses' rows
-                            int[] row = baseRowMode.clone();
-                            double[] frozenTargets = frozenTargetsByIndex[ci];
-                            for (int k = 0; k < frozen.length; k++) {
-                                row[frozen[k]] = 0;      // identity row — bus decoupled from the main component
-                                // ...held at a CLEAN flat state (V=1, phi=0) via the target override, NOT the base
-                                // equation target (a P/Q value that gives a nonsensical islanded voltage/angle).
-                                ovIndexList.add(s * n + frozen[k]);
-                                ovValueList.add(frozenTargets[k]);
+                    for (int s = 0; s < chunkSize; s++) {
+                        if (disabledIdx[s] != null) {        // clear this slot's outage(s) from the previous chunk
+                            for (int ei : disabledIdx[s]) {
+                                disabledMask[s][ei] = false;
                             }
-                            rowModePerScenario[s] = row;
+                            disabledIdx[s] = null;
                         }
-                        for (LfBranch reclosed : contingencies.get(ci).reclosedBranches()) {
-                            if (reclosed.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
-                                Integer ze = ziElemByBranchNumChunk.get(reclosed.getNum());
-                                ziOnSlotElemList.add(s);
-                                ziOnSlotElemList.add(ze);
-                                // flip the two dummy rows from identity (pinned 0) to the ZERO_V/ZERO_PHI
-                                // coupling; targets stay 0 (switch: rho=1, phase shift 0)
+                        for (int e : gpuData.baseOpenCbElements()) {
+                            disabledMask[s][e] = true;           // base-open elements stay OUT unless this scenario recloses them
+                        }
+                        rowModePerScenario[s] = baseRowMode;     // default: base layout (padding + non-fragmenting)
+                        if (s < realCount) {                 // real scenario: disable its outaged branch(es)
+                            int ci = group.get(chunkStart + s);
+                            List<LfBranch> branches = contingencies.get(ci).outagedBranches();
+                            List<LfShunt> shunts = contingencies.get(ci).outagedShunts();
+                            int[] eis = new int[branches.size() + shunts.size()];
+                            int ei = 0;
+                            for (LfBranch branch : branches) {
+                                int idx = elementMapper.getElementIndex(branch);          // qualification guarantees >= 0
+                                disabledMask[s][idx] = true;
+                                eis[ei++] = idx;
+                            }
+                            for (LfShunt shunt : shunts) {                                // fixed-shunt disconnection
+                                int idx = elementMapper.getElementIndex(shunt);          // qualification guarantees >= 0
+                                disabledMask[s][idx] = true;
+                                eis[ei++] = idx;
+                            }
+                            disabledIdx[s] = eis;
+                            int[] frozen = frozenRowsByIndex[ci];
+                            if (frozen.length > 0) {         // fragmenting outage: freeze the islanded buses' rows
+                                int[] row = baseRowMode.clone();
+                                double[] frozenTargets = frozenTargetsByIndex[ci];
+                                for (int k = 0; k < frozen.length; k++) {
+                                    row[frozen[k]] = 0;      // identity row — bus decoupled from the main component
+                                    // ...held at a CLEAN flat state (V=1, phi=0) via the target override, NOT the base
+                                    // equation target (a P/Q value that gives a nonsensical islanded voltage/angle).
+                                    ovIndexList.add(s * n + frozen[k]);
+                                    ovValueList.add(frozenTargets[k]);
+                                }
+                                rowModePerScenario[s] = row;
+                            }
+                            for (LfBranch ziOut : contingencies.get(ci).outagedZiBranches()) {
+                                Integer ze = ziElemByNumAll.get(ziOut.getNum());
+                                ziOffSlotElemList.add(s);
+                                ziOffSlotElemList.add(ze);
+                                // the decoupled branch's ZERO_V/ZERO_PHI rows become identities again
+                                // (dummies pinned to 0) — the inverse of a close
                                 int dpRow = gpuData.ziIdx()[ze * 11 + 4];
                                 int dqRow = gpuData.ziIdx()[ze * 11 + 5];
-                                int[] row = rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rowModePerScenario[s];
-                                row[dpRow] = 1;
-                                row[dqRow] = 1;
-                                rowModePerScenario[s] = row;
-                            } else {
-                                disabledMask[s][elementMapper.getElementIndex(reclosed)] = false;
+                                int[] rowZi = rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rowModePerScenario[s];
+                                rowZi[dpRow] = 0;
+                                rowZi[dqRow] = 0;
+                                ovIndexList.add(s * n + dpRow);
+                                ovValueList.add(0.0);
+                                ovIndexList.add(s * n + dqRow);
+                                ovValueList.add(0.0);
+                                rowModePerScenario[s] = rowZi;
                             }
-                        }
-                        for (TapR1Override tap : contingencies.get(ci).tapOverrides()) {
-                            r1OvSlotElemList.add(s);
-                            r1OvSlotElemList.add(elementMapper.getElementIndex(tap.branch()));   // cb pack index == element index
-                            for (double v : tap.cbRow()) {
-                                r1OvValList.add(v);
-                            }
-                        }
-                        for (ShuntShift sh : contingencies.get(ci).shuntShifts()) {
-                            shOvSlotElemList.add(s);
-                            shOvSlotElemList.add(elementMapper.getElementIndex(sh.shunt()) - shPackOffset);
-                            shOvGbList.add(sh.dg());
-                            shOvGbList.add(sh.db());
-                        }
-                        GenOutage[] gos = genOutagesByIndex[ci];
-                        if (gos != null) {               // generator loss(es): per-BUS target overrides (merged by bus;
-                            for (GenOutage go : gos) {   // at most one DS-participant bus per contingency by construction)
-                                ovIndexList.add(s * n + go.pRow());
-                                ovValueList.add(go.pTarget());
-                                if (go.qOverride()) {    // Q target sheds the lost gens' Q: on the PV->PQ flip AND
-                                    ovIndexList.add(s * n + go.vRow());   // on an ALREADY-PQ bus losing fixed-Q gens (#21)
-                                    ovValueList.add(go.qTarget());
-                                }
-                                if (go.toPq()) {
+                            for (LfBranch reclosed : contingencies.get(ci).reclosedBranches()) {
+                                if (reclosed.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
+                                    Integer ze = ziElemByBranchNumChunk.get(reclosed.getNum());
+                                    ziOnSlotElemList.add(s);
+                                    ziOnSlotElemList.add(ze);
+                                    // flip the two dummy rows from identity (pinned 0) to the ZERO_V/ZERO_PHI
+                                    // coupling; targets stay 0 (switch: rho=1, phase shift 0)
+                                    int dpRow = gpuData.ziIdx()[ze * 11 + 4];
+                                    int dqRow = gpuData.ziIdx()[ze * 11 + 5];
                                     int[] row = rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rowModePerScenario[s];
-                                    row[go.vRow()] = 1;  // BUS_V row becomes the reactive-power equation (PV→PQ)
+                                    row[dpRow] = 1;
+                                    row[dqRow] = 1;
                                     rowModePerScenario[s] = row;
-                                }
-                                if (hasDs && go.dsBus() >= 0) {   // lost gen(s) on a DS-participant bus: per-scenario reweight
-                                    dsOvBus[s] = go.dsBus();
-                                    dsOvFactorDelta[s] = go.dsFactorDelta();
-                                    dsOvBaseDelta[s] = go.dsBaseDelta();
-                                    dsOvMaxDelta[s] = go.dsMaxDelta();
-                                    dsOvMinDelta[s] = go.dsMinDelta();
+                                } else {
+                                    disabledMask[s][elementMapper.getElementIndex(reclosed)] = false;
                                 }
                             }
-                        }
-                    }
-                    // else: padding scenario = base case (no element disabled), discarded below
-                }
-                int[] targetOverrideIndex = ovIndexList.stream().mapToInt(Integer::intValue).toArray();
-                double[] targetOverrideValue = ovValueList.stream().mapToDouble(Double::doubleValue).toArray();
-                if (pairPhase && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_OV"))) {
-                    for (int s2 = 0; s2 < realCount; s2++) {
-                        StringBuilder sb = new StringBuilder("GPU-PAIR-OV "
-                                + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(STRATEGY_KEY_SEP, '|'));
-                        for (int k2 = 0; k2 < targetOverrideIndex.length; k2++) {
-                            if (targetOverrideIndex[k2] / n == s2) {
-                                int row = targetOverrideIndex[k2] % n;
-                                sb.append(String.format(" row%d=%.4f(base %.4f)", row, targetOverrideValue[k2], baseTargets[row]));
+                            for (TapR1Override tap : contingencies.get(ci).tapOverrides()) {
+                                r1OvSlotElemList.add(s);
+                                r1OvSlotElemList.add(elementMapper.getElementIndex(tap.branch()));   // cb pack index == element index
+                                for (double v : tap.cbRow()) {
+                                    r1OvValList.add(v);
+                                }
+                            }
+                            for (ShuntShift sh : contingencies.get(ci).shuntShifts()) {
+                                shOvSlotElemList.add(s);
+                                shOvSlotElemList.add(elementMapper.getElementIndex(sh.shunt()) - shPackOffset);
+                                shOvGbList.add(sh.dg());
+                                shOvGbList.add(sh.db());
+                            }
+                            GenOutage[] gos = genOutagesByIndex[ci];
+                            if (gos != null) {               // generator loss(es): per-BUS target overrides (merged by bus;
+                                for (GenOutage go : gos) {   // at most one DS-participant bus per contingency by construction)
+                                    ovIndexList.add(s * n + go.pRow());
+                                    ovValueList.add(go.pTarget());
+                                    if (go.qOverride()) {    // Q target sheds the lost gens' Q: on the PV->PQ flip AND
+                                        ovIndexList.add(s * n + go.vRow());   // on an ALREADY-PQ bus losing fixed-Q gens (#21)
+                                        ovValueList.add(go.qTarget());
+                                    }
+                                    if (go.toPq()) {
+                                        int[] row = rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rowModePerScenario[s];
+                                        row[go.vRow()] = 1;  // BUS_V row becomes the reactive-power equation (PV→PQ)
+                                        rowModePerScenario[s] = row;
+                                    }
+                                    if (hasDs && go.dsBus() >= 0) {   // lost gen(s) on a DS-participant bus: per-scenario reweight
+                                        dsOvBus[s] = go.dsBus();
+                                        dsOvFactorDelta[s] = go.dsFactorDelta();
+                                        dsOvBaseDelta[s] = go.dsBaseDelta();
+                                        dsOvMaxDelta[s] = go.dsMaxDelta();
+                                        dsOvMinDelta[s] = go.dsMinDelta();
+                                    }
+                                }
                             }
                         }
-                        System.err.println(sb);
+                        // else: padding scenario = base case (no element disabled), discarded below
                     }
-                    System.err.println("GPU-PAIR-SHOV slotElem=" + shOvSlotElemList + " gb=" + shOvGbList
-                            + " shPackOffset=" + shPackOffset);
-                }
-                // Pair phase: warm continuation from each parent contingency's state + RL pinning.
-                double[] x0Full = null;
-                int[] rlStateIn = null;
-                if (pairPhase) {
-                    x0Full = new double[chunkSize * n];
-                    rlStateIn = nrl > 0 ? new int[chunkSize * nrl] : null;
-                    for (int s = 0; s < chunkSize; s++) {
-                        double[] parent = null;
-                        int[] parentRl = null;
-                        if (s < realCount) {
-                            String pairId = contingencies.get(group.get(chunkStart + s)).contingencyId();
-                            Integer pIdx = indexById.get(pairId.substring(0, pairId.indexOf(STRATEGY_KEY_SEP)));
-                            if (pIdx != null && resultsByIndex[pIdx] != null
-                                    && (int) resultsByIndex[pIdx][n + 2] == STATUS_CONVERGED) {
-                                parent = resultsByIndex[pIdx];
-                                parentRl = rlByIndex.get(pIdx);
+                    int[] targetOverrideIndex = ovIndexList.stream().mapToInt(Integer::intValue).toArray();
+                    double[] targetOverrideValue = ovValueList.stream().mapToDouble(Double::doubleValue).toArray();
+                    if (pairPhase && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_OV"))) {
+                        for (int s2 = 0; s2 < realCount; s2++) {
+                            StringBuilder sb = new StringBuilder("GPU-PAIR-OV "
+                                    + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(STRATEGY_KEY_SEP, '|'));
+                            for (int k2 = 0; k2 < targetOverrideIndex.length; k2++) {
+                                if (targetOverrideIndex[k2] / n == s2) {
+                                    int row = targetOverrideIndex[k2] % n;
+                                    sb.append(String.format(" row%d=%.4f(base %.4f)", row, targetOverrideValue[k2], baseTargets[row]));
+                                }
+                            }
+                            System.err.println(sb);
+                        }
+                        System.err.println("GPU-PAIR-SHOV slotElem=" + shOvSlotElemList + " gb=" + shOvGbList
+                                + " shPackOffset=" + shPackOffset);
+                    }
+                    // Pair phase: warm continuation from each parent contingency's state + RL pinning.
+                    double[] x0Full = null;
+                    int[] rlStateIn = null;
+                    if (pairPhase) {
+                        x0Full = new double[chunkSize * n];
+                        rlStateIn = nrl > 0 ? new int[chunkSize * nrl] : null;
+                        for (int s = 0; s < chunkSize; s++) {
+                            double[] parent = null;
+                            int[] parentRl = null;
+                            if (s < realCount) {
+                                String pairId = contingencies.get(group.get(chunkStart + s)).contingencyId();
+                                Integer pIdx = indexById.get(pairId.substring(0, pairId.indexOf(STRATEGY_KEY_SEP)));
+                                if (pIdx != null && resultsByIndex[pIdx] != null
+                                        && (int) resultsByIndex[pIdx][n + 2] == STATUS_CONVERGED) {
+                                    parent = resultsByIndex[pIdx];
+                                    parentRl = rlByIndex.get(pIdx);
+                                }
+                            }
+                            for (int i = 0; i < n; i++) {
+                                x0Full[s * n + i] = parent != null ? parent[i] : baseState[i];
+                            }
+                            if (rlStateIn != null) {
+                                System.arraycopy(parentRl != null ? parentRl : baseRlSeed, 0, rlStateIn, s * nrl, nrl);
                             }
                         }
-                        for (int i = 0; i < n; i++) {
-                            x0Full[s * n + i] = parent != null ? parent[i] : baseState[i];
-                        }
-                        if (rlStateIn != null) {
-                            System.arraycopy(parentRl != null ? parentRl : baseRlSeed, 0, rlStateIn, s * nrl, nrl);
-                        }
                     }
-                }
-                boolean dbgPairRl = pairPhase && nrl > 0 && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_RL"));
-                int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl) && nrl > 0 ? new int[chunkSize * nrl] : null;
-                double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
-                        rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
-                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                        parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                        batchLsMode, batchMaxDv, batchMaxDphi,
-                        batchLsMode == 2 ? varType : null, x0Full,
-                        shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                        shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                        rlStateIn, rlStateOut,
-                        r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                        r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                        batchMaxOuterIterations, batchMaxPqPvSwitch, batchDsRejectResidual,
-                        nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray());
-                if (dbgPairRl) {
-                    for (int s2 = 0; s2 < realCount; s2++) {
-                        StringBuilder sb = new StringBuilder("GPU-PAIR-RL " + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(STRATEGY_KEY_SEP, '|'));
-                        for (int i2 = 0; i2 < nrl; i2++) {
-                            int v = rlStateOut[s2 * nrl + i2];
-                            if ((v & 3) != 0) {
-                                sb.append(" ctl").append(i2).append("=lt").append(v & 3).append("/sc").append(v >> 2);
-                            }
-                        }
-                        System.err.println(sb);
-                    }
-                }
-                if (rlStateOut != null && !pairPhase) {      // capture each ctg's final RL pinning for its pairs
-                    for (int s = 0; s < realCount; s++) {
-                        int[] slice = new int[nrl];
-                        System.arraycopy(rlStateOut, s * nrl, slice, 0, nrl);
-                        rlByIndex.put(group.get(chunkStart + s), slice);
-                    }
-                }
-                if (transformerControllers != null && !transformerControllers.isEmpty()) {
-                    chunkResults = orchestrateTransformerControl(handle, chunkSize, realCount, n,
-                            chunkResults, transformerControllers, rowModePerScenario, baseRowMode, disabledMask,
-                            targetOverrideIndex, targetOverrideValue,
+                    boolean dbgPairRl = pairPhase && nrl > 0 && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_RL"));
+                    int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl) && nrl > 0 ? new int[chunkSize * nrl] : null;
+                    double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
+                            rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
                             dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                            baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, varType);
+                            parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                            batchLsMode, batchMaxDv, batchMaxDphi,
+                            batchLsMode == 2 ? varType : null, x0Full,
+                            shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                            shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                            rlStateIn, rlStateOut,
+                            r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                            r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                            batchMaxOuterIterations, batchMaxPqPvSwitch, batchDsRejectResidual,
+                            nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                            ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
+                    if (dbgPairRl) {
+                        for (int s2 = 0; s2 < realCount; s2++) {
+                            StringBuilder sb = new StringBuilder("GPU-PAIR-RL " + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(STRATEGY_KEY_SEP, '|'));
+                            for (int i2 = 0; i2 < nrl; i2++) {
+                                int v = rlStateOut[s2 * nrl + i2];
+                                if ((v & 3) != 0) {
+                                    sb.append(" ctl").append(i2).append("=lt").append(v & 3).append("/sc").append(v >> 2);
+                                }
+                            }
+                            System.err.println(sb);
+                        }
+                    }
+                    if (rlStateOut != null && !pairPhase) {      // capture each ctg's final RL pinning for its pairs
+                        for (int s = 0; s < realCount; s++) {
+                            int[] slice = new int[nrl];
+                            System.arraycopy(rlStateOut, s * nrl, slice, 0, nrl);
+                            rlByIndex.put(group.get(chunkStart + s), slice);
+                        }
+                    }
+                    if (transformerControllers != null && !transformerControllers.isEmpty()) {
+                        chunkResults = orchestrateTransformerControl(handle, chunkSize, realCount, n,
+                                chunkResults, transformerControllers, rowModePerScenario, baseRowMode, disabledMask,
+                                targetOverrideIndex, targetOverrideValue,
+                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, varType);
+                    }
+                    for (int s = 0; s < realCount; s++) {
+                        resultsByIndex[group.get(chunkStart + s)] = chunkResults[s];
+                    }
                 }
-                for (int s = 0; s < realCount; s++) {
-                    resultsByIndex[group.get(chunkStart + s)] = chunkResults[s];
-                }
-            }
             }
             long elapsed = System.currentTimeMillis() - startTime;
             LOGGER.info("Batched N-1: {} GPU scenarios in {} chunk(s) of <= {} solved in {} ms ({} ms/scenario)",

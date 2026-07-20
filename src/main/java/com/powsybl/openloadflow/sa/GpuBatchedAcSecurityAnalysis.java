@@ -52,13 +52,13 @@ import com.powsybl.security.monitor.StateMonitor;
 import com.powsybl.security.results.ConnectivityResult;
 import com.powsybl.security.results.NetworkResult;
 import com.powsybl.security.results.OperatorStrategyResult;
-import java.util.Objects;
 import com.powsybl.security.results.PostContingencyResult;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -401,14 +401,25 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 boolean loadsBatchable = !currentContext.getParameters().getNetworkParameters().isUseLoadModel();
                 List<GpuBatchedSecurityAnalysisSolver.LoadLoss> loads =
                         pc.getLoadIdsToLose().isEmpty() ? List.of() : (loadsBatchable ? loadOutages(net, pc) : null);
-                List<LfBranch> branches = pc.getBranchIdsToOpen().isEmpty() ? List.of() : closedBranchOutages(net, pc);
+                // Node-breaker contingency PROPAGATION opens the target's breakers alongside it, and
+                // switches are zero-impedance LfBranches — split them out so the impedant part still
+                // meets the <=2-branch mask rule; the switch part becomes a per-scenario zi-element
+                // outage (validator: dead-stub shape only).
+                List<LfBranch> ziOutages = pc.getBranchIdsToOpen().keySet().stream()
+                        .map(net::getBranchById).filter(Objects::nonNull)
+                        .filter(b -> b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC))
+                        .toList();
+                List<LfBranch> branches = pc.getBranchIdsToOpen().isEmpty() ? List.of()
+                        : closedBranchOutages(net, pc, ziOutages);
                 // Shunt section shifts (both directions; full disconnection of any aggregate = minus the
                 // section admittance): per-scenario admittance overrides, combinable with everything.
                 List<GpuBatchedSecurityAnalysisSolver.ShuntShift> shifts =
                         pc.getShuntIdsToShift().isEmpty() ? List.of() : shuntShifts(net, pc);
                 if (branches != null && gens != null && loads != null && shifts != null
-                        && (!branches.isEmpty() || !gens.isEmpty() || !loads.isEmpty() || !shifts.isEmpty())) {
-                    batch.add(BatchContingency.branchesAndInjections(pc.getContingency().getId(), branches, gens, loads, shifts, List.of()));
+                        && (!branches.isEmpty() || !gens.isEmpty() || !loads.isEmpty() || !shifts.isEmpty()
+                            || !ziOutages.isEmpty())) {
+                    batch.add(BatchContingency.branchesAndInjections(pc.getContingency().getId(), branches, gens, loads,
+                            shifts, List.of(), ziOutages));
                     // Batched OPERATOR STRATEGIES stage 1: TrueCondition (always-applied) strategies
                     // matching this contingency become EXTRA batch scenarios — the (ctg, strategy)
                     // pair is just another BatchContingency with the actions COMPOSED onto the
@@ -420,7 +431,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                             continue;
                         }
                         BatchContingency pair = composeStrategyScenario(net, pc.getContingency().getId(), strategy,
-                                branches, gens, loads, shifts);
+                                ziOutages, branches, gens, loads, shifts);
                         if (pair != null) {
                             batch.add(pair);
                         }
@@ -621,6 +632,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      *  or null when any action is out of stage-1 scope (branch open/RECLOSE, LoadAction,
      *  GeneratorAction — absolute or relative active power). */
     private BatchContingency composeStrategyScenario(LfNetwork net, String contingencyId, OperatorStrategy strategy,
+                                                     List<LfBranch> ctgZiOutages,
                                                      List<LfBranch> ctgBranches,
                                                      List<LfGenerator> ctgGens,
                                                      List<GpuBatchedSecurityAnalysisSolver.LoadLoss> ctgLoads,
@@ -744,7 +756,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 LfShunt shunt = net.getShuntById(spa.getShuntCompensatorId());
                 if (sc == null || shunt == null
                         || !(sc.getModel() instanceof com.powsybl.iidm.network.ShuntCompensatorLinearModel lin)) {
-                        return null;                             // unpacked / non-linear model — CPU
+                    return null;                                 // unpacked / non-linear model — CPU
                 }
                 double dSections = spa.getSectionCount() - sc.getSectionCount();
                 double zb = sc.getTerminal().getVoltageLevel().getNominalV()
@@ -784,9 +796,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             return null;
         }
         return new BatchContingency(contingencyId + STRATEGY_KEY_SEP + strategy.getId(),
-                branches, ctgGens, loads, shifts, taps, List.of(), reclosed);
+                branches, ctgGens, loads, shifts, taps, List.of(), reclosed, ctgZiOutages);
     }
-
 
     /** Compiles a tap-position action (RTC or PST) into a per-scenario full-row override — the
      *  target tap's [y, g1, g2, b1, b2, ksi, r1, a1] replaces the branch's static inputs, so
@@ -844,13 +855,18 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     /** The contingency's closed-branch outages (0-2, BOTH_SIDES only), or null when the branch part is
      *  out of batch scope. Generators are allowed alongside (branch+generator combos batch since 2026-07-17);
      *  buses and loads are not. */
-    private static List<LfBranch> closedBranchOutages(LfNetwork net, PropagatedContingency pc) {
-        int n = pc.getBranchIdsToOpen().size();
+    private static List<LfBranch> closedBranchOutages(LfNetwork net, PropagatedContingency pc, List<LfBranch> ziOutages) {
+        java.util.Set<String> ziIds = ziOutages.stream().map(LfBranch::getId)
+                .collect(java.util.stream.Collectors.toSet());
+        int n = pc.getBranchIdsToOpen().size() - ziIds.size();   // the switch part is masked separately
         if (n > 2 || !pc.getBusIdsToLose().isEmpty()) {
             return null;
         }
-        List<LfBranch> branches = new ArrayList<>(n);
+        List<LfBranch> branches = new ArrayList<>(Math.max(n, 0));
         for (Map.Entry<String, DisabledBranchStatus> e : pc.getBranchIdsToOpen().entrySet()) {
+            if (ziIds.contains(e.getKey())) {
+                continue;
+            }
             if (e.getValue() != DisabledBranchStatus.BOTH_SIDES) {
                 return null;
             }

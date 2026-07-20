@@ -207,6 +207,19 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
             for (int i = 0; i < cpu.getPostContingencyResults().size(); i++) {
                 assertEquals(cpu.getPostContingencyResults().get(i).getStatus(),
                         gpu.getPostContingencyResults().get(i).getStatus());
+                if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"))) {
+                    var cbz = cpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                    var gbz = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                    System.err.println("PLAINDUMP sizes cpu=" + cbz.size() + " gpu=" + gbz.size());
+                    for (int z = 0; z < Math.min(cbz.size(), gbz.size()); z++) {
+                        System.err.printf("PLAINDUMP %-10s cpu=%9.4f | %-10s gpu=%9.4f%n", cbz.get(z).getBusId(),
+                                cbz.get(z).getV(), gbz.get(z).getBusId(), gbz.get(z).getV());
+                    }
+                    cpu.getPostContingencyResults().get(i).getLimitViolationsResult().getLimitViolations()
+                            .forEach(v -> System.err.println("PLAINVIOL cpu " + v.getSubjectId() + " " + v.getLimitType() + " " + v.getValue()));
+                    gpu.getPostContingencyResults().get(i).getLimitViolationsResult().getLimitViolations()
+                            .forEach(v -> System.err.println("PLAINVIOL gpu " + v.getSubjectId() + " " + v.getLimitType() + " " + v.getValue()));
+                }
                 assertEquals(cpu.getPostContingencyResults().get(i).getLimitViolationsResult().getLimitViolations().size(),
                         gpu.getPostContingencyResults().get(i).getLimitViolationsResult().getLimitViolations().size(),
                         "violation count for " + cpu.getPostContingencyResults().get(i).getContingency().getId());
@@ -343,7 +356,6 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         }
     }
-
 
     private static void printReport(com.powsybl.commons.report.ReportNode node, int depth) {
         System.err.println("CPU-REPORT " + "  ".repeat(depth) + node.getMessage());
@@ -518,6 +530,29 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     @Test
+    void nodeBreakerPropagatedContingencyBatchMatchesCpu() {
+        // #33: with contingency PROPAGATION on (production default) a node-breaker line outage also
+        // opens the target's breakers — switches are zero-impedance LfBranches, so the naive shape is
+        // "3 branches" and nothing batched at all on a node-breaker network. The switch part is now a
+        // per-scenario zi-element outage: the dead stub it leaves behind is frozen by the existing
+        // islanding machinery, and the impedant part still obeys the <=2-branch mask rule.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.NodeBreakerNetworkFactory.create();
+        // L3 (BBS2 side <-> BBS3, behind the NON-retained B5/B6 so propagation stops at the retained C)
+        // makes BBS2/BBS3 the most-meshed buses, so the slack lands in the LIVE component. Without it
+        // the slack sits on the BBS1 stub, and CPU RELOCATES it (PropagatedContingency) — a shape the
+        // batched pack cannot express, so the validator rejects it to CPU (see ISLANDS_SLACK).
+        var vl1 = network.getVoltageLevel("VL1");
+        var vl2 = network.getVoltageLevel("VL2");
+        vl1.getNodeBreakerView().newBreaker().setId("B5").setNode1(1).setNode2(7).add();
+        vl2.getNodeBreakerView().newBreaker().setId("B6").setNode1(0).setNode2(4).add();
+        network.newLine().setId("L3").setVoltageLevel1("VL1").setNode1(7).setVoltageLevel2("VL2").setNode2(4)
+                .setR(3).setX(33).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        assertGpuMatchesCpu(network, List.of(new Contingency("L1", new BranchContingency("L1"))), 0.05, true);
+    }
+
+    @Test
     void baseOpenSwitchCloseStrategyBatchMatchesCpu() {
         // #31: SwitchAction CLOSING a base-open busbar coupler (zero-impedance branch). The retained
         // switch's dummy variables already have rows (identity-pinned to 0 while open), so the close
@@ -624,25 +659,25 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         List<String> lineIds = IeeeCdfNetworkFactory.create14().getLineStream()
                 .map(l -> l.getId()).toList();
         try {
-        for (String lineId : lineIds) {
-            Network network = IeeeCdfNetworkFactory.create14();
-            // extra fixed-Q gen at B10 (the #21 shape): a non-voltage-capable gen in the RL mix
-            network.getVoltageLevel("VL10").newGenerator().setId("B10-GQ").setBus("B10").setConnectableBus("B10")
-                    .setTargetP(5).setTargetQ(8).setVoltageRegulatorOn(false).setMinP(0).setMaxP(20).add();
-            List<Contingency> contingencies = List.of(new Contingency(lineId, new BranchContingency(lineId)));
-            List<com.powsybl.action.Action> actions = List.of(
-                    new com.powsybl.action.GeneratorActionBuilder().withId("redispatch2")
-                            .withGeneratorId("B2-G").withActivePowerRelativeValue(true).withActivePowerValue(60).build());
-            List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
-                    new com.powsybl.contingency.strategy.OperatorStrategy("sGen",
-                            com.powsybl.contingency.ContingencyContext.all(),
-                            new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("redispatch2")));
-            try {
-                assertStrategyMatchesCpu(network, contingencies, strategies, actions, -1);
-            } catch (AssertionError e) {
-                throw new AssertionError("ctg " + lineId + ": " + e.getMessage(), e);
+            for (String lineId : lineIds) {
+                Network network = IeeeCdfNetworkFactory.create14();
+                // extra fixed-Q gen at B10 (the #21 shape): a non-voltage-capable gen in the RL mix
+                network.getVoltageLevel("VL10").newGenerator().setId("B10-GQ").setBus("B10").setConnectableBus("B10")
+                        .setTargetP(5).setTargetQ(8).setVoltageRegulatorOn(false).setMinP(0).setMaxP(20).add();
+                List<Contingency> contingencies = List.of(new Contingency(lineId, new BranchContingency(lineId)));
+                List<com.powsybl.action.Action> actions = List.of(
+                        new com.powsybl.action.GeneratorActionBuilder().withId("redispatch2")
+                                .withGeneratorId("B2-G").withActivePowerRelativeValue(true).withActivePowerValue(60).build());
+                List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                        new com.powsybl.contingency.strategy.OperatorStrategy("sGen",
+                                com.powsybl.contingency.ContingencyContext.all(),
+                                new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("redispatch2")));
+                try {
+                    assertStrategyMatchesCpu(network, contingencies, strategies, actions, -1);
+                } catch (AssertionError e) {
+                    throw new AssertionError("ctg " + lineId + ": " + e.getMessage(), e);
+                }
             }
-        }
         } finally {
             System.clearProperty("olf.gpu.test.slackTol");
             System.clearProperty("olf.gpu.test.convEps");

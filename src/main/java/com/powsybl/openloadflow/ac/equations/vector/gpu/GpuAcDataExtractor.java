@@ -152,6 +152,7 @@ public final class GpuAcDataExtractor {
 
         List<double[]> ziIn = new ArrayList<>();
         List<int[]> ziIdx = new ArrayList<>();
+        List<Integer> ziNums = new ArrayList<>();            // LfBranch num per zi element (per-scenario masks)
 
         // closed-branch element index per branch number (-1 = not a closed branch), used to wire the
         // DISTR_Q reactive contributions to their closed-branch q1/q2 outputs.
@@ -187,6 +188,7 @@ public final class GpuAcDataExtractor {
                             + " has no DUMMY_P/DUMMY_Q variables (unsupported non-impedant shape, e.g. both "
                             + "ends voltage-controlled or a 3-winding star)");
                 }
+                ziNums.add(br.getNum());
                 ziIn.add(new double[] {PiModel.R2 / pi.getR1()});
                 ziIdx.add(new int[] {phiCol[b1n], qRow[b1n], phiCol[b2n], qRow[b2n], dpRow, dqRow,
                     vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n],
@@ -281,6 +283,7 @@ public final class GpuAcDataExtractor {
                 int b2n = b2.getNum();
                 baseOpenZi.add(ziIn.size());
                 baseOpenZiNums.add(br.getNum());
+                ziNums.add(br.getNum());
                 ziIn.add(new double[] {PiModel.R2 / br.getPiModel().getR1()});
                 ziIdx.add(new int[] {phiCol[b1n], qRow[b1n], phiCol[b2n], qRow[b2n], dpRow, dqRow,
                     vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n], 1});
@@ -473,7 +476,8 @@ public final class GpuAcDataExtractor {
                 toDoubleArray(dsBaseTargetP), toDoubleArray(dsMaxDelta), toDoubleArray(dsMinDelta),
                 baseOpenCb.stream().mapToInt(Integer::intValue).toArray(),
                 baseOpenZi.stream().mapToInt(Integer::intValue).toArray(),
-                baseOpenZiNums.stream().mapToInt(Integer::intValue).toArray());
+                baseOpenZiNums.stream().mapToInt(Integer::intValue).toArray(),
+                ziNums.stream().mapToInt(Integer::intValue).toArray());
     }
 
     /**

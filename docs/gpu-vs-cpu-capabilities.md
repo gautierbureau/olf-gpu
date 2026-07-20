@@ -137,6 +137,7 @@ Full predicate list in Part II §F.
 | Branch+generator+load+shunt combos | ✅ | branch part ≤2; gen on islanded bus → ⏩ |
 | ≥3 branch outage, single-side opening, bus/busbar loss, HVDC contingency | ⏩ | |
 | Outage of a DISTR_RHO controller branch | ⏩ | outaging one member reforms the 1/count coupling — mask cannot represent it |
+| Node-breaker outage under contingency PROPAGATION | ✅ | 2026-07-20: the propagated retained-breaker openings are per-scenario ZERO-IMPEDANCE element outages (`ziOff` — identity row-mode flip, dummies pinned 0), the impedant part keeps the ≤2 mask rule, the dead stub is frozen by the islanding machinery. Switch outage leaving BOTH sides energized (zi spanning tree would change) → ⏩; outage ISOLATING THE SLACK → ⏩ (CPU relocates the slack, the batched pack anchors on the base slack row) |
 
 ### SA machinery parity
 
@@ -203,7 +204,19 @@ element falls back to the stock per-strategy CPU path individually.
    controls first (present in RTE parameter sets); the §D catalogue is the port checklist.
 2. **HVDC + SVC packing** — extractor term/variable work; unblocks plain-LF coverage on
    those networks and their SA/action rows.
-3. **Node-breaker contingency propagation** — a propagated contingency opens the target's breakers too (switches are LfBranches in breaker mode), tripping the >2-branch batch guard; production node-breaker networks need switch outages as zi-element masks. (Switch CLOSES landed 2026-07-20; shunt reconnection 2026-07-19.)
+3. **Node-breaker contingency propagation** — ✅ **landed 2026-07-20.** A propagated contingency
+   opens the target's retained breakers alongside it (switches are LfBranches in breaker mode), so
+   the naive shape was ">2 branches" and NOTHING batched on a node-breaker network. Now split: the
+   impedant part still obeys the ≤2-branch element mask, the switch part is a per-scenario
+   **zero-impedance element outage** (`ziOff`), and the dead stub it leaves behind is frozen by the
+   existing islanding machinery. Remaining ⏩ CPU cases: (a) a switch outage that leaves BOTH sides
+   energized (the zero-impedance spanning tree would have to be re-picked per scenario); (b) an
+   outage that **isolates the slack** — CPU RELOCATES the slack into the largest connected component
+   (`PropagatedContingency`: "leads to an isolated slack bus"), and the batched pack anchors its
+   targets and distributed-slack participation on the BASE slack row, so a relocated slack is not
+   expressible as a per-scenario mask (`ISLANDS_SLACK`). (b) is the next scope-widening step and is
+   common on node-breaker networks — measure its share before building it. (Switch CLOSES landed
+   2026-07-20; shunt reconnection 2026-07-19.)
 4. **Bus/busbar contingencies, ≥3-branch outages, single-side openings.**
 5. **⚠️ corner-case deltas inside supported scope** (Part II): keep-strongest-PV guard,
    curve-limits-at-runtime-P, shared-control transformer groups (`useInitialTapPosition`),

@@ -1675,12 +1675,18 @@ __global__ void fillDistrRhoBatch(int ndr, int nScenarios, int n, int nnz,
 __global__ void fillZeroImpBatch(int nzi, int nScenarios, int n, int nnz,
                                  const double* in, const int* ix, const int* dest,
                                  const double* x, double* vals, double* F, const char* active,
-                                 int nziBase, int nZiOn, const int* ziOnSlotElem) {
+                                 int nziBase, int nZiOn, const int* ziOnSlotElem,
+                                 int nZiOff, const int* ziOffSlotElem) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nzi * nScenarios) return;
     int e = tid % nzi;
     int s = tid / nzi;
     if (!active[s]) return;
+    for (int k = 0; k < nZiOff; k++) {                       // per-scenario switch OUTAGE (node-breaker
+        if (ziOffSlotElem[2 * k] == s && ziOffSlotElem[2 * k + 1] == e) {   // contingency propagation)
+            return;
+        }
+    }
     if (e >= nziBase) {
         // BASE-OPEN closable switch element: contributes ONLY in scenarios that CLOSE it —
         // sparse (slot, elem) enable list, a handful of entries per run.
@@ -2180,6 +2186,8 @@ struct BatchSolverContext {
     int nziBase = 0;                                         // zi elements [0,nziBase) always enabled; [nziBase,nzi) are
                                                              // base-open closable switches gated by the ziOn list
     int nZiOn = 0;
+    int nZiOff = 0;
+    DeviceBuf dZiOffSlotElem;                                // nZiOff*2 ints (slot, zi elem) — scenarios that OPEN a switch
     DeviceBuf dZiOnSlotElem;                                 // nZiOn*2 ints (slot, zi elem) — scenarios that CLOSE a switch
     int nR1Ov = 0;                                           // per-scenario closed-branch tap overrides (tap/PST actions)
     DeviceBuf dR1OvSlotElem, dR1OvVal;                       // nR1Ov*2 ints / nR1Ov*8 doubles (full cbIn row per entry)
@@ -2470,7 +2478,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               const int* rlStateIn, int* rlStateOut,
                               int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
                               int maxOuterProductive, int rlMaxSwitch, int dsRejectResidual,
-                              int nziBase, int nZiOn, const int* ziOnSlotElem) {
+                              int nziBase, int nZiOn, const int* ziOnSlotElem,
+                              int nZiOff, const int* ziOffSlotElem) {
     int n = ctx->n;
     int nnz = ctx->nnz;
     int nS = ctx->nScenarios;
@@ -2498,6 +2507,13 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         ctx->dShOvGb.upload(dummyD, sizeof(dummyD));
     }
     ctx->nziBase = nziBase > 0 ? nziBase : ctx->nzi;         // default: every zi element always enabled
+    ctx->nZiOff = nZiOff;
+    if (nZiOff > 0) {
+        ctx->dZiOffSlotElem.upload(ziOffSlotElem, static_cast<size_t>(nZiOff) * 2 * sizeof(int));
+    } else if (!ctx->dZiOffSlotElem.p) {
+        int dummyZiOff[2] = {-1, -1};
+        ctx->dZiOffSlotElem.upload(dummyZiOff, sizeof(dummyZiOff));
+    }
     ctx->nZiOn = nZiOn;
     if (nZiOn > 0) {
         ctx->dZiOnSlotElem.upload(ziOnSlotElem, static_cast<size_t>(nZiOn) * 2 * sizeof(int));
@@ -2708,7 +2724,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
         if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
         if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
-        if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>());
+        if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>());
         applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: stream-ordered into the solve, no host sync
 
@@ -3002,7 +3018,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // reads the slack row's balance from dQbuf — without the coupler's dummy-P the DS sees a
     // phantom mismatch equal to the through-flow and distributes it FOREVER (measured: +392 MW
     // runaway on the first switch-close scenario until the per-scenario budget rejected it).
-    if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>());
+    if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>());
     CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitched.p, 0, nS * sizeof(char), ctx->stream));
     // Apply ONLY the current phase's outer loop this pass (sequential, like OLF) — never both at once.
     bool inDsPhase = (phase == 0);
@@ -3386,7 +3402,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jintArray jRlStateIn, jintArray jRlStateOut,
         jintArray jR1OvSlotElem, jdoubleArray jR1OvVal,
         jint maxOuterProductive, jint rlMaxSwitch, jint dsRejectResidual,
-        jint nziBase, jintArray jZiOnSlotElem) {
+        jint nziBase, jintArray jZiOnSlotElem, jintArray jZiOffSlotElem) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     std::vector<int> r1OvSlotElemVec;
     std::vector<double> r1OvValVec;
@@ -3396,6 +3412,12 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         env->GetIntArrayRegion(jR1OvSlotElem, 0, rn, r1OvSlotElemVec.data());
         r1OvValVec.resize(static_cast<size_t>(rn) * 4);      // full 8-double cbIn row per (slot, elem) entry
         env->GetDoubleArrayRegion(jR1OvVal, 0, rn * 4, r1OvValVec.data());
+    }
+    std::vector<int> ziOffSlotElemVec;
+    if (jZiOffSlotElem != nullptr) {
+        jsize zn = env->GetArrayLength(jZiOffSlotElem);
+        ziOffSlotElemVec.resize(zn);
+        env->GetIntArrayRegion(jZiOffSlotElem, 0, zn, ziOffSlotElemVec.data());
     }
     std::vector<int> ziOnSlotElemVec;
     if (jZiOnSlotElem != nullptr) {
@@ -3523,7 +3545,9 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
                                 r1OvValVec.empty() ? nullptr : r1OvValVec.data(),
                                 maxOuterProductive, rlMaxSwitch, dsRejectResidual,
                                 nziBase, static_cast<int>(ziOnSlotElemVec.size() / 2),
-                                ziOnSlotElemVec.empty() ? nullptr : ziOnSlotElemVec.data());
+                                ziOnSlotElemVec.empty() ? nullptr : ziOnSlotElemVec.data(),
+                                static_cast<int>(ziOffSlotElemVec.size() / 2),
+                                ziOffSlotElemVec.empty() ? nullptr : ziOffSlotElemVec.data());
         if (jRlStateOut != nullptr && !rlStateOutVec.empty()) {
             env->SetIntArrayRegion(jRlStateOut, 0, static_cast<jsize>(rlStateOutVec.size()), rlStateOutVec.data());
         }

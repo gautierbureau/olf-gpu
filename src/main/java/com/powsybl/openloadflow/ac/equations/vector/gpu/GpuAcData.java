@@ -74,7 +74,8 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
                         int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget,
                         int[] dsPhiRow, double[] dsFactor, int dsSlackPhiRow, double dsSlackTargetP,
                         double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
-                        int[] baseOpenCbElements, int[] baseOpenZiElements, int[] baseOpenZiBranchNums) {
+                        int[] baseOpenCbElements, int[] baseOpenZiElements, int[] baseOpenZiBranchNums,
+                        int[] ziBranchNums) {
 
     /**
      * Content equality over every array — true means a cached solver context built from

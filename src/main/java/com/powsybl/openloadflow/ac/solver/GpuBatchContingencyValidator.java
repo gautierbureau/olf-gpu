@@ -152,9 +152,16 @@ public final class GpuBatchContingencyValidator {
             // freeze the whole energized network instead of the stub.
             LfBus slack = network.getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
             if (!connectivity.getLargestConnectedComponent().contains(slack)) {
-                LOGGER.debug("Contingency {} rejected: outage isolates the slack bus (CPU relocates the slack)",
-                        contingency.contingencyId());
-                return Qualification.rejected(contingency, Disqualification.ISLANDS_SLACK);
+                // Isolating the slack necessarily FRAGMENTS the network, so in fixed-iter mode (islanding
+                // handling off) that is the reason to report — it is the mode's primary rejection and what
+                // its contract documents. Only when islanding IS handled does the distinction matter: there
+                // a fragmenting outage would normally qualify with frozen islanded buses, and it is
+                // specifically the relocated slack that disqualifies it.
+                Disqualification reason = handleIslanding
+                        ? Disqualification.ISLANDS_SLACK : Disqualification.FRAGMENTS_NETWORK;
+                LOGGER.debug("Contingency {} rejected ({}): outage isolates the slack bus (CPU relocates the slack)",
+                        contingency.contingencyId(), reason);
+                return Qualification.rejected(contingency, reason);
             }
             // The main component must be ANCHORED on the slack before querying, exactly as
             // PropagatedContingency does (setMainComponentVertex + getVerticesRemovedFromMainComponent).

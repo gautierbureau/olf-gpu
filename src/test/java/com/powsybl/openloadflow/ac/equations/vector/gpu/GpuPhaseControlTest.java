@@ -68,7 +68,8 @@ class GpuPhaseControlTest {
      * on the GPU would still match on voltages in a lightly loaded case, but not on the tap.
      */
     private void compare(Supplier<Network> networkSupplier,
-                         BiConsumer<LoadFlowParameters, OpenLoadFlowParameters> customizer, String label) {
+                         BiConsumer<LoadFlowParameters, OpenLoadFlowParameters> customizer, String label,
+                         int expectedSolvedTap) {
         LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
 
         Network cpuNetwork = networkSupplier.get();
@@ -104,35 +105,35 @@ class GpuPhaseControlTest {
             worstA = Math.max(worstA, Math.abs(cpuBus.getAngle() - gpuBus.getAngle()));
             compared++;
         }
-        int cpuTap = cpuNetwork.getTwoWindingsTransformer("PS1").getPhaseTapChanger().getTapPosition();
-        int gpuTap = gpuNetwork.getTwoWindingsTransformer("PS1").getPhaseTapChanger().getTapPosition();
+        int cpuTap = cpuNetwork.getTwoWindingsTransformer("PS1").getPhaseTapChanger().getSolvedTapPosition();
+        int gpuTap = gpuNetwork.getTwoWindingsTransformer("PS1").getPhaseTapChanger().getSolvedTapPosition();
         System.out.printf("PST GPU vs CPU [%s]: %d buses, max dV = %.2e kV, max dAngle = %.2e deg, tap %d/%d%n",
                 label, compared, worstV, worstA, cpuTap, gpuTap);
         assertTrue(compared > 0, "must compare at least one bus");
+        assertEquals(expectedSolvedTap, cpuTap, "the CPU reference must move the tap — otherwise this test "
+                + "asserts nothing about phase control (getSolvedTapPosition, NOT getTapPosition: OLF leaves "
+                + "the input tapPosition untouched)");
         assertEquals(cpuTap, gpuTap, "the PST must end on the same tap (a dropped phase control would not)");
         assertTrue(worstV < 1e-3, "bus voltages must match (max dV = " + worstV + " kV)");
         assertTrue(worstA < 1e-3, "bus angles must match (max dAngle = " + worstA + " deg)");
     }
 
-    @org.junit.jupiter.api.Disabled("does NOT yet exercise the alpha column — see the comment below")
     @Test
     void incrementalActivePowerControl() {
-        // UNPROVEN. This test passes, but it does not validate the BRANCH_TARGET_ALPHA1 packing:
-        // the PST never acts (tap stays at 1 on both arms even with the regulation value moved far
-        // off the natural flow), and GPU-vs-CPU comes out BIT-IDENTICAL (0.00e+00) instead of the
-        // ~1e-14 the genuinely GPU-solved no-control case shows. Both facts say the equation system
-        // here has no alpha column at all, so the identity row under test is never activated.
-        // Setting olf.gpu.cpuFallback=false does not fail it either, which only confirms nothing
-        // unsupported is being packed. Before trusting the a1 path, the test must FIRST assert that
-        // the built equation system actually contains a BRANCH_ALPHA1 variable (build the LfNetwork +
-        // AcEquationSystemCreator directly, as GpuTransformerVoltageControlTest does for rho) and
-        // that the tap MOVES; only then is a state comparison meaningful.
+        // NOTE — this asserts CPU-parity for PST modelling (the tap really moves 1->2, mirroring OLF's
+        // AcLoadFlowPhaseShifterTest.incrementalPhaseShifterActivePowerControlTest), but it does NOT
+        // cover the GPU BRANCH_ALPHA1 packing. FALSIFIED: reverting the validate() allowlist so a1 is
+        // rejected again leaves this test GREEN, and GPU-vs-CPU is bit-identical (0.00e+00) where the
+        // genuinely GPU-solved no-control case shows ~1e-14. So the GPU solver never sees this system —
+        // and olf.gpu.cpuFallback=false does not make it loud, which suggests the bail-out happens
+        // OUTSIDE the guard that property controls (the GPU sources catch broad exceptions by design;
+        // IllegalCatch is suppressed for them). Find that catch before trusting the a1 path — see #36.
         // INCREMENTAL: BRANCH_TARGET_ALPHA1 identity row active all run — the row this change packs.
         compare(GpuPhaseControlTest::regulatingPst,
             (p, olf) -> {
                 p.setPhaseShifterRegulationOn(true);
                 olf.setPhaseShifterControlMode(OpenLoadFlowParameters.PhaseShifterControlMode.INCREMENTAL);
-            }, "incremental");
+            }, "incremental", 2);
     }
 
     @Test
@@ -145,7 +146,7 @@ class GpuPhaseControlTest {
                 p.setPhaseShifterRegulationOn(true);
                 olf.setPhaseShifterControlMode(
                         OpenLoadFlowParameters.PhaseShifterControlMode.CONTINUOUS_WITH_DISCRETISATION);
-            }, "continuous");
+            }, "continuous", 2);
     }
 
     @Test
@@ -154,15 +155,21 @@ class GpuPhaseControlTest {
         // plain branches. This is the shape every run has today (phaseShifterRegulationOn defaults
         // to false and the RTE parameter file does not set it).
         compare(PhaseControlFactory::createNetworkWithT2wt,
-                (p, olf) -> p.setPhaseShifterRegulationOn(false), "no control");
+                (p, olf) -> p.setPhaseShifterRegulationOn(false), "no control", 1);
     }
 
     private static Network regulatingPst() {
+        // Same setup as OLF's own AcLoadFlowPhaseShifterTest.incrementalPhaseShifterActivePowerControlTest,
+        // which is the CPU reference for this modelling: the regulation TERMINAL must be set (side 1),
+        // and the loop moves the tap 1 -> 2 to pull P1 from 50.084 MW to 83.687 MW.
         Network network = PhaseControlFactory.createNetworkWithT2wt();
-        network.getTwoWindingsTransformer("PS1").getPhaseTapChanger()
+        com.powsybl.iidm.network.TwoWindingsTransformer t2wt = network.getTwoWindingsTransformer("PS1");
+        t2wt.getPhaseTapChanger()
                 .setRegulationMode(com.powsybl.iidm.network.PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL)
-                .setRegulationValue(83)
                 .setTargetDeadband(1)
+                .setTapPosition(1)
+                .setRegulationTerminal(t2wt.getTerminal1())
+                .setRegulationValue(100)
                 .setRegulating(true);
         return network;
     }

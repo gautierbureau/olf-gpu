@@ -121,13 +121,12 @@ class GpuPhaseControlTest {
     @Test
     void incrementalActivePowerControl() {
         // NOTE — this asserts CPU-parity for PST modelling (the tap really moves 1->2, mirroring OLF's
-        // AcLoadFlowPhaseShifterTest.incrementalPhaseShifterActivePowerControlTest), but it does NOT
-        // cover the GPU BRANCH_ALPHA1 packing. FALSIFIED: reverting the validate() allowlist so a1 is
-        // rejected again leaves this test GREEN, and GPU-vs-CPU is bit-identical (0.00e+00) where the
-        // genuinely GPU-solved no-control case shows ~1e-14. So the GPU solver never sees this system —
-        // and olf.gpu.cpuFallback=false does not make it loud, which suggests the bail-out happens
-        // OUTSIDE the guard that property controls (the GPU sources catch broad exceptions by design;
-        // IllegalCatch is suppressed for them). Find that catch before trusting the a1 path — see #36.
+        // AcLoadFlowPhaseShifterTest.incrementalPhaseShifterActivePowerControlTest), and the GPU arm
+        // currently FALLS BACK to CPU: "equation row 4 has no diagonal pairing". The a1 identity row has
+        // no natural (a1row, a1col) entry in the CSR pattern — unlike BRANCH_TARGET_RHO1, whose row IS a
+        // bus Q row moved onto the rho column, so the branch's dq/dr1 scatter supplies its diagonal.
+        // Nothing scatters into the a1 row, so applyRowMode has no diagPos to write its 1.0 into.
+        // Until the pattern builder emits that diagonal, this test proves CPU parity only. See #36.
         // INCREMENTAL: BRANCH_TARGET_ALPHA1 identity row active all run — the row this change packs.
         compare(GpuPhaseControlTest::regulatingPst,
             (p, olf) -> {

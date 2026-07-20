@@ -645,9 +645,10 @@ public final class GpuAcDataExtractor {
                     // transformer ratio distribution ((1/count)·Σ r1 − r1_k) — a linear coupling of the
                     // controller BRANCH_RHO1 variables, re-assembled by the GPU DISTR_RHO family. Accept.
                 }
-                case BUS_TARGET_V, BUS_TARGET_PHI, BRANCH_TARGET_RHO1 -> {
-                    // identity rows on a single variable (v−target, phi−target, or r1−target when a
-                    // transformer ratio is held constant) — applied device-side by the row-mode mask
+                case BUS_TARGET_V, BUS_TARGET_PHI, BRANCH_TARGET_RHO1, BRANCH_TARGET_ALPHA1 -> {
+                    // identity rows on a single variable (v−target, phi−target, r1−target when a
+                    // transformer ratio is held constant, a1−target when a phase shift is) — applied
+                    // device-side by the row-mode mask
                     for (SingleEquationTerm<AcVariableType, AcEquationType> t : e.getTerms()) {
                         if (t.isActive() && !(t instanceof VariableEquationTerm)) {
                             throw new PowsyblException("GPU AC solver: unsupported equation term "

@@ -685,6 +685,23 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 if (b == null || (sw.isOpen() ? branches.contains(b) : !branches.remove(b))) {
                     if (b != null && sw.isOpen()) {
                         branches.add(b);
+                    } else if (b != null && b.isDisabled()
+                            && b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
+                        // CLOSE of a retained-open switch (zero-impedance branch). Only the
+                        // spanning-tree MERGE shape is batched: distinct zero-impedance groups (or
+                        // none) on the two sides. A loop-closing switch is an electrical no-op on
+                        // the CPU too (non-tree edge: dummies stay pinned) — compose nothing.
+                        LfBus zb1 = b.getBus1();
+                        LfBus zb2 = b.getBus2();
+                        if (zb1 == null || zb2 == null || zb1.isDisabled() || zb2.isDisabled()) {
+                            return null;                     // dead-island re-energization — CPU
+                        }
+                        var zn1 = zb1.getZeroImpedanceNetwork(com.powsybl.openloadflow.network.LoadFlowModel.AC);
+                        var zn2 = zb2.getZeroImpedanceNetwork(com.powsybl.openloadflow.network.LoadFlowModel.AC);
+                        if (zn1 == null || zn2 == null || zn1 != zn2) {
+                            reclosed.add(b);                 // tree merge — batched
+                        }
+                        // same zero-impedance network: loop close, no-op — skip
                     } else {
                         return null;
                     }

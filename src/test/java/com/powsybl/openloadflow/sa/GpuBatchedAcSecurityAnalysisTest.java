@@ -375,6 +375,11 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                     .setSlackBusPMaxMismatch(Double.parseDouble(sSlackTol));
         }
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        // Node-breaker networks: contingency PROPAGATION opens the target's breakers too (switches are
+        // LfBranches in breaker mode), tripping the batch's >2-branch guard — keep the strategy tests
+        // on the un-propagated contingency shape (switch outages as zi-element outages are future scope).
+        sap.addExtension(OpenSecurityAnalysisParameters.class,
+                new OpenSecurityAnalysisParameters().setContingencyPropagation(false));
         sap.setLoadFlowParameters(lfp);
         java.util.Set<String> allVls = network.getVoltageLevelStream().map(vl -> vl.getId())
                 .collect(java.util.stream.Collectors.toSet());
@@ -509,6 +514,32 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 new com.powsybl.contingency.strategy.OperatorStrategy("sShuntRe",
                         com.powsybl.contingency.ContingencyContext.all(),
                         new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("reconnectShunt")));
+        assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
+    }
+
+    @Test
+    void baseOpenSwitchCloseStrategyBatchMatchesCpu() {
+        // #31: SwitchAction CLOSING a base-open busbar coupler (zero-impedance branch). The retained
+        // switch's dummy variables already have rows (identity-pinned to 0 while open), so the close
+        // is a per-scenario zi-element enable + identity->coupling row flip on the device. Node-breaker
+        // network: coupler C open at base splits VL1 into BBS1 (lines L1+L3) and BBS2 (G + L2); the
+        // L1 outage keeps both sides energized, the strategy merges them back.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.NodeBreakerNetworkFactory.create();
+        var vl1 = network.getVoltageLevel("VL1");
+        var vl2 = network.getVoltageLevel("VL2");
+        vl1.getNodeBreakerView().newBreaker().setId("B5").setNode1(0).setNode2(7).add();
+        vl2.getNodeBreakerView().newBreaker().setId("B6").setNode1(0).setNode2(4).add();
+        network.newLine().setId("L3").setVoltageLevel1("VL1").setNode1(7).setVoltageLevel2("VL2").setNode2(4)
+                .setR(3).setX(33).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        network.getSwitch("C").setOpen(true);
+        List<Contingency> contingencies = List.of(new Contingency("L1", new BranchContingency("L1")));
+        List<com.powsybl.action.Action> actions = List.of(new com.powsybl.action.SwitchAction("closeC", "C", false));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sCloseC",
+                        com.powsybl.contingency.ContingencyContext.all(),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeC")));
         assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
     }
 

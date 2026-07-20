@@ -171,7 +171,7 @@ element falls back to the stock per-strategy CPU path individually.
 |---|---|---|
 | TerminalsConnectionAction (open) | ✅ | adds the branch to the pair's outage mask |
 | TerminalsConnectionAction (close) | ✅ | re-closing a ctg-opened branch AND closing a BASE-OPEN branch (2026-07-19: opt-in base-open pack, default-disabled mask, reclose clears the bit); dead-island re-energization (disabled endpoint) → ⏩ |
-| SwitchAction | 🔶 | open + reclose-of-ctg-opened; closing a base-open switch → ⏩ (a retained switch is a ZERO-IMPEDANCE branch whose dummy variables are row-less while disabled — per-scenario close needs the dummy pre-activation feature, designed and tasked) |
+| SwitchAction | ✅ | open, reclose-of-ctg-opened, AND closing a base-open switch (2026-07-20: per-scenario zi-element enable + identity→coupling row flip — the retained switch's dummy variables keep their rows while open). Scope: spanning-tree MERGES with energized endpoints; loop closes composed as the CPU-matching no-op; ≥2 switch closes per scenario → ⏩ |
 | Base-open SHUNT reconnection (TerminalsConnectionAction on a shunt) | ✅ | enabled by the olf-local-patches upstream patch (59565edb6: shuntIdsToClose retention + section-controller reconnection, LINEAR model); batched as a per-scenario ShuntShift of the full section admittance; open-of-connected also covered. REQUIRES the patched OLF 2.4.0-SNAPSHOT |
 | LoadAction | ✅ | absolute / relative P shed as injection delta |
 | RatioTapChangerTapPositionAction | ✅ | full static-row override [y g1 g2 b1 b2 ksi r1 a1] from the target tap — per-tap impedance changes covered; controlled transformer → ⏩ |
@@ -203,7 +203,7 @@ element falls back to the stock per-strategy CPU path individually.
    controls first (present in RTE parameter sets); the §D catalogue is the port checklist.
 2. **HVDC + SVC packing** — extractor term/variable work; unblocks plain-LF coverage on
    those networks and their SA/action rows.
-3. **SwitchAction closes of base-open switches** — per-scenario zero-impedance topology (dummy pre-activation design ready; busbar-coupler closes are the classic RTE topology remedial). Base-open shunt reconnection landed 2026-07-19 via the olf-local-patches upstream patch.
+3. **Node-breaker contingency propagation** — a propagated contingency opens the target's breakers too (switches are LfBranches in breaker mode), tripping the >2-branch batch guard; production node-breaker networks need switch outages as zi-element masks. (Switch CLOSES landed 2026-07-20; shunt reconnection 2026-07-19.)
 4. **Bus/busbar contingencies, ≥3-branch outages, single-side openings.**
 5. **⚠️ corner-case deltas inside supported scope** (Part II): keep-strongest-PV guard,
    curve-limits-at-runtime-P, shared-control transformer groups (`useInitialTapPosition`),

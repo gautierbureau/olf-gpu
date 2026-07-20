@@ -74,7 +74,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
                         int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget,
                         int[] dsPhiRow, double[] dsFactor, int dsSlackPhiRow, double dsSlackTargetP,
                         double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
-                        int[] baseOpenCbElements) {
+                        int[] baseOpenCbElements, int[] baseOpenZiElements, int[] baseOpenZiBranchNums) {
 
     /**
      * Content equality over every array — true means a cached solver context built from
@@ -99,7 +99,8 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
      * and can share one device-resident structure (see {@code GpuAcStructures}).
      */
     public boolean sameStructureInputsAs(GpuAcData other) {
-        if (other != null && !java.util.Arrays.equals(baseOpenCbElements, other.baseOpenCbElements)) {
+        if (other != null && (!java.util.Arrays.equals(baseOpenCbElements, other.baseOpenCbElements)
+                || !java.util.Arrays.equals(baseOpenZiElements, other.baseOpenZiElements))) {
             return false;
         }
         return other != null

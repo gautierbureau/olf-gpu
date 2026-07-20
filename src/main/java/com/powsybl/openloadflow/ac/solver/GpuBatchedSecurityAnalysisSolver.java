@@ -635,11 +635,18 @@ public final class GpuBatchedSecurityAnalysisSolver {
         // outages a DISTR_RHO controller or a zero-impedance branch is routed to the CPU (below / via the
         // element mapper) because the fixed batch pattern cannot represent the resulting structural change.
         java.util.Set<String> baseOpenIds = contingencies.stream()
-                .flatMap(c -> c.reclosedBranches().stream()).map(LfBranch::getId)
+                .flatMap(c -> c.reclosedBranches().stream())
+                .filter(b -> !b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC))
+                .map(LfBranch::getId)
                 .collect(java.util.stream.Collectors.toSet());
-        GpuAcData gpuData = baseOpenIds.isEmpty()
+        java.util.Set<String> baseOpenZiIds = contingencies.stream()
+                .flatMap(c -> c.reclosedBranches().stream())
+                .filter(b -> b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC))
+                .map(LfBranch::getId)
+                .collect(java.util.stream.Collectors.toSet());
+        GpuAcData gpuData = baseOpenIds.isEmpty() && baseOpenZiIds.isEmpty()
                 ? GpuAcDataCache.extract(network, equationSystem, distributedSlack, reactiveLimits)
-                : GpuAcDataExtractor.extract(network, equationSystem, distributedSlack, reactiveLimits, baseOpenIds);
+                : GpuAcDataExtractor.extract(network, equationSystem, distributedSlack, reactiveLimits, baseOpenIds, baseOpenZiIds);
         GpuAcActivation baseActivation = GpuAcActivation.fromEquationSystem(network, equationSystem);
         GpuBatchElementMapper elementMapper = new GpuBatchElementMapper(network, baseOpenIds);
 
@@ -690,8 +697,23 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     || !c.tapOverrides().isEmpty() || !c.reclosedBranches().isEmpty()) {   // injection/shift/tap/reclose (or branch+)
                 java.util.Set<Integer> baseOpenSet = java.util.Arrays.stream(gpuData.baseOpenCbElements())
                         .boxed().collect(java.util.stream.Collectors.toSet());
-                boolean recloseOk = c.reclosedBranches().stream()
-                        .allMatch(b -> baseOpenSet.contains(elementMapper.getElementIndex(b)));
+                java.util.Map<Integer, Integer> ziElemByBranchNum = new java.util.HashMap<>();
+                for (int z = 0; z < gpuData.baseOpenZiElements().length; z++) {
+                    ziElemByBranchNum.put(gpuData.baseOpenZiBranchNums()[z], gpuData.baseOpenZiElements()[z]);
+                }
+                boolean recloseOk = true;
+                int ziCloses = 0;
+                for (LfBranch rb : c.reclosedBranches()) {
+                    if (rb.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
+                        // switch close: packed base-open zi element, exactly one per scenario
+                        // (multi-switch closes can interact through the spanning tree — CPU)
+                        if (!ziElemByBranchNum.containsKey(rb.getNum()) || ++ziCloses > 1) {
+                            recloseOk = false;
+                        }
+                    } else if (!baseOpenSet.contains(elementMapper.getElementIndex(rb))) {
+                        recloseOk = false;
+                    }
+                }
                 if (!recloseOk) {
                     continue;                                // reclose of an unpacked base-open branch — CPU
                 }
@@ -1126,7 +1148,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                     batchLsMode, batchMaxDv, batchMaxDphi,
                     batchLsMode == 2 ? varType : null, x0Full, null, null, null, null, null, null,
-                    batchMaxOuterIterations, batchMaxPqPvSwitch, batchDsRejectResidual);
+                    batchMaxOuterIterations, batchMaxPqPvSwitch, batchDsRejectResidual, 0, null);
             for (int slot : affected) {
                 chunkResults[slot] = r2[slot];
             }
@@ -1204,6 +1226,12 @@ public final class GpuBatchedSecurityAnalysisSolver {
         // lists rebuilt per chunk. Empty when no generator outage is in the chunk.
         List<Integer> ovIndexList = new ArrayList<>();
         List<Double> ovValueList = new ArrayList<>();
+        java.util.Map<Integer, Integer> ziElemByBranchNumChunk = new java.util.HashMap<>();
+        for (int z = 0; z < gpuData.baseOpenZiElements().length; z++) {
+            ziElemByBranchNumChunk.put(gpuData.baseOpenZiBranchNums()[z], gpuData.baseOpenZiElements()[z]);
+        }
+        int nziBase = gpuData.ziIdx().length / 11 - gpuData.baseOpenZiElements().length;
+        List<Integer> ziOnSlotElemList = new ArrayList<>(); // per-scenario zi-element enables (switch closes)
         List<Integer> shOvSlotElemList = new ArrayList<>();  // per-scenario shunt admittance overrides
         List<Double> shOvGbList = new ArrayList<>();
         List<Integer> r1OvSlotElemList = new ArrayList<>();  // per-scenario fixed-ratio tap overrides
@@ -1249,6 +1277,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 int realCount = Math.min(chunkSize, nbg - chunkStart);
                 ovIndexList.clear();
                 ovValueList.clear();
+                ziOnSlotElemList.clear();
                 shOvSlotElemList.clear();
                 shOvGbList.clear();
                 r1OvSlotElemList.clear();
@@ -1302,7 +1331,21 @@ public final class GpuBatchedSecurityAnalysisSolver {
                             rowModePerScenario[s] = row;
                         }
                         for (LfBranch reclosed : contingencies.get(ci).reclosedBranches()) {
-                            disabledMask[s][elementMapper.getElementIndex(reclosed)] = false;
+                            if (reclosed.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
+                                Integer ze = ziElemByBranchNumChunk.get(reclosed.getNum());
+                                ziOnSlotElemList.add(s);
+                                ziOnSlotElemList.add(ze);
+                                // flip the two dummy rows from identity (pinned 0) to the ZERO_V/ZERO_PHI
+                                // coupling; targets stay 0 (switch: rho=1, phase shift 0)
+                                int dpRow = gpuData.ziIdx()[ze * 11 + 4];
+                                int dqRow = gpuData.ziIdx()[ze * 11 + 5];
+                                int[] row = rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rowModePerScenario[s];
+                                row[dpRow] = 1;
+                                row[dqRow] = 1;
+                                rowModePerScenario[s] = row;
+                            } else {
+                                disabledMask[s][elementMapper.getElementIndex(reclosed)] = false;
+                            }
                         }
                         for (TapR1Override tap : contingencies.get(ci).tapOverrides()) {
                             r1OvSlotElemList.add(s);
@@ -1399,7 +1442,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         rlStateIn, rlStateOut,
                         r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                         r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                        batchMaxOuterIterations, batchMaxPqPvSwitch, batchDsRejectResidual);
+                        batchMaxOuterIterations, batchMaxPqPvSwitch, batchDsRejectResidual,
+                        nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray());
                 if (dbgPairRl) {
                     for (int s2 = 0; s2 < realCount; s2++) {
                         StringBuilder sb = new StringBuilder("GPU-PAIR-RL " + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(STRATEGY_KEY_SEP, '|'));

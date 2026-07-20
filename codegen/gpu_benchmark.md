@@ -1216,3 +1216,30 @@ production bench parity unchanged (22/6; GPU warm 12.2 s ≈ CPU-4t).
   (ieee14 B9 shunt disconnected, reconnected by strategy, 0.05 kV state match, pair on
   device). Bench @1e-7 zero-diff (cold 12.6 s x1.31, warm 11.7 s x1.41); fixed-iter
   4.32 ms/scn 499/500.
+
+## 2026-07-20 — SwitchAction closes of base-open switches batched (#31)
+- The "structural feature" collapsed after the OLF zi-lifecycle mine: a RETAINED-OPEN switch's
+  DUMMY_P/Q variables ALREADY HAVE ROWS — its DUMMY_TARGET_P/Q identity equations stay ACTIVE
+  while disabled (dummies pinned 0) and the bus coupling terms never deactivate. No variable
+  pre-activation, no n change, full state congruence for free. OLF truth table (per zi branch):
+  tree edge = ZERO_V/ZERO_PHI active; non-tree AND disabled = DUMMY_TARGETs active. The close
+  is therefore exactly our machinery class: per-scenario element enable + identity->coupling
+  rowMode flip on the two dummy rows (targets stay 0 for a switch: rho=1, phase 0).
+- Device: fillZeroImpBatch gains (nziBase, ziOn sparse list) — elements [nziBase,nzi) are
+  base-open closables contributing only in scenarios that close them; extractor packs them
+  opt-in (tree flag baked 1 — qualification scopes closes to spanning-tree MERGES: distinct
+  zero-impedance groups on the two sides; loop closes are CPU-matching electrical no-ops,
+  composed as nothing; >=2 zi closes per scenario -> CPU).
+- BUG found on the way (latent for ANY zi-bearing batched network): the RL/DS decision pass
+  rebuilt qBuf WITHOUT the zi dummy transfers — the slack retain saw a phantom mismatch equal
+  to the coupler through-flow and the waterfill distributed it FOREVER (+392 MW on a ~600 MW
+  system until the per-scenario budget rejected the scenario). fillZeroImpBatch now runs in
+  the qBuf pass too.
+- First BREAKER-MODE coverage in the extension's test suite: NodeBreakerNetworkFactory + an
+  added L3, coupler C open at base, L1 outage, TrueCondition strategy closes C (busbar merge)
+  — pair on device, 0.05 kV match vs CPU. Node-breaker contingency PROPAGATION opens the
+  target's breakers too (>2 branches -> batch guard): strategy tests run un-propagated;
+  propagated switch outages (zi-element outage masks) are the follow-up for production
+  node-breaker networks.
+- 28/28 tests (1 pre-existing skip); production bench @1e-7 zero-diff (cold 12.5 s x1.37,
+  warm 11.1 s x1.55); fixed-iter 4.29 ms/scn 499/500.

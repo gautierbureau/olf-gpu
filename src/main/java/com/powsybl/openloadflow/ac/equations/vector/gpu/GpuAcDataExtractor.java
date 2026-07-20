@@ -105,7 +105,13 @@ public final class GpuAcDataExtractor {
      */
     public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                     boolean distributedSlack, boolean reactiveLimits) {
-        return extract(network, es, distributedSlack, reactiveLimits, java.util.Set.of());
+        return extract(network, es, distributedSlack, reactiveLimits, java.util.Set.of(), java.util.Set.of());
+    }
+
+    public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+                                    boolean distributedSlack, boolean reactiveLimits,
+                                    java.util.Set<String> baseOpenBranchIds) {
+        return extract(network, es, distributedSlack, reactiveLimits, baseOpenBranchIds, java.util.Set.of());
     }
 
     /**
@@ -118,7 +124,8 @@ public final class GpuAcDataExtractor {
      */
     public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                     boolean distributedSlack, boolean reactiveLimits,
-                                    java.util.Set<String> baseOpenBranchIds) {
+                                    java.util.Set<String> baseOpenBranchIds,
+                                    java.util.Set<String> baseOpenZiBranchIds) {
         validate(network, es);
 
         // Cache each bus's BUS_PHI/BUS_V column once: a bus appears in several branches (degree ~3),
@@ -241,6 +248,42 @@ public final class GpuAcDataExtractor {
                     pi.getKsi(), pi.getR1(), pi.getA1()});
                 cbIdx.add(new int[] {ph1, qRow[b1.getNum()], ph2, qRow[b2.getNum()],
                     ph1, v1, ph2, v2, -1, -1});              // no control columns on a disabled branch
+            }
+        }
+
+        // BASE-OPEN closable ZERO-IMPEDANCE branches (retained-open switches, batch SA only): a
+        // DISABLED zi branch keeps its DUMMY_TARGET_P/Q identity rows ACTIVE (dummies pinned 0) and
+        // its dummy variables therefore HAVE rows — packing it adds the coupling slots to the
+        // superset pattern; the solver enables the element and flips the two dummy rows to the
+        // ZERO_V/ZERO_PHI coupling only in scenarios that CLOSE the switch (always a spanning-tree
+        // merge by qualification scope, so the tree flag is baked to 1). Both coupling targets are 0
+        // for a switch (rho = 1, phase shift A = 0), matching the identity rows' targets — no
+        // per-scenario target override needed.
+        List<Integer> baseOpenZi = new ArrayList<>();
+        List<Integer> baseOpenZiNums = new ArrayList<>();
+        if (!baseOpenZiBranchIds.isEmpty()) {
+            for (LfBranch br : network.getBranches()) {
+                if (!br.isDisabled() || !baseOpenZiBranchIds.contains(br.getId())
+                        || !br.isZeroImpedance(LoadFlowModel.AC)) {
+                    continue;
+                }
+                LfBus b1 = br.getBus1();
+                LfBus b2 = br.getBus2();
+                if (b1 == null || b2 == null || b1.isDisabled() || b2.isDisabled()) {
+                    continue;                                // dead-island reconnection — CPU scope
+                }
+                int dpRow = dummyPCol[br.getNum()];
+                int dqRow = dummyQCol[br.getNum()];
+                if (dpRow < 0 || dqRow < 0) {
+                    continue;                                // no dummy rows — CPU scope
+                }
+                int b1n = b1.getNum();
+                int b2n = b2.getNum();
+                baseOpenZi.add(ziIn.size());
+                baseOpenZiNums.add(br.getNum());
+                ziIn.add(new double[] {PiModel.R2 / br.getPiModel().getR1()});
+                ziIdx.add(new int[] {phiCol[b1n], qRow[b1n], phiCol[b2n], qRow[b2n], dpRow, dqRow,
+                    vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n], 1});
             }
         }
 
@@ -428,7 +471,9 @@ public final class GpuAcDataExtractor {
                 toDoubleArray(rlVtarget),
                 toIntArray(dsPhiRow), dsFactor, dsSlackPhiRow, dsSlackTargetP,
                 toDoubleArray(dsBaseTargetP), toDoubleArray(dsMaxDelta), toDoubleArray(dsMinDelta),
-                baseOpenCb.stream().mapToInt(Integer::intValue).toArray());
+                baseOpenCb.stream().mapToInt(Integer::intValue).toArray(),
+                baseOpenZi.stream().mapToInt(Integer::intValue).toArray(),
+                baseOpenZiNums.stream().mapToInt(Integer::intValue).toArray());
     }
 
     /**

@@ -168,6 +168,13 @@ element falls back to the stock per-strategy CPU path individually.
 
 ### Action types (powsybl action-api 7.3.0, complete list)
 
+> **Read this before marking any action ⏩.** A row is only meaningful if the CPU side DOES something.
+> Four rows here were once marked ⏩ ("a GPU gap we could close") for actions OLF does not implement at
+> all — they were written by reading core's action-api and asking "could our composer express this?",
+> never checking `LfActionUtils.createLfAction`, whose `default` throws `UnsupportedOperationException`.
+> Compiling such an action on the GPU would make the batched path SUCCEED where the stock CPU path
+> throws, violating the provider's safety contract. Check the switch first; mark — , not ⏩.
+
 | Action | Batched | Notes |
 |---|---|---|
 | TerminalsConnectionAction (open) | ✅ | adds the branch to the pair's outage mask |
@@ -180,8 +187,9 @@ element falls back to the stock per-strategy CPU path individually.
 | ShuntCompensatorPositionAction | ✅ | linear model only; non-linear → ⏩ |
 | GeneratorAction (active-power redispatch) | ✅ | composed as a net-injection delta on the warm-continued pair (2026-07-19; DS base-shift accounting fixed — see §A); targetV/targetQ/voltageRegulatorOn changes → ⏩. Validated across every ieee14 contingency incl. islanding |
 | PercentChangeLoadAction | — | **not a GPU gap**: OLF itself does not implement it. `LfActionUtils.createLfAction` has no `PCT_LOAD_CHANGE` case and its `default` throws `UnsupportedOperationException`; zero references in the whole OLF tree (the class only exists in core's action-api). Compiling it on the GPU would make the batched path SUCCEED where the CPU path throws — a safety-contract violation. Needs an upstream `LfPercentChangeLoadAction` first (see the #32 shunt patch for the pattern), then the composer is ~5 lines: p0PercentChange/100 × P0 → LoadLoss, with CONSTANT_PQ_RATIO also shifting q |
-| RatioTapChangerRegulationAction / PhaseTapChangerRegulationAction | ⏩ | changes control MODE, not position |
-| HvdcAction / StaticVarCompensatorAction / AreaInterchangeTargetAction / BoundaryLineAction | ⏩ | element not packed / loop not batched |
+| RatioTapChangerRegulationAction / PhaseTapChangerRegulationAction | — | **not a GPU gap**: OLF does not implement them. No `createLfAction` case, zero references in the OLF tree; the classes exist only in core's action-api, so OLF throws. Batching them would make the GPU SUCCEED where CPU throws |
+| HvdcAction, AreaInterchangeTargetAction | ⏩ | GENUINE gaps, but blocked UPSTREAM of the strategy machinery, not by it: HVDC is not packed by the extractor (§E), and area interchange control is an unported outer loop (§D). Batching the action is meaningless until the element/loop exists device-side |
+| StaticVarCompensatorAction, BoundaryLineAction | — | **not a GPU gap**: no `createLfAction` case in OLF, so it throws — same as the regulation actions above |
 | MultipleActionsAction | — | **not a GPU gap**: same as above — no `MULTIPLE_ACTIONS` case in `LfActionUtils.createLfAction`, so OLF throws on it. Once upstream supports it, the composer compiles recursively over its members |
 
 ## 4. Solver capabilities (batched path specifics)
@@ -218,6 +226,15 @@ element falls back to the stock per-strategy CPU path individually.
    common on node-breaker networks — measure its share before building it. (Switch CLOSES landed
    2026-07-20; shunt reconnection 2026-07-19.)
 4. **Bus/busbar contingencies, ≥3-branch outages, single-side openings.**
+4b. **Operator strategies** — the machinery is complete for its scope; what is left is NOT strategy
+   work. Only **multi-stage conditional actions** (#30) remain in the machinery itself: stage-on-stage
+   needs the stage-1 state evaluated before stage 2 is composed, i.e. a second warm continuation off
+   the pair's own result rather than one extra scenario. The two remaining action gaps —
+   `HvdcAction` and `AreaInterchangeTargetAction` — are blocked upstream (extractor packing §E and an
+   unported outer loop §D). Narrow carve-outs inside supported actions: tap action on a transformer
+   under ACTIVE voltage control (worth re-examining now that transformer voltage control is batched
+   and the control-row pairing is understood), PST tap action under active phase control, non-linear
+   shunt model, GeneratorAction touching targetV/targetQ/regulator rather than P.
 5. **⚠️ corner-case deltas inside supported scope** (Part II): keep-strongest-PV guard,
    curve-limits-at-runtime-P, shared-control transformer groups (`useInitialTapPosition`),
    multi-slack components, realistic-voltage post-check on batched states. (DS balance

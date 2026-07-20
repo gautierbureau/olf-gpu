@@ -129,6 +129,17 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      *  network or fails at runtime (default true). Set to false to fail loudly instead. */
     public static final String CPU_FALLBACK_PROPERTY = "olf.gpu.cpuFallback";
 
+    /**
+     * Number of solves that bailed out of the GPU path since JVM start. Tests assert on it because a
+     * silent fallback is INVISIBLE otherwise: results stay CPU-identical (that is the whole point of the
+     * contract), the warning is logged through a logger the test config does not attach an appender to,
+     * and {@link #CPU_FALLBACK_PROPERTY}=false only covers throws that reach the catch below. A GPU test
+     * that does not check this counter can pass while never touching the GPU at all — that is exactly how
+     * the BRANCH_ALPHA1 packing looked "green but uncovered" until the counter existed.
+     */
+    public static final java.util.concurrent.atomic.AtomicLong CPU_FALLBACK_COUNT =
+            new java.util.concurrent.atomic.AtomicLong();
+
     private final NativeContext context = new NativeContext();
 
     private final Invalidation invalidation = new Invalidation();
@@ -249,6 +260,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             status = result.isStop() ? AcSolverStatus.CONVERGED : AcSolverStatus.MAX_ITERATION_REACHED;
             LOGGER.debug("GPU Newton-Raphson: {} iterations, |f(x)|={}, {}", iterations, result.getNorm(), status);
         } catch (RuntimeException e) {
+            CPU_FALLBACK_COUNT.incrementAndGet();
             // the native context may be mid-iteration inconsistent — rebuild next run
             GpuAcNewtonSolver.destroyContext(context.handle.getAndSet(0));
             cachedData = null;

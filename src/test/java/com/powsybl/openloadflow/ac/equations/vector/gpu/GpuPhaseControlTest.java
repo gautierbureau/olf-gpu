@@ -69,7 +69,7 @@ class GpuPhaseControlTest {
      */
     private void compare(Supplier<Network> networkSupplier,
                          BiConsumer<LoadFlowParameters, OpenLoadFlowParameters> customizer, String label,
-                         int expectedSolvedTap) {
+                         int expectedSolvedTap, boolean expectGpuSolve) {
         LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
 
         Network cpuNetwork = networkSupplier.get();
@@ -86,6 +86,7 @@ class GpuPhaseControlTest {
 
         Network gpuNetwork = networkSupplier.get();
         LoadFlowParameters gpuParameters = new LoadFlowParameters();
+        long fallbacksBefore = com.powsybl.openloadflow.ac.solver.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
         OpenLoadFlowParameters gpuOlf = OpenLoadFlowParameters.create(gpuParameters)
                 .setNewtonRaphsonConvEpsPerEq(1e-8)
                 .setAcSolverType(GpuNewtonRaphsonFactory.NAME);
@@ -105,6 +106,14 @@ class GpuPhaseControlTest {
             worstA = Math.max(worstA, Math.abs(cpuBus.getAngle() - gpuBus.getAngle()));
             compared++;
         }
+        long fallbacks = com.powsybl.openloadflow.ac.solver.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get()
+                - fallbacksBefore;
+        if (expectGpuSolve) {
+            assertEquals(0, fallbacks, "the GPU must actually SOLVE this system — a silent fallback would "
+                    + "leave every other assertion here passing on CPU-vs-CPU results");
+        } else {
+            assertTrue(fallbacks > 0, "this shape must fall back to CPU");
+        }
         int cpuTap = cpuNetwork.getTwoWindingsTransformer("PS1").getPhaseTapChanger().getSolvedTapPosition();
         int gpuTap = gpuNetwork.getTwoWindingsTransformer("PS1").getPhaseTapChanger().getSolvedTapPosition();
         System.out.printf("PST GPU vs CPU [%s]: %d buses, max dV = %.2e kV, max dAngle = %.2e deg, tap %d/%d%n",
@@ -120,19 +129,17 @@ class GpuPhaseControlTest {
 
     @Test
     void incrementalActivePowerControl() {
-        // NOTE — this asserts CPU-parity for PST modelling (the tap really moves 1->2, mirroring OLF's
-        // AcLoadFlowPhaseShifterTest.incrementalPhaseShifterActivePowerControlTest), and the GPU arm
-        // currently FALLS BACK to CPU: "equation row 4 has no diagonal pairing". The a1 identity row has
-        // no natural (a1row, a1col) entry in the CSR pattern — unlike BRANCH_TARGET_RHO1, whose row IS a
-        // bus Q row moved onto the rho column, so the branch's dq/dr1 scatter supplies its diagonal.
-        // Nothing scatters into the a1 row, so applyRowMode has no diagPos to write its 1.0 into.
-        // Until the pattern builder emits that diagonal, this test proves CPU parity only. See #36.
+        // Mirrors OLF's AcLoadFlowPhaseShifterTest.incrementalPhaseShifterActivePowerControlTest
+        // (tap moves 1->2, P1 50.084 -> 83.687 MW) and asserts the GPU actually SOLVES it: expectGpuSolve
+        // checks CPU_FALLBACK_COUNT did not move. Without that check this test passed for a whole session
+        // while the GPU silently fell back — CPU-identical results are the fallback CONTRACT, so they
+        // prove nothing on their own.
         // INCREMENTAL: BRANCH_TARGET_ALPHA1 identity row active all run — the row this change packs.
         compare(GpuPhaseControlTest::regulatingPst,
             (p, olf) -> {
                 p.setPhaseShifterRegulationOn(true);
                 olf.setPhaseShifterControlMode(OpenLoadFlowParameters.PhaseShifterControlMode.INCREMENTAL);
-            }, "incremental", 2);
+            }, "incremental", 2, true);
     }
 
     @Test
@@ -145,7 +152,7 @@ class GpuPhaseControlTest {
                 p.setPhaseShifterRegulationOn(true);
                 olf.setPhaseShifterControlMode(
                         OpenLoadFlowParameters.PhaseShifterControlMode.CONTINUOUS_WITH_DISCRETISATION);
-            }, "continuous", 2);
+            }, "continuous", 2, false);
     }
 
     @Test
@@ -154,7 +161,7 @@ class GpuPhaseControlTest {
         // plain branches. This is the shape every run has today (phaseShifterRegulationOn defaults
         // to false and the RTE parameter file does not set it).
         compare(PhaseControlFactory::createNetworkWithT2wt,
-                (p, olf) -> p.setPhaseShifterRegulationOn(false), "no control", 1);
+                (p, olf) -> p.setPhaseShifterRegulationOn(false), "no control", 1, true);
     }
 
     private static Network regulatingPst() {

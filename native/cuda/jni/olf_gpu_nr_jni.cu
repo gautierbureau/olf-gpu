@@ -659,6 +659,16 @@ std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const in
             // free control, or the unit derivative of the r1−target identity when it is held constant.
             pairRc(ix[9], ix[9]);
         }
+        if (ix[8] >= 0) {
+            // Claim the a1 row (phase control). Unlike rho — whose row IS a bus Q row relocated onto the
+            // rho column, so the dq/dr1 scatter lands on its diagonal — NOTHING scatters into the a1 row:
+            // dp1da1/dq1da1/dp2da1/dq2da1 all go to the BUS P/Q rows against the a1 COLUMN. The a1 row is
+            // therefore an identity row only (a1−target, INCREMENTAL mode holding a1 at its tap value),
+            // and its 1.0 comes from the per-solve row-mode mask. The (r,r) entry is already guaranteed
+            // in the pattern below; all that is missing is this claim, without which rowMap has no
+            // pairing for the row and buildStructure rejects the system.
+            pairRc(ix[8], ix[8]);
+        }
     }
     for (int e = 0; e < nob; e++) {                          // P1 Q1 P2 Q2 v1 v2 (no ph cols:
         const int* ix = obIdx + e * 6;                       // P rows pair via closed branches)

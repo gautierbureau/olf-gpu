@@ -529,6 +529,14 @@ public final class GpuAcDataExtractor {
                 case BUS_TARGET_V -> AcVariableType.BUS_V;
                 case BUS_TARGET_PHI -> AcVariableType.BUS_PHI;
                 case BRANCH_TARGET_RHO1 -> AcVariableType.BRANCH_RHO1;   // ratio held constant: r1−target identity
+                // Phase shift held constant: a1−target identity. This is the ONLY phase-control row the
+                // GPU packs, and it is the one INCREMENTAL mode keeps active for the whole run (that loop
+                // never calls setPhaseControlEnabled, so a1 stays a variable PINNED to its tap value and
+                // the taps move between solves). CONTINUOUS mode with control ON activates BRANCH_TARGET_P
+                // on the CONTROLLED branch instead — a branch-owned power row the GPU has no family for,
+                // and it is NOT in this switch, so it hits the default throw below and the solver falls
+                // back to CPU for that solve. Safe by construction, never silently dropped.
+                case BRANCH_TARGET_ALPHA1 -> AcVariableType.BRANCH_ALPHA1;
                 case DUMMY_TARGET_P -> AcVariableType.DUMMY_P;           // non-tree zero-imp: dummyP held = 0
                 case DUMMY_TARGET_Q -> AcVariableType.DUMMY_Q;           // non-tree zero-imp: dummyQ held = 0
                 case BUS_TARGET_P, BUS_TARGET_Q -> null;     // power rows, mapped above
@@ -568,10 +576,16 @@ public final class GpuAcDataExtractor {
         for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
             // BRANCH_RHO1 (continuous transformer voltage control) is supported for a single
             // transformer locally controlling one of its own terminal buses; computeQRow throws
-            // on the unsupported shapes (phase control, remote / multi-transformer DISTR_RHO).
+            // on the unsupported shapes (remote / multi-transformer DISTR_RHO).
+            // BRANCH_ALPHA1 (phase control) is packed as a COLUMN only: the closed-branch kernel already
+            // reads a1 from the state vector when the branch derives it (cbIdx[8]) and already emits
+            // dp1da1/dq1da1/dp2da1/dq2da1. Which ROW pairs with that column is decided in
+            // extractActivation: BRANCH_TARGET_ALPHA1 (identity, INCREMENTAL mode) is packed,
+            // BRANCH_TARGET_P (CONTINUOUS mode with control enabled) throws there.
             AcVariableType vtype = v.getType();
             if (vtype != AcVariableType.BUS_V && vtype != AcVariableType.BUS_PHI
                     && vtype != AcVariableType.BRANCH_RHO1
+                    && vtype != AcVariableType.BRANCH_ALPHA1
                     && vtype != AcVariableType.DUMMY_P && vtype != AcVariableType.DUMMY_Q) {
                 throw new PowsyblException("GPU AC solver: unsupported variable type " + vtype
                         + " (only plain AC power flow + transformer voltage control + zero-impedance "

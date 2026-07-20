@@ -179,10 +179,10 @@ element falls back to the stock per-strategy CPU path individually.
 | PhaseTapChangerTapPositionAction | ✅ | same compiler (validated incl. ±100% per-step r/x/g/b swings); PST under active phase control → ⏩ |
 | ShuntCompensatorPositionAction | ✅ | linear model only; non-linear → ⏩ |
 | GeneratorAction (active-power redispatch) | ✅ | composed as a net-injection delta on the warm-continued pair (2026-07-19; DS base-shift accounting fixed — see §A); targetV/targetQ/voltageRegulatorOn changes → ⏩. Validated across every ieee14 contingency incl. islanding |
-| PercentChangeLoadAction | ⏩ | trivially compilable to LoadLoss — not yet wired |
+| PercentChangeLoadAction | — | **not a GPU gap**: OLF itself does not implement it. `LfActionUtils.createLfAction` has no `PCT_LOAD_CHANGE` case and its `default` throws `UnsupportedOperationException`; zero references in the whole OLF tree (the class only exists in core's action-api). Compiling it on the GPU would make the batched path SUCCEED where the CPU path throws — a safety-contract violation. Needs an upstream `LfPercentChangeLoadAction` first (see the #32 shunt patch for the pattern), then the composer is ~5 lines: p0PercentChange/100 × P0 → LoadLoss, with CONSTANT_PQ_RATIO also shifting q |
 | RatioTapChangerRegulationAction / PhaseTapChangerRegulationAction | ⏩ | changes control MODE, not position |
 | HvdcAction / StaticVarCompensatorAction / AreaInterchangeTargetAction / BoundaryLineAction | ⏩ | element not packed / loop not batched |
-| MultipleActionsAction | ⏩ | composite — could compile recursively over supported members |
+| MultipleActionsAction | — | **not a GPU gap**: same as above — no `MULTIPLE_ACTIONS` case in `LfActionUtils.createLfAction`, so OLF throws on it. Once upstream supports it, the composer compiles recursively over its members |
 
 ## 4. Solver capabilities (batched path specifics)
 

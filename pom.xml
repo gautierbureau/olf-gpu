@@ -147,6 +147,21 @@
                     </annotationProcessorPaths>
                 </configuration>
             </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- Auto-registers GpuTestIsolationExtension for every test: it resets the batched
+                         solver's JVM-GLOBAL configuration between tests (a provider-driven run leaves
+                         dsRejectResidual/maxOuterIterations set, poisoning any later test that drives the
+                         solver DIRECTLY) and reports silent CPU fallbacks. -->
+                    <properties>
+                        <configurationParameters>
+                            junit.jupiter.extensions.autodetection.enabled = true
+                        </configurationParameters>
+                    </properties>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
 </project>

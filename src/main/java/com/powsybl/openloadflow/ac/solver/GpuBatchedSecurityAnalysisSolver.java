@@ -91,6 +91,32 @@ public final class GpuBatchedSecurityAnalysisSolver {
         batchDsRejectResidual = dsRejectResidual ? 1 : 0;
     }
 
+    /**
+     * Restores every piece of this class's JVM-GLOBAL configuration to its device default. Callers that
+     * drive the batched solver DIRECTLY (rather than through {@link
+     * com.powsybl.openloadflow.sa.GpuBatchedAcSecurityAnalysis}, which sets all of it on every run) must
+     * call this first, or they inherit whatever the last provider-driven run left behind.
+     *
+     * <p>This is a real trap, not a theoretical one: a run parameterized from the RTE file
+     * (slackDistributionFailureBehavior=FAIL) leaves {@code dsRejectResidual} set, and the NEXT direct
+     * solver use then rejects every scenario it saturates to the CPU. That is how
+     * GpuBatchedPegaseFullLoadflowTest came to pass alone and fail in a full suite run, with all 40
+     * scenarios reporting needsCpuFallback.
+     *
+     * <p>The leak is one-directional for correctness: a stale {@code true} over-rejects (slow, still
+     * correct), while a stale {@code false} would under-reject and leave a residual at the slack that the
+     * run's actual failure behavior forbids. The static config should ultimately become per-call state.
+     */
+    public static void resetGlobalConfig() {
+        batchTransformerControl = false;
+        batchMaxOuterIterations = 0;
+        batchMaxPqPvSwitch = 0;
+        batchDsRejectResidual = 0;
+        batchLsMode = 0;
+        batchMaxDv = 0;
+        batchMaxDphi = 0;
+    }
+
     /** One voltage-controlling transformer, precomputed for the per-scenario orchestrator:
      *  rho row (== r1 col, self-paired), controlled-bus V col, target/deadband, continuous r1
      *  range, discrete tap r1 values, its element index (per-scenario outage check), and the

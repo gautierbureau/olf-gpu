@@ -1,1 +1,1 @@
-com.powsybl.openloadflow.ac.equations.vector.gpu.GpuFallbackAuditExtension
+com.powsybl.openloadflow.ac.equations.vector.gpu.GpuTestIsolationExtension

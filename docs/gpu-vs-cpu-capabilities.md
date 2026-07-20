@@ -66,7 +66,7 @@ validation project sets it false to fail loudly instead).
 | Transformer ratio control (local, own terminal) | ✅ | r1 as state variable, qRow moved onto the rho column ("item 4" derivation) |
 | Transformer ratio control (remote pilot / multi-transformer groups) | 🔶 | DISTR_RHO linear coupling derived incl. free-controller mechanism; remote controller zero-diagonal left to cuDSS pivoting; see Part II §E.4 |
 | Remote generator voltage control (DISTR_Q), incl. **multiple controllers on one pilot** | 🔶 | fully wired in sequential LF (weights, free controller, shunt / open-branch / zero-impedance contributors); voltage-controlling-shunt contributor ❌; batch path rejects all DISTR_Q. Part II §E.3 |
-| Transformer phase control (BRANCH_ALPHA1 as variable) | ❌ | unsupported variable type — extractor throws |
+| Transformer phase control (BRANCH_ALPHA1 as variable) | ❌ | `validate()` allows only BUS_V/BUS_PHI/BRANCH_RHO1/DUMMY_P/Q (`GpuAcDataExtractor:571`) → throws. **Applies to BOTH phase-control modes**: `AcEquationSystemCreator.isDeriveA1` (`:697`) keys on `isPhaseController()` alone, never on the mode, so any REGULATING PST creates the α1 column — CONTINUOUS and INCREMENTAL alike. GATE: all of it hangs off `LoadFlowParameters.isPhaseShifterRegulationOn()` (core default **false**, `LoadFlowParameters:108`; the RTE params file does not set it) → with the flag off there are no TransformerPhaseControl objects, no α1 variable, and PST networks pack normally. Verify the flag in a production parameter set before treating this as a blocker |
 | Controllable shunt (SHUNT_B as variable) | ❌ | unsupported variable type |
 | Fixed shunts | ✅ | per-bus G,B pack |
 | Zero-impedance branches | 🔶 | only shapes with DUMMY_P/DUMMY_Q; one-side-open ZI ❌; both-ends-controlled / 3-winding star ❌. Part II §E.5 |
@@ -111,7 +111,7 @@ the stock CPU path (base + contingencies + strategies), logged.
 | TransformerVoltageControl | 🔶 | AFTER_GENERATOR mode, only when the generator-freeze stage is structurally unnecessary (`transformerControlSupported`); per-controller (no shared-group ratio manager). §C |
 | AcHvdcAcEmulationLimits, FreezingHvdcACEmulation | 🔶 | tolerated as structural no-ops when the network has **no HVDC**; otherwise ⏩ |
 | VoltageMonitoring | 🔶 | tolerated when **no SVC**; otherwise ⏩ |
-| PhaseControl / IncrementalPhaseControl | ⏩ | semantic axes catalogued in §D for a future port |
+| PhaseControl / IncrementalPhaseControl | ⏩ (⚠️ over an ❌) | the loop guard routes the whole run to CPU, but the ROOT CAUSE is deeper than an unported loop: the α1 variable makes the network fail to pack at all (see §1 row above), so plain LF on the same network also leaves the GPU (via `olf.gpu.cpuFallback`; the validation project, which sets it false, would fail loudly). Porting the loop is useless until the extractor accepts α1. Semantic axes in §D |
 | IncrementalTransformerVoltageControl / Simple | ⏩ | §D |
 | TransformerReactivePowerControl (incremental) | ⏩ | §D |
 | ShuntVoltageControl (incl. incremental) | ⏩ | §D |
@@ -309,13 +309,40 @@ Each of these is ⏩ in batched SA (whole-run fallback) and ✅-by-construction 
 The axes below are what a device port must reproduce — captured now so a future port
 doesn't rediscover them.
 
-- **PhaseControl** (`PhaseControl`): CONTROLLER mode = continuous solve then switch-off +
-  round A1 at iteration 0; LIMITER mode = from iteration 1, one-tap steps to bring current
-  under limit, direction from sign of dI/dA1; a PST necessary for connectivity (its removal
-  changes component count) gets its control switched off.
-- **IncrementalPhaseControl** (`IncrementalPhaseControl`): sensitivity-driven (BRANCH_ALPHA1
-  transposed-Jacobian), CONTROLLER acts outside half-deadband (min 1 MW), LIMITER only when
-  over limit; SENSI_EPS=1e-6, MAX_DIRECTION_CHANGE=3, cross-PST impact warning at 0.75 margin.
+- **PhaseControl** (`PhaseControl`, CONTINUOUS_WITH_DISCRETISATION — the OLF default mode):
+  CONTROLLER mode = continuous solve then switch-off + round A1 at iteration 0; LIMITER mode =
+  from iteration 1, one-tap steps to bring current under limit, direction from sign of dI/dA1;
+  a PST necessary for connectivity (its removal changes component count) gets its control
+  switched off. Row structure: `BRANCH_TARGET_P` on the CONTROLLED branch (one closed-branch
+  p1/p2 term, side per `getControlledSide()`) active while control is on; `BRANCH_TARGET_ALPHA1`
+  (identity row on the α1 variable, target = `piModel.getA1()`) active while it is off — exactly
+  one of the two at a time, so the system stays square (`AcEquationSystemCreator:528-587`).
+  Unit A throws — current limiter is never solved continuously.
+- **IncrementalPhaseControl** (`IncrementalPhaseControl`): `setPhaseControlEnabled` is NEVER
+  called, so `BRANCH_TARGET_ALPHA1` stays active for the whole run — α1 is a variable PINNED to
+  its tap value, and the column exists only so the loop can solve the transposed Jacobian
+  (RHS = `toRadians(1)` at the α1 equation row, `solveTransposed`, one column per controller).
+  CONTROLLER acts outside half-deadband (floor 0.5 MW), then `da = toRadians(dp/a2p)` and
+  `updateTapPositionToReachNewA1` → CLOSEST tap; LIMITER acts only when over limit and uses
+  `updateTapPositionToExceedNewA1` → FIRST tap ABOVE, deliberately overshooting so the limit
+  clears. SENSI_EPS=1e-6, MAX_DIRECTION_CHANGE=3 (after 3 reversals the PST is locked monotone),
+  MAX_TAP_SHIFT unbounded (tap range + direction guard are the only limits; a saturated PST
+  contributes 0 moves and the loop simply reports STABLE), cross-PST impact warning at 0.75
+  margin (log only, no algorithmic effect). DC variant ignores LIMITER PSTs entirely.
+
+  **Port state — much of the structure already exists and is unreachable today:** `CB_SCATTER`
+  (`native/cuda/closed_branch_scatter.h`) already carries `dp1da1[5] dq1da1[12] dp2da1[19]
+  dq2da1[26]` scattering to the branch-owned α1 column (endpoint 2, colVar 0), and
+  `GpuAcDataExtractor:203` already packs `branchAlphaCol` into `cbIdx[8]` — both dead because
+  `validate()` throws first. Staged port: (1) allowlist α1 + pack the `BRANCH_TARGET_ALPHA1`
+  identity row — structurally the same as the ZI dummy-target rows, and the CONTROLLER on/off
+  swap is a row-mode identity flip, i.e. the #33 `ziOff` machinery; this alone unblocks plain LF
+  in INCREMENTAL mode (outer loops run on CPU there by construction). (2) `BRANCH_TARGET_P` —
+  the genuinely new piece, a BRANCH-owned row fed by one closed-branch p1/p2 term; precedent is
+  the DISTR_RHO family, which already scatters into a branch-owned extra row
+  (`olf_gpu_nr_jni.cu:519`). `computeQRow` also throws on phase-control shapes today.
+  (3) Batched SA is the expensive tier: per-scenario transposed solve + the discrete tap finders
+  + the direction-change guard.
 - **IncrementalTransformerVoltageControl**: BRANCH_TARGET_RHO1 sensitivities, insensitivity
   filter 0.05 (reset when another loop ran in between), one-tap-at-a-time distribution
   across shared controllers, maxTapShift per sweep, MAX_DIRECTION_CHANGE=3.

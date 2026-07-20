@@ -115,7 +115,7 @@ the stock CPU path (base + contingencies + strategies), logged.
 | IncrementalTransformerVoltageControl / Simple | ⏩ | §D |
 | TransformerReactivePowerControl (incremental) | ⏩ | §D |
 | ShuntVoltageControl (incl. incremental) | ⏩ | §D |
-| SecondaryVoltageControl | ⏩ | §D |
+| SecondaryVoltageControl | ⏩ (batched only) | **plain LF: ✅ validated 2026-07-20** — this loop owns NO solver variable and NO equation type. It builds its own dense side matrices, solves a small LU OUTSIDE the Newton system, and writes back only `GeneratorVoltageControl.setTargetValue()` — i.e. it mutates the RHS of existing BUS_TARGET_V rows and their active flags. On the sequential path (CPU outer loops around a GPU inner solve) it therefore needs NO packing support: `GpuSecondaryVoltageControlTest` drives the ieee14 z1 pilot point to 13.0000 kV with max dV 2.8e-14 vs CPU and ZERO CPU fallbacks. Still ⏩ for the BATCHED path. §D |
 | AreaInterchangeControl | ⏩ | §D |
 | AutomationSystem | ⏩ | §D |
 
@@ -356,6 +356,19 @@ doesn't rediscover them.
   target Vs via a cross-zone LU sensitivity system; re-enables helpful PQ-switched
   controllers; DV_EPS=1e-4 pu, alignment eps 1e-3; ANY implausible new targetV ⇒ zone-wide
   skip with FAILED status.
+  **Structural footprint: NONE** — no variable, no equation type; the sensitivity RHS is
+  built on existing BUS_TARGET_V rows and solved via `j.solveTransposed`, the side matrices
+  (`createA`/`createK0`/`createJk`/`createJvpp`) are dense and standalone. Hence plain LF
+  works unmodified (validated 2026-07-20). For a BATCHED port the pieces are: (a) a
+  transposed solve per scenario — reuse the per-scenario cuDSS factorization rather than
+  shipping Jacobians to the host (incremental phase control needs the same primitive);
+  (b) per-scenario target mutation, which the override toolkit already does; (c) the
+  generator-control enable/disable propagation. ⚠️ Note it FIGHTS the reactive-limits loop:
+  `tryToReEnableHelpfulControllerBuses` flips Q-limited buses back from BUS_TARGET_Q to
+  BUS_TARGET_V when SOME but not all controllers in a zone are limited — a mid-run
+  activation change the device RL port would have to honor. Gate: `secondaryVoltageControl`
+  (default false, absent from the RTE params file) + the iidm SecondaryVoltageControl
+  extension with a resolvable pilot bus per zone.
 - **AreaInterchangeControl**: replaces DistributedSlack (config filter); per-area
   interchange mismatch vs areaInterchangePMaxMismatch; buses-without-area absorb slack
   first, then margin-proportional cross-area distribution; throws on >1 synchronous

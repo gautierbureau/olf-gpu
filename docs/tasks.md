@@ -252,6 +252,29 @@ the RHS (`∂F/∂p`) side — neither touches `J`, its factorization, or the tr
   `initFactorsRhs` + `fillSvcPilotFactorsRhs`, commented *"∂F/∂p columns (one per variable
   group), including the SVC pilot closed-loop — identical to forward."*
 
+**DECIDED — the SVC coordination matrix stays on CPU in the end-goal design, for the adjoint.**
+It is small, and per converged state it costs one LU plus one back-substitution per pilot. It
+is pilot-independent, so it is built once per state and reused for every pilot. Porting it to
+device would be substantial work (a second solver path for a small system, exactly the regime
+where a GPU is latency-bound and loses) for no measurable gain. For the adjoint the data
+crossing the boundary is small — per-pilot weights used to fill an RHS column — and the host
+boundary is already being crossed anyway, since the cotangents come from the host. So: keep it
+on CPU, deliberately, and do not revisit.
+
+**NOT settled for the batched SVC OUTER LOOP (consumer 2) — measure before assuming the same.**
+The javadoc is explicit that a Coordination is *"not valid after the load flow re-solves —
+build a fresh one per converged state"*, i.e. it is STATE-dependent, not structural. The two
+usages therefore differ sharply:
+- *Adjoint:* one converged state per sample ⇒ one small build+LU per sample. Negligible.
+- *SVC outer loop, batched:* the state changes every outer iteration, so it is a rebuild per
+  outer iteration PER SCENARIO — with a device→host→device synchronization each time. At
+  B ≈ 500 scenarios × several outer iterations the arithmetic is still trivial, but the
+  SYNCHRONIZATION could dominate and would serialize the batch on the host. That is the thing
+  to measure.
+  If it does hurt, the fix is probably NOT "port the coordination to GPU" but "batch the B
+  small systems together" — block-diagonal or the non-uniform cuDSS batch, i.e. machinery this
+  task is building anyway.
+
 **Consequences for the GPU work:** (a) the transpose/factorization design above is orthogonal
 to both controls — they do not complicate `Jᵀ`; (b) what must be ported is the **RHS
 construction** (participation-weighted for slack, coordination-weighted for the SVC pilot),

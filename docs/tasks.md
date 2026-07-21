@@ -136,18 +136,31 @@ correct when members share a sparsity pattern (as N-1 scenarios do).
 3. **`(∂y/∂x)ᵀ` RHS extraction and `(∂F/∂p)ᵀ` products** on device for a declared
    function/variable set (CPU's `buildAdjointFactors` + the scatter of `der()` into equation
    rows is the reference implementation).
-4. **Non-uniform batching — DECIDED, and it is required.** Training runs on **different
-   networks**, so the uniform UBATCH the entire SA path rests on (one shared sparsity pattern,
-   B sets of values) **does not apply to a training batch**. Options from the pyloadflow tex
-   note: (3) non-uniform list of shapes, or (4) **block-diagonal / fused** — glue the B grids
-   into one giant block-diagonal matrix, one analysis + one factorization; the blocks are
-   independent so there is no fill between them, and (usefully) the transpose of a
-   block-diagonal is block-diagonal with each block transposed, so the orientation fix below
-   composes unchanged. Caveat for (4): the symbolic analysis is per batch *composition*, so it
-   only amortizes if membership is stable across steps — with reshuffled minibatches every
-   step, re-analysis could dominate. Measure before committing.
+4. **Batching for different networks — cuDSS's NON-UNIFORM batch is the primary answer, and
+   pyloadflow already validated it.** Training runs on **different networks**, so the uniform
+   UBATCH the entire SA path rests on (one shared sparsity pattern, B sets of values) **does
+   not apply to a training batch**. Of the four layouts in
+   `pyloadflow/docs/batched_solves_cpu_gpu.tex` §"Four ways to lay out B systems":
+   - **(3) non-uniform batch — the fit.** cuDSS accepts a *list* of differently-patterned
+     matrices as one batched call: each member keeps its own pattern, the library overlaps
+     their work; no shared symbolic analysis, but one launch instead of B. Available since
+     **cuDSS ≥ 0.4.0** (we pin 0.8.0). pyloadflow states the batched *"non-uniform / uniform
+     cuDSS solve confirmed for the VJP"* (`docs/gpu_security_analysis.md`), and its SA design
+     already **buckets** work into pattern-preserving → uniform vs topology-changing →
+     non-uniform, with a classifier in `jacobian/pattern.py`. Port that bucketing idea rather
+     than reinventing: different networks simply always land in the non-uniform bucket.
+   - **(4) block-diagonal / fused** — glue the B grids onto one diagonal: one analysis + one
+     factorization, no fill between independent blocks, and the transpose of a block-diagonal
+     is block-diagonal with each block transposed, so the orientation fix composes unchanged.
+     Viable alternative, but its symbolic analysis is per batch *composition*, so it only
+     amortizes if membership is stable across steps; reshuffled minibatches could make
+     re-analysis dominate.
+   Decide by measurement (non-uniform's per-member analysis vs block-diagonal's per-composition
+   analysis), not by argument. **Do not treat block-diagonal as the only option** — the
+   non-uniform path is the one with existing evidence behind it.
    Note consumers 2 and 3 (SVC, incremental phase control) run INSIDE the SA batch where the
-   pattern IS shared, so they never hit this — another reason to do them first.
+   pattern IS shared, so they stay on the uniform path and never hit this — another reason to
+   do them first.
 5. **Non-smoothness.** `x*(p)` is piecewise-smooth: PV↔PQ switching on Q-limits, tap limits,
    distributed-slack participation changes. The correct derivative is that of the locally
    active KKT system, so the active set must be exposed and freezable while linearizing.

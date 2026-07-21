@@ -136,11 +136,18 @@ correct when members share a sparsity pattern (as N-1 scenarios do).
 3. **`(∂y/∂x)ᵀ` RHS extraction and `(∂F/∂p)ᵀ` products** on device for a declared
    function/variable set (CPU's `buildAdjointFactors` + the scatter of `der()` into equation
    rows is the reference implementation).
-4. **Non-uniform batching is an open question.** Our uniform batch assumes all members share
-   one sparsity pattern (true for N-1: perturbations of one base case). Training samples may
-   be *different* networks or snapshots, breaking that assumption — the tex note's layouts
-   (3) non-uniform list and (4) block-diagonal are the alternatives. Decide before promising a
-   training-batch API.
+4. **Non-uniform batching — DECIDED, and it is required.** Training runs on **different
+   networks**, so the uniform UBATCH the entire SA path rests on (one shared sparsity pattern,
+   B sets of values) **does not apply to a training batch**. Options from the pyloadflow tex
+   note: (3) non-uniform list of shapes, or (4) **block-diagonal / fused** — glue the B grids
+   into one giant block-diagonal matrix, one analysis + one factorization; the blocks are
+   independent so there is no fill between them, and (usefully) the transpose of a
+   block-diagonal is block-diagonal with each block transposed, so the orientation fix below
+   composes unchanged. Caveat for (4): the symbolic analysis is per batch *composition*, so it
+   only amortizes if membership is stable across steps — with reshuffled minibatches every
+   step, re-analysis could dominate. Measure before committing.
+   Note consumers 2 and 3 (SVC, incremental phase control) run INSIDE the SA batch where the
+   pattern IS shared, so they never hit this — another reason to do them first.
 5. **Non-smoothness.** `x*(p)` is piecewise-smooth: PV↔PQ switching on Q-limits, tap limits,
    distributed-slack participation changes. The correct derivative is that of the locally
    active KKT system, so the active set must be exposed and freezable while linearizing.
@@ -148,8 +155,59 @@ correct when members share a sparsity pattern (as N-1 scenarios do).
    network with known binding Q-limits before trusting it broadly. (CPU's adjoint already
    handles distributed slack and the SVC pilot lever, so check what it does there first.)
 
+**THE ORIENTATION PROBLEM — the crux, and why the CPU adjoint does not port.**
+CPU and GPU store the Jacobian in **opposite conventions**, deliberately:
+
+- **GPU** (`olf_gpu_nr_jni.cu` header): *"J is true CSR with row = equation column, col =
+  variable row, so cuDSS solves `J dx = -F` directly — no transposition games (contrast
+  powsybl-math's CSC-as-CSR convention, which exists to serve solveTransposed)."*
+- **CPU** (powsybl-math): CSC-as-CSR, i.e. the stored matrix **is `M = Jᵀ`**.
+
+The consequence is the opposite of what one first assumes, and the CPU adjoint says so in
+code: `// λ = J⁻ᵀ x̄: the stored matrix is M = Jᵀ, so plain solve() IS the adjoint solve. One
+solve.` → `context.getJacobianMatrix().solve(lambda)`. On CPU the **backward is a plain
+`solve()`**; `solveTransposed()` is what the **forward** sensitivity uses (`J (dx/dp) = −∂F/∂p`).
+
+So each convention makes exactly ONE direction free:
+
+| | stored | plain `solve()` gives | free direction | pays the transpose |
+|---|---|---|---|---|
+| CPU (powsybl-math) | `Jᵀ` | `J⁻ᵀ` | **adjoint / backward** | forward sensitivity |
+| GPU (ours, true CSR) | `J` | `J⁻¹` | **forward Newton** | **adjoint / backward** |
+
+Our GPU convention is the *right* choice for its workload — the Newton does many solves per
+sample, the adjoint is one solve at the end — so this is not a mistake to undo. But it does
+mean the adjoint lands on the side that pays, and **cuDSS (pinned 0.8.0) has no
+solve-transpose**, so we cannot ask the existing factors for `Jᵀ` either. Do NOT "fix" this by
+flipping the convention: that would make every Newton iteration pay to save one adjoint solve.
+
+**Resolution (works today):** keep the forward Newton in its current orientation — it does
+many solves per sample and must stay fast — and at convergence build `Jᵀ` explicitly, factorize
+it **once**, then the adjoint is a plain non-transposed cuDSS solve.
+- The value transpose is a **gather with a precomputed permutation**: for a given sparsity
+  pattern the `CSR(J) → CSR(Jᵀ)` index map is symbolic, computed once per distinct pattern,
+  then each sample's values are permuted by one kernel. cuDSS's symbolic analysis for `Jᵀ` is
+  likewise once per pattern.
+- Cost: **+1 factorization per sample per training step**, against the ~4–8 refactorizations
+  the forward Newton already performs — roughly 12–25% overhead. That is the price of no
+  solve-transpose, and it is acceptable.
+
+**Build the workaround to be DELETED.** The cuDSS team has said solve-transpose is in
+progress and should land in a future release. When it does, the explicit `Jᵀ` build *and* its
+factorization both disappear: the adjoint becomes a transposed solve against the factors the
+forward already computed, at near-zero marginal cost. So put the adjoint solve behind a small
+seam (one function: "solve with `Jᵀ` given the forward's factors") with the transpose-and-
+refactorize as its first implementation, so the swap is local rather than a rewrite. Re-check
+on every cuDSS bump — `native/cudss-swap.sh` already does the A/B, and cuDSS version choice is
+already tracked in memory as a decisive perf lever.
+(If cuDSS instead exposes the raw `L`/`U` factors, the same seam takes the other classical
+route: `J = LU` ⇒ `Jᵀ = UᵀLᵀ`, so an adjoint solve is two transposed triangular solves against
+the existing factors — also no second factorization.)
+
 **Acceptance gate, inherited from the CPU work:** three-way agreement — finite difference
-(independent ground truth) vs forward sensitivity vs the adjoint. The two analytic paths
+(independent ground truth) vs forward sensitivity vs the adjoint. **The orientation mismatch
+makes this gate non-optional**: an inverted convention produces a plausible-looking but wrong
+gradient, and FD is what catches it. The two analytic paths
 should agree to solver tolerance (same kernels, opposite contraction order); FD agrees to
 truncation error and catches a systematic error common to both. `AcSensitivityAnalysisAdjointTest`
 already encodes this pattern; mirror it rather than inventing a new gate.

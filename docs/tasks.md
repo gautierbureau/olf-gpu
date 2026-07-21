@@ -311,12 +311,38 @@ the primitive on ground we control, before the JAX/pypowsybl context plumbing of
 **FIRST STEPS (ordered).** Principle: prove the risky primitive on ground we control, before
 any JAX or batching complexity.
 
-**Prerequisite decision — how does the CPU adjoint reach our build?** The GPU extension builds
-against OLF `2.4.0-SNAPSHOT` from `powsybl-open-loadflow-3` (`olf-local-patches`), but
-`runAdjoint` lives in `powsybl-open-loadflow-5` on `adjoint-vjp`. Either rebase/merge that
-branch into the `olf-local-patches` line, or keep them separate and compare against recorded
-reference values. Settle this first: the CPU adjoint is the ORACLE for every step below, and
-an exact reference is far stronger than finite differences alone.
+**Prerequisite — how the CPU adjoint reaches our build. SETTLED 2026-07-21: rebase, then
+cherry-pick/squash.** The GPU extension builds against OLF `2.4.0-SNAPSHOT` from
+`powsybl-open-loadflow-3` (`olf-local-patches`); `runAdjoint` lives on `adjoint-vjp` in
+`powsybl-open-loadflow-5`. Facts checked:
+- **All the OLF checkouts are WORKTREES OF ONE REPOSITORY** (`git worktree list`), so every
+  object is already shared: `adjoint-vjp`'s tip `a9de15a3d` is directly reachable from OLF-3.
+  **No remote, no fetch needed** — cherry-pick/merge works across the worktrees as-is.
+- **`olf-local-patches` is 2 ahead / 2 BEHIND main** (merge base `6ef8e6fc7` "Bump to
+  v2.4.0-SNAPSHOT"), while `adjoint-vjp` is based on current main. **So rebase
+  `olf-local-patches` onto main FIRST**, then take the adjoint work. (Main's `fe0bd3dfb`
+  = #1451, which adds outer-loop names to status text, touches ~60 files — that, not our work,
+  is what makes a raw two-tip diff look large.)
+- **`olf-local-patches` does NOT contain shunt or SVC sensitivity** — its only 2 commits are the
+  shunt *reconnection action* work (#32: `TerminalsConnectionAction` on a base-open LINEAR
+  shunt + the `getShuntIdsToShift()` accessor). **It does not need to:** both
+  `SvcPilotPointClosedLoopSensitivity` (+ its test) and `SHUNT_COMPENSATOR_SUSCEPTANCE`
+  sensitivity are **already on main**, so the rebase brings them in.
+- **What to take from `adjoint-vjp`:** 21 commits vs main, but not all are wanted —
+  `e7ed4632b` is already upstream as main's `fe0bd3dfb` (#1451), and four prototype commits
+  are later deleted wholesale by `168999764` ("Remove the superseded
+  LoadFlowAdjoint/ClassicVoltageControlVjp prototype", −608 lines). Cherry-picking the range
+  verbatim would add-then-delete a prototype. **Prefer `git merge --squash adjoint-vjp` after
+  the rebase** — it takes the tip state in one commit with no prototype churn. Collision risk
+  is low: the adjoint touches only 9 files, almost all under `sensi/`, disjoint from the
+  shunt-action work.
+- After the rebase: rebuild + reinstall OLF into the isolated m2 and re-run the GPU suite, since
+  the extension builds against it (this is also the moment to re-check the pinned
+  `powsybl-open-loadflow.version`).
+
+The CPU adjoint is the ORACLE for every step below, and an exact reference is far stronger than
+finite differences alone — which is why it is worth doing this properly rather than comparing
+against recorded numbers.
 
 1. **Single-scenario GPU adjoint, no batching.** Run one network to convergence on the GPU,
    build `Jᵀ` via the permutation, factorize, adjoint-solve, contract to `θ̄`. Compare against

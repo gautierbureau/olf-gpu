@@ -169,6 +169,19 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
             com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp)
                     .setNewtonRaphsonConvEpsPerEq(Double.parseDouble(convEpsEnv));
         }
+        // OLF_GPU_SA_GPU_CONV_EPS: override the GPU arm's eps ONLY, leaving the CPU arm at its value.
+        // This is the honest production framing: CPU runs the file's production criterion (1e-4) while
+        // the GPU runs its fast operating point (1e-7, tighter → an at-least-as-converged answer). Same
+        // run, same warmup, so the comparison has no cross-run machine-state drift. copy() is a full
+        // JSON round-trip → an independent LoadFlowParameters preserving every file setting (30-iter
+        // outer budget, MAX_VOLTAGE_CHANGE scaling, …), so only the eps differs between the arms.
+        LoadFlowParameters lfpGpu = lfp;
+        String gpuConvEpsEnv = System.getenv("OLF_GPU_SA_GPU_CONV_EPS");
+        if (gpuConvEpsEnv != null) {
+            lfpGpu = lfp.copy();
+            com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfpGpu)
+                    .setNewtonRaphsonConvEpsPerEq(Double.parseDouble(gpuConvEpsEnv));
+        }
 
         // The FAIR production CPU arm is multithreaded — OLF SA parallelizes contingencies across
         // threads in production. The single-thread arm is an optional reference (OLF_GPU_SA_CPU_SINGLE=1).
@@ -212,7 +225,7 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
             // cuLaunchKernel (measured — hs_err in precomputeBatch). The GPU's parallelism IS the
             // batch; provider-side serialization is the product fix to make threadCount safe.
             SecurityAnalysisParameters sapGpu = new SecurityAnalysisParameters();
-            sapGpu.setLoadFlowParameters(lfp);
+            sapGpu.setLoadFlowParameters(lfpGpu);
             sapGpu.setIncreasedViolationsParameters(sap.getIncreasedViolationsParameters());
             long g0 = System.nanoTime();
             gpuCold = runSecurityAnalysis(network, contingencies, monitors, sapGpu);
@@ -227,6 +240,10 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
 
         int n = contingencies.size();
         System.out.printf("PROD-SA case9241pegase | %d ctg | RTE production parameters (rte-loadflow-default-parameters.json), full outer loops%n", n);
+        System.out.printf("  conv eps: CPU=%.1e  GPU=%.1e%s%n",
+                com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp).getNewtonRaphsonConvEpsPerEq(),
+                com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfpGpu).getNewtonRaphsonConvEpsPerEq(),
+                lfpGpu == lfp ? " (shared)" : " (per-arm split: CPU production criterion, GPU fast point)");
         if (cpu1Ms >= 0) {
             System.out.printf("  CPU  AcSecurityAnalysis (1 thread)   : %6d ms | %.2f ms/ctg%n", cpu1Ms, cpu1Ms / (double) n);
         }

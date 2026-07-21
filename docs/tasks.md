@@ -261,19 +261,33 @@ crossing the boundary is small — per-pilot weights used to fill an RHS column 
 boundary is already being crossed anyway, since the cotangents come from the host. So: keep it
 on CPU, deliberately, and do not revisit.
 
-**NOT settled for the batched SVC OUTER LOOP (consumer 2) — measure before assuming the same.**
-The javadoc is explicit that a Coordination is *"not valid after the load flow re-solves —
-build a fresh one per converged state"*, i.e. it is STATE-dependent, not structural. The two
-usages therefore differ sharply:
-- *Adjoint:* one converged state per sample ⇒ one small build+LU per sample. Negligible.
-- *SVC outer loop, batched:* the state changes every outer iteration, so it is a rebuild per
-  outer iteration PER SCENARIO — with a device→host→device synchronization each time. At
-  B ≈ 500 scenarios × several outer iterations the arithmetic is still trivial, but the
-  SYNCHRONIZATION could dominate and would serialize the batch on the host. That is the thing
-  to measure.
-  If it does hurt, the fix is probably NOT "port the coordination to GPU" but "batch the B
-  small systems together" — block-diagonal or the non-uniform cuDSS batch, i.e. machinery this
-  task is building anyway.
+**ALSO SETTLED — the SVC OUTER LOOP may stay host-side in batched SA too. Investigated
+2026-07-21; my earlier "the synchronization could dominate" worry was overstated.**
+The batched architecture is ALREADY hybrid, and transformer voltage control (#16) is the
+proven production precedent:
+- **On device, inside the native solve loop:** distributed slack + reactive limits — the HOT
+  loops, iterating many times per solve, where host round-trips would be fatal.
+- **On host, orchestrated around whole batched solves:** transformer voltage control.
+  `orchestrateTransformerControl` reads `chunkResults[slot]` (the converged state per
+  scenario), loops `for (int step = 0; step < 8; step++)`, and each step rebuilds per-scenario
+  `x0` / row-modes / targets and calls `solveBatchContext` again, copying `r2[slot]` back for
+  the affected slots.
+
+The decisive fact: **`solveBatchContext` already returns the full per-scenario state to the
+host after every batched solve.** A host-orchestrated outer loop therefore costs **no extra
+transfer** — that data crosses regardless. And the device fills honour an `active[s]` mask
+(15 sites in the JNI), so an orchestration step only does work for the scenarios still moving.
+So the state changing per iteration is not an objection: re-solving on changed state is exactly
+what the orchestrator does, and TVC already does it in production under RTE parameters.
+
+What this means for SVC: **follow the TVC pattern** — host-side orchestration around batched
+solves, with the coordination matrix built on host per converged state (see above). The real
+cost driver is **iteration count, not data volume**: each orchestration step is one batched
+re-solve. TVC bounds itself at 8 steps; SVC must be similarly bounded, so check its
+convergence behaviour before wiring it. The residual host cost is B small coordination
+builds+LUs per outer iteration — at B ≈ 500 these are tiny matrices and parallelizable across
+host threads, so measure it but do not pre-optimize. Only if that measurement surprises does
+batching the B small systems (block-diagonal / non-uniform cuDSS) become worth it.
 
 **Consequences for the GPU work:** (a) the transpose/factorization design above is orthogonal
 to both controls — they do not complicate `Jᵀ`; (b) what must be ported is the **RHS

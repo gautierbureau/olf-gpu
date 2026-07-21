@@ -153,6 +153,9 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
 
 ## Repo / git
 
+- **Open work lives in `docs/tasks.md`** (the MCP task tracker disconnected 2026-07-21;
+  that file is now the durable record — open items, what is resolved and why, plus the
+  method notes worth not relearning). Reconcile rather than overwrite if the tracker returns.
 - THIS repo has no remote yet — commit locally.
 - The OLF fork checkout (`~/Projects/powsybl/powsybl-open-loadflow-3`): push only to
   the `test6` remote (`gautierbureau/test6`), **never `origin`** (upstream powsybl);

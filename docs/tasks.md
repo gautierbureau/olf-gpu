@@ -58,6 +58,105 @@ decision hysteresis — only re-check RL on scenarios whose q moved > tol; narro
 when few scenarios are active). Worth it only if a consumer insists on eps=1e-4 on the GPU.
 Keep the fixed-iter bench and the SA tests at baseline for any such work.
 
+### #40 — Batched transposed solve (adjoint/VJP) — ONE primitive, THREE consumers
+Not started. The single highest-leverage missing capability on the batched device path,
+because three separate roadmap items all need the *same* thing: **a transposed solve against
+the per-scenario cuDSS factorization we have already computed**, without shipping Jacobians
+back to the host.
+
+**Consumer 1 — GNN training with an implicit load-flow layer** (the driver). A converged AC
+LF is an implicit function `F(x, p) = 0`; by the implicit function theorem
+`dx*/dp = −J⁻¹ ∂F/∂p`. Training a GNN whose forward pass contains an LF layer means
+backpropagating through it, which in JAX is a `custom_vjp` whose backward is the adjoint
+
+```
+Jᵀ λ = (∂y/∂x)ᵀ ȳ          ← ONE transposed solve, reusing the factorization
+p̄    = (∂y/∂p)ᵀ ȳ − (∂F/∂p)ᵀ λ
+```
+
+Reverse mode is what training needs (many parameters → one scalar loss), so this is one
+transposed solve total, versus one solve per variable in the forward-mode sensitivity
+analysis that exists today. Design already worked out in
+`~/Projects/energnn/project-tertiary-voltage-control/docs/`:
+`differentiable_power_flow.md` (the `custom_vjp` boundary, the phased plan, and §4's list of
+what OLF must expose), `adjoint_block_and_vjp_math.md`, `energnn_vjp_training_integration.md`.
+The reverse-mode derivation — specifically *why* each transpose is forced rather than a
+layout convention — is in `~/Projects/powsybl/powerflow/pyloadflow/docs/reverse_mode_vjp_explained.md`.
+
+**Consumer 2 — SecondaryVoltageControl, batched.** Its sensitivity RHS is built on existing
+`BUS_TARGET_V` rows and solved with `j.solveTransposed` (validated on plain LF 2026-07-21,
+`87f61f1`; batched port still ⏩).
+
+**Consumer 3 — IncrementalPhaseControl, batched.** Same primitive: a transposed solve with
+`toRadians(1)` injected at the `BRANCH_TARGET_ALPHA1` row, one column per controller.
+
+**PRIOR ART — do not start from scratch. Three layers already exist:**
+
+1. **A working CPU adjoint in OLF.** `~/Projects/powsybl/powsybl-open-loadflow-5`, branch
+   **`adjoint-vjp`** (~12 commits, head `a9de15a3d`). `AcSensitivityAnalysis.runAdjoint(...)`
+   is exposed as a public SPI entry on `OpenSensitivityAnalysisProvider`. It contracts
+   `θ̄ = Sᵀ·ȳ` **without materialising S**, using a single
+   `context.getJacobianMatrix().solveTransposed(factorsStates)` and an **O(functions+variables)
+   minimal factor set** (validated against the full cross product). The public surface is
+   deliberately small: `runAdjoint`, `AdjointBlock`/`AdjointVariable`, `functionCotangentKey`.
+   Returns the UNSCALED sensitivity (physical dual of `get_sensitivity_matrix`).
+   10 tests in `AcSensitivityAnalysisAdjointTest`, including **finite-difference gates**
+   (`runAdjointMatchesForwardSensitivityAndFiniteDifferenceOnIeee14`), distributed slack, the
+   SVC pilot lever, line admittance, linearity in the cotangents, and silent-failure guards
+   (rejects a cotangent keying no block function; rejects empty declarations) — the commit
+   log shows those guards were added after real silent-zero/silent-drop bugs.
+   **This is the semantics the GPU path must reproduce, not reinvent.**
+2. **The lifetime mechanism, already solved on CPU.** `runAdjoint` reuses the AC load flow
+   retained in `NetworkCache` (`networkCacheEnabled`) — the cached LF *is* how the
+   factorization survives between the forward and the adjoint call. The GPU equivalent is the
+   open question in item 2 below.
+3. **The Python prototype that preceded this OLF GPU work** —
+   `~/Projects/powsybl/powerflow/pyloadflow`. `docs/reverse_mode_vjp_explained.md` derives why
+   each transpose is *forced* vs a layout convention; `docs/jacobians_and_implicit_diff.md`;
+   and `docs/batched_solves_cpu_gpu.tex` works the batching design explicitly, including
+   §"Scenario B — the forward *with* a gradient (VJP)" and §"Four ways to lay out B systems".
+
+**What the batched GPU path already has:** UBATCH cuDSS with a per-scenario LU over a fixed
+superset CSR pattern — exactly the "uniform batch" layout that the tex note identifies as
+correct when members share a sparsity pattern (as N-1 scenarios do).
+
+**What is missing — i.e. the GPU/batched delta over the working CPU adjoint:**
+1. **Batched transposed solve against the existing per-scenario factorization** — cuDSS
+   solve-transpose on the factors already computed, no refactorization, no host round-trip.
+   CPU does this with one `solveTransposed` on a retained `JacobianMatrix`; the device
+   equivalent over a UBATCH of factors is the core new piece.
+2. **Factorization LIFETIME across the fwd/bwd boundary.** The requirement that differs in
+   kind from security analysis, and the easiest to underestimate. SA frees its factors as soon
+   as the forward converges; a VJP must keep the per-sample factors alive *between* `f_fwd`
+   and `f_bwd`, and JAX may separate, reorder under `jit`, or repeat those calls. CPU solved
+   this via `NetworkCache`; the device needs a context with `create → adjoint_solve → free`,
+   an opaque handle in the `custom_vjp` residual, matrices staying in device memory, and
+   thread-safe re-entrancy for parallel training. NB our batched solver already had a
+   JVM-global-state incident (#38) — do not repeat it; make context state per-call.
+3. **`(∂y/∂x)ᵀ` RHS extraction and `(∂F/∂p)ᵀ` products** on device for a declared
+   function/variable set (CPU's `buildAdjointFactors` + the scatter of `der()` into equation
+   rows is the reference implementation).
+4. **Non-uniform batching is an open question.** Our uniform batch assumes all members share
+   one sparsity pattern (true for N-1: perturbations of one base case). Training samples may
+   be *different* networks or snapshots, breaking that assumption — the tex note's layouts
+   (3) non-uniform list and (4) block-diagonal are the alternatives. Decide before promising a
+   training-batch API.
+5. **Non-smoothness.** `x*(p)` is piecewise-smooth: PV↔PQ switching on Q-limits, tap limits,
+   distributed-slack participation changes. The correct derivative is that of the locally
+   active KKT system, so the active set must be exposed and freezable while linearizing.
+   `differentiable_power_flow.md` §6 calls this the correctness frontier — prototype on a
+   network with known binding Q-limits before trusting it broadly. (CPU's adjoint already
+   handles distributed slack and the SVC pilot lever, so check what it does there first.)
+
+**Acceptance gate, inherited from the CPU work:** three-way agreement — finite difference
+(independent ground truth) vs forward sensitivity vs the adjoint. The two analytic paths
+should agree to solver tolerance (same kernels, opposite contraction order); FD agrees to
+truncation error and catches a systematic error common to both. `AcSensitivityAnalysisAdjointTest`
+already encodes this pattern; mirror it rather than inventing a new gate.
+
+**Sequencing note:** consumers 2 and 3 are self-contained inside our batch and would prove
+the primitive on ground we control, before the JAX/pypowsybl context plumbing of consumer 1.
+
 ### #18 — GPU-vs-CPU LF validation project
 Blocked on RTE Nexus access.
 **Standing constraint: never read or load `.arc` files or any real network data.**

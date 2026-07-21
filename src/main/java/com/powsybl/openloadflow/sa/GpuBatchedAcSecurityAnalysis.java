@@ -165,7 +165,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // STRUCTURAL: run the base (pre-contingency) load flow on the GPU solver when the device
         // is available and the user left the default CPU Newton-Raphson. This absorbs the one-time
         // CUDA init into the base phase (so the batched contingency pass that follows is warm) and
-        // solves the base faster — the same base-on-GPU placement gpusim2grid has natively. An
+        // solves the base faster by keeping it on the device. An
         // explicit non-default solver choice (e.g. FAST_DECOUPLED) is respected; a network the GPU
         // extractor rejects degrades to the CPU solver inside GpuNewtonRaphson (cpuFallback).
         // DETECT-AND-FALLBACK (the provider's safety contract: enabling it must never change results).

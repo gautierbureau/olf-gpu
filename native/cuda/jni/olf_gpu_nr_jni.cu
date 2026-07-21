@@ -2248,8 +2248,8 @@ struct BatchSolverContext {
     // Dedicated stream for the WHOLE batch solve (every kernel/memset/async copy + cuDSS via
     // cudssSetStream): keeps the per-iteration launch sequence off the legacy default stream,
     // whose implicit device-wide serialization stitched the timeline with sync points (the
-    // ~25 ms/iter host/launch gaps of the 2026-07-15 nsys attribution — gpusim2grid runs its
-    // loop on one explicit stream and shows none). Created BLOCKING (default flags), so any
+    // ~25 ms/iter host/launch gaps of the 2026-07-15 nsys attribution — a loop kept on one
+    // explicit stream shows none). Created BLOCKING (default flags), so any
     // op left on the legacy stream still orders correctly against it — safety over speed for
     // whatever this conversion misses.
     cudaStream_t stream = nullptr;

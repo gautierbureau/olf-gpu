@@ -171,9 +171,8 @@ class GpuBatchedN1FixedIterTest {
         // shared structure, LU probe, cuDSS analyses and solver contexts all rebuild — without the
         // clear, content matching would alias the first pass's device structure and un-cold the
         // measurement). JIT and the CUDA driver are warm; everything GPU-side is cold. This is the
-        // long-running-service scenario (a new network snapshot arriving at a warm process) and
-        // the closest structural analogue to gpusim2grid's repeated in-process runs (Python has no
-        // JIT ramp). The [E2E] line from the first pass stays the single-shot cold number.
+        // long-running-service scenario: a new network snapshot arriving at a warm process,
+        // repeated in-process runs. The [E2E] line from the first pass stays the single-shot cold number.
         if (System.getenv("OLF_GPU_E2E") != null && !"0".equals(System.getenv("OLF_GPU_E2E_WARMJIT"))) {
             Problem p2 = loadGpuScope(iidm);
             try (AcLoadFlowContext context = p2.context()) {

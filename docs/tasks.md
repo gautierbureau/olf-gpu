@@ -168,22 +168,33 @@ code: `// λ = J⁻ᵀ x̄: the stored matrix is M = Jᵀ, so plain solve() IS t
 solve.` → `context.getJacobianMatrix().solve(lambda)`. On CPU the **backward is a plain
 `solve()`**; `solveTransposed()` is what the **forward** sensitivity uses (`J (dx/dp) = −∂F/∂p`).
 
-So each convention makes exactly ONE direction free:
+**On CPU BOTH directions are free, and the convention is not what makes them so.** KLU
+implements `klu_solve` *and* `klu_tsolve` against the **same numeric factorization** — a
+transpose solve is just the triangular solves taken in the other order, at the same cost and
+with no refactorization. So one factorization serves both directions. The storage convention
+only decides which method *name* maps to which mathematical direction; it costs nothing
+either way:
 
-| | stored | plain `solve()` gives | free direction | pays the transpose |
-|---|---|---|---|---|
-| CPU (powsybl-math) | `Jᵀ` | `J⁻ᵀ` | **adjoint / backward** | forward sensitivity |
-| GPU (ours, true CSR) | `J` | `J⁻¹` | **forward Newton** | **adjoint / backward** |
+| | stored | one factorization gives | |
+|---|---|---|---|
+| CPU (powsybl-math + KLU) | `Jᵀ` | `solve()` → `J⁻ᵀ` (**backward**) | `solveTransposed()` → `J⁻¹` (**forward**) |
+| GPU (ours, true CSR + cuDSS) | `J` | `solve()` → `J⁻¹` (**forward**) | **transpose solve: not available** |
 
-Our GPU convention is the *right* choice for its workload — the Newton does many solves per
-sample, the adjoint is one solve at the end — so this is not a mistake to undo. But it does
-mean the adjoint lands on the side that pays, and **cuDSS (pinned 0.8.0) has no
-solve-transpose**, so we cannot ask the existing factors for `Jᵀ` either. Do NOT "fix" this by
-flipping the convention: that would make every Newton iteration pay to save one adjoint solve.
+**So the problem is not our convention — it is a missing cuDSS capability.** cuDSS (pinned
+0.8.0) offers only the non-transposed solve against its factors, so a GPU factorization yields
+**one** direction instead of two. Flipping our storage convention would not help: it would
+merely move the unavailable direction from the adjoint to the Newton, which is strictly worse
+(the Newton does many solves per sample, the adjoint one at the end).
 
-**Resolution (works today):** keep the forward Newton in its current orientation — it does
-many solves per sample and must stay fast — and at convergence build `Jᵀ` explicitly, factorize
-it **once**, then the adjoint is a plain non-transposed cuDSS solve.
+**The precise ask of cuDSS is parity with KLU: a transpose solve against an existing
+factorization.** The cuDSS team has said this is in progress. The moment it ships, our
+true-CSR convention costs nothing, the workaround below deletes, and the adjoint becomes one
+extra solve rather than an extra factorization.
+
+**Resolution while cuDSS lacks it (works today):** keep the forward Newton in its current
+orientation and, at convergence, build `Jᵀ` explicitly, factorize it **once**, then the adjoint
+is a plain non-transposed cuDSS solve. This buys the second direction with a second
+factorization — precisely the cost KLU does not pay.
 - The value transpose is a **gather with a precomputed permutation**: for a given sparsity
   pattern the `CSR(J) → CSR(Jᵀ)` index map is symbolic, computed once per distinct pattern,
   then each sample's values are permuted by one kernel. cuDSS's symbolic analysis for `Jᵀ` is
@@ -192,17 +203,17 @@ it **once**, then the adjoint is a plain non-transposed cuDSS solve.
   the forward Newton already performs — roughly 12–25% overhead. That is the price of no
   solve-transpose, and it is acceptable.
 
-**Build the workaround to be DELETED.** The cuDSS team has said solve-transpose is in
-progress and should land in a future release. When it does, the explicit `Jᵀ` build *and* its
-factorization both disappear: the adjoint becomes a transposed solve against the factors the
-forward already computed, at near-zero marginal cost. So put the adjoint solve behind a small
-seam (one function: "solve with `Jᵀ` given the forward's factors") with the transpose-and-
-refactorize as its first implementation, so the swap is local rather than a rewrite. Re-check
-on every cuDSS bump — `native/cudss-swap.sh` already does the A/B, and cuDSS version choice is
-already tracked in memory as a decisive perf lever.
+**Build the workaround to be DELETED.** When cuDSS ships the transpose solve, the explicit
+`Jᵀ` build *and* its factorization both disappear and the GPU reaches KLU parity: one
+factorization, both directions. So put the adjoint behind a small seam (one function: "solve
+with `Jᵀ` given the forward's factors") whose first implementation is transpose-and-
+refactorize, so the swap is local rather than a rewrite. Re-check on every cuDSS bump —
+`native/cudss-swap.sh` already does the A/B, and cuDSS version choice is already tracked as a
+decisive perf lever.
 (If cuDSS instead exposes the raw `L`/`U` factors, the same seam takes the other classical
 route: `J = LU` ⇒ `Jᵀ = UᵀLᵀ`, so an adjoint solve is two transposed triangular solves against
-the existing factors — also no second factorization.)
+the existing factors — again one factorization, which is exactly how KLU's `klu_tsolve`
+works.)
 
 **Acceptance gate, inherited from the CPU work:** three-way agreement — finite difference
 (independent ground truth) vs forward sensitivity vs the adjoint. **The orientation mismatch

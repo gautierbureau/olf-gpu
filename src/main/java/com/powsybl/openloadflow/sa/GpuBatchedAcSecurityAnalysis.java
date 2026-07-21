@@ -139,6 +139,12 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     // buses vs the CPU. 0 = the device infinity-norm floor (kept for PER_EQUATION_TYPE, whose per-eq criteria
     // are not ported to the device).
     private double batchConvEpsPerEq;
+    // The run's batched outer-loop parameterization, captured here (per provider instance = per run) and
+    // assembled into a GpuBatchedSecurityAnalysisSolver.BatchConfig at the solveBatchN1 call. This replaced
+    // the solver's former JVM-global static config, whose leak between a provider run and a direct-solver
+    // run caused the pegase full-suite failure — see BatchConfig's javadoc.
+    private GpuBatchedSecurityAnalysisSolver.BatchConfig batchConfig =
+            GpuBatchedSecurityAnalysisSolver.BatchConfig.DEVICE_DEFAULTS;
     private com.powsybl.loadflow.LoadFlowParameters currentLoadFlowParameters;
 
     protected GpuBatchedAcSecurityAnalysis(Network network, MatrixFactory matrixFactory,
@@ -212,11 +218,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // device defaults (maxOuterLoopIterations, reactiveLimitsMaxPqPvSwitch), and make a
         // saturated slack distribution reject its scenario to the CPU fallback whenever the
         // failure behavior is not LEAVE_ON_SLACK_BUS (e.g. RTE production uses FAIL).
-        GpuBatchedSecurityAnalysisSolver.setOuterLoopParams(
-                olfGuardParams.getMaxOuterLoopIterations(),
-                olfGuardParams.getReactiveLimitsMaxPqPvSwitch(),
-                olfGuardParams.getSlackDistributionFailureBehavior()
-                        != com.powsybl.openloadflow.OpenLoadFlowParameters.SlackDistributionFailureBehavior.LEAVE_ON_SLACK_BUS);
+        int cfgMaxOuterIterations = olfGuardParams.getMaxOuterLoopIterations();
+        int cfgMaxPqPvSwitch = olfGuardParams.getReactiveLimitsMaxPqPvSwitch();
+        boolean cfgDsRejectResidual = olfGuardParams.getSlackDistributionFailureBehavior()
+                != com.powsybl.openloadflow.OpenLoadFlowParameters.SlackDistributionFailureBehavior.LEAVE_ON_SLACK_BUS;
         boolean batchDisabled = !unsupportedOuterLoops.isEmpty();
         if (batchDisabled) {
             LOGGER.info("GPU batched SA: outer loops {} are not implemented in the batched device path — "
@@ -245,8 +250,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 .anyMatch(ol -> DistributedSlackOuterLoop.NAME.equals(ol.getName()));
         this.batchReactiveLimits = acParameters.getOuterLoops().stream()
                 .anyMatch(ol -> ReactiveLimitsOuterLoop.NAME.equals(ol.getName()));
-        GpuBatchedSecurityAnalysisSolver.setTransformerControl(transformerControlBatchable
-                && acParameters.getOuterLoops().stream().anyMatch(ol -> "TransformerVoltageControl".equals(ol.getName())));
+        boolean cfgTransformerControl = transformerControlBatchable
+                && acParameters.getOuterLoops().stream().anyMatch(ol -> "TransformerVoltageControl".equals(ol.getName()));
         // DETECT-AND-FALLBACK (the provider's safety contract: enabling it must never change results).
         // The batched device path implements ONLY the two outer loops above; any OTHER loop in the
         // resolved list (e.g. transformer voltage control under the RTE production parameters) would be
@@ -281,13 +286,17 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // solve as the CPU per-contingency Newton (per scenario). Without this the batch takes raw full
         // steps, PV/PQ switch decisions read different intermediate states, and converged states drift
         // (measured 2026-07-17 under the RTE parameters: 6,137 one-sided violation diffs).
+        int cfgLsMode = 0;
+        double cfgMaxDv = 0.0;
+        double cfgMaxDphi = 0.0;
         if (olfParams.getStateVectorScalingMode() == com.powsybl.openloadflow.ac.solver.StateVectorScalingMode.MAX_VOLTAGE_CHANGE) {
-            GpuBatchedSecurityAnalysisSolver.setStateVectorScaling(2,
-                    olfParams.getMaxVoltageChangeStateVectorScalingMaxDv(),
-                    olfParams.getMaxVoltageChangeStateVectorScalingMaxDphi());
-        } else {
-            GpuBatchedSecurityAnalysisSolver.setStateVectorScaling(0, 0.0, 0.0);
+            cfgLsMode = 2;
+            cfgMaxDv = olfParams.getMaxVoltageChangeStateVectorScalingMaxDv();
+            cfgMaxDphi = olfParams.getMaxVoltageChangeStateVectorScalingMaxDphi();
         }
+        // Assemble the run's per-call batched config (replaces the solver's former JVM-global statics).
+        this.batchConfig = new GpuBatchedSecurityAnalysisSolver.BatchConfig(cfgLsMode, cfgMaxDv, cfgMaxDphi,
+                cfgTransformerControl, cfgMaxOuterIterations, cfgMaxPqPvSwitch, cfgDsRejectResidual);
         // Run the engine's load flows — the pre-contingency BASE and any contingency that falls through to
         // the sequential path — on the FULL GPU Newton-Raphson when the device + network support it. The base
         // then solves on-device and PRE-WARMS CUDA for the batched contingency pass (the one-time device init
@@ -450,7 +459,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
                     net, baseState, batch, es, target, new NewtonRaphsonParameters(),
                     batchDistributedSlack, batchReactiveLimits,
-                    batchReactiveLimitTol, batchSlackDistTol, batchConvEpsPerEq, reportNode);
+                    batchReactiveLimitTol, batchSlackDistTol, batchConvEpsPerEq, reportNode, batchConfig);
             for (BatchScenarioResult r : results) {
                 if (r.hasConverged()) {
                     precomputedStates.put(r.contingencyId(), r.state());

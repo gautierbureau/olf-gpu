@@ -52,69 +52,42 @@ public final class GpuBatchedSecurityAnalysisSolver {
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchedSecurityAnalysisSolver.class);
 
     /** System property: an explicit GPU batch chunk size (scenarios). When unset, the chunk is auto-sized from free device memory. */
-    // MAX_VOLTAGE_CHANGE state-vector scaling for the batched device solve (mirrors the CPU's
-    // MaxVoltageChangeStateVectorScaling PER SCENARIO). Set by GpuBatchedAcSecurityAnalysis from the
-    // resolved OLF parameters before each run; 0 = raw full Newton steps (the historical behavior).
-    private static volatile int batchLsMode;
-    private static volatile double batchMaxDv;
-    private static volatile double batchMaxDphi;
-
-    public static void setStateVectorScaling(int lsMode, double maxDv, double maxDphi) {
-        batchLsMode = lsMode;
-        batchMaxDv = maxDv;
-        batchMaxDphi = maxDphi;
-    }
-
-    // Transformer voltage-control orchestration (AFTER_GENERATOR mode ported per scenario as a
-    // Java orchestrator around repeated batched solves). Set by GpuBatchedAcSecurityAnalysis when
-    // the resolved outer loops include TransformerVoltageControl and the network is in stage-1
-    // scope (no generator controls under the transformer-controlled voltage level — see
-    // transformerControlSupported); the guard falls back to CPU otherwise.
-    private static volatile boolean batchTransformerControl;
-
-    public static void setTransformerControl(boolean enabled) {
-        batchTransformerControl = enabled;
-    }
-
-    private static volatile int batchMaxOuterIterations;     // 0 = device default (20, OLF's default)
-    private static volatile int batchMaxPqPvSwitch;          // 0 = device default (3)
-    private static volatile int batchDsRejectResidual;       // 1 = saturated-DS residual rejects the scenario to CPU
-
-    /** Wires the run's outer-loop parameterization into the device loops (the provider calls this
-     *  from the resolved parameters): OLF's maxOuterLoopIterations and reactiveLimitsMaxPqPvSwitch
-     *  replace the device constants, and a slackDistributionFailureBehavior other than
-     *  LEAVE_ON_SLACK_BUS makes a saturated distribution REJECT the scenario (CPU fallback replays
-     *  it with the real behavior) instead of silently leaving the residual at the slack. */
-    public static void setOuterLoopParams(int maxOuterIterations, int maxPqPvSwitch, boolean dsRejectResidual) {
-        batchMaxOuterIterations = maxOuterIterations;
-        batchMaxPqPvSwitch = maxPqPvSwitch;
-        batchDsRejectResidual = dsRejectResidual ? 1 : 0;
-    }
-
     /**
-     * Restores every piece of this class's JVM-GLOBAL configuration to its device default. Callers that
-     * drive the batched solver DIRECTLY (rather than through {@link
-     * com.powsybl.openloadflow.sa.GpuBatchedAcSecurityAnalysis}, which sets all of it on every run) must
-     * call this first, or they inherit whatever the last provider-driven run left behind.
+     * The run's outer-loop parameterization for the batched device path — a PER-CALL value, threaded
+     * from {@link com.powsybl.openloadflow.sa.GpuBatchedAcSecurityAnalysis} into {@link #solveBatchN1}
+     * and down to the device call. It used to live in JVM-global static fields set through setters
+     * before each run; production was safe only because the provider always wrote every field first,
+     * but anything driving the solver DIRECTLY inherited the previous run's values. That leak (a stale
+     * {@code dsRejectResidual} from an RTE run rejecting every saturated scenario of the next direct
+     * run) is why GpuBatchedPegaseFullLoadflowTest passed alone yet failed in a full-suite run. Making
+     * it a parameter removes the leak by construction; the leak was one-directional (a stale
+     * {@code true} over-rejects — slow but correct; a stale {@code false} would under-reject and leave a
+     * residual at the slack the run's failure behavior forbids — a silent wrong answer).
      *
-     * <p>This is a real trap, not a theoretical one: a run parameterized from the RTE file
-     * (slackDistributionFailureBehavior=FAIL) leaves {@code dsRejectResidual} set, and the NEXT direct
-     * solver use then rejects every scenario it saturates to the CPU. That is how
-     * GpuBatchedPegaseFullLoadflowTest came to pass alone and fail in a full suite run, with all 40
-     * scenarios reporting needsCpuFallback.
-     *
-     * <p>The leak is one-directional for correctness: a stale {@code true} over-rejects (slow, still
-     * correct), while a stale {@code false} would under-reject and leave a residual at the slack that the
-     * run's actual failure behavior forbids. The static config should ultimately become per-call state.
+     * <ul>
+     *   <li>{@code lsMode}/{@code maxDv}/{@code maxDphi}: MAX_VOLTAGE_CHANGE state-vector scaling per
+     *       scenario (mirrors the CPU's MaxVoltageChangeStateVectorScaling); lsMode 0 = raw full Newton
+     *       steps.</li>
+     *   <li>{@code transformerControl}: run the per-scenario AFTER_GENERATOR transformer voltage-control
+     *       orchestrator (set only when the resolved outer loops include it and the network is in scope).</li>
+     *   <li>{@code maxOuterIterations}/{@code maxPqPvSwitch}: OLF's maxOuterLoopIterations and
+     *       reactiveLimitsMaxPqPvSwitch replacing the device constants; 0 = device default (20 / 3).</li>
+     *   <li>{@code dsRejectResidual}: a slackDistributionFailureBehavior other than LEAVE_ON_SLACK_BUS
+     *       makes a saturated distribution REJECT the scenario (CPU fallback replays it with the real
+     *       behavior) instead of silently leaving the residual at the slack.</li>
+     * </ul>
      */
-    public static void resetGlobalConfig() {
-        batchTransformerControl = false;
-        batchMaxOuterIterations = 0;
-        batchMaxPqPvSwitch = 0;
-        batchDsRejectResidual = 0;
-        batchLsMode = 0;
-        batchMaxDv = 0;
-        batchMaxDphi = 0;
+    public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean transformerControl,
+                              int maxOuterIterations, int maxPqPvSwitch, boolean dsRejectResidual) {
+
+        /** The device defaults — no state-vector scaling, no transformer control, device outer-loop
+         *  constants, and LEAVE_ON_SLACK_BUS behavior (never reject a saturated scenario). This is what
+         *  every non-provider entry point (tests, direct callers) uses. */
+        public static final BatchConfig DEVICE_DEFAULTS = new BatchConfig(0, 0, 0, false, 0, 0, false);
+
+        int dsRejectResidualFlag() {
+            return dsRejectResidual ? 1 : 0;
+        }
     }
 
     /** One voltage-controlling transformer, precomputed for the per-scenario orchestrator:
@@ -651,7 +624,45 @@ public final class GpuBatchedSecurityAnalysisSolver {
                                                          double reactiveLimitTol, double slackDistTol,
                                                          double convEpsPerEq,
                                                          ReportNode reportNode) {
+        // Non-provider callers (tests, direct use) get the device defaults — the per-call BatchConfig
+        // replaces the former JVM-global statics, so no run can inherit another's config.
+        return solveBatchN1(network, baseState, contingencies, equationSystem, targetVector, parameters, tol,
+                distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode,
+                BatchConfig.DEVICE_DEFAULTS);
+    }
+
+    /** As the no-{@code tol} / {@code convEpsPerEq} overload but carrying the run's {@link BatchConfig}
+     *  (outer-loop parameterization). This is the entry point {@link
+     *  com.powsybl.openloadflow.sa.GpuBatchedAcSecurityAnalysis} uses; it defaults {@code tol} to the
+     *  GPU tolerance floor, exactly like the matching provider-facing overload without a config. */
+    public static List<BatchScenarioResult> solveBatchN1(LfNetwork network, double[] baseState,
+                                                         List<BatchContingency> contingencies,
+                                                         EquationSystem<AcVariableType, AcEquationType> equationSystem,
+                                                         TargetVector<AcVariableType, AcEquationType> targetVector,
+                                                         NewtonRaphsonParameters parameters,
+                                                         boolean distributedSlack, boolean reactiveLimits,
+                                                         double reactiveLimitTol, double slackDistTol,
+                                                         double convEpsPerEq, ReportNode reportNode,
+                                                         BatchConfig config) {
+        return solveBatchN1(network, baseState, contingencies, equationSystem, targetVector, parameters,
+                GpuNewtonRaphson.GPU_TOLERANCE, distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol,
+                convEpsPerEq, reportNode, config);
+    }
+
+    /** Terminal implementation carrying the per-call {@link BatchConfig}. */
+    public static List<BatchScenarioResult> solveBatchN1(LfNetwork network, double[] baseState,
+                                                         List<BatchContingency> contingencies,
+                                                         EquationSystem<AcVariableType, AcEquationType> equationSystem,
+                                                         TargetVector<AcVariableType, AcEquationType> targetVector,
+                                                         NewtonRaphsonParameters parameters,
+                                                         double tol,
+                                                         boolean distributedSlack, boolean reactiveLimits,
+                                                         double reactiveLimitTol, double slackDistTol,
+                                                         double convEpsPerEq,
+                                                         ReportNode reportNode,
+                                                         BatchConfig config) {
         Objects.requireNonNull(network);
+        Objects.requireNonNull(config);
         Objects.requireNonNull(baseState);
         Objects.requireNonNull(contingencies);
         Objects.requireNonNull(equationSystem);
@@ -842,11 +853,12 @@ public final class GpuBatchedSecurityAnalysisSolver {
             solveQualifiedInChunks(batchedIndices, contingencies, elementMapper, gpuData, baseState,
                     baseTargets, baseActivation.rowMode(), frozenRowsByIndex, frozenTargetsByIndex, genOutagesByIndex,
                     n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
-                    batchLsMode == 2 ? GpuAcDataExtractor.extractVarType(equationSystem, n) : null,
-                    batchTransformerControl
+                    config.lsMode() == 2 ? GpuAcDataExtractor.extractVarType(equationSystem, n) : null,
+                    config.transformerControl()
                             ? buildTransformerControllers(network, equationSystem, targetVector, baseActivation,
                                     baseTargets, elementMapper)
-                            : null);
+                            : null,
+                    config);
         }
 
         // Assemble results in the original contingency order: batched scenarios carry their
@@ -1106,7 +1118,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
             int[] targetOverrideIndex, double[] targetOverrideValue,
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
             double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
-            double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, int[] varType) {
+            double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, int[] varType,
+            BatchConfig config) {
         // INITIAL: which (slot, controller) pairs are out of deadband on the converged first solve?
         List<int[]> enabled = new ArrayList<>();             // {slot, controllerIdx}
         for (int slot = 0; slot < realCount; slot++) {
@@ -1182,9 +1195,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
                     dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
                     parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                    batchLsMode, batchMaxDv, batchMaxDphi,
-                    batchLsMode == 2 ? varType : null, x0Full, null, null, null, null, null, null,
-                    batchMaxOuterIterations, batchMaxPqPvSwitch, batchDsRejectResidual, 0, null, null);
+                    config.lsMode(), config.maxDv(), config.maxDphi(),
+                    config.lsMode() == 2 ? varType : null, x0Full, null, null, null, null, null, null,
+                    config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0, null, null);
             for (int slot : affected) {
                 chunkResults[slot] = r2[slot];
             }
@@ -1241,7 +1254,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
-                                               List<TransformerController> transformerControllers) {
+                                               List<TransformerController> transformerControllers,
+                                               BatchConfig config) {
         int nb = batchedIndices.size();
         int chunkSize = resolveChunkSize(nb, n, gpuData);
         int nChunks = (nb + chunkSize - 1) / chunkSize;
@@ -1494,14 +1508,14 @@ public final class GpuBatchedSecurityAnalysisSolver {
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
                             dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
                             parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                            batchLsMode, batchMaxDv, batchMaxDphi,
-                            batchLsMode == 2 ? varType : null, x0Full,
+                            config.lsMode(), config.maxDv(), config.maxDphi(),
+                            config.lsMode() == 2 ? varType : null, x0Full,
                             shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
                             rlStateIn, rlStateOut,
                             r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                            batchMaxOuterIterations, batchMaxPqPvSwitch, batchDsRejectResidual,
+                            config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(),
                             nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
                     if (dbgPairRl) {
@@ -1528,7 +1542,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                                 chunkResults, transformerControllers, rowModePerScenario, baseRowMode, disabledMask,
                                 targetOverrideIndex, targetOverrideValue,
                                 dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, varType);
+                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, varType,
+                                config);
                     }
                     for (int s = 0; s < realCount; s++) {
                         resultsByIndex[group.get(chunkStart + s)] = chunkResults[s];

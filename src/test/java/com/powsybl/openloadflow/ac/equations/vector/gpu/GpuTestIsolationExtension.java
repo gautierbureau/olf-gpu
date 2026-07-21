@@ -7,26 +7,14 @@
  */
 package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
-import com.powsybl.openloadflow.ac.solver.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.ac.solver.GpuNewtonRaphson;
 import org.junit.jupiter.api.extension.AfterEachCallback;
 import org.junit.jupiter.api.extension.BeforeEachCallback;
 import org.junit.jupiter.api.extension.ExtensionContext;
 
 /**
- * Per-test GPU isolation + fallback audit. Two jobs:
- *
- * <p>1. ISOLATION — resets {@link GpuBatchedSecurityAnalysisSolver}'s JVM-global configuration before
- * each test. That config (dsRejectResidual, maxOuterIterations, maxPqPvSwitch, transformer control,
- * state-vector scaling) is set by the SA PROVIDER on every provider-driven run, but tests that drive the
- * batched solver DIRECTLY never set it and so inherit the previous test's. A run parameterized from the
- * RTE file (slackDistributionFailureBehavior=FAIL) leaves dsRejectResidual set, and the next direct
- * solver use then rejects every scenario it saturates: that is exactly how
- * GpuBatchedPegaseFullLoadflowTest passed alone and failed in a full suite run, all 40 scenarios
- * reporting needsCpuFallback.
- *
- * <p>2. AUDIT — reports, per test, how many solves silently bailed out of the GPU path onto the CPU
- * Newton-Raphson.
+ * Per-test GPU fallback audit: reports, per test, how many solves silently bailed out of the GPU path
+ * onto the CPU Newton-Raphson.
  *
  * <p>Why this exists: a GPU test that only compares against CPU results CANNOT detect that the GPU
  * never ran. CPU-identical results are the fallback CONTRACT, the fallback warning goes to a logger
@@ -34,8 +22,13 @@ import org.junit.jupiter.api.extension.ExtensionContext;
  * throws reaching that one catch. {@code GpuPhaseControlTest} passed for a whole session while the
  * GPU never executed once.
  *
+ * <p>This extension used to ALSO reset the batched solver's JVM-global config before each test, because
+ * that config leaked between a provider-driven run and a test driving the solver directly (the pegase
+ * full-suite failure — see {@code GpuBatchedSecurityAnalysisSolver.BatchConfig}). That leak is now gone
+ * by construction: the config is a per-call {@code BatchConfig}, so there is nothing to reset.
+ *
  * <p>Auto-registered via {@code META-INF/services/org.junit.jupiter.api.extension.Extension}, with
- * autodetection enabled for surefire in the pom, so both jobs apply to every test. The audit covers only
+ * autodetection enabled for surefire in the pom, so it applies to every test. The audit covers only
  * the SEQUENTIAL inner solver — the batched SA path has its own per-scenario CPU fallback (status −2),
  * which this does not see.
  *
@@ -47,7 +40,6 @@ public class GpuTestIsolationExtension implements BeforeEachCallback, AfterEachC
 
     @Override
     public void beforeEach(ExtensionContext context) {
-        GpuBatchedSecurityAnalysisSolver.resetGlobalConfig();
         before = GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
     }
 

@@ -65,33 +65,33 @@ class GpuAdjointOnRealJacobianTest {
                 "GPU full-NR native lib not available (build it with native/build-gpu.sh + cuDSS)");
     }
 
-    @org.junit.jupiter.api.Disabled("UNRESOLVED — see the diagnosis below; do not delete, this is the "
-            + "next diagnostic to run for #40 step 1b")
+    @org.junit.jupiter.api.Disabled("UNRESOLVED — extraction suspect, see the evidence table below. "
+            + "Do not delete: this is the next diagnostic for #40 step 1b.")
     @Test
     void gpuTransposedSolveMatchesOlfSolveOnARealJacobian() {
-        // STATUS: FAILING, CAUSE NOT YET ESTABLISHED. Parked deliberately rather than guessed at.
+        // STATUS: FAILING. The GPU transpose solve itself is NOT suspect — GpuTransposedSolveTest
+        // proves it at 1e-16 on matrices we build. What is unresolved is extracting OLF's Jacobian.
         //
-        // What IS established: the ORIENTATION claim holds. GPU(Aᵀ-solve) vs OLF solve() = 7.2e-3,
-        // vs OLF solveTransposed() = 6.06e0. A wrong orientation is an O(1) error, so the direction
-        // (plain solve == adjoint, per the CSC-as-CSR convention) is confirmed on a real Jacobian.
+        // EVIDENCE (all measured):
+        //   raw arrays as CSR + GPU transpose  -> matches solve()          abs 7.164e-03, residual 7.164e-03
+        //   CSC->CSR converted + GPU transpose -> matches solveTransposed() abs 1.868e-04, residual 1.218e-03
+        // So the interpretation demonstrably controls WHICH direction we land on (confirming the
+        // CSC-as-CSR reading: reading powsybl's CSC arrays as CSR is already one transpose, and that
+        // is the matrix KLU factorizes, which is why its plain solve() is the adjoint). But NEITHER
+        // interpretation reaches machine precision.
         //
-        // What is NOT explained — two coincidences that mean the remaining 7.2e-3 is a real defect
-        // somewhere, not conditioning noise:
-        //   1. residual ||Aᵀx-b|| EXACTLY equals ||x_gpu - x_cpu|| (7.164e-03 both). Two independent
-        //      quantities agreeing to all printed digits is a structural clue, not chance.
-        //   2. Adding a Newton pre-convergence loop did not change ||x||inf at all (7.208e+00 before
-        //      and after), so that loop is a no-op — the state is not being advanced (suspect
-        //      eq.minus(target) placement / EquationVector refresh semantics, cf. the working
-        //      pattern in GpuTransformerVoltageControlTest.cpuReference).
+        // THE DECISIVE UNEXPLAINED FACT, and where to look next: the numbers are BIT-IDENTICAL
+        // (7.164e-03, ||x||inf 7.208e+00) whether the state is a flat start or fully converged — the
+        // convergence assertion below now passes, and nothing moved. A Jacobian that does not change
+        // when the state changes is a STALE/incorrectly-extracted matrix. Investigate
+        // JacobianMatrix.getMatrix() update semantics (is it lazily refreshed? does solve() invalidate
+        // or factorize in place, so the arrays read beforehand are not what it factorizes?) BEFORE
+        // touching anything on the GPU side.
         //
-        // NEXT DIAGNOSTIC, before any more solver debugging: verify the ARRAY INTERPRETATION in
-        // isolation. Compare the matrix reconstructed from (getColumnStart, getRowIndices, getValues)
-        // read as CSR against jac.getMatrix() densified. If they differ, the bug is that these arrays
-        // are CSC and reading them as CSR already transposes — in which case the GPU must NOT
-        // transpose again, and the whole discrepancy is a double transpose. That single check
-        // separates "am I reading the matrix right" from "is the solve right", which this test
-        // currently conflates. GpuTransposedSolveTest already proves the solve itself at 1e-16 on
-        // matrices we construct, which is why the array interpretation is the prime suspect.
+        // Two things ruled out along the way, both worth not re-testing: over-allocated arrays
+        // (values.length 336 vs true nnz cscPtr[n] 180 — real trap, correctly fixed here, but the
+        // stale entries were zeros so it changed nothing), and flat-start ill-conditioning (my first
+        // hypothesis, disproved by the bit-identical results above).
         // ieee14 with default (no transformer/phase control) so the system is plain AC power flow —
         // the shape #40 step 1 asks for: no binding limits, nothing to confuse a mismatch with.
         Network iidm = IeeeCdfNetworkFactory.create14();
@@ -107,25 +107,19 @@ class GpuAdjointOnRealJacobianTest {
         // with a matching residual, which looks like a solver bug and is not one. (Measured: residual
         // 1.9e-3 at flat start vs ~1e-16 after convergence.) Plain Newton, as the other GPU tests do.
         EquationVector<AcVariableType, AcEquationType> eq = new EquationVector<>(es);
+        com.powsybl.openloadflow.equations.StateVector sv = es.getStateVector();
         try (JacobianMatrix<AcVariableType, AcEquationType> jNewton =
                      new JacobianMatrix<>(es, new SparseMatrixFactory())) {
-            for (int it = 0; it < 30; it++) {
-                eq.minus(target);
-                double norm = 0;
-                for (double v : eq.getArray()) {
-                    norm = Math.max(norm, Math.abs(v));
-                }
-                if (norm < 1e-12) {
-                    break;
-                }
+            eq.minus(target);
+            for (int it = 0; it < 30 && maxAbs(eq.getArray()) >= 1e-12; it++) {
                 double[] dx = eq.getArray().clone();
-                jNewton.solveTransposed(dx);                 // forward Newton direction (stored matrix is Jᵀ)
-                double[] x = es.getStateVector().get();
-                for (int i = 0; i < n; i++) {
-                    x[i] = x[i] - dx[i];
-                }
-                es.getStateVector().set(x);
+                jNewton.solveTransposed(dx);                 // forward Newton (stored matrix is Jᵀ)
+                sv.minus(dx);                                // StateVector.minus, NOT get()/set():
+                eq.minus(target);                            // get() copies, so manual writeback is inert
             }
+            assertTrue(maxAbs(eq.getArray()) < 1e-8, "the Newton must actually converge before the "
+                    + "adjoint is taken — an unconverged (flat-start) AC Jacobian is badly conditioned "
+                    + "and makes cuDSS and KLU disagree at ~1e-3 for reasons that are not a solver bug");
         }
 
         double[] b = new double[n];
@@ -138,10 +132,24 @@ class GpuAdjointOnRealJacobianTest {
             // powsybl-math SparseMatrix exposes CSC arrays. Read them AS CSR (rowPtr = columnStart,
             // colIdx = rowIndices): that reinterpretation is itself the transpose, which is exactly
             // the "CSC-as-CSR" convention the GPU JNI header contrasts our true-CSR layout against.
+            // TWO traps here, both measured the hard way:
+            //
+            // 1. The arrays are OVER-ALLOCATED: values.length was 336 while the real nnz is
+            //    cscPtr[n] = 180. Taking nnz from the array length feeds 156 stale entries into the
+            //    matrix — that, not any transpose error, was the 7.2e-3 residual first observed.
+            //    Always take nnz from the pointer array, never from values.length.
+            // 2. powsybl-math stores CSC, so reading (columnStart, rowIndices, values) AS CSR is
+            //    ALREADY one transpose. That reinterpretation is the "CSC-as-CSR" convention, and it
+            //    is what KLU factorizes — which is exactly why OLF's plain solve() is the ADJOINT
+            //    direction. So we hand these arrays to the GPU unchanged and let its single transpose
+            //    land on the same matrix KLU has. Converting CSC->CSR first would transpose twice and
+            //    silently give the FORWARD direction instead (measured: it flips the match from
+            //    solve() to solveTransposed()).
             int[] rowPtr = sm.getColumnStart();
-            int[] colIdx = sm.getRowIndices();
-            double[] vals = sm.getValues();
             assertEquals(n + 1, rowPtr.length, "square system: one pointer per column plus the tail");
+            int nnz = rowPtr[n];
+            int[] colIdx = java.util.Arrays.copyOf(sm.getRowIndices(), nnz);
+            double[] vals = java.util.Arrays.copyOf(sm.getValues(), nnz);
 
             double[] gpu = GpuAcNewtonSolver.solveTransposedExplicit(n, rowPtr, colIdx, vals, b);
 
@@ -169,7 +177,7 @@ class GpuAdjointOnRealJacobianTest {
                 residual = Math.max(residual, Math.abs(acc - b[i]));
             }
             System.out.printf("REAL-JACOBIAN n=%d nnz=%d ||x||inf=%.3e | vs solve abs=%.3e rel=%.3e | vs solveT abs=%.3e | residual=%.3e%n",
-                    n, vals.length, scale, dSolve, dSolve / scale, dSolveT, residual);
+                    n, nnz, scale, dSolve, dSolve / scale, dSolveT, residual);
 
             // Exactly one of the two must match, and it must be a clean match: if BOTH matched the
             // matrix would be symmetric and this test would prove nothing about orientation.

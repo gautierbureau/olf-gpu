@@ -228,6 +228,38 @@ route: `J = LU` ⇒ `Jᵀ = UᵀLᵀ`, so an adjoint solve is two transposed tri
 the existing factors — again one factorization, which is exactly how KLU's `klu_tsolve`
 works.)
 
+**Active-set / control handling in the CPU adjoint (checked 2026-07-21).** The reassuring
+finding for the GPU port: **both distributed slack and the SVC pilot are handled entirely on
+the RHS (`∂F/∂p`) side — neither touches `J`, its factorization, or the transpose machinery.**
+
+- **Distributed slack** enters only as `slackParticipationByBus`
+  (`AcSensitivityAnalysis:447-456`), folded into the RHS by
+  `initFactorsRhs → fillRhsSensitivityVariable → factorGroup.fillRhs(rhs, participationByBus)`
+  (`AbstractSensitivityAnalysis:772-794`). With `isDistributedSlack()` it is
+  `getParticipatingElements(...)` mapped to `-factor` per bus; otherwise the single entry
+  `{slack bus: -1.0}`. So a parameter perturbation carries its slack redistribution inside the
+  `∂F/∂p` column. Note this takes the participation **at the converged state** and treats it as
+  fixed — i.e. it IS the "freeze the locally-active branch" linearization the differentiability
+  design calls for, already in practice.
+- **SVC pilot closed loop** is `fillSvcPilotFactorsRhs` (`AcSensitivityAnalysis:250-296`) →
+  `SvcPilotPointClosedLoopSensitivity.buildCoordination(context)` →
+  `coordination.weightsForPilot(pilotBus)`, which fills that variable group's RHS column with
+  per-pilot weights over the controller buses. The coordination system is a **separate small
+  matrix with its own `LUDecomposition`** (`SvcPilotPointClosedLoopSensitivity.Coordination`,
+  field `luB`), NOT a modification of the LF Jacobian — and it is built + factorized **once**
+  because it is pilot-independent, then reused for every queried pilot.
+- The adjoint reuses the forward's RHS builder verbatim: `analyseAdjoint` calls the same
+  `initFactorsRhs` + `fillSvcPilotFactorsRhs`, commented *"∂F/∂p columns (one per variable
+  group), including the SVC pilot closed-loop — identical to forward."*
+
+**Consequences for the GPU work:** (a) the transpose/factorization design above is orthogonal
+to both controls — they do not complicate `Jᵀ`; (b) what must be ported is the **RHS
+construction** (participation-weighted for slack, coordination-weighted for the SVC pilot),
+not new solver machinery; (c) the SVC coordination's build-once/reuse-for-all-pilots structure
+is the pattern to keep on device; (d) the "freeze the active set at the converged point"
+question is, for distributed slack at least, already answered by existing practice — mirror
+it rather than inventing a convention.
+
 **Acceptance gate, inherited from the CPU work:** three-way agreement — finite difference
 (independent ground truth) vs forward sensitivity vs the adjoint. **The orientation mismatch
 makes this gate non-optional**: an inverted convention produces a plausible-looking but wrong
@@ -238,6 +270,44 @@ already encodes this pattern; mirror it rather than inventing a new gate.
 
 **Sequencing note:** consumers 2 and 3 are self-contained inside our batch and would prove
 the primitive on ground we control, before the JAX/pypowsybl context plumbing of consumer 1.
+
+**FIRST STEPS (ordered).** Principle: prove the risky primitive on ground we control, before
+any JAX or batching complexity.
+
+**Prerequisite decision — how does the CPU adjoint reach our build?** The GPU extension builds
+against OLF `2.4.0-SNAPSHOT` from `powsybl-open-loadflow-3` (`olf-local-patches`), but
+`runAdjoint` lives in `powsybl-open-loadflow-5` on `adjoint-vjp`. Either rebase/merge that
+branch into the `olf-local-patches` line, or keep them separate and compare against recorded
+reference values. Settle this first: the CPU adjoint is the ORACLE for every step below, and
+an exact reference is far stronger than finite differences alone.
+
+1. **Single-scenario GPU adjoint, no batching.** Run one network to convergence on the GPU,
+   build `Jᵀ` via the permutation, factorize, adjoint-solve, contract to `θ̄`. Compare against
+   `runAdjoint` on the same network with the same cotangents, plus an FD check. This isolates
+   the highest bug risk — orientation/permutation — from everything else. **Deliberately pick
+   a case with NO binding Q-limits**, so any mismatch is the transpose and not the active-set
+   question. No batching, no JAX, no context lifetime.
+2. **Measure the cost assumption early.** The "+1 factorization ≈ 12–25% overhead" above is an
+   ESTIMATE, not a measurement. Time transpose-build + factorize against the forward's existing
+   factorizations on a real case. If it is much worse, the sequencing changes — it may be
+   better to wait for cuDSS's transpose solve than to build around the workaround. Cheap to
+   check, and exactly the kind of assumption that has bitten this project before.
+3. **Put in the seam** (one function: "solve with `Jᵀ` given the forward's factors", with
+   transpose-and-refactorize as its only implementation) once step 1 proves correctness, so the
+   cuDSS upgrade is a local swap rather than a rewrite.
+4. **Extend to the uniform batch** — per-scenario `Jᵀ`, batched factorize, batched adjoint
+   solve; still the shared-pattern UBATCH, still no JAX.
+5. **Prove it through a real consumer: batched SVC or incremental phase control.** Needs no
+   JAX, no non-uniform batching, no context-lifetime plumbing, and both are independently on
+   the roadmap. If the primitive works here, it is real.
+
+Only then: non-uniform batching (port pyloadflow's pattern bucketing) and the JAX/pypowsybl
+context for training.
+
+Verify cheaply alongside step 1: (a) that cuDSS 0.8.0 genuinely lacks a transpose-solve entry
+point — confirm the API surface rather than assume; it also establishes the re-check procedure
+for each bump; (b) what the CPU adjoint does for distributed slack and the SVC pilot, since it
+already handles both (see "Active-set / control handling in the CPU adjoint" below).
 
 ### #18 — GPU-vs-CPU LF validation project
 Blocked on RTE Nexus access.

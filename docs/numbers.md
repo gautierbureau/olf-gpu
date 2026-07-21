@@ -19,6 +19,24 @@ root-cause, not noise (the 22→20 shift from wiring maxOuterLoopIterations prov
 "Caps" = GPU-covered capabilities / total tracked in docs/gpu-vs-cpu-capabilities.md
 (counter: `python3 codegen/capability_count.py`; full+partial+delta over non-N/A rows).
 
+## Headline — total run wall-clock (case9241pegase, 500 contingencies, seconds)
+
+Total time to run all 500 contingencies (= the ms/ctg columns below × 0.5). GPU-arm
+seconds match the raw millisecond totals the bench prints (16725 / 13926 / 11761 ms).
+
+| Measurement (2026-07-21) | Arm & criterion | Cold | Warm | ×CPU (warm) |
+|---|---|---|---|---|
+| Equal-tol `856767c` | CPU @1e-7 | — | 16.66 | — |
+| | GPU @1e-7 | 12.50 | **11.35** | ×1.47 |
+| **Per-arm split `7ac0627`** | CPU @1e-4 *(production criterion)* | — | 16.73 | — |
+| | GPU @1e-7 *(fast operating point)* | 13.93 | **11.76** | **×1.42** |
+
+The CPU takes ~16.7 s at its production criterion; the GPU takes ~11.8 s warm to produce
+a tighter-or-equal answer — ~5 s faster per full run. The two CPU rows (16.66 vs 16.73 s)
+are the eps-insensitivity finding: loosening 1e-7 → 1e-4 buys the CPU essentially nothing,
+so it cannot close the gap by relaxing its criterion. Equivalence (bit-exact 0/0/0
+violations) is proven at equal tolerance; the split run is a timing comparison only.
+
 | Date | Commit | Prod COLD ms/ctg | Prod warm ms/ctg | CPU-4t ms/ctg | Warm ×CPU | Viol diff (cpu/gpu/ctg) | FxIter COLD E2E ms/ctg | FxIter warm ms/scn | @1e-6 | Caps | Note |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | 2026-07-17 | (perf day) | — | 24.4–25.2 | 27.0 | ~×1.10 | 15/7/6 | 11.56 | 4.31 | 499/500 | — | straggler exit + device norms + compaction landed; violation saga closed |

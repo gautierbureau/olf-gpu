@@ -311,8 +311,10 @@ the primitive on ground we control, before the JAX/pypowsybl context plumbing of
 **FIRST STEPS (ordered).** Principle: prove the risky primitive on ground we control, before
 any JAX or batching complexity.
 
-**Prerequisite — how the CPU adjoint reaches our build. SETTLED 2026-07-21: rebase, then
-cherry-pick/squash.** The GPU extension builds against OLF `2.4.0-SNAPSHOT` from
+**Prerequisite — how the CPU adjoint reaches our build. DONE 2026-07-21** (rebased onto main,
+`git merge --squash adjoint-vjp` as `ec2063108` "Bring in the CPU adjoint (VJP) from adjoint-vjp",
+pushed to `gb`). Plan and reasoning kept below because it documents *why* squash rather than
+cherry-pick. The GPU extension builds against OLF `2.4.0-SNAPSHOT` from
 `powsybl-open-loadflow-3` (`olf-local-patches`); `runAdjoint` lives on `adjoint-vjp` in
 `powsybl-open-loadflow-5`. Facts checked:
 - **All the OLF checkouts are WORKTREES OF ONE REPOSITORY** (`git worktree list`), so every
@@ -343,6 +345,26 @@ cherry-pick/squash.** The GPU extension builds against OLF `2.4.0-SNAPSHOT` from
 The CPU adjoint is the ORACLE for every step below, and an exact reference is far stronger than
 finite differences alone — which is why it is worth doing this properly rather than comparing
 against recorded numbers.
+
+**Steps 1a and 1b are DONE (2026-07-22).** `GpuTransposedSolveTest` proves the transpose machinery
+on synthetic non-symmetric matrices (~1e-16, with a guard test that transposing changes the answer),
+and `GpuAdjointOnRealJacobianTest` now passes on a real ieee14 Jacobian:
+`vs solve abs=5.3e-15 rel=7.4e-16 | vs solveTransposed abs=6.06e+00 | residual=5.6e-15`.
+**The orientation claim above is CONFIRMED by measurement, not inverted:** powsybl's CSC arrays read
+as CSR are already one transpose, that is the matrix KLU factorizes, so OLF's plain `solve()` IS the
+adjoint direction and our single GPU transpose lands on it.
+
+> **Pivoting is a hard prerequisite for any GPU solve on a RAW Jacobian.** 1b failed at 7.164e-03 for
+> a week on a misdiagnosis ("stale extraction"). The extraction was always correct — a dense solve
+> built from those exact arrays matches `solve()` to 6.2e-15. The real cause: the Jacobian has
+> **5 exactly-zero diagonal entries and 0 of 28 diagonally dominant rows**, while `applyReorderAlg`
+> forces AMD with no pivoting configured; cuDSS substitutes a static perturbation for the zero pivot
+> and returns a wrong `x` **with a matching residual**, which is why it read as a correctness bug.
+> Measured: AMD 7.16e-03, nested dissection 7.18e-02, natural order 6.2e-15, **AMD + MC64-style
+> matching 3.6e-15** (the fix, `applyAdjointMatching`). Iterative refinement does NOT help (IR=0 and
+> IR=3 bit-identical). The batched NR never hit this only because it builds a superset pattern with a
+> guaranteed nonzero diagonal — **steps 4–5 must keep that guarantee or set matching explicitly.**
+> Natural ordering is not an option at scale (fill explodes on grid patterns).
 
 1. **Single-scenario GPU adjoint, no batching.** Run one network to convergence on the GPU,
    build `Jᵀ` via the permutation, factorize, adjoint-solve, contract to `θ̄`. Compare against

@@ -179,6 +179,39 @@ constexpr OlfReorderAlg REORDER_ALGS[] = {CUDSS_ALG_DEFAULT, CUDSS_ALG_1, CUDSS_
                                           CUDSS_ALG_3, CUDSS_ALG_4, CUDSS_ALG_5};
 #endif
 
+// ---------------------------------------------------------------------------------
+// Matching (MC64-style) for the STANDALONE adjoint solve — NOT used by the batched NR.
+//
+// The batched NR path can skip this because it builds its own superset pattern with a
+// GUARANTEED nonzero diagonal (the diagonal-pairing row permutation), so cuDSS never
+// meets a zero pivot even though we configure no pivoting. A raw OLF Jacobian handed
+// over unpermuted has no such guarantee: measured on ieee14, 5 of 28 diagonal entries
+// are EXACTLY zero and 0 of 28 rows are diagonally dominant. cuDSS then substitutes a
+// static perturbation for the zero pivot and returns a wrong answer WITH A MATCHING
+// RESIDUAL — which reads as a correctness bug and is really a pivoting one. Measured
+// on that matrix, error vs KLU: AMD 7.2e-3, nested dissection 7.2e-2, natural order
+// 6.2e-15. Iterative refinement does NOT rescue it (IR=0 and IR=3 are bit-identical).
+//
+// Natural order is not a fix — fill explodes on grid patterns at real network sizes —
+// so we keep the fill-reducing ordering and give cuDSS a matching pass to permute
+// large entries onto the diagonal first. Override with OLF_GPU_MATCHING_ALG=<0..6>
+// (0 disables; see cudssMatchingAlg_t), mainly to reproduce the failure above.
+// ---------------------------------------------------------------------------------
+inline void applyAdjointMatching(cudssConfig_t config) {
+#if CUDSS_VERSION >= 800
+    const char* e = std::getenv("OLF_GPU_MATCHING_ALG");
+    // Treat an EMPTY value as unset, like applyReorderAlg: atoi("") is 0, which is
+    // CUDSS_MATCHING_ALG_NONE, so `VAR= cmd` would silently disable matching instead of
+    // selecting the default — a trap that cost a whole misread sweep row.
+    const bool unset = e == nullptr || *e == '\0';
+    cudssMatchingAlg_t alg = unset ? CUDSS_MATCHING_ALG_AUTO
+                                   : static_cast<cudssMatchingAlg_t>(std::atoi(e));
+    CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_MATCHING_ALG, &alg, sizeof(alg)));
+#else
+    (void) config;                                           // 0.7.1 has no matching knob
+#endif
+}
+
 inline void applyReorderAlg(cudssConfig_t config) {
     const char* e = std::getenv("OLF_GPU_REORDER_ALG");
     if (e == nullptr || *e == '\0') {
@@ -3706,6 +3739,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveTra
         CUDSS_CHECK(cudssCreate(&ds.handle));
         CUDSS_CHECK(cudssConfigCreate(&ds.config));
         applyReorderAlg(ds.config);
+        applyAdjointMatching(ds.config);
         CUDSS_CHECK(cudssDataCreate(ds.handle, &ds.data));
         CUDSS_CHECK(cudssMatrixCreateCsr(&ds.matA, nn, nn, nnz, dRowPtr.as<int>(), nullptr,
                                          dColIdx.as<int>(), dVals.as<double>(), OLF_CUDSS_CSR_TYPES,

@@ -65,33 +65,26 @@ class GpuAdjointOnRealJacobianTest {
                 "GPU full-NR native lib not available (build it with native/build-gpu.sh + cuDSS)");
     }
 
-    @org.junit.jupiter.api.Disabled("UNRESOLVED — extraction suspect, see the evidence table below. "
-            + "Do not delete: this is the next diagnostic for #40 step 1b.")
     @Test
     void gpuTransposedSolveMatchesOlfSolveOnARealJacobian() {
-        // STATUS: FAILING. The GPU transpose solve itself is NOT suspect — GpuTransposedSolveTest
-        // proves it at 1e-16 on matrices we build. What is unresolved is extracting OLF's Jacobian.
-        //
-        // EVIDENCE (all measured):
-        //   raw arrays as CSR + GPU transpose  -> matches solve()          abs 7.164e-03, residual 7.164e-03
-        //   CSC->CSR converted + GPU transpose -> matches solveTransposed() abs 1.868e-04, residual 1.218e-03
-        // So the interpretation demonstrably controls WHICH direction we land on (confirming the
-        // CSC-as-CSR reading: reading powsybl's CSC arrays as CSR is already one transpose, and that
-        // is the matrix KLU factorizes, which is why its plain solve() is the adjoint). But NEITHER
-        // interpretation reaches machine precision.
-        //
-        // THE DECISIVE UNEXPLAINED FACT, and where to look next: the numbers are BIT-IDENTICAL
-        // (7.164e-03, ||x||inf 7.208e+00) whether the state is a flat start or fully converged — the
-        // convergence assertion below now passes, and nothing moved. A Jacobian that does not change
-        // when the state changes is a STALE/incorrectly-extracted matrix. Investigate
-        // JacobianMatrix.getMatrix() update semantics (is it lazily refreshed? does solve() invalidate
-        // or factorize in place, so the arrays read beforehand are not what it factorizes?) BEFORE
-        // touching anything on the GPU side.
-        //
-        // Two things ruled out along the way, both worth not re-testing: over-allocated arrays
-        // (values.length 336 vs true nnz cscPtr[n] 180 — real trap, correctly fixed here, but the
-        // stale entries were zeros so it changed nothing), and flat-start ill-conditioning (my first
-        // hypothesis, disproved by the bit-identical results above).
+        // RESOLVED (was failing at 7.164e-03). The cause was NOT the extraction and NOT the transpose:
+        // it was cuDSS PIVOTING. GpuJacobianExtractionDiagnosticTest measured every step —
+        //   * the CSC arrays are clean: no -1 pointers, no duplicate (row,col), no unsorted columns;
+        //   * the matrix DOES track the state (170 of 180 entries move between flat start and
+        //     convergence), so the earlier "stale extraction" reading was wrong — the bit-identical
+        //     numbers came from the reordering being state-independent, not the matrix;
+        //   * a dense solve built from those very arrays reproduces OLF's solve() to 6.217e-15,
+        //     which proves the extraction AND the orientation claim outright.
+        // What was actually broken: the factorized matrix has 5 EXACTLY ZERO diagonal entries and
+        // 0 of 28 diagonally dominant rows, while applyReorderAlg forces AMD with no pivoting. cuDSS
+        // substitutes a static perturbation for the zero pivot and returns a wrong x WITH A MATCHING
+        // RESIDUAL — which is why this masqueraded as a correctness bug. Measured on this matrix:
+        //   AMD 7.164e-03 | nested dissection 7.179e-02 | natural order 6.217e-15
+        //   iterative refinement changes NOTHING (IR=0 and IR=3 are bit-identical)
+        //   AMD + MC64-style matching (CUDSS_CONFIG_MATCHING_ALG) 3.553e-15   <-- the fix
+        // The batched NR never hit this because it builds a superset pattern with a GUARANTEED
+        // nonzero diagonal; a raw Jacobian handed over unpermuted has no such guarantee. See
+        // applyAdjointMatching in olf_gpu_nr_jni.cu.
         // ieee14 with default (no transformer/phase control) so the system is plain AC power flow —
         // the shape #40 step 1 asks for: no binding limits, nothing to confuse a mismatch with.
         Network iidm = IeeeCdfNetworkFactory.create14();

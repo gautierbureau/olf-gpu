@@ -106,6 +106,13 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
     protected final NewtonRaphsonParameters parameters;
 
+    private static double deviceConvEpsPerEq(NewtonRaphsonParameters parameters) {
+        if (parameters.getStoppingCriteria() instanceof DefaultNewtonRaphsonStoppingCriteria criteria) {
+            return criteria.getConvEpsPerEq();
+        }
+        return 0.0;
+    }
+
     /**
      * The cached native solver context (superset CSR pattern, device buffers, cuDSS
      * analysis) + the listener deregistration, released when this solver becomes
@@ -241,8 +248,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 case MAX_VOLTAGE_CHANGE -> 2;
             };
             long t1 = System.nanoTime();
+            double convEpsPerEq = deviceConvEpsPerEq(parameters);
             double[] out = GpuAcNewtonSolver.solveContext(context.handle.get(),
-                    x0, target, activation.rowMode(), parameters.getMaxIterations(), GPU_TOLERANCE,
+                    x0, target, activation.rowMode(), parameters.getMaxIterations(), GPU_TOLERANCE, convEpsPerEq,
                     lsMode, parameters.getLineSearchStateVectorScalingMaxIteration(),
                     parameters.getLineSearchStateVectorScalingStepFold(),
                     parameters.getMaxVoltageChangeStateVectorScalingMaxDv(),
@@ -408,7 +416,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
         @Override
         public void onLoadActivePowerTargetChange(LfLoad load, double oldTargetP, double newTargetP) {
-            // target values are re-read every solve
+            structureChanged();                                  // DS packs embed bus/load active-power targets
         }
 
         @Override
@@ -419,7 +427,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         @Override
         public void onGenerationActivePowerTargetChange(LfGenerator generator, double oldGenerationTargetP,
                                                         double newGenerationTargetP) {
-            // target values are re-read every solve
+            structureChanged();                                  // DS packs embed generator targetP-derived headroom/base P
         }
 
         @Override

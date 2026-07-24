@@ -195,6 +195,10 @@ public final class GpuAcNewtonSolver {
      *                zeroes the row, sets the diagonal to 1 and F = x - target)
      * @param maxIter maximum Newton iterations
      * @param tol     convergence tolerance on the mismatch infinity norm
+     * @param convEpsPerEq if {@code > 0}, the device inner-Newton uses OLF's exact
+     *                     {@code DefaultNewtonRaphsonStoppingCriteria} rule
+     *                     ({@code ‖F‖₂ < sqrt(convEpsPerEq² · n)}) instead of the
+     *                     infinity-norm floor
      * @param lsMode  device step scaling: 0 = none, 1 = line search, 2 = max voltage change
      * @param maxDv   MAX_VOLTAGE_CHANGE (lsMode 2): clamp on |Δv| per iteration (BUS_V rows)
      * @param maxDphi MAX_VOLTAGE_CHANGE (lsMode 2): clamp on |Δφ| per iteration (BUS_PHI rows, radians)
@@ -204,7 +208,7 @@ public final class GpuAcNewtonSolver {
      *         mismatch infinity norm
      */
     public static native double[] solveContext(long handle, double[] x0, double[] target,
-                                               int[] rowMode, int maxIter, double tol,
+                                               int[] rowMode, int maxIter, double tol, double convEpsPerEq,
                                                int lsMode, int lsMaxIter, double lsStepFold,
                                                double maxDv, double maxDphi, int[] varType);
 
@@ -257,7 +261,7 @@ public final class GpuAcNewtonSolver {
             long handle = createContext(structure);
             try {
                 // undamped (no device step scaling): lsMode 0 ignores maxDv/maxDphi/varType
-                return solveContext(handle, x0, target, rowMode, maxIter, tol, 0, 0, 0.0, 0.0, 0.0, new int[x0.length]);
+                return solveContext(handle, x0, target, rowMode, maxIter, tol, 0.0, 0, 0, 0.0, 0.0, 0.0, new int[x0.length]);
             } finally {
                 destroyContext(handle);
             }

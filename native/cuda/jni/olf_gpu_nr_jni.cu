@@ -1094,7 +1094,7 @@ SolverContext* createContext(const SharedStructurePtr& st) {
 }
 
 Result solveContext(SolverContext* ctx, const double* x0, const double* target, const int* rowMode,
-                    int maxIter, double tol, int lsMode, int lsMaxIter, double lsStepFold,
+                    int maxIter, double tol, double convEpsPerEq, int lsMode, int lsMaxIter, double lsStepFold,
                     double maxDv, double maxDphi, const int* varType) {
     int n = ctx->n;
     CUDA_CHECK(cudaMemcpy(ctx->dX.p, x0, n * sizeof(double), cudaMemcpyHostToDevice));
@@ -1150,6 +1150,7 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
     double bestNorm2 = HUGE_VAL;
     double bestInf = HUGE_VAL;
     const bool trace = std::getenv("OLF_GPU_TRACE") != nullptr;   // per-iteration diagnostic
+    const double olf2NormThreshold = convEpsPerEq > 0.0 ? std::sqrt(convEpsPerEq * convEpsPerEq * n) : 0.0;
     double lastNorm2 = 0.0;
     bool haveLast = false;                                   // a full step was applied at the previous iteration
     int it = 0;
@@ -1186,7 +1187,12 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
         }
         lastNorm2 = norm2;
         haveLast = true;
-        if (res.norm < tol || it == maxIter) break;
+        bool converged = convEpsPerEq > 0.0 ? (norm2 < olf2NormThreshold) : (res.norm < tol);
+        // Mirror CPU NewtonRaphson.run: x0 may already satisfy the stopping criterion after an outer-loop
+        // retarget, but the CPU still performs one Newton step before it is allowed to stop. If we early-exit
+        // here on it==0, distributed-slack target changes can be accepted without any state update and the
+        // outer loop sees the same slack mismatch again.
+        if ((converged && it > 0) || it == maxIter) break;
 
         // J dx = -F on the device (analyze ONCE per structure, refactorize after —
         // including across solver runs reusing this context)
@@ -1224,7 +1230,8 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     }
     res.iters = it;
-    if (res.norm >= tol && !hXbest.empty()) {
+    bool converged = convEpsPerEq > 0.0 ? (bestNorm2 < olf2NormThreshold) : (res.norm < tol);
+    if (!converged && !hXbest.empty()) {
         // not converged to tol: return the best visited iterate, not the last plateau sample
         res.norm = bestInf;
         std::copy(hXbest.begin(), hXbest.end(), res.x.begin());
@@ -3262,7 +3269,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createCo
 extern "C" JNIEXPORT jdoubleArray JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveContext(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jx0, jdoubleArray jtarget,
-        jintArray jrowMode, jint maxIter, jdouble tol, jint lsMode, jint lsMaxIter, jdouble lsStepFold,
+        jintArray jrowMode, jint maxIter, jdouble tol, jdouble convEpsPerEq, jint lsMode, jint lsMaxIter, jdouble lsStepFold,
         jdouble maxDv, jdouble maxDphi, jintArray jvarType) {
     auto* ctx = reinterpret_cast<SolverContext*>(handle);
     jdouble* x0 = env->GetDoubleArrayElements(jx0, nullptr);
@@ -3277,7 +3284,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveCon
         if (ctx == nullptr || n != ctx->n) {
             throw std::runtime_error("invalid solver context or state size");
         }
-        res = solveContext(ctx, x0, target, rowMode, maxIter, tol, lsMode, lsMaxIter, lsStepFold,
+        res = solveContext(ctx, x0, target, rowMode, maxIter, tol, convEpsPerEq, lsMode, lsMaxIter, lsStepFold,
                            maxDv, maxDphi, varType);
     } catch (const std::exception& e) {
         error = e.what();

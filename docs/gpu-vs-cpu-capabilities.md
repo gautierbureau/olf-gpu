@@ -256,7 +256,7 @@ open-loadflow sources.
 CPU reference: `DistributedSlackOuterLoop` + `ActivePowerDistribution` +
 `GenerationActivePowerDistributionStep` / `LoadActivePowerDistributionStep`.
 Device: extraction `EXT:299-380`, kernels `computeSlackRetain` `CU:1831-1843` and
-`distributeSlackWaterfillBatch` `CU:1897-1952`.
+`distributeSlackBatch` (full water-filling) `CU:1897-1952`.
 
 | Corner case | CPU behavior | GPU batched | Verdict |
 |---|---|---|---|

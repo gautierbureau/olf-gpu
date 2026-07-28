@@ -8,7 +8,7 @@ bus's own generators participate** in the distribution. Companion docs:
 branch `claude/level-a-closed-branch-formulas`, characterized in commit `ec7b5751`.
 
 Code: `native/cuda/jni/olf_gpu_nr_jni.cu` (`computeSlackRetain`,
-`distributeSlackWaterfillBatch`), `GpuAcDataExtractor` (the `dsFactor` normalization).
+`distributeSlackBatch`), `GpuAcDataExtractor` (the `dsFactor` normalization).
 Characterization test: `GpuBatchedParticipatingSlackConvergenceTest`.
 
 ---
@@ -61,7 +61,7 @@ participation share undistributed at the slack** and distributes only the rest:
 
 ```
 retain   = f_slack · (slackMismatch + absorbed)              # computeSlackRetain, re-evaluated each pass
-rem      = slackMismatch − retain                            # distributeSlackWaterfillBatch
+rem      = slackMismatch − retain                            # distributeSlackBatch
 if |rem| ≤ slackDistTol: stop                                # the DS gate, matched to OLF's
 else: water-fill rem over the NON-slack participating buses ∝ their factors
 ```

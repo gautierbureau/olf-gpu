@@ -1921,59 +1921,15 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
     retain[s] = oneMinusFactorSum * ((qBuf[(size_t) s * n + slackPhiRow] - slackTargetP) + absorbed);
 }
 
-__global__ void distributeSlackBatch(int nds, int nScenarios, int n, double tol, int slackPhiRow,
-                                     double slackTargetP, double factorSum, const int* dsPhiRow, const double* dsFactor,
-                                     const double* dsBaseTargetP, const double* dsMaxDelta, const double* dsMinDelta,
-                                     const double* dsRetain, const double* qBuf, const char* rlActive,
-                                     const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
-                                     const double* dsOvMaxDelta, const double* dsOvMinDelta,
-                                     double* target, char* switched) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= nds * nScenarios) return;
-    int i = tid % nds;
-    int s = tid / nds;
-    if (!rlActive[s]) return;
-    // Distribute only the mismatch in EXCESS of the slack's frozen retained share — so a participating slack
-    // keeps its part and the loop converges to OLF's allocation instead of leaking everything to the others.
-    double distributable = (qBuf[(size_t) s * n + slackPhiRow] - slackTargetP) - dsRetain[s];
-    if (distributable > tol || distributable < -tol) {
-        // Per-scenario generator-loss reweight (dsOvBus[s] = the DS-pack index losing a participating gen, -1
-        // if none): the lost gen drops out of the slack participation, so that bus's factor / base P / head-
-        // room / footroom shrink by the gen's contribution, AND the total factor sum (the share denominator)
-        // shrinks by the same factor delta — so the OTHER buses pick up the lost gen's share, matching OLF.
-        double f = dsFactor[i], base = dsBaseTargetP[i], maxD = dsMaxDelta[i], minD = dsMinDelta[i];
-        double fsum = factorSum;
-        if (dsOvBus != nullptr && dsOvBus[s] >= 0) {
-            fsum -= dsOvFactorDelta[s];                      // the lost gen left the participation
-            if (dsOvBus[s] == i) {                           // ... and it sat on this bus
-                f -= dsOvFactorDelta[s];
-                base -= dsOvBaseDelta[s];
-                maxD -= dsOvMaxDelta[s];
-                minD -= dsOvMinDelta[s];
-            }
-        }
-        // Clamp the bus's CUMULATIVE delta (current target − base) to [footroom, headroom]. An over-allocation
-        // past a generator-saturation limit is clamped here, so its share stays unabsorbed and reappears at the
-        // slack — redistributed to unsaturated buses next outer pass (∝ their factors), converging to OLF's
-        // water-filling. Only flag a re-solve if the bus actually moved. fsum renormalizes the per-bus shares.
-        size_t idx = (size_t) s * n + dsPhiRow[i];
-        double cum = target[idx] - base;
-        double clamped = fmin(fmax(cum + (f / fsum) * distributable, minD), maxD);
-        if (clamped != cum) {
-            target[idx] = base + clamped;
-            switched[s] = 1;
-        }
-    }
-}
-
 // Distribute the slack mismatch by FULL WATER-FILLING per scenario (one thread = one scenario), matching OLF's
 // ActivePowerDistribution.run + GenerationActivePowerDistributionStep.run: distribute the whole mismatch among
 // the participating buses, re-normalizing the factors over the UNSATURATED buses each round and removing buses
 // that hit a limit, iterating until the residual falls below residueEps (P_RESIDUE_EPS) or all buses saturate —
-// all WITHOUT a power-flow re-solve. The previous per-(bus,scenario) kernel did ONE clamp step and let the
-// saturated residual reappear at the slack to be redistributed on the NEXT outer pass (AFTER a re-solve), so
-// the loss change between steps made it converge to a different in-tolerance point than OLF under saturation.
-__global__ void distributeSlackWaterfillBatch(int nds, int nScenarios, int n, double slackDistTol, double residueEps,
+// all WITHOUT a power-flow re-solve. The full water-fill at a FIXED operating point is what matches OLF under
+// saturation: a single clamp step per outer pass (letting the saturated residual reappear at the slack, to be
+// redistributed only AFTER the next re-solve) would drift — the loss change between re-solves converges to a
+// different in-tolerance point than OLF.
+__global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slackDistTol, double residueEps,
                                               int slackPhiRow, double slackTargetP, const int* dsPhiRow,
                                               const double* dsFactor, const double* dsBaseTargetP,
                                               const double* dsMaxDelta, const double* dsMinDelta, const double* dsRetain,
@@ -3083,7 +3039,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvBaseDelta.as<double>());
             if (!ctx->dDsResidual.p) ctx->dDsResidual.alloc(nS * sizeof(char));
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsResidual.p, 0, nS * sizeof(char), ctx->stream));
-            distributeSlackWaterfillBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nds, nS, n, SLACK_DIST_TOL, P_RESIDUE_EPS,
+            distributeSlackBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nds, nS, n, SLACK_DIST_TOL, P_RESIDUE_EPS,
                     ctx->dsSlackPhiRow, ctx->dsSlackTargetP, ctx->dDsPhiRow.as<int>(),
                     ctx->dDsFactor.as<double>(), ctx->dDsBaseTargetP.as<double>(),
                     ctx->dDsMaxDelta.as<double>(), ctx->dDsMinDelta.as<double>(), ctx->dDsRetain.as<double>(),

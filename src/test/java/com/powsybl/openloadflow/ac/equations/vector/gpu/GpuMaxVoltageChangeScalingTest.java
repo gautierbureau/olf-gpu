@@ -99,11 +99,11 @@ class GpuMaxVoltageChangeScalingTest {
         double[] clamped;
         try {
             clamped = GpuAcNewtonSolver.solveContext(handle, x0, stableTargets, activation.rowMode(),
-                    MAX_ITER, TOL, 2, 0, 0.0, MAX_DV, MAX_DPHI, varType);
+                    MAX_ITER, TOL, 0.0, 2, 0, 0.0, MAX_DV, MAX_DPHI, varType);
             clampedIters = (int) clamped[n];
             // same start, no clamp (lsMode 0) — the clamp must cost extra iterations, else the test is vacuous
             double[] undamped = GpuAcNewtonSolver.solveContext(handle, x0, stableTargets, activation.rowMode(),
-                    MAX_ITER, TOL, 0, 0, 0.0, 0.0, 0.0, varType);
+                    MAX_ITER, TOL, 0.0, 0, 0, 0.0, 0.0, 0.0, varType);
             undampedIters = (int) undamped[n];
         } finally {
             GpuAcNewtonSolver.destroyContext(handle);

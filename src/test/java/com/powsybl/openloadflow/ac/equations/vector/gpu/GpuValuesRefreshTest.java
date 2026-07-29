@@ -71,7 +71,7 @@ class GpuValuesRefreshTest {
         double[] targets = act.applyTargets(target.getArray());          // structure/activation unchanged by an r1 move
 
         long h1 = GpuAcNewtonSolver.createContext(GpuAcStructures.handle(n, d1));
-        double[] out1 = GpuAcNewtonSolver.solveContext(h1, x0, targets, rowMode, MAX_ITER, TOL, 0, 0, 0.0, 0.0, 0.0, new int[n]);
+        double[] out1 = GpuAcNewtonSolver.solveContext(h1, x0, targets, rowMode, MAX_ITER, TOL, 0.0, 0, 0, 0.0, 0.0, 0.0, new int[n]);
 
         // Values-only change: move the NHV2_NLOAD transformer's ratio. Same topology -> same CSR pattern.
         LfBranch trafo = network.getBranchById("NHV2_NLOAD");
@@ -83,11 +83,11 @@ class GpuValuesRefreshTest {
 
         // VALUES path: re-upload the packs into the existing context (no rebuild, no re-analysis).
         GpuAcNewtonSolver.refreshContextValues(h1, d2.cbIn(), d2.obIn(), d2.shIn(), d2.hvIn(), d2.ziIn());
-        double[] outRefreshed = GpuAcNewtonSolver.solveContext(h1, x0, targets, rowMode, MAX_ITER, TOL, 0, 0, 0.0, 0.0, 0.0, new int[n]);
+        double[] outRefreshed = GpuAcNewtonSolver.solveContext(h1, x0, targets, rowMode, MAX_ITER, TOL, 0.0, 0, 0, 0.0, 0.0, 0.0, new int[n]);
 
         // Reference: a context built FROM SCRATCH on the new values.
         long h2 = GpuAcNewtonSolver.createContext(GpuAcStructures.handle(n, d2));
-        double[] outRebuilt = GpuAcNewtonSolver.solveContext(h2, x0, targets, rowMode, MAX_ITER, TOL, 0, 0, 0.0, 0.0, 0.0, new int[n]);
+        double[] outRebuilt = GpuAcNewtonSolver.solveContext(h2, x0, targets, rowMode, MAX_ITER, TOL, 0.0, 0, 0, 0.0, 0.0, 0.0, new int[n]);
 
         double worst = 0;
         double moved = 0;

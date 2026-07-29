@@ -91,7 +91,7 @@ class GpuAcStructuresTest {
         long ctx = GpuAcNewtonSolver.createContext(aliased);
         try {
             double[] out = GpuAcNewtonSolver.solveContext(ctx, es.getStateVector().get().clone(), targets,
-                    act.rowMode(), 30, 1e-10, 0, 0, 0.0, 0.0, 0.0, new int[n]);
+                    act.rowMode(), 30, 1e-10, 0.0, 0, 0, 0.0, 0.0, 0.0, new int[n]);
             assertTrue(out[n + 1] < 1e-10, "the solve on the cross-flavor-shared structure must converge");
         } finally {
             GpuAcNewtonSolver.destroyContext(ctx);

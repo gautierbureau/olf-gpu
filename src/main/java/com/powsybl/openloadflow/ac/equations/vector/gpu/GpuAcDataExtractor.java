@@ -712,14 +712,16 @@ public final class GpuAcDataExtractor {
         int[] qRow = vCol.clone();
         for (LfBus bus : network.getBuses()) {
             int bn = bus.getNum();
-            // A remote generator voltage controller bus has its BUS_TARGET_Q deactivated — its reactive
+            boolean vActive = row(es, bn, AcEquationType.BUS_TARGET_V) >= 0;
+            boolean qActive = row(es, bn, AcEquationType.BUS_TARGET_Q) >= 0;
+            // A remote generator voltage controller bus normally has its BUS_TARGET_Q deactivated — its reactive
             // injection feeds the DISTR_Q rows, never its own BUS_V row — so suppress its per-bus Q scatter.
-            if (bus.getGeneratorVoltageControl().isPresent() && !bus.isGeneratorVoltageControlled()) {
+            // If the controller is switched to PQ by reactive limits, BUS_TARGET_Q becomes active again and the
+            // bus must recover its own BUS_V-backed Q row.
+            if (bus.getGeneratorVoltageControl().isPresent() && !bus.isGeneratorVoltageControlled() && !qActive) {
                 qRow[bn] = -1;
                 continue;
             }
-            boolean vActive = row(es, bn, AcEquationType.BUS_TARGET_V) >= 0;
-            boolean qActive = row(es, bn, AcEquationType.BUS_TARGET_Q) >= 0;
             if (!(vActive && qActive)) {
                 continue;                                   // plain PQ / generator PV bus: Q stays on its V row
             }
@@ -732,9 +734,10 @@ public final class GpuAcDataExtractor {
             if (gvc != null) {
                 LfBus freeController = gvc.getMergedControllerElements().stream()
                         .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_Q) < 0)
+                        .filter(c -> row(es, c.getNum(), AcEquationType.BUS_TARGET_Q) < 0)
                         .findFirst()
                         .orElseThrow(() -> new PowsyblException("GPU AC solver: remote generator voltage control "
-                                + "of bus " + bus.getId() + " has no free controller (all DISTR_Q active)"));
+                                + "of bus " + bus.getId() + " has no free enabled controller"));
                 qRow[bn] = vCol[freeController.getNum()];
                 continue;
             }

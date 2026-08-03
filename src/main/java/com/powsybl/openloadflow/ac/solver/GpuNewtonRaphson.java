@@ -380,7 +380,11 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
         @Override
         public void onGeneratorVoltageControlChange(LfBus controllerBus, boolean newVoltageControllerEnabled) {
-            activationChanged();                                 // PV↔PQ
+            if (controllerBus.getGeneratorVoltageControl().isPresent() && !controllerBus.isGeneratorVoltageControlled()) {
+                structureChanged();                              // remote controller enable/disable reshapes qRow routing
+            } else {
+                activationChanged();                             // local PV↔PQ
+            }
         }
 
         @Override

@@ -84,11 +84,8 @@ class GpuLoadFlowTest {
                 cpuResult.getComponentResults().get(0).getIterationCount(),
                 gpuResult.getComponentResults().get(0).getIterationCount(),
                 worstV, worstA);
-        // both runs converge, but to DIFFERENT points inside the stopping-criteria basin:
-        // the CPU Newton stops at the configured criteria (1e-4 pu by default) while the
-        // GPU iterates to a 1e-8 pu mismatch — so states agree to the criteria's slack,
-        // not to machine precision (a missing/wrong term would diverge at the 1e-1 level;
-        // the machine-precision equivalence is asserted by GpuFullNewtonTest).
+        // With the same OLF stopping criterion wired on both sides, the production LoadFlow.run
+        // path should now land on the same operating point up to small floating-point noise.
         assertTrue(compared > 0, "must compare at least one bus");
         assertTrue(worstV < 1e-3, "bus voltages must match (max dV = " + worstV + " kV)");
         assertTrue(worstA < 1e-3, "bus angles must match (max dAngle = " + worstA + " deg)");

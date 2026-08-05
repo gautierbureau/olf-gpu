@@ -5,12 +5,16 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver;
+package com.powsybl.openloadflow.ac.solver.gpu;
 
 import com.google.auto.service.AutoService;
 import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.solver.AcSolver;
+import com.powsybl.openloadflow.ac.solver.AcSolverFactory;
+import com.powsybl.openloadflow.ac.solver.NewtonRaphsonFactory;
+import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationVector;
 import com.powsybl.openloadflow.equations.JacobianMatrix;

@@ -15,7 +15,7 @@ import com.powsybl.loadflow.LoadFlowResult;
 import com.powsybl.math.matrix.DenseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.OpenLoadFlowProvider;
-import com.powsybl.openloadflow.ac.solver.GpuNewtonRaphsonFactory;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
 import com.powsybl.openloadflow.network.EurostagFactory;
 import com.powsybl.openloadflow.network.SlackBusSelectionMode;
 import org.junit.jupiter.api.BeforeEach;
@@ -28,7 +28,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * The GPU solver as a SAFE DEFAULT: a network whose equation system the GPU extractor
  * rejects (here a ZIP load model — an unsupported variable-length equation term) must
- * still converge through {@link com.powsybl.openloadflow.ac.solver.GpuNewtonRaphson}'s
+ * still converge through {@link com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson}'s
  * CPU fallback ({@code olf.gpu.cpuFallback}, default on), producing the same solution
  * as a plain CPU run — never wrong, only un-accelerated. This is what makes routing the
  * security analysis's base load flow to the GPU solver unconditionally safe.

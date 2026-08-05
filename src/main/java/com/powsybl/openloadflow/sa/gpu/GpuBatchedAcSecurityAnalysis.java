@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.sa;
+package com.powsybl.openloadflow.sa.gpu;
 
 import com.google.common.base.Stopwatch;
 import com.powsybl.action.Action;
@@ -25,12 +25,12 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
-import com.powsybl.openloadflow.ac.solver.GpuBatchedSecurityAnalysisSolver;
-import com.powsybl.openloadflow.ac.solver.GpuBatchedSecurityAnalysisSolver.BatchContingency;
-import com.powsybl.openloadflow.ac.solver.GpuBatchedSecurityAnalysisSolver.BatchScenarioResult;
-import com.powsybl.openloadflow.ac.solver.GpuNewtonRaphsonFactory;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonFactory;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver.BatchContingency;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver.BatchScenarioResult;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.network.DisabledBranchStatus;
@@ -42,6 +42,13 @@ import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfShunt;
 import com.powsybl.openloadflow.network.LoadFlowModel;
 import com.powsybl.openloadflow.network.impl.PropagatedContingency;
+import com.powsybl.openloadflow.sa.AbstractNetworkResult;
+import com.powsybl.openloadflow.sa.AcSecurityAnalysis;
+import com.powsybl.openloadflow.sa.ContingencyActivePowerLossDistribution;
+import com.powsybl.openloadflow.sa.LimitViolationManager;
+import com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters;
+import com.powsybl.openloadflow.sa.PostContingencyNetworkResult;
+import com.powsybl.openloadflow.sa.PreContingencyNetworkResult;
 import com.powsybl.openloadflow.util.PerUnit;
 import com.powsybl.security.LimitViolationsResult;
 import com.powsybl.security.PostContingencyComputationStatus;
@@ -64,7 +71,7 @@ import java.util.Set;
 /**
  * Prototype integration of the batched GPU N-1 ({@link GpuBatchedSecurityAnalysisSolver})
  * into OLF's AC security-analysis engine. Single-branch contingencies whose post-contingency
- * states the GPU batch can solve (qualified by {@link com.powsybl.openloadflow.ac.solver.GpuBatchContingencyValidator})
+ * states the GPU batch can solve (qualified by {@link com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContingencyValidator})
  * are solved ALL AT ONCE, once, right after the pre-contingency load flow; the engine's
  * per-contingency loop then INJECTS each precomputed state instead of running its own
  * Newton-Raphson, and reuses the existing violation-detection and result-building machinery

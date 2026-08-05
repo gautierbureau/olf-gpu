@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver;
+package com.powsybl.openloadflow.ac.solver.gpu;
 
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.commons.report.ReportNode;
@@ -18,6 +18,14 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
+import com.powsybl.openloadflow.ac.solver.AbstractAcSolver;
+import com.powsybl.openloadflow.ac.solver.AcSolverResult;
+import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
+import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
+import com.powsybl.openloadflow.ac.solver.DefaultNewtonRaphsonStoppingCriteria;
+import com.powsybl.openloadflow.ac.solver.NewtonRaphson;
+import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
+import com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteria;
 import com.powsybl.openloadflow.equations.EquationArray;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationSystemIndex;
@@ -88,7 +96,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
     private static final Cleaner CLEANER = Cleaner.create();
 
-    protected static final double GPU_TOLERANCE = 1e-8;
+    public static final double GPU_TOLERANCE = 1e-8;
 
     // Diagnostics for the invalidation taxonomy: how the cached native context is reconciled across
     // solves — STRUCTURE rebuilds (pattern + cuDSS re-analysis) vs cheap VALUES re-uploads (a transformer

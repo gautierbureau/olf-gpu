@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver;
+package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
@@ -16,6 +16,8 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcStructures;
+import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;
 import com.powsybl.openloadflow.equations.Variable;
@@ -54,7 +56,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
     /** System property: an explicit GPU batch chunk size (scenarios). When unset, the chunk is auto-sized from free device memory. */
     /**
      * The run's outer-loop parameterization for the batched device path — a PER-CALL value, threaded
-     * from {@link com.powsybl.openloadflow.sa.GpuBatchedAcSecurityAnalysis} into {@link #solveBatchN1}
+     * from {@link com.powsybl.openloadflow.sa.gpu.GpuBatchedAcSecurityAnalysis} into {@link #solveBatchN1}
      * and down to the device call. It used to live in JVM-global static fields set through setters
      * before each run; production was safe only because the provider always wrote every field first,
      * but anything driving the solver DIRECTLY inherited the previous run's values. That leak (a stale
@@ -633,7 +635,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
 
     /** As the no-{@code tol} / {@code convEpsPerEq} overload but carrying the run's {@link BatchConfig}
      *  (outer-loop parameterization). This is the entry point {@link
-     *  com.powsybl.openloadflow.sa.GpuBatchedAcSecurityAnalysis} uses; it defaults {@code tol} to the
+     *  com.powsybl.openloadflow.sa.gpu.GpuBatchedAcSecurityAnalysis} uses; it defaults {@code tol} to the
      *  GPU tolerance floor, exactly like the matching provider-facing overload without a config. */
     public static List<BatchScenarioResult> solveBatchN1(LfNetwork network, double[] baseState,
                                                          List<BatchContingency> contingencies,

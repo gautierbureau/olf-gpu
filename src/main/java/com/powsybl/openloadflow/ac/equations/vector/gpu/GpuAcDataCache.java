@@ -40,8 +40,8 @@ import java.util.WeakHashMap;
 
 /**
  * Shared, invalidation-guarded {@link GpuAcDataExtractor} cache, so the two GPU consumers of ONE
- * equation system — the base-case {@link com.powsybl.openloadflow.ac.solver.GpuNewtonRaphson}
- * and the batched N-1 {@link com.powsybl.openloadflow.ac.solver.GpuBatchedSecurityAnalysisSolver}
+ * equation system — the base-case {@link com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson}
+ * and the batched N-1 {@link com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver}
  * — extract it once per state instead of once each. In a cold security-analysis pass the base
  * load flow's LAST extraction (post outer loops) is exactly the state the batch then needs, so
  * the batch's extraction becomes a cache hit (host extraction is a measurable slice of the pass

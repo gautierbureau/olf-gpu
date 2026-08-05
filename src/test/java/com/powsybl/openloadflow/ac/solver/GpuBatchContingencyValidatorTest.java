@@ -9,9 +9,11 @@ package com.powsybl.openloadflow.ac.solver;
 
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
-import com.powsybl.openloadflow.ac.solver.GpuBatchContingencyValidator.Disqualification;
-import com.powsybl.openloadflow.ac.solver.GpuBatchContingencyValidator.Qualification;
-import com.powsybl.openloadflow.ac.solver.GpuBatchedSecurityAnalysisSolver.BatchContingency;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContingencyValidator;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContingencyValidator.Disqualification;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContingencyValidator.Qualification;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver.BatchContingency;
 import com.powsybl.openloadflow.network.EurostagFactory;
 import com.powsybl.openloadflow.network.FirstSlackBusSelector;
 import com.powsybl.openloadflow.network.LfBranch;

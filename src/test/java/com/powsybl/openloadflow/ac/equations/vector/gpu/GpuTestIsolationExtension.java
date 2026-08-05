@@ -7,7 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
-import com.powsybl.openloadflow.ac.solver.GpuNewtonRaphson;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson;
 import org.junit.jupiter.api.extension.AfterEachCallback;
 import org.junit.jupiter.api.extension.BeforeEachCallback;
 import org.junit.jupiter.api.extension.ExtensionContext;

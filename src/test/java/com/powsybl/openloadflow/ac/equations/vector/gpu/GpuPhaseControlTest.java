@@ -15,7 +15,7 @@ import com.powsybl.loadflow.LoadFlowResult;
 import com.powsybl.math.matrix.DenseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.OpenLoadFlowProvider;
-import com.powsybl.openloadflow.ac.solver.GpuNewtonRaphsonFactory;
+import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
 import com.powsybl.openloadflow.network.PhaseControlFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -86,7 +86,7 @@ class GpuPhaseControlTest {
 
         Network gpuNetwork = networkSupplier.get();
         LoadFlowParameters gpuParameters = new LoadFlowParameters();
-        long fallbacksBefore = com.powsybl.openloadflow.ac.solver.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
+        long fallbacksBefore = com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
         OpenLoadFlowParameters gpuOlf = OpenLoadFlowParameters.create(gpuParameters)
                 .setNewtonRaphsonConvEpsPerEq(1e-8)
                 .setAcSolverType(GpuNewtonRaphsonFactory.NAME);
@@ -106,7 +106,7 @@ class GpuPhaseControlTest {
             worstA = Math.max(worstA, Math.abs(cpuBus.getAngle() - gpuBus.getAngle()));
             compared++;
         }
-        long fallbacks = com.powsybl.openloadflow.ac.solver.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get()
+        long fallbacks = com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get()
                 - fallbacksBefore;
         if (expectGpuSolve) {
             assertEquals(0, fallbacks, "the GPU must actually SOLVE this system — a silent fallback would "

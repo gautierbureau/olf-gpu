@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.sa;
+package com.powsybl.openloadflow.sa.gpu;
 
 import com.google.auto.service.AutoService;
 import com.powsybl.contingency.ContingenciesProvider;
@@ -19,6 +19,8 @@ import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.graph.NaiveGraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.sa.AcSecurityAnalysis;
+import com.powsybl.openloadflow.sa.OpenSecurityAnalysisProvider;
 import com.powsybl.openloadflow.util.PowsyblOpenLoadFlowVersion;
 import com.powsybl.security.SecurityAnalysisProvider;
 import com.powsybl.security.SecurityAnalysisReport;

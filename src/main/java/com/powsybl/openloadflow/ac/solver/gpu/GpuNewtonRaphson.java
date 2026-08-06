@@ -9,7 +9,6 @@ package com.powsybl.openloadflow.ac.solver.gpu;
 
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.commons.report.ReportNode;
-import com.powsybl.iidm.network.TwoSides;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
@@ -26,31 +25,16 @@ import com.powsybl.openloadflow.ac.solver.DefaultNewtonRaphsonStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphson;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteria;
-import com.powsybl.openloadflow.equations.EquationArray;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationSystemIndex;
 import com.powsybl.openloadflow.equations.EquationSystemIndexListener;
-import com.powsybl.openloadflow.equations.EquationTermArray;
 import com.powsybl.openloadflow.equations.EquationVector;
 import com.powsybl.openloadflow.equations.JacobianMatrix;
-import com.powsybl.openloadflow.equations.SingleEquation;
-import com.powsybl.openloadflow.equations.SingleEquationTerm;
 import com.powsybl.openloadflow.equations.TargetVector;
-import com.powsybl.openloadflow.equations.Variable;
-import com.powsybl.openloadflow.network.GeneratorVoltageControl;
-import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
-import com.powsybl.openloadflow.network.LfElement;
-import com.powsybl.openloadflow.network.LfGenerator;
-import com.powsybl.openloadflow.network.LfHvdc;
-import com.powsybl.openloadflow.network.LfLoad;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfNetworkListener;
-import com.powsybl.openloadflow.network.LfShunt;
 import com.powsybl.openloadflow.network.LfSynchronousNetwork;
-import com.powsybl.openloadflow.network.LfZeroImpedanceNetwork;
-import com.powsybl.openloadflow.network.LoadFlowModel;
-import com.powsybl.openloadflow.network.TransformerVoltageControl;
 import com.powsybl.openloadflow.network.util.VoltageInitializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -61,7 +45,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Newton-Raphson run ENTIRELY on the GPU behind one JNI call ({@link GpuAcNewtonSolver}):
@@ -121,25 +104,6 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         return 0.0;
     }
 
-    /**
-     * The cached native solver context (superset CSR pattern, device buffers, cuDSS
-     * analysis) + the listener deregistration, released when this solver becomes
-     * unreachable (the AcSolver SPI has no close hook). The Runnable must not reference
-     * the solver itself.
-     */
-    private static final class NativeContext implements Runnable {
-        private final AtomicLong handle = new AtomicLong();
-        private Runnable removeListeners;
-
-        @Override
-        public void run() {
-            GpuAcNewtonSolver.destroyContext(handle.getAndSet(0));
-            if (removeListeners != null) {
-                removeListeners.run();                       // dead-flags only — never mutates listener lists
-            }
-        }
-    }
-
     /** System property: fall back to the CPU Newton-Raphson when the GPU path rejects the
      *  network or fails at runtime (default true). Set to false to fail loudly instead. */
     public static final String CPU_FALLBACK_PROPERTY = "olf.gpu.cpuFallback";
@@ -155,9 +119,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     public static final java.util.concurrent.atomic.AtomicLong CPU_FALLBACK_COUNT =
             new java.util.concurrent.atomic.AtomicLong();
 
-    private final NativeContext context = new NativeContext();
+    private final GpuNativeContext context = new GpuNativeContext();
 
-    private final Invalidation invalidation = new Invalidation();
+    private final GpuSolverInvalidation invalidation = new GpuSolverInvalidation();
 
     private GpuAcData cachedData;
 
@@ -180,7 +144,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         // no dispatch in flight) — this caps accumulation on a long-lived LfNetwork at ~1 while
         // keeping the cleaner thread away from the (non-thread-safe) listener lists.
         for (LfNetworkListener l : List.copyOf(network.getListeners())) {
-            if (l instanceof Invalidation inv && inv.dead) {
+            if (l instanceof GpuSolverInvalidation inv && inv.dead) {
                 network.removeListener(l);
             }
         }
@@ -189,7 +153,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         // the cleaning action must not reference the solver itself (it would never become
         // phantom-reachable); the Invalidation listener object is referenced instead. It only
         // dead-flags: the index-side listener stays registered (no-op) for the es lifetime.
-        Invalidation listener = invalidation;
+        GpuSolverInvalidation listener = invalidation;
         context.removeListeners = () -> listener.dead = true;
         CLEANER.register(this, context);
     }
@@ -306,199 +270,5 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             slackBusActivePowerMismatch.put(lfScNetwork.getNumSC(), lfScNetwork.getSlackBuses().stream().mapToDouble(LfBus::getMismatchP).sum());
         }
         return new AcSolverResult(status, iterations, slackBusActivePowerMismatch);
-    }
-
-    /**
-     * The event-driven invalidation state, a SEPARATE listener object (the Cleaner action
-     * references it for deregistration — referencing the solver itself would keep it
-     * strongly reachable forever and the cleanup would never run).
-     */
-    private static final class Invalidation
-            implements EquationSystemIndexListener<AcVariableType, AcEquationType>, LfNetworkListener {
-
-        /** Set by the CLEANER THREAD when the owning solver is collected. The listener then
-         *  no-ops and is PURGED SYNCHRONOUSLY by the next solver's constructor — the cleaner
-         *  itself must NEVER call removeListener: LfNetwork's listener list is a plain
-         *  ArrayList iterated during event dispatch on the solve thread, and a cross-thread
-         *  removal is a ConcurrentModificationException (measured 2026-07-17: NetworkState
-         *  .restore -> notifyDisable iterating while a collected solver's cleaner removed). */
-        private volatile boolean dead = false;
-
-        private boolean structureDirty = true;
-
-        private boolean activationDirty = true;
-
-        // ---------------------------------------------------------------------------------
-        // Event classification. STRUCTURE = the extracted element packs / variable rows may
-        // have changed -> full re-extract + validation. run() then splits STRUCTURE into two
-        // levels by comparing the fresh data: a changed CSR pattern (index packs) rebuilds +
-        // re-analyzes, while an unchanged pattern with only changed element PARAMETERS (a tap or
-        // shunt-b move) takes the cheap VALUES re-upload (refreshContextValues, analysis reused).
-        // ACTIVATION = only which equations are active changed -> refresh rowMode/targetMap.
-        // Target-value events need nothing: targets are re-read from the TargetVector (which
-        // maintains itself through its own listeners) on every solve.
-        // ---------------------------------------------------------------------------------
-
-        private void structureChanged() {
-            structureDirty = true;
-        }
-
-        private void activationChanged() {
-            activationDirty = true;
-        }
-
-        // --- EquationSystemIndexListener ---
-
-        @Override
-        public void onVariableChange(Variable<AcVariableType> variable, ChangeType changeType) {
-            structureChanged();                                  // variable rows shift
-        }
-
-        @Override
-        public void onEquationChange(SingleEquation<AcVariableType, AcEquationType> equation, ChangeType changeType) {
-            activationChanged();                                 // single equation (de)activated
-        }
-
-        @Override
-        public void onEquationTermChange(SingleEquationTerm<AcVariableType, AcEquationType> term) {
-            if (term instanceof com.powsybl.openloadflow.equations.VariableEquationTerm) {
-                activationChanged();                             // identity-term toggle = PV→PQ side effect
-            } else {
-                structureChanged();                              // any other term toggling (open/closed switching)
-            }
-        }
-
-        @Override
-        public void onEquationArrayChange(EquationArray<AcVariableType, AcEquationType> equationArray, ChangeType changeType) {
-            activationChanged();                                 // array element (de)activated (PV→PQ)
-        }
-
-        @Override
-        public void onEquationTermArrayChange(EquationTermArray<AcVariableType, AcEquationType> equationTermArray,
-                                              int termNum, ChangeType changeType) {
-            structureChanged();                                  // array term toggling
-        }
-
-        @Override
-        public void onEquationIndexOrderChanged() {
-            activationChanged();                                 // OLF equation columns renumbered:
-        }                                                        // structure is column-free, targetMap is not
-
-        // --- LfNetworkListener ---
-
-        @Override
-        public void onGeneratorVoltageControlChange(LfBus controllerBus, boolean newVoltageControllerEnabled) {
-            if (controllerBus.getGeneratorVoltageControl().isPresent() && !controllerBus.isGeneratorVoltageControlled()) {
-                structureChanged();                              // remote controller enable/disable reshapes qRow routing
-            } else {
-                activationChanged();                             // local PV↔PQ
-            }
-        }
-
-        @Override
-        public void onGeneratorVoltageControlTargetChange(GeneratorVoltageControl control, double newTargetVoltage) {
-            // target values are re-read every solve
-        }
-
-        @Override
-        public void onGeneratorReactivePowerControlChange(LfBus controllerBus, boolean newReactiveControllerEnabled) {
-            structureChanged();
-        }
-
-        @Override
-        public void onTransformerPhaseControlChange(LfBranch controllerBranch, boolean newPhaseControlEnabled) {
-            structureChanged();
-        }
-
-        @Override
-        public void onTransformerVoltageControlChange(LfBranch controllerBranch, boolean newVoltageControllerEnabled) {
-            structureChanged();
-        }
-
-        @Override
-        public void onTransformerVoltageControlTargetChange(TransformerVoltageControl transformerVoltageControl,
-                                                            double newTargetVoltage) {
-            // target values are re-read every solve
-        }
-
-        @Override
-        public void onShuntVoltageControlChange(LfShunt controllerShunt, boolean newVoltageControllerEnabled) {
-            structureChanged();
-        }
-
-        @Override
-        public void onLoadActivePowerTargetChange(LfLoad load, double oldTargetP, double newTargetP) {
-            structureChanged();                                  // DS packs embed bus/load active-power targets
-        }
-
-        @Override
-        public void onLoadReactivePowerTargetChange(LfLoad load, double oldTargetQ, double newTargetQ) {
-            // target values are re-read every solve
-        }
-
-        @Override
-        public void onGenerationActivePowerTargetChange(LfGenerator generator, double oldGenerationTargetP,
-                                                        double newGenerationTargetP) {
-            structureChanged();                                  // DS packs embed generator targetP-derived headroom/base P
-        }
-
-        @Override
-        public void onGenerationReactivePowerTargetChange(LfBus bus, double oldGenerationTargetQ,
-                                                          double newGenerationTargetQ) {
-            // target values are re-read every solve
-        }
-
-        @Override
-        public void onDisableChange(LfElement element, boolean disabled) {
-            structureChanged();
-        }
-
-        @Override
-        public void onTapPositionChange(LfBranch branch, int oldPosition, int newPosition) {
-            structureChanged();                                  // r1/a1 in cbIn; run() downgrades to VALUES
-        }
-
-        @Override
-        public void onShuntSusceptanceChange(LfShunt shunt, double b) {
-            structureChanged();                                  // b in shIn; run() downgrades to VALUES
-        }
-
-        @Override
-        public void onZeroImpedanceNetworkSpanningTreeChange(LfBranch branch, LoadFlowModel loadFlowModel,
-                                                             boolean spanningTree) {
-            structureChanged();
-        }
-
-        @Override
-        public void onZeroImpedanceNetworkSplit(LfZeroImpedanceNetwork initialNetwork,
-                                                List<LfZeroImpedanceNetwork> splitNetworks, LoadFlowModel loadFlowModel) {
-            structureChanged();
-        }
-
-        @Override
-        public void onZeroImpedanceNetworkMerge(LfZeroImpedanceNetwork network1, LfZeroImpedanceNetwork network2,
-                                                LfZeroImpedanceNetwork mergedNetwork, LoadFlowModel loadFlowModel) {
-            structureChanged();
-        }
-
-        @Override
-        public void onBranchConnectionStatusChange(LfBranch branch, TwoSides side, boolean connected) {
-            structureChanged();
-        }
-
-        @Override
-        public void onSlackBusChange(LfBus bus, boolean slack) {
-            activationChanged();                                 // PHI identity moves
-        }
-
-        @Override
-        public void onReferenceBusChange(LfBus bus, boolean reference) {
-            activationChanged();
-        }
-
-        @Override
-        public void onHvdcAcEmulationStatusChange(LfHvdc hvdc, LfHvdc.AcEmulationControl.AcEmulationStatus acEmulationStatus) {
-            structureChanged();
-        }
     }
 }

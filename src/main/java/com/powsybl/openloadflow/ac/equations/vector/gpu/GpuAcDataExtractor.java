@@ -10,25 +10,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
-import com.powsybl.openloadflow.ac.equations.ClosedBranchSide1ActiveFlowEquationTerm;
-import com.powsybl.openloadflow.ac.equations.ClosedBranchSide1ReactiveFlowEquationTerm;
-import com.powsybl.openloadflow.ac.equations.ClosedBranchSide2ActiveFlowEquationTerm;
-import com.powsybl.openloadflow.ac.equations.ClosedBranchSide2ReactiveFlowEquationTerm;
-import com.powsybl.openloadflow.ac.equations.HvdcAcEmulationSide1ActiveFlowEquationTerm;
-import com.powsybl.openloadflow.ac.equations.HvdcAcEmulationSide2ActiveFlowEquationTerm;
-import com.powsybl.openloadflow.ac.equations.OpenBranchSide1ActiveFlowEquationTerm;
-import com.powsybl.openloadflow.ac.equations.OpenBranchSide1ReactiveFlowEquationTerm;
-import com.powsybl.openloadflow.ac.equations.OpenBranchSide2ActiveFlowEquationTerm;
-import com.powsybl.openloadflow.ac.equations.OpenBranchSide2ReactiveFlowEquationTerm;
-import com.powsybl.openloadflow.ac.equations.ShuntCompensatorActiveFlowEquationTerm;
-import com.powsybl.openloadflow.ac.equations.ShuntCompensatorReactiveFlowEquationTerm;
-import com.powsybl.openloadflow.equations.EquationArray;
 import com.powsybl.openloadflow.equations.EquationSystem;
-import com.powsybl.openloadflow.equations.EquationTermArray;
-import com.powsybl.openloadflow.equations.SingleEquation;
-import com.powsybl.openloadflow.equations.SingleEquationTerm;
-import com.powsybl.openloadflow.equations.Variable;
-import com.powsybl.openloadflow.equations.VariableEquationTerm;
 import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -70,19 +52,6 @@ import java.util.Set;
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public final class GpuAcDataExtractor {
-
-    private static final Set<Class<?>> SUPPORTED_PQ_TERMS = Set.of(
-            ClosedBranchSide1ActiveFlowEquationTerm.class, ClosedBranchSide1ReactiveFlowEquationTerm.class,
-            ClosedBranchSide2ActiveFlowEquationTerm.class, ClosedBranchSide2ReactiveFlowEquationTerm.class,
-            OpenBranchSide1ActiveFlowEquationTerm.class, OpenBranchSide1ReactiveFlowEquationTerm.class,
-            OpenBranchSide2ActiveFlowEquationTerm.class, OpenBranchSide2ReactiveFlowEquationTerm.class,
-            ShuntCompensatorActiveFlowEquationTerm.class, ShuntCompensatorReactiveFlowEquationTerm.class,
-            HvdcAcEmulationSide1ActiveFlowEquationTerm.class, HvdcAcEmulationSide2ActiveFlowEquationTerm.class);
-
-    // the closed-branch equation-term arrays of the VECTORIZED equation system
-    // (AcVectorizedEquationSystemCreator) — the GPU covers exactly the same physics
-    private static final Set<String> SUPPORTED_ARRAY_EVALUATORS = Set.of(
-            "ac_p_array_closed_1", "ac_p_array_closed_2", "ac_q_array_closed_1", "ac_q_array_closed_2");
 
     private GpuAcDataExtractor() {
     }
@@ -126,7 +95,7 @@ public final class GpuAcDataExtractor {
                                     boolean distributedSlack, boolean reactiveLimits,
                                     java.util.Set<String> baseOpenBranchIds,
                                     java.util.Set<String> baseOpenZiBranchIds) {
-        validate(network, es);
+        GpuAcValidation.validate(es);
 
         // Cache each bus's BUS_PHI/BUS_V column once: a bus appears in several branches (degree ~3),
         // so resolving these per branch-endpoint repeats the same variable lookups ~2x its degree.
@@ -136,19 +105,19 @@ public final class GpuAcDataExtractor {
         int[] vCol = new int[nBuses];
         for (LfBus bus : network.getBuses()) {
             int bn = bus.getNum();
-            phiCol[bn] = col(es, bn, AcVariableType.BUS_PHI);
-            vCol[bn] = col(es, bn, AcVariableType.BUS_V);
+            phiCol[bn] = GpuAcRowIndexing.col(es, bn, AcVariableType.BUS_PHI);
+            vCol[bn] = GpuAcRowIndexing.col(es, bn, AcVariableType.BUS_V);
         }
 
         // Per-branch transformer control columns (BRANCH_RHO1 ratio, BRANCH_ALPHA1 phase), -1 when
         // the branch does not derive that control. A controlling transformer's rho column also
         // becomes the controlled bus's Q-balance row (qRow below) — the strong-diagonal pairing.
         int nBranches = network.getBranches().size();
-        int[] branchRhoCol = branchVarCols(es, nBranches, AcVariableType.BRANCH_RHO1);
-        int[] branchAlphaCol = branchVarCols(es, nBranches, AcVariableType.BRANCH_ALPHA1);
-        int[] dummyPCol = branchVarCols(es, nBranches, AcVariableType.DUMMY_P);
-        int[] dummyQCol = branchVarCols(es, nBranches, AcVariableType.DUMMY_Q);
-        int[] qRow = computeQRow(network, es, vCol, branchRhoCol);
+        int[] branchRhoCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.BRANCH_RHO1);
+        int[] branchAlphaCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.BRANCH_ALPHA1);
+        int[] dummyPCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.DUMMY_P);
+        int[] dummyQCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.DUMMY_Q);
+        int[] qRow = GpuAcRowIndexing.computeQRow(network, es, vCol, branchRhoCol);
 
         List<double[]> ziIn = new ArrayList<>();
         List<int[]> ziIdx = new ArrayList<>();
@@ -368,8 +337,8 @@ public final class GpuAcDataExtractor {
         if (reactiveLimits) {                                   // empty pack when the RL outer loop is disabled
             for (LfBus bus : network.getBuses()) {
                 int bn = bus.getNum();
-                boolean vActive = row(es, bn, AcEquationType.BUS_TARGET_V) >= 0;
-                boolean qActive = row(es, bn, AcEquationType.BUS_TARGET_Q) >= 0;
+                boolean vActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_V) >= 0;
+                boolean qActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_Q) >= 0;
                 boolean basePv = vActive && !qActive;          // voltage-controlling in the base case
                 boolean basePqCapable = qActive && !vActive    // switched to PQ in the base case but still capable
                         && !bus.isGeneratorVoltageControlEnabled();
@@ -413,7 +382,7 @@ public final class GpuAcDataExtractor {
                 break;
             }
             int bn = bus.getNum();
-            if (row(es, bn, AcEquationType.BUS_TARGET_PHI) >= 0) {       // the slack/reference bus
+            if (GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_PHI) >= 0) {       // the slack/reference bus
                 dsSlackPhiRow = phiCol[bn];
                 dsSlackTargetP = bus.getTargetP();
                 for (LfGenerator g : bus.getGenerators()) {
@@ -423,7 +392,7 @@ public final class GpuAcDataExtractor {
                 }
                 continue;
             }
-            if (row(es, bn, AcEquationType.BUS_TARGET_P) < 0) {
+            if (GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) < 0) {
                 continue;                                               // no active P balance to retarget
             }
             double factor = 0;
@@ -481,291 +450,6 @@ public final class GpuAcDataExtractor {
     }
 
     /**
-     * Extract what ACTIVATION decides — the per-row power-equation/identity mode and the
-     * OLF-column→stable-row target mapping. Rebuilt only when an activation event fired
-     * (the structure stays valid across PV→PQ switching). Walks every active equation, so
-     * an unsupported equation type ACTIVATED at runtime (e.g. zero-impedance) fails loudly
-     * here even though the full structural validation does not re-run.
-     */
-    public static GpuAcActivation extractActivation(LfNetwork network,
-                                                    EquationSystem<AcVariableType, AcEquationType> es, int n) {
-        int[] mode = new int[n];
-        java.util.Arrays.fill(mode, 1);
-        int[] targetMap = new int[n];
-        java.util.Arrays.fill(targetMap, -1);
-        int nBranches = network.getBranches().size();
-        int[] branchRhoCol = branchVarCols(es, nBranches, AcVariableType.BRANCH_RHO1);
-        int[] vCol = new int[network.getBuses().size()];
-        for (LfBus bus : network.getBuses()) {
-            vCol[bus.getNum()] = col(es, bus.getNum(), AcVariableType.BUS_V);
-        }
-        int[] qRow = computeQRow(network, es, vCol, branchRhoCol);
-        for (LfBus bus : network.getBuses()) {
-            int p = row(es, bus.getNum(), AcEquationType.BUS_TARGET_P);
-            if (p >= 0) {
-                targetMap[col(es, bus.getNum(), AcVariableType.BUS_PHI)] = p;
-            }
-            int q = row(es, bus.getNum(), AcEquationType.BUS_TARGET_Q);
-            if (q >= 0) {
-                targetMap[qRow[bus.getNum()]] = q;          // Q row = V row, or the controlling rho row
-            }
-        }
-        for (SingleEquation<AcVariableType, AcEquationType> e : es.getIndex().getSortedSingleEquationsToSolve()) {
-            // POWER-equation rows (mode stays 1) whose stable row is a non-bus-P/Q variable — assembled by
-            // the GPU DISTR_Q / zero-impedance passes; just map the target onto that variable's row.
-            AcVariableType powerRowVar = switch (e.getType()) {
-                case DISTR_Q -> AcVariableType.BUS_V;        // controller's BUS_V row
-                case DISTR_RHO -> AcVariableType.BRANCH_RHO1; // controller's BRANCH_RHO1 row
-                case ZERO_V -> AcVariableType.DUMMY_P;       // zero-imp v1−rho·v2 sits on the DUMMY_P row
-                case ZERO_PHI -> AcVariableType.DUMMY_Q;     // zero-imp phi1−phi2 sits on the DUMMY_Q row
-                default -> null;
-            };
-            if (powerRowVar != null) {
-                targetMap[col(es, e.getElementNum(), powerRowVar)] = e.getColumn();
-                continue;
-            }
-            // IDENTITY rows (mode 0): the device row-mode mask writes diag 1 and F = x − target.
-            AcVariableType vt = switch (e.getType()) {
-                case BUS_TARGET_V -> AcVariableType.BUS_V;
-                case BUS_TARGET_PHI -> AcVariableType.BUS_PHI;
-                case BRANCH_TARGET_RHO1 -> AcVariableType.BRANCH_RHO1;   // ratio held constant: r1−target identity
-                // Phase shift held constant: a1−target identity. This is the ONLY phase-control row the
-                // GPU packs, and it is the one INCREMENTAL mode keeps active for the whole run (that loop
-                // never calls setPhaseControlEnabled, so a1 stays a variable PINNED to its tap value and
-                // the taps move between solves). CONTINUOUS mode with control ON activates BRANCH_TARGET_P
-                // on the CONTROLLED branch instead — a branch-owned power row the GPU has no family for,
-                // and it is NOT in this switch, so it hits the default throw below and the solver falls
-                // back to CPU for that solve. Safe by construction, never silently dropped.
-                case BRANCH_TARGET_ALPHA1 -> AcVariableType.BRANCH_ALPHA1;
-                case DUMMY_TARGET_P -> AcVariableType.DUMMY_P;           // non-tree zero-imp: dummyP held = 0
-                case DUMMY_TARGET_Q -> AcVariableType.DUMMY_Q;           // non-tree zero-imp: dummyQ held = 0
-                case BUS_TARGET_P, BUS_TARGET_Q -> null;     // power rows, mapped above
-                default -> throw new PowsyblException("GPU AC solver: unsupported equation type "
-                        + e.getType() + " activated");
-            };
-            if (vt != null) {
-                int r = col(es, e.getElementNum(), vt);
-                mode[r] = 0;
-                targetMap[r] = e.getColumn();
-            }
-        }
-        return new GpuAcActivation(mode, targetMap);
-    }
-
-    /**
-     * Per-row variable kind for the MAX_VOLTAGE_CHANGE device step scaling: {@code 0} = BUS_PHI (clamp
-     * the angle step to maxDphi), {@code 1} = BUS_V (clamp the magnitude step to maxDv), {@code 2} = any
-     * other variable (BRANCH_RHO1, …) — scaled by the global step factor but never itself a clamp source,
-     * mirroring {@code MaxVoltageChangeStateVectorScaling} (which only inspects BUS_V / BUS_PHI). Indexed by
-     * the variable row, which is the column index of the Newton step.
-     */
-    public static int[] extractVarType(EquationSystem<AcVariableType, AcEquationType> es, int n) {
-        int[] varType = new int[n];
-        java.util.Arrays.fill(varType, 2);
-        for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
-            varType[v.getRow()] = switch (v.getType()) {
-                case BUS_PHI -> 0;
-                case BUS_V -> 1;
-                default -> 2;
-            };
-        }
-        return varType;
-    }
-
-    private static void validate(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es) {
-        for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
-            // BRANCH_RHO1 (continuous transformer voltage control) is supported for a single
-            // transformer locally controlling one of its own terminal buses; computeQRow throws
-            // on the unsupported shapes (remote / multi-transformer DISTR_RHO).
-            // BRANCH_ALPHA1 (phase control) is packed as a COLUMN only: the closed-branch kernel already
-            // reads a1 from the state vector when the branch derives it (cbIdx[8]) and already emits
-            // dp1da1/dq1da1/dp2da1/dq2da1. Which ROW pairs with that column is decided in
-            // extractActivation: BRANCH_TARGET_ALPHA1 (identity, INCREMENTAL mode) is packed,
-            // BRANCH_TARGET_P (CONTINUOUS mode with control enabled) throws there.
-            AcVariableType vtype = v.getType();
-            if (vtype != AcVariableType.BUS_V && vtype != AcVariableType.BUS_PHI
-                    && vtype != AcVariableType.BRANCH_RHO1
-                    && vtype != AcVariableType.BRANCH_ALPHA1
-                    && vtype != AcVariableType.DUMMY_P && vtype != AcVariableType.DUMMY_Q) {
-                throw new PowsyblException("GPU AC solver: unsupported variable type " + vtype
-                        + " (only plain AC power flow + transformer voltage control + zero-impedance "
-                        + "branches are supported)");
-            }
-        }
-        // vectorized (equation-array) systems: the arrays carry the closed-branch terms
-        // (same physics as the GPU closed-branch kernel); per-element scalar terms
-        // (open-branch, shunt, HVDC) attach to the array elements
-        for (EquationArray<AcVariableType, AcEquationType> arr : es.getIndex().getSortedEquationArraysToSolve()) {
-            if (arr.getType() != AcEquationType.BUS_TARGET_P && arr.getType() != AcEquationType.BUS_TARGET_Q) {
-                throw new PowsyblException("GPU AC solver: unsupported equation-array type " + arr.getType());
-            }
-            for (EquationTermArray<AcVariableType, AcEquationType> ta : arr.getTermArrays()) {
-                String name = ((EquationTermArray.EquationTermArrayElementImpl<AcVariableType, AcEquationType>) ta.getElement(0))
-                        .getEvaluator().getName();
-                if (!SUPPORTED_ARRAY_EVALUATORS.contains(name)) {
-                    throw new PowsyblException("GPU AC solver: unsupported equation-term array '" + name
-                            + "' in " + arr.getType());
-                }
-            }
-            for (int elementNum = 0; elementNum < arr.getElementCount(); elementNum++) {
-                for (SingleEquationTerm<AcVariableType, AcEquationType> t : arr.getSingleEquationTerms(elementNum)) {
-                    // a VariableEquationTerm is a zero-impedance DUMMY_P/Q coupling term (GPU zi family)
-                    if (t.isActive() && !SUPPORTED_PQ_TERMS.contains(t.getClass())
-                            && !isDummyCouplingTerm(t)) {
-                        throw new PowsyblException("GPU AC solver: unsupported equation term "
-                                + t.getClass().getSimpleName() + " in " + arr.getType());
-                    }
-                }
-            }
-        }
-        for (SingleEquation<AcVariableType, AcEquationType> e : es.getIndex().getSortedSingleEquationsToSolve()) {
-            switch (e.getType()) {
-                case BUS_TARGET_P, BUS_TARGET_Q -> {
-                    for (SingleEquationTerm<AcVariableType, AcEquationType> t : e.getTerms()) {
-                        // a VariableEquationTerm here is a zero-impedance branch's DUMMY_P/DUMMY_Q coupling
-                        // term, assembled by the GPU zero-impedance family — accept it.
-                        if (t.isActive() && !SUPPORTED_PQ_TERMS.contains(t.getClass())
-                                && !isDummyCouplingTerm(t)) {
-                            throw new PowsyblException("GPU AC solver: unsupported equation term "
-                                    + t.getClass().getSimpleName() + " in " + e.getType());
-                        }
-                    }
-                }
-                case DISTR_Q -> {
-                    // reactive-distribution row: OLF sums per-controller reactive terms wrapped in
-                    // MultiplyByScalarEquationTerm. The GPU re-assembles it from network topology, so the
-                    // real coverage guard is buildDistrQContributions (it throws on shunt / open-branch /
-                    // remote shapes it cannot wire). Accept the equation here.
-                }
-                case ZERO_V, ZERO_PHI, DUMMY_TARGET_P, DUMMY_TARGET_Q -> {
-                    // zero-impedance branch coupling (v1−rho·v2 / phi1−phi2) and the held-dummy identities —
-                    // assembled by the GPU zero-impedance family from network topology. Accept.
-                }
-                case DISTR_RHO -> {
-                    // transformer ratio distribution ((1/count)·Σ r1 − r1_k) — a linear coupling of the
-                    // controller BRANCH_RHO1 variables, re-assembled by the GPU DISTR_RHO family. Accept.
-                }
-                case BUS_TARGET_V, BUS_TARGET_PHI, BRANCH_TARGET_RHO1, BRANCH_TARGET_ALPHA1 -> {
-                    // identity rows on a single variable (v−target, phi−target, r1−target when a
-                    // transformer ratio is held constant, a1−target when a phase shift is) — applied
-                    // device-side by the row-mode mask
-                    for (SingleEquationTerm<AcVariableType, AcEquationType> t : e.getTerms()) {
-                        if (t.isActive() && !(t instanceof VariableEquationTerm)) {
-                            throw new PowsyblException("GPU AC solver: unsupported equation term "
-                                    + t.getClass().getSimpleName() + " in " + e.getType());
-                        }
-                    }
-                }
-                default -> throw new PowsyblException("GPU AC solver: unsupported equation type " + e.getType());
-            }
-        }
-        // NOTE: a branch flagged disconnection-allowed (a security-analysis contingency candidate) is NOT
-        // rejected. Disconnection is a discrete event BETWEEN solves (a contingency), never a switch WITHIN
-        // a single Newton/outer-loop sequence — so for any one fixed configuration the extracted pattern is
-        // correct. A currently-closed candidate is modelled as a normal closed branch; when a contingency
-        // outages it, its terms deactivate and it drops out of the index packs, so the structure changes and
-        // GpuNewtonRaphson rebuilds its context (sameStructureAs is false) while the batch masks it
-        // per-scenario. The throw that used to live here was therefore over-conservative.
-    }
-
-    /** A P/Q-balance term over only DUMMY_P/DUMMY_Q variables — a zero-impedance coupling term the GPU
-     *  zero-impedance family assembles (its wrapper class may be a Variable or a MultiplyByScalar term). */
-    private static boolean isDummyCouplingTerm(SingleEquationTerm<AcVariableType, AcEquationType> t) {
-        return !t.getVariables().isEmpty() && t.getVariables().stream()
-                .allMatch(v -> v.getType() == AcVariableType.DUMMY_P || v.getType() == AcVariableType.DUMMY_Q);
-    }
-
-    private static int col(EquationSystem<AcVariableType, AcEquationType> es, int bus, AcVariableType t) {
-        return es.getVariableSet().getVariable(bus, t).getRow();
-    }
-
-    private static int row(EquationSystem<AcVariableType, AcEquationType> es, int bus, AcEquationType t) {
-        return es.getEquation(bus, t).map(e -> e.getColumn()).orElse(-1);
-    }
-
-    /** Variable rows of every {@code type} variable, indexed by its element (branch) number; -1 when absent. */
-    private static int[] branchVarCols(EquationSystem<AcVariableType, AcEquationType> es, int nBranches,
-                                       AcVariableType type) {
-        int[] cols = new int[nBranches];
-        java.util.Arrays.fill(cols, -1);
-        for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
-            if (v.getType() == type) {
-                cols[v.getElementNum()] = v.getRow();
-            }
-        }
-        return cols;
-    }
-
-    /**
-     * The stable Q-balance row of each bus (indexed by bus number). Normally a bus's reactive
-     * balance sits on its own BUS_V variable row. When a bus is voltage-controlled by a transformer
-     * — signalled by BOTH its BUS_TARGET_V and BUS_TARGET_Q being active (a generator PV bus has V
-     * active but Q inactive, so it is excluded) — the BUS_V row instead carries the v−target identity,
-     * and the reactive balance moves onto the controlling transformer's BRANCH_RHO1 column, which is
-     * the extra degree of freedom. That rho column is then the strong diagonal of the Q row.
-     *
-     * <p>Only the simple local single-transformer case is supported; throws on shunt voltage control,
-     * remote control, and ratio distribution across several transformers (DISTR_RHO).
-     */
-    private static int[] computeQRow(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                     int[] vCol, int[] branchRhoCol) {
-        int[] qRow = vCol.clone();
-        for (LfBus bus : network.getBuses()) {
-            int bn = bus.getNum();
-            boolean vActive = row(es, bn, AcEquationType.BUS_TARGET_V) >= 0;
-            boolean qActive = row(es, bn, AcEquationType.BUS_TARGET_Q) >= 0;
-            // A remote generator voltage controller bus normally has its BUS_TARGET_Q deactivated — its reactive
-            // injection feeds the DISTR_Q rows, never its own BUS_V row — so suppress its per-bus Q scatter.
-            // If the controller is switched to PQ by reactive limits, BUS_TARGET_Q becomes active again and the
-            // bus must recover its own BUS_V-backed Q row.
-            if (bus.getGeneratorVoltageControl().isPresent() && !bus.isGeneratorVoltageControlled() && !qActive) {
-                qRow[bn] = -1;
-                continue;
-            }
-            if (!(vActive && qActive)) {
-                continue;                                   // plain PQ / generator PV bus: Q stays on its V row
-            }
-            // A pilot bus controlled by REMOTE generators: its reactive balance moves onto the free
-            // controller's BUS_V row (the controller whose DISTR_Q is inactive — the extra freedom).
-            GeneratorVoltageControl gvc = bus.getGeneratorVoltageControl()
-                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
-                    .filter(c -> bus.isGeneratorVoltageControlled() && !c.isLocalControl())
-                    .orElse(null);
-            if (gvc != null) {
-                LfBus freeController = gvc.getMergedControllerElements().stream()
-                        .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_Q) < 0)
-                        .filter(c -> row(es, c.getNum(), AcEquationType.BUS_TARGET_Q) < 0)
-                        .findFirst()
-                        .orElseThrow(() -> new PowsyblException("GPU AC solver: remote generator voltage control "
-                                + "of bus " + bus.getId() + " has no free enabled controller"));
-                qRow[bn] = vCol[freeController.getNum()];
-                continue;
-            }
-            // A pilot bus voltage-controlled by transformers: its reactive balance moves onto the FREE
-            // controller's BRANCH_RHO1 row (the controller whose DISTR_RHO is inactive — the extra freedom).
-            // With one local transformer this is item 4; with several it is ratio distribution (DISTR_RHO),
-            // and the controller may even be remote (then the pilot-Q diagonal is zero → cuDSS pivoting).
-            TransformerVoltageControl tvc = bus.getTransformerVoltageControl()
-                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
-                    .orElseThrow(() -> new PowsyblException("GPU AC solver: bus " + bus.getId()
-                            + " has active voltage and reactive targets but no supported voltage control "
-                            + "(shunt voltage control is not supported)"));
-            LfBranch freeController = tvc.getMergedControllerElements().stream()
-                    .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_RHO) < 0)
-                    .findFirst()
-                    .orElseThrow(() -> new PowsyblException("GPU AC solver: transformer voltage control of bus "
-                            + bus.getId() + " has no free controller (all DISTR_RHO active)"));
-            int rhoRow = branchRhoCol[freeController.getNum()];
-            if (rhoRow < 0) {
-                throw new PowsyblException("GPU AC solver: controlling transformer " + freeController.getId()
-                        + " has no BRANCH_RHO1 variable");
-            }
-            qRow[bn] = rhoRow;
-        }
-        return qRow;
-    }
-
-    /**
      * Build the weighted closed-branch reactive contributions of every active DISTR_Q row (remote
      * generator voltage control). For a control group, the row at controller {@code Gk}'s BUS_V row is
      * {@code DISTR_Q_k = qPct_k·Σ_j q_Gj − q_Gk}, so each controller {@code Gj}'s reactive injection
@@ -789,7 +473,7 @@ public final class GpuAcDataExtractor {
             }
             List<LfBus> controllers = gvc.getMergedControllerElements();
             for (LfBus gk : controllers) {
-                if (row(es, gk.getNum(), AcEquationType.DISTR_Q) < 0) {
+                if (GpuAcRowIndexing.row(es, gk.getNum(), AcEquationType.DISTR_Q) < 0) {
                     continue;                                // the free controller carries the pilot's Q, no DISTR_Q
                 }
                 int dqRow = vCol[gk.getNum()];
@@ -866,7 +550,7 @@ public final class GpuAcDataExtractor {
             List<LfBranch> controllers = tvc.getMergedControllerElements();
             long count = controllers.stream().filter(c -> !c.isDisabled()).count();
             for (LfBranch gk : controllers) {
-                if (row(es, gk.getNum(), AcEquationType.DISTR_RHO) < 0) {
+                if (GpuAcRowIndexing.row(es, gk.getNum(), AcEquationType.DISTR_RHO) < 0) {
                     continue;                                // the free controller carries the pilot's Q, no DISTR_RHO
                 }
                 int drRow = branchRhoCol[gk.getNum()];
@@ -901,7 +585,7 @@ public final class GpuAcDataExtractor {
                 continue;
             }
             List<LfBranch> group = tvc.getMergedControllerElements();
-            boolean distrRho = group.stream().anyMatch(c -> row(es, c.getNum(), AcEquationType.DISTR_RHO) >= 0);
+            boolean distrRho = group.stream().anyMatch(c -> GpuAcRowIndexing.row(es, c.getNum(), AcEquationType.DISTR_RHO) >= 0);
             if (distrRho) {
                 controllers.addAll(group);
             }

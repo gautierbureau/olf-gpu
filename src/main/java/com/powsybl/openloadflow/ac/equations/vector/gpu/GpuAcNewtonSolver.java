@@ -113,7 +113,7 @@ public final class GpuAcNewtonSolver {
      * @param maxDv   MAX_VOLTAGE_CHANGE (lsMode 2): clamp on |Δv| per iteration (BUS_V rows)
      * @param maxDphi MAX_VOLTAGE_CHANGE (lsMode 2): clamp on |Δφ| per iteration (BUS_PHI rows, radians)
      * @param varType per row, the variable kind for the maxVoltageChange clamp (0 = BUS_PHI,
-     *                1 = BUS_V, 2 = other); see GpuAcDataExtractor#extractVarType. Unused for lsMode 0/1.
+     *                1 = BUS_V, 2 = other); see GpuAcActivationExtractor#extractVarType. Unused for lsMode 0/1.
      * @return {@code double[n + 2]}: the converged state, then iterations, then the final
      *         mismatch infinity norm
      */

@@ -12,6 +12,7 @@ import com.powsybl.commons.report.ReportNode;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivationExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
@@ -205,8 +206,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 invalidation.activationDirty = true;
             }
             if (invalidation.activationDirty) {
-                activation = GpuAcDataExtractor.extractActivation(network, equationSystem, n);
-                varType = GpuAcDataExtractor.extractVarType(equationSystem, n);
+                activation = GpuAcActivationExtractor.extractActivation(network, equationSystem, n);
+                varType = GpuAcActivationExtractor.extractVarType(equationSystem, n);
                 invalidation.activationDirty = false;
             }
             double[] target = activation.applyTargets(targetVector.getArray());

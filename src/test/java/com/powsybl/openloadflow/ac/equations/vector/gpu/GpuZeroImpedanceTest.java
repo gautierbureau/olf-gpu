@@ -96,7 +96,7 @@ class GpuZeroImpedanceTest {
 
         double[] x0 = sv.get().clone();
         GpuAcData d = GpuAcDataExtractor.extract(network, es);
-        GpuAcActivation activation = GpuAcDataExtractor.extractActivation(network, es, n);
+        GpuAcActivation activation = GpuAcActivationExtractor.extractActivation(network, es, n);
         double[] stableTargets = activation.applyTargets(target.getArray());
 
         double[] out = GpuAcNewtonSolver.solve(x0, stableTargets, activation.rowMode(), MAX_ITER, TOL,

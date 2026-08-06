@@ -113,7 +113,7 @@ class GpuVsCpuFixedIterTest {
         double[] x0 = p.sv().get().clone();      // the DC-init state, common start
 
         GpuAcData d = GpuAcDataExtractor.extract(p.network(), p.es());
-        GpuAcActivation activation = GpuAcDataExtractor.extractActivation(p.network(), p.es(), n);
+        GpuAcActivation activation = GpuAcActivationExtractor.extractActivation(p.network(), p.es(), n);
         double[] stableTargets = activation.applyTargets(p.target().getArray());
 
         System.out.printf("GPU-vs-CPU undamped fixed-K on %s (n=%d), DC-init base case%n",

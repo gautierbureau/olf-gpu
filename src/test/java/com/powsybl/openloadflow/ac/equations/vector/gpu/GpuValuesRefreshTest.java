@@ -66,7 +66,7 @@ class GpuValuesRefreshTest {
 
         double[] x0 = es.getStateVector().get().clone();
         GpuAcData d1 = GpuAcDataExtractor.extract(network, es);
-        GpuAcActivation act = GpuAcDataExtractor.extractActivation(network, es, n);
+        GpuAcActivation act = GpuAcActivationExtractor.extractActivation(network, es, n);
         int[] rowMode = act.rowMode();
         double[] targets = act.applyTargets(target.getArray());          // structure/activation unchanged by an r1 move
 

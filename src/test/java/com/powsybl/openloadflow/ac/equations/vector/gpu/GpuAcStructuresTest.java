@@ -86,7 +86,7 @@ class GpuAcStructuresTest {
         assertEquals(hits + 3, GpuAcStructures.hitCount());
 
         // A context built on the aliased handle solves normally.
-        GpuAcActivation act = GpuAcDataExtractor.extractActivation(network, es, n);
+        GpuAcActivation act = GpuAcActivationExtractor.extractActivation(network, es, n);
         double[] targets = act.applyTargets(target.getArray());
         long ctx = GpuAcNewtonSolver.createContext(aliased);
         try {

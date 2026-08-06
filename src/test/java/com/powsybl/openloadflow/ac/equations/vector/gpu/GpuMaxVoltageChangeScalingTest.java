@@ -89,8 +89,8 @@ class GpuMaxVoltageChangeScalingTest {
 
         double[] x0 = sv.get().clone();
         GpuAcData d = GpuAcDataExtractor.extract(network, es);
-        GpuAcActivation activation = GpuAcDataExtractor.extractActivation(network, es, n);
-        int[] varType = GpuAcDataExtractor.extractVarType(es, n);
+        GpuAcActivation activation = GpuAcActivationExtractor.extractActivation(network, es, n);
+        int[] varType = GpuAcActivationExtractor.extractVarType(es, n);
         double[] stableTargets = activation.applyTargets(target.getArray());
 
         long handle = GpuAcNewtonSolver.createContext(GpuAcStructures.handle(n, d));

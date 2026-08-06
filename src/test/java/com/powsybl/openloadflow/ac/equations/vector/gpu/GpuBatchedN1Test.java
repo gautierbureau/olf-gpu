@@ -93,7 +93,7 @@ class GpuBatchedN1Test {
 
         double[] x0 = sv.get().clone();
         GpuAcData d = GpuAcDataExtractor.extract(network, es);
-        GpuAcActivation activation = GpuAcDataExtractor.extractActivation(network, es, n);
+        GpuAcActivation activation = GpuAcActivationExtractor.extractActivation(network, es, n);
         double[] stableTargets = activation.applyTargets(target.getArray());
 
         // K identical scenarios, no element disabled — every scenario is the base case. The base
@@ -149,7 +149,7 @@ class GpuBatchedN1Test {
 
         double[] x0 = sv.get().clone();
         GpuAcData d = GpuAcDataExtractor.extract(network, es);
-        GpuAcActivation activation = GpuAcDataExtractor.extractActivation(network, es, n);
+        GpuAcActivation activation = GpuAcActivationExtractor.extractActivation(network, es, n);
         double[] stableTargets = activation.applyTargets(target.getArray());
 
         int nElements = d.getTotalElementCount();

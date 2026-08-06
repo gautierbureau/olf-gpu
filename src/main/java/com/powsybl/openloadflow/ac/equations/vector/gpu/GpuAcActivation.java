@@ -37,6 +37,6 @@ public record GpuAcActivation(int[] rowMode, int[] targetMap) {
     public static GpuAcActivation fromEquationSystem(LfNetwork network,
                                                      EquationSystem<AcVariableType, AcEquationType> es) {
         int n = es.getIndex().getSortedVariablesToFind().size();
-        return GpuAcDataExtractor.extractActivation(network, es, n);
+        return GpuAcActivationExtractor.extractActivation(network, es, n);
     }
 }

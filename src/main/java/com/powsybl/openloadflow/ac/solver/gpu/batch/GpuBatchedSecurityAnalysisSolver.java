@@ -11,6 +11,7 @@ import com.powsybl.commons.report.ReportNode;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivationExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
@@ -855,7 +856,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
             solveQualifiedInChunks(batchedIndices, contingencies, elementMapper, gpuData, baseState,
                     baseTargets, baseActivation.rowMode(), frozenRowsByIndex, frozenTargetsByIndex, genOutagesByIndex,
                     n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
-                    config.lsMode() == 2 ? GpuAcDataExtractor.extractVarType(equationSystem, n) : null,
+                    config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
                     config.transformerControl()
                             ? buildTransformerControllers(network, equationSystem, targetVector, baseActivation,
                                     baseTargets, elementMapper)

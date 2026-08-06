@@ -87,7 +87,7 @@ class GpuBatchedDistrRhoTest {
 
         GpuAcData d = GpuAcDataExtractor.extract(net, es);
         assertTrue(d.getDistrRhoContributionCount() > 0, "the test network must exercise DISTR_RHO rows");
-        Set<LfBranch> controllers = GpuAcDataExtractor.distrRhoControllerBranches(net, es);
+        Set<LfBranch> controllers = GpuAcOuterLoopPacks.distrRhoControllerBranches(net, es);
         assertTrue(!controllers.isEmpty(), "must have DISTR_RHO controller transformers");
 
         cpuReference(es, target, eq, sv);                    // converge the base case as the hot start

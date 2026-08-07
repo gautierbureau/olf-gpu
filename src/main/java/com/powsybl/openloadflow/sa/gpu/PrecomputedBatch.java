@@ -1,0 +1,40 @@
+/**
+ * Copyright (c) 2026, RTE (http://www.rte-france.com)
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ * SPDX-License-Identifier: MPL-2.0
+ */
+package com.powsybl.openloadflow.sa.gpu;
+
+import com.powsybl.openloadflow.ac.equations.AcEquationType;
+import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.equations.EquationSystem;
+import com.powsybl.openloadflow.equations.Variable;
+
+import java.util.Map;
+
+/**
+ * The output of {@link GpuBatchPrecomputer#precompute}: the ONLY coupling between the batch precompute
+ * and the per-contingency injection. Holds the converged device state per scenario id
+ * ({@code states}), the islanded LfBus nums to exclude from each scenario's results
+ * ({@code islandedBuses}), the BASE variable-row snapshot the injection remaps through
+ * ({@code baseVariableRows}), and the engine's equation system the states were solved against
+ * ({@code equationSystem} — {@code null} when nothing was precomputed, the CPU-fallback signal).
+ *
+ * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
+ */
+record PrecomputedBatch(Map<String, double[]> states, Map<String, int[]> islandedBuses,
+                        Map<Variable<AcVariableType>, Integer> baseVariableRows,
+                        EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+
+    /** Nothing precomputed — every contingency falls back to the sequential CPU path. */
+    static PrecomputedBatch empty() {
+        return new PrecomputedBatch(Map.of(), Map.of(), Map.of(), null);
+    }
+
+    /** True when the batch precompute reached the device solve (an equation system is captured). */
+    boolean isReady() {
+        return equationSystem != null;
+    }
+}

@@ -27,6 +27,7 @@ import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
@@ -98,13 +99,13 @@ class GpuBatchedPegaseFullLoadflowTest {
         assumeTrue(Files.exists(CASES.resolve(CASE)), CASE + " not found");
         // Only override when the env var IS set — a bare run measures the production defaults
         // (mode 3 UBATCH, memory auto-sized chunk).
-        if (System.getProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY) == null
+        if (System.getProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY) == null
                 && System.getenv("OLF_GPU_MAXBATCH") != null) {
-            System.setProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY, System.getenv("OLF_GPU_MAXBATCH"));
+            System.setProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY, System.getenv("OLF_GPU_MAXBATCH"));
         }
-        if (System.getProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY) == null
+        if (System.getProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY) == null
                 && System.getenv("OLF_GPU_BATCHMODE") != null) {
-            System.setProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY, System.getenv("OLF_GPU_BATCHMODE"));
+            System.setProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY, System.getenv("OLF_GPU_BATCHMODE"));
         }
     }
 

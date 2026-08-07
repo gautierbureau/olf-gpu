@@ -32,6 +32,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.LoadLoss;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.ShuntShift;
@@ -201,7 +202,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         OpenLoadFlowParameters olfGuardParams = OpenLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters());
         boolean transformerControlBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL
-                && GpuBatchedSecurityAnalysisSolver.transformerControlSupported(lfNetwork);
+                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
         boolean noSvc = lfNetwork.getBuses().stream()
                 .flatMap(b -> b.getGenerators().stream())
                 .noneMatch(g -> g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator);
@@ -831,7 +832,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         if (b == null || tapChanger == null) {
             return null;
         }
-        double[][] table = GpuBatchedSecurityAnalysisSolver.tapModels(b.getPiModel());
+        double[][] table = GpuBatchTransformerControl.tapModels(b.getPiModel());
         int low = tapChanger.getLowTapPosition();
         int idx = (relative ? tapChanger.getTapPosition() + tapPosition : tapPosition) - low;
         if (table.length == 0 || idx < 0 || idx >= table.length) {

@@ -37,13 +37,13 @@ class GpuBatchedSecurityAnalysisSolverTest {
 
     @Test
     void explicitCapIsHonouredAndClampedToCount() {
-        System.setProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY, "64");
+        System.setProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY, "64");
         try {
-            assertEquals(64, GpuBatchedSecurityAnalysisSolver.resolveChunkSize(1000, 10, EMPTY));
-            assertEquals(10, GpuBatchedSecurityAnalysisSolver.resolveChunkSize(10, 10, EMPTY),
+            assertEquals(64, GpuBatchContextCache.resolveChunkSize(1000, 10, EMPTY));
+            assertEquals(10, GpuBatchContextCache.resolveChunkSize(10, 10, EMPTY),
                     "chunk is clamped to the scenario count");
         } finally {
-            System.clearProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY);
+            System.clearProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY);
         }
     }
 
@@ -51,24 +51,24 @@ class GpuBatchedSecurityAnalysisSolverTest {
     void autoSizeFallsBackToDefaultWhenNoGpu() {
         assumeFalse(GpuAcNewtonSolver.isAvailable(), "auto-size queries the device when a GPU is present");
         // No GPU: recommendBatchSize is unlinked, so resolveChunkSize falls back to the default.
-        System.clearProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY);
-        assertEquals(GpuBatchedSecurityAnalysisSolver.DEFAULT_MAX_BATCH,
-                GpuBatchedSecurityAnalysisSolver.resolveChunkSize(1000, 10, EMPTY));
+        System.clearProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY);
+        assertEquals(GpuBatchContextCache.DEFAULT_MAX_BATCH,
+                GpuBatchContextCache.resolveChunkSize(1000, 10, EMPTY));
     }
 
     @Test
     void chunkSizeAlwaysClampedToScenarioCount() {
         // Holds for every path (explicit cap, auto-size, or fallback): 1 <= chunk <= nb.
-        System.clearProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY);
-        int chunk = GpuBatchedSecurityAnalysisSolver.resolveChunkSize(5, 10, EMPTY);
+        System.clearProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY);
+        int chunk = GpuBatchContextCache.resolveChunkSize(5, 10, EMPTY);
         assertTrue(chunk >= 1 && chunk <= 5, "chunk must be in [1, nb], was " + chunk);
 
-        System.setProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY, "0");   // invalid -> auto/fallback
+        System.setProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY, "0");   // invalid -> auto/fallback
         try {
-            int c2 = GpuBatchedSecurityAnalysisSolver.resolveChunkSize(5, 10, EMPTY);
+            int c2 = GpuBatchContextCache.resolveChunkSize(5, 10, EMPTY);
             assertTrue(c2 >= 1 && c2 <= 5, "chunk must be in [1, nb], was " + c2);
         } finally {
-            System.clearProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY);
+            System.clearProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY);
         }
     }
 }

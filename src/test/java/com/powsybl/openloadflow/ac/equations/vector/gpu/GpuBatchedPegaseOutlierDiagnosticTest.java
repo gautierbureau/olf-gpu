@@ -28,6 +28,7 @@ import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
@@ -87,7 +88,7 @@ class GpuBatchedPegaseOutlierDiagnosticTest {
     void localizeOutlier() {
         assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");
         assumeTrue(Files.exists(CASES.resolve(CASE)), CASE + " not found");
-        System.setProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY, "3");
+        System.setProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY, "3");
 
         Network iidm = Network.read(CASES.resolve(CASE));
         LoadFlowParameters lfp = gpuScopeParameters();

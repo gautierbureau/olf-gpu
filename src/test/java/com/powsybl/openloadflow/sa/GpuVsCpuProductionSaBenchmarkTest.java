@@ -16,7 +16,7 @@ import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.CommonTestConfig;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuTestPaths;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.sa.gpu.GpuBatchedAcSecurityAnalysis;
 import com.powsybl.openloadflow.sa.gpu.GpuSecurityAnalysisProvider;
@@ -78,13 +78,13 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
         // env var IS set: a bare run must measure the PRODUCTION defaults (mode 3 UBATCH, memory
         // auto-sized chunk) — the old hardcoded 0/32 fallbacks made it read ~2x slower than what
         // any real provider user gets.
-        if (System.getProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY) == null
+        if (System.getProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY) == null
                 && System.getenv("OLF_GPU_MAXBATCH") != null) {
-            System.setProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY, System.getenv("OLF_GPU_MAXBATCH"));
+            System.setProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY, System.getenv("OLF_GPU_MAXBATCH"));
         }
-        if (System.getProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY) == null
+        if (System.getProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY) == null
                 && System.getenv("OLF_GPU_BATCHMODE") != null) {
-            System.setProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY, System.getenv("OLF_GPU_BATCHMODE"));
+            System.setProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY, System.getenv("OLF_GPU_BATCHMODE"));
         }
         // OLF_GPU_SA_GPU_BASE=0: force the GPU arm's BASE load flow onto the CPU solver too (isolates
         // base-trajectory differences from the batched contingency path in A/B debugging).

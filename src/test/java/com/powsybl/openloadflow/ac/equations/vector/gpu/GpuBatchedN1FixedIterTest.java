@@ -22,6 +22,7 @@ import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;
@@ -112,13 +113,13 @@ class GpuBatchedN1FixedIterTest {
         // memory auto-sized chunk). Caveat kept from the old hardcoded cap: selecting mode 1
         // (OLF_GPU_BATCHMODE=1) without an explicit OLF_GPU_MAXBATCH cap can over-commit device
         // memory at PEGASE-9241 on a small card — mode 1's memory model is not auto-size-aware.
-        if (System.getProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY) == null
+        if (System.getProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY) == null
                 && System.getenv("OLF_GPU_MAXBATCH") != null) {
-            System.setProperty(GpuBatchedSecurityAnalysisSolver.MAX_BATCH_PROPERTY, System.getenv("OLF_GPU_MAXBATCH"));
+            System.setProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY, System.getenv("OLF_GPU_MAXBATCH"));
         }
-        if (System.getProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY) == null
+        if (System.getProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY) == null
                 && System.getenv("OLF_GPU_BATCHMODE") != null) {
-            System.setProperty(GpuBatchedSecurityAnalysisSolver.BATCH_MODE_PROPERTY, System.getenv("OLF_GPU_BATCHMODE"));
+            System.setProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY, System.getenv("OLF_GPU_BATCHMODE"));
         }
     }
 
@@ -191,7 +192,7 @@ class GpuBatchedN1FixedIterTest {
         LfNetwork network = p.network();
         EquationSystem<AcVariableType, AcEquationType> es = p.es();
         TargetVector<AcVariableType, AcEquationType> target = p.target();
-        GpuBatchedSecurityAnalysisSolver.clearContextCache();
+        GpuBatchContextCache.clearContextCache();
         GpuAcStructures.clear();
         long baseLfT0 = System.nanoTime();
         new AcloadFlowEngine(context).run();
@@ -288,7 +289,7 @@ class GpuBatchedN1FixedIterTest {
             int kE2E = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_E2E_K", "4"));
             NewtonRaphsonParameters params = new NewtonRaphsonParameters();
             params.setMaxIterations(kE2E);
-            GpuBatchedSecurityAnalysisSolver.clearContextCache();
+            GpuBatchContextCache.clearContextCache();
             long g0 = System.nanoTime();
             List<BatchScenarioResult> cold = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
                     network, baseState, contingencies, es, target, params, TOL, ReportNode.NO_OP);

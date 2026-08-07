@@ -24,7 +24,7 @@ import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationVector;
 import com.powsybl.openloadflow.equations.JacobianMatrix;
@@ -115,7 +115,7 @@ class GpuBatchedParticipatingSlackConvergenceTest {
         boolean[][] disabledMask = {new boolean[d.getTotalElementCount()]};
         int[][] rowModes = {act.rowMode()};
         double[][] batch = GpuAcNewtonSolver.solveBatch(baseState, stableTargets, rowModes, disabledMask,
-                GpuBatchedSecurityAnalysisSolver.resolveBatchMode(), MAX_ITER, 1e-10, 1e-4, dsTolPu,
+                GpuBatchContextCache.resolveBatchMode(), MAX_ITER, 1e-10, 1e-4, dsTolPu,
                 d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
                 new int[0], new double[0], new double[0], new double[0], new double[0],
                 d.dsPhiRow(), d.dsFactor(), d.dsSlackPhiRow(), d.dsSlackTargetP(),

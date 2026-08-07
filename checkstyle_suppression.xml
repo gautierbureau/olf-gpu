@@ -21,9 +21,10 @@
          pack in one place; splitting it would scatter tightly-coupled index bookkeeping. -->
     <suppress files="[/\\]GpuAcDataExtractor\.java" checks="MethodLength"/>
 
-    <!-- solveQualifiedInChunks assembles ~30 per-scenario device buffers (masks, row modes, target /
-         tap / shunt / distributed-slack overrides, zero-impedance enable+disable slots) that are all
-         reused across chunks and mutated in lockstep. Splitting it would mean threading every buffer
-         through a parameter object for no readability gain. -->
-    <suppress files="[/\\]GpuBatchedSecurityAnalysisSolver\.java" checks="MethodLength"/>
+    <!-- GpuBatchChunkSolver.solveQualifiedInChunks assembles ~30 per-scenario device buffers (masks,
+         row modes, target / tap / shunt / distributed-slack overrides, zero-impedance enable+disable
+         slots) that are all reused across chunks and mutated in lockstep. GpuBatchedSecurityAnalysisSolver
+         .solveBatchN1 is the terminal qualification+assembly funnel. Splitting either would mean threading
+         every buffer through a parameter object for no readability gain. -->
+    <suppress files="[/\\](GpuBatchedSecurityAnalysisSolver|GpuBatchChunkSolver)\.java" checks="MethodLength"/>
 </suppressions>

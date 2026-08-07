@@ -24,7 +24,7 @@ import org.junit.jupiter.api.extension.ExtensionContext;
  *
  * <p>This extension used to ALSO reset the batched solver's JVM-global config before each test, because
  * that config leaked between a provider-driven run and a test driving the solver directly (the pegase
- * full-suite failure — see {@code GpuBatchedSecurityAnalysisSolver.BatchConfig}). That leak is now gone
+ * full-suite failure — see {@code BatchConfig}). That leak is now gone
  * by construction: the config is a per-call {@code BatchConfig}, so there is nothing to reset.
  *
  * <p>Auto-registered via {@code META-INF/services/org.junit.jupiter.api.extension.Extension}, with

@@ -55,45 +55,6 @@ public final class GpuBatchedSecurityAnalysisSolver {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchedSecurityAnalysisSolver.class);
 
-    /** System property: an explicit GPU batch chunk size (scenarios). When unset, the chunk is auto-sized from free device memory. */
-    /**
-     * The run's outer-loop parameterization for the batched device path — a PER-CALL value, threaded
-     * from {@link com.powsybl.openloadflow.sa.gpu.GpuBatchedAcSecurityAnalysis} into {@link #solveBatchN1}
-     * and down to the device call. It used to live in JVM-global static fields set through setters
-     * before each run; production was safe only because the provider always wrote every field first,
-     * but anything driving the solver DIRECTLY inherited the previous run's values. That leak (a stale
-     * {@code dsRejectResidual} from an RTE run rejecting every saturated scenario of the next direct
-     * run) is why GpuBatchedPegaseFullLoadflowTest passed alone yet failed in a full-suite run. Making
-     * it a parameter removes the leak by construction; the leak was one-directional (a stale
-     * {@code true} over-rejects — slow but correct; a stale {@code false} would under-reject and leave a
-     * residual at the slack the run's failure behavior forbids — a silent wrong answer).
-     *
-     * <ul>
-     *   <li>{@code lsMode}/{@code maxDv}/{@code maxDphi}: MAX_VOLTAGE_CHANGE state-vector scaling per
-     *       scenario (mirrors the CPU's MaxVoltageChangeStateVectorScaling); lsMode 0 = raw full Newton
-     *       steps.</li>
-     *   <li>{@code transformerControl}: run the per-scenario AFTER_GENERATOR transformer voltage-control
-     *       orchestrator (set only when the resolved outer loops include it and the network is in scope).</li>
-     *   <li>{@code maxOuterIterations}/{@code maxPqPvSwitch}: OLF's maxOuterLoopIterations and
-     *       reactiveLimitsMaxPqPvSwitch replacing the device constants; 0 = device default (20 / 3).</li>
-     *   <li>{@code dsRejectResidual}: a slackDistributionFailureBehavior other than LEAVE_ON_SLACK_BUS
-     *       makes a saturated distribution REJECT the scenario (CPU fallback replays it with the real
-     *       behavior) instead of silently leaving the residual at the slack.</li>
-     * </ul>
-     */
-    public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean transformerControl,
-                              int maxOuterIterations, int maxPqPvSwitch, boolean dsRejectResidual) {
-
-        /** The device defaults — no state-vector scaling, no transformer control, device outer-loop
-         *  constants, and LEAVE_ON_SLACK_BUS behavior (never reject a saturated scenario). This is what
-         *  every non-provider entry point (tests, direct callers) uses. */
-        public static final BatchConfig DEVICE_DEFAULTS = new BatchConfig(0, 0, 0, false, 0, 0, false);
-
-        int dsRejectResidualFlag() {
-            return dsRejectResidual ? 1 : 0;
-        }
-    }
-
     /** One voltage-controlling transformer, precomputed for the per-scenario orchestrator:
      *  rho row (== r1 col, self-paired), controlled-bus V col, target/deadband, continuous r1
      *  range, discrete tap r1 values, its element index (per-scenario outage check), and the
@@ -321,100 +282,6 @@ public final class GpuBatchedSecurityAnalysisSolver {
         }
     }
 
-    /** A contingency to analyze on the device: exactly one of — 1–2 branch outages (N-1 / N-2, disabled in
-     *  the per-scenario element mask), a single generator loss ({@code lostGenerator}, applied as a per-scenario
-     *  target override), or one+ fixed-shunt disconnections ({@code outagedShunts}, disabled in the element
-     *  mask like branches). */
-    /** Separator inside a (contingency, strategy) pair's BatchContingency id — pairs are solved in a
-     *  SECOND phase, WARM-CONTINUED from their parent contingency's state and reactive-limits pinning. */
-    public static final char STRATEGY_KEY_SEP = '\u0001';
-
-    /** A lost load's per-bus injection deltas (pu): removing it RAISES the bus P/Q targets. */
-    public record LoadLoss(LfBus bus, double p, double q) {
-    }
-
-    /** A per-scenario shunt admittance change (pu deltas ADDED to the packed g/b): section shifts
-     *  in either direction; full disconnection = minus the section admittance; reconnection = plus. */
-    public record ShuntShift(LfShunt shunt, double dg, double db) {
-    }
-
-    /** A per-scenario RATIO override for a FIXED-tap transformer (tap-position actions): the
-     *  ABSOLUTE r1 replacing the packed static ratio. Guarded to branches whose ratio is NOT a
-     *  state variable (voltage-controlled transformers route their tap changes elsewhere). */
-    /** The target tap's full static branch row [y, g1, g2, b1, b2, ksi, r1, a1] (cbIn packing),
-     *  replacing the element's row for one scenario — per-tap impedance changes included. The
-     *  branch's ratio and phase must be FIXED (not state variables): the batch qualification
-     *  rejects controlled transformers. */
-    public record TapR1Override(LfBranch branch, double[] cbRow) {
-    }
-
-    public record BatchContingency(String contingencyId, List<LfBranch> outagedBranches, List<LfGenerator> lostGenerators,
-                                   List<LoadLoss> lostLoads, List<ShuntShift> shuntShifts, List<TapR1Override> tapOverrides,
-                                   List<LfShunt> outagedShunts, List<LfBranch> reclosedBranches,
-                                   List<LfBranch> outagedZiBranches) {
-        public BatchContingency {
-            Objects.requireNonNull(contingencyId);
-            Objects.requireNonNull(outagedBranches);
-            Objects.requireNonNull(lostGenerators);
-            Objects.requireNonNull(lostLoads);
-            Objects.requireNonNull(shuntShifts);
-            Objects.requireNonNull(tapOverrides);
-            Objects.requireNonNull(outagedShunts);
-            boolean isInjection = !lostGenerators.isEmpty() || !lostLoads.isEmpty() || !shuntShifts.isEmpty()
-                    || !tapOverrides.isEmpty();
-            boolean isShunt = !outagedShunts.isEmpty();
-            boolean isBranch = !outagedBranches.isEmpty();
-            // Batchable shapes: 1-2 branches, N generators, N loads, and branch+injection COMBOS
-            // (independent mechanisms: element mask vs target/row-mode overrides); fixed shunts
-            // stay exclusive (their DISTR_Q interplay is validated separately).
-            if (!isInjection && !isShunt && !isBranch || outagedBranches.size() > 2
-                    || isShunt && (isInjection || isBranch)) {
-                throw new IllegalArgumentException(
-                        "a batched contingency is 1-2 branches and/or injection loss(es), or fixed shunt(s) alone");
-            }
-            outagedBranches = List.copyOf(outagedBranches);
-            lostGenerators = List.copyOf(lostGenerators);
-            lostLoads = List.copyOf(lostLoads);
-            shuntShifts = List.copyOf(shuntShifts);
-            tapOverrides = List.copyOf(tapOverrides);
-            outagedShunts = List.copyOf(outagedShunts);
-        }
-
-        /** A branch outage (N-1 or N-2). */
-        public BatchContingency(String contingencyId, List<LfBranch> outagedBranches) {
-            this(contingencyId, outagedBranches, List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
-        }
-
-        /** Convenience for the common single-branch (N-1) case. */
-        public BatchContingency(String contingencyId, LfBranch outagedBranch) {
-            this(contingencyId, List.of(Objects.requireNonNull(outagedBranch)), List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
-        }
-
-        /** A combined branch + generator/load contingency. */
-        public static BatchContingency branchesAndInjections(String contingencyId, List<LfBranch> branches,
-                                                            List<LfGenerator> gens, List<LoadLoss> loads,
-                                                            List<ShuntShift> shifts, List<TapR1Override> taps,
-                                                            List<LfBranch> outagedZi) {
-            return new BatchContingency(contingencyId, branches, gens, loads, shifts, taps, List.of(), List.of(), outagedZi);
-        }
-
-        public static BatchContingency branchesAndInjections(String contingencyId, List<LfBranch> branches,
-                                                             List<LfGenerator> gens, List<LoadLoss> loads,
-                                                             List<ShuntShift> shifts, List<TapR1Override> taps) {
-            return new BatchContingency(contingencyId, branches, gens, loads, shifts, taps, List.of(), List.of(), List.of());
-        }
-
-        /** A generator loss. */
-        public static BatchContingency generator(String contingencyId, LfGenerator lostGenerator) {
-            return new BatchContingency(contingencyId, List.of(), List.of(Objects.requireNonNull(lostGenerator)), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
-        }
-
-        /** A fixed-shunt disconnection (the shunt element is masked off, like a branch outage). */
-        public static BatchContingency shunt(String contingencyId, LfShunt outagedShunt) {
-            return new BatchContingency(contingencyId, List.of(), List.of(), List.of(), List.of(), List.of(), List.of(Objects.requireNonNull(outagedShunt)), List.of(), List.of());
-        }
-    }
-
     /** The per-scenario target/row-mode changes a generator loss applies on the device: remove the lost
      *  generator's P from its bus's P target ({@code pRow}→{@code pTarget}); if the loss un-controls the bus
      *  ({@code toPq}) flip its BUS_V row to the reactive-power equation and set {@code vRow}→{@code qTarget}.
@@ -427,40 +294,6 @@ public final class GpuBatchedSecurityAnalysisSolver {
      *  This is only valid when the slack itself does not participate (otherwise the loss is rejected). */
     public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, boolean toPq, boolean qOverride,
                             int dsBus, double dsFactorDelta, double dsBaseDelta, double dsMaxDelta, double dsMinDelta) {
-    }
-
-    /** Convergence status: the scenario converged within the tolerance. */
-    public static final int STATUS_CONVERGED = 0;
-    /** Convergence status: the scenario hit the iteration cap without converging. */
-    public static final int STATUS_MAX_ITERATION = 1;
-    /** Convergence status: the scenario diverged (NaN/Inf mismatch). */
-    public static final int STATUS_DIVERGED = -1;
-    /**
-     * Convergence status: the contingency was not batched on the GPU (it fragments the
-     * network or its branch is absent from the GPU model) and must be solved by the
-     * sequential CPU security-analysis path. The state is the base case (unchanged).
-     */
-    public static final int STATUS_REJECTED = -2;
-
-    /**
-     * The per-scenario outcome: the converged state, iteration count, final mismatch and
-     * the convergence status (see the {@code STATUS_*} constants).
-     */
-    public record BatchScenarioResult(String contingencyId, double[] state, int iterations,
-                                      double finalMismatch, int convergenceStatus, int[] islandedBusNums) {
-        public BatchScenarioResult {
-            Objects.requireNonNull(contingencyId);
-            Objects.requireNonNull(state);
-        }
-
-        public boolean hasConverged() {
-            return convergenceStatus == STATUS_CONVERGED;
-        }
-
-        /** True if this contingency must fall back to the sequential CPU path. */
-        public boolean needsCpuFallback() {
-            return convergenceStatus == STATUS_REJECTED;
-        }
     }
 
     /**
@@ -795,7 +628,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     FrozenIsland fi = islandedFrozen(equationSystem, q.islandedBuses());
                     islandedNumsByIndex[i] = q.islandedBuses().stream().mapToInt(LfBus::getNum).toArray();
                     if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"))) {
-                        System.err.println("FROZEN-ISLAND(combo) '" + c.contingencyId().replace(STRATEGY_KEY_SEP, '|') + "' buses="
+                        System.err.println("FROZEN-ISLAND(combo) '" + c.contingencyId().replace(GpuBatchStatus.STRATEGY_KEY_SEP, '|') + "' buses="
                                 + q.islandedBuses().stream().map(b -> b.getId() + "#" + b.getNum()).toList()
                                 + " rows=" + java.util.Arrays.toString(fi.rows()));
                     }
@@ -832,7 +665,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 FrozenIsland fi = islandedFrozen(equationSystem, q.islandedBuses());
                 islandedNumsByIndex[i] = q.islandedBuses().stream().mapToInt(LfBus::getNum).toArray();
                 if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"))) {
-                    System.err.println("FROZEN-ISLAND '" + c.contingencyId().replace(STRATEGY_KEY_SEP, '|') + "' buses="
+                    System.err.println("FROZEN-ISLAND '" + c.contingencyId().replace(GpuBatchStatus.STRATEGY_KEY_SEP, '|') + "' buses="
                             + q.islandedBuses().stream().map(b -> b.getId() + "#" + b.getNum()).toList()
                             + " rows=" + java.util.Arrays.toString(fi.rows()));
                 }
@@ -866,7 +699,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         }
 
         // Assemble results in the original contingency order: batched scenarios carry their
-        // GPU outcome; rejected ones carry the base state with STATUS_REJECTED.
+        // GPU outcome; rejected ones carry the base state with GpuBatchStatus.STATUS_REJECTED.
         List<BatchScenarioResult> results = new ArrayList<>(contingencies.size());
         for (int i = 0; i < contingencies.size(); i++) {
             String id = contingencies.get(i).contingencyId();
@@ -877,7 +710,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 results.add(new BatchScenarioResult(id, state, (int) result[n], result[n + 1], (int) result[n + 2],
                         islandedNumsByIndex[i] != null ? islandedNumsByIndex[i] : new int[0]));
             } else {
-                results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, STATUS_REJECTED, new int[0]));
+                results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, GpuBatchStatus.STATUS_REJECTED, new int[0]));
             }
         }
         return results;
@@ -1128,7 +961,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         List<int[]> enabled = new ArrayList<>();             // {slot, controllerIdx}
         for (int slot = 0; slot < realCount; slot++) {
             double[] r = chunkResults[slot];
-            if (r == null || (int) r[n + 2] != STATUS_CONVERGED) {
+            if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
                 continue;
             }
             for (int c = 0; c < tcs.size(); c++) {
@@ -1210,7 +1043,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
             boolean anyContinuous = false;
             for (int slot : affected) {
                 double[] r = chunkResults[slot];
-                if (r == null || (int) r[n + 2] != STATUS_CONVERGED) {
+                if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
                     continue;
                 }
                 for (int c = 0; c < tcs.size(); c++) {
@@ -1313,7 +1146,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         List<Integer> ctgIdxList = new ArrayList<>();
         List<Integer> pairIdxList = new ArrayList<>();
         for (int idx : batchedIndices) {
-            (contingencies.get(idx).contingencyId().indexOf(STRATEGY_KEY_SEP) >= 0 ? pairIdxList : ctgIdxList).add(idx);
+            (contingencies.get(idx).contingencyId().indexOf(GpuBatchStatus.STRATEGY_KEY_SEP) >= 0 ? pairIdxList : ctgIdxList).add(idx);
         }
         java.util.Map<String, Integer> indexById = new java.util.HashMap<>();
         for (int i = 0; i < contingencies.size(); i++) {
@@ -1468,7 +1301,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     if (pairPhase && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_OV"))) {
                         for (int s2 = 0; s2 < realCount; s2++) {
                             StringBuilder sb = new StringBuilder("GPU-PAIR-OV "
-                                    + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(STRATEGY_KEY_SEP, '|'));
+                                    + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(GpuBatchStatus.STRATEGY_KEY_SEP, '|'));
                             for (int k2 = 0; k2 < targetOverrideIndex.length; k2++) {
                                 if (targetOverrideIndex[k2] / n == s2) {
                                     int row = targetOverrideIndex[k2] % n;
@@ -1491,9 +1324,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
                             int[] parentRl = null;
                             if (s < realCount) {
                                 String pairId = contingencies.get(group.get(chunkStart + s)).contingencyId();
-                                Integer pIdx = indexById.get(pairId.substring(0, pairId.indexOf(STRATEGY_KEY_SEP)));
+                                Integer pIdx = indexById.get(pairId.substring(0, pairId.indexOf(GpuBatchStatus.STRATEGY_KEY_SEP)));
                                 if (pIdx != null && resultsByIndex[pIdx] != null
-                                        && (int) resultsByIndex[pIdx][n + 2] == STATUS_CONVERGED) {
+                                        && (int) resultsByIndex[pIdx][n + 2] == GpuBatchStatus.STATUS_CONVERGED) {
                                     parent = resultsByIndex[pIdx];
                                     parentRl = rlByIndex.get(pIdx);
                                 }
@@ -1524,7 +1357,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                             ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
                     if (dbgPairRl) {
                         for (int s2 = 0; s2 < realCount; s2++) {
-                            StringBuilder sb = new StringBuilder("GPU-PAIR-RL " + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(STRATEGY_KEY_SEP, '|'));
+                            StringBuilder sb = new StringBuilder("GPU-PAIR-RL " + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(GpuBatchStatus.STRATEGY_KEY_SEP, '|'));
                             for (int i2 = 0; i2 < nrl; i2++) {
                                 int v = rlStateOut[s2 * nrl + i2];
                                 if ((v & 3) != 0) {

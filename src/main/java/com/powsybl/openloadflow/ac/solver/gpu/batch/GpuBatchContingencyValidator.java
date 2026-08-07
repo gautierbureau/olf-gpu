@@ -60,18 +60,18 @@ public final class GpuBatchContingencyValidator {
      * frozen to identity (held at base) in that scenario's per-scenario row mode, so the islanded
      * sub-block stays non-singular and the main component solves correctly.
      */
-    public record Qualification(GpuBatchedSecurityAnalysisSolver.BatchContingency contingency,
+    public record Qualification(BatchContingency contingency,
                                 boolean qualified, Disqualification reason, List<LfBus> islandedBuses) {
 
-        static Qualification ok(GpuBatchedSecurityAnalysisSolver.BatchContingency c) {
+        static Qualification ok(BatchContingency c) {
             return new Qualification(c, true, null, List.of());
         }
 
-        static Qualification okIslanding(GpuBatchedSecurityAnalysisSolver.BatchContingency c, List<LfBus> islandedBuses) {
+        static Qualification okIslanding(BatchContingency c, List<LfBus> islandedBuses) {
             return new Qualification(c, true, null, List.copyOf(islandedBuses));
         }
 
-        static Qualification rejected(GpuBatchedSecurityAnalysisSolver.BatchContingency c, Disqualification reason) {
+        static Qualification rejected(BatchContingency c, Disqualification reason) {
             return new Qualification(c, false, reason, List.of());
         }
     }
@@ -91,7 +91,7 @@ public final class GpuBatchContingencyValidator {
      * @return one {@link Qualification} per input contingency, in order
      */
     public static List<Qualification> qualify(LfNetwork network,
-                                              List<GpuBatchedSecurityAnalysisSolver.BatchContingency> contingencies,
+                                              List<BatchContingency> contingencies,
                                               GpuBatchElementMapper elementMapper,
                                               boolean handleIslanding) {
         Objects.requireNonNull(network);
@@ -109,7 +109,7 @@ public final class GpuBatchContingencyValidator {
 
     private static Qualification qualifyOne(LfNetwork network, GraphConnectivity<LfBus, LfBranch> connectivity,
                                            Set<LfBus> slackBuses,
-                                           GpuBatchedSecurityAnalysisSolver.BatchContingency contingency,
+                                           BatchContingency contingency,
                                            GpuBatchElementMapper elementMapper,
                                            boolean handleIslanding) {
         List<LfBranch> branches = contingency.outagedBranches();

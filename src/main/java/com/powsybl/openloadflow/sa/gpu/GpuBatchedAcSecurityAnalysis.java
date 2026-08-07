@@ -28,9 +28,14 @@ import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonFactory;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver.BatchContingency;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver.BatchScenarioResult;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.LoadLoss;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.ShuntShift;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.TapR1Override;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.network.DisabledBranchStatus;
@@ -112,7 +117,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     private List<Action> currentActions = List.of();
     /** Separator inside the precomputed-state key of a (contingency, strategy) pair — the SOLVER's
      *  constant, which also drives its two-phase warm-continuation ordering. */
-    private static final char STRATEGY_KEY_SEP = GpuBatchedSecurityAnalysisSolver.STRATEGY_KEY_SEP;
+    private static final char STRATEGY_KEY_SEP = GpuBatchStatus.STRATEGY_KEY_SEP;
     private LfNetwork currentLfNetwork;
     private AcLoadFlowContext currentContext;
     private EquationSystem<AcVariableType, AcEquationType> batchEquationSystem;
@@ -147,11 +152,11 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     // are not ported to the device).
     private double batchConvEpsPerEq;
     // The run's batched outer-loop parameterization, captured here (per provider instance = per run) and
-    // assembled into a GpuBatchedSecurityAnalysisSolver.BatchConfig at the solveBatchN1 call. This replaced
+    // assembled into a BatchConfig at the solveBatchN1 call. This replaced
     // the solver's former JVM-global static config, whose leak between a provider run and a direct-solver
     // run caused the pegase full-suite failure — see BatchConfig's javadoc.
-    private GpuBatchedSecurityAnalysisSolver.BatchConfig batchConfig =
-            GpuBatchedSecurityAnalysisSolver.BatchConfig.DEVICE_DEFAULTS;
+    private BatchConfig batchConfig =
+            BatchConfig.DEVICE_DEFAULTS;
     private com.powsybl.loadflow.LoadFlowParameters currentLoadFlowParameters;
 
     protected GpuBatchedAcSecurityAnalysis(Network network, MatrixFactory matrixFactory,
@@ -302,7 +307,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             cfgMaxDphi = olfParams.getMaxVoltageChangeStateVectorScalingMaxDphi();
         }
         // Assemble the run's per-call batched config (replaces the solver's former JVM-global statics).
-        this.batchConfig = new GpuBatchedSecurityAnalysisSolver.BatchConfig(cfgLsMode, cfgMaxDv, cfgMaxDphi,
+        this.batchConfig = new BatchConfig(cfgLsMode, cfgMaxDv, cfgMaxDphi,
                 cfgTransformerControl, cfgMaxOuterIterations, cfgMaxPqPvSwitch, cfgDsRejectResidual);
         // Run the engine's load flows — the pre-contingency BASE and any contingency that falls through to
         // the sequential path — on the FULL GPU Newton-Raphson when the device + network support it. The base
@@ -415,7 +420,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 List<LfGenerator> gens = pc.getGeneratorIdsToLose().isEmpty() ? List.of() : generatorOutages(net, pc);
                 // ZIP/voltage-dependent load model: per-scenario load removal is not a target override — CPU.
                 boolean loadsBatchable = !currentContext.getParameters().getNetworkParameters().isUseLoadModel();
-                List<GpuBatchedSecurityAnalysisSolver.LoadLoss> loads =
+                List<LoadLoss> loads =
                         pc.getLoadIdsToLose().isEmpty() ? List.of() : (loadsBatchable ? loadOutages(net, pc) : null);
                 // Node-breaker contingency PROPAGATION opens the target's breakers alongside it, and
                 // switches are zero-impedance LfBranches — split them out so the impedant part still
@@ -429,7 +434,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                         : closedBranchOutages(net, pc, ziOutages);
                 // Shunt section shifts (both directions; full disconnection of any aggregate = minus the
                 // section admittance): per-scenario admittance overrides, combinable with everything.
-                List<GpuBatchedSecurityAnalysisSolver.ShuntShift> shifts =
+                List<ShuntShift> shifts =
                         pc.getShuntIdsToShift().isEmpty() ? List.of() : shuntShifts(net, pc);
                 if (branches != null && gens != null && loads != null && shifts != null
                         && (!branches.isEmpty() || !gens.isEmpty() || !loads.isEmpty() || !shifts.isEmpty()
@@ -518,11 +523,11 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     /** The contingency's lost loads as per-bus injection deltas (pu, from the propagation's PowerShift),
      *  or null when unresolvable. Guards: bus losses out of scope; the ZIP/voltage-dependent load model
      *  makes per-scenario load removal unrepresentable as a target override (checked by the caller). */
-    private List<GpuBatchedSecurityAnalysisSolver.LoadLoss> loadOutages(LfNetwork net, PropagatedContingency pc) {
+    private List<LoadLoss> loadOutages(LfNetwork net, PropagatedContingency pc) {
         if (pc.getLoadIdsToLose().isEmpty() || !pc.getBusIdsToLose().isEmpty()) {
             return null;
         }
-        List<GpuBatchedSecurityAnalysisSolver.LoadLoss> out = new java.util.ArrayList<>();
+        List<LoadLoss> out = new java.util.ArrayList<>();
         for (Map.Entry<String, com.powsybl.openloadflow.network.PowerShift> e : pc.getLoadIdsToLose().entrySet()) {
             com.powsybl.iidm.network.Load load = network.getLoad(e.getKey());
             if (load == null || load.getTerminal().getBusView().getBus() == null) {
@@ -532,7 +537,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             if (bus == null || bus.isDisabled()) {
                 return null;
             }
-            out.add(new GpuBatchedSecurityAnalysisSolver.LoadLoss(bus, e.getValue().getActive(), e.getValue().getReactive()));
+            out.add(new LoadLoss(bus, e.getValue().getActive(), e.getValue().getReactive()));
         }
         return out;
     }
@@ -617,7 +622,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         }
         var filtered = result.getBusResults().stream().filter(br -> !islandedBusIds.contains(br.getBusId())).toList();
         if (dbg) {
-            System.err.println("FILTER-ISLANDED '" + scenarioId.replace(GpuBatchedSecurityAnalysisSolver.STRATEGY_KEY_SEP, '|')
+            System.err.println("FILTER-ISLANDED '" + scenarioId.replace(GpuBatchStatus.STRATEGY_KEY_SEP, '|')
                     + "' ids=" + islandedBusIds + " " + result.getBusResults().size() + "->" + filtered.size());
         }
         return new NetworkResult(result.getBranchResults(), filtered,
@@ -651,12 +656,12 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                      List<LfBranch> ctgZiOutages,
                                                      List<LfBranch> ctgBranches,
                                                      List<LfGenerator> ctgGens,
-                                                     List<GpuBatchedSecurityAnalysisSolver.LoadLoss> ctgLoads,
-                                                     List<GpuBatchedSecurityAnalysisSolver.ShuntShift> ctgShifts) {
+                                                     List<LoadLoss> ctgLoads,
+                                                     List<ShuntShift> ctgShifts) {
         List<LfBranch> branches = new java.util.ArrayList<>(ctgBranches);
-        List<GpuBatchedSecurityAnalysisSolver.LoadLoss> loads = new java.util.ArrayList<>(ctgLoads);
-        List<GpuBatchedSecurityAnalysisSolver.ShuntShift> shifts = new java.util.ArrayList<>(ctgShifts);
-        List<GpuBatchedSecurityAnalysisSolver.TapR1Override> taps = new java.util.ArrayList<>();
+        List<LoadLoss> loads = new java.util.ArrayList<>(ctgLoads);
+        List<ShuntShift> shifts = new java.util.ArrayList<>(ctgShifts);
+        List<TapR1Override> taps = new java.util.ArrayList<>();
         List<LfBranch> reclosed = new java.util.ArrayList<>();
         Map<String, Action> actionById = new java.util.HashMap<>();
         for (Action a : currentActions) {
@@ -689,7 +694,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                             * sc.getTerminal().getVoltageLevel().getNominalV() / PerUnit.SB;
                     double sign = tca.isOpen() ? -1 : 1;
                     double n = sc.getSectionCount();
-                    shifts.add(new GpuBatchedSecurityAnalysisSolver.ShuntShift(lfShunt,
+                    shifts.add(new ShuntShift(lfShunt,
                             sign * gPerSection * n * zb, sign * lin.getBPerSection() * n * zb));
                     continue;
                 }
@@ -748,11 +753,11 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     return null;
                 }
                 double dP = la.isRelativeValue() ? -newP : load.getP0() - newP;   // LoadLoss.p = load REMOVED (pu)
-                loads.add(new GpuBatchedSecurityAnalysisSolver.LoadLoss(bus, dP / PerUnit.SB, 0));
+                loads.add(new LoadLoss(bus, dP / PerUnit.SB, 0));
             } else if (a instanceof com.powsybl.action.RatioTapChangerTapPositionAction rtca) {
                 var tapChanger = network.getTwoWindingsTransformer(rtca.getTransformerId()) != null
                         ? network.getTwoWindingsTransformer(rtca.getTransformerId()).getRatioTapChanger() : null;
-                GpuBatchedSecurityAnalysisSolver.TapR1Override ov = tapOverride(net, rtca.getTransformerId(),
+                TapR1Override ov = tapOverride(net, rtca.getTransformerId(),
                         tapChanger, rtca.isRelativeValue(), rtca.getTapPosition());
                 if (ov == null) {
                     return null;
@@ -761,7 +766,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             } else if (a instanceof com.powsybl.action.PhaseTapChangerTapPositionAction ptca) {
                 var tapChanger = network.getTwoWindingsTransformer(ptca.getTransformerId()) != null
                         ? network.getTwoWindingsTransformer(ptca.getTransformerId()).getPhaseTapChanger() : null;
-                GpuBatchedSecurityAnalysisSolver.TapR1Override ov = tapOverride(net, ptca.getTransformerId(),
+                TapR1Override ov = tapOverride(net, ptca.getTransformerId(),
                         tapChanger, ptca.isRelativeValue(), ptca.getTapPosition());
                 if (ov == null) {
                     return null;
@@ -778,7 +783,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 double zb = sc.getTerminal().getVoltageLevel().getNominalV()
                         * sc.getTerminal().getVoltageLevel().getNominalV() / PerUnit.SB;
                 double gPerSection = Double.isNaN(lin.getGPerSection()) ? 0 : lin.getGPerSection();   // optional in iidm
-                shifts.add(new GpuBatchedSecurityAnalysisSolver.ShuntShift(shunt,
+                shifts.add(new ShuntShift(shunt,
                         gPerSection * dSections * zb, lin.getBPerSection() * dSections * zb));
             } else if (a instanceof com.powsybl.action.GeneratorAction ga) {
                 // Pure ACTIVE-POWER redispatch only: a targetV/targetQ/regulator change alters the
@@ -803,7 +808,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 boolean relative = ga.isActivePowerRelativeValue().orElse(false);
                 double deltaP = relative ? ga.getActivePowerValue().getAsDouble()
                                          : ga.getActivePowerValue().getAsDouble() - gen.getTargetP();
-                loads.add(new GpuBatchedSecurityAnalysisSolver.LoadLoss(bus, deltaP / PerUnit.SB, 0));
+                loads.add(new LoadLoss(bus, deltaP / PerUnit.SB, 0));
             } else {
                 return null;                                 // out of stage-1 scope — CPU per-strategy path
             }
@@ -819,7 +824,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      *  target tap's [y, g1, g2, b1, b2, ksi, r1, a1] replaces the branch's static inputs, so
      *  per-tap impedance changes are covered. Null when out of batch scope: unknown transformer /
      *  tap changer, no tap table, or out-of-range position. */
-    private static GpuBatchedSecurityAnalysisSolver.TapR1Override tapOverride(LfNetwork net, String transformerId,
+    private static TapR1Override tapOverride(LfNetwork net, String transformerId,
                                                                               com.powsybl.iidm.network.TapChanger<?, ?, ?, ?> tapChanger,
                                                                               boolean relative, int tapPosition) {
         LfBranch b = net.getBranchById(transformerId);
@@ -832,22 +837,22 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         if (table.length == 0 || idx < 0 || idx >= table.length) {
             return null;                                     // no tap table / out-of-range position — CPU
         }
-        return new GpuBatchedSecurityAnalysisSolver.TapR1Override(b, table[idx]);
+        return new TapR1Override(b, table[idx]);
     }
 
     /** The contingency's shunt admittance shifts (pu deltas, negated: the propagation's shift is the
      *  admittance REMOVED), or null when a shunt is unresolvable. */
-    private static List<GpuBatchedSecurityAnalysisSolver.ShuntShift> shuntShifts(LfNetwork net, PropagatedContingency pc) {
+    private static List<ShuntShift> shuntShifts(LfNetwork net, PropagatedContingency pc) {
         if (!pc.getBusIdsToLose().isEmpty()) {
             return null;
         }
-        List<GpuBatchedSecurityAnalysisSolver.ShuntShift> out = new java.util.ArrayList<>();
+        List<ShuntShift> out = new java.util.ArrayList<>();
         for (Map.Entry<String, com.powsybl.openloadflow.network.AdmittanceShift> e : pc.getShuntIdsToShift().entrySet()) {
             LfShunt shunt = net.getShuntById(e.getKey());
             if (shunt == null || shunt.isDisabled()) {
                 return null;
             }
-            out.add(new GpuBatchedSecurityAnalysisSolver.ShuntShift(shunt, -e.getValue().getG(), -e.getValue().getB()));
+            out.add(new ShuntShift(shunt, -e.getValue().getG(), -e.getValue().getB()));
         }
         return out;
     }

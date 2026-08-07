@@ -318,119 +318,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
             }
         }
         boolean slackParticipates = java.util.Arrays.stream(gpuData.dsFactor()).sum() < 1 - 1e-9;
-        List<Integer> batchedIndices = new ArrayList<>();
-        int[][] frozenRowsByIndex = new int[contingencies.size()][];     // islanded buses' variable rows, per contingency
-        int[][] islandedNumsByIndex = new int[contingencies.size()][];   // islanded LfBus nums (result-building excludes them)
-        double[][] frozenTargetsByIndex = new double[contingencies.size()][];   // the clean value each frozen row holds (V=1, phi=0)
-        GenOutage[][] genOutagesByIndex = new GenOutage[contingencies.size()][];   // per-bus merged outages, else null
-        int islandingCount = 0;
-        for (int i = 0; i < qualifications.size(); i++) {
-            GpuBatchContingencyValidator.Qualification q = qualifications.get(i);
-            if (!q.qualified()) {
-                continue;
-            }
-            BatchContingency c = contingencies.get(i);
-            if (!c.lostGenerators().isEmpty() || !c.lostLoads().isEmpty() || !c.shuntShifts().isEmpty()
-                    || !c.tapOverrides().isEmpty() || !c.reclosedBranches().isEmpty()
-                    || !c.outagedZiBranches().isEmpty()) {   // injection/shift/tap/reclose/switch-outage (or branch+)
-                java.util.Set<Integer> baseOpenSet = java.util.Arrays.stream(gpuData.baseOpenCbElements())
-                        .boxed().collect(java.util.stream.Collectors.toSet());
-                java.util.Map<Integer, Integer> ziElemByBranchNum = new java.util.HashMap<>();
-                for (int z = 0; z < gpuData.baseOpenZiElements().length; z++) {
-                    ziElemByBranchNum.put(gpuData.baseOpenZiBranchNums()[z], gpuData.baseOpenZiElements()[z]);
-                }
-                boolean recloseOk = true;
-                int ziCloses = 0;
-                for (LfBranch rb : c.reclosedBranches()) {
-                    if (rb.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
-                        // switch close: packed base-open zi element, exactly one per scenario
-                        // (multi-switch closes can interact through the spanning tree — CPU)
-                        if (!ziElemByBranchNum.containsKey(rb.getNum()) || ++ziCloses > 1) {
-                            recloseOk = false;
-                        }
-                    } else if (!baseOpenSet.contains(elementMapper.getElementIndex(rb))) {
-                        recloseOk = false;
-                    }
-                }
-                if (!recloseOk) {
-                    continue;                                // reclose of an unpacked base-open branch — CPU
-                }
-                boolean tapOk = true;
-                for (TapR1Override tap : c.tapOverrides()) { // packed CLOSED branch with FIXED ratio AND
-                    int ei = elementMapper.getElementIndex(tap.branch());   // phase (neither is a state variable)
-                    if (ei < 0 || ei >= elementMapper.getClosedBranchCount()
-                            || gpuData.cbIdx()[ei * 10 + 9] >= 0 || gpuData.cbIdx()[ei * 10 + 8] >= 0) {
-                        tapOk = false;
-                    }
-                }
-                if (!tapOk) {
-                    continue;                                // controlled/unpacked transformer tap — CPU
-                }
-                if (!c.shuntShifts().isEmpty()
-                        && !GpuBatchQualification.canBatchShuntOutage(c.shuntShifts().stream().map(ShuntShift::shunt).toList(), elementMapper, gpuData)) {
-                    continue;                                // unpacked / DISTR_Q-contributing shunt — CPU
-                }
-                GenOutage[] gos = GpuBatchInjectionOutages.computeInjectionOutages(equationSystem, gpuData, dsSum, slackParticipates,
-                        c.lostGenerators(), c.lostLoads());
-                if (gos == null) {                           // slack / >1 DS bus / remote gen — route to CPU
-                    continue;
-                }
-                if (!c.outagedBranches().isEmpty()) {        // COMBO: the branch part must also qualify
-                    if (c.outagedBranches().stream().anyMatch(distrRhoControllers::contains)) {
-                        continue;
-                    }
-                    // conservative: a lost generator on an ISLANDED bus is out of combo scope
-                    GpuBatchQualification.FrozenIsland fi = GpuBatchQualification.islandedFrozen(equationSystem, q.islandedBuses());
-                    islandedNumsByIndex[i] = q.islandedBuses().stream().mapToInt(LfBus::getNum).toArray();
-                    if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"))) {
-                        System.err.println("FROZEN-ISLAND(combo) '" + c.contingencyId().replace(GpuBatchStatus.STRATEGY_KEY_SEP, '|') + "' buses="
-                                + q.islandedBuses().stream().map(b -> b.getId() + "#" + b.getNum()).toList()
-                                + " rows=" + java.util.Arrays.toString(fi.rows()));
-                    }
-                    boolean genOnIsland = false;
-                    for (GenOutage go : gos) {
-                        for (int fr : fi.rows()) {
-                            if (fr == go.pRow() || fr == go.vRow()) {
-                                genOnIsland = true;
-                            }
-                        }
-                    }
-                    if (genOnIsland) {
-                        continue;
-                    }
-                    frozenRowsByIndex[i] = fi.rows();
-                    frozenTargetsByIndex[i] = fi.targets();
-                    if (fi.rows().length > 0) {
-                        islandingCount++;
-                    }
-                } else {
-                    frozenRowsByIndex[i] = GpuBatchQualification.NO_FROZEN_ROWS;
-                    frozenTargetsByIndex[i] = GpuBatchQualification.NO_FROZEN_TARGETS;
-                }
-                genOutagesByIndex[i] = gos;
-                batchedIndices.add(i);
-            } else if (!c.outagedShunts().isEmpty()) {       // fixed-shunt disconnection: mask the shunt element
-                if (GpuBatchQualification.canBatchShuntOutage(c.outagedShunts(), elementMapper, gpuData)) {
-                    batchedIndices.add(i);
-                    frozenRowsByIndex[i] = GpuBatchQualification.NO_FROZEN_ROWS;
-                    frozenTargetsByIndex[i] = GpuBatchQualification.NO_FROZEN_TARGETS;
-                }                                            // else: not a packed fixed shunt / DISTR_Q contributor → CPU
-            } else if (c.outagedBranches().stream().noneMatch(distrRhoControllers::contains)) {
-                batchedIndices.add(i);
-                GpuBatchQualification.FrozenIsland fi = GpuBatchQualification.islandedFrozen(equationSystem, q.islandedBuses());
-                islandedNumsByIndex[i] = q.islandedBuses().stream().mapToInt(LfBus::getNum).toArray();
-                if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"))) {
-                    System.err.println("FROZEN-ISLAND '" + c.contingencyId().replace(GpuBatchStatus.STRATEGY_KEY_SEP, '|') + "' buses="
-                            + q.islandedBuses().stream().map(b -> b.getId() + "#" + b.getNum()).toList()
-                            + " rows=" + java.util.Arrays.toString(fi.rows()));
-                }
-                frozenRowsByIndex[i] = fi.rows();
-                frozenTargetsByIndex[i] = fi.targets();
-                if (frozenRowsByIndex[i].length > 0) {
-                    islandingCount++;
-                }
-            }
-        }
+        GpuBatchQualification.ScenarioPlan plan = GpuBatchQualification.planScenarios(contingencies, qualifications,
+                elementMapper, gpuData, equationSystem, dsSum, slackParticipates, distrRhoControllers);
+        List<Integer> batchedIndices = plan.batchedIndices();
+        int islandingCount = plan.islandingCount();
         int rejected = contingencies.size() - batchedIndices.size();
         if (rejected > 0 || islandingCount > 0) {
             LOGGER.info("Batched N-1: {} of {} contingencies routed to the CPU path (absent from the GPU "
@@ -443,7 +334,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         double[][] resultsByIndex = new double[contingencies.size()][];
         if (!batchedIndices.isEmpty()) {
             GpuBatchChunkSolver.solveQualifiedInChunks(batchedIndices, contingencies, elementMapper, gpuData, baseState,
-                    baseTargets, baseActivation.rowMode(), frozenRowsByIndex, frozenTargetsByIndex, genOutagesByIndex,
+                    baseTargets, baseActivation.rowMode(), plan.frozenRowsByIndex(), plan.frozenTargetsByIndex(), plan.genOutagesByIndex(),
                     n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                     config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
                     config.transformerControl()
@@ -463,7 +354,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 double[] state = new double[n];
                 System.arraycopy(result, 0, state, 0, n);
                 results.add(new BatchScenarioResult(id, state, (int) result[n], result[n + 1], (int) result[n + 2],
-                        islandedNumsByIndex[i] != null ? islandedNumsByIndex[i] : new int[0]));
+                        plan.islandedNumsByIndex()[i] != null ? plan.islandedNumsByIndex()[i] : new int[0]));
             } else {
                 results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, GpuBatchStatus.STATUS_REJECTED, new int[0]));
             }

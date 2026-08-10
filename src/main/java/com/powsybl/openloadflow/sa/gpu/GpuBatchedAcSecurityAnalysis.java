@@ -14,24 +14,15 @@ import com.powsybl.contingency.Contingency;
 import com.powsybl.contingency.strategy.OperatorStrategy;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.math.matrix.MatrixFactory;
-import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
-import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
-import com.powsybl.openloadflow.ac.equations.AcEquationType;
-import com.powsybl.openloadflow.ac.equations.AcVariableType;
-import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
-import com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop;
-import com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonFactory;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
-import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
@@ -172,52 +163,17 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // HVDC (structural no-ops). On fallback the provider behaves EXACTLY like the stock CPU
         // AcSecurityAnalysis — no batch AND no solver swap (the sequential GPU-inner-solver path has
         // an open CME bug under outer-loop switching).
-        boolean noHvdc = lfNetwork.getHvdcs().isEmpty();
-        // TransformerVoltageControl is BATCHABLE since the per-scenario orchestrator port
-        // (AFTER_GENERATOR mode only; stage-1 scope = no generator voltage controls under the
-        // transformer-controlled level — the solver checks). Anything else falls back.
-        OpenLoadFlowParameters olfGuardParams = OpenLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters());
-        boolean transformerControlBatchable =
-                olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL
-                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
-        boolean noSvc = lfNetwork.getBuses().stream()
-                .flatMap(b -> b.getGenerators().stream())
-                .noneMatch(g -> g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator);
-        List<String> unsupportedOuterLoops = new java.util.ArrayList<>(acParameters.getOuterLoops().stream()
-                .map(ol -> ol.getName())
-                .filter(name -> !DistributedSlackOuterLoop.NAME.equals(name)
-                        && !ReactiveLimitsOuterLoop.NAME.equals(name)
-                        && !(transformerControlBatchable && "TransformerVoltageControl".equals(name))
-                        && !(noHvdc && ("AcHvdcAcEmulationLimits".equals(name) || "FreezingHvdcACEmulation".equals(name)))
-                        && !(noSvc && "VoltageMonitoring".equals(name)))
-                .toList());
-        // Parameterization corner cases the device DS loop does not model (see
-        // docs/gpu-vs-cpu-capabilities.md Part II §A): the device weights are always maxP/droop with
-        // active limits — any other balance type or unlimited distribution must fall back whole-run.
-        boolean dsLoopActive = acParameters.getOuterLoops().stream()
-                .anyMatch(ol -> DistributedSlackOuterLoop.NAME.equals(ol.getName()));
-        com.powsybl.loadflow.LoadFlowParameters lfGuardParams = securityAnalysisParameters.getLoadFlowParameters();
-        if (dsLoopActive && lfGuardParams.getBalanceType()
-                != com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P_MAX) {
-            unsupportedOuterLoops.add("DistributedSlack[balanceType=" + lfGuardParams.getBalanceType() + "]");
-        }
-        if (dsLoopActive && !olfGuardParams.isUseActiveLimits()) {
-            unsupportedOuterLoops.add("DistributedSlack[useActiveLimits=false]");
-        }
-        // Parameterization the device loops DO model — wire the run's values in place of the
-        // device defaults (maxOuterLoopIterations, reactiveLimitsMaxPqPvSwitch), and make a
-        // saturated slack distribution reject its scenario to the CPU fallback whenever the
-        // failure behavior is not LEAVE_ON_SLACK_BUS (e.g. RTE production uses FAIL).
-        int cfgMaxOuterIterations = olfGuardParams.getMaxOuterLoopIterations();
-        int cfgMaxPqPvSwitch = olfGuardParams.getReactiveLimitsMaxPqPvSwitch();
-        boolean cfgDsRejectResidual = olfGuardParams.getSlackDistributionFailureBehavior()
-                != com.powsybl.openloadflow.OpenLoadFlowParameters.SlackDistributionFailureBehavior.LEAVE_ON_SLACK_BUS;
-        boolean batchDisabled = !unsupportedOuterLoops.isEmpty();
-        if (batchDisabled) {
+        GpuSaRunScope.Scope scope = GpuSaRunScope.evaluate(lfNetwork, acParameters, securityAnalysisParameters);
+        if (scope.batchDisabled()) {
             LOGGER.info("GPU batched SA: outer loops {} are not implemented in the batched device path — "
-                    + "falling back to the sequential CPU path for all contingencies", unsupportedOuterLoops);
+                    + "falling back to the sequential CPU path for all contingencies", scope.unsupportedOuterLoops());
         }
-        if (!batchDisabled && !multiThread && gpuBaseLoadFlowEnabled() && GpuAcNewtonSolver.isAvailable()
+        // STRUCTURAL: run the base (pre-contingency) load flow on the GPU solver when the device is available
+        // and the user left the default CPU Newton-Raphson — absorbs the one-time CUDA init into the base
+        // phase (so the batched contingency pass is warm). Skipped under multithreading (concurrent partition
+        // load flows on the single-device sequential solver race in native code) and when the batch is
+        // disabled by the outer-loop guard (then the provider behaves exactly like the stock CPU SA).
+        if (!scope.batchDisabled() && !multiThread && gpuBaseLoadFlowEnabled() && GpuAcNewtonSolver.isAvailable()
                 && acParameters.getSolverFactory().getClass() == NewtonRaphsonFactory.class) {
             LOGGER.info("GPU-batched SA: running the base load flow on the GPU Newton-Raphson "
                     + "(absorbs CUDA init; CPU fallback inside the solver)");
@@ -231,60 +187,16 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         this.currentOperatorStrategies = operatorStrategies != null ? operatorStrategies : List.of();
         this.currentActions = actions != null ? actions : List.of();
         this.precomputed = PrecomputedBatch.empty();
-        // Capture which outer loops this run actually applies, so the batched device solver runs the
-        // distributed-slack / reactive-limits passes only when OLF does (presence in the resolved outer-loop
-        // list is the definitive signal — gens may report participation / buses may be PV regardless).
-        this.batchDistributedSlack = acParameters.getOuterLoops().stream()
-                .anyMatch(ol -> DistributedSlackOuterLoop.NAME.equals(ol.getName()));
-        this.batchReactiveLimits = acParameters.getOuterLoops().stream()
-                .anyMatch(ol -> ReactiveLimitsOuterLoop.NAME.equals(ol.getName()));
-        boolean cfgTransformerControl = transformerControlBatchable
-                && acParameters.getOuterLoops().stream().anyMatch(ol -> "TransformerVoltageControl".equals(ol.getName()));
-        // DETECT-AND-FALLBACK (the provider's safety contract: enabling it must never change results).
-        // The batched device path implements ONLY the two outer loops above; any OTHER loop in the
-        // resolved list (e.g. transformer voltage control under the RTE production parameters) would be
-        // silently dropped per scenario — measured 2026-07-17 as thousands of non-border violation
-        // diffs vs the CPU (a controlled bus held at 1.154 pu across unrelated outages). Until those
-        // loops are ported, such a run stays entirely on the sequential CPU path (the base +
-        // fall-through load flows still run on the GPU inner Newton below, where the Java engine
-        // applies every outer loop unchanged).
-        if (batchDisabled) {                                 // outer-loop guard (computed above, before the solver swap)
+        this.batchDistributedSlack = scope.distributedSlack();
+        this.batchReactiveLimits = scope.reactiveLimits();
+        if (scope.batchDisabled()) {                         // outer-loop guard: also skip the solver swap below
             this.currentLfNetwork = null;
             this.currentContingencies = null;
         }
-        // Align the device outer-loop tolerances to the CPU loadflow's (per-unit on the 100 MVA base). The
-        // reactive-limits PV→PQ switch threshold is NOT always maxReactivePowerMismatch: OLF derives it from the
-        // stopping-criteria type exactly as AbstractAcOuterLoopConfig.createReactiveLimitsOuterLoop does —
-        // UNIFORM_CRITERIA (the default) ties it to convEpsPerEq, PER_EQUATION_TYPE_CRITERIA to
-        // maxReactivePowerMismatch/SB. Deriving it the same way keeps the device switch DECISIONS identical to
-        // OLF when a user changes convEpsPerEq (with defaults both are 1e-4, which masked the divergence).
-        OpenLoadFlowParameters olfParams = OpenLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters());
-        this.batchSlackDistTol = olfParams.getSlackBusPMaxMismatch() / PerUnit.SB;
-        this.batchReactiveLimitTol = switch (olfParams.getNewtonRaphsonStoppingCriteriaType()) {
-            case UNIFORM_CRITERIA -> olfParams.getNewtonRaphsonConvEpsPerEq();
-            case PER_EQUATION_TYPE_CRITERIA -> olfParams.getMaxReactivePowerMismatch() / PerUnit.SB;
-        };
-        // Device inner Newton uses OLF's exact criterion for UNIFORM_CRITERIA (so switch decisions are made at
-        // the same convergence depth as the CPU); the device infinity-norm floor otherwise.
-        this.batchConvEpsPerEq = switch (olfParams.getNewtonRaphsonStoppingCriteriaType()) {
-            case UNIFORM_CRITERIA -> olfParams.getNewtonRaphsonConvEpsPerEq();
-            case PER_EQUATION_TYPE_CRITERIA -> 0.0;
-        };
-        // MAX_VOLTAGE_CHANGE state-vector scaling: apply the SAME per-step clamp in the batched device
-        // solve as the CPU per-contingency Newton (per scenario). Without this the batch takes raw full
-        // steps, PV/PQ switch decisions read different intermediate states, and converged states drift
-        // (measured 2026-07-17 under the RTE parameters: 6,137 one-sided violation diffs).
-        int cfgLsMode = 0;
-        double cfgMaxDv = 0.0;
-        double cfgMaxDphi = 0.0;
-        if (olfParams.getStateVectorScalingMode() == com.powsybl.openloadflow.ac.solver.StateVectorScalingMode.MAX_VOLTAGE_CHANGE) {
-            cfgLsMode = 2;
-            cfgMaxDv = olfParams.getMaxVoltageChangeStateVectorScalingMaxDv();
-            cfgMaxDphi = olfParams.getMaxVoltageChangeStateVectorScalingMaxDphi();
-        }
-        // Assemble the run's per-call batched config (replaces the solver's former JVM-global statics).
-        this.batchConfig = new BatchConfig(cfgLsMode, cfgMaxDv, cfgMaxDphi,
-                cfgTransformerControl, cfgMaxOuterIterations, cfgMaxPqPvSwitch, cfgDsRejectResidual);
+        this.batchSlackDistTol = scope.slackDistTol();
+        this.batchReactiveLimitTol = scope.reactiveLimitTol();
+        this.batchConvEpsPerEq = scope.convEpsPerEq();
+        this.batchConfig = scope.batchConfig();
         // Run the engine's load flows — the pre-contingency BASE and any contingency that falls through to
         // the sequential path — on the FULL GPU Newton-Raphson when the device + network support it. The base
         // then solves on-device and PRE-WARMS CUDA for the batched contingency pass (the one-time device init
@@ -294,7 +206,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // When the batch is disabled by the outer-loop guard, ALSO skip the solver swap: the provider then
         // behaves exactly like the stock CPU AcSecurityAnalysis (the safety contract), and the sequential
         // per-contingency runs avoid the GPU-inner-solver + outer-loop-switching path (open CME bug there).
-        if (!batchDisabled && gpuBaseLoadFlowEnabled() && GpuAcNewtonSolver.isAvailable() && gpuSupports(lfNetwork, acParameters)) {
+        if (!scope.batchDisabled() && gpuBaseLoadFlowEnabled() && GpuAcNewtonSolver.isAvailable() && GpuSaRunScope.gpuSupports(lfNetwork, acParameters)) {
             acParameters.setSolverFactory(new GpuNewtonRaphsonFactory(), securityAnalysisParameters.getLoadFlowParameters());
             LOGGER.info("GPU batched SA: base + fall-through load flows run on the GPU Newton-Raphson (CUDA pre-warm)");
         }
@@ -315,21 +227,6 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
 
     private static boolean gpuBaseLoadFlowEnabled() {
         return Boolean.parseBoolean(System.getProperty(GPU_BASE_LOADFLOW_PROPERTY, "true"));
-    }
-
-    /** True if the GPU full Newton-Raphson can solve this network — a throwaway extract (which VALIDATES and
-     *  throws on anything uncovered) is the same gate the batch uses, so the base never runs on the GPU for a
-     *  network whose contingencies would fall back to the CPU anyway. */
-    private static boolean gpuSupports(LfNetwork lfNetwork, AcLoadFlowParameters acParameters) {
-        try {
-            EquationSystem<AcVariableType, AcEquationType> es =
-                    new AcEquationSystemCreator(lfNetwork, acParameters.getEquationSystemCreationParameters()).create();
-            GpuAcDataExtractor.extract(lfNetwork, es);
-            return true;
-        } catch (RuntimeException e) {
-            LOGGER.debug("GPU batched SA: base load flow stays on CPU (network not GPU-supported: {})", e.toString());
-            return false;
-        }
     }
 
     @Override

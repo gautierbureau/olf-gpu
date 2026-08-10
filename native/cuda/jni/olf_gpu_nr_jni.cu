@@ -2266,6 +2266,120 @@ struct BatchSolverContext {
     }
 };
 
+static void setupBatchMatricesUniform(BatchSolverContext* ctx) {
+    int n = ctx->n;
+    int nScenarios = ctx->nScenarios;
+    // ---- uniform batched matrices: one A (CSR) per scenario sharing the pattern, batched
+    //      dense B/X. The host pointer + size arrays persist in the context. ----
+        int* rowPtrDev = ctx->st->dRowPtr.as<int>();
+        int* colDev = ctx->st->dColIdx.as<int>();
+        double* valsDev = ctx->dVals.as<double>();
+        double* bDev = ctx->dB.as<double>();
+        double* xDev = ctx->dDx.as<double>();
+        ctx->valPtrs.resize(nScenarios);
+        ctx->rowStartPtrs.resize(nScenarios);
+        ctx->rowEndPtrs.resize(nScenarios);
+        ctx->colPtrs.resize(nScenarios);
+        ctx->bPtrs.resize(nScenarios);
+        ctx->xPtrs.resize(nScenarios);
+        ctx->nrowsArr.assign(nScenarios, n);
+        ctx->ncolsArr.assign(nScenarios, n);
+        ctx->ncols1Arr.assign(nScenarios, 1);
+        ctx->nnzArr.assign(nScenarios, ctx->nnz);
+        ctx->ldArr.assign(nScenarios, n);
+        for (int s = 0; s < nScenarios; s++) {
+            ctx->valPtrs[s] = valsDev + (size_t) s * ctx->nnz;
+            ctx->rowStartPtrs[s] = rowPtrDev;                // shared CSR row offsets
+            ctx->rowEndPtrs[s] = rowPtrDev + 1;              // rowEnd = rowStart + 1
+            ctx->colPtrs[s] = colDev;                        // shared column indices
+            ctx->bPtrs[s] = bDev + (size_t) s * n;
+            ctx->xPtrs[s] = xDev + (size_t) s * n;
+        }
+        // cuDSS 0.8 batch API wants the pointer arrays in DEVICE memory (arrays of device
+        // pointers); the size arrays stay on the host. Upload the six host pointer arrays.
+        size_t ptrBytes = static_cast<size_t>(nScenarios) * sizeof(void*);
+        ctx->dValPtrs.upload(ctx->valPtrs.data(), ptrBytes);
+        ctx->dRowStartPtrs.upload(ctx->rowStartPtrs.data(), ptrBytes);
+        ctx->dRowEndPtrs.upload(ctx->rowEndPtrs.data(), ptrBytes);
+        ctx->dColPtrs.upload(ctx->colPtrs.data(), ptrBytes);
+        ctx->dBPtrs.upload(ctx->bPtrs.data(), ptrBytes);
+        ctx->dXPtrs.upload(ctx->xPtrs.data(), ptrBytes);
+        CUDSS_CHECK(cudssMatrixCreateBatchCsr(&ctx->matABatch, nScenarios,
+                ctx->nrowsArr.data(), ctx->ncolsArr.data(), ctx->nnzArr.data(),
+                ctx->dRowStartPtrs.as<void*>(), nullptr, ctx->dColPtrs.as<void*>(), ctx->dValPtrs.as<void*>(),
+                OLF_CUDSS_CSR_TYPES,
+                CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
+        CUDSS_CHECK(cudssMatrixCreateBatchDn(&ctx->matBBatch, nScenarios,
+                ctx->nrowsArr.data(), ctx->ncols1Arr.data(), ctx->ldArr.data(),
+                ctx->dBPtrs.as<void*>(), OLF_CUDSS_BDN_TYPES, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateBatchDn(&ctx->matXBatch, nScenarios,
+                ctx->nrowsArr.data(), ctx->ncols1Arr.data(), ctx->ldArr.data(),
+                ctx->dXPtrs.as<void*>(), OLF_CUDSS_BDN_TYPES, CUDSS_LAYOUT_COL_MAJOR));
+}
+
+static void setupBatchMatricesBlockDiag(BatchSolverContext* ctx) {
+    int n = ctx->n;
+    int nScenarios = ctx->nScenarios;
+    const std::vector<int>& rowPtr = ctx->st->rowPtr;
+    const std::vector<int>& colIdx = ctx->st->colIdx;
+    // ---- block-diagonal single matrix: one (n*nS) CSR = blkdiag(J_1..J_nS). Its values array
+    //      IS dVals (per-scenario nnz contiguous); we only build the big rowPtr/colIdx (per-block
+    //      pattern with column offsets s*n). One ANALYZE+FACTORIZE, then REFACTORIZE every solve. ----
+    {
+        long bigN = (long) n * nScenarios;
+        long bigNnz = (long) ctx->nnz * nScenarios;
+        std::vector<int> bigRowPtr(bigN + 1), bigColIdx(bigNnz);
+        bigRowPtr[0] = 0;
+        for (int s = 0; s < nScenarios; s++) {
+            for (int r = 0; r < n; r++) {
+                long gRow = (long) s * n + r;
+                bigRowPtr[gRow + 1] = bigRowPtr[gRow] + (rowPtr[r + 1] - rowPtr[r]);
+                for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
+                    bigColIdx[(long) s * ctx->nnz + k] = colIdx[k] + s * n;   // shift cols into block s
+                }
+            }
+        }
+        ctx->dBigRowPtr.upload(bigRowPtr.data(), (bigN + 1) * sizeof(int));
+        ctx->dBigColIdx.upload(bigColIdx.data(), bigNnz * sizeof(int));
+        CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->matBig, bigN, bigN, bigNnz,
+                ctx->dBigRowPtr.as<int>(), nullptr, ctx->dBigColIdx.as<int>(), ctx->dVals.as<double>(),
+                OLF_CUDSS_CSR_TYPES,
+                CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matBigB, bigN, 1, bigN, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matBigX, bigN, 1, bigN, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    }
+}
+
+static void setupBatchMatricesUbatch(BatchSolverContext* ctx) {
+    int n = ctx->n;
+    int nScenarios = ctx->nScenarios;
+    // ---- UBATCH: ONE per-block CSR (n, nnz, shared rowPtr/colIdx) with batched value/RHS pointers;
+    //      cuDSS analyzes a single block (cheap) and factorizes/solves all nS via UBATCH_SIZE.
+    //      Modes 4/5 share this exact setup and differ only in the per-iteration factorize policy
+    //      (mode 4 = factor at chunk iter 0 only; mode 5 = factor once + refactorize after). ----
+    {
+        int ub = nScenarios;
+        CUDSS_CHECK(cudssConfigSet(ctx->ds.config, CUDSS_CONFIG_UBATCH_SIZE, &ub, sizeof(ub)));
+        CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->matUb, n, n, ctx->nnz,
+                ctx->st->dRowPtr.as<int>(), nullptr, ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(),
+                OLF_CUDSS_CSR_TYPES,
+                CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matUbB, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matUbX, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    }
+}
+
+static void setupBatchMatricesFallback(BatchSolverContext* ctx) {
+    int n = ctx->n;
+    // ---- fallback: a single matrix repointed per scenario inside the solve loop ----
+    CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->ds.matA, n, n, ctx->nnz,
+                                     ctx->st->dRowPtr.as<int>(), nullptr, ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(),
+                                     OLF_CUDSS_CSR_TYPES,
+                                     CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->ds.matB, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->ds.matX, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+}
+
 BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenarios, int mode,
                                        int nrl, const int* rlVrow, const double* rlMinQ,
                                        const double* rlMaxQ, const double* rlLoadQ, const double* rlVtarget,
@@ -2356,102 +2470,13 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     CUDSS_CHECK(cudssDataCreate(ctx->ds.handle, &ctx->ds.data));
 
     if (mode == 1) {
-    // ---- uniform batched matrices: one A (CSR) per scenario sharing the pattern, batched
-    //      dense B/X. The host pointer + size arrays persist in the context. ----
-        int* rowPtrDev = ctx->st->dRowPtr.as<int>();
-        int* colDev = ctx->st->dColIdx.as<int>();
-        double* valsDev = ctx->dVals.as<double>();
-        double* bDev = ctx->dB.as<double>();
-        double* xDev = ctx->dDx.as<double>();
-        ctx->valPtrs.resize(nScenarios);
-        ctx->rowStartPtrs.resize(nScenarios);
-        ctx->rowEndPtrs.resize(nScenarios);
-        ctx->colPtrs.resize(nScenarios);
-        ctx->bPtrs.resize(nScenarios);
-        ctx->xPtrs.resize(nScenarios);
-        ctx->nrowsArr.assign(nScenarios, n);
-        ctx->ncolsArr.assign(nScenarios, n);
-        ctx->ncols1Arr.assign(nScenarios, 1);
-        ctx->nnzArr.assign(nScenarios, ctx->nnz);
-        ctx->ldArr.assign(nScenarios, n);
-        for (int s = 0; s < nScenarios; s++) {
-            ctx->valPtrs[s] = valsDev + (size_t) s * ctx->nnz;
-            ctx->rowStartPtrs[s] = rowPtrDev;                // shared CSR row offsets
-            ctx->rowEndPtrs[s] = rowPtrDev + 1;              // rowEnd = rowStart + 1
-            ctx->colPtrs[s] = colDev;                        // shared column indices
-            ctx->bPtrs[s] = bDev + (size_t) s * n;
-            ctx->xPtrs[s] = xDev + (size_t) s * n;
-        }
-        // cuDSS 0.8 batch API wants the pointer arrays in DEVICE memory (arrays of device
-        // pointers); the size arrays stay on the host. Upload the six host pointer arrays.
-        size_t ptrBytes = static_cast<size_t>(nScenarios) * sizeof(void*);
-        ctx->dValPtrs.upload(ctx->valPtrs.data(), ptrBytes);
-        ctx->dRowStartPtrs.upload(ctx->rowStartPtrs.data(), ptrBytes);
-        ctx->dRowEndPtrs.upload(ctx->rowEndPtrs.data(), ptrBytes);
-        ctx->dColPtrs.upload(ctx->colPtrs.data(), ptrBytes);
-        ctx->dBPtrs.upload(ctx->bPtrs.data(), ptrBytes);
-        ctx->dXPtrs.upload(ctx->xPtrs.data(), ptrBytes);
-        CUDSS_CHECK(cudssMatrixCreateBatchCsr(&ctx->matABatch, nScenarios,
-                ctx->nrowsArr.data(), ctx->ncolsArr.data(), ctx->nnzArr.data(),
-                ctx->dRowStartPtrs.as<void*>(), nullptr, ctx->dColPtrs.as<void*>(), ctx->dValPtrs.as<void*>(),
-                OLF_CUDSS_CSR_TYPES,
-                CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-        CUDSS_CHECK(cudssMatrixCreateBatchDn(&ctx->matBBatch, nScenarios,
-                ctx->nrowsArr.data(), ctx->ncols1Arr.data(), ctx->ldArr.data(),
-                ctx->dBPtrs.as<void*>(), OLF_CUDSS_BDN_TYPES, CUDSS_LAYOUT_COL_MAJOR));
-        CUDSS_CHECK(cudssMatrixCreateBatchDn(&ctx->matXBatch, nScenarios,
-                ctx->nrowsArr.data(), ctx->ncols1Arr.data(), ctx->ldArr.data(),
-                ctx->dXPtrs.as<void*>(), OLF_CUDSS_BDN_TYPES, CUDSS_LAYOUT_COL_MAJOR));
+        setupBatchMatricesUniform(ctx.get());
     } else if (mode == 2) {
-    // ---- block-diagonal single matrix: one (n*nS) CSR = blkdiag(J_1..J_nS). Its values array
-    //      IS dVals (per-scenario nnz contiguous); we only build the big rowPtr/colIdx (per-block
-    //      pattern with column offsets s*n). One ANALYZE+FACTORIZE, then REFACTORIZE every solve. ----
-    {
-        long bigN = (long) n * nScenarios;
-        long bigNnz = (long) ctx->nnz * nScenarios;
-        std::vector<int> bigRowPtr(bigN + 1), bigColIdx(bigNnz);
-        bigRowPtr[0] = 0;
-        for (int s = 0; s < nScenarios; s++) {
-            for (int r = 0; r < n; r++) {
-                long gRow = (long) s * n + r;
-                bigRowPtr[gRow + 1] = bigRowPtr[gRow] + (rowPtr[r + 1] - rowPtr[r]);
-                for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
-                    bigColIdx[(long) s * ctx->nnz + k] = colIdx[k] + s * n;   // shift cols into block s
-                }
-            }
-        }
-        ctx->dBigRowPtr.upload(bigRowPtr.data(), (bigN + 1) * sizeof(int));
-        ctx->dBigColIdx.upload(bigColIdx.data(), bigNnz * sizeof(int));
-        CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->matBig, bigN, bigN, bigNnz,
-                ctx->dBigRowPtr.as<int>(), nullptr, ctx->dBigColIdx.as<int>(), ctx->dVals.as<double>(),
-                OLF_CUDSS_CSR_TYPES,
-                CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matBigB, bigN, 1, bigN, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matBigX, bigN, 1, bigN, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-    }
+        setupBatchMatricesBlockDiag(ctx.get());
     } else if (mode == 3 || mode == 4 || mode == 5) {
-    // ---- UBATCH: ONE per-block CSR (n, nnz, shared rowPtr/colIdx) with batched value/RHS pointers;
-    //      cuDSS analyzes a single block (cheap) and factorizes/solves all nS via UBATCH_SIZE.
-    //      Modes 4/5 share this exact setup and differ only in the per-iteration factorize policy
-    //      (mode 4 = factor at chunk iter 0 only; mode 5 = factor once + refactorize after). ----
-    {
-        int ub = nScenarios;
-        CUDSS_CHECK(cudssConfigSet(ctx->ds.config, CUDSS_CONFIG_UBATCH_SIZE, &ub, sizeof(ub)));
-        CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->matUb, n, n, ctx->nnz,
-                ctx->st->dRowPtr.as<int>(), nullptr, ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(),
-                OLF_CUDSS_CSR_TYPES,
-                CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matUbB, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matUbX, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-    }
+        setupBatchMatricesUbatch(ctx.get());
     } else {
-    // ---- fallback: a single matrix repointed per scenario inside the solve loop ----
-    CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->ds.matA, n, n, ctx->nnz,
-                                     ctx->st->dRowPtr.as<int>(), nullptr, ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(),
-                                     OLF_CUDSS_CSR_TYPES,
-                                     CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->ds.matB, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
-    CUDSS_CHECK(cudssMatrixCreateDn(&ctx->ds.matX, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        setupBatchMatricesFallback(ctx.get());
     }
     return ctx.release();
 }

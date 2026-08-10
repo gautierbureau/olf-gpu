@@ -5,26 +5,25 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.equations.vector.gpu;
+package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.iidm.network.Branch;
-import com.powsybl.iidm.network.Generator;
+import com.powsybl.iidm.network.Line;
 import com.powsybl.iidm.network.Network;
-import com.powsybl.iidm.network.Substation;
-import com.powsybl.iidm.network.TopologyKind;
-import com.powsybl.iidm.network.VoltageLevel;
-import com.powsybl.iidm.network.extensions.ActivePowerControlAdder;
+import com.powsybl.iidm.network.Terminal;
 import com.powsybl.math.matrix.DenseMatrixFactory;
 import com.powsybl.openloadflow.ac.AcTargetVector;
 import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcOuterLoopPacks;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuTestPaths;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationVector;
 import com.powsybl.openloadflow.equations.JacobianMatrix;
@@ -34,6 +33,8 @@ import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfNetworkParameters;
+import com.powsybl.openloadflow.network.VoltageControl;
+import com.powsybl.openloadflow.network.VoltageControlNetworkFactory;
 import com.powsybl.openloadflow.network.impl.Networks;
 import com.powsybl.openloadflow.network.util.UniformValueVoltageInitializer;
 import org.junit.jupiter.api.BeforeEach;
@@ -41,23 +42,25 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * Batched N-1 on a network with a zero-impedance branch (bus coupler) — the third family pass. The coupler's
- * DUMMY_P/Q variables couple the two buses' P/Q balances (and a spanning-tree edge adds the ZERO_V/ZERO_PHI
- * voltage/angle coupling), assembled per scenario by the {@code fillZeroImpBatch} kernel.
+ * Batched N-1 on a network with transformer ratio distribution (DISTR_RHO) — two transformers share the
+ * voltage control of one bus, so each controller's BRANCH_RHO1 row carries a linear {@code (1/count)·Σr1 − r1}
+ * equation assembled per scenario by the {@code fillDistrRhoBatch} kernel.
  *
- * <p>A contingency that outages the coupler itself is auto-rejected to the CPU (the element mapper does not
- * contain zero-impedance branches, so it is NOT_IN_GPU_MODEL — outaging a bus coupler is islanding-like). The
- * meshed lines around the coupler stay non-islanding when outaged, so they batch on-device and must agree with
- * a CPU {@code LoadFlow.run}. Skipped unless the native lib is available.
+ * <p>Outaging a CONTROLLING transformer reforms the {@code 1/count} coefficients (OLF redistributes the ratio
+ * across the survivors), which the fixed batch pattern cannot represent — so those contingencies must be
+ * REJECTED to the CPU. This verifies (1) DISTR_RHO networks now batch (no throw), (2) a controller-transformer
+ * outage is routed to the CPU, and (3) the surviving (non-controller) contingencies agree with a CPU
+ * {@code LoadFlow.run}. Skipped unless the native lib is available.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-class GpuBatchedZeroImpedanceTest {
+class GpuBatchedDistrRhoTest {
 
     private static final int MAX_ITER = 30;
     private static final double TOL = 1e-12;
@@ -73,17 +76,21 @@ class GpuBatchedZeroImpedanceTest {
     }
 
     @Test
-    void zeroImpedanceBatchedN1RejectsCouplerOutageAndMatchesCpu() {
-        Network gpuNet = meshedWithCoupler();
-        LfNetwork net = load(gpuNet).get(0);
+    void distrRhoBatchedN1RejectsControllerOutageAndMatchesCpu() {
+        Network gpuNet = sharedControlMeshed();
+        LfNetwork net = load(gpuNet);
         EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(net).create();
+        enableTransformerControl(net);
+
         AcSolverUtil.initStateVector(net, es, new UniformValueVoltageInitializer());
         StateVector sv = es.getStateVector();
         AcTargetVector target = new AcTargetVector(net, es);
         EquationVector<AcVariableType, AcEquationType> eq = new EquationVector<>(es);
 
         GpuAcData d = GpuAcDataExtractor.extract(net, es);
-        assertTrue(d.getZeroImpedanceCount() > 0, "the test network must exercise zero-impedance branches");
+        assertTrue(d.getDistrRhoContributionCount() > 0, "the test network must exercise DISTR_RHO rows");
+        Set<LfBranch> controllers = GpuAcOuterLoopPacks.distrRhoControllerBranches(net, es);
+        assertTrue(!controllers.isEmpty(), "must have DISTR_RHO controller transformers");
 
         cpuReference(es, target, eq, sv);                    // converge the base case as the hot start
         double[] baseState = sv.get().clone();
@@ -101,34 +108,37 @@ class GpuBatchedZeroImpedanceTest {
 
         double worst = 0;
         int checked = 0;
-        int couplerRejected = 0;
+        int controllerRejected = 0;
         for (int i = 0; i < conts.size(); i++) {
             BatchContingency c = conts.get(i);
             BatchScenarioResult r = results.get(i);
-            boolean isCoupler = "coupler".equals(c.contingencyId());
-            if (isCoupler) {
-                assertTrue(r.needsCpuFallback(), "the zero-impedance coupler outage must be rejected to the CPU");
-                couplerRejected++;
+            boolean isController = c.outagedBranches().stream().anyMatch(controllers::contains);
+            if (isController) {
+                assertTrue(r.needsCpuFallback(), "a controlling transformer outage (" + c.contingencyId()
+                        + ") must be rejected to the CPU (coefficients reform)");
+                controllerRejected++;
                 continue;
             }
             if (r.needsCpuFallback() || !r.hasConverged()) {
-                continue;
+                continue;                                    // islanding / de-energized → CPU owns it
             }
             sv.set(java.util.Arrays.copyOf(r.state(), n));
             AcSolverUtil.updateNetwork(net, es);
 
             // CPU reference: OLF's own Newton on a FRESH equation system with the branch disconnected — the SAME
-            // voltage init, tolerance (TOL) and code path as the device (no engine-specific criteria), so any
-            // disagreement is a real device bug rather than a parameter mismatch.
-            Network cpu = meshedWithCoupler();
+            // continuous ratio-distribution (DISTR_RHO) the device solves, with the SAME voltage init / tolerance
+            // / code path. (A full LoadFlow.run instead drives the ratio through the transformer-voltage-control
+            // OUTER LOOP — a different method, agreeing only to ~5e-4. Same-method, same-params is ~1e-9.)
+            Network cpu = sharedControlMeshed();
             Branch<?> br = cpu.getBranch(c.contingencyId());
             if (br == null) {
                 continue;
             }
             br.getTerminal1().disconnect();
             br.getTerminal2().disconnect();
-            LfNetwork cpuLf = load(cpu).get(0);
+            LfNetwork cpuLf = load(cpu);
             EquationSystem<AcVariableType, AcEquationType> cpuEs = new AcEquationSystemCreator(cpuLf).create();
+            enableTransformerControl(cpuLf);                 // same continuous DISTR_RHO control the device solves
             AcSolverUtil.initStateVector(cpuLf, cpuEs, new UniformValueVoltageInitializer());
             AcTargetVector cpuT = new AcTargetVector(cpuLf, cpuEs);
             EquationVector<AcVariableType, AcEquationType> cpuEq = new EquationVector<>(cpuEs);
@@ -147,49 +157,44 @@ class GpuBatchedZeroImpedanceTest {
             worst = Math.max(worst, w);
             checked++;
         }
-        System.out.printf("GPU batched zero-impedance N-1: %d zero-imp branches, %d coupler outage rejected, "
-                + "%d checked, worst max|gpu - cpu| = %.2e%n",
-                d.getZeroImpedanceCount(), couplerRejected, checked, worst);
-        assertTrue(couplerRejected >= 1, "must reject the coupler outage");
-        assertTrue(checked >= 1, "must validate at least one non-coupler contingency on the device");
-        assertTrue(worst < 1e-12, "every GPU zero-impedance post-contingency state must match OLF's Newton (worst = " + worst + ")");
+        System.out.printf("GPU batched DISTR_RHO N-1 [transformer shared control]: %d dr contributions, "
+                + "%d controller outages rejected, %d checked, worst max|gpu - cpu| = %.2e%n",
+                d.getDistrRhoContributionCount(), controllerRejected, checked, worst);
+        assertTrue(controllerRejected >= 1, "must reject at least one controller-transformer outage");
+        assertTrue(checked >= 1, "must validate at least one non-controller DISTR_RHO contingency on the device");
+        assertTrue(worst < 1e-12, "every GPU DISTR_RHO post-contingency state must match OLF's Newton (worst = " + worst + ")");
     }
 
-    /** Meshed triangle b1-b2-b3 plus a zero-impedance coupler b3-b4 feeding a load on b4. Outaging a triangle
-     *  line stays non-islanding (so it batches and exercises the coupler's DUMMY_P/Q assembly per scenario);
-     *  outaging the coupler is auto-rejected (bus-coupler / islanding-like). */
-    private static Network meshedWithCoupler() {
-        Network n = Network.create("zero-imp-meshed", "test");
-        Substation s = n.newSubstation().setId("s").add();
-        for (int i = 1; i <= 4; i++) {
-            VoltageLevel vl = s.newVoltageLevel().setId("vl" + i).setNominalV(100)
-                    .setTopologyKind(TopologyKind.BUS_BREAKER).add();
-            vl.getBusBreakerView().newBus().setId("b" + i).add();
-        }
-        Generator g1 = n.getVoltageLevel("vl1").newGenerator().setId("g1").setBus("b1").setConnectableBus("b1")
-                .setMinP(0).setMaxP(400).setTargetP(160).setTargetV(100).setVoltageRegulatorOn(true).add();
-        g1.newExtension(ActivePowerControlAdder.class).withParticipate(false).withDroop(4).add();
-        n.getVoltageLevel("vl2").newLoad().setId("l2").setBus("b2").setConnectableBus("b2").setP0(50).setQ0(20).add();
-        n.getVoltageLevel("vl3").newLoad().setId("l3").setBus("b3").setConnectableBus("b3").setP0(50).setQ0(20).add();
-        n.getVoltageLevel("vl4").newLoad().setId("l4").setBus("b4").setConnectableBus("b4").setP0(50).setQ0(20).add();
-        line(n, "l12", "vl1", "b1", "vl2", "b2", 1.0, 10.0);
-        line(n, "l23", "vl2", "b2", "vl3", "b3", 1.0, 10.0);
-        line(n, "l13", "vl1", "b1", "vl3", "b3", 1.0, 10.0);
-        line(n, "coupler", "vl3", "b3", "vl4", "b4", 0.0, 0.0);   // zero impedance -> DUMMY_P/Q coupler
+    /** The shared-transformer-control network plus a line parallel to LINE_12, so that outaging a
+     *  non-controller line stays non-islanding and actually exercises the batched DISTR_RHO assembly. */
+    private static Network sharedControlMeshed() {
+        Network n = VoltageControlNetworkFactory.createWithTransformerSharedRemoteControl();
+        Line l12 = n.getLine("LINE_12");
+        Terminal t1 = l12.getTerminal1();
+        Terminal t2 = l12.getTerminal2();
+        n.newLine().setId("LINE_12b")
+                .setVoltageLevel1(t1.getVoltageLevel().getId()).setBus1(t1.getBusBreakerView().getBus().getId())
+                .setConnectableBus1(t1.getBusBreakerView().getConnectableBus().getId())
+                .setVoltageLevel2(t2.getVoltageLevel().getId()).setBus2(t2.getBusBreakerView().getBus().getId())
+                .setConnectableBus2(t2.getBusBreakerView().getConnectableBus().getId())
+                .setR(1.05).setX(10.0).setG1(0).setB1(0).setG2(0).setB2(0)
+                .add();
         return n;
     }
 
-    private static void line(Network n, String id, String vlA, String busA, String vlB, String busB,
-                             double r, double x) {
-        n.newLine().setId(id)
-                .setVoltageLevel1(vlA).setBus1(busA).setConnectableBus1(busA)
-                .setVoltageLevel2(vlB).setBus2(busB).setConnectableBus2(busB)
-                .setR(r).setX(x).setG1(0).setB1(0).setG2(0).setB2(0)
-                .add();
+    private static LfNetwork load(Network iidm) {
+        return Networks.load(iidm, new LfNetworkParameters()
+                .setSlackBusSelector(new FirstSlackBusSelector())
+                .setTransformerVoltageControl(true)).get(0);
     }
 
-    private static List<LfNetwork> load(Network iidm) {
-        return Networks.load(iidm, new LfNetworkParameters().setSlackBusSelector(new FirstSlackBusSelector()));
+    private static void enableTransformerControl(LfNetwork net) {
+        for (LfBranch b : net.<LfBranch>getControllerElements(VoltageControl.Type.TRANSFORMER)) {
+            if (b.isConnectedAtBothSides()) {
+                b.setVoltageControlEnabled(true);
+            }
+        }
+        net.fixTransformerVoltageControls();
     }
 
     private static double[] cpuReference(EquationSystem<AcVariableType, AcEquationType> es,

@@ -5,25 +5,30 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.equations.vector.gpu;
+package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.commons.report.ReportNode;
+import com.powsybl.iidm.network.Bus;
 import com.powsybl.iidm.network.Generator;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.Substation;
 import com.powsybl.iidm.network.TopologyKind;
 import com.powsybl.iidm.network.VoltageLevel;
 import com.powsybl.iidm.network.extensions.ActivePowerControlAdder;
+import com.powsybl.loadflow.LoadFlow;
+import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.math.matrix.DenseMatrixFactory;
+import com.powsybl.openloadflow.OpenLoadFlowParameters;
+import com.powsybl.openloadflow.OpenLoadFlowProvider;
 import com.powsybl.openloadflow.ac.AcTargetVector;
 import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuTestPaths;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationVector;
 import com.powsybl.openloadflow.equations.JacobianMatrix;
@@ -32,6 +37,7 @@ import com.powsybl.openloadflow.network.FirstSlackBusSelector;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfNetworkParameters;
+import com.powsybl.openloadflow.network.SlackBusSelectionMode;
 import com.powsybl.openloadflow.network.impl.Networks;
 import com.powsybl.openloadflow.network.util.UniformValueVoltageInitializer;
 import org.junit.jupiter.api.BeforeEach;
@@ -43,22 +49,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * Batched generator contingency (N-1) on the device. A generator loss is not a branch mask — the batch
- * applies it as a per-scenario target override that mirrors {@code LfContingency.processLostGenerators}:
- * remove the generator's P from its bus's P target, and — when the bus loses its last voltage controller —
- * flip the bus PV→PQ (BUS_V row becomes the reactive-power equation, with a recomputed Q target).
+ * Batched generator contingency at a DISTRIBUTED-SLACK participant bus (Stage 2). Losing a participating
+ * generator is a per-scenario target override (remove its P, PV→PQ-flip the bus) PLUS a per-scenario
+ * distributed-slack reweight: the lost generator drops out of the slack participation, so its bus's
+ * participation factor / base P / headroom / footroom shrink by its share AND the per-scenario factor sum
+ * shrinks by the same factor delta, so the other participating buses absorb its share — exactly OLF's
+ * {@code DistributedSlackOuterLoop} after {@code LfContingency.processLostGenerators}.
  *
- * <p>Stage 1 scope: a generator at a NON distributed-slack-participant bus (the DS reweight is a follow-up),
- * not the slack/reference bus, not a remote/DISTR_Q controller — those fall through to the CPU. This verifies
- * (1) losing the non-slack voltage-controlling generator g2 solves on the device and matches a CPU
- * {@code LoadFlow.run} of the same outage, and (2) losing the slack generator g1 is rejected to the CPU.
+ * <p>The slack generator does not participate, so the on-device retain stays zero (the reweight math holds).
+ * Verifies the device solution of losing the participating, sole-voltage-controller g2 matches a CPU
+ * {@code LoadFlow.run} (distributed slack on) of the same outage.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-class GpuBatchedGeneratorContingencyTest {
+class GpuBatchedGeneratorContingencyDsTest {
 
     private static final int MAX_ITER = 30;
-    private static final double TOL = 1e-12;
+    private static final double TOL = 1e-8;
 
     static {
         GpuTestPaths.init();
@@ -71,84 +78,88 @@ class GpuBatchedGeneratorContingencyTest {
     }
 
     @Test
-    void generatorContingencyBatchedMatchesCpu() {
-        Network gpuNet = meshed3Bus();
+    void generatorAtDistributedSlackBusBatchedMatchesCpu() {
+        Network gpuNet = threeBusDs();
         LfNetwork net = load(gpuNet).get(0);
         EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(net).create();
         AcSolverUtil.initStateVector(net, es, new UniformValueVoltageInitializer());
         StateVector sv = es.getStateVector();
         AcTargetVector target = new AcTargetVector(net, es);
         EquationVector<AcVariableType, AcEquationType> eq = new EquationVector<>(es);
-        cpuReference(es, target, eq, sv);
+        cpuReference(es, target, eq, sv);                    // converge the base case (no distribution) as the hot start
         double[] baseState = sv.get().clone();
         int n = baseState.length;
 
-        List<BatchContingency> conts = List.of(
-                BatchContingency.generator("g2", net.getGeneratorById("g2")),    // batchable: non-slack, non-DS
-                BatchContingency.generator("g1", net.getGeneratorById("g1")));    // slack source: must reject
+        assertTrue(GpuAcDataExtractor.extract(net, es).getDistributedSlackBusCount() > 0,
+                "the network must have participating generators (a DS reweight to exercise)");
+
+        // g2 participates in the distributed slack AND is its bus's sole voltage controller: losing it removes
+        // its P, flips b2 PV→PQ, and reweights the slack distribution onto g3.
+        List<BatchContingency> conts = List.of(BatchContingency.generator("g2", net.getGeneratorById("g2")));
 
         List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(net, baseState, conts,
-                es, target, new NewtonRaphsonParameters(), TOL, false, false, ReportNode.NO_OP);
+                es, target, new NewtonRaphsonParameters(), 1e-10, true, false, ReportNode.NO_OP);
 
         BatchScenarioResult rG2 = results.get(0);
-        BatchScenarioResult rG1 = results.get(1);
-        assertTrue(rG1.needsCpuFallback(), "losing the slack generator g1 must be rejected to the CPU");
         assertTrue(!rG2.needsCpuFallback() && rG2.hasConverged(),
-                "losing g2 must solve on the device (status=" + rG2.convergenceStatus() + ")");
+                "losing the DS-participant g2 must solve on the device (status=" + rG2.convergenceStatus() + ")");
 
-        // CPU reference: OLF's own Newton on a FRESH equation system with g2 disconnected (b2 becomes PQ) — the
-        // SAME voltage init, tolerance (TOL) and code path as the device, so cpu/gpu use identical parameters
-        // and the only thing compared is the physics. Any disagreement is a real device bug.
+        // CPU reference: disconnect g2, full LoadFlow.run with distributed slack on (same scope).
         sv.set(java.util.Arrays.copyOf(rG2.state(), n));
         AcSolverUtil.updateNetwork(net, es);
-        Network cpu = meshed3Bus();
+        Network cpu = threeBusDs();
         cpu.getGenerator("g2").getTerminal().disconnect();
-        LfNetwork cpuLf = load(cpu).get(0);
-        EquationSystem<AcVariableType, AcEquationType> cpuEs = new AcEquationSystemCreator(cpuLf).create();
-        AcSolverUtil.initStateVector(cpuLf, cpuEs, new UniformValueVoltageInitializer());
-        AcTargetVector cpuT = new AcTargetVector(cpuLf, cpuEs);
-        EquationVector<AcVariableType, AcEquationType> cpuEq = new EquationVector<>(cpuEs);
-        cpuReference(cpuEs, cpuT, cpuEq, cpuEs.getStateVector());
-        AcSolverUtil.updateNetwork(cpuLf, cpuEs);
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+        LoadFlowParameters lfp = new LoadFlowParameters().setDistributedSlack(true).setUseReactiveLimits(false);
+        // TIGHT inner-Newton reference: OLF's default UNIFORM_CRITERIA (convEpsPerEq=1e-4) stops ~e-4 short of the
+        // true root, which used to read as a ~1.6e-6 GPU "gap". Drive it to 1e-12 so the reference lands on the
+        // true root the device already sits on (see GpuBatchedGenOverrideDiagnosticTest / GpuBatchedL1L2DiagnosticTest).
+        OpenLoadFlowParameters.create(lfp).setSlackBusSelectionMode(SlackBusSelectionMode.FIRST)
+                .setNewtonRaphsonConvEpsPerEq(1e-12);
+        assertTrue(runner.run(cpu, lfp).isFullyConverged(), "CPU reference for losing g2 must converge");
 
         double worst = 0;
-        for (LfBus cpuBus : cpuLf.getBuses()) {
+        for (Bus cpuBus : cpu.getBusView().getBuses()) {
             LfBus gpuBus = net.getBusById(cpuBus.getId());
-            if (gpuBus == null) {
+            if (gpuBus == null || Double.isNaN(cpuBus.getV())) {
                 continue;
             }
-            worst = Math.max(worst, Math.abs(cpuBus.getV() - gpuBus.getV()));
-            worst = Math.max(worst, Math.abs(cpuBus.getAngle() - gpuBus.getAngle()));
+            worst = Math.max(worst, Math.abs(cpuBus.getV() / cpuBus.getVoltageLevel().getNominalV() - gpuBus.getV()));
+            worst = Math.max(worst, Math.abs(Math.toRadians(cpuBus.getAngle()) - gpuBus.getAngle()));
         }
-        System.out.printf("GPU batched generator contingency [lose g2, PV→PQ]: converged=%b, max|gpu - cpu| = %.2e%n",
-                rG2.hasConverged(), worst);
-        assertTrue(worst < 1e-12, "the GPU generator-contingency state must match OLF's Newton (worst = " + worst + ")");
+        System.out.printf("GPU batched gen contingency at DS bus [lose g2, PV→PQ + reweight]: converged=%b, "
+                + "max|gpu - cpu| = %.2e%n", rG2.hasConverged(), worst);
+        assertTrue(worst < 1e-10, "the GPU DS-reweight generator-contingency state must match the CPU LoadFlow "
+                + "(worst = " + worst + ")");
     }
 
-    /** Meshed b1(slack gen)-b2(gen, sole voltage controller)-b3(load). Losing g2 removes its P AND flips b2
-     *  PV→PQ; both generators are non-participating so no bus is a distributed-slack participant. */
-    private static Network meshed3Bus() {
-        Network n = Network.create("gen-contingency", "test");
+    /** Meshed b1(non-participating slack gen)-b2(participating gen, sole controller)-b3(participating gen);
+     *  b2/b3 carry loads exceeding the scheduled generation, so the slack absorbs a deficit distributed across
+     *  b2/b3. Losing g2 removes its P, flips b2 PV→PQ AND reweights the distribution onto g3. */
+    private static Network threeBusDs() {
+        Network n = Network.create("gen-contingency-ds", "test");
         Substation s = n.newSubstation().setId("s").add();
         for (int i = 1; i <= 3; i++) {
             VoltageLevel vl = s.newVoltageLevel().setId("vl" + i).setNominalV(100)
                     .setTopologyKind(TopologyKind.BUS_BREAKER).add();
             vl.getBusBreakerView().newBus().setId("b" + i).add();
         }
-        gen(n, "g1", "vl1", "b1", 60);
-        gen(n, "g2", "vl2", "b2", 50);
-        n.getVoltageLevel("vl2").newLoad().setId("l2").setBus("b2").setConnectableBus("b2").setP0(20).setQ0(10).add();
-        n.getVoltageLevel("vl3").newLoad().setId("l3").setBus("b3").setConnectableBus("b3").setP0(100).setQ0(40).add();
+        gen(n, "g1", "vl1", "b1", 20, false);                // slack source, does NOT participate
+        gen(n, "g2", "vl2", "b2", 40, true);                 // participating + sole voltage controller of b2
+        gen(n, "g3", "vl3", "b3", 40, true);                 // participating: absorbs g2's lost share
+        n.getVoltageLevel("vl2").newLoad().setId("l2").setBus("b2").setConnectableBus("b2").setP0(90).setQ0(20).add();
+        n.getVoltageLevel("vl3").newLoad().setId("l3").setBus("b3").setConnectableBus("b3").setP0(90).setQ0(20).add();
         line(n, "l12", "vl1", "b1", "vl2", "b2");
         line(n, "l23", "vl2", "b2", "vl3", "b3");
         line(n, "l13", "vl1", "b1", "vl3", "b3");
         return n;
     }
 
-    private static void gen(Network n, String id, String vl, String bus, double targetP) {
+    private static void gen(Network n, String id, String vl, String bus, double targetP, boolean participate) {
         Generator g = n.getVoltageLevel(vl).newGenerator().setId(id).setBus(bus).setConnectableBus(bus)
                 .setMinP(0).setMaxP(400).setTargetP(targetP).setTargetV(100).setVoltageRegulatorOn(true).add();
-        g.newExtension(ActivePowerControlAdder.class).withParticipate(false).withDroop(4).add();
+        g.newMinMaxReactiveLimits().setMinQ(-400).setMaxQ(400).add();   // wide: reactive limits never bind here
+        g.newExtension(ActivePowerControlAdder.class).withParticipate(participate).withDroop(4).add();
     }
 
     private static void line(Network n, String id, String vlA, String busA, String vlB, String busB) {

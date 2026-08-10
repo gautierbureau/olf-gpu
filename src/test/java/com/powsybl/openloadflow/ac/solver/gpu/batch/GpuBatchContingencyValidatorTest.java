@@ -5,15 +5,12 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.ac.solver;
+package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.iidm.network.Network;
 import com.powsybl.iidm.network.test.EurostagTutorialExample1Factory;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContingencyValidator;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContingencyValidator.Disqualification;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContingencyValidator.Qualification;
-import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
 import com.powsybl.openloadflow.network.EurostagFactory;
 import com.powsybl.openloadflow.network.FirstSlackBusSelector;
 import com.powsybl.openloadflow.network.LfBranch;

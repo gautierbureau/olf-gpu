@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  * SPDX-License-Identifier: MPL-2.0
  */
-package com.powsybl.openloadflow.sa;
+package com.powsybl.openloadflow.sa.gpu;
 
 import com.powsybl.contingency.BranchContingency;
 import com.powsybl.contingency.Contingency;
@@ -18,8 +18,9 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuTestPaths;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
-import com.powsybl.openloadflow.sa.gpu.GpuBatchedAcSecurityAnalysis;
-import com.powsybl.openloadflow.sa.gpu.GpuSecurityAnalysisProvider;
+import com.powsybl.openloadflow.sa.AbstractOpenSecurityAnalysisTest;
+import com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters;
+import com.powsybl.openloadflow.sa.OpenSecurityAnalysisProvider;
 import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.results.PostContingencyResult;

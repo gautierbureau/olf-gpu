@@ -2515,24 +2515,13 @@ __global__ void applyTargetOverrideBatch(int nOv, const int* ovIndex, const doub
     }
 }
 
-BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const double* target,
-                              const int* rowMode, const int* baseRowMode, const char* disabled,
-                              int nOv, const int* ovIndex, const double* ovValue,
-                              const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
-                              const double* dsOvMaxDelta, const double* dsOvMinDelta, int maxIter, double tol,
-                              double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
-                              int lsMode, double maxDv, double maxDphi, const int* varType,
-                              const double* x0Full, int nShOv, const int* shOvSlotElem, const double* shOvGb,
-                              const int* rlStateIn, int* rlStateOut,
-                              int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                              int maxOuterProductive, int rlMaxSwitch, int dsRejectResidual,
-                              int nziBase, int nZiOn, const int* ziOnSlotElem,
-                              int nZiOff, const int* ziOffSlotElem) {
+static void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double maxDv, double maxDphi,
+                                 const int* varType, int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                                 int nziBase, int nZiOff, const int* ziOffSlotElem,
+                                 int nZiOn, const int* ziOnSlotElem,
+                                 int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal) {
     int n = ctx->n;
-    int nnz = ctx->nnz;
     int nS = ctx->nScenarios;
-    // MAX_VOLTAGE_CHANGE (lsMode 2): per-scenario step clamp, same rule as the base solver's
-    // (varType 1 = V vs maxDv, 0 = PHI vs maxDphi; whole step scaled). Buffers allocated lazily.
     bool clampStep = lsMode == 2 && varType != nullptr;
     if (clampStep && !ctx->dVarType.p) {
         ctx->dVarType.upload(varType, static_cast<size_t>(n) * sizeof(int));
@@ -2579,6 +2568,28 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         ctx->dR1OvSlotElem.upload(dummyI, sizeof(dummyI));
         ctx->dR1OvVal.upload(dummyD, sizeof(dummyD));
     }
+}
+
+BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const double* target,
+                              const int* rowMode, const int* baseRowMode, const char* disabled,
+                              int nOv, const int* ovIndex, const double* ovValue,
+                              const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
+                              const double* dsOvMaxDelta, const double* dsOvMinDelta, int maxIter, double tol,
+                              double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
+                              int lsMode, double maxDv, double maxDphi, const int* varType,
+                              const double* x0Full, int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                              const int* rlStateIn, int* rlStateOut,
+                              int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                              int maxOuterProductive, int rlMaxSwitch, int dsRejectResidual,
+                              int nziBase, int nZiOn, const int* ziOnSlotElem,
+                              int nZiOff, const int* ziOffSlotElem) {
+    int n = ctx->n;
+    int nnz = ctx->nnz;
+    int nS = ctx->nScenarios;
+    // MAX_VOLTAGE_CHANGE (lsMode 2): per-scenario step clamp, same rule as the base solver's
+    // (varType 1 = V vs maxDv, 0 = PHI vs maxDphi; whole step scaled). Buffers allocated lazily.
+    uploadBatchOverrides(ctx, lsMode, maxDv, maxDphi, varType, nShOv, shOvSlotElem, shOvGb,
+                         nziBase, nZiOff, ziOffSlotElem, nZiOn, ziOnSlotElem, nR1Ov, r1OvSlotElem, r1OvVal);
     size_t nTot = static_cast<size_t>(n) * nS;
     DeviceBuf dOvIndex, dOvValue;                            // function-scoped: outlive the async override kernel
     DeviceBuf dBaseMode;                                     // the contingency-free base row mode (length n)

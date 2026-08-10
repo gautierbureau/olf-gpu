@@ -846,6 +846,92 @@ struct SharedStructure {
 // context copies it, so destroyStructure only drops the Java-side reference.
 using SharedStructurePtr = std::shared_ptr<SharedStructure>;
 
+static void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
+                            int ndq, const int* dqElem, const int* dqSide, const int* dqKind,
+                            const double* dqWeight, const int* dqRow,
+                            const int* cbIdx, const int* obIdx, const int* shIdx) {
+    st->ndq = ndq;
+    if (ndq > 0) {
+        std::vector<int> dqDest(static_cast<size_t>(ndq) * 6, -1);
+        for (int c = 0; c < ndq; c++) {
+            int mappedRow = rowMap[dqRow[c]];
+            dqDest[c * 6 + 0] = -2 - mappedRow;              // q value -> F row
+            if (dqKind[c] == 1) {                            // shunt: dq/dv on the bus V column
+                dqDest[c * 6 + 1] = pos.at(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 3 + 2]);
+            } else if (dqKind[c] == 2) {                     // half-open: dq/dv on the connected-side V col
+                const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
+                dqDest[c * 6 + 1] = pos.at(mappedRow, dqSide[c] == 0 ? oq[4] : oq[5]);
+            } else if (dqKind[c] == 3) {                     // zero-impedance: J slot on the dummyQ column
+                dqDest[c * 6 + 1] = pos.at(mappedRow, dqElem[c]);
+            } else {                                         // closed branch
+                const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 10;
+                dqDest[c * 6 + 1] = pos.at(mappedRow, q[5]);     // dq/dv1
+                dqDest[c * 6 + 2] = pos.at(mappedRow, q[7]);     // dq/dv2
+                dqDest[c * 6 + 3] = pos.at(mappedRow, q[4]);     // dq/dph1
+                dqDest[c * 6 + 4] = pos.at(mappedRow, q[6]);     // dq/dph2
+                dqDest[c * 6 + 5] = q[9] >= 0 ? pos.at(mappedRow, q[9]) : -1;  // dq/dr1
+            }
+        }
+        st->dDqElem.upload(dqElem, ndq * sizeof(int));
+        st->dDqSide.upload(dqSide, ndq * sizeof(int));
+        st->dDqKind.upload(dqKind, ndq * sizeof(int));
+        st->dDqWeight.upload(dqWeight, ndq * sizeof(double));
+        st->dDqDest.upload(dqDest.data(), dqDest.size() * sizeof(int));
+    }
+}
+
+static void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
+                             int nzi, const double* ziIn, const int* ziIdx) {
+    st->nzi = nzi;
+    if (nzi > 0) {
+        std::vector<int> ziDest(static_cast<size_t>(nzi) * 14, -1);
+        for (int e = 0; e < nzi; e++) {
+            const int* z = ziIdx + static_cast<size_t>(e) * 11;
+            // -1 Q row = a DISTR_Q controller whose reactive balance is suppressed (its dummyQ joins the
+            // DISTR_Q rows via kind 3, not its own Q balance) — skip the coupling there.
+            int b1P = rowMap[z[0]], b2P = rowMap[z[2]];
+            int b1Q = z[1] >= 0 ? rowMap[z[1]] : -1, b2Q = z[3] >= 0 ? rowMap[z[3]] : -1;
+            int* dd = ziDest.data() + static_cast<size_t>(e) * 14;
+            dd[0] = -2 - b1P;                                // F bus1 P (+dummyP)
+            dd[1] = -2 - b2P;                                // F bus2 P (-dummyP)
+            dd[2] = b1Q >= 0 ? -2 - b1Q : -1;                // F bus1 Q (+dummyQ), skip if suppressed
+            dd[3] = b2Q >= 0 ? -2 - b2Q : -1;                // F bus2 Q (-dummyQ), skip if suppressed
+            dd[4] = pos.at(b1P, z[4]);                       // J(bus1 P, dummyP)
+            dd[5] = pos.at(b2P, z[4]);                       // J(bus2 P, dummyP)
+            dd[6] = b1Q >= 0 ? pos.at(b1Q, z[5]) : -1;       // J(bus1 Q, dummyQ)
+            dd[7] = b2Q >= 0 ? pos.at(b2Q, z[5]) : -1;       // J(bus2 Q, dummyQ)
+            if (z[10]) {                                     // spanning-tree edge
+                int dpRow = rowMap[z[4]], dqRow2 = rowMap[z[5]];
+                dd[8] = -2 - dpRow;                          // F ZERO_V row
+                dd[9] = pos.at(dpRow, z[6]);                 // J(ZERO_V, v1)
+                dd[10] = pos.at(dpRow, z[7]);                // J(ZERO_V, v2)
+                dd[11] = -2 - dqRow2;                        // F ZERO_PHI row
+                dd[12] = pos.at(dqRow2, z[8]);               // J(ZERO_PHI, ph1)
+                dd[13] = pos.at(dqRow2, z[9]);               // J(ZERO_PHI, ph2)
+            }
+        }
+        st->dZiIn.upload(ziIn, nzi * sizeof(double));
+        st->dZiIdx.upload(ziIdx, static_cast<size_t>(nzi) * 11 * sizeof(int));
+        st->dZiDest.upload(ziDest.data(), ziDest.size() * sizeof(int));
+    }
+}
+
+static void buildDistrRhoDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
+                              int ndr, const int* drRow, const int* drCol, const double* drCoef) {
+    st->ndr = ndr;
+    if (ndr > 0) {
+        std::vector<int> drDest(static_cast<size_t>(ndr) * 2);
+        for (int c = 0; c < ndr; c++) {
+            int mappedRow = rowMap[drRow[c]];
+            drDest[c * 2 + 0] = -2 - mappedRow;              // DISTR_RHO F row
+            drDest[c * 2 + 1] = pos.at(mappedRow, drCol[c]); // J slot
+        }
+        st->dDrCol.upload(drCol, ndr * sizeof(int));
+        st->dDrCoef.upload(drCoef, ndr * sizeof(double));
+        st->dDrDest.upload(drDest.data(), drDest.size() * sizeof(int));
+    }
+}
+
 SharedStructure* buildStructure(int n,
                                 int ncb, const double* cbIn, const int* cbIdx,
                                 int nob, const double* obIn, const int* obIdx,
@@ -926,82 +1012,13 @@ SharedStructure* buildStructure(int n,
 
     // ---- DISTR_Q destinations: per contribution {F-row, dq/dv1, dq/dv2, dq/dph1, dq/dph2, dq/dr1}
     //      (-2-row encodes an F row, >=0 a J slot, -1 skip) ----
-    st->ndq = ndq;
-    if (ndq > 0) {
-        std::vector<int> dqDest(static_cast<size_t>(ndq) * 6, -1);
-        for (int c = 0; c < ndq; c++) {
-            int mappedRow = rowMap[dqRow[c]];
-            dqDest[c * 6 + 0] = -2 - mappedRow;              // q value -> F row
-            if (dqKind[c] == 1) {                            // shunt: dq/dv on the bus V column
-                dqDest[c * 6 + 1] = pos.at(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 3 + 2]);
-            } else if (dqKind[c] == 2) {                     // half-open: dq/dv on the connected-side V col
-                const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
-                dqDest[c * 6 + 1] = pos.at(mappedRow, dqSide[c] == 0 ? oq[4] : oq[5]);
-            } else if (dqKind[c] == 3) {                     // zero-impedance: J slot on the dummyQ column
-                dqDest[c * 6 + 1] = pos.at(mappedRow, dqElem[c]);
-            } else {                                         // closed branch
-                const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 10;
-                dqDest[c * 6 + 1] = pos.at(mappedRow, q[5]);     // dq/dv1
-                dqDest[c * 6 + 2] = pos.at(mappedRow, q[7]);     // dq/dv2
-                dqDest[c * 6 + 3] = pos.at(mappedRow, q[4]);     // dq/dph1
-                dqDest[c * 6 + 4] = pos.at(mappedRow, q[6]);     // dq/dph2
-                dqDest[c * 6 + 5] = q[9] >= 0 ? pos.at(mappedRow, q[9]) : -1;  // dq/dr1
-            }
-        }
-        st->dDqElem.upload(dqElem, ndq * sizeof(int));
-        st->dDqSide.upload(dqSide, ndq * sizeof(int));
-        st->dDqKind.upload(dqKind, ndq * sizeof(int));
-        st->dDqWeight.upload(dqWeight, ndq * sizeof(double));
-        st->dDqDest.upload(dqDest.data(), dqDest.size() * sizeof(int));
-    }
+    buildDistrQDest(st.get(), pos, rowMap, ndq, dqElem, dqSide, dqKind, dqWeight, dqRow, cbIdx, obIdx, shIdx);
 
     // ---- zero-impedance destinations: per branch the 8 dummy couplings + (tree) the 6 ZERO_V/ZERO_PHI ----
-    st->nzi = nzi;
-    if (nzi > 0) {
-        std::vector<int> ziDest(static_cast<size_t>(nzi) * 14, -1);
-        for (int e = 0; e < nzi; e++) {
-            const int* z = ziIdx + static_cast<size_t>(e) * 11;
-            // -1 Q row = a DISTR_Q controller whose reactive balance is suppressed (its dummyQ joins the
-            // DISTR_Q rows via kind 3, not its own Q balance) — skip the coupling there.
-            int b1P = rowMap[z[0]], b2P = rowMap[z[2]];
-            int b1Q = z[1] >= 0 ? rowMap[z[1]] : -1, b2Q = z[3] >= 0 ? rowMap[z[3]] : -1;
-            int* dd = ziDest.data() + static_cast<size_t>(e) * 14;
-            dd[0] = -2 - b1P;                                // F bus1 P (+dummyP)
-            dd[1] = -2 - b2P;                                // F bus2 P (-dummyP)
-            dd[2] = b1Q >= 0 ? -2 - b1Q : -1;                // F bus1 Q (+dummyQ), skip if suppressed
-            dd[3] = b2Q >= 0 ? -2 - b2Q : -1;                // F bus2 Q (-dummyQ), skip if suppressed
-            dd[4] = pos.at(b1P, z[4]);                       // J(bus1 P, dummyP)
-            dd[5] = pos.at(b2P, z[4]);                       // J(bus2 P, dummyP)
-            dd[6] = b1Q >= 0 ? pos.at(b1Q, z[5]) : -1;       // J(bus1 Q, dummyQ)
-            dd[7] = b2Q >= 0 ? pos.at(b2Q, z[5]) : -1;       // J(bus2 Q, dummyQ)
-            if (z[10]) {                                     // spanning-tree edge
-                int dpRow = rowMap[z[4]], dqRow2 = rowMap[z[5]];
-                dd[8] = -2 - dpRow;                          // F ZERO_V row
-                dd[9] = pos.at(dpRow, z[6]);                 // J(ZERO_V, v1)
-                dd[10] = pos.at(dpRow, z[7]);                // J(ZERO_V, v2)
-                dd[11] = -2 - dqRow2;                        // F ZERO_PHI row
-                dd[12] = pos.at(dqRow2, z[8]);               // J(ZERO_PHI, ph1)
-                dd[13] = pos.at(dqRow2, z[9]);               // J(ZERO_PHI, ph2)
-            }
-        }
-        st->dZiIn.upload(ziIn, nzi * sizeof(double));
-        st->dZiIdx.upload(ziIdx, static_cast<size_t>(nzi) * 11 * sizeof(int));
-        st->dZiDest.upload(ziDest.data(), ziDest.size() * sizeof(int));
-    }
+    buildZeroImpDest(st.get(), pos, rowMap, nzi, ziIn, ziIdx);
 
     // ---- DISTR_RHO destinations: per contribution {F row, J slot (row, r1 col)} ----
-    st->ndr = ndr;
-    if (ndr > 0) {
-        std::vector<int> drDest(static_cast<size_t>(ndr) * 2);
-        for (int c = 0; c < ndr; c++) {
-            int mappedRow = rowMap[drRow[c]];
-            drDest[c * 2 + 0] = -2 - mappedRow;              // DISTR_RHO F row
-            drDest[c * 2 + 1] = pos.at(mappedRow, drCol[c]); // J slot
-        }
-        st->dDrCol.upload(drCol, ndr * sizeof(int));
-        st->dDrCoef.upload(drCoef, ndr * sizeof(double));
-        st->dDrDest.upload(drDest.data(), drDest.size() * sizeof(int));
-    }
+    buildDistrRhoDest(st.get(), pos, rowMap, ndr, drRow, drCol, drCoef);
 
     std::vector<int> diagPos(n);
     for (int r = 0; r < n; r++) diagPos[r] = pos.at(r, r);

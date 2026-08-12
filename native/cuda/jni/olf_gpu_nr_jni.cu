@@ -1187,18 +1187,6 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
     Result res;
     res.x.resize(n);
     std::vector<double> hDx(lsMode == 2 ? n : 0);            // host step buffer for MAX_VOLTAGE_CHANGE clamp
-    // Best-iterate fallback: on a mismatch plateau (near-singular J at the solution — a case
-    // at the PV-curve nose) the iterates limit-cycle around the stopping-criteria level, and
-    // the LAST iterate is a lottery sample of that wander (observed norm2 wandering in
-    // [1.98, 2.15]e-4 around a 2.0e-4 criterion — the verdict flipped with maxIter or any
-    // last-ulp kernel change). Track the best accepted iterate by the 2-norm and return IT
-    // when the loop exhausts maxIter, so the CPU-side stopping-criteria judgment sees the
-    // best visited state. This mirrors the CPU solver, which tests its criterion EVERY
-    // iteration and stops at the first dip — it never exposes the later wander. Runs that
-    // reach tol return the final iterate, bit-identical to the previous behavior.
-    std::vector<double> hXbest;
-    double bestNorm2 = HUGE_VAL;
-    double bestInf = HUGE_VAL;
     const bool trace = std::getenv("OLF_GPU_TRACE") != nullptr;   // per-iteration diagnostic
     const double olf2NormThreshold = convEpsPerEq > 0.0 ? std::sqrt(convEpsPerEq * convEpsPerEq * n) : 0.0;
     double lastNorm2 = 0.0;
@@ -1228,12 +1216,6 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
         }
         if (trace) {
             std::fprintf(stderr, "OLF_GPU_TRACE it=%d infnorm=%.17e norm2=%.17e\n", it, res.norm, norm2);
-        }
-        if (norm2 < bestNorm2) {                             // accepted iterate: remember the best
-            bestNorm2 = norm2;
-            bestInf = res.norm;
-            hXbest.resize(n);
-            CUDA_CHECK(cudaMemcpy(hXbest.data(), ctx->dX.p, n * sizeof(double), cudaMemcpyDeviceToHost));
         }
         lastNorm2 = norm2;
         haveLast = true;
@@ -1280,14 +1262,11 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     }
     res.iters = it;
-    bool converged = convEpsPerEq > 0.0 ? (bestNorm2 < olf2NormThreshold) : (res.norm < tol);
-    if (!converged && !hXbest.empty()) {
-        // not converged to tol: return the best visited iterate, not the last plateau sample
-        res.norm = bestInf;
-        std::copy(hXbest.begin(), hXbest.end(), res.x.begin());
-    } else {
-        CUDA_CHECK(cudaMemcpy(res.x.data(), ctx->dX.p, n * sizeof(double), cudaMemcpyDeviceToHost));
-    }
+    // Return the LAST iterate (res.norm is its ‖F‖∞, set by the final fillAndNorm), matching the CPU
+    // NewtonRaphson, which returns whatever state it holds when its loop exits. The final
+    // CONVERGED / MAX_ITERATION_REACHED verdict is decided by the configured stopping criteria on the
+    // CPU from this written-back state (see GpuNewtonRaphson), so no on-device best-iterate selection.
+    CUDA_CHECK(cudaMemcpy(res.x.data(), ctx->dX.p, n * sizeof(double), cudaMemcpyDeviceToHost));
     return res;
 }
 

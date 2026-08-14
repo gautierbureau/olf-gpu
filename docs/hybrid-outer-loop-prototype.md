@@ -98,6 +98,35 @@ return states
   warm-restart, `DistributedSlackOuterLoop` in the same round, straggler/compaction handling,
   and the retirement bookkeeping the native driver already does.
 
+## Prototype run findings (2026-08-14) — IMPORTANT, corrects the hypothesis
+
+`GpuHybridBatchValidationTest` drives the two divergent contingencies with the device doing
+inner Newton + **device DS**, and OLF's Java `ReactiveLimitsOuterLoop` deciding RL. It compiles,
+runs on pegase, and converges cleanly (2 rounds with per-scenario `NetworkState` snapshots).
+
+**Result: VL-7616_0 ends PV — same as the device kernel batch, still NOT CPU's PQ.** Moving RL
+alone to Java does NOT fix the divergence. Why: the RL switch DECISION depends on the STATE, and
+the state is still produced with the **device distributed-slack** (waterfill). The ~4e-7 DS
+difference vs OLF's `ActivePowerDistribution`, amplified at VL-7616's maxQ boundary, keeps its Q
+just under maxQ — so OLF's check, fed that state, correctly holds it PV. **The DS is the seed, not
+a bystander.**
+
+Two consequences for a full solver:
+1. **DS must move to Java too** (device = pure inner Newton, empty RL AND DS packs) so the state
+   feeding the decisions matches CPU. Reuse `DistributedSlackOuterLoop` the same way, and rebuild
+   the target vector after it redistributes generator P (a fresh `AcTargetVector` re-reads it).
+   Transformer voltage control (AFTER_GENERATOR in the RTE params) would need the same treatment
+   or the state won't fully match CPU.
+2. **The activation-extraction bridge needs to reliably capture OLF's switches:** the prototype
+   showed a case (v=1.1323 with a PV flag) where the `setGeneratorVoltageControlEnabled` switch
+   did not fully propagate into the equation activation that `GpuAcActivation.fromEquationSystem`
+   re-reads — so the device rowMode lagged the Java decision. Verify the equation-system listener
+   / activation is in sync after each `check` before extracting.
+
+Net: the hybrid architecture is sound and runs, but "fall in line with CPU" requires the FULL
+outer loop (DS+RL, and transformer VC) in Java — not RL alone. The prototype's value was pinning
+this down empirically.
+
 ## Validation plan
 
 1. **Correctness:** run `GpuVsCpuProductionSaBenchmarkTest#productionSaGpuVsCpu` at the shared

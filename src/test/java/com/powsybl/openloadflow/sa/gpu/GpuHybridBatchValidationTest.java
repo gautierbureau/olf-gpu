@@ -41,6 +41,7 @@ import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFa
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.NetworkState;
 import com.powsybl.openloadflow.network.impl.LfNetworkLoaderImpl;
@@ -180,12 +181,23 @@ class GpuHybridBatchValidationTest {
 
         NetworkState baseSnap = NetworkState.save(network);
         NetworkState[] snaps = new NetworkState[nS];       // each scenario's evolving PV/PQ state, persisted across rounds
+        // NetworkState/BusState does NOT capture the generator ACTIVE-power target (only the reactive side), yet
+        // OLF's distributed-slack loop redistributes it (GenerationActivePowerDistributionStep.setTargetP). So a
+        // scenario's accumulated redistribution would leak between scenarios and reset within one — the slack
+        // mismatch then never converges for a large-redistribution outage (e.g. LINE-26-4231, 4.72 pu). Manage
+        // the per-scenario generator targetP explicitly alongside the NetworkState snapshot.
+        List<LfGenerator> gens = network.getBuses().stream().flatMap(b -> b.getGenerators().stream()).toList();
+        double[] baseGenP = gens.stream().mapToDouble(LfGenerator::getTargetP).toArray();
+        double[][] genSnap = new double[nS][];
 
         // per-scenario device inputs
         int[][] rowMode = new int[nS][];
         boolean[][] disabled = new boolean[nS][nElements];
         double[][] scenTargets = new double[nS][];
         boolean[] retired = new boolean[nS];
+        boolean[] routedByBudget = new boolean[nS];        // exceeded the per-scenario outer budget -> CPU fallback
+        int[] scenPasses = new int[nS];
+        int maxOuter = acp.getMaxOuterLoopIterations();    // production per-scenario outer-iteration budget
         for (int s = 0; s < nS; s++) {
             rowMode[s] = baseRowMode.clone();
             scenTargets[s] = baseTargets.clone();
@@ -240,8 +252,14 @@ class GpuHybridBatchValidationTest {
                 long tr0 = System.nanoTime();
                 if (snaps[s] != null) {
                     snaps[s].restore();                                 // resume THIS scenario's accumulated PV/PQ state
+                    for (int g = 0; g < gens.size(); g++) {
+                        gens.get(g).setTargetP(genSnap[s][g]);          // + its accumulated distributed-slack targetP
+                    }
                 } else {
                     baseSnap.restore();                                 // first round: from the base-converged state
+                    for (int g = 0; g < gens.size(); g++) {
+                        gens.get(g).setTargetP(baseGenP[g]);
+                    }
                 }
                 tSnap += System.nanoTime() - tr0;
                 for (LfBranch b : ctgs.get(s).outagedBranches()) {
@@ -258,9 +276,16 @@ class GpuHybridBatchValidationTest {
                 nJavaCalls++;
                 long tsv0 = System.nanoTime();
                 snaps[s] = NetworkState.save(network);                   // persist this scenario's evolved PV/PQ + targets
+                genSnap[s] = gens.stream().mapToDouble(LfGenerator::getTargetP).toArray();   // + accumulated targetP
                 tSnap += System.nanoTime() - tsv0;
                 if (bridges[s].isStable()) {
                     retired[s] = true;
+                } else if (++scenPasses[s] >= maxOuter) {
+                    // Exceeded the per-scenario outer-iteration budget (as the device batch's prodIters cap does):
+                    // this scenario does not converge on the GPU (e.g. a distributed-slack runaway on a stressed
+                    // outage) — route it to the CPU fallback, exactly like production. Not counted as GPU-converged.
+                    retired[s] = true;
+                    routedByBudget[s] = true;
                 } else {
                     allStable = false;
                 }
@@ -273,9 +298,15 @@ class GpuHybridBatchValidationTest {
         GpuAcNewtonSolver.destroyStructure(structure);
 
         // Report: does the hybrid end with VL-7616_0 pinned to PQ (as CPU does) rather than held PV?
-        boolean converged = rounds < 40;
-        System.out.printf("%n=== HYBRID batch: %d scenarios (%d islanding routed to CPU), %d rounds, converged=%s ===%n",
-                nS, nRoutedCpu, rounds, converged);
+        int budgetRouted = 0;
+        for (int s = 0; s < nS; s++) {
+            if (routedByBudget[s]) {
+                budgetRouted++;
+            }
+        }
+        int gpuConverged = nS - budgetRouted;
+        System.out.printf("%n=== HYBRID batch: %d scenarios | %d GPU-converged, %d islanding->CPU, %d budget->CPU | %d rounds ===%n",
+                nS, gpuConverged, nRoutedCpu, budgetRouted, rounds);
         System.out.printf("  TIMING total: solve(cuDSS batched inner, SAME in both designs)=%.0f ms | java(OLF outer-loop work)=%.0f ms"
                 + " | snapshot(prototype-only, a production hybrid avoids)=%.0f ms | javaCalls=%d%n",
                 tSolve / 1e6, tJava / 1e6, tSnap / 1e6, nJavaCalls);
@@ -292,9 +323,19 @@ class GpuHybridBatchValidationTest {
                     }
                 }
                 if (nNonConv <= 8) {
-                    System.out.printf("  NON-CONVERGED %s: unstable-by-loop%s | lastSlackMismatch(pu)=%.4e | disabledElems=%d%n",
+                    int changedTargets = 0;
+                    double maxDelta = 0;
+                    for (int r = 0; r < n; r++) {
+                        double d = Math.abs(scenTargets[s][r] - baseTargets[r]);
+                        if (d > 1e-9) {
+                            changedTargets++;
+                            maxDelta = Math.max(maxDelta, d);
+                        }
+                    }
+                    System.out.printf("  NON-CONVERGED %s: unstable-by-loop%s | lastSlackMismatch(pu)=%.4e | disabledElems=%d"
+                            + " | changedTargets=%d maxDelta=%.4e%n",
                             ctgs.get(s).contingencyId(), sb, bridges[s].lastSlackMismatch(),
-                            ctgs.get(s).outagedBranches().size());
+                            ctgs.get(s).outagedBranches().size(), changedTargets, maxDelta);
                 }
             }
         }

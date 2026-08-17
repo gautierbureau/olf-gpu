@@ -111,8 +111,18 @@ class GpuHybridBatchValidationTest {
         int[] baseRowMode = baseAct.rowMode();
         double[] baseTargets = baseAct.applyTargets(target.getArray());
 
-        // contingencies -> per-scenario disabled-element masks
-        List<BatchContingency> ctgs = CTG_IDS.stream()
+        // contingencies -> per-scenario disabled-element masks. Default: the 2 divergent ones; with
+        // OLF_GPU_HYBRID_N=k, take the first k single-branch contingencies from the file (throughput sizing).
+        List<String> ids = CTG_IDS;
+        String nEnv = System.getenv("OLF_GPU_HYBRID_N");
+        if (nEnv != null) {
+            ids = Files.readAllLines(Path.of(System.getenv("OLF_GPU_CONT_FILE"))).stream()
+                    .map(String::trim).filter(x -> !x.isEmpty())
+                    .filter(id -> network.getBranchById(id) != null)
+                    .limit(Integer.parseInt(nEnv)).toList();
+        }
+        List<BatchContingency> ctgs = ids.stream()
+                .filter(id -> network.getBranchById(id) != null)
                 .map(id -> new BatchContingency(id, network.getBranchById(id)))
                 .toList();
         int nS = ctgs.size();
@@ -124,7 +134,7 @@ class GpuHybridBatchValidationTest {
         int nElements = gpuData.getTotalElementCount();
         GpuBatchElementMapper mapper = new GpuBatchElementMapper(network);
 
-        int mode = 1;                                                      // batched API (simple, robust for a small nS)
+        int mode = 3;   // UBATCH (production mode)
         long structure = GpuAcNewtonSolver.createStructure(n, gpuData.cbIn(), gpuData.cbIdx(), gpuData.obIn(), gpuData.obIdx(),
                 gpuData.shIn(), gpuData.shIdx(), gpuData.hvIn(), gpuData.hvIdx(),
                 gpuData.dqElem(), gpuData.dqSide(), gpuData.dqWeight(), gpuData.dqRow(), gpuData.dqKind(),
@@ -174,6 +184,10 @@ class GpuHybridBatchValidationTest {
         double[][] states = null;
 
         int rounds = 0;
+        long tSolve = 0;                                                  // batched device inner solve (cuDSS) — SAME in both designs
+        long tJava = 0;                                                   // essential Java outer-loop work (state load + OLF checks + re-extract)
+        long tSnap = 0;                                                   // prototype-only NetworkState save/restore (a production hybrid avoids this)
+        long nJavaCalls = 0;
         for (int round = 0; round < 40; round++) {
             rounds = round + 1;
             // sparse target overrides (rows where this scenario's target differs from the base)
@@ -187,6 +201,7 @@ class GpuHybridBatchValidationTest {
                     }
                 }
             }
+            long ts0 = System.nanoTime();
             states = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets, rowMode, baseRowMode, disabled,
                     ovIdx.stream().mapToInt(Integer::intValue).toArray(), ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
                     new int[0], new double[0], new double[0], new double[0], new double[0],
@@ -194,6 +209,7 @@ class GpuHybridBatchValidationTest {
                     0, 0.0, 0.0, null, x0,                                // lsMode, maxDv, maxDphi, varType, x0PerScenario
                     null, null, null, null, null, null,                  // shuntOv, rlStateIn/Out, r1Ov
                     30, 3, 0, 0, null, null);                            // maxOuterIterations(device DS), maxPqPvSwitch, dsRejectResidual, nzi...
+            tSolve += System.nanoTime() - ts0;
 
             // warm restart for the next round
             x0 = new double[nS * n];
@@ -206,21 +222,28 @@ class GpuHybridBatchValidationTest {
                 if (retired[s]) {
                     continue;
                 }
+                long tr0 = System.nanoTime();
                 if (snaps[s] != null) {
                     snaps[s].restore();                                 // resume THIS scenario's accumulated PV/PQ state
                 } else {
                     baseSnap.restore();                                 // first round: from the base-converged state
                 }
+                tSnap += System.nanoTime() - tr0;
                 for (LfBranch b : ctgs.get(s).outagedBranches()) {
                     b.setDisabled(true);                                // apply this scenario's outage
                 }
                 double[] st = new double[n];
                 System.arraycopy(states[s], 0, st, 0, n);
+                long tj0 = System.nanoTime();
                 GpuAcActivation act = bridges[s].applyOuterLoopStep(st);  // set state -> all OLF outer loops -> re-extract
-                snaps[s] = NetworkState.save(network);                   // persist this scenario's evolved PV/PQ + targets
                 rowMode[s] = act.rowMode();
                 // fresh target vector: captures the P redistributed by the Java distributed-slack loop (and any tap change)
                 scenTargets[s] = act.applyTargets(new AcTargetVector(network, es).getArray());
+                tJava += System.nanoTime() - tj0;
+                nJavaCalls++;
+                long tsv0 = System.nanoTime();
+                snaps[s] = NetworkState.save(network);                   // persist this scenario's evolved PV/PQ + targets
+                tSnap += System.nanoTime() - tsv0;
                 if (bridges[s].isStable()) {
                     retired[s] = true;
                 } else {
@@ -236,8 +259,13 @@ class GpuHybridBatchValidationTest {
 
         // Report: does the hybrid end with VL-7616_0 pinned to PQ (as CPU does) rather than held PV?
         boolean converged = rounds < 40;
-        System.out.printf("%n=== HYBRID reactive-limits batch: %d scenarios, %d rounds, converged=%s ===%n", nS, rounds, converged);
-        for (int s = 0; s < nS; s++) {
+        System.out.printf("%n=== HYBRID batch: %d scenarios, %d rounds, converged=%s ===%n", nS, rounds, converged);
+        System.out.printf("  TIMING total: solve(cuDSS batched inner, SAME in both designs)=%.0f ms | java(OLF outer-loop work)=%.0f ms"
+                + " | snapshot(prototype-only, a production hybrid avoids)=%.0f ms | javaCalls=%d%n",
+                tSolve / 1e6, tJava / 1e6, tSnap / 1e6, nJavaCalls);
+        System.out.printf("  PER-UNIT: java=%.3f ms/scenario-pass | solve=%.1f ms/round%n",
+                nJavaCalls > 0 ? tJava / 1e6 / nJavaCalls : 0.0, rounds > 0 ? tSolve / 1e6 / rounds : 0.0);
+        for (int s = 0; s < nS && nS <= 4; s++) {
             snaps[s].restore();                                          // the hybrid's OWN evolved PV/PQ state for this scenario
             es.getStateVector().set(states[s]);
             AcSolverUtil.updateNetwork(network, es);
@@ -252,7 +280,7 @@ class GpuHybridBatchValidationTest {
                 }
             }
             double tgtV = b7616 == null ? Double.NaN : b7616.getGeneratorVoltageControl().map(c -> c.getTargetValue()).orElse(Double.NaN);
-            System.out.printf("  %-16s conv=%d  VL-7616_0=%s  v=%.6f%n", CTG_IDS.get(s), (int) states[s][n], pv, v7616);
+            System.out.printf("  %-16s conv=%d  VL-7616_0=%s  v=%.6f%n", ctgs.get(s).contingencyId(), (int) states[s][n], pv, v7616);
             System.out.printf("      DIAG row=%d rowMode=%d(1=power/PV,0=identity) target=%.6f deviceStateV=%.6f targetV=%.6f%n",
                     vrow, vrow >= 0 ? rowMode[s][vrow] : -9, vrow >= 0 ? scenTargets[s][vrow] : Double.NaN,
                     vrow >= 0 ? states[s][vrow] : Double.NaN, tgtV);

@@ -256,6 +256,22 @@ class GpuHybridBatchValidationTest {
             System.out.printf("      DIAG row=%d rowMode=%d(1=power/PV,0=identity) target=%.6f deviceStateV=%.6f targetV=%.6f%n",
                     vrow, vrow >= 0 ? rowMode[s][vrow] : -9, vrow >= 0 ? scenTargets[s][vrow] : Double.NaN,
                     vrow >= 0 ? states[s][vrow] : Double.NaN, tgtV);
+            // invariant: every mode-0 (identity) row must satisfy x == target on the device solve.
+            int nMode0 = 0;
+            int notPinned = 0;
+            String ex = "";
+            for (int r = 0; r < n; r++) {
+                if (rowMode[s][r] == 0) {
+                    nMode0++;
+                    if (Math.abs(states[s][r] - scenTargets[s][r]) > 1e-5) {
+                        notPinned++;
+                        if (notPinned <= 3) {
+                            ex += String.format(" [r=%d x=%.6f tgt=%.6f]", r, states[s][r], scenTargets[s][r]);
+                        }
+                    }
+                }
+            }
+            System.out.printf("      PIN-CHECK: %d/%d mode-0 rows NOT pinned to target%s%n", notPinned, nMode0, ex);
         }
         baseSnap.restore();
         context.close();

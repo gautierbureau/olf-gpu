@@ -53,6 +53,9 @@ public final class GpuHybridOuterLoopBridge {
     private final java.util.List<AcOuterLoopContext> outerLoopContexts;
 
     private boolean lastStable = true;
+    private double lastSlackMismatch;
+    private final OuterLoopStatus[] lastStatuses;
+    private final int[] unstableCount;                                // per-loop count of UNSTABLE results (oscillation finder)
 
     /**
      * @param outerLoops        the FULL ordered OLF outer-loop set for this scenario (innermost first —
@@ -69,6 +72,27 @@ public final class GpuHybridOuterLoopBridge {
         this.n = n;
         this.outerLoops = outerLoops;
         this.outerLoopContexts = outerLoopContexts;
+        this.lastStatuses = new OuterLoopStatus[outerLoops.size()];
+        this.unstableCount = new int[outerLoops.size()];
+    }
+
+    /** Per-loop UNSTABLE counts across all passes — the outer loop that never stops for a scenario stands out. */
+    public int[] unstableCount() {
+        return unstableCount;
+    }
+
+    /** Names of the outer loops, index-aligned with {@link #unstableCount()}. */
+    public String loopName(int i) {
+        return outerLoops.get(i).getName();
+    }
+
+    public int loopCount() {
+        return outerLoops.size();
+    }
+
+    /** Max |per-SC slack active-power mismatch (pu)| at the last step — huge/steady ⇒ islanding or DS not applied. */
+    public double lastSlackMismatch() {
+        return lastSlackMismatch;
     }
 
     /**
@@ -94,6 +118,7 @@ public final class GpuHybridOuterLoopBridge {
             slackMismatch.put(sc.getNumSC(),
                     sc.getSlackBuses().stream().mapToDouble(com.powsybl.openloadflow.network.LfBus::getMismatchP).sum());
         }
+        lastSlackMismatch = slackMismatch.values().stream().mapToDouble(Math::abs).max().orElse(0.0);
         AcSolverResult solverResult = new AcSolverResult(AcSolverStatus.CONVERGED, 1, slackMismatch);
 
         // 2. every OLF outer loop, in order — the validated decisions, mutating activation / targets / taps
@@ -101,8 +126,10 @@ public final class GpuHybridOuterLoopBridge {
         for (int i = 0; i < outerLoops.size(); i++) {
             outerLoopContexts.get(i).setLastSolverResult(solverResult);
             OuterLoopResult result = outerLoops.get(i).check(outerLoopContexts.get(i), ReportNode.NO_OP);
+            lastStatuses[i] = result.status();
             if (result.status() != OuterLoopStatus.STABLE) {
                 lastStable = false;
+                unstableCount[i]++;
             }
         }
 

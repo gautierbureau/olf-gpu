@@ -265,6 +265,24 @@ class GpuHybridBatchValidationTest {
                 tSolve / 1e6, tJava / 1e6, tSnap / 1e6, nJavaCalls);
         System.out.printf("  PER-UNIT: java=%.3f ms/scenario-pass | solve=%.1f ms/round%n",
                 nJavaCalls > 0 ? tJava / 1e6 / nJavaCalls : 0.0, rounds > 0 ? tSolve / 1e6 / rounds : 0.0);
+        int nNonConv = 0;
+        for (int s = 0; s < nS; s++) {
+            if (!retired[s]) {
+                nNonConv++;
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < bridges[s].loopCount(); i++) {
+                    if (bridges[s].unstableCount()[i] > 0) {
+                        sb.append(String.format(" %s=%d", bridges[s].loopName(i), bridges[s].unstableCount()[i]));
+                    }
+                }
+                if (nNonConv <= 8) {
+                    System.out.printf("  NON-CONVERGED %s: unstable-by-loop%s | lastSlackMismatch(pu)=%.4e | disabledElems=%d%n",
+                            ctgs.get(s).contingencyId(), sb, bridges[s].lastSlackMismatch(),
+                            ctgs.get(s).outagedBranches().size());
+                }
+            }
+        }
+        System.out.printf("  NON-CONVERGED total: %d/%d%n", nNonConv, nS);
         for (int s = 0; s < nS && nS <= 4; s++) {
             snaps[s].restore();                                          // the hybrid's OWN evolved PV/PQ state for this scenario
             es.getStateVector().set(states[s]);

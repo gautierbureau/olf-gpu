@@ -33,6 +33,7 @@ import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContingencyValidator;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuHybridOuterLoopBridge;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -121,10 +122,25 @@ class GpuHybridBatchValidationTest {
                     .filter(id -> network.getBranchById(id) != null)
                     .limit(Integer.parseInt(nEnv)).toList();
         }
-        List<BatchContingency> ctgs = ids.stream()
+        GpuBatchElementMapper mapper = new GpuBatchElementMapper(network);
+        List<BatchContingency> allCtgs = ids.stream()
                 .filter(id -> network.getBranchById(id) != null)
                 .map(id -> new BatchContingency(id, network.getBranchById(id)))
                 .toList();
+        // ISLANDING QUALIFICATION — route islanding outages to CPU, exactly like the production batch. Without
+        // it, an outage that islands buses leaves the slack unbalanceable and OLF's distributed-slack loop
+        // oscillates forever (measured: LINE-26-4231, 4.72 pu stranded, dragged the loop to the 40-round cap).
+        List<GpuBatchContingencyValidator.Qualification> quals =
+                GpuBatchContingencyValidator.qualify(network, allCtgs, mapper, false);
+        List<BatchContingency> ctgs = new ArrayList<>();
+        int nRoutedCpu = 0;
+        for (GpuBatchContingencyValidator.Qualification q : quals) {
+            if (q.qualified()) {
+                ctgs.add(q.contingency());
+            } else {
+                nRoutedCpu++;
+            }
+        }
         int nS = ctgs.size();
 
         // device structure with BOTH RL and DS packs EMPTY -> PURE batched inner Newton; ALL outer loops
@@ -132,7 +148,6 @@ class GpuHybridBatchValidationTest {
         // decision is OLF's own, not a device-outer-loop approximation. (DISTR_Q/DISTR_RHO linear couplings stay.)
         GpuAcData gpuData = GpuAcDataExtractor.extract(network, es, false, false);
         int nElements = gpuData.getTotalElementCount();
-        GpuBatchElementMapper mapper = new GpuBatchElementMapper(network);
 
         int mode = 3;   // UBATCH (production mode)
         long structure = GpuAcNewtonSolver.createStructure(n, gpuData.cbIn(), gpuData.cbIdx(), gpuData.obIn(), gpuData.obIdx(),
@@ -259,7 +274,8 @@ class GpuHybridBatchValidationTest {
 
         // Report: does the hybrid end with VL-7616_0 pinned to PQ (as CPU does) rather than held PV?
         boolean converged = rounds < 40;
-        System.out.printf("%n=== HYBRID batch: %d scenarios, %d rounds, converged=%s ===%n", nS, rounds, converged);
+        System.out.printf("%n=== HYBRID batch: %d scenarios (%d islanding routed to CPU), %d rounds, converged=%s ===%n",
+                nS, nRoutedCpu, rounds, converged);
         System.out.printf("  TIMING total: solve(cuDSS batched inner, SAME in both designs)=%.0f ms | java(OLF outer-loop work)=%.0f ms"
                 + " | snapshot(prototype-only, a production hybrid avoids)=%.0f ms | javaCalls=%d%n",
                 tSolve / 1e6, tJava / 1e6, tSnap / 1e6, nJavaCalls);

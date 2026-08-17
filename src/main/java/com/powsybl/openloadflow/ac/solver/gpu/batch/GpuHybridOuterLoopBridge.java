@@ -14,6 +14,8 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivationExtractor;
 import com.powsybl.openloadflow.ac.outerloop.AcOuterLoop;
+import com.powsybl.openloadflow.ac.solver.AcSolverResult;
+import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopResult;
@@ -47,33 +49,37 @@ public final class GpuHybridOuterLoopBridge {
     private final LfNetwork network;
     private final EquationSystem<AcVariableType, AcEquationType> equationSystem;
     private final int n;
-    private final AcOuterLoop outerLoop;
-    private final AcOuterLoopContext outerLoopContext;
+    private final java.util.List<AcOuterLoop> outerLoops;
+    private final java.util.List<AcOuterLoopContext> outerLoopContexts;
 
-    private OuterLoopStatus lastStatus = OuterLoopStatus.STABLE;
+    private boolean lastStable = true;
 
     /**
-     * @param outerLoop        an OLF outer loop (reactive limits or distributed slack), already
-     *                         {@code initialize}d on {@code outerLoopContext}
-     * @param outerLoopContext its context, with the loadflow context set and the network attached
+     * @param outerLoops        the FULL ordered OLF outer-loop set for this scenario (innermost first —
+     *                          distributed slack, then reactive limits, then transformer voltage control, …),
+     *                          each already {@code initialize}d on its context
+     * @param outerLoopContexts the matching per-loop contexts (loadflow context set, network attached)
      */
     public GpuHybridOuterLoopBridge(LfNetwork network,
                                     EquationSystem<AcVariableType, AcEquationType> equationSystem,
-                                    int n, AcOuterLoop outerLoop, AcOuterLoopContext outerLoopContext) {
+                                    int n, java.util.List<AcOuterLoop> outerLoops,
+                                    java.util.List<AcOuterLoopContext> outerLoopContexts) {
         this.network = network;
         this.equationSystem = equationSystem;
         this.n = n;
-        this.outerLoop = outerLoop;
-        this.outerLoopContext = outerLoopContext;
+        this.outerLoops = outerLoops;
+        this.outerLoopContexts = outerLoopContexts;
     }
 
     /**
      * One hybrid outer-loop step for a single scenario: load its device-solved state onto the network,
-     * let OLF's validated outer loop decide (mutating the activation), and re-extract the device row
-     * mode + target mapping from the mutated activation.
+     * let every OLF outer loop decide in order (each mutating the activation / targets / taps), and
+     * re-extract the device row mode + target mapping from the mutated activation. The device runs a
+     * PURE inner Newton, so the state fed to these decisions is OLF's own — not a device-outer-loop
+     * approximation — which is what makes the decisions match the CPU.
      *
      * @param scenarioState the flat converged state ({@code n} doubles) the batched inner solve produced
-     * @return the device activation (row mode + target map) AFTER OLF's switch decisions; pair with
+     * @return the device activation (row mode + target map) AFTER OLF's decisions; pair with
      *         {@link #isStable()} to know whether this scenario still needs another inner re-solve
      */
     public GpuAcActivation applyOuterLoopStep(double[] scenarioState) {
@@ -81,16 +87,31 @@ public final class GpuHybridOuterLoopBridge {
         equationSystem.getStateVector().set(scenarioState);
         AcSolverUtil.updateNetwork(network, equationSystem);
 
-        // 2. OLF's validated decision — mutates the equation-system activation on any PV↔PQ switch
-        OuterLoopResult result = outerLoop.check(outerLoopContext, ReportNode.NO_OP);
-        lastStatus = result.status();
+        // per-synchronous-component slack active-power mismatch, exactly as NewtonRaphson builds it for the
+        // solver result (the distributed-slack loop reads it from the context's last solver result).
+        java.util.Map<Integer, Double> slackMismatch = new java.util.TreeMap<>();
+        for (com.powsybl.openloadflow.network.LfSynchronousNetwork sc : network.getSynchronousNetworks()) {
+            slackMismatch.put(sc.getNumSC(),
+                    sc.getSlackBuses().stream().mapToDouble(com.powsybl.openloadflow.network.LfBus::getMismatchP).sum());
+        }
+        AcSolverResult solverResult = new AcSolverResult(AcSolverStatus.CONVERGED, 1, slackMismatch);
 
-        // 3. re-encode the (possibly switched) activation into the device row mode the batch consumes
+        // 2. every OLF outer loop, in order — the validated decisions, mutating activation / targets / taps
+        lastStable = true;
+        for (int i = 0; i < outerLoops.size(); i++) {
+            outerLoopContexts.get(i).setLastSolverResult(solverResult);
+            OuterLoopResult result = outerLoops.get(i).check(outerLoopContexts.get(i), ReportNode.NO_OP);
+            if (result.status() != OuterLoopStatus.STABLE) {
+                lastStable = false;
+            }
+        }
+
+        // 3. re-encode the (possibly changed) activation into the device row mode the batch consumes
         return GpuAcActivationExtractor.extractActivation(network, equationSystem, n);
     }
 
-    /** @return true when the last {@link #applyOuterLoopStep} left the scenario STABLE (no re-solve needed). */
+    /** @return true when the last {@link #applyOuterLoopStep} left every outer loop STABLE (no re-solve needed). */
     public boolean isStable() {
-        return lastStatus == OuterLoopStatus.STABLE;
+        return lastStable;
     }
 }

@@ -117,8 +117,10 @@ class GpuHybridBatchValidationTest {
                 .toList();
         int nS = ctgs.size();
 
-        // device structure with the RL pack EMPTY (reactiveLimits=false) but DS ON -> inner + device DS, no PV<->PQ
-        GpuAcData gpuData = GpuAcDataExtractor.extract(network, es, true, false);
+        // device structure with BOTH RL and DS packs EMPTY -> PURE batched inner Newton; ALL outer loops
+        // (distributed slack, reactive limits, transformer VC) run in OLF's Java, so the state feeding every
+        // decision is OLF's own, not a device-outer-loop approximation. (DISTR_Q/DISTR_RHO linear couplings stay.)
+        GpuAcData gpuData = GpuAcDataExtractor.extract(network, es, false, false);
         int nElements = gpuData.getTotalElementCount();
         GpuBatchElementMapper mapper = new GpuBatchElementMapper(network);
 
@@ -132,20 +134,23 @@ class GpuHybridBatchValidationTest {
                 gpuData.dsPhiRow(), gpuData.dsFactor(), gpuData.dsSlackPhiRow(), gpuData.dsSlackTargetP(),
                 gpuData.dsBaseTargetP(), gpuData.dsMaxDelta(), gpuData.dsMinDelta());
 
-        // OLF's validated reactive-limits outer loop + a context bound to this network/loadflow
-        AcOuterLoop rlLoop = acp.getOuterLoops().stream()
-                .filter(o -> o instanceof ReactiveLimitsOuterLoop).findFirst().orElseThrow();
-        // ONE outer-loop context (and thus PV<->PQ switch counter) PER SCENARIO — as OLF's SA gives each
-        // contingency its own — so scenarios do not contaminate each other's switch bookkeeping.
+        // OLF's FULL ordered outer-loop set (distributed slack, reactive limits, transformer VC, …) — one
+        // context PER (scenario, loop), as OLF's SA gives each contingency its own, so scenarios never
+        // contaminate each other's switch/redistribution bookkeeping.
+        List<AcOuterLoop> allLoops = acp.getOuterLoops();
         java.lang.reflect.Constructor<AcOuterLoopContext> olCtor = AcOuterLoopContext.class.getDeclaredConstructor(LfNetwork.class);
         olCtor.setAccessible(true);
         GpuHybridOuterLoopBridge[] bridges = new GpuHybridOuterLoopBridge[nS];
         for (int s = 0; s < nS; s++) {
-            AcOuterLoopContext olCtx = olCtor.newInstance(network);
-            olCtx.setLoadFlowContext(context);
-            rlLoop.initialize(olCtx);
-            olCtx.setLastSolverResult(new AcSolverResult(AcSolverStatus.CONVERGED, 1, java.util.Map.of()));
-            bridges[s] = new GpuHybridOuterLoopBridge(network, es, n, rlLoop, olCtx);
+            List<AcOuterLoopContext> ctxs = new ArrayList<>();
+            for (AcOuterLoop ol : allLoops) {
+                AcOuterLoopContext olCtx = olCtor.newInstance(network);
+                olCtx.setLoadFlowContext(context);
+                ol.initialize(olCtx);
+                olCtx.setLastSolverResult(new AcSolverResult(AcSolverStatus.CONVERGED, 1, java.util.Map.of()));
+                ctxs.add(olCtx);
+            }
+            bridges[s] = new GpuHybridOuterLoopBridge(network, es, n, allLoops, ctxs);
         }
 
         NetworkState baseSnap = NetworkState.save(network);
@@ -211,10 +216,11 @@ class GpuHybridBatchValidationTest {
                 }
                 double[] st = new double[n];
                 System.arraycopy(states[s], 0, st, 0, n);
-                GpuAcActivation act = bridges[s].applyOuterLoopStep(st);  // set state -> OLF RL check (mutates network) -> re-extract
-                snaps[s] = NetworkState.save(network);                   // persist this scenario's evolved PV/PQ for next round
+                GpuAcActivation act = bridges[s].applyOuterLoopStep(st);  // set state -> all OLF outer loops -> re-extract
+                snaps[s] = NetworkState.save(network);                   // persist this scenario's evolved PV/PQ + targets
                 rowMode[s] = act.rowMode();
-                scenTargets[s] = act.applyTargets(target.getArray());
+                // fresh target vector: captures the P redistributed by the Java distributed-slack loop (and any tap change)
+                scenTargets[s] = act.applyTargets(new AcTargetVector(network, es).getArray());
                 if (bridges[s].isStable()) {
                     retired[s] = true;
                 } else {
@@ -238,7 +244,18 @@ class GpuHybridBatchValidationTest {
             LfBus b7616 = network.getBuses().stream().filter(b -> "VL-7616_0".equals(b.getId())).findFirst().orElse(null);
             String pv = b7616 == null ? "?" : (b7616.isGeneratorVoltageControlEnabled() ? "PV(diverges from CPU)" : "PQ(matches CPU)");
             double v7616 = b7616 == null ? Double.NaN : b7616.getV();
+            int vrow = -1;
+            for (com.powsybl.openloadflow.equations.Variable<AcVariableType> var : es.getIndex().getSortedVariablesToFind()) {
+                if (var.getType() == AcVariableType.BUS_V && b7616 != null && var.getElementNum() == b7616.getNum()) {
+                    vrow = var.getRow();
+                    break;
+                }
+            }
+            double tgtV = b7616 == null ? Double.NaN : b7616.getGeneratorVoltageControl().map(c -> c.getTargetValue()).orElse(Double.NaN);
             System.out.printf("  %-16s conv=%d  VL-7616_0=%s  v=%.6f%n", CTG_IDS.get(s), (int) states[s][n], pv, v7616);
+            System.out.printf("      DIAG row=%d rowMode=%d(1=power/PV,0=identity) target=%.6f deviceStateV=%.6f targetV=%.6f%n",
+                    vrow, vrow >= 0 ? rowMode[s][vrow] : -9, vrow >= 0 ? scenTargets[s][vrow] : Double.NaN,
+                    vrow >= 0 ? states[s][vrow] : Double.NaN, tgtV);
         }
         baseSnap.restore();
         context.close();

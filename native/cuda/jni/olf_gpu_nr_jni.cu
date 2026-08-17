@@ -2825,11 +2825,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     live[s] = 0;                             // failed: stop iterating its outer loops
                     nActive--;
                     anyChanged = true;
-                } else if (converged) {
-                    res.status[s] = 0;
-                    active[s] = 0;
-                    nActive--;
-                    anyChanged = true;
+                } else if (converged && it > 0) {            // force >=1 iteration, like CPU NewtonRaphson /
+                    res.status[s] = 0;                       // solveContext (line ~1227): a warm-started state may
+                    active[s] = 0;                           // already meet the global 2-norm threshold yet leave a
+                    nActive--;                               // just-flipped identity row (PV target) unpinned — one
+                    anyChanged = true;                       // Newton step pins it. Retiring at it==0 skips that solve.
                 } else if (it == maxIter) {
                     res.status[s] = 1;                       // exhausted iterations
                     active[s] = 0;

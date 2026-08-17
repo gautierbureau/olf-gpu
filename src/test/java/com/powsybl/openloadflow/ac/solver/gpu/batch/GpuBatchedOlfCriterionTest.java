@@ -83,17 +83,23 @@ class GpuBatchedOlfCriterionTest {
                 tight.iterations(), tight.finalMismatch(), tight.hasConverged());
 
         assertTrue(loose.hasConverged() && tight.hasConverged(), "both criterion runs must converge");
-        // The loose OLF criterion stops at a LOOSER residual than the tight one — the device honored convEpsPerEq.
-        assertTrue(loose.finalMismatch() > tight.finalMismatch() * 10,
-                "the OLF default criterion (1e-4) must stop looser than the tight one (1e-12): loose="
-                        + loose.finalMismatch() + " tight=" + tight.finalMismatch());
-        // ...and in no more iterations (a looser stop happens at the same or an earlier Newton step).
-        assertTrue(loose.iterations() <= tight.iterations(),
-                "the looser criterion must not take MORE iterations (loose=" + loose.iterations()
-                        + " tight=" + tight.iterations() + ")");
         // The tight criterion reaches machine precision (the true root).
         assertTrue(tight.finalMismatch() < 1e-8, "the tight criterion must converge to the true root (||F||inf="
                 + tight.finalMismatch() + ")");
+        // CORRECTED behavior (2026-08-17): the batch device, like CPU NewtonRaphson / solveContext, always takes
+        // >=1 Newton iteration and never retires at it==0. So for this easy warm-started outage ONE step reaches
+        // the root at BOTH criteria — the loose (1e-4) and tight (1e-12) runs coincide at machine precision.
+        // The former assertion (loose stops at a LOOSER residual than tight) was validating the it==0
+        // early-retirement — the very defect that caused the batch-vs-CPU divergence: after an outer-loop switch
+        // flipped a PV row to an identity, a warm state already under the global 2-norm threshold got retired
+        // WITHOUT the one Newton step needed to pin that row. The `it > 0` guard in solveBatchContext fixes it
+        // (matching solveContext line ~1227) and eliminated the production onlyGPU divergence entirely.
+        assertTrue(loose.finalMismatch() < 1e-8,
+                "with the forced first iteration, the loose criterion also reaches the root for a 1-step warm "
+                        + "solve (matching CPU): loose=" + loose.finalMismatch() + " tight=" + tight.finalMismatch());
+        assertTrue(loose.iterations() <= tight.iterations(),
+                "the looser criterion must not take MORE iterations (loose=" + loose.iterations()
+                        + " tight=" + tight.iterations() + ")");
     }
 
     private static BatchScenarioResult solve(LfNetwork net, double[] baseState, List<BatchContingency> conts,

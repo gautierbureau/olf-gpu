@@ -110,6 +110,7 @@ class GpuBatchedN1Test {
                 new int[0], new double[0], -1, 0.0,
                 new double[0], new double[0], new double[0],
                 new int[0], new int[0], new double[0], new int[0], new int[0],
+                new int[0], new int[0], new double[0],
                 new int[0], new int[0], new double[0], new double[0], new int[0]);
 
         double[] xRef = cpuReference(es, target, eq, sv);
@@ -166,6 +167,7 @@ class GpuBatchedN1Test {
                 new int[0], new double[0], -1, 0.0,
                 new double[0], new double[0], new double[0],
                 new int[0], new int[0], new double[0], new int[0], new int[0],
+                new int[0], new int[0], new double[0],
                 new int[0], new int[0], new double[0], new double[0], new int[0]);
 
         int status0 = (int) batch[0][n + 2];

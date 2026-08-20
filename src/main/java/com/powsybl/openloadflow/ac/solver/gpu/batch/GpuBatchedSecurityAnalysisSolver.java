@@ -445,7 +445,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
             long structure = GpuAcNewtonSolver.createStructure(n, gpuData.cbIn(), gpuData.cbIdx(), gpuData.obIn(), gpuData.obIdx(),
                     gpuData.shIn(), gpuData.shIdx(), gpuData.hvIn(), gpuData.hvIdx(),
                     gpuData.dqElem(), gpuData.dqSide(), gpuData.dqWeight(), gpuData.dqRow(), gpuData.dqKind(),
-                    gpuData.ziIn(), gpuData.ziIdx(), gpuData.drRow(), gpuData.drCol(), gpuData.drCoef());
+                    gpuData.ziIn(), gpuData.ziIdx(), gpuData.drRow(), gpuData.drCol(), gpuData.drCoef(),
+                    gpuData.dbRow(), gpuData.dbCol(), gpuData.dbCoef());
             try {
                 res = GpuHybridBatchOuterLoopEngine.solve(new GpuHybridBatchOuterLoopEngine.Inputs(
                         structure, 3, gpuData, nElements, network, equationSystem, context, n,

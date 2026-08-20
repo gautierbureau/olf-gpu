@@ -121,7 +121,7 @@ class GpuBatchedParticipatingSlackConvergenceTest {
                 d.dsPhiRow(), d.dsFactor(), d.dsSlackPhiRow(), d.dsSlackTargetP(),
                 d.dsBaseTargetP(), d.dsMaxDelta(), d.dsMinDelta(),
                 d.dqElem(), d.dqSide(), d.dqWeight(), d.dqRow(), d.dqKind(),
-                d.drRow(), d.drCol(), d.drCoef(), d.ziIn(), d.ziIdx());
+                d.drRow(), d.drCol(), d.drCoef(), d.dbRow(), d.dbCol(), d.dbCoef(), d.ziIn(), d.ziIdx());
         int n = baseState.length;
         if ((int) batch[0][n + 2] != 0) {
             System.out.printf("    (GPU did not converge at dsTol=%.0e)%n", dsTolPu);

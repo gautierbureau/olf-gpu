@@ -21,7 +21,10 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
  *       transformer also routes the controlled bus's Q row to its {@code r1col} (see GpuAcDataExtractor)</li>
  *   <li>open branches — in {@code nob*7} (y ksi g1 b1 g2 b2 r1),
  *       idx {@code nob*6} (Prow1 Qrow1 Prow2 Qrow2 v1col v2col)</li>
- *   <li>shunts — in {@code nsh*2} (g b), idx {@code nsh*3} (Prow Qrow vcol)</li>
+ *   <li>shunts — in {@code nsh*2} (g b), idx {@code nsh*4} (Prow Qrow vcol bcol) — {@code bcol} is the
+ *       shunt's SHUNT_B variable row when it derives voltage control (b read from the state vector; dq/db
+ *       scattered onto that column), else -1 (fixed shunt, b constant); a controlling shunt also routes the
+ *       controlled bus's Q row to its {@code bcol}, the analogue of the transformer rho pairing</li>
  *   <li>HVDC AC emulation — in {@code nhv*5} (p0 k lossFactor1 lossFactor2 r),
  *       idx {@code nhv*4} (Prow1 Prow2 ph1col ph2col)</li>
  * </ul>
@@ -71,6 +74,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
                         int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                         double[] ziIn, int[] ziIdx,
                         int[] drRow, int[] drCol, double[] drCoef,
+                        int[] dbRow, int[] dbCol, double[] dbCoef,
                         int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget,
                         int[] dsPhiRow, double[] dsFactor, int dsSlackPhiRow, double dsSlackTargetP,
                         double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
@@ -114,7 +118,9 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
                 && java.util.Arrays.equals(dqKind, other.dqKind)
                 && java.util.Arrays.equals(ziIn, other.ziIn) && java.util.Arrays.equals(ziIdx, other.ziIdx)
                 && java.util.Arrays.equals(drRow, other.drRow) && java.util.Arrays.equals(drCol, other.drCol)
-                && java.util.Arrays.equals(drCoef, other.drCoef);
+                && java.util.Arrays.equals(drCoef, other.drCoef)
+                && java.util.Arrays.equals(dbRow, other.dbRow) && java.util.Arrays.equals(dbCol, other.dbCol)
+                && java.util.Arrays.equals(dbCoef, other.dbCoef);
     }
 
     /**
@@ -135,6 +141,8 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
                 && java.util.Arrays.equals(ziIdx, other.ziIdx)
                 && java.util.Arrays.equals(drRow, other.drRow) && java.util.Arrays.equals(drCol, other.drCol)
                 && java.util.Arrays.equals(drCoef, other.drCoef)
+                && java.util.Arrays.equals(dbRow, other.dbRow) && java.util.Arrays.equals(dbCol, other.dbCol)
+                && java.util.Arrays.equals(dbCoef, other.dbCoef)
                 && java.util.Arrays.equals(rlVrow, other.rlVrow) && java.util.Arrays.equals(rlMinQ, other.rlMinQ)
                 && java.util.Arrays.equals(rlMaxQ, other.rlMaxQ) && java.util.Arrays.equals(rlLoadQ, other.rlLoadQ)
                 && java.util.Arrays.equals(rlVtarget, other.rlVtarget)
@@ -153,7 +161,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
     }
 
     public int getShuntCount() {
-        return shIdx.length / 3;
+        return shIdx.length / 4;
     }
 
     public int getHvdcCount() {

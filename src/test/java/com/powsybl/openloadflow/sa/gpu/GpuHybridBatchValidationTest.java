@@ -169,7 +169,8 @@ class GpuHybridBatchValidationTest {
         long structure = GpuAcNewtonSolver.createStructure(n, gpuData.cbIn(), gpuData.cbIdx(), gpuData.obIn(), gpuData.obIdx(),
                 gpuData.shIn(), gpuData.shIdx(), gpuData.hvIn(), gpuData.hvIdx(),
                 gpuData.dqElem(), gpuData.dqSide(), gpuData.dqWeight(), gpuData.dqRow(), gpuData.dqKind(),
-                gpuData.ziIn(), gpuData.ziIdx(), gpuData.drRow(), gpuData.drCol(), gpuData.drCoef());
+                gpuData.ziIn(), gpuData.ziIdx(), gpuData.drRow(), gpuData.drCol(), gpuData.drCoef(),
+                gpuData.dbRow(), gpuData.dbCol(), gpuData.dbCoef());
         // (The batch-context handle + the per-scenario outer-loop bridges are now owned by
         // GpuHybridBatchOuterLoopEngine, which is invoked below.)
 

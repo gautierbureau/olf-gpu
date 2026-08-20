@@ -72,7 +72,8 @@ public final class GpuAcNewtonSolver {
                                               double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
                                               int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                                               double[] ziIn, int[] ziIdx,
-                                              int[] drRow, int[] drCol, double[] drCoef);
+                                              int[] drRow, int[] drCol, double[] drCoef,
+                                              int[] dbRow, int[] dbCol, double[] dbCoef);
 
     /**
      * Release a structure handle from {@link #createStructure} (idempotent for handle 0). Contexts
@@ -164,9 +165,10 @@ public final class GpuAcNewtonSolver {
                                  double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
                                  int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                                  double[] ziIn, int[] ziIdx,
-                                 int[] drRow, int[] drCol, double[] drCoef) {
+                                 int[] drRow, int[] drCol, double[] drCoef,
+                                 int[] dbRow, int[] dbCol, double[] dbCoef) {
         long structure = createStructure(x0.length, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
-                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef);
+                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef);
         try {
             long handle = createContext(structure);
             try {
@@ -290,11 +292,12 @@ public final class GpuAcNewtonSolver {
                                          int dsSlackPhiRow, double dsSlackTargetP,
                                          double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
                                          int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
-                                         int[] drRow, int[] drCol, double[] drCoef, double[] ziIn, int[] ziIdx) {
+                                         int[] drRow, int[] drCol, double[] drCoef,
+                                         int[] dbRow, int[] dbCol, double[] dbCoef, double[] ziIn, int[] ziIdx) {
         int n = x0Base.length;
         int nScenarios = disabledElementMask.length;
         long structure = createStructure(n, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
-                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef);
+                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef);
         try {
             long handle = createBatchContext(structure, nScenarios, mode,
                     rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, dsPhiRow, dsFactor, dsSlackPhiRow, dsSlackTargetP,

@@ -76,9 +76,10 @@ final class GpuAcValidation {
             if (vtype != AcVariableType.BUS_V && vtype != AcVariableType.BUS_PHI
                     && vtype != AcVariableType.BRANCH_RHO1
                     && vtype != AcVariableType.BRANCH_ALPHA1
+                    && vtype != AcVariableType.SHUNT_B
                     && vtype != AcVariableType.DUMMY_P && vtype != AcVariableType.DUMMY_Q) {
                 throw new PowsyblException("GPU AC solver: unsupported variable type " + vtype
-                        + " (only plain AC power flow + transformer voltage control + zero-impedance "
+                        + " (only plain AC power flow + transformer/shunt voltage control + zero-impedance "
                         + "branches are supported)");
             }
         }
@@ -135,10 +136,14 @@ final class GpuAcValidation {
                     // transformer ratio distribution ((1/count)·Σ r1 − r1_k) — a linear coupling of the
                     // controller BRANCH_RHO1 variables, re-assembled by the GPU DISTR_RHO family. Accept.
                 }
-                case BUS_TARGET_V, BUS_TARGET_PHI, BRANCH_TARGET_RHO1, BRANCH_TARGET_ALPHA1 -> {
+                case DISTR_SHUNT_B -> {
+                    // shunt susceptance distribution ((1/count)·Σ b − b_k) — a linear coupling of the
+                    // controller SHUNT_B variables, re-assembled by the GPU DISTR_SHUNT_B family. Accept.
+                }
+                case BUS_TARGET_V, BUS_TARGET_PHI, BRANCH_TARGET_RHO1, BRANCH_TARGET_ALPHA1, SHUNT_TARGET_B -> {
                     // identity rows on a single variable (v−target, phi−target, r1−target when a
-                    // transformer ratio is held constant, a1−target when a phase shift is) — applied
-                    // device-side by the row-mode mask
+                    // transformer ratio is held constant, a1−target when a phase shift is, b−target when a
+                    // shunt susceptance is held constant) — applied device-side by the row-mode mask
                     for (SingleEquationTerm<AcVariableType, AcEquationType> t : e.getTerms()) {
                         if (t.isActive() && !(t instanceof VariableEquationTerm)) {
                             throw new PowsyblException("GPU AC solver: unsupported equation term "

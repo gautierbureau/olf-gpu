@@ -285,11 +285,13 @@ RC resolveOb(const ObScatter& s, const int* ix) {            // P1 Q1 P2 Q2 v1 v
     return rc;
 }
 
-RC resolveSh(const ShScatter& s, const int* ix) {            // P Q v
+RC resolveSh(const ShScatter& s, const int* ix) {            // P Q v bcol
     RC rc;
     if (s.role == 2) return rc;
     rc.row = ix[s.rowEq];                                    // single bus: rowEnd == 0
-    if (s.role == 1) rc.col = ix[2];
+    // col endpoint 0 = the bus (BUS_V at ix[2]); endpoint 2 = the shunt's own control col (SHUNT_B at
+    // ix[3]) — -1 when the shunt derives no voltage control, so dq/db resolves to absent and is skipped.
+    if (s.role == 1) rc.col = (s.colEnd == 2) ? ix[3] : ix[2];
     return rc;
 }
 
@@ -412,9 +414,12 @@ __global__ void fillShunt(int ne, const double* in, const int* ix, const int* de
     int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= ne) return;
     const double* p = in + e * 2;                            // g b
-    double v = x[ix[e * 3 + 2]];
+    // b is the SHUNT_B state variable when the shunt derives voltage control (bcol = ix[e*4+3] >= 0),
+    // else the fixed packed susceptance — exactly like a closed branch reads r1 from x[r1col] or cbIn.
+    double b = ix[e * 4 + 3] >= 0 ? x[ix[e * 4 + 3]] : p[1];
+    double v = x[ix[e * 4 + 2]];
     double o[SH_NOUT];
-    evalShunt(v, p[0], p[1], 0, o + 0, o + 1, o + 2, o + 3, o + 4);
+    evalShunt(v, p[0], b, 0, o + 0, o + 1, o + 2, o + 3, o + 4);
     scatterAdd(SH_NOUT, dest + e * SH_NOUT, o, vals, F);
 }
 
@@ -447,8 +452,8 @@ __global__ void fillDistrQ(int ndq, const int* dqElem, const int* dqSide, const 
     double w = dqWeight[c];
     const int* dst = dqDest + c * 6;
     if (dqKind[c] == 1) {                                    // shunt q: {q value -> F, dq/dv -> J(row, vcol)}
-        const double* sp = shIn + e * 2;                     // g b
-        int vcol = shIx[e * 3 + 2];
+        const double* sp = shIn + e * 2;                     // g b (a DISTR_Q shunt contributor is always fixed)
+        int vcol = shIx[e * 4 + 2];
         double so[SH_NOUT];
         evalShunt(x[vcol], sp[0], sp[1], 0, so + 0, so + 1, so + 2, so + 3, so + 4);
         if (dst[0] <= -2) atomicAdd(&F[-2 - dst[0]], w * so[2]);    // q
@@ -551,6 +556,18 @@ __global__ void fillDistrRho(int ndr, const int* drCol, const double* drCoef, co
     double coef = drCoef[c];
     addAt(drDest[c * 2 + 0], coef * x[drCol[c]], vals, F);   // F[DISTR_RHO row] += coef * r1
     addAt(drDest[c * 2 + 1], coef, vals, F);                 // J(DISTR_RHO row, r1) += coef
+}
+
+// DISTR_SHUNT_B (shunt susceptance distribution): the SHUNT_B analogue of fillDistrRho. A controller's
+// DISTR_SHUNT_B row = (1/count)·Σ b − b_k, so each contribution is coef·b_j into the row's F + a constant
+// coef in J(row, b_j). dest[2] = {F row, J slot} (built host-side through the CSR pattern).
+__global__ void fillDistrShuntB(int ndb, const int* dbCol, const double* dbCoef, const int* dbDest,
+                                const double* x, double* vals, double* F) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= ndb) return;
+    double coef = dbCoef[c];
+    addAt(dbDest[c * 2 + 0], coef * x[dbCol[c]], vals, F);   // F[DISTR_SHUNT_B row] += coef * b
+    addAt(dbDest[c * 2 + 1], coef, vals, F);                 // J(DISTR_SHUNT_B row, b) += coef
 }
 
 // Slack/PV target identity rows, applied as a PER-SOLVE mask over the fixed superset
@@ -710,9 +727,14 @@ std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const in
         claimMovedV(ix[1], ix[4]);
         claimMovedV(ix[3], ix[5]);
     }
-    for (int e = 0; e < nsh; e++) {                          // P Q v
-        pairRc(shIdx[e * 3 + 1], shIdx[e * 3 + 1]);          // Q self-pairs (v col, or rho col if controlled)
-        claimMovedV(shIdx[e * 3 + 1], shIdx[e * 3 + 2]);
+    for (int e = 0; e < nsh; e++) {                          // P Q v bcol
+        pairRc(shIdx[e * 4 + 1], shIdx[e * 4 + 1]);          // Q self-pairs (v col, or SHUNT_B col if controlled)
+        claimMovedV(shIdx[e * 4 + 1], shIdx[e * 4 + 2]);
+        if (shIdx[e * 4 + 3] >= 0) {
+            // claim the SHUNT_B row: its diagonal is the b col either way — dq/db when the susceptance is a
+            // free control, or the unit derivative of the b−target identity when it is held constant.
+            pairRc(shIdx[e * 4 + 3], shIdx[e * 4 + 3]);
+        }
     }
     for (int e = 0; e < nhv; e++) {                          // P1 P2 ph1 ph2
         const int* ix = hvIdx + e * 4;
@@ -755,12 +777,13 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
                           const int* cbIdx, const int* obIdx, const int* shIdx,
                           int ndq, const int* dqElem, const int* dqSide, const int* dqKind, const int* dqRow,
                           int ndr, const int* drRow, const int* drCol,
+                          int ndb, const int* dbRow, const int* dbCol,
                           int nzi, const int* ziIdx,
                           std::vector<std::pair<int, int>>& pat) {
     for (int c = 0; c < ndq; c++) {
         int mappedRow = rowMap[dqRow[c]];
         if (dqKind[c] == 1) {                                // shunt q: bus V column
-            pat.emplace_back(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 3 + 2]);
+            pat.emplace_back(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 4 + 2]);
         } else if (dqKind[c] == 2) {                         // half-open: connected-side V column
             const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
             pat.emplace_back(mappedRow, dqSide[c] == 0 ? oq[4] : oq[5]);
@@ -777,6 +800,9 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
     }
     for (int c = 0; c < ndr; c++) {                          // DISTR_RHO: controller r1 column in a DISTR_RHO row
         pat.emplace_back(rowMap[drRow[c]], drCol[c]);
+    }
+    for (int c = 0; c < ndb; c++) {                          // DISTR_SHUNT_B: controller b column in a DISTR_SHUNT_B row
+        pat.emplace_back(rowMap[dbRow[c]], dbCol[c]);
     }
     for (int e = 0; e < nzi; e++) {                          // zero-impedance: dummy couplings + (tree) ZERO_V/PHI
         const int* z = ziIdx + static_cast<size_t>(e) * 11;
@@ -838,6 +864,8 @@ struct SharedStructure {
     DeviceBuf dZiIn, dZiIdx, dZiDest;                        // nzi (dZiIn) / nzi*11 (dZiIdx) / nzi*14 (dZiDest)
     int ndr = 0;                                             // DISTR_RHO linear contributions
     DeviceBuf dDrCol, dDrCoef, dDrDest;                      // ndr each (dDrDest is ndr*2)
+    int ndb = 0;                                             // DISTR_SHUNT_B linear contributions
+    DeviceBuf dDbCol, dDbCoef, dDbDest;                      // ndb each (dDbDest is ndb*2)
     DeviceBuf dRowPtr, dColIdx, dDiagPos;                    // device CSR pattern + guaranteed-diagonal slots
     double luBytes = 0.0;                                    // cached LU-probe footprint (0 = not probed yet)
 };
@@ -857,7 +885,7 @@ static void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const st
             int mappedRow = rowMap[dqRow[c]];
             dqDest[c * 6 + 0] = -2 - mappedRow;              // q value -> F row
             if (dqKind[c] == 1) {                            // shunt: dq/dv on the bus V column
-                dqDest[c * 6 + 1] = pos.at(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 3 + 2]);
+                dqDest[c * 6 + 1] = pos.at(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 4 + 2]);
             } else if (dqKind[c] == 2) {                     // half-open: dq/dv on the connected-side V col
                 const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
                 dqDest[c * 6 + 1] = pos.at(mappedRow, dqSide[c] == 0 ? oq[4] : oq[5]);
@@ -932,6 +960,22 @@ static void buildDistrRhoDest(SharedStructure* st, const CsrPattern& pos, const 
     }
 }
 
+static void buildDistrShuntBDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
+                                 int ndb, const int* dbRow, const int* dbCol, const double* dbCoef) {
+    st->ndb = ndb;
+    if (ndb > 0) {
+        std::vector<int> dbDest(static_cast<size_t>(ndb) * 2);
+        for (int c = 0; c < ndb; c++) {
+            int mappedRow = rowMap[dbRow[c]];
+            dbDest[c * 2 + 0] = -2 - mappedRow;              // DISTR_SHUNT_B F row
+            dbDest[c * 2 + 1] = pos.at(mappedRow, dbCol[c]); // J slot
+        }
+        st->dDbCol.upload(dbCol, ndb * sizeof(int));
+        st->dDbCoef.upload(dbCoef, ndb * sizeof(double));
+        st->dDbDest.upload(dbDest.data(), dbDest.size() * sizeof(int));
+    }
+}
+
 SharedStructure* buildStructure(int n,
                                 int ncb, const double* cbIn, const int* cbIdx,
                                 int nob, const double* obIn, const int* obIdx,
@@ -940,7 +984,8 @@ SharedStructure* buildStructure(int n,
                                 int ndq, const int* dqElem, const int* dqSide, const double* dqWeight,
                                 const int* dqRow, const int* dqKind,
                                 int nzi, const double* ziIn, const int* ziIdx,
-                                int ndr, const int* drRow, const int* drCol, const double* drCoef) {
+                                int ndr, const int* drRow, const int* drCol, const double* drCoef,
+                                int ndb, const int* dbRow, const int* dbCol, const double* dbCoef) {
     auto st = std::make_unique<SharedStructure>();
     st->n = n;
     st->nElements = ncb + nob + nsh + nhv;
@@ -966,7 +1011,7 @@ SharedStructure* buildStructure(int n,
     };
     std::vector<int> cbIdxM = mapRows(cbIdx, ncb, 10, {0, 1, 2, 3});
     std::vector<int> obIdxM = mapRows(obIdx, nob, 6, {0, 1, 2, 3});
-    std::vector<int> shIdxM = mapRows(shIdx, nsh, 3, {0, 1});
+    std::vector<int> shIdxM = mapRows(shIdx, nsh, 4, {0, 1});
     std::vector<int> hvIdxM = mapRows(hvIdx, nhv, 4, {0, 1});
     cbIdx = cbIdxM.data();
     obIdx = obIdxM.data();
@@ -977,10 +1022,10 @@ SharedStructure* buildStructure(int n,
     std::vector<std::pair<int, int>> pat;
     collectPattern(ncb, cbIdx, 10, CB_SCATTER, CB_NOUT, resolveCb, pat);
     collectPattern(nob, obIdx, 6, OB_SCATTER, OB_NOUT, resolveOb, pat);
-    collectPattern(nsh, shIdx, 3, SH_SCATTER, SH_NOUT, resolveSh, pat);
+    collectPattern(nsh, shIdx, 4, SH_SCATTER, SH_NOUT, resolveSh, pat);
     collectPattern(nhv, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pat);
     collectFamilyPattern(rowMap, cbIdx, obIdx, shIdx, ndq, dqElem, dqSide, dqKind, dqRow,
-                         ndr, drRow, drCol, nzi, ziIdx, pat);
+                         ndr, drRow, drCol, ndb, dbRow, dbCol, nzi, ziIdx, pat);
     for (int r = 0; r < n; r++) {
         pat.emplace_back(r, r);                              // guaranteed diagonal: the per-solve
     }                                                        // row-mode mask writes 1.0 there
@@ -1007,7 +1052,7 @@ SharedStructure* buildStructure(int n,
         initClosedBranchTrig<<<grid(ncb), BLOCK>>>(ncb, st->cb.in.as<double>(), st->cbTrig.as<double>());
     }
     setupFamily(st->ob, nob, obIn, 7, obIdx, 6, OB_SCATTER, OB_NOUT, resolveOb, pos);
-    setupFamily(st->sh, nsh, shIn, 2, shIdx, 3, SH_SCATTER, SH_NOUT, resolveSh, pos);
+    setupFamily(st->sh, nsh, shIn, 2, shIdx, 4, SH_SCATTER, SH_NOUT, resolveSh, pos);
     setupFamily(st->hv, nhv, hvIn, 5, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pos);
 
     // ---- DISTR_Q destinations: per contribution {F-row, dq/dv1, dq/dv2, dq/dph1, dq/dph2, dq/dr1}
@@ -1019,6 +1064,9 @@ SharedStructure* buildStructure(int n,
 
     // ---- DISTR_RHO destinations: per contribution {F row, J slot (row, r1 col)} ----
     buildDistrRhoDest(st.get(), pos, rowMap, ndr, drRow, drCol, drCoef);
+
+    // ---- DISTR_SHUNT_B destinations: per contribution {F row, J slot (row, b col)} ----
+    buildDistrShuntBDest(st.get(), pos, rowMap, ndb, dbRow, dbCol, dbCoef);
 
     std::vector<int> diagPos(n);
     for (int r = 0; r < n; r++) diagPos[r] = pos.at(r, r);
@@ -1089,7 +1137,7 @@ struct SolverContext {
     SharedStructurePtr st;                                   // shared with any batch context on the same extraction
     int n = 0;
     int nnz = 0;
-    int ndq = 0, nzi = 0, ndr = 0;                           // copies of the structure counts
+    int ndq = 0, nzi = 0, ndr = 0, ndb = 0;                  // copies of the structure counts
     std::vector<double> hF;                                  // host mismatch buffer
     DeviceBuf dX, dTarget, dF, dB, dDx, dVals, dMode;
     DeviceBuf dXprev;                                        // state before the last full step (line search)
@@ -1113,6 +1161,7 @@ SolverContext* createContext(const SharedStructurePtr& st) {
     ctx->ndq = st->ndq;
     ctx->nzi = st->nzi;
     ctx->ndr = st->ndr;
+    ctx->ndb = st->ndb;
     ctx->hF.resize(n);
 
     // ---- device state (persists across solves) ----
@@ -1167,6 +1216,7 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
         if (ctx->ndq) fillDistrQ<<<grid(ctx->ndq), BLOCK, 0, ctx->stream>>>(ctx->ndq, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->nzi) fillZeroImp<<<grid(ctx->nzi), BLOCK, 0, ctx->stream>>>(ctx->nzi, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->ndr) fillDistrRho<<<grid(ctx->ndr), BLOCK, 0, ctx->stream>>>(ctx->ndr, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        if (ctx->ndb) fillDistrShuntB<<<grid(ctx->ndb), BLOCK, 0, ctx->stream>>>(ctx->ndb, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         applyRowMode<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         CUDA_CHECK(cudaMemcpy(ctx->hF.data(), ctx->dF.p, n * sizeof(double), cudaMemcpyDeviceToHost));
@@ -1470,7 +1520,11 @@ __global__ void fillShuntBatch(int ne, int nScenarios, int n, int nnz, int nElem
     double g = p[0];
     double b = p[1];
     applyShuntOverride(nShOv, shOvSlotElem, shOvGb, s, e, g, b);
-    double v = x[(size_t) s * n + ix[e * 3 + 2]];
+    // A voltage-controlling shunt (bcol >= 0) reads its susceptance from the per-scenario state vector; a
+    // fixed shunt keeps the packed value (+ any contingency shunt-shift override).
+    int bcol = ix[e * 4 + 3];
+    if (bcol >= 0) b = x[(size_t) s * n + bcol];
+    double v = x[(size_t) s * n + ix[e * 4 + 2]];
     double o[SH_NOUT];
     evalShunt(v, g, b, 0, o + 0, o + 1, o + 2, o + 3, o + 4);
     scatterAdd(SH_NOUT, dest + e * SH_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
@@ -1599,7 +1653,9 @@ __global__ void fillShuntBatchF(int ne, int nScenarios, int n, int nnz, int nEle
     double g = p[0];
     double b = p[1];
     applyShuntOverride(nShOv, shOvSlotElem, shOvGb, s, e, g, b);
-    double v = x[(size_t) s * n + ix[e * 3 + 2]];
+    int bcol = ix[e * 4 + 3];
+    if (bcol >= 0) b = x[(size_t) s * n + bcol];             // voltage-controlling shunt: b from state
+    double v = x[(size_t) s * n + ix[e * 4 + 2]];
     double o[2];
     evalShuntF(v, g, b, 0, o + 0, o + 1);
     const int pos[2] = {0, 2};
@@ -1650,7 +1706,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
 
     if (kind == 1) {                             // shunt q: {q -> F, dq/dv -> J(row, vcol)}
         const double* sp = shIn + e * 2;
-        int vcol = shIx[e * 3 + 2];
+        int vcol = shIx[e * 4 + 2];
         double so[SH_NOUT];
         evalShunt(xs[vcol], sp[0], sp[1], 0, so + 0, so + 1, so + 2, so + 3, so + 4);
         if (dst[0] <= -2) atomicAdd(&FS[-2 - dst[0]], w * so[2]);
@@ -1712,6 +1768,23 @@ __global__ void fillDistrRhoBatch(int ndr, int nScenarios, int n, int nnz,
     int dF = drDest[c * 2 + 0];
     int dJ = drDest[c * 2 + 1];
     if (dF <= -2) atomicAdd(&F[(size_t) s * n + (-2 - dF)], coef * x[(size_t) s * n + drCol[c]]);
+    if (dJ >= 0) atomicAdd(&vals[(size_t) s * nnz + dJ], coef);
+}
+
+// Batched DISTR_SHUNT_B fill: the SHUNT_B analogue of fillDistrRhoBatch. Linear coef*b into the controller's
+// SHUNT_B row, strided per scenario, active-gated.
+__global__ void fillDistrShuntBBatch(int ndb, int nScenarios, int n, int nnz,
+                                     const int* dbCol, const double* dbCoef, const int* dbDest,
+                                     const double* x, double* vals, double* F, const char* active) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= ndb * nScenarios) return;
+    int c = tid % ndb;
+    int s = tid / ndb;
+    if (!active[s]) return;
+    double coef = dbCoef[c];
+    int dF = dbDest[c * 2 + 0];
+    int dJ = dbDest[c * 2 + 1];
+    if (dF <= -2) atomicAdd(&F[(size_t) s * n + (-2 - dF)], coef * x[(size_t) s * n + dbCol[c]]);
     if (dJ >= 0) atomicAdd(&vals[(size_t) s * nnz + dJ], coef);
 }
 
@@ -2177,7 +2250,7 @@ struct BatchSolverContext {
     int nScenarios = 0;
     int nElements = 0;
     int cbOffset = 0, obOffset = 0, shOffset = 0, hvOffset = 0;   // element-mask offsets per family
-    int ndq = 0, ndr = 0, nzi = 0;                           // copies of the structure counts
+    int ndq = 0, ndr = 0, ndb = 0, nzi = 0;                  // copies of the structure counts
     DeviceBuf dX, dTarget, dF, dB, dDx, dVals, dMode;        // per-scenario (n or nnz strided)
     bool clampStep = false;                                  // MAX_VOLTAGE_CHANGE per-scenario step clamp (set per solve)
     double maxDv = 0.0, maxDphi = 0.0;
@@ -2396,6 +2469,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     ctx->hvOffset = st->hvOffset;
     ctx->ndq = st->ndq;
     ctx->ndr = st->ndr;
+    ctx->ndb = st->ndb;
     ctx->nzi = st->nzi;
     const std::vector<int>& rowMap = st->rowMap;
     const std::vector<int>& rowPtr = st->rowPtr;
@@ -2762,6 +2836,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
         if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
         if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
+        if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>());
         applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: stream-ordered into the solve, no host sync
@@ -3186,7 +3261,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
         jdoubleArray jshIn, jintArray jshIdx, jdoubleArray jhvIn, jintArray jhvIdx,
         jintArray jdqElem, jintArray jdqSide, jdoubleArray jdqWeight, jintArray jdqRow, jintArray jdqKind,
         jdoubleArray jziIn, jintArray jziIdx,
-        jintArray jdrRow, jintArray jdrCol, jdoubleArray jdrCoef) {
+        jintArray jdrRow, jintArray jdrCol, jdoubleArray jdrCoef,
+        jintArray jdbRow, jintArray jdbCol, jdoubleArray jdbCoef) {
     jdouble* cbIn = env->GetDoubleArrayElements(jcbIn, nullptr);
     jint* cbIdx = env->GetIntArrayElements(jcbIdx, nullptr);
     jdouble* obIn = env->GetDoubleArrayElements(jobIn, nullptr);
@@ -3205,14 +3281,18 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
     jint* drRow = env->GetIntArrayElements(jdrRow, nullptr);
     jint* drCol = env->GetIntArrayElements(jdrCol, nullptr);
     jdouble* drCoef = env->GetDoubleArrayElements(jdrCoef, nullptr);
+    jint* dbRow = env->GetIntArrayElements(jdbRow, nullptr);
+    jint* dbCol = env->GetIntArrayElements(jdbCol, nullptr);
+    jdouble* dbCoef = env->GetDoubleArrayElements(jdbCoef, nullptr);
 
     int ncb = env->GetArrayLength(jcbIdx) / 10;
     int nob = env->GetArrayLength(jobIdx) / 6;
-    int nsh = env->GetArrayLength(jshIdx) / 3;
+    int nsh = env->GetArrayLength(jshIdx) / 4;
     int nhv = env->GetArrayLength(jhvIdx) / 4;
     int ndq = env->GetArrayLength(jdqElem);
     int nzi = env->GetArrayLength(jziIdx) / 11;
     int ndr = env->GetArrayLength(jdrRow);
+    int ndb = env->GetArrayLength(jdbRow);
 
     std::string error;
     SharedStructurePtr* st = nullptr;
@@ -3221,7 +3301,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
                                                    nsh, shIn, shIdx, nhv, hvIn, hvIdx,
                                                    ndq, dqElem, dqSide, dqWeight, dqRow, dqKind,
                                                    nzi, ziIn, ziIdx,
-                                                   ndr, drRow, drCol, drCoef));
+                                                   ndr, drRow, drCol, drCoef,
+                                                   ndb, dbRow, dbCol, dbCoef));
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {
@@ -3246,6 +3327,9 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
     env->ReleaseIntArrayElements(jdrRow, drRow, JNI_ABORT);
     env->ReleaseIntArrayElements(jdrCol, drCol, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jdrCoef, drCoef, JNI_ABORT);
+    env->ReleaseIntArrayElements(jdbRow, dbRow, JNI_ABORT);
+    env->ReleaseIntArrayElements(jdbCol, dbCol, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jdbCoef, dbCoef, JNI_ABORT);
 
     if (!error.empty()) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),

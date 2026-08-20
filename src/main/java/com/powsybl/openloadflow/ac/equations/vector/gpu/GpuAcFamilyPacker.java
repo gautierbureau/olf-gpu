@@ -56,6 +56,7 @@ final class GpuAcFamilyPacker {
         int[] branchAlphaCol = columns.branchAlphaCol();
         int[] dummyPCol = columns.dummyPCol();
         int[] dummyQCol = columns.dummyQCol();
+        int[] shuntBCol = columns.shuntBCol();
         int[] qRow = columns.qRow();
         int nBuses = network.getBuses().size();
         int nBranches = network.getBranches().size();
@@ -205,11 +206,21 @@ final class GpuAcFamilyPacker {
         int[] shElemOf = new int[nBuses];                    // shunt element index per bus (-1 = none)
         java.util.Arrays.fill(shElemOf, -1);
         for (LfBus bus : network.getBuses()) {
+            // Fixed (non-controlling) shunt: b is a constant (bRow = -1, idx 3). shElemOf points DISTR_Q's
+            // reactive contribution at the fixed shunt.
             bus.getShunt().ifPresent(sh -> {
                 shElemOf[bus.getNum()] = shIn.size();
                 shIn.add(new double[] {sh.getG(), sh.getB()});
                 shIdx.add(new int[] {
-                    phiCol[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()]});
+                    phiCol[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], -1});
+            });
+            // Voltage-CONTROLLING shunt: its susceptance b is a SHUNT_B state variable (bRow >= 0, idx 3), so the
+            // device reads b from x and scatters dq/db onto the b column — the exact analogue of a transformer's
+            // BRANCH_RHO1. bRow = -1 degrades it to a fixed shunt (shunt voltage control off in the equation system).
+            bus.getControllerShunt().ifPresent(sh -> {
+                shIn.add(new double[] {sh.getG(), sh.getB()});
+                shIdx.add(new int[] {
+                    phiCol[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], shuntBCol[sh.getNum()]});
             });
         }
 

@@ -16,6 +16,8 @@ import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.LfShunt;
+import com.powsybl.openloadflow.network.ShuntVoltageControl;
 import com.powsybl.openloadflow.network.TransformerVoltageControl;
 import com.powsybl.openloadflow.network.VoltageControl;
 
@@ -64,11 +66,11 @@ final class GpuAcRowIndexing {
      * and the reactive balance moves onto the controlling transformer's BRANCH_RHO1 column, which is
      * the extra degree of freedom. That rho column is then the strong diagonal of the Q row.
      *
-     * <p>Only the simple local single-transformer case is supported; throws on shunt voltage control,
-     * remote control, and ratio distribution across several transformers (DISTR_RHO).
+     * <p>Transformer AND shunt voltage control are supported (a shunt-controlled bus's reactive balance moves
+     * onto the free controlling shunt's SHUNT_B column, the exact analogue of the transformer rho case).
      */
     static int[] computeQRow(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                             int[] vCol, int[] branchRhoCol) {
+                             int[] vCol, int[] branchRhoCol, int[] shuntBCol) {
         int[] qRow = vCol.clone();
         for (LfBus bus : network.getBuses()) {
             int bn = bus.getNum();
@@ -101,6 +103,26 @@ final class GpuAcRowIndexing {
                 qRow[bn] = vCol[freeController.getNum()];
                 continue;
             }
+            // A pilot bus voltage-controlled by shunts: its reactive balance moves onto the FREE controller
+            // shunt's SHUNT_B row (the controller whose DISTR_SHUNT_B is inactive — the extra freedom), the
+            // exact analogue of the transformer rho case below.
+            ShuntVoltageControl svc = bus.getShuntVoltageControl()
+                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                    .orElse(null);
+            if (svc != null) {
+                LfShunt freeShunt = svc.getMergedControllerElements().stream()
+                        .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_SHUNT_B) < 0)
+                        .findFirst()
+                        .orElseThrow(() -> new PowsyblException("GPU AC solver: shunt voltage control of bus "
+                                + bus.getId() + " has no free controller (all DISTR_SHUNT_B active)"));
+                int bRow = shuntBCol[freeShunt.getNum()];
+                if (bRow < 0) {
+                    throw new PowsyblException("GPU AC solver: controlling shunt " + freeShunt.getId()
+                            + " has no SHUNT_B variable");
+                }
+                qRow[bn] = bRow;
+                continue;
+            }
             // A pilot bus voltage-controlled by transformers: its reactive balance moves onto the FREE
             // controller's BRANCH_RHO1 row (the controller whose DISTR_RHO is inactive — the extra freedom).
             // With one local transformer this is item 4; with several it is ratio distribution (DISTR_RHO),
@@ -108,8 +130,7 @@ final class GpuAcRowIndexing {
             TransformerVoltageControl tvc = bus.getTransformerVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .orElseThrow(() -> new PowsyblException("GPU AC solver: bus " + bus.getId()
-                            + " has active voltage and reactive targets but no supported voltage control "
-                            + "(shunt voltage control is not supported)"));
+                            + " has active voltage and reactive targets but no supported voltage control"));
             LfBranch freeController = tvc.getMergedControllerElements().stream()
                     .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_RHO) < 0)
                     .findFirst()

@@ -29,7 +29,7 @@
 //       double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
 //       double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx, int[] idIdx)
 //     x0/target: length n (state by variable row / target by equation column)
-//     cbIn nbr*8  (y g1 g2 b1 b2 ksi r1 a1)   cbIdx nbr*10 (P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col)
+//     cbIn nbr*8  (y g1 g2 b1 b2 ksi r1 a1)   cbIdx nbr*12 (P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col qAlt1 qAlt2)
 //     obIn nob*7  (y ksi g1 b1 g2 b2 r1)      obIdx nob*6 (P1 Q1 P2 Q2 v1 v2)
 //     shIn nsh*2  (g b)                       shIdx nsh*3 (P Q v)
 //     hvIn nhv*5  (p0 k lf1 lf2 r)            hvIdx nhv*4 (P1 P2 ph1 ph2)
@@ -361,6 +361,77 @@ std::vector<int> buildDest(int ne, const int* idx, int stride, const S* table, i
     return dest;
 }
 
+// ---- Dynamic Q-relocation (production-design doc §11) ---------------------------------------
+// A transformer/shunt voltage-controlled bus has two possible reactive-balance rows across the
+// outer loop: its own BUS_V row (control OFF) and the free controller's BRANCH_RHO1 / SHUNT_B row
+// (control ON). The extractor freezes ONE into cbIdx; the alternate travels at cbIdx[10+rowEnd]
+// (packed by GpuAcFamilyPacker as qRowAlt, remapped through rowMap like every other row index).
+// When enabled, the closed-branch fill routes each controlled-bus q output to whichever of the two
+// candidate rows is FREE this scenario (row-mode != 0), so one shared batch structure follows a
+// per-scenario control toggle instead of solving a subtly wrong system.
+static bool dynQRelocEnabled() {
+    static int v = -1;
+    if (v < 0) {
+        const char* e = getenv("OLF_GPU_DYN_QRELOC");
+        v = (e && e[0] == '1') ? 1 : 0;
+    }
+    return v != 0;
+}
+
+// The alternate candidate Q row for a closed-branch output, or -1 if this output does not relocate
+// (only Q rows, rowEq==1) or the endpoint bus has no second candidate (qRowAlt was -1).
+inline int cbAltRow(const CbScatter& s, const int* ix) {
+    return s.rowEq == 1 ? ix[10 + s.rowEnd] : -1;
+}
+
+// Union the alternate Q rows into the CSR pattern: for each closed-branch role-1 Q output emit an
+// extra (altRow, col) entry so buildDest can resolve a slot there. Deduped by the caller's unique().
+void collectCbAltPattern(int ncb, const int* cbIdx, std::vector<std::pair<int, int>>& pat) {
+    for (int e = 0; e < ncb; e++) {
+        const int* ix = cbIdx + static_cast<size_t>(e) * 12;
+        for (int k = 0; k < CB_NOUT; k++) {
+            const CbScatter& s = CB_SCATTER[k];
+            if (s.role != 1) {
+                continue;
+            }
+            RC rc = resolveCb(s, ix);
+            int altRow = cbAltRow(s, ix);
+            if (rc.col >= 0 && altRow >= 0 && altRow != rc.row) {
+                pat.emplace_back(altRow, rc.col);
+            }
+        }
+    }
+}
+
+// Per (closed branch, output): the alternate destination (CSR slot for a role-1 J entry, -2-row for
+// a role-0 F residual) and the FROZEN row to test the per-scenario row-mode against. selRow == -1
+// marks an output that never relocates (the fill then always uses the frozen dest). Sized ncb*CB_NOUT
+// like the frozen dest, so the fill indexes all three arrays identically.
+void buildCbDynDest(int ncb, const int* cbIdx, const CsrPattern& pos,
+                    std::vector<int>& altDest, std::vector<int>& selRow) {
+    altDest.assign(static_cast<size_t>(ncb) * CB_NOUT, -1);
+    selRow.assign(static_cast<size_t>(ncb) * CB_NOUT, -1);
+    for (int e = 0; e < ncb; e++) {
+        const int* ix = cbIdx + static_cast<size_t>(e) * 12;
+        for (int k = 0; k < CB_NOUT; k++) {
+            const CbScatter& s = CB_SCATTER[k];
+            RC rc = resolveCb(s, ix);
+            int altRow = cbAltRow(s, ix);
+            size_t o = static_cast<size_t>(e) * CB_NOUT + k;
+            if (altRow < 0 || altRow == rc.row) {
+                continue;                                    // not a relocatable output
+            }
+            if (s.role == 1 && rc.col >= 0) {
+                altDest[o] = pos.at(altRow, rc.col);
+                selRow[o] = rc.row;
+            } else if (s.role == 0) {
+                altDest[o] = -2 - altRow;
+                selRow[o] = rc.row;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------
 // Device: the four family fill kernels + the loop helpers
 // ---------------------------------------------------------------------------------
@@ -376,12 +447,29 @@ __device__ void scatterAdd(int nout, const int* dest, const double* o, double* v
     }
 }
 
+// Dynamic Q-relocation scatter: when an output's frozen Q row is an identity this scenario
+// (mode[selRow] == 0), route it to the alternate candidate row instead. mode is this scenario's
+// row-mode slice (length n). dest/altDest/selRow share the per-output layout of scatterAdd.
+__device__ void scatterAddDyn(int nout, const int* dest, const int* altDest, const int* selRow,
+                              const int* mode, const double* o, double* vals, double* F) {
+    for (int k = 0; k < nout; k++) {
+        int sr = selRow[k];
+        int d = (sr >= 0 && mode[sr] == 0) ? altDest[k] : dest[k];
+        if (d >= 0) {
+            atomicAdd(&vals[d], o[k]);
+        } else if (d <= -2) {
+            atomicAdd(&F[-2 - d], o[k]);
+        }
+    }
+}
+
 __global__ void fillClosedBranch(int ne, const double* in, const int* ix, const int* dest,
-                                 const double* x, double* vals, double* F) {
+                                 const double* x, double* vals, double* F,
+                                 const int* altDest, const int* selRow, const int* mode, int dynReloc) {
     int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= ne) return;
     const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
-    const int* q = ix + e * 10;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
+    const int* q = ix + e * 12;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     double v1 = x[q[5]], v2 = x[q[7]], ph1 = x[q[4]], ph2 = x[q[6]];
     // a controlling transformer's ratio/shift are STATE variables — read them from x at their
     // column; otherwise the fixed pi-model value from the input pack (q[8]/q[9] are -1 then).
@@ -392,7 +480,11 @@ __global__ void fillClosedBranch(int ne, const double* in, const int* ix, const 
                      o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
                      o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
                      o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
-    scatterAdd(CB_NOUT, dest + e * CB_NOUT, o, vals, F);
+    if (dynReloc) {
+        scatterAddDyn(CB_NOUT, dest + e * CB_NOUT, altDest + e * CB_NOUT, selRow + e * CB_NOUT, mode, o, vals, F);
+    } else {
+        scatterAdd(CB_NOUT, dest + e * CB_NOUT, o, vals, F);
+    }
 }
 
 __global__ void fillOpenBranch(int ne, const double* in, const int* ix, const int* dest,
@@ -481,7 +573,7 @@ __global__ void fillDistrQ(int ndq, const int* dqElem, const int* dqSide, const 
         return;
     }
     const double* p = cbIn + e * 8;                          // y g1 g2 b1 b2 ksi r1 a1
-    const int* q = cbIx + e * 10;                            // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
+    const int* q = cbIx + e * 12;                            // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     double v1 = x[q[5]], v2 = x[q[7]], ph1 = x[q[4]], ph2 = x[q[6]];
     double r1 = q[9] >= 0 ? x[q[9]] : p[6];
     double a1 = q[8] >= 0 ? x[q[8]] : p[7];
@@ -642,6 +734,8 @@ struct CudssCtx {
 struct Family {
     int ne = 0, instride = 0, ixstride = 0, nout = 0;
     DeviceBuf in, ix, dest;
+    DeviceBuf altDest, selRow;                               // Dynamic Q-relocation (cb only); empty when disabled
+    bool dynReloc = false;                                   // altDest/selRow populated and the fill should select
 };
 
 // Build one family's device-side data (inputs, indices, role-folded destinations).
@@ -694,7 +788,7 @@ std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const in
         }
     };
     for (int e = 0; e < ncb; e++) {                          // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
-        const int* ix = cbIdx + e * 10;
+        const int* ix = cbIdx + e * 12;
         pairRc(ix[0], ix[4]);                                // P1 -> ph1
         pairRc(ix[2], ix[6]);                                // P2 -> ph2
         // Q rows pair with their own stable index — its V col on an ordinary bus (Qrow==v col), the
@@ -790,7 +884,7 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
         } else if (dqKind[c] == 3) {                         // zero-imp DUMMY_Q column
             pat.emplace_back(mappedRow, dqElem[c]);
         } else {                                             // closed branch: v1 v2 ph1 ph2 r1
-            const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 10;
+            const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 12;
             pat.emplace_back(mappedRow, q[5]);
             pat.emplace_back(mappedRow, q[7]);
             pat.emplace_back(mappedRow, q[4]);
@@ -892,7 +986,7 @@ static void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const st
             } else if (dqKind[c] == 3) {                     // zero-impedance: J slot on the dummyQ column
                 dqDest[c * 6 + 1] = pos.at(mappedRow, dqElem[c]);
             } else {                                         // closed branch
-                const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 10;
+                const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 12;
                 dqDest[c * 6 + 1] = pos.at(mappedRow, q[5]);     // dq/dv1
                 dqDest[c * 6 + 2] = pos.at(mappedRow, q[7]);     // dq/dv2
                 dqDest[c * 6 + 3] = pos.at(mappedRow, q[4]);     // dq/dph1
@@ -1009,7 +1103,7 @@ SharedStructure* buildStructure(int n,
         }
         return out;
     };
-    std::vector<int> cbIdxM = mapRows(cbIdx, ncb, 10, {0, 1, 2, 3});
+    std::vector<int> cbIdxM = mapRows(cbIdx, ncb, 12, {0, 1, 2, 3, 10, 11});
     std::vector<int> obIdxM = mapRows(obIdx, nob, 6, {0, 1, 2, 3});
     std::vector<int> shIdxM = mapRows(shIdx, nsh, 4, {0, 1});
     std::vector<int> hvIdxM = mapRows(hvIdx, nhv, 4, {0, 1});
@@ -1020,7 +1114,11 @@ SharedStructure* buildStructure(int n,
 
     // ---- fixed CSR pattern (rows = permuted equations, cols = variables) ----
     std::vector<std::pair<int, int>> pat;
-    collectPattern(ncb, cbIdx, 10, CB_SCATTER, CB_NOUT, resolveCb, pat);
+    collectPattern(ncb, cbIdx, 12, CB_SCATTER, CB_NOUT, resolveCb, pat);
+    bool dynReloc = dynQRelocEnabled();
+    if (dynReloc) {
+        collectCbAltPattern(ncb, cbIdx, pat);                // union the alternate Q rows into the pattern
+    }
     collectPattern(nob, obIdx, 6, OB_SCATTER, OB_NOUT, resolveOb, pat);
     collectPattern(nsh, shIdx, 4, SH_SCATTER, SH_NOUT, resolveSh, pat);
     collectPattern(nhv, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pat);
@@ -1046,7 +1144,24 @@ SharedStructure* buildStructure(int n,
     st->dColIdx.upload(st->colIdx.data(), st->nnz * sizeof(int));
 
     // ---- family device data (inputs, indices, role-folded destinations) + static trig ----
-    setupFamily(st->cb, ncb, cbIn, 8, cbIdx, 10, CB_SCATTER, CB_NOUT, resolveCb, pos);
+    setupFamily(st->cb, ncb, cbIn, 8, cbIdx, 12, CB_SCATTER, CB_NOUT, resolveCb, pos);
+    if (dynReloc && ncb) {                                   // Dynamic Q-relocation: alt-dest + frozen-row select map
+        std::vector<int> altDest;
+        std::vector<int> selRow;
+        buildCbDynDest(ncb, cbIdx, pos, altDest, selRow);
+        st->cb.altDest.upload(altDest.data(), altDest.size() * sizeof(int));
+        st->cb.selRow.upload(selRow.data(), selRow.size() * sizeof(int));
+        st->cb.dynReloc = true;
+        if (getenv("OLF_GPU_DYN_QRELOC_DEBUG")) {
+            int nSel = 0;
+            for (int v : selRow) {
+                if (v >= 0) {
+                    nSel++;
+                }
+            }
+            std::fprintf(stderr, "[DYN-QRELOC] ncb=%d relocatable-outputs=%d\n", ncb, nSel);
+        }
+    }
     if (ncb) {                                               // per-element static trig (OLF's precomputed-trig shape)
         st->cbTrig.alloc(static_cast<size_t>(ncb) * 6 * sizeof(double));
         initClosedBranchTrig<<<grid(ncb), BLOCK>>>(ncb, st->cb.in.as<double>(), st->cbTrig.as<double>());
@@ -1209,7 +1324,7 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
     auto fillAndNorm = [&]() -> double {
         CUDA_CHECK(cudaMemsetAsync(ctx->dVals.p, 0, ctx->nnz * sizeof(double), ctx->stream));
         initF<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dTarget.as<double>(), ctx->dF.as<double>());
-        if (ctx->st->cb.ne) fillClosedBranch<<<grid(ctx->st->cb.ne), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        if (ctx->st->cb.ne) fillClosedBranch<<<grid(ctx->st->cb.ne), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0);
         if (ctx->st->ob.ne) fillOpenBranch<<<grid(ctx->st->ob.ne), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->st->sh.ne) fillShunt<<<grid(ctx->st->sh.ne), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->st->hv.ne) fillHvdc<<<grid(ctx->st->hv.ne), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
@@ -1444,14 +1559,15 @@ __global__ void fillClosedBranchBatch(int ne, int nScenarios, int n, int nnz, in
                                       const double* in, const int* ix, const int* dest,
                                       const double* x, double* vals, double* F,
                                       const char* disabled, const char* active,
-                                      int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal) {
+                                      int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                                      const int* altDest, const int* selRow, const int* mode, int dynReloc) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ne * nScenarios) return;
     int e = tid % ne;
     int s = tid / ne;
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
     const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
-    const int* q = ix + e * 10;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
+    const int* q = ix + e * 12;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     double pOv[8];
     if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) {
         p = pOv;
@@ -1470,7 +1586,12 @@ __global__ void fillClosedBranchBatch(int ne, int nScenarios, int n, int nnz, in
                      o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
                      o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
                      o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
-    scatterAdd(CB_NOUT, dest + e * CB_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+    if (dynReloc) {
+        scatterAddDyn(CB_NOUT, dest + e * CB_NOUT, altDest + e * CB_NOUT, selRow + e * CB_NOUT,
+                      mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+    } else {
+        scatterAdd(CB_NOUT, dest + e * CB_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+    }
 }
 
 __global__ void fillOpenBranchBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
@@ -1582,18 +1703,34 @@ __device__ void scatterAddF(int nres, const int* dest, const int* pos, const dou
     }
 }
 
+// Dynamic Q-relocation, residual-only variant: route each residual to its alternate F row when the
+// frozen row is an identity this scenario. dest/altDest/selRow are the element's per-output slices;
+// pos maps each of the nres residuals to its CB_NOUT output index.
+__device__ void scatterAddFDyn(int nres, const int* dest, const int* altDest, const int* selRow,
+                               const int* pos, const int* mode, const double* o, double* F) {
+    for (int k = 0; k < nres; k++) {
+        int idx = pos[k];
+        int sr = selRow[idx];
+        int d = (sr >= 0 && mode[sr] == 0) ? altDest[idx] : dest[idx];
+        if (d <= -2) {
+            atomicAdd(&F[-2 - d], o[k]);
+        }
+    }
+}
+
 __global__ void fillClosedBranchBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                        const double* in, const int* ix, const int* dest, const double* trig,
                                        const double* x, double* F,
                                        const char* disabled, const char* active,
-                                       int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal) {
+                                       int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                                       const int* altDest, const int* selRow, const int* mode, int dynReloc) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ne * nScenarios) return;
     int e = tid % ne;
     int s = tid / ne;
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
     const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
-    const int* q = ix + e * 10;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
+    const int* q = ix + e * 12;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     double pOv[8];
     bool tapOv = findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv);
     if (tapOv) {
@@ -1616,7 +1753,12 @@ __global__ void fillClosedBranchBatchF(int ne, int nScenarios, int n, int nnz, i
                          sinKsi, sinTheta1, cosTheta1, cosKsi, sinTheta2, cosTheta2, 0,
                          o + 0, o + 1, o + 2, o + 3);
     const int pos[4] = {0, 7, 14, 21};
-    scatterAddF(4, dest + e * CB_NOUT, pos, o, F + (size_t) s * n);
+    if (dynReloc) {
+        scatterAddFDyn(4, dest + e * CB_NOUT, altDest + e * CB_NOUT, selRow + e * CB_NOUT,
+                       pos, mode + (size_t) s * n, o, F + (size_t) s * n);
+    } else {
+        scatterAddF(4, dest + e * CB_NOUT, pos, o, F + (size_t) s * n);
+    }
 }
 
 __global__ void fillOpenBranchBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
@@ -1734,7 +1876,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
     }
     // kind 0: closed-branch q1/q2 + its derivatives
     const double* p = cbIn + e * 8;
-    const int* q = cbIx + e * 10;
+    const int* q = cbIx + e * 12;
     double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
     double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
     double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
@@ -2808,9 +2950,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         initFBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dTarget.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (ctx->st->cb.ne) {
             if (fOnly) {
-                fillClosedBranchBatchF<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->st->cbTrig.as<double>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>());
+                fillClosedBranchBatchF<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->st->cbTrig.as<double>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0);
             } else {
-                fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>());
+                fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0);
             }
         }
         if (ctx->st->ob.ne) {
@@ -3124,7 +3266,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // bus reactive balance. Disabled branches are skipped (outage); dVals is scratch (the next inner
     // iteration memsets and refills it).
     CUDA_CHECK(cudaMemsetAsync(ctx->dQbuf.p, 0, nTot * sizeof(double), ctx->stream));
-    if (ctx->st->cb.ne) fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>());
+    // Reactive-limit Q buffer: physical bus-Q for PV-limit detection — keep the FROZEN routing
+    // (dynReloc=0), the relocation only concerns the Newton residual, not this diagnostic Q.
+    if (ctx->st->cb.ne) fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), nullptr, nullptr, nullptr, 0);
     if (ctx->st->ob.ne) fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>());
     if (ctx->st->sh.ne) fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>());
     // Zero-impedance dummy transfers MUST be in the Q/P buffer too: the distributed-slack retain
@@ -3285,7 +3429,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
     jint* dbCol = env->GetIntArrayElements(jdbCol, nullptr);
     jdouble* dbCoef = env->GetDoubleArrayElements(jdbCoef, nullptr);
 
-    int ncb = env->GetArrayLength(jcbIdx) / 10;
+    int ncb = env->GetArrayLength(jcbIdx) / 12;             // cbIdx stride 12 (…a1col r1col qAlt1 qAlt2)
     int nob = env->GetArrayLength(jobIdx) / 6;
     int nsh = env->GetArrayLength(jshIdx) / 4;
     int nhv = env->GetArrayLength(jhvIdx) / 4;

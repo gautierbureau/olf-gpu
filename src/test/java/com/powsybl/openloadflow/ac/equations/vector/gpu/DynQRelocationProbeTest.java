@@ -66,8 +66,8 @@ class DynQRelocationProbeTest {
             }
         };
         int[] cb = d.cbIdx();
-        for (int e = 0; e < cb.length / 10; e++) {
-            int b = e * 10;
+        for (int e = 0; e < cb.length / 12; e++) {          // cbIdx stride 12 (…a1col r1col qAlt1 qAlt2)
+            int b = e * 12;
             pairRc.accept(cb[b], cb[b + 4]);
             pairRc.accept(cb[b + 2], cb[b + 6]);
             pairRc.accept(cb[b + 1], cb[b + 1]);

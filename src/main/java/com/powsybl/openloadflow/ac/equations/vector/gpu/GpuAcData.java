@@ -15,7 +15,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
  * switching. Packings (an index of -1 marks an absent branch side):
  * <ul>
  *   <li>closed branches — in {@code ncb*8} (y g1 g2 b1 b2 ksi r1 a1),
- *       idx {@code ncb*10} (Prow1 Qrow1 Prow2 Qrow2 ph1col v1col ph2col v2col a1col r1col).
+ *       idx {@code ncb*12} (Prow1 Qrow1 Prow2 Qrow2 ph1col v1col ph2col v2col a1col r1col qAlt1 qAlt2).
  *       {@code a1col}/{@code r1col} are the BRANCH_ALPHA1/BRANCH_RHO1 variable columns when the
  *       branch derives that control (transformer phase/voltage control), else -1; a controlling
  *       transformer also routes the controlled bus's Q row to its {@code r1col} (see GpuAcDataExtractor)</li>
@@ -153,7 +153,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
     }
 
     public int getClosedBranchCount() {
-        return cbIdx.length / 10;
+        return cbIdx.length / 12;
     }
 
     public int getOpenBranchCount() {

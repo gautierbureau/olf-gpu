@@ -58,6 +58,7 @@ final class GpuAcFamilyPacker {
         int[] dummyQCol = columns.dummyQCol();
         int[] shuntBCol = columns.shuntBCol();
         int[] qRow = columns.qRow();
+        int[] qRowAlt = columns.qRowAlt();                   // Dynamic Q-relocation: 2nd candidate Q row per bus (§11)
         int nBuses = network.getBuses().size();
         int nBranches = network.getBranches().size();
 
@@ -120,7 +121,8 @@ final class GpuAcFamilyPacker {
                 // transformer's rho col when this bus is voltage-controlled). a1col/r1col carry the
                 // branch's own control columns, -1 when not derived (then those scatter rows skip).
                 cbIdx.add(new int[] {ph1, qRow[b1.getNum()], ph2, qRow[b2.getNum()],
-                    ph1, v1, ph2, v2, a1col, r1col});
+                    ph1, v1, ph2, v2, a1col, r1col,
+                    qRowAlt[b1.getNum()], qRowAlt[b2.getNum()]});    // [10],[11]: alternate Q rows (dyn reloc)
             } else if (b2 != null) {                       // side 1 open: p2/q2 at bus2, variable v2
                 obElemOf[br.getNum()] = obIn.size();
                 obIn.add(new double[] {pi.getY(), pi.getKsi(), pi.getG1(), pi.getB1(), pi.getG2(), pi.getB2(), pi.getR1()});
@@ -160,7 +162,8 @@ final class GpuAcFamilyPacker {
                 cbIn.add(new double[] {pi.getY(), pi.getG1(), pi.getG2(), pi.getB1(), pi.getB2(),
                     pi.getKsi(), pi.getR1(), pi.getA1()});
                 cbIdx.add(new int[] {ph1, qRow[b1.getNum()], ph2, qRow[b2.getNum()],
-                    ph1, v1, ph2, v2, -1, -1});              // no control columns on a disabled branch
+                    ph1, v1, ph2, v2, -1, -1,                // no control columns on a disabled branch
+                    qRowAlt[b1.getNum()], qRowAlt[b2.getNum()]});    // [10],[11]: alternate Q rows (dyn reloc)
             }
         }
 

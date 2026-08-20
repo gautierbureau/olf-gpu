@@ -145,4 +145,54 @@ final class GpuAcRowIndexing {
         }
         return qRow;
     }
+
+    /**
+     * The ALTERNATE Q-balance-row candidate for each control-capable bus, for Dynamic Q-relocation
+     * (see the production-design doc §11). A transformer/shunt voltage-controlled bus has exactly two
+     * possible reactive-balance rows across the outer loop: its own BUS_V row (control OFF, the ratio /
+     * susceptance held constant) and the free controller's BRANCH_RHO1 / SHUNT_B row (control ON, Q
+     * relocated onto the control variable). {@link #computeQRow} bakes whichever one is active at
+     * extraction; this returns the OTHER one so the fill kernel can follow a per-scenario control
+     * toggle on the shared structure. {@code -1} for a bus that is not transformer/shunt voltage
+     * controlled (no second candidate — its Q row is fixed). The control-var COLUMN persists whether
+     * the control is on or off (pinned by BRANCH_TARGET_RHO1 / SHUNT_TARGET_B when off), so the row is
+     * always resolvable. The free controller is selected identically to {@link #computeQRow}: the one
+     * whose distribution equation is inactive (with all inactive, the first — stable across states).
+     */
+    static int[] computeQRowAlt(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+                                int[] vCol, int[] branchRhoCol, int[] shuntBCol, int[] qRow) {
+        int[] alt = new int[vCol.length];
+        java.util.Arrays.fill(alt, -1);
+        for (LfBus bus : network.getBuses()) {
+            int bn = bus.getNum();
+            int controlVarRow = -1;
+            TransformerVoltageControl tvc = bus.getTransformerVoltageControl()
+                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                    .orElse(null);
+            ShuntVoltageControl svc = bus.getShuntVoltageControl()
+                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                    .orElse(null);
+            if (tvc != null) {
+                LfBranch ctl = tvc.getMergedControllerElements().stream()
+                        .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_RHO) < 0)
+                        .findFirst().orElse(null);
+                if (ctl != null) {
+                    controlVarRow = branchRhoCol[ctl.getNum()];
+                }
+            } else if (svc != null) {
+                LfShunt ctl = svc.getMergedControllerElements().stream()
+                        .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_SHUNT_B) < 0)
+                        .findFirst().orElse(null);
+                if (ctl != null) {
+                    controlVarRow = shuntBCol[ctl.getNum()];
+                }
+            }
+            if (controlVarRow >= 0 && vCol[bn] >= 0) {
+                // Relocated at extraction (qRow == controlVarRow) -> alternate is the bus V row;
+                // not relocated (qRow == vCol) -> alternate is the control-var row.
+                alt[bn] = qRow[bn] == controlVarRow ? vCol[bn] : controlVarRow;
+            }
+        }
+        return alt;
+    }
 }

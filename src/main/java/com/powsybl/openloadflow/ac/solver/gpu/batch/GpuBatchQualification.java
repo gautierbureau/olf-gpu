@@ -163,7 +163,7 @@ final class GpuBatchQualification {
                 for (TapR1Override tap : c.tapOverrides()) { // packed CLOSED branch with FIXED ratio AND
                     int ei = elementMapper.getElementIndex(tap.branch());   // phase (neither is a state variable)
                     if (ei < 0 || ei >= elementMapper.getClosedBranchCount()
-                            || gpuData.cbIdx()[ei * 10 + 9] >= 0 || gpuData.cbIdx()[ei * 10 + 8] >= 0) {
+                            || gpuData.cbIdx()[ei * 12 + 9] >= 0 || gpuData.cbIdx()[ei * 12 + 8] >= 0) {
                         tapOk = false;
                     }
                 }

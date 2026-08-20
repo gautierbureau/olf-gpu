@@ -58,7 +58,7 @@ public final class GpuAcNewtonSolver {
      *
      * @param n     number of variables / equations
      * @param cbIn  closed branches, {@code ncb*8}: (y g1 g2 b1 b2 ksi r1 a1)
-     * @param cbIdx closed branches, {@code ncb*10}: (Prow1 Qrow1 Prow2 Qrow2 ph1col v1col ph2col v2col a1col r1col)
+     * @param cbIdx closed branches, {@code ncb*12}: (Prow1 Qrow1 Prow2 Qrow2 ph1col v1col ph2col v2col a1col r1col qAlt1 qAlt2)
      * @param obIn  open branches, {@code nob*7}: (y ksi g1 b1 g2 b2 r1)
      * @param obIdx open branches, {@code nob*6}: (Prow1 Qrow1 Prow2 Qrow2 v1col v2col)
      * @param shIn  shunts, {@code nsh*2}: (g b)

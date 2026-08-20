@@ -147,7 +147,10 @@ public final class GpuHybridBatchOuterLoopEngine {
         // filtered/initialized exactly as AcloadFlowEngine.run() does, so per-scenario contexts match core.
         GpuHybridOuterLoopBridge[] bridges = new GpuHybridOuterLoopBridge[nS];
         for (int s = 0; s < nS; s++) {
-            List<Pair<AcOuterLoop, AcOuterLoopContext>> pairs = AcloadFlowEngine.createOuterLoopsAndContexts(in.context());
+            // initialize=false: the loops are initialized PER SCENARIO by the bridge (after restoring the base),
+            // exactly as OLF re-runs the outer loops per contingency. Initializing here would enable
+            // transformer/shunt voltage control on the shared network at setup, corrupting the base snapshot.
+            List<Pair<AcOuterLoop, AcOuterLoopContext>> pairs = AcloadFlowEngine.createOuterLoopsAndContexts(in.context(), false);
             List<AcOuterLoop> loops = pairs.stream().map(Pair::getLeft).toList();
             List<AcOuterLoopContext> ctxs = pairs.stream().map(Pair::getRight).toList();
             for (AcOuterLoopContext ctx : ctxs) {

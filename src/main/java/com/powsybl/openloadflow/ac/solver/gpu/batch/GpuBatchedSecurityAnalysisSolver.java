@@ -437,7 +437,17 @@ public final class GpuBatchedSecurityAnalysisSolver {
             List<LfGenerator> gens = network.getBuses().stream().flatMap(b -> b.getGenerators().stream()).toList();
             double[] baseGenP = gens.stream().mapToDouble(LfGenerator::getTargetP).toArray();
             double[] originalGenP = gens.stream().mapToDouble(LfGenerator::getInitialTargetP).toArray();
-            List<LfBus> ctrlBuses = network.getControllerElements(VoltageControl.Type.GENERATOR);
+            // Compact-snapshot controller buses: generator VC controllers PLUS shunt VC controller buses.
+            // BusState already captures the controller-shunt susceptance + voltage-control-enabled flag, so
+            // adding the shunt controller buses isolates the ShuntVoltageControl outer loop's per-scenario
+            // mutations (dispatchB + setVoltageControlEnabled). Dynamic Q-relocation (§11) lets the shared
+            // structure follow the shunt control on<->off toggle.
+            List<LfBus> ctrlBuses = new ArrayList<>(network.getControllerElements(VoltageControl.Type.GENERATOR));
+            for (LfBus bus : network.getBuses()) {
+                if (bus.getControllerShunt().isPresent() && !ctrlBuses.contains(bus)) {
+                    ctrlBuses.add(bus);
+                }
+            }
             List<LfHvdc> hvdcs = network.getHvdcs();
             List<LfBranch> transformerBranches = network.getControllerElements(VoltageControl.Type.TRANSFORMER);
             int[] varType = config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null;

@@ -63,6 +63,7 @@ public final class GpuHybridOuterLoopBridge {
     // the next, and the whole sequence is re-cycled until a full pass triggers no inner re-solve. A device
     // round == one inner Newton re-solve, so this state advances one loop-check at a time (see applyOuterLoopStep).
     private int loopIdx = 0;                                          // the loop currently being stabilized
+    private boolean initialized = false;                             // outer loops initialize()d for this scenario yet?
     private boolean cycleHadResolve = false;                         // did the current do/while pass trigger a re-solve
     private int outerLoopTotalIterations = 0;                        // global re-solve counter (OLF's outerLoopTotalIterations)
     private final int[] loopIteration;                               // per-loop-type iteration (OLF's outerLoopIterationByType)
@@ -139,6 +140,28 @@ public final class GpuHybridOuterLoopBridge {
         // 1. load the batched inner-solve state so LfBus V/φ/Q reflect this scenario
         equationSystem.getStateVector().set(scenarioState);
         AcSolverUtil.updateNetwork(network, equationSystem);
+
+        // 1b. FIRST step for this scenario: initialize() every outer loop exactly as OLF's runOuterLoop does
+        //     before its first check — some loops set up required context data (DistributedSlack/ReactiveLimits)
+        //     and, crucially, ShuntVoltageControl ENABLES its control ONLY in initialize() (its check() only
+        //     rounds/disables at iteration 0), so without this the shunt is never voltage-controlled and freezes
+        //     at its base section. If initialize CHANGED the activation (a control was enabled/disabled), return
+        //     the fresh activation so the device re-solves under it BEFORE any check runs (matching OLF: solve
+        //     after initialize, then check) — a one-terminal shunt needs that continuous solve before check()
+        //     rounds. When it did NOT change the activation (DS/RL set only context data), fall straight through
+        //     to the check loop to avoid a spurious extra re-solve round.
+        if (!initialized) {
+            initialized = true;
+            int[] before = GpuAcActivationExtractor.extractActivation(network, equationSystem, n).rowMode();
+            for (int i = 0; i < outerLoops.size(); i++) {
+                outerLoops.get(i).initialize(outerLoopContexts.get(i));
+            }
+            GpuAcActivation after = GpuAcActivationExtractor.extractActivation(network, equationSystem, n);
+            if (!java.util.Arrays.equals(before, after.rowMode())) {
+                lastStable = false;
+                return after;
+            }
+        }
 
         // per-synchronous-component slack active-power mismatch, exactly as NewtonRaphson builds it for the
         // solver result (the distributed-slack loop reads it from the context's last solver result).

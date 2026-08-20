@@ -15,35 +15,35 @@ import com.powsybl.math.matrix.SparseMatrixFactory;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
-import com.powsybl.openloadflow.ac.AcOuterLoopContext;
 import com.powsybl.openloadflow.ac.AcTargetVector;
 import com.powsybl.openloadflow.ac.AcloadFlowEngine;
 import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivationExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuTestPaths;
-import com.powsybl.openloadflow.ac.outerloop.AcOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop;
-import com.powsybl.openloadflow.ac.solver.AcSolverResult;
-import com.powsybl.openloadflow.ac.solver.AcSolverStatus;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContingencyValidator;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuHybridBatchOuterLoopEngine;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuHybridOuterLoopBridge;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
-import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
-import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
+import com.powsybl.openloadflow.network.LfHvdc;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.NetworkState;
+import com.powsybl.openloadflow.network.VoltageControl;
 import com.powsybl.openloadflow.network.impl.LfNetworkLoaderImpl;
 import com.powsybl.openloadflow.network.util.PreviousValueVoltageInitializer;
 import org.junit.jupiter.api.BeforeEach;
@@ -54,6 +54,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
@@ -98,20 +99,33 @@ class GpuHybridBatchValidationTest {
         acp.getNetworkParameters().setMaxSlackBusCount(1);
 
         LfNetwork network = LfNetwork.load(iidm, new LfNetworkLoaderImpl(), acp.getNetworkParameters(), ReportNode.NO_OP).get(0);
-        EquationSystem<AcVariableType, AcEquationType> es =
-                new AcEquationSystemCreator(network, acp.getEquationSystemCreationParameters()).create();
-        AcSolverUtil.initStateVector(network, es, acp.getVoltageInitializer());
-        AcTargetVector target = new AcTargetVector(network, es);
 
+        // Original generator setpoints (getInitialTargetP is fixed at network load; the base LF does not commit it).
+        double[] originalGenP = network.getBuses().stream().flatMap(b -> b.getGenerators().stream())
+                .mapToDouble(LfGenerator::getInitialTargetP).toArray();
+
+        // Base loadflow FIRST — its own context creates the AC equation system AFTER the DC voltage initializer has
+        // run (the correct OLF order). We then build the device/bridge equation system `es` fresh, AFTER the base run.
+        // Creating `es` BEFORE the base run (and DC-initializing it) corrupts it: OLF attaches DC equations to the
+        // network during DC init and they overwrite the AC equations of an already-created AC equation system. That
+        // corrupted `es` makes the device's pure-inner solve of the ill-conditioned LINE-26-4231 converge to a
+        // SPURIOUS high-loss branch (slack 6.44 pu) that no outer loop can recover; a fresh `es` built after DC init
+        // converges to the physical low-loss branch (verified on CPU: GpuCpuPureInnerProbe#scalarVsVectorizedBranch,
+        // esBEFORE -6.44 pu vs esAFTER +0.05 pu — same 18482 vars, NOT a vectorized-vs-scalar effect).
         AcLoadFlowContext context = new AcLoadFlowContext(network, acp);   // kept open — the outer-loop context needs it
         new AcloadFlowEngine(context).run();                              // converge the base case (network -> base state)
+
+        EquationSystem<AcVariableType, AcEquationType> es =
+                new AcEquationSystemCreator(network, acp.getEquationSystemCreationParameters()).create();
         AcSolverUtil.initStateVector(network, es, new PreviousValueVoltageInitializer());
         double[] baseState = es.getStateVector().get().clone();
         int n = baseState.length;
 
         GpuAcActivation baseAct = GpuAcActivation.fromEquationSystem(network, es);
         int[] baseRowMode = baseAct.rowMode();
-        double[] baseTargets = baseAct.applyTargets(target.getArray());
+        // Build the base target vector from a FRESH AcTargetVector AFTER the base run so it captures the base
+        // distributed-slack redistribution (AcTargetVector is lazy + invalidated on targetP change).
+        double[] baseTargets = baseAct.applyTargets(new AcTargetVector(network, es).getArray());
 
         // contingencies -> per-scenario disabled-element masks. Default: the 2 divergent ones; with
         // OLF_GPU_HYBRID_N=k, take the first k single-branch contingencies from the file (throughput sizing).
@@ -144,9 +158,10 @@ class GpuHybridBatchValidationTest {
         }
         int nS = ctgs.size();
 
-        // device structure with BOTH RL and DS packs EMPTY -> PURE batched inner Newton; ALL outer loops
-        // (distributed slack, reactive limits, transformer VC) run in OLF's Java, so the state feeding every
-        // decision is OLF's own, not a device-outer-loop approximation. (DISTR_Q/DISTR_RHO linear couplings stay.)
+        // BOTH RL and DS packs EMPTY -> PURE batched inner Newton; ALL outer loops run in OLF's Java. This now
+        // converges every contingency (incl. the once-divergent LINE-26-4231) because `es` is built AFTER the base
+        // LF's DC init (see above) — the device extracts an uncorrupted equation system and lands on the physical
+        // low-loss branch.
         GpuAcData gpuData = GpuAcDataExtractor.extract(network, es, false, false);
         int nElements = gpuData.getTotalElementCount();
 
@@ -155,147 +170,57 @@ class GpuHybridBatchValidationTest {
                 gpuData.shIn(), gpuData.shIdx(), gpuData.hvIn(), gpuData.hvIdx(),
                 gpuData.dqElem(), gpuData.dqSide(), gpuData.dqWeight(), gpuData.dqRow(), gpuData.dqKind(),
                 gpuData.ziIn(), gpuData.ziIdx(), gpuData.drRow(), gpuData.drCol(), gpuData.drCoef());
-        long handle = GpuAcNewtonSolver.createBatchContext(structure, nS, mode,
-                gpuData.rlVrow(), gpuData.rlMinQ(), gpuData.rlMaxQ(), gpuData.rlLoadQ(), gpuData.rlVtarget(),
-                gpuData.dsPhiRow(), gpuData.dsFactor(), gpuData.dsSlackPhiRow(), gpuData.dsSlackTargetP(),
-                gpuData.dsBaseTargetP(), gpuData.dsMaxDelta(), gpuData.dsMinDelta());
+        // (The batch-context handle + the per-scenario outer-loop bridges are now owned by
+        // GpuHybridBatchOuterLoopEngine, which is invoked below.)
 
-        // OLF's FULL ordered outer-loop set (distributed slack, reactive limits, transformer VC, …) — one
-        // context PER (scenario, loop), as OLF's SA gives each contingency its own, so scenarios never
-        // contaminate each other's switch/redistribution bookkeeping.
-        List<AcOuterLoop> allLoops = acp.getOuterLoops();
-        java.lang.reflect.Constructor<AcOuterLoopContext> olCtor = AcOuterLoopContext.class.getDeclaredConstructor(LfNetwork.class);
-        olCtor.setAccessible(true);
-        GpuHybridOuterLoopBridge[] bridges = new GpuHybridOuterLoopBridge[nS];
-        for (int s = 0; s < nS; s++) {
-            List<AcOuterLoopContext> ctxs = new ArrayList<>();
-            for (AcOuterLoop ol : allLoops) {
-                AcOuterLoopContext olCtx = olCtor.newInstance(network);
-                olCtx.setLoadFlowContext(context);
-                ol.initialize(olCtx);
-                olCtx.setLastSolverResult(new AcSolverResult(AcSolverStatus.CONVERGED, 1, java.util.Map.of()));
-                ctxs.add(olCtx);
-            }
-            bridges[s] = new GpuHybridOuterLoopBridge(network, es, n, allLoops, ctxs);
-        }
-
+        // Compact-snapshot element sets (controller buses + HVDCs) + a base full snapshot kept ONLY for the
+        // one-time base reset before the perf comparison (never used in the engine's hot loop).
+        List<LfBus> ctrlBuses = network.getControllerElements(VoltageControl.Type.GENERATOR);
+        List<LfHvdc> hvdcs = network.getHvdcs();
         NetworkState baseSnap = NetworkState.save(network);
-        NetworkState[] snaps = new NetworkState[nS];       // each scenario's evolving PV/PQ state, persisted across rounds
-        // NetworkState/BusState does NOT capture the generator ACTIVE-power target (only the reactive side), yet
-        // OLF's distributed-slack loop redistributes it (GenerationActivePowerDistributionStep.setTargetP). So a
-        // scenario's accumulated redistribution would leak between scenarios and reset within one — the slack
-        // mismatch then never converges for a large-redistribution outage (e.g. LINE-26-4231, 4.72 pu). Manage
-        // the per-scenario generator targetP explicitly alongside the NetworkState snapshot.
         List<LfGenerator> gens = network.getBuses().stream().flatMap(b -> b.getGenerators().stream()).toList();
         double[] baseGenP = gens.stream().mapToDouble(LfGenerator::getTargetP).toArray();
-        double[][] genSnap = new double[nS][];
 
-        // per-scenario device inputs
-        int[][] rowMode = new int[nS][];
-        boolean[][] disabled = new boolean[nS][nElements];
-        double[][] scenTargets = new double[nS][];
-        boolean[] retired = new boolean[nS];
-        boolean[] routedByBudget = new boolean[nS];        // exceeded the per-scenario outer budget -> CPU fallback
-        int[] scenPasses = new int[nS];
-        int maxOuter = acp.getMaxOuterLoopIterations();    // production per-scenario outer-iteration budget
-        for (int s = 0; s < nS; s++) {
-            rowMode[s] = baseRowMode.clone();
-            scenTargets[s] = baseTargets.clone();
-            for (LfBranch b : ctgs.get(s).outagedBranches()) {
-                disabled[s][mapper.getElementIndex(b)] = true;
-            }
-        }
+        // Device state-vector scaling mirroring the production CPU solver (rte params = MAX_VOLTAGE_CHANGE);
+        // lsMode: NONE=0, LINE_SEARCH=1, MAX_VOLTAGE_CHANGE=2.
+        NewtonRaphsonParameters acSolverParams = (NewtonRaphsonParameters) acp.getAcSolverParameters();
+        int lsMode = switch (acSolverParams.getStateVectorScalingMode()) {
+            case NONE -> 0;
+            case LINE_SEARCH -> 1;
+            case MAX_VOLTAGE_CHANGE -> 2;
+        };
+        double lsMaxDv = acSolverParams.getMaxVoltageChangeStateVectorScalingMaxDv();
+        double lsMaxDphi = acSolverParams.getMaxVoltageChangeStateVectorScalingMaxDphi();
+        int[] varType = lsMode == 2 ? GpuAcActivationExtractor.extractVarType(es, n) : null;
 
-        NewtonRaphsonParameters nrp = new NewtonRaphsonParameters().setMaxIterations(30);
-        double[] x0 = null;                                               // first round: base state tiled on-device
-        double[][] states = null;
-
-        int rounds = 0;
-        long tSolve = 0;                                                  // batched device inner solve (cuDSS) — SAME in both designs
-        long tJava = 0;                                                   // essential Java outer-loop work (state load + OLF checks + re-extract)
-        long tSnap = 0;                                                   // prototype-only NetworkState save/restore (a production hybrid avoids this)
-        long nJavaCalls = 0;
-        for (int round = 0; round < 40; round++) {
-            rounds = round + 1;
-            // sparse target overrides (rows where this scenario's target differs from the base)
-            List<Integer> ovIdx = new ArrayList<>();
-            List<Double> ovVal = new ArrayList<>();
-            for (int s = 0; s < nS; s++) {
-                for (int r = 0; r < n; r++) {
-                    if (scenTargets[s][r] != baseTargets[r]) {
-                        ovIdx.add(s * n + r);
-                        ovVal.add(scenTargets[s][r]);
-                    }
-                }
-            }
-            long ts0 = System.nanoTime();
-            states = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets, rowMode, baseRowMode, disabled,
-                    ovIdx.stream().mapToInt(Integer::intValue).toArray(), ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                    new int[0], new double[0], new double[0], new double[0], new double[0],
-                    nrp.getMaxIterations(), 1e-6, 1e-4, 1e-2, 1e-4,       // tol, reactiveLimitTol(unused), slackDistTol, convEpsPerEq
-                    0, 0.0, 0.0, null, x0,                                // lsMode, maxDv, maxDphi, varType, x0PerScenario
-                    null, null, null, null, null, null,                  // shuntOv, rlStateIn/Out, r1Ov
-                    30, 3, 0, 0, null, null);                            // maxOuterIterations(device DS), maxPqPvSwitch, dsRejectResidual, nzi...
-            tSolve += System.nanoTime() - ts0;
-
-            // warm restart for the next round
-            x0 = new double[nS * n];
-            for (int s = 0; s < nS; s++) {
-                System.arraycopy(states[s], 0, x0, s * n, n);
-            }
-
-            boolean allStable = true;
-            for (int s = 0; s < nS; s++) {
-                if (retired[s]) {
-                    continue;
-                }
-                long tr0 = System.nanoTime();
-                if (snaps[s] != null) {
-                    snaps[s].restore();                                 // resume THIS scenario's accumulated PV/PQ state
-                    for (int g = 0; g < gens.size(); g++) {
-                        gens.get(g).setTargetP(genSnap[s][g]);          // + its accumulated distributed-slack targetP
-                    }
-                } else {
-                    baseSnap.restore();                                 // first round: from the base-converged state
-                    for (int g = 0; g < gens.size(); g++) {
-                        gens.get(g).setTargetP(baseGenP[g]);
-                    }
-                }
-                tSnap += System.nanoTime() - tr0;
-                for (LfBranch b : ctgs.get(s).outagedBranches()) {
-                    b.setDisabled(true);                                // apply this scenario's outage
-                }
-                double[] st = new double[n];
-                System.arraycopy(states[s], 0, st, 0, n);
-                long tj0 = System.nanoTime();
-                GpuAcActivation act = bridges[s].applyOuterLoopStep(st);  // set state -> all OLF outer loops -> re-extract
-                rowMode[s] = act.rowMode();
-                // fresh target vector: captures the P redistributed by the Java distributed-slack loop (and any tap change)
-                scenTargets[s] = act.applyTargets(new AcTargetVector(network, es).getArray());
-                tJava += System.nanoTime() - tj0;
-                nJavaCalls++;
-                long tsv0 = System.nanoTime();
-                snaps[s] = NetworkState.save(network);                   // persist this scenario's evolved PV/PQ + targets
-                genSnap[s] = gens.stream().mapToDouble(LfGenerator::getTargetP).toArray();   // + accumulated targetP
-                tSnap += System.nanoTime() - tsv0;
-                if (bridges[s].isStable()) {
-                    retired[s] = true;
-                } else if (++scenPasses[s] >= maxOuter) {
-                    // Exceeded the per-scenario outer-iteration budget (as the device batch's prodIters cap does):
-                    // this scenario does not converge on the GPU (e.g. a distributed-slack runaway on a stressed
-                    // outage) — route it to the CPU fallback, exactly like production. Not counted as GPU-converged.
-                    retired[s] = true;
-                    routedByBudget[s] = true;
-                } else {
-                    allStable = false;
-                }
-            }
-            if (allStable) {
-                break;
-            }
-        }
-        GpuAcNewtonSolver.destroyBatchContext(handle);
+        // Run the EXTRACTED production driver (cross-round compaction + compact snapshot + save-skip + straggler
+        // routing). It owns the batch-context handle + the per-scenario outer-loop bridges; we own the structure.
+        GpuHybridBatchOuterLoopEngine.Result res = GpuHybridBatchOuterLoopEngine.solve(
+                new GpuHybridBatchOuterLoopEngine.Inputs(structure, mode, gpuData, nElements,
+                        network, es, context, n, baseState, baseTargets, baseRowMode,
+                        ctgs, mapper, gens, baseGenP, originalGenP, ctrlBuses, hvdcs,
+                        network.getControllerElements(VoltageControl.Type.TRANSFORMER),
+                        lsMode, lsMaxDv, lsMaxDphi, varType,
+                        30, acp.getMaxOuterLoopIterations(), 3));
         GpuAcNewtonSolver.destroyStructure(structure);
+
+        double[][] states = res.states();
+        double[][] round0States = res.round0States();
+        int[][] rowMode = res.rowMode();
+        double[][] scenTargets = res.scenTargets();
+        boolean[] retired = res.retired();
+        boolean[] routedByBudget = res.routedByBudget();
+        GpuHybridOuterLoopBridge[] bridges = res.bridges();
+        int rounds = res.rounds();
+        long tSolve = res.solveNanos();
+        long tJava = res.javaNanos();
+        long tSnap = res.snapshotNanos();
+        long nJavaCalls = res.javaCalls();
+
+        // Correctness gate: the hybrid must GPU-converge all but genuinely non-convergent contingencies
+        // (TWT-106-2546 fails on CPU too and is correctly routed to the CPU fallback).
+        assertTrue(res.gpuConvergedCount() >= nS - 1,
+                "expected >= " + (nS - 1) + " GPU-converged, got " + res.gpuConvergedCount() + "/" + nS);
 
         // Report: does the hybrid end with VL-7616_0 pinned to PQ (as CPU does) rather than held PV?
         int budgetRouted = 0;
@@ -340,8 +265,17 @@ class GpuHybridBatchValidationTest {
             }
         }
         System.out.printf("  NON-CONVERGED total: %d/%d%n", nNonConv, nS);
+        for (int s = 0; s < nS; s++) {
+            if (routedByBudget[s]) {
+                System.out.printf("  ROUTED-TO-CPU %s: round0 device[iters=%d ||F||inf=%.3e status=%d] | last device[iters=%d ||F||inf=%.3e status=%d]%n",
+                        ctgs.get(s).contingencyId(),
+                        (int) round0States[s][n], round0States[s][n + 1], (int) round0States[s][n + 2],
+                        (int) states[s][n], states[s][n + 1], (int) states[s][n + 2]);
+            }
+        }
         for (int s = 0; s < nS && nS <= 4; s++) {
-            snaps[s].restore();                                          // the hybrid's OWN evolved PV/PQ state for this scenario
+            // (The scenario's evolved PV/PQ + HVDC state is now engine-internal; this ≤4-scenario diagnostic reads
+            // the device solve state directly — the PV/PQ flag reflects the base network, not the scenario's switches.)
             es.getStateVector().set(states[s]);
             AcSolverUtil.updateNetwork(network, es);
             LfBus b7616 = network.getBuses().stream().filter(b -> "VL-7616_0".equals(b.getId())).findFirst().orElse(null);
@@ -377,6 +311,41 @@ class GpuHybridBatchValidationTest {
             System.out.printf("      PIN-CHECK: %d/%d mode-0 rows NOT pinned to target%s%n", notPinned, nMode0, ex);
         }
         baseSnap.restore();
+
+        // =========================================================================================================
+        // HEAD-TO-HEAD: this Java-outer-loop hybrid vs the production ON-DEVICE outer-loop batch, SAME contingency
+        // set, SAME network/JVM. The on-device path (GpuBatchedSecurityAnalysisSolver.solveBatchN1) folds DS + RL
+        // into the device solve as CUDA kernels; it is run warm (a warm-up call first) so both numbers exclude the
+        // one-off CUDA init the hybrid loop above already paid. Per-contingency ms is the comparable metric.
+        // =========================================================================================================
+        AcTargetVector cmpTarget = new AcTargetVector(network, es);
+        NewtonRaphsonParameters cmpNrp = new NewtonRaphsonParameters().setMaxIterations(30);
+        baseSnap.restore();
+        long odCold0 = System.nanoTime();
+        GpuBatchedSecurityAnalysisSolver.solveBatchN1(network, baseState, ctgs, es, cmpTarget, cmpNrp, ReportNode.NO_OP); // 1st (cold data structures; CUDA already init by the hybrid loop)
+        long odColdTime = System.nanoTime() - odCold0;
+        baseSnap.restore();
+        long od0 = System.nanoTime();
+        List<BatchScenarioResult> odResults = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                network, baseState, ctgs, es, cmpTarget, cmpNrp, ReportNode.NO_OP);
+        long odTime = System.nanoTime() - od0;
+        long odConverged = odResults.stream().filter(r -> !r.needsCpuFallback()).count();
+
+        double hybridProductiveMs = (tSolve + tJava) / 1e6;   // exclude prototype-only snapshot (a real hybrid avoids it)
+        double hybridTotalMs = (tSolve + tJava + tSnap) / 1e6;
+        double odMs = odTime / 1e6;
+        System.out.printf("%n=== PERF HEAD-TO-HEAD (%d contingencies) ===%n", nS);
+        System.out.printf("  ON-DEVICE outer loops (solveBatchN1): warm=%.0f ms (%.3f ms/ctg) | cold-1st-call=%.0f ms (%.3f ms/ctg) | %d/%d converged%n",
+                odMs, odMs / nS, odColdTime / 1e6, odColdTime / 1e6 / nS, odConverged, nS);
+        System.out.printf("  JAVA-outer-loop HYBRID: productive(solve+java)=%.0f ms | %.3f ms/ctg  [+ prototype snapshot %.0f ms -> total %.0f ms]%n",
+                hybridProductiveMs, hybridProductiveMs / nS, tSnap / 1e6, hybridTotalMs);
+        // The hybrid re-solves ONLY still-active scenarios each round (cross-round compaction); a non-converging
+        // straggler still forces the round cap but runs those extra rounds solo, so its cost is small. The on-device
+        // solveBatchN1 folds the outer loops into a single solve with per-scenario early-exit.
+        System.out.printf("  hybrid breakdown: inner solve=%.0f ms (%d rounds, active-only compaction) | java outer=%.0f ms | snapshot=%.0f ms%n",
+                tSolve / 1e6, rounds, tJava / 1e6, tSnap / 1e6);
+        System.out.printf("  hybrid productive / on-device = x%.2f  (>1 => hybrid slower)%n", hybridProductiveMs / odMs);
+
         context.close();
     }
 }

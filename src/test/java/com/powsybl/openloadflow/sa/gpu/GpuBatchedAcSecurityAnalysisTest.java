@@ -137,6 +137,112 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         }
     }
 
+    @Test
+    void javaLoadBasedDistributedSlackMatchesCpu() {
+        // Phase 3 (olf.gpu.sa.outerLoopMode=JAVA + BalanceType.PROPORTIONAL_TO_LOAD): load-based distributed slack
+        // is BEYOND the DEVICE gate (which is generation-P_MAX-only). OLF's own DistributedSlackOuterLoop
+        // redistributes the mismatch onto LOADS; the JAVA engine isolates load targetP/targetQ per scenario with an
+        // explicit flat array. The batch must ENGAGE and the post-contingency states must match the stock CPU SA.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true)
+                .setBalanceType(com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)   // create() ATTACHES the extension
+                .setSlackBusPMaxMismatch(0.01).setNewtonRaphsonConvEpsPerEq(1e-9);
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        java.util.Set<String> allVls = network.getVoltageLevelStream().map(vl -> vl.getId())
+                .collect(java.util.stream.Collectors.toSet());
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), allVls, java.util.Set.of()));
+        List<Contingency> contingencies = List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")));
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, monitors, sap);
+        System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY, "JAVA");
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, monitors, sap);
+            assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() > 0,
+                    "the JAVA load-based-DS run must ENGAGE the batch (guard fell back -> the path is not exercised)");
+            assertEquals(cpu.getPostContingencyResults().size(), gpu.getPostContingencyResults().size());
+            for (int i = 0; i < cpu.getPostContingencyResults().size(); i++) {
+                assertEquals(cpu.getPostContingencyResults().get(i).getStatus(),
+                        gpu.getPostContingencyResults().get(i).getStatus());
+                var cb = cpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                var gb = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                assertEquals(cb.size(), gb.size());
+                for (int b = 0; b < cb.size(); b++) {
+                    org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 0.05,
+                            "JAVA load-based-DS bus voltage " + cb.get(b).getBusId());
+                }
+            }
+        } finally {
+            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
+    @Test
+    void javaTransformerVoltageControlMatchesCpu() {
+        // Phase 3 (olf.gpu.sa.outerLoopMode=JAVA + transformer voltage control): the device runs the inner
+        // Newton ONLY (the continuous ratio is a BRANCH_RHO1 variable solved in-Newton), and OLF's own Java
+        // TransformerVoltageControlOuterLoop makes the discrete tap DECISIONS per scenario — the compact snapshot
+        // now isolates the transformer BranchState. Same T2wt+parallel-line setup as the DEVICE test: the batch
+        // must ENGAGE and the post-contingency states must match the stock CPU SA.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.TwoWindingsTransformer t2wt = network.getTwoWindingsTransformer("T2wT");
+        t2wt.getRatioTapChanger()
+                .setTargetDeadband(0).setRegulating(true).setTapPosition(0)
+                .setRegulationTerminal(t2wt.getTerminal2()).setTargetV(34.0);
+        com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+        network.newLine()
+                .setId(l0.getId() + "_BIS")
+                .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId())
+                .setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId())
+                .setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l0.getR() * 2).setX(l0.getX() * 2)
+                .setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2())
+                .add();
+        List<Contingency> contingencies = List.of(new Contingency(l0.getId() + "_BIS", new BranchContingency(l0.getId() + "_BIS")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        java.util.Set<String> allVls = network.getVoltageLevelStream().map(vl -> vl.getId())
+                .collect(java.util.stream.Collectors.toSet());
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), allVls, java.util.Set.of()));
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, monitors, sap);
+        System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY, "JAVA");
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, monitors, sap);
+            assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() > 0,
+                    "the JAVA transformer-control run must ENGAGE the batch (guard fell back -> the path is not exercised)");
+            assertEquals(cpu.getPostContingencyResults().size(), gpu.getPostContingencyResults().size());
+            for (int i = 0; i < cpu.getPostContingencyResults().size(); i++) {
+                assertEquals(cpu.getPostContingencyResults().get(i).getStatus(),
+                        gpu.getPostContingencyResults().get(i).getStatus());
+                var cb = cpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                var gb = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                assertEquals(cb.size(), gb.size());
+                for (int b = 0; b < cb.size(); b++) {
+                    org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 0.05,
+                            "JAVA transformer-VC bus voltage " + cb.get(b).getBusId());
+                }
+            }
+        } finally {
+            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
     private static Network distributedSlackNetworkWithExtras() {
         Network network = com.powsybl.openloadflow.network.DistributedSlackNetworkFactory.create();
         // Second generator on b2 (same-bus multi-gen loss) — participating like g2.
@@ -646,6 +752,28 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                     .setTargetP(5).setTargetQ(8).setVoltageRegulatorOn(false).setMinP(0).setMaxP(20).add();
             assertGpuMatchesCpu(network2, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1"))), 0.05, true);
         } finally {
+            System.clearProperty("olf.gpu.test.slackTol");
+            System.clearProperty("olf.gpu.test.convEps");
+        }
+    }
+
+    @Test
+    void javaOuterLoopModeMatchesCpu() {
+        // Phase 2 (olf.gpu.sa.outerLoopMode=JAVA): the batched device runs the inner Newton ONLY, and OLF's
+        // own Java outer loops (distributed slack + reactive limits) make every per-scenario decision via
+        // GpuHybridBatchOuterLoopEngine. The batch must ENGAGE (a branch-only, non-islanding outage) and the
+        // post-contingency states must match the stock CPU SA — the whole point of JAVA mode (CPU-fidelity by
+        // construction). Same tight slack band as the L1-2-1 regression so DS-arm ambiguity does not mask a defect.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY, "JAVA");
+        System.setProperty("olf.gpu.test.slackTol", "0.01");
+        System.setProperty("olf.gpu.test.convEps", "1e-9");
+        try {
+            Network network = IeeeCdfNetworkFactory.create14();
+            assertGpuMatchesCpu(network, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1"))), 0.05, true);
+        } finally {
+            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
             System.clearProperty("olf.gpu.test.slackTol");
             System.clearProperty("olf.gpu.test.convEps");
         }

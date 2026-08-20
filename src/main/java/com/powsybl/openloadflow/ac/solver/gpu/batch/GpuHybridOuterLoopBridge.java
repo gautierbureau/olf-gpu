@@ -54,8 +54,18 @@ public final class GpuHybridOuterLoopBridge {
 
     private boolean lastStable = true;
     private double lastSlackMismatch;
+    private String lastSlackDetail = "";
     private final OuterLoopStatus[] lastStatuses;
     private final int[] unstableCount;                                // per-loop count of UNSTABLE results (oscillation finder)
+
+    // --- OLF-faithful NESTED outer-loop state machine (persists across device rounds) ---
+    // Mirrors AcloadFlowEngine.run(): the loops are nested (innermost first), each fully stabilized before
+    // the next, and the whole sequence is re-cycled until a full pass triggers no inner re-solve. A device
+    // round == one inner Newton re-solve, so this state advances one loop-check at a time (see applyOuterLoopStep).
+    private int loopIdx = 0;                                          // the loop currently being stabilized
+    private boolean cycleHadResolve = false;                         // did the current do/while pass trigger a re-solve
+    private int outerLoopTotalIterations = 0;                        // global re-solve counter (OLF's outerLoopTotalIterations)
+    private final int[] loopIteration;                               // per-loop-type iteration (OLF's outerLoopIterationByType)
 
     /**
      * @param outerLoops        the FULL ordered OLF outer-loop set for this scenario (innermost first —
@@ -74,6 +84,7 @@ public final class GpuHybridOuterLoopBridge {
         this.outerLoopContexts = outerLoopContexts;
         this.lastStatuses = new OuterLoopStatus[outerLoops.size()];
         this.unstableCount = new int[outerLoops.size()];
+        this.loopIteration = new int[outerLoops.size()];
     }
 
     /** Per-loop UNSTABLE counts across all passes — the outer loop that never stops for a scenario stands out. */
@@ -95,12 +106,30 @@ public final class GpuHybridOuterLoopBridge {
         return lastSlackMismatch;
     }
 
+    /** The actual slack-bus set + per-bus target/mismatch fed to DS at the last step (compare vs the CPU LF). */
+    public String lastSlackDetail() {
+        return lastSlackDetail;
+    }
+
     /**
-     * One hybrid outer-loop step for a single scenario: load its device-solved state onto the network,
-     * let every OLF outer loop decide in order (each mutating the activation / targets / taps), and
-     * re-extract the device row mode + target mapping from the mutated activation. The device runs a
-     * PURE inner Newton, so the state fed to these decisions is OLF's own — not a device-outer-loop
-     * approximation — which is what makes the decisions match the CPU.
+     * One hybrid outer-loop step for a single scenario, faithful to OLF's NESTED {@code runOuterLoop}.
+     *
+     * <p>OLF's {@code AcloadFlowEngine.run()} does NOT check every outer loop once per Newton solve. It runs
+     * the loops <em>nested and sequential</em>: {@code runOuterLoop} fully stabilizes ONE loop (check → on
+     * UNSTABLE re-solve the inner Newton → re-check the SAME loop → … until STABLE) before moving to the next,
+     * and the whole ordered sequence is re-cycled (the outer {@code do/while}) until a full pass triggers no
+     * re-solve. A naive "check all loops every round" flat driver instead lets distributed-slack and
+     * reactive-limits fire simultaneously against one stale state — which, for a slack-adjacent outage, sends
+     * the distributed-slack loop into a never-settling crawl.
+     *
+     * <p>Here a device round equals exactly one inner Newton re-solve (the batch solves every active scenario
+     * at once), so this method advances the nested state machine by the MINIMUM work that needs a re-solve:
+     * it keeps checking loops in order against the current state — advancing on STABLE (a STABLE check never
+     * mutates, so several loops can clear in one call with no re-solve) — until either a check returns
+     * UNSTABLE (it mutated activation/targets, so a device re-solve is required: stay on this loop, return
+     * with {@link #isStable()} false) or a full pass completes with no UNSTABLE (every loop simultaneously
+     * stable → converged, {@link #isStable()} true). This reproduces OLF's "re-run the solver only on
+     * UNSTABLE" and its DS-fully-then-RL-fully ordering exactly.
      *
      * @param scenarioState the flat converged state ({@code n} doubles) the batched inner solve produced
      * @return the device activation (row mode + target map) AFTER OLF's decisions; pair with
@@ -119,22 +148,58 @@ public final class GpuHybridOuterLoopBridge {
                     sc.getSlackBuses().stream().mapToDouble(com.powsybl.openloadflow.network.LfBus::getMismatchP).sum());
         }
         lastSlackMismatch = slackMismatch.values().stream().mapToDouble(Math::abs).max().orElse(0.0);
-        AcSolverResult solverResult = new AcSolverResult(AcSolverStatus.CONVERGED, 1, slackMismatch);
-
-        // 2. every OLF outer loop, in order — the validated decisions, mutating activation / targets / taps
-        lastStable = true;
-        for (int i = 0; i < outerLoops.size(); i++) {
-            outerLoopContexts.get(i).setLastSolverResult(solverResult);
-            OuterLoopResult result = outerLoops.get(i).check(outerLoopContexts.get(i), ReportNode.NO_OP);
-            lastStatuses[i] = result.status();
-            if (result.status() != OuterLoopStatus.STABLE) {
-                lastStable = false;
-                unstableCount[i]++;
+        // one-shot diagnostic: the actual slack bus set + per-bus mismatch this scenario feeds to DS (compare vs CPU LF)
+        StringBuilder sd = new StringBuilder();
+        sd.append("SCs=").append(network.getSynchronousNetworks().size());
+        for (com.powsybl.openloadflow.network.LfSynchronousNetwork sc : network.getSynchronousNetworks()) {
+            for (com.powsybl.openloadflow.network.LfBus sb : sc.getSlackBuses()) {
+                sd.append(String.format(" [sc%d %s tP=%.3f mismP=%.3f disabled=%b]",
+                        sc.getNumSC(), sb.getId(), sb.getTargetP(), sb.getMismatchP(), sb.isDisabled()));
             }
         }
+        lastSlackDetail = sd.toString();
+        AcSolverResult solverResult = new AcSolverResult(AcSolverStatus.CONVERGED, 1, slackMismatch);
 
-        // 3. re-encode the (possibly changed) activation into the device row mode the batch consumes
-        return GpuAcActivationExtractor.extractActivation(network, equationSystem, n);
+        // 2. advance OLF's NESTED runOuterLoop state machine against this single device state. A STABLE check
+        //    never mutates, so we sweep forward through the loop list without a re-solve; the first UNSTABLE
+        //    check mutates and needs a device round, so we return there. (See the method javadoc.)
+        while (true) {
+            AcOuterLoop loop = outerLoops.get(loopIdx);
+            AcOuterLoopContext ctx = outerLoopContexts.get(loopIdx);
+            ctx.setIteration(loopIteration[loopIdx]);
+            ctx.setOuterLoopTotalIterations(outerLoopTotalIterations);
+            ctx.setLastSolverResult(solverResult);
+            OuterLoopResult result = loop.check(ctx, ReportNode.NO_OP);
+            lastStatuses[loopIdx] = result.status();
+
+            if (result.status() != OuterLoopStatus.STABLE) {
+                // UNSTABLE: this loop mutated the activation / targets / taps -> a device re-solve is required
+                // before it (or any later loop) can be checked again. Stay on this loop (OLF's runOuterLoop
+                // re-checks the SAME loop after the re-solve until it stabilizes).
+                unstableCount[loopIdx]++;
+                loopIteration[loopIdx]++;
+                outerLoopTotalIterations++;
+                cycleHadResolve = true;
+                lastStable = false;
+                return GpuAcActivationExtractor.extractActivation(network, equationSystem, n);
+            }
+
+            // STABLE: this loop is settled for now; move to the next one, checked against the SAME state.
+            loopIdx++;
+            if (loopIdx >= outerLoops.size()) {
+                loopIdx = 0;
+                if (cycleHadResolve) {
+                    // OLF's outer do/while: a pass that re-solved must be followed by another full pass, because
+                    // a later loop's re-solve can have destabilized an earlier one. Confirm on the (unchanged)
+                    // state; if everything is still stable the next wrap exits with cycleHadResolve == false.
+                    cycleHadResolve = false;
+                    continue;
+                }
+                // full pass, no UNSTABLE anywhere -> every outer loop is simultaneously stable -> converged.
+                lastStable = true;
+                return GpuAcActivationExtractor.extractActivation(network, equationSystem, n);
+            }
+        }
     }
 
     /** @return true when the last {@link #applyOuterLoopStep} left every outer loop STABLE (no re-solve needed). */

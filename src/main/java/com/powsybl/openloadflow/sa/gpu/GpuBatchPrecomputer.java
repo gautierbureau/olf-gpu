@@ -21,6 +21,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.LoadLoss;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.OuterLoopMode;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.ShuntShift;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
@@ -138,10 +139,13 @@ final class GpuBatchPrecomputer {
                 return PrecomputedBatch.empty();
             }
 
-            List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                    net, baseState, batch, es, target, new NewtonRaphsonParameters(),
-                    distributedSlack, reactiveLimits,
-                    reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
+            List<BatchScenarioResult> results = config.outerLoopMode() == OuterLoopMode.JAVA
+                    ? GpuBatchedSecurityAnalysisSolver.solveBatchN1JavaOuterLoops(
+                            net, context, baseState, batch, es, target, config, reportNode)
+                    : GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                            net, baseState, batch, es, target, new NewtonRaphsonParameters(),
+                            distributedSlack, reactiveLimits,
+                            reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
             Map<String, double[]> states = new HashMap<>();
             Map<String, int[]> islandedBuses = new HashMap<>();
             for (BatchScenarioResult r : results) {

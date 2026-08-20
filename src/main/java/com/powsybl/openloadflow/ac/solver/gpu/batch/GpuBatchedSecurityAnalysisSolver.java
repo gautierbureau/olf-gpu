@@ -8,6 +8,7 @@
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.commons.report.ReportNode;
+import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
@@ -15,6 +16,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivationExtractor
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcOuterLoopPacks;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson;
@@ -23,7 +25,9 @@ import com.powsybl.openloadflow.equations.TargetVector;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
+import com.powsybl.openloadflow.network.LfHvdc;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.VoltageControl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -359,6 +363,120 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, GpuBatchStatus.STATUS_REJECTED, new int[0]));
             }
         }
+        return results;
+    }
+
+    /**
+     * The JAVA outer-loop batch path ({@link BatchConfig#outerLoopMode()} == {@link OuterLoopMode#JAVA}): batch the
+     * inner Newton on the device with EMPTY DS/RL packs, and make every outer-loop DECISION per scenario in OLF's
+     * own Java outer loops via {@link GpuHybridBatchOuterLoopEngine} — so the decisions match the CPU exactly by
+     * construction. Returns per-scenario {@link BatchScenarioResult} in INPUT order (the same contract as the
+     * device path); a scenario the engine cannot represent (injection/shunt/reclose/zi deltas — the engine applies
+     * branch-outage masks only) or that islands the slack, or that the engine routes to CPU (straggler / budget),
+     * comes back {@link GpuBatchStatus#STATUS_REJECTED} for the caller's per-contingency CPU fallback.
+     *
+     * @param context the base AC loadflow context (its outer loops are replayed per scenario) — MUST be the
+     *                context whose equation system + target vector are passed here (the engine drives that network)
+     */
+    public static List<BatchScenarioResult> solveBatchN1JavaOuterLoops(LfNetwork network, AcLoadFlowContext context,
+                                                                       double[] baseState, List<BatchContingency> contingencies,
+                                                                       EquationSystem<AcVariableType, AcEquationType> equationSystem,
+                                                                       TargetVector<AcVariableType, AcEquationType> targetVector,
+                                                                       BatchConfig config, ReportNode reportNode) {
+        Objects.requireNonNull(network);
+        Objects.requireNonNull(context);
+        Objects.requireNonNull(baseState);
+        Objects.requireNonNull(contingencies);
+        Objects.requireNonNull(equationSystem);
+        Objects.requireNonNull(targetVector);
+        Objects.requireNonNull(config);
+        int n = baseState.length;
+
+        // The JAVA engine applies ONLY branch-outage masks; a contingency carrying injection/shunt/reclose/zi
+        // deltas is not representable and routes to CPU. Then drop islanding outages (the slack is unbalanceable,
+        // OLF's DS loop would oscillate to the round cap) — exactly like the device path.
+        int[] engineIndexOfInput = new int[contingencies.size()];
+        java.util.Arrays.fill(engineIndexOfInput, -1);
+        List<BatchContingency> branchOnly = new ArrayList<>();
+        List<Integer> branchOnlyInputIndex = new ArrayList<>();
+        for (int i = 0; i < contingencies.size(); i++) {
+            BatchContingency c = contingencies.get(i);
+            boolean branchOutageOnly = !c.outagedBranches().isEmpty()
+                    && c.lostGenerators().isEmpty() && c.lostLoads().isEmpty() && c.shuntShifts().isEmpty()
+                    && c.tapOverrides().isEmpty() && c.outagedShunts().isEmpty() && c.reclosedBranches().isEmpty()
+                    && c.outagedZiBranches().isEmpty();
+            if (branchOutageOnly) {
+                branchOnly.add(c);
+                branchOnlyInputIndex.add(i);
+            }
+        }
+        GpuBatchElementMapper mapper = new GpuBatchElementMapper(network);
+        List<BatchContingency> qualified = new ArrayList<>();
+        List<Integer> qualifiedInputIndex = new ArrayList<>();
+        if (!branchOnly.isEmpty()) {
+            List<GpuBatchContingencyValidator.Qualification> quals =
+                    GpuBatchContingencyValidator.qualify(network, branchOnly, mapper, false);
+            for (int j = 0; j < quals.size(); j++) {
+                if (quals.get(j).qualified()) {
+                    engineIndexOfInput[branchOnlyInputIndex.get(j)] = qualified.size();
+                    qualified.add(quals.get(j).contingency());
+                    qualifiedInputIndex.add(branchOnlyInputIndex.get(j));
+                }
+            }
+        }
+
+        GpuHybridBatchOuterLoopEngine.Result res = null;
+        if (!qualified.isEmpty()) {
+            // Device data with EMPTY DS/RL packs — the inner Newton runs pure; OLF's Java outer loops do DS/RL/HVDC.
+            GpuAcData gpuData = GpuAcDataExtractor.extract(network, equationSystem, false, false);
+            int nElements = gpuData.getTotalElementCount();
+            GpuAcActivation baseActivation = GpuAcActivation.fromEquationSystem(network, equationSystem);
+            int[] baseRowMode = baseActivation.rowMode();
+            double[] baseTargets = baseActivation.applyTargets(targetVector.getArray());
+            List<LfGenerator> gens = network.getBuses().stream().flatMap(b -> b.getGenerators().stream()).toList();
+            double[] baseGenP = gens.stream().mapToDouble(LfGenerator::getTargetP).toArray();
+            double[] originalGenP = gens.stream().mapToDouble(LfGenerator::getInitialTargetP).toArray();
+            List<LfBus> ctrlBuses = network.getControllerElements(VoltageControl.Type.GENERATOR);
+            List<LfHvdc> hvdcs = network.getHvdcs();
+            List<LfBranch> transformerBranches = network.getControllerElements(VoltageControl.Type.TRANSFORMER);
+            int[] varType = config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null;
+            int maxOuter = context.getParameters().getMaxOuterLoopIterations();
+
+            long structure = GpuAcNewtonSolver.createStructure(n, gpuData.cbIn(), gpuData.cbIdx(), gpuData.obIn(), gpuData.obIdx(),
+                    gpuData.shIn(), gpuData.shIdx(), gpuData.hvIn(), gpuData.hvIdx(),
+                    gpuData.dqElem(), gpuData.dqSide(), gpuData.dqWeight(), gpuData.dqRow(), gpuData.dqKind(),
+                    gpuData.ziIn(), gpuData.ziIdx(), gpuData.drRow(), gpuData.drCol(), gpuData.drCoef());
+            try {
+                res = GpuHybridBatchOuterLoopEngine.solve(new GpuHybridBatchOuterLoopEngine.Inputs(
+                        structure, 3, gpuData, nElements, network, equationSystem, context, n,
+                        baseState, baseTargets, baseRowMode, qualified, mapper, gens, baseGenP, originalGenP,
+                        ctrlBuses, hvdcs, transformerBranches, config.lsMode(), config.maxDv(), config.maxDphi(), varType,
+                        30, maxOuter, 3));
+            } finally {
+                GpuAcNewtonSolver.destroyStructure(structure);
+            }
+        }
+
+        // Assemble in INPUT order: engine-converged scenarios carry their GPU outcome, everything else is REJECTED
+        // (branch-non-representable / islanding / engine-routed) for the per-contingency CPU fallback.
+        List<BatchScenarioResult> results = new ArrayList<>(contingencies.size());
+        int engineConverged = 0;
+        for (int i = 0; i < contingencies.size(); i++) {
+            String id = contingencies.get(i).contingencyId();
+            int e = engineIndexOfInput[i];
+            if (res != null && e >= 0 && res.gpuConverged(e)) {
+                double[] st = res.states()[e];
+                double[] state = new double[n];
+                System.arraycopy(st, 0, state, 0, n);
+                results.add(new BatchScenarioResult(id, state, (int) st[n], st[n + 1], GpuBatchStatus.STATUS_CONVERGED, new int[0]));
+                engineConverged++;
+            } else {
+                results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, GpuBatchStatus.STATUS_REJECTED, new int[0]));
+            }
+        }
+        LOGGER.info("Batched N-1 (JAVA outer loops): {} of {} contingencies converged on the device (Java outer "
+                + "loops); {} routed to the CPU path (non-branch-outage / islanding / non-convergent)",
+                engineConverged, contingencies.size(), contingencies.size() - engineConverged);
         return results;
     }
 

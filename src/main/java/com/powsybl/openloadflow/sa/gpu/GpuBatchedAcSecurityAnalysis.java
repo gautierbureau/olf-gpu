@@ -86,6 +86,12 @@ import java.util.Objects;
  */
 public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
 
+    /** System property selecting how the batched N-1 runs its OUTER loops: {@code DEVICE} (CUDA-kernel outer
+     *  loops folded into the device solve, the default) or {@code JAVA} (device inner solve only, OLF's Java
+     *  outer loops make the per-scenario decisions via {@code GpuHybridBatchOuterLoopEngine}). Matches the
+     *  module's other GPU toggles (there is no GPU parameters extension). Read in {@link GpuSaRunScope}. */
+    public static final String GPU_OUTER_LOOP_MODE_PROPERTY = "olf.gpu.sa.outerLoopMode";
+
     /** How many contingencies the LAST GpuBatchPrecomputer.precompute solved on the GPU device: {@code -1} when
      *  the batch was not attempted (no device, nothing to batch), {@code 0+} otherwise. Test-visibility hook
      *  to assert the GPU actually engaged on a device-equipped machine (vs a silent CPU fallback). */

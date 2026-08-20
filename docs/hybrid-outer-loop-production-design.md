@@ -602,3 +602,24 @@ Only after (a)–(d) hold do the fill-kernel selection changes (C) become meanin
   `GpuTransformerVoltageControlTest`, `GpuShuntVoltageControlTest`, `GpuBatchedAcSecurityAnalysisTest`.
 - Both benches (fixed-iter K=4 + split-bench), cold-first reporting — per the standing bench
   discipline; confirm the union-pattern nnz increase does not regress warm throughput past noise.
+
+### 11.8 Implementation status (2026-08-20)
+
+**Closed-branch increment landed** (commit `5ef436c`, branch `hybrid-java-outer-loop`), gated behind
+`OLF_GPU_DYN_QRELOC` (default off):
+- `cbIdx` widened 10→12 (alternate Q rows at `[10]`,`[11]`), `computeQRowAlt`, the `collectPattern`
+  union (`collectCbAltPattern`), the dual-dest + frozen-row selector (`buildCbDynDest`), and the fill
+  selection (`scatterAddDyn`/`scatterAddFDyn`) across all three closed-branch fills.
+- `buildRowMap` **untouched** — the bijection is layout-invariant, re-confirmed at stride 12 by
+  `DynQRelocationProbeTest`.
+- **No regression:** flag-off is byte-identical (29/29 batch SA + 10/10 core); flag-on all 39 pass and
+  the relocation fires (`OLF_GPU_DYN_QRELOC_DEBUG` reports the relocatable-output count).
+
+**Finding that reframes the value.** The ~6e-3 kV two-terminal transformer-VC SA residual is **not**
+the wrong-row bug. For a two-terminal control the *final* rounded structure is control-off — the same
+state the base extraction froze — so relocation fires only in the intermediate continuous phase and
+the final result is unchanged (flag-on and flag-off both `5.994e-3` at default convEps). That residual
+is convergence **depth**, which the tight-convEps setting in `transformerVoltageControlBatchMatchesCpu`
+masks. Dynamic Q-relocation's real payoff is the **one-terminal shunt-VC** case (the batch
+architectural limit where `SHUNT_B` freezes at warm-start), which needs the **shunt-family extension**
+(`shIdx` 4→5, `fillShunt`/`fillShuntBatch` selection, a shunt-VC batch test) to demonstrate end-to-end.

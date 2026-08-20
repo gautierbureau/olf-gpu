@@ -432,6 +432,57 @@ void buildCbDynDest(int ncb, const int* cbIdx, const CsrPattern& pos,
     }
 }
 
+// Shunt analogue of cbAltRow / collectCbAltPattern / buildCbDynDest. The alternate Q row of a
+// voltage-controlling shunt (its own bus's SHUNT_B row <-> bus-V row) travels at shIdx[4]. A fixed
+// shunt on a transformer/shunt-controlled bus also relocates (qRowAlt was set for that bus). This is
+// the one-terminal case dynamic relocation exists for: SHUNT_B has no second terminal to hold its
+// column, so a frozen structure freezes it at warm-start.
+inline int shAltRow(const ShScatter& s, const int* ix) {
+    return s.rowEq == 1 ? ix[4] : -1;
+}
+
+void collectShAltPattern(int nsh, const int* shIdx, std::vector<std::pair<int, int>>& pat) {
+    for (int e = 0; e < nsh; e++) {
+        const int* ix = shIdx + static_cast<size_t>(e) * 5;
+        for (int k = 0; k < SH_NOUT; k++) {
+            const ShScatter& s = SH_SCATTER[k];
+            if (s.role != 1) {
+                continue;
+            }
+            RC rc = resolveSh(s, ix);
+            int altRow = shAltRow(s, ix);
+            if (rc.col >= 0 && altRow >= 0 && altRow != rc.row) {
+                pat.emplace_back(altRow, rc.col);
+            }
+        }
+    }
+}
+
+void buildShDynDest(int nsh, const int* shIdx, const CsrPattern& pos,
+                    std::vector<int>& altDest, std::vector<int>& selRow) {
+    altDest.assign(static_cast<size_t>(nsh) * SH_NOUT, -1);
+    selRow.assign(static_cast<size_t>(nsh) * SH_NOUT, -1);
+    for (int e = 0; e < nsh; e++) {
+        const int* ix = shIdx + static_cast<size_t>(e) * 5;
+        for (int k = 0; k < SH_NOUT; k++) {
+            const ShScatter& s = SH_SCATTER[k];
+            RC rc = resolveSh(s, ix);
+            int altRow = shAltRow(s, ix);
+            size_t o = static_cast<size_t>(e) * SH_NOUT + k;
+            if (altRow < 0 || altRow == rc.row) {
+                continue;
+            }
+            if (s.role == 1 && rc.col >= 0) {
+                altDest[o] = pos.at(altRow, rc.col);
+                selRow[o] = rc.row;
+            } else if (s.role == 0) {
+                altDest[o] = -2 - altRow;
+                selRow[o] = rc.row;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------
 // Device: the four family fill kernels + the loop helpers
 // ---------------------------------------------------------------------------------
@@ -502,17 +553,22 @@ __global__ void fillOpenBranch(int ne, const double* in, const int* ix, const in
 }
 
 __global__ void fillShunt(int ne, const double* in, const int* ix, const int* dest,
-                          const double* x, double* vals, double* F) {
+                          const double* x, double* vals, double* F,
+                          const int* altDest, const int* selRow, const int* mode, int dynReloc) {
     int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= ne) return;
     const double* p = in + e * 2;                            // g b
-    // b is the SHUNT_B state variable when the shunt derives voltage control (bcol = ix[e*4+3] >= 0),
+    // b is the SHUNT_B state variable when the shunt derives voltage control (bcol = ix[e*5+3] >= 0),
     // else the fixed packed susceptance — exactly like a closed branch reads r1 from x[r1col] or cbIn.
-    double b = ix[e * 4 + 3] >= 0 ? x[ix[e * 4 + 3]] : p[1];
-    double v = x[ix[e * 4 + 2]];
+    double b = ix[e * 5 + 3] >= 0 ? x[ix[e * 5 + 3]] : p[1];
+    double v = x[ix[e * 5 + 2]];
     double o[SH_NOUT];
     evalShunt(v, p[0], b, 0, o + 0, o + 1, o + 2, o + 3, o + 4);
-    scatterAdd(SH_NOUT, dest + e * SH_NOUT, o, vals, F);
+    if (dynReloc) {
+        scatterAddDyn(SH_NOUT, dest + e * SH_NOUT, altDest + e * SH_NOUT, selRow + e * SH_NOUT, mode, o, vals, F);
+    } else {
+        scatterAdd(SH_NOUT, dest + e * SH_NOUT, o, vals, F);
+    }
 }
 
 __global__ void fillHvdc(int ne, const double* in, const int* ix, const int* dest,
@@ -545,7 +601,7 @@ __global__ void fillDistrQ(int ndq, const int* dqElem, const int* dqSide, const 
     const int* dst = dqDest + c * 6;
     if (dqKind[c] == 1) {                                    // shunt q: {q value -> F, dq/dv -> J(row, vcol)}
         const double* sp = shIn + e * 2;                     // g b (a DISTR_Q shunt contributor is always fixed)
-        int vcol = shIx[e * 4 + 2];
+        int vcol = shIx[e * 5 + 2];
         double so[SH_NOUT];
         evalShunt(x[vcol], sp[0], sp[1], 0, so + 0, so + 1, so + 2, so + 3, so + 4);
         if (dst[0] <= -2) atomicAdd(&F[-2 - dst[0]], w * so[2]);    // q
@@ -822,12 +878,12 @@ std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const in
         claimMovedV(ix[3], ix[5]);
     }
     for (int e = 0; e < nsh; e++) {                          // P Q v bcol
-        pairRc(shIdx[e * 4 + 1], shIdx[e * 4 + 1]);          // Q self-pairs (v col, or SHUNT_B col if controlled)
-        claimMovedV(shIdx[e * 4 + 1], shIdx[e * 4 + 2]);
-        if (shIdx[e * 4 + 3] >= 0) {
+        pairRc(shIdx[e * 5 + 1], shIdx[e * 5 + 1]);          // Q self-pairs (v col, or SHUNT_B col if controlled)
+        claimMovedV(shIdx[e * 5 + 1], shIdx[e * 5 + 2]);
+        if (shIdx[e * 5 + 3] >= 0) {
             // claim the SHUNT_B row: its diagonal is the b col either way — dq/db when the susceptance is a
             // free control, or the unit derivative of the b−target identity when it is held constant.
-            pairRc(shIdx[e * 4 + 3], shIdx[e * 4 + 3]);
+            pairRc(shIdx[e * 5 + 3], shIdx[e * 5 + 3]);
         }
     }
     for (int e = 0; e < nhv; e++) {                          // P1 P2 ph1 ph2
@@ -877,7 +933,7 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
     for (int c = 0; c < ndq; c++) {
         int mappedRow = rowMap[dqRow[c]];
         if (dqKind[c] == 1) {                                // shunt q: bus V column
-            pat.emplace_back(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 4 + 2]);
+            pat.emplace_back(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 5 + 2]);
         } else if (dqKind[c] == 2) {                         // half-open: connected-side V column
             const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
             pat.emplace_back(mappedRow, dqSide[c] == 0 ? oq[4] : oq[5]);
@@ -979,7 +1035,7 @@ static void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const st
             int mappedRow = rowMap[dqRow[c]];
             dqDest[c * 6 + 0] = -2 - mappedRow;              // q value -> F row
             if (dqKind[c] == 1) {                            // shunt: dq/dv on the bus V column
-                dqDest[c * 6 + 1] = pos.at(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 4 + 2]);
+                dqDest[c * 6 + 1] = pos.at(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 5 + 2]);
             } else if (dqKind[c] == 2) {                     // half-open: dq/dv on the connected-side V col
                 const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
                 dqDest[c * 6 + 1] = pos.at(mappedRow, dqSide[c] == 0 ? oq[4] : oq[5]);
@@ -1105,7 +1161,7 @@ SharedStructure* buildStructure(int n,
     };
     std::vector<int> cbIdxM = mapRows(cbIdx, ncb, 12, {0, 1, 2, 3, 10, 11});
     std::vector<int> obIdxM = mapRows(obIdx, nob, 6, {0, 1, 2, 3});
-    std::vector<int> shIdxM = mapRows(shIdx, nsh, 4, {0, 1});
+    std::vector<int> shIdxM = mapRows(shIdx, nsh, 5, {0, 1, 4});
     std::vector<int> hvIdxM = mapRows(hvIdx, nhv, 4, {0, 1});
     cbIdx = cbIdxM.data();
     obIdx = obIdxM.data();
@@ -1120,7 +1176,10 @@ SharedStructure* buildStructure(int n,
         collectCbAltPattern(ncb, cbIdx, pat);                // union the alternate Q rows into the pattern
     }
     collectPattern(nob, obIdx, 6, OB_SCATTER, OB_NOUT, resolveOb, pat);
-    collectPattern(nsh, shIdx, 4, SH_SCATTER, SH_NOUT, resolveSh, pat);
+    collectPattern(nsh, shIdx, 5, SH_SCATTER, SH_NOUT, resolveSh, pat);
+    if (dynReloc) {
+        collectShAltPattern(nsh, shIdx, pat);                // union the shunt alternate Q rows
+    }
     collectPattern(nhv, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pat);
     collectFamilyPattern(rowMap, cbIdx, obIdx, shIdx, ndq, dqElem, dqSide, dqKind, dqRow,
                          ndr, drRow, drCol, ndb, dbRow, dbCol, nzi, ziIdx, pat);
@@ -1167,7 +1226,24 @@ SharedStructure* buildStructure(int n,
         initClosedBranchTrig<<<grid(ncb), BLOCK>>>(ncb, st->cb.in.as<double>(), st->cbTrig.as<double>());
     }
     setupFamily(st->ob, nob, obIn, 7, obIdx, 6, OB_SCATTER, OB_NOUT, resolveOb, pos);
-    setupFamily(st->sh, nsh, shIn, 2, shIdx, 4, SH_SCATTER, SH_NOUT, resolveSh, pos);
+    setupFamily(st->sh, nsh, shIn, 2, shIdx, 5, SH_SCATTER, SH_NOUT, resolveSh, pos);
+    if (dynReloc && nsh) {                                   // Dynamic Q-relocation: shunt alt-dest + selector
+        std::vector<int> shAltDest;
+        std::vector<int> shSelRow;
+        buildShDynDest(nsh, shIdx, pos, shAltDest, shSelRow);
+        st->sh.altDest.upload(shAltDest.data(), shAltDest.size() * sizeof(int));
+        st->sh.selRow.upload(shSelRow.data(), shSelRow.size() * sizeof(int));
+        st->sh.dynReloc = true;
+        if (getenv("OLF_GPU_DYN_QRELOC_DEBUG")) {
+            int nSel = 0;
+            for (int v : shSelRow) {
+                if (v >= 0) {
+                    nSel++;
+                }
+            }
+            std::fprintf(stderr, "[DYN-QRELOC] nsh=%d relocatable-outputs=%d\n", nsh, nSel);
+        }
+    }
     setupFamily(st->hv, nhv, hvIn, 5, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pos);
 
     // ---- DISTR_Q destinations: per contribution {F-row, dq/dv1, dq/dv2, dq/dph1, dq/dph2, dq/dr1}
@@ -1326,7 +1402,7 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
         initF<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dTarget.as<double>(), ctx->dF.as<double>());
         if (ctx->st->cb.ne) fillClosedBranch<<<grid(ctx->st->cb.ne), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0);
         if (ctx->st->ob.ne) fillOpenBranch<<<grid(ctx->st->ob.ne), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
-        if (ctx->st->sh.ne) fillShunt<<<grid(ctx->st->sh.ne), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        if (ctx->st->sh.ne) fillShunt<<<grid(ctx->st->sh.ne), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0);
         if (ctx->st->hv.ne) fillHvdc<<<grid(ctx->st->hv.ne), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->ndq) fillDistrQ<<<grid(ctx->ndq), BLOCK, 0, ctx->stream>>>(ctx->ndq, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->nzi) fillZeroImp<<<grid(ctx->nzi), BLOCK, 0, ctx->stream>>>(ctx->nzi, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
@@ -1631,7 +1707,8 @@ __global__ void fillShuntBatch(int ne, int nScenarios, int n, int nnz, int nElem
                                const double* in, const int* ix, const int* dest,
                                const double* x, double* vals, double* F,
                                const char* disabled, const char* active,
-                               int nShOv, const int* shOvSlotElem, const double* shOvGb) {
+                               int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                               const int* altDest, const int* selRow, const int* mode, int dynReloc) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ne * nScenarios) return;
     int e = tid % ne;
@@ -1643,12 +1720,17 @@ __global__ void fillShuntBatch(int ne, int nScenarios, int n, int nnz, int nElem
     applyShuntOverride(nShOv, shOvSlotElem, shOvGb, s, e, g, b);
     // A voltage-controlling shunt (bcol >= 0) reads its susceptance from the per-scenario state vector; a
     // fixed shunt keeps the packed value (+ any contingency shunt-shift override).
-    int bcol = ix[e * 4 + 3];
+    int bcol = ix[e * 5 + 3];
     if (bcol >= 0) b = x[(size_t) s * n + bcol];
-    double v = x[(size_t) s * n + ix[e * 4 + 2]];
+    double v = x[(size_t) s * n + ix[e * 5 + 2]];
     double o[SH_NOUT];
     evalShunt(v, g, b, 0, o + 0, o + 1, o + 2, o + 3, o + 4);
-    scatterAdd(SH_NOUT, dest + e * SH_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+    if (dynReloc) {
+        scatterAddDyn(SH_NOUT, dest + e * SH_NOUT, altDest + e * SH_NOUT, selRow + e * SH_NOUT,
+                      mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+    } else {
+        scatterAdd(SH_NOUT, dest + e * SH_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+    }
 }
 
 __global__ void fillHvdcBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
@@ -1785,7 +1867,8 @@ __global__ void fillShuntBatchF(int ne, int nScenarios, int n, int nnz, int nEle
                                 const double* in, const int* ix, const int* dest,
                                 const double* x, double* F,
                                 const char* disabled, const char* active,
-                                int nShOv, const int* shOvSlotElem, const double* shOvGb) {
+                                int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                                const int* altDest, const int* selRow, const int* mode, int dynReloc) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ne * nScenarios) return;
     int e = tid % ne;
@@ -1795,13 +1878,18 @@ __global__ void fillShuntBatchF(int ne, int nScenarios, int n, int nnz, int nEle
     double g = p[0];
     double b = p[1];
     applyShuntOverride(nShOv, shOvSlotElem, shOvGb, s, e, g, b);
-    int bcol = ix[e * 4 + 3];
+    int bcol = ix[e * 5 + 3];
     if (bcol >= 0) b = x[(size_t) s * n + bcol];             // voltage-controlling shunt: b from state
-    double v = x[(size_t) s * n + ix[e * 4 + 2]];
+    double v = x[(size_t) s * n + ix[e * 5 + 2]];
     double o[2];
     evalShuntF(v, g, b, 0, o + 0, o + 1);
     const int pos[2] = {0, 2};
-    scatterAddF(2, dest + e * SH_NOUT, pos, o, F + (size_t) s * n);
+    if (dynReloc) {
+        scatterAddFDyn(2, dest + e * SH_NOUT, altDest + e * SH_NOUT, selRow + e * SH_NOUT,
+                       pos, mode + (size_t) s * n, o, F + (size_t) s * n);
+    } else {
+        scatterAddF(2, dest + e * SH_NOUT, pos, o, F + (size_t) s * n);
+    }
 }
 
 __global__ void fillHvdcBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
@@ -1848,7 +1936,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
 
     if (kind == 1) {                             // shunt q: {q -> F, dq/dv -> J(row, vcol)}
         const double* sp = shIn + e * 2;
-        int vcol = shIx[e * 4 + 2];
+        int vcol = shIx[e * 5 + 2];
         double so[SH_NOUT];
         evalShunt(xs[vcol], sp[0], sp[1], 0, so + 0, so + 1, so + 2, so + 3, so + 4);
         if (dst[0] <= -2) atomicAdd(&FS[-2 - dst[0]], w * so[2]);
@@ -2964,9 +3052,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
         if (ctx->st->sh.ne) {
             if (fOnly) {
-                fillShuntBatchF<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>());
+                fillShuntBatchF<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0);
             } else {
-                fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>());
+                fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0);
             }
         }
         if (ctx->st->hv.ne) {
@@ -3270,7 +3358,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // (dynReloc=0), the relocation only concerns the Newton residual, not this diagnostic Q.
     if (ctx->st->cb.ne) fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), nullptr, nullptr, nullptr, 0);
     if (ctx->st->ob.ne) fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>());
-    if (ctx->st->sh.ne) fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>());
+    if (ctx->st->sh.ne) fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), nullptr, nullptr, nullptr, 0);
     // Zero-impedance dummy transfers MUST be in the Q/P buffer too: the distributed-slack retain
     // reads the slack row's balance from dQbuf — without the coupler's dummy-P the DS sees a
     // phantom mismatch equal to the through-flow and distributes it FOREVER (measured: +392 MW
@@ -3431,7 +3519,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
 
     int ncb = env->GetArrayLength(jcbIdx) / 12;             // cbIdx stride 12 (…a1col r1col qAlt1 qAlt2)
     int nob = env->GetArrayLength(jobIdx) / 6;
-    int nsh = env->GetArrayLength(jshIdx) / 4;
+    int nsh = env->GetArrayLength(jshIdx) / 5;             // shIdx stride 5 (P Q v bcol qAlt)
     int nhv = env->GetArrayLength(jhvIdx) / 4;
     int ndq = env->GetArrayLength(jdqElem);
     int nzi = env->GetArrayLength(jziIdx) / 11;

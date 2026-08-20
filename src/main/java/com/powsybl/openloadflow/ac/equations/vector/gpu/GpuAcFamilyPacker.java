@@ -215,7 +215,8 @@ final class GpuAcFamilyPacker {
                 shElemOf[bus.getNum()] = shIn.size();
                 shIn.add(new double[] {sh.getG(), sh.getB()});
                 shIdx.add(new int[] {
-                    phiCol[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], -1});
+                    phiCol[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], -1,
+                    qRowAlt[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
             });
             // Voltage-CONTROLLING shunt: its susceptance b is a SHUNT_B state variable (bRow >= 0, idx 3), so the
             // device reads b from x and scatters dq/db onto the b column — the exact analogue of a transformer's
@@ -223,7 +224,8 @@ final class GpuAcFamilyPacker {
             bus.getControllerShunt().ifPresent(sh -> {
                 shIn.add(new double[] {sh.getG(), sh.getB()});
                 shIdx.add(new int[] {
-                    phiCol[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], shuntBCol[sh.getNum()]});
+                    phiCol[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], shuntBCol[sh.getNum()],
+                    qRowAlt[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
             });
         }
 

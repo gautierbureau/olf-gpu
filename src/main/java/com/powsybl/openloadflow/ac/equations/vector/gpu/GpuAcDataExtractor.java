@@ -93,7 +93,7 @@ public final class GpuAcDataExtractor {
         return new GpuAcData(
                 GpuAcArrays.flatD(family.cbIn(), 8), GpuAcArrays.flatI(family.cbIdx(), 12),
                 GpuAcArrays.flatD(family.obIn(), 7), GpuAcArrays.flatI(family.obIdx(), 6),
-                GpuAcArrays.flatD(family.shIn(), 2), GpuAcArrays.flatI(family.shIdx(), 4),
+                GpuAcArrays.flatD(family.shIn(), 2), GpuAcArrays.flatI(family.shIdx(), 5),
                 GpuAcArrays.flatD(family.hvIn(), 5), GpuAcArrays.flatI(family.hvIdx(), 4),
                 dq.dqElem(), dq.dqSide(), dq.dqWeight(), dq.dqRow(), dq.dqKind(),
                 GpuAcArrays.flatD(family.ziIn(), 1), GpuAcArrays.flatI(family.ziIdx(), 11),

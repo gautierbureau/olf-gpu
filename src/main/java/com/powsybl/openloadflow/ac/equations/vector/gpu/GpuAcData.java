@@ -161,7 +161,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
     }
 
     public int getShuntCount() {
-        return shIdx.length / 4;
+        return shIdx.length / 5;
     }
 
     public int getHvdcCount() {

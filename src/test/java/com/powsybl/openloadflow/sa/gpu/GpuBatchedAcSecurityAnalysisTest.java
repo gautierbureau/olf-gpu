@@ -114,14 +114,28 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         List<Contingency> contingencies = List.of(new Contingency(l0.getId() + "_BIS", new BranchContingency(l0.getId() + "_BIS")));
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        // Tighten BOTH sides' outer-loop convergence (narrow the distributed-slack band + deepen the inner-Newton
+        // stopping) so CPU and GPU settle to the SAME depth — then the only residual is inner-Newton precision, not
+        // the ~0.05 kV redistribution band the default tolerances leave. (1e-9 is at the GPU's feasible floor;
+        // tighter, e.g. 1e-11, drops below it and the base GPU LF falls back to CPU.)
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
-                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
+                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL)
+                .setSlackBusPMaxMismatch(0.01).setNewtonRaphsonConvEpsPerEq(1e-9);
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
-        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, java.util.Collections.emptyList(), sap);
+        // STATE-LEVEL comparison: monitor every voltage level. Status + violation-count parity is BLIND to a
+        // "converged-but-wrong" tap solve — the on-device orchestrator toggles the control layout via row-mode +
+        // target-override deltas on the fixed structure, and only a bus-voltage check confirms the discrete tap
+        // decision AND the post-rounding solve actually agree with the CPU (this scenario's tap really rounds:
+        // the controlled bus lands off the 34.0 target on the closest section).
+        java.util.Set<String> tvcVls = network.getVoltageLevelStream().map(vl -> vl.getId())
+                .collect(java.util.stream.Collectors.toSet());
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), tvcVls, java.util.Set.of()));
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, monitors, sap);
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         try {
-            SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, java.util.Collections.emptyList(), sap);
+            SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, monitors, sap);
             assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() > 0,
                     "the transformer-control run must ENGAGE the batch (guard fell back -> the port is not exercised)");
             assertEquals(cpu.getPostContingencyResults().size(), gpu.getPostContingencyResults().size());
@@ -131,6 +145,17 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 assertEquals(cpu.getPostContingencyResults().get(i).getLimitViolationsResult().getLimitViolations().size(),
                         gpu.getPostContingencyResults().get(i).getLimitViolationsResult().getLimitViolations().size(),
                         "violation count must match for " + cpu.getPostContingencyResults().get(i).getContingency().getId());
+                var cbv = cpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                var gbv = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                assertEquals(cbv.size(), gbv.size());
+                for (int b = 0; b < cbv.size(); b++) {
+                    // With matched convergence depth the DEVICE batch agrees with the CPU SA to inner-Newton
+                    // precision (~1e-10 kV measured); 1e-6 kV is a tight guard far below any real solve error yet
+                    // robust to cross-platform float noise.
+                    org.junit.jupiter.api.Assertions.assertEquals(cbv.get(b).getV(), gbv.get(b).getV(), 1e-6,
+                            "transformer-VC bus voltage " + cbv.get(b).getBusId() + " for "
+                                    + cpu.getPostContingencyResults().get(i).getContingency().getId());
+                }
             }
         } finally {
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());

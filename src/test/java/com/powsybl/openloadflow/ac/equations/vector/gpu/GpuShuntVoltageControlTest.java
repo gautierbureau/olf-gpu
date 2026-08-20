@@ -130,4 +130,64 @@ class GpuShuntVoltageControlTest {
         }
         return m;
     }
+
+    /**
+     * Dynamic Q-relocation (§11) on the ONE-TERMINAL shunt case, at the single-solve level so no SA /
+     * JAVA machinery is needed. Reproduces the shared-structure batch condition directly: the structure
+     * is extracted with shunt control OFF (Q frozen on the bus-V row, SHUNT_B pinned), then solved with
+     * the control-ON activation (bus-V row becomes the v-target identity, SHUNT_B a free Newton row) —
+     * exactly what the batch does per round on its fixed structure. Flag OFF, the frozen structure keeps
+     * Q on the (now-identity) bus-V row so SHUNT_B never receives it and freezes at warm-start -> the
+     * controlled bus misses its target. Flag ON (OLF_GPU_DYN_QRELOC=1), the fill routes Q to the free
+     * SHUNT_B row and the solve matches OLF's continuous reference. Asserts the match only when the flag
+     * is set; always prints both numbers.
+     */
+    @Test
+    void dynQRelocUnlocksSharedStructureShuntControl() {
+        Network iidm = ShuntNetworkFactory.create();
+        LfNetworkParameters params = new LfNetworkParameters()
+                .setSlackBusSelector(new FirstSlackBusSelector())
+                .setShuntVoltageControl(true);
+        LfNetwork network = Networks.load(iidm, params).get(0);
+        EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(network).create();
+        int n = es.getIndex().getSortedVariablesToFind().size();
+
+        // (1) SHARED structure extracted with control OFF (the rounded-base state): Q on the bus-V row.
+        AcSolverUtil.initStateVector(network, es, new UniformValueVoltageInitializer());
+        double[] x0 = es.getStateVector().get().clone();
+        GpuAcData dOff = GpuAcDataExtractor.extract(network, es);
+
+        // (2) Enable continuous control, re-extract the ACTIVATION only (row-mode + targets) — the
+        //     per-round toggle the batch applies on the FIXED structure.
+        for (LfShunt shunt : network.<LfShunt>getControllerElements(VoltageControl.Type.SHUNT)) {
+            shunt.setVoltageControlEnabled(true);
+        }
+        GpuAcActivation onAct = GpuAcActivationExtractor.extractActivation(network, es, n);
+        AcTargetVector target = new AcTargetVector(network, es);
+        double[] onTargets = onAct.applyTargets(target.getArray());
+
+        // (3) Solve the OFF structure with the ON activation.
+        double[] out = GpuAcNewtonSolver.solve(x0, onTargets, onAct.rowMode(), MAX_ITER, TOL,
+                dOff.cbIn(), dOff.cbIdx(), dOff.obIn(), dOff.obIdx(), dOff.shIn(), dOff.shIdx(), dOff.hvIn(), dOff.hvIdx(),
+                dOff.dqElem(), dOff.dqSide(), dOff.dqWeight(), dOff.dqRow(), dOff.dqKind(),
+                dOff.ziIn(), dOff.ziIdx(),
+                dOff.drRow(), dOff.drCol(), dOff.drCoef(), dOff.dbRow(), dOff.dbCol(), dOff.dbCoef());
+        double norm = out[n + 1];
+
+        // (4) Reference: OLF's own continuous (control-ON) solve — the correct answer.
+        StateVector sv = es.getStateVector();
+        EquationVector<AcVariableType, AcEquationType> eq = new EquationVector<>(es);
+        double[] xRef = cpuReference(es, target, eq, sv);
+        double worst = 0;
+        for (int i = 0; i < n; i++) {
+            worst = Math.max(worst, Math.abs(out[i] - xRef[i]));
+        }
+        boolean flagOn = "1".equals(System.getenv("OLF_GPU_DYN_QRELOC"));
+        System.out.printf("[DYN-QRELOC shunt shared-structure] OLF_GPU_DYN_QRELOC=%s  ||F||inf=%.2e  "
+                + "max|x_gpu - x_olf|=%.3e%n", System.getenv("OLF_GPU_DYN_QRELOC"), norm, worst);
+        if (flagOn) {
+            assertTrue(norm < TOL, "flag ON: GPU Newton must converge on the shared structure (||F||inf=" + norm + ")");
+            assertTrue(worst < 1e-6, "flag ON: dynamic Q-relocation must match OLF's continuous solve (max diff=" + worst + ")");
+        }
+    }
 }

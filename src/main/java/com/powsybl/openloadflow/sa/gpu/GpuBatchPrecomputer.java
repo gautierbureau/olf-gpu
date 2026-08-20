@@ -141,7 +141,8 @@ final class GpuBatchPrecomputer {
 
             List<BatchScenarioResult> results = config.outerLoopMode() == OuterLoopMode.JAVA
                     ? GpuBatchedSecurityAnalysisSolver.solveBatchN1JavaOuterLoops(
-                            net, context, baseState, batch, es, target, config, reportNode)
+                            net, context, baseState, batch, es, target,
+                            reactiveLimitTol, slackDistTol, convEpsPerEq, config, reportNode)
                     : GpuBatchedSecurityAnalysisSolver.solveBatchN1(
                             net, baseState, batch, es, target, new NewtonRaphsonParameters(),
                             distributedSlack, reactiveLimits,

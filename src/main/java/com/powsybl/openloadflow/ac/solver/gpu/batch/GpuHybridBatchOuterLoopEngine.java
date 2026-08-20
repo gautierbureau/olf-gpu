@@ -96,7 +96,8 @@ public final class GpuHybridBatchOuterLoopEngine {
                          List<LfGenerator> gens, double[] baseGenP, double[] originalGenP,
                          List<LfBus> ctrlBuses, List<LfHvdc> hvdcs, List<LfBranch> transformerBranches,
                          int lsMode, double lsMaxDv, double lsMaxDphi, int[] varType,
-                         int maxIterations, int maxOuter, int rejectRouteThreshold) {
+                         int maxIterations, int maxOuter, int rejectRouteThreshold,
+                         double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq) {
     }
 
     /**
@@ -238,7 +239,9 @@ public final class GpuHybridBatchOuterLoopEngine {
                     rowModeC, in.baseRowMode(), disabledC,
                     ovIdx.stream().mapToInt(Integer::intValue).toArray(), ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
                     new int[0], new double[0], new double[0], new double[0], new double[0],
-                    in.maxIterations(), 1e-6, 1e-4, 1e-2, 1e-4,          // tol, reactiveLimitTol(unused), slackDistTol, convEpsPerEq
+                    // the RUN's inner-solve stopping criteria — convEpsPerEq drives the norm-2 stop, matching the
+                    // CPU (RL/DS tols are moot here: the packs are empty and OLF's Java loops do DS/RL).
+                    in.maxIterations(), in.tol(), in.reactiveLimitTol(), in.slackDistTol(), in.convEpsPerEq(),
                     in.lsMode(), in.lsMaxDv(), in.lsMaxDphi(), in.varType(), x0C,
                     null, null, null, null, null, null,                  // shuntOv, rlStateIn/Out, r1Ov
                     30, 3, 0, 0, null, null);                            // maxOuterIterations (moot: DS pack empty), maxPqPvSwitch, ...

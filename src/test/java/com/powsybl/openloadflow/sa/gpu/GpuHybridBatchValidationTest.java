@@ -202,7 +202,8 @@ class GpuHybridBatchValidationTest {
                         ctgs, mapper, gens, baseGenP, originalGenP, ctrlBuses, hvdcs,
                         network.getControllerElements(VoltageControl.Type.TRANSFORMER),
                         lsMode, lsMaxDv, lsMaxDphi, varType,
-                        30, acp.getMaxOuterLoopIterations(), 3));
+                        30, acp.getMaxOuterLoopIterations(), 3,
+                        1e-8, 1e-4, 1e-2, 1e-4));   // tol (GPU_TOLERANCE floor), reactiveLimitTol, slackDistTol, convEpsPerEq
         GpuAcNewtonSolver.destroyStructure(structure);
 
         double[][] states = res.states();

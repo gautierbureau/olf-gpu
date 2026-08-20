@@ -382,6 +382,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                                                                        double[] baseState, List<BatchContingency> contingencies,
                                                                        EquationSystem<AcVariableType, AcEquationType> equationSystem,
                                                                        TargetVector<AcVariableType, AcEquationType> targetVector,
+                                                                       double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                                                                        BatchConfig config, ReportNode reportNode) {
         Objects.requireNonNull(network);
         Objects.requireNonNull(context);
@@ -452,7 +453,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         structure, 3, gpuData, nElements, network, equationSystem, context, n,
                         baseState, baseTargets, baseRowMode, qualified, mapper, gens, baseGenP, originalGenP,
                         ctrlBuses, hvdcs, transformerBranches, config.lsMode(), config.maxDv(), config.maxDphi(), varType,
-                        30, maxOuter, 3));
+                        30, maxOuter, 3,
+                        GpuNewtonRaphson.GPU_TOLERANCE, reactiveLimitTol, slackDistTol, convEpsPerEq));
             } finally {
                 GpuAcNewtonSolver.destroyStructure(structure);
             }

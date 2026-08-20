@@ -623,3 +623,26 @@ is convergence **depth**, which the tight-convEps setting in `transformerVoltage
 masks. Dynamic Q-relocation's real payoff is the **one-terminal shunt-VC** case (the batch
 architectural limit where `SHUNT_B` freezes at warm-start), which needs the **shunt-family extension**
 (`shIdx` 4→5, `fillShunt`/`fillShuntBatch` selection, a shunt-VC batch test) to demonstrate end-to-end.
+
+**Shunt family landed + value demonstrated** (commits `ad25d28`, `9e6ee55`). `shIdx` widened 4→5 with
+the alternate Q row at `[4]`; `collectShAltPattern` / `buildShDynDest` and the `scatterAddDyn` wiring
+mirror the closed-branch path across `fillShunt`/`fillShuntBatch`/`fillShuntBatchF`. Flag-off stays
+byte-identical (40/40); flag-on 39/39.
+
+`GpuShuntVoltageControlTest#dynQRelocUnlocksSharedStructureShuntControl` proves the one-terminal fix at
+the single-solve level (no SA/JAVA machinery): extract the structure control-OFF, solve it with the
+control-ON activation (what the batch does per round on the fixed structure).
+
+| | `‖F‖∞` | `max\|x_gpu − x_olf\|` |
+|---|---|---|
+| flag OFF | `3.45e-14` (converges) | **`2.995e+00`** — converged-but-WRONG: `SHUNT_B` frozen at warm-start |
+| flag ON | `3.45e-14` | **`2.398e-14`** — machine-precision match to OLF |
+
+This is the case dynamic Q-relocation exists for: a two-terminal transformer keeps its control column
+constrained by the other terminal (so its *final* result is unaffected — §11.8 first paragraph); a
+one-terminal shunt does not, so a frozen structure freezes `SHUNT_B` and converges on a wrong system.
+Dynamic relocation routes Q to the free control-variable row and recovers the correct solve.
+
+**Next (increment 3):** exercise this in a real batch outer loop — re-enable shunt VC in the JAVA
+hybrid (`GpuSaRunScope.JAVA_SUPPORTED_LOOPS`, reverted earlier only because of this Q-relocation
+blocker) or add a device shunt orchestrator — and a batch shunt-VC SA test asserting CPU parity.

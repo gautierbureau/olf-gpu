@@ -271,11 +271,13 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     @Test
     @org.junit.jupiter.api.Disabled("Increment 3 WIP: the JAVA hybrid now DRIVES shunt VC (bridge initialize() "
             + "enables control, compact snapshot isolates the controller shunt, dynamic Q-relocation follows the "
-            + "on<->off toggle), and the batch ENGAGES — but the pre-contingency (N) result differs from CPU by "
-            + "~0.7 kV because the SA base solve leaves the shunt in CONTINUOUS control (b=4.8, vcEnabled=true) "
-            + "instead of rounding to a section like CPU. That base-solve shunt-VC-rounding gap is orthogonal to "
-            + "dynamic Q-relocation (proven at the single-solve level in GpuShuntVoltageControlTest) and is the "
-            + "remaining work before this end-to-end assertion can pass.")
+            + "on<->off toggle) and the batch ENGAGES. The base solve is CORRECT — proven by "
+            + "GpuShuntVoltageControlTest#shuntBaseLoadFlowGpuVsCpuDiagnostic: the GPU base LF rounds the shunt to "
+            + "the SAME section as CPU on this topology. The remaining gap is the ENGINE's per-scenario shunt-VC "
+            + "solve, which converges to a continuous-like result (~2.4 kV off CPU's rounded post-contingency "
+            + "voltage) instead of the rounded section — a hybrid-engine outer-loop-sequencing issue orthogonal to "
+            + "dynamic Q-relocation (proven at the single-solve level). The base-network-state restore in the "
+            + "solver is in place; the engine per-scenario rounding is the open item.")
     void javaShuntVoltageControlMatchesCpu() {
         // Increment 3 (olf.gpu.sa.outerLoopMode=JAVA + shunt voltage control + Dynamic Q-relocation §11):
         // the device runs the inner Newton ONLY (the continuous susceptance is a SHUNT_B variable solved

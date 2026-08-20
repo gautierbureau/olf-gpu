@@ -123,6 +123,49 @@ class GpuShuntVoltageControlTest {
         assertTrue(worst < 1e-6, "GPU state must match OLF's Newton (max diff = " + worst + ")");
     }
 
+    @Test
+    void shuntBaseLoadFlowGpuVsCpuDiagnostic() {
+        java.util.function.Supplier<Network> supplier = () -> {
+            Network net = ShuntNetworkFactory.create();
+            com.powsybl.iidm.network.Line l1 = net.getLine("l1");
+            net.newLine().setId("l1_BIS")
+                    .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId())
+                    .setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                    .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId())
+                    .setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                    .setR(l1.getR() * 2).setX(l1.getX() * 2)
+                    .setG1(l1.getG1()).setB1(l1.getB1()).setG2(l1.getG2()).setB2(l1.getB2()).add();
+            return net;
+        };
+        com.powsybl.loadflow.LoadFlow.Runner runner = new com.powsybl.loadflow.LoadFlow.Runner(
+                new com.powsybl.openloadflow.OpenLoadFlowProvider(new DenseMatrixFactory()));
+
+        com.powsybl.loadflow.LoadFlowParameters cpuParams = new com.powsybl.loadflow.LoadFlowParameters()
+                .setShuntCompensatorVoltageControlOn(true);
+        Network cpuNet = supplier.get();
+        runner.run(cpuNet, cpuParams);
+
+        com.powsybl.loadflow.LoadFlowParameters gpuParams = new com.powsybl.loadflow.LoadFlowParameters()
+                .setShuntCompensatorVoltageControlOn(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(gpuParams)
+                .setAcSolverType(com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory.NAME);
+        Network gpuNet = supplier.get();
+        runner.run(gpuNet, gpuParams);
+
+        // The GPU base load flow must round the shunt to the SAME section as CPU and land on the same
+        // voltages — proving the base solve's shunt VC (continuous SHUNT_B in-Newton + discrete section
+        // rounding via OLF's ShuntVoltageControlOuterLoop) matches CPU on the SA's parallel-line topology.
+        for (String vl : new String[] {"vl1", "vl2", "vl3"}) {
+            double cpuV = cpuNet.getVoltageLevel(vl).getBusView().getBusStream().findFirst().orElseThrow().getV();
+            double gpuV = gpuNet.getVoltageLevel(vl).getBusView().getBusStream().findFirst().orElseThrow().getV();
+            org.junit.jupiter.api.Assertions.assertEquals(cpuV, gpuV, 1e-3, "base-LF bus voltage " + vl);
+        }
+        org.junit.jupiter.api.Assertions.assertEquals(
+                cpuNet.getShuntCompensator("SHUNT").getSolvedSectionCount(),
+                gpuNet.getShuntCompensator("SHUNT").getSolvedSectionCount(),
+                "base-LF shunt must round to the same section");
+    }
+
     private static double maxAbs(double[] a) {
         double m = 0;
         for (double v : a) {

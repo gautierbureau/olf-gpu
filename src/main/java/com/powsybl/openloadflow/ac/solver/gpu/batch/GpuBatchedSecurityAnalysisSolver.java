@@ -458,6 +458,14 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     gpuData.dqElem(), gpuData.dqSide(), gpuData.dqWeight(), gpuData.dqRow(), gpuData.dqKind(),
                     gpuData.ziIn(), gpuData.ziIdx(), gpuData.drRow(), gpuData.drCol(), gpuData.drCoef(),
                     gpuData.dbRow(), gpuData.dbCol(), gpuData.dbCoef());
+            // The engine drives OLF's Java outer loops on the SHARED network, mutating control-enabled flags
+            // (shunt/transformer VC), taps, PV/PQ, distributed targetP, and the state vector across scenarios.
+            // It restores the compact snapshot only BETWEEN scenarios, leaving the network in the last
+            // scenario's state when it returns. Snapshot the full base network state here and restore it after,
+            // so the pre-contingency (N) result and any CPU fall-through solve see the base state the base LF
+            // left — not a scenario's continuous-control mutation.
+            com.powsybl.openloadflow.network.NetworkState baseNetworkState =
+                    com.powsybl.openloadflow.network.NetworkState.save(network);
             try {
                 res = GpuHybridBatchOuterLoopEngine.solve(new GpuHybridBatchOuterLoopEngine.Inputs(
                         structure, 3, gpuData, nElements, network, equationSystem, context, n,
@@ -466,6 +474,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         30, maxOuter, 3,
                         GpuNewtonRaphson.GPU_TOLERANCE, reactiveLimitTol, slackDistTol, convEpsPerEq));
             } finally {
+                baseNetworkState.restore();
+                equationSystem.getStateVector().set(baseState.clone());
                 GpuAcNewtonSolver.destroyStructure(structure);
             }
         }

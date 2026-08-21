@@ -1335,4 +1335,52 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         // code paths, not a GPU error — and the GPU is the more accurate of the two SA implementations here.
         org.junit.jupiter.api.Assertions.assertEquals(plGpuDef, saGpuV, 1e-3, "GPU batched SA must reproduce a fresh post-contingency LF");
     }
+
+    @org.junit.jupiter.api.Test
+    void tvcSaAllOrchestrationsAgreeAtTightTolerance() {
+        // VALIDATION of the principle: the GPU SA (JAVA hybrid AND on-device orchestrator) agrees with the CPU
+        // sequential SA once the criteria/tolerance are tight enough that the orchestration-driven convergence-
+        // depth difference (different number of outer-loop re-solves per contingency) washes out. Run the SAME
+        // TVC contingency in all three orchestrations at TIGHT convEps and assert they converge to one solution.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
+        network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().setTargetDeadband(0).setRegulating(true)
+                .setTapPosition(0).setRegulationTerminal(network.getTwoWindingsTransformer("T2wT").getTerminal2()).setTargetV(34.0);
+        com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+        String bis = l0.getId() + "_BIS";
+        network.newLine().setId(bis)
+                .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency(bis, new BranchContingency(bis)));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL)
+                .setSlackBusPMaxMismatch(1e-4).setNewtonRaphsonConvEpsPerEq(1e-9);   // TIGHT: wash out orchestration depth
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        java.util.Set<String> vls = network.getVoltageLevelStream().map(vl -> vl.getId()).collect(java.util.stream.Collectors.toSet());
+        List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), vls, java.util.Set.of()));
+        java.util.function.Function<SecurityAnalysisResult, Double> v3 = r -> r.getPostContingencyResults().get(0)
+                .getNetworkResult().getBusResults().stream().filter(b -> b.getBusId().equals("BUS_3")).findFirst().orElseThrow().getV();
+
+        double cpu = v3.apply(runSecurityAnalysis(network, ctgs, mon, sap));  // CPU sequential
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        double gpuDevice = v3.apply(runSecurityAnalysis(network, ctgs, mon, sap));  // GPU on-device orchestrator
+        System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY, "JAVA");
+        double gpuJava;
+        try {
+            gpuJava = v3.apply(runSecurityAnalysis(network, ctgs, mon, sap));  // GPU JAVA hybrid (OLF's real loops)
+        } finally {
+            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+        System.err.printf("[ORCH] tight convEps  V(BUS_3)  CPU=%.9f  GPU-DEVICE=%.9f  GPU-JAVA=%.9f%n", cpu, gpuDevice, gpuJava);
+        System.err.printf("[ORCH] max spread=%.3e%n", Math.max(Math.abs(cpu - gpuDevice), Math.abs(cpu - gpuJava)));
+        org.junit.jupiter.api.Assertions.assertEquals(cpu, gpuDevice, 1e-4, "CPU vs GPU on-device SA must agree at tight tolerance");
+        org.junit.jupiter.api.Assertions.assertEquals(cpu, gpuJava, 1e-4, "CPU vs GPU JAVA-hybrid SA must agree at tight tolerance");
+    }
 }

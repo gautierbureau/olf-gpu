@@ -1164,28 +1164,46 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                     .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
             return network;
         };
-        java.util.function.Supplier<com.powsybl.loadflow.LoadFlowParameters> mkLfp = () -> {
+        java.util.function.BiFunction<Double, Boolean, Double> plainLfV3 = (convEps, gpu) -> {
+            com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                    .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+            var ext = com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                    .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL)
+                    .setNewtonRaphsonConvEpsPerEq(convEps);
+            if (gpu) {
+                ext.setAcSolverType(com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory.NAME);
+            }
+            Network net = baseNet.get();
+            net.getLine(bisHolder[0]).getTerminal1().disconnect();
+            net.getLine(bisHolder[0]).getTerminal2().disconnect();
+            new com.powsybl.loadflow.LoadFlow.Runner(new com.powsybl.openloadflow.OpenLoadFlowProvider(commonTestConfig.matrixFactory())).run(net, lfp);
+            return net.getVoltageLevel("VL_3").getBusView().getBusStream().findFirst().orElseThrow().getV();
+        };
+
+        // (A) SOLVER IDENTITY: at a TIGHT convEps a plain post-contingency LF converges to THE solution, so
+        //     CPU and GPU must agree to ~machine precision (the inner Newton is bit-for-bit equivalent; the
+        //     ~1e-5 seen at DEFAULT convEps is only the stopping-tolerance band, not the solver).
+        double plCpuTight = plainLfV3.apply(1e-8, false);
+        double plGpuTight = plainLfV3.apply(1e-8, true);
+        System.err.printf("[SOLVER-IDENTITY] tight convEps: plainLF-CPU=%.10f plainLF-GPU=%.10f  d=%.3e%n",
+                plCpuTight, plGpuTight, Math.abs(plCpuTight - plGpuTight));
+        org.junit.jupiter.api.Assertions.assertEquals(plCpuTight, plGpuTight, 1e-9,
+                "CPU and GPU plain LF must agree to machine precision at tight convEps");
+
+        // (B) The DEFAULT-convEps SA anomaly: the GPU batched SA reproduces a fresh DEFAULT-convEps LF; the
+        //     CPU SA does not (it diverges from its OWN plain LF). Compare all at the SAME default convEps.
+        double plGpuDef = plainLfV3.apply(1e-4, true);  // fresh-LF reference at default convEps
+        java.util.function.Supplier<com.powsybl.loadflow.LoadFlowParameters> mkSaLfp = () -> {
             com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                     .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
             com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
                     .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
             return lfp;
         };
-        com.powsybl.loadflow.LoadFlow.Runner runner = new com.powsybl.loadflow.LoadFlow.Runner(new com.powsybl.openloadflow.OpenLoadFlowProvider(commonTestConfig.matrixFactory()));
-        Network plCpu = baseNet.get();
-        plCpu.getLine(bisHolder[0]).getTerminal1().disconnect();
-        plCpu.getLine(bisHolder[0]).getTerminal2().disconnect();
-        runner.run(plCpu, mkLfp.get());
-        Network plGpu = baseNet.get();
-        plGpu.getLine(bisHolder[0]).getTerminal1().disconnect();
-        plGpu.getLine(bisHolder[0]).getTerminal2().disconnect();
-        com.powsybl.loadflow.LoadFlowParameters gLfp = mkLfp.get();
-        com.powsybl.openloadflow.OpenLoadFlowParameters.create(gLfp).setAcSolverType(com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory.NAME);
-        runner.run(plGpu, gLfp);
         Network saNet = baseNet.get();
         List<Contingency> ctgs = List.of(new Contingency(bisHolder[0], new BranchContingency(bisHolder[0])));
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
-        sap.setLoadFlowParameters(mkLfp.get());
+        sap.setLoadFlowParameters(mkSaLfp.get());
         List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
                 com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(),
                 saNet.getVoltageLevelStream().map(vl -> vl.getId()).collect(java.util.stream.Collectors.toSet()), java.util.Set.of()));
@@ -1193,17 +1211,12 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         SecurityAnalysisResult saGpu = runSecurityAnalysis(baseNet.get(), ctgs, mon, sap);
         securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
-        double plCpuV = plCpu.getVoltageLevel("VL_3").getBusView().getBusStream().findFirst().orElseThrow().getV();
-        double plGpuV = plGpu.getVoltageLevel("VL_3").getBusView().getBusStream().findFirst().orElseThrow().getV();
         double saCpuV = saCpu.getPostContingencyResults().get(0).getNetworkResult().getBusResults().stream().filter(b -> b.getBusId().equals("BUS_3")).findFirst().orElseThrow().getV();
         double saGpuV = saGpu.getPostContingencyResults().get(0).getNetworkResult().getBusResults().stream().filter(b -> b.getBusId().equals("BUS_3")).findFirst().orElseThrow().getV();
-        System.err.printf("[MATCHED] V(BUS_3)  plainLF-CPU=%.6f  plainLF-GPU=%.6f  SA-CPU=%.6f  SA-GPU=%.6f%n", plCpuV, plGpuV, saCpuV, saGpuV);
-        System.err.printf("[MATCHED] plLF-CPU vs SA-CPU=%.3e (CPU-SA outlier) | SA-GPU vs plLF=%.3e | plLF CPU-vs-GPU=%.3e%n",
-                Math.abs(plCpuV - saCpuV), Math.abs(plGpuV - saGpuV), Math.abs(plCpuV - plGpuV));
-        // The two solvers agree on a plain post-contingency LF (the ground truth), and the GPU batched SA
-        // reproduces it. The ~6e-3 "GPU vs CPU SA" gap is a CPU-SA anomaly: the CPU security analysis
-        // diverges from its OWN plain LoadFlow of the same contingency (same config) — it is NOT a GPU error.
-        org.junit.jupiter.api.Assertions.assertEquals(plCpuV, plGpuV, 1e-3, "CPU and GPU must agree on a plain post-contingency LF");
-        org.junit.jupiter.api.Assertions.assertEquals(plGpuV, saGpuV, 1e-3, "GPU batched SA must reproduce a fresh post-contingency LF");
+        System.err.printf("[SA-DEFAULT] freshLF=%.6f  SA-GPU=%.6f (d=%.3e)  SA-CPU=%.6f (d=%.3e, CPU-SA outlier)%n",
+                plGpuDef, saGpuV, Math.abs(plGpuDef - saGpuV), saCpuV, Math.abs(plGpuDef - saCpuV));
+        // The GPU batched SA reproduces a fresh post-contingency LF; the CPU SA diverges from its own plain
+        // LF (~6e-3). So the "GPU vs CPU SA" gap is a CPU-SA anomaly, not a GPU error.
+        org.junit.jupiter.api.Assertions.assertEquals(plGpuDef, saGpuV, 1e-3, "GPU batched SA must reproduce a fresh post-contingency LF");
     }
 }

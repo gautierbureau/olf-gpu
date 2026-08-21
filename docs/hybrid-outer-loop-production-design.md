@@ -616,13 +616,20 @@ Only after (a)–(d) hold do the fill-kernel selection changes (C) become meanin
   the relocation fires (`OLF_GPU_DYN_QRELOC_DEBUG` reports the relocatable-output count).
 
 **Finding that reframes the value.** The ~6e-3 kV two-terminal transformer-VC SA residual is **not**
-the wrong-row bug. For a two-terminal control the *final* rounded structure is control-off — the same
-state the base extraction froze — so relocation fires only in the intermediate continuous phase and
-the final result is unchanged (flag-on and flag-off both `5.994e-3` at default convEps). That residual
-is convergence **depth**, which the tight-convEps setting in `transformerVoltageControlBatchMatchesCpu`
-masks. Dynamic Q-relocation's real payoff is the **one-terminal shunt-VC** case (the batch
-architectural limit where `SHUNT_B` freezes at warm-start), which needs the **shunt-family extension**
-(`shIdx` 4→5, `fillShunt`/`fillShuntBatch` selection, a shunt-VC batch test) to demonstrate end-to-end.
+the wrong-row bug and dynamic Q-relocation does not touch it (flag-on and flag-off both `5.994e-3` at
+default convEps). **Correction — it is NOT "convergence depth" (an earlier mislabel):** a convEps
+sweep (both sides) shows a *discontinuous* ~765× cliff between `1e-4`→`1e-5`, the signature of a
+**discrete tap-rounding flip**, not a smooth depth shrink. At default tolerance CPU and GPU round the
+transformer to **different taps** — the GPU inner solve (cuDSS) and CPU inner solve (LU) differ at the
+ULP level, giving a slightly different continuous ratio, and with `targetDeadband=0` (maximal
+sensitivity) they land on opposite sides of a tap boundary. It is **not** the device orchestrator:
+JAVA mode runs OLF's *identical* rounding code and disagrees by the same `5.3e-3`. So
+`transformerVoltageControlBatchMatchesCpu` "passes" only by tightening BOTH sides to `1e-9` — which
+resolves the ratio precisely enough that both round the same — i.e. it **masks** a real
+cross-solver knife-edge, it does not fix it (a non-zero tap deadband, which real transformers have and
+the test zeroes, would largely eliminate it). This residual is **orthogonal to dynamic Q-relocation**,
+whose real payoff is the **one-terminal shunt-VC** case (the batch architectural limit where `SHUNT_B`
+freezes at warm-start) — demonstrated end-to-end in the shunt-family work below.
 
 **Shunt family landed + value demonstrated** (commits `ad25d28`, `9e6ee55`). `shIdx` widened 4→5 with
 the alternate Q row at `[4]`; `collectShAltPattern` / `buildShDynDest` and the `scatterAddDyn` wiring

@@ -1140,6 +1140,105 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         }
     }
 
+    private static void countReportKeys(com.powsybl.commons.report.ReportNode node, java.util.Map<String, Integer> tally) {
+        tally.merge(node.getMessageKey(), 1, Integer::sum);
+        for (com.powsybl.commons.report.ReportNode c : node.getChildren()) {
+            countReportKeys(c, tally);
+        }
+    }
+
+    private static com.powsybl.commons.report.ReportNode findSubtree(com.powsybl.commons.report.ReportNode node, String key) {
+        if (key.equals(node.getMessageKey())) {
+            return node;
+        }
+        for (com.powsybl.commons.report.ReportNode c : node.getChildren()) {
+            var found = findSubtree(c, key);
+            if (found != null) {
+                return found;
+            }
+        }
+        return null;
+    }
+
+    @org.junit.jupiter.api.Test
+    void tvcSaVsFreshLfIterationCounts() {
+        // CPU-ONLY: understand why the CPU sequential SA does not reproduce a fresh CPU LF for this
+        // contingency (~6e-3 kV) BEFORE looking at the GPU path. Instrument outer-loop + Newton iteration
+        // counts (olf.OuterLoopIteration / olf.mismatchInitial / olf.mismatchIteration) for both, at
+        // IDENTICAL default config. No GPU involved.
+        String[] bis = new String[1];
+        java.util.function.Supplier<Network> baseNet = () -> {
+            Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
+            network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().setTargetDeadband(0).setRegulating(true)
+                    .setTapPosition(0).setRegulationTerminal(network.getTwoWindingsTransformer("T2wT").getTerminal2()).setTargetV(34.0);
+            com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+            bis[0] = l0.getId() + "_BIS";
+            network.newLine().setId(bis[0])
+                    .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                    .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                    .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
+            return network;
+        };
+        java.util.function.BiConsumer<com.powsybl.loadflow.LoadFlowParameters, com.powsybl.openloadflow.OpenLoadFlowParameters.ReportedFeatures> cfg = (lfp, feat) ->
+                com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                        .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL)
+                        .setNewtonRaphsonConvEpsPerEq(1e-4)
+                        .setReportedFeatures(java.util.Set.of(feat));
+
+        // FRESH LF at the post-contingency operating point (l0_BIS disconnected)
+        Network pc = baseNet.get();
+        pc.getLine(bis[0]).getTerminal1().disconnect();
+        pc.getLine(bis[0]).getTerminal2().disconnect();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        cfg.accept(lfp, com.powsybl.openloadflow.OpenLoadFlowParameters.ReportedFeatures.NEWTON_RAPHSON_LOAD_FLOW);
+        com.powsybl.commons.report.ReportNode rLf = com.powsybl.commons.report.ReportNode.newRootReportNode()
+                .withResourceBundles(com.powsybl.openloadflow.util.report.PowsyblOpenLoadFlowReportResourceBundle.BASE_NAME)
+                .withMessageTemplate("olf.securityAnalysis").build();
+        loadFlowProvider.run(pc, computationManager, pc.getVariantManager().getWorkingVariantId(), lfp, rLf).join();
+        java.util.Map<String, Integer> tLf = new java.util.TreeMap<>();
+        countReportKeys(rLf, tLf);
+        double lfV3 = pc.getVoltageLevel("VL_3").getBusView().getBusStream().findFirst().orElseThrow().getV();
+        System.err.printf("[ITER] FRESH-LF  V(BUS_3)=%.6f  outerLoopIter=%d  newtonIter=%d%n", lfV3,
+                tLf.getOrDefault("olf.OuterLoopIteration", 0),
+                tLf.getOrDefault("olf.mismatchInitial", 0) + tLf.getOrDefault("olf.mismatchIteration", 0));
+
+        // CPU sequential SA on the contingency
+        Network saNet = baseNet.get();
+        List<Contingency> ctgs = List.of(new Contingency(bis[0], new BranchContingency(bis[0])));
+        com.powsybl.loadflow.LoadFlowParameters saLfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        cfg.accept(saLfp, com.powsybl.openloadflow.OpenLoadFlowParameters.ReportedFeatures.NEWTON_RAPHSON_SECURITY_ANALYSIS);
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(saLfp);
+        List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(),
+                saNet.getVoltageLevelStream().map(vl -> vl.getId()).collect(java.util.stream.Collectors.toSet()), java.util.Set.of()));
+        com.powsybl.commons.report.ReportNode rSa = com.powsybl.commons.report.ReportNode.newRootReportNode()
+                .withResourceBundles(com.powsybl.openloadflow.util.report.PowsyblOpenLoadFlowReportResourceBundle.BASE_NAME)
+                .withMessageTemplate("olf.securityAnalysis").build();
+        SecurityAnalysisResult saCpu = runSecurityAnalysis(saNet, ctgs, mon, sap, rSa);
+        double saV3 = saCpu.getPostContingencyResults().get(0).getNetworkResult().getBusResults().stream().filter(b -> b.getBusId().equals("BUS_3")).findFirst().orElseThrow().getV();
+        // isolate the POST-contingency subtree (exclude the base N run)
+        var preNode = findSubtree(rSa, "olf.preContingencySimulation");
+        var postNode = findSubtree(rSa, "olf.postContingencySimulation");
+        java.util.Map<String, Integer> tPre = new java.util.TreeMap<>();
+        java.util.Map<String, Integer> tPost = new java.util.TreeMap<>();
+        if (preNode != null) {
+            countReportKeys(preNode, tPre);
+        }
+        if (postNode != null) {
+            countReportKeys(postNode, tPost);
+        }
+        System.err.printf("[ITER] CPU-SA base N       outerLoopIter=%d  newtonIter=%d%n",
+                tPre.getOrDefault("olf.OuterLoopIteration", 0),
+                tPre.getOrDefault("olf.mismatchInitial", 0) + tPre.getOrDefault("olf.mismatchIteration", 0));
+        System.err.printf("[ITER] CPU-SA post-ctg     V(BUS_3)=%.6f  outerLoopIter=%d  newtonIter=%d%n", saV3,
+                tPost.getOrDefault("olf.OuterLoopIteration", 0),
+                tPost.getOrDefault("olf.mismatchInitial", 0) + tPost.getOrDefault("olf.mismatchIteration", 0));
+        System.err.println("[ITER] CPU-SA post-ctg keys: " + tPost);
+    }
+
     @org.junit.jupiter.api.Test
     void tvcSaGpuReproducesFreshLoadFlow() {
         // The GPU batched transformer-VC SA must reproduce a fresh (fully re-converged) post-contingency

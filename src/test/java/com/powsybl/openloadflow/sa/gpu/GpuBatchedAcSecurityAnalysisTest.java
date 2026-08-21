@@ -275,12 +275,10 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         // in-Newton), OLF's own ShuntVoltageControlOuterLoop makes the discrete section DECISIONS per
         // scenario, the compact snapshot isolates the controller-shunt b + VC-enabled (BusState), and
         // dynamic Q-relocation lets the ONE shared structure follow the shunt control on<->off toggle (a
-        // one-terminal SHUNT_B would otherwise freeze). Requires OLF_GPU_DYN_QRELOC=1 (the gate falls back
-        // to CPU without it), so the test is skipped unless the flag is set.
+        // one-terminal SHUNT_B would otherwise freeze). Relocation auto-enables in the CUDA structure
+        // whenever a controllable bus is present, so no flag is required.
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        org.junit.jupiter.api.Assumptions.assumeTrue("1".equals(System.getenv("OLF_GPU_DYN_QRELOC")),
-                "requires OLF_GPU_DYN_QRELOC=1 (JAVA shunt VC is gated on dynamic Q-relocation)");
         Network network = com.powsybl.openloadflow.network.ShuntNetworkFactory.create();
         // Radial b1-b2-b3(SHUNT): add a parallel circuit to l1 (b1-b2) and outage the CLONE so the grid
         // stays connected, flows shift, and the shunt control does real work per scenario.

@@ -179,11 +179,11 @@ class GpuShuntVoltageControlTest {
      * JAVA machinery is needed. Reproduces the shared-structure batch condition directly: the structure
      * is extracted with shunt control OFF (Q frozen on the bus-V row, SHUNT_B pinned), then solved with
      * the control-ON activation (bus-V row becomes the v-target identity, SHUNT_B a free Newton row) —
-     * exactly what the batch does per round on its fixed structure. Flag OFF, the frozen structure keeps
-     * Q on the (now-identity) bus-V row so SHUNT_B never receives it and freezes at warm-start -> the
-     * controlled bus misses its target. Flag ON (OLF_GPU_DYN_QRELOC=1), the fill routes Q to the free
-     * SHUNT_B row and the solve matches OLF's continuous reference. Asserts the match only when the flag
-     * is set; always prints both numbers.
+     * exactly what the batch does per round on its fixed structure. Without relocation the frozen
+     * structure would keep Q on the (now-identity) bus-V row so SHUNT_B never receives it and freezes at
+     * warm-start (state ~3 off). Dynamic Q-relocation — auto-enabled because the structure has a
+     * controllable bus — routes Q to the free SHUNT_B row, and the solve matches OLF's continuous
+     * reference to machine precision.
      */
     @Test
     void dynQRelocUnlocksSharedStructureShuntControl() {
@@ -225,12 +225,8 @@ class GpuShuntVoltageControlTest {
         for (int i = 0; i < n; i++) {
             worst = Math.max(worst, Math.abs(out[i] - xRef[i]));
         }
-        boolean flagOn = "1".equals(System.getenv("OLF_GPU_DYN_QRELOC"));
-        System.out.printf("[DYN-QRELOC shunt shared-structure] OLF_GPU_DYN_QRELOC=%s  ||F||inf=%.2e  "
-                + "max|x_gpu - x_olf|=%.3e%n", System.getenv("OLF_GPU_DYN_QRELOC"), norm, worst);
-        if (flagOn) {
-            assertTrue(norm < TOL, "flag ON: GPU Newton must converge on the shared structure (||F||inf=" + norm + ")");
-            assertTrue(worst < 1e-6, "flag ON: dynamic Q-relocation must match OLF's continuous solve (max diff=" + worst + ")");
-        }
+        System.out.printf("[DYN-QRELOC shunt shared-structure] ||F||inf=%.2e  max|x_gpu - x_olf|=%.3e%n", norm, worst);
+        assertTrue(norm < TOL, "GPU Newton must converge on the shared structure (||F||inf=" + norm + ")");
+        assertTrue(worst < 1e-6, "dynamic Q-relocation must match OLF's continuous solve (max diff=" + worst + ")");
     }
 }

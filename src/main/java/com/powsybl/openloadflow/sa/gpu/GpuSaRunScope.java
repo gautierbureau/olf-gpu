@@ -184,12 +184,6 @@ final class GpuSaRunScope {
      *  the WHOLE run to the CPU fallback. TEMPORARY — shrinks to empty as coverage lands (§5.7). Differs from the
      *  DEVICE gate: EVERY OLF balance type works (generation- AND load-based — the engine isolates both generator
      *  and load targets per scenario), and no useActiveLimits requirement (JAVA runs OLF's own ActivePowerDistribution). */
-    /** Dynamic Q-relocation (§11) toggle, shared with the native fill via the {@code OLF_GPU_DYN_QRELOC}
-     *  env var so the Java gate and the CUDA structure agree. Required for JAVA-mode shunt voltage control. */
-    static boolean dynQRelocEnabled() {
-        return "1".equals(System.getenv("OLF_GPU_DYN_QRELOC"));
-    }
-
     private static List<String> javaUnsupportedOuterLoops(LfNetwork lfNetwork, AcLoadFlowParameters acParameters,
                                                           boolean noHvdc, boolean noSvc) {
         List<String> unsupported = new ArrayList<>();
@@ -204,10 +198,12 @@ final class GpuSaRunScope {
                     || "TransformerVoltageControl".equals(name) && GpuBatchTransformerControl.transformerControlSupported(lfNetwork)
                     // ShuntVoltageControl: the JAVA engine runs OLF's real shunt VC loop; the continuous
                     // susceptance is solved INSIDE the device inner Newton (SHUNT_B is a variable in es) and the
-                    // compact snapshot isolates the controller-shunt b + VC-enabled per scenario (BusState). It
-                    // requires Dynamic Q-relocation (§11): a one-terminal SHUNT_B freezes on the shared structure
-                    // without it, so this is gated on OLF_GPU_DYN_QRELOC (else the whole run routes to CPU).
-                    || "ShuntVoltageControl".equals(name) && dynQRelocEnabled())
+                    // compact snapshot isolates the controller-shunt b + VC-enabled per scenario (BusState).
+                    // Dynamic Q-relocation (§11) — which keeps the shared structure correct as the one-terminal
+                    // SHUNT_B toggles — is auto-enabled in the CUDA structure whenever a controllable bus is
+                    // present, so no gate is needed here (unsupported shunt shapes throw at extraction and the
+                    // precompute falls back to CPU).
+                    || "ShuntVoltageControl".equals(name))
                     // conservative structural no-ops: allow the HVDC/SVC-touching loops only when they cannot
                     // fire yet (widen once JAVA's HVDC/SVC handling is validated — the snapshot already captures
                     // HvdcState, and SVCs are generator-voltage-control buses already in the controller set).

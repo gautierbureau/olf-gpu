@@ -605,15 +605,19 @@ Only after (a)–(d) hold do the fill-kernel selection changes (C) become meanin
 
 ### 11.8 Implementation status (2026-08-20)
 
-**Closed-branch increment landed** (commit `5ef436c`, branch `hybrid-java-outer-loop`), gated behind
-`OLF_GPU_DYN_QRELOC` (default off):
+**Closed-branch + shunt increments landed** (branch `hybrid-java-outer-loop`), **auto-enabled per
+structure** — `buildStructure` turns relocation on exactly when an element carries an alternate Q row
+(`hasRelocatable` scans `cbIdx[e*12+10/11]` / `shIdx[e*5+4]`), so plain PF keeps the fast frozen-dest
+path and only voltage-control structures pay the tiny per-output selector cost. No environment-variable
+gate (functional behaviour must not hide behind an env var):
 - `cbIdx` widened 10→12 (alternate Q rows at `[10]`,`[11]`), `computeQRowAlt`, the `collectPattern`
   union (`collectCbAltPattern`), the dual-dest + frozen-row selector (`buildCbDynDest`), and the fill
-  selection (`scatterAddDyn`/`scatterAddFDyn`) across all three closed-branch fills.
+  selection (`scatterAddDyn`/`scatterAddFDyn`) across all three closed-branch fills; shunt mirror at
+  `shIdx` 5.
 - `buildRowMap` **untouched** — the bijection is layout-invariant, re-confirmed at stride 12 by
   `DynQRelocationProbeTest`.
-- **No regression:** flag-off is byte-identical (29/29 batch SA + 10/10 core); flag-on all 39 pass and
-  the relocation fires (`OLF_GPU_DYN_QRELOC_DEBUG` reports the relocatable-output count).
+- **No regression:** 43/43 tests pass with relocation always auto-enabled (byte-identical for plain PF
+  and two-terminal TVC, correct for one-terminal shunt VC).
 
 **Finding that reframes the value.** The ~6e-3 kV two-terminal transformer-VC SA residual is **not**
 the wrong-row bug and dynamic Q-relocation does not touch it (flag-on and flag-off both `5.994e-3` at

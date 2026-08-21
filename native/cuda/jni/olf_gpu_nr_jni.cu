@@ -366,16 +366,27 @@ std::vector<int> buildDest(int ne, const int* idx, int stride, const S* table, i
 // outer loop: its own BUS_V row (control OFF) and the free controller's BRANCH_RHO1 / SHUNT_B row
 // (control ON). The extractor freezes ONE into cbIdx; the alternate travels at cbIdx[10+rowEnd]
 // (packed by GpuAcFamilyPacker as qRowAlt, remapped through rowMap like every other row index).
-// When enabled, the closed-branch fill routes each controlled-bus q output to whichever of the two
-// candidate rows is FREE this scenario (row-mode != 0), so one shared batch structure follows a
+// When enabled, the closed-branch/shunt fill routes each controlled-bus q output to whichever of the
+// two candidate rows is FREE this scenario (row-mode != 0), so one shared batch structure follows a
 // per-scenario control toggle instead of solving a subtly wrong system.
-static bool dynQRelocEnabled() {
-    static int v = -1;
-    if (v < 0) {
-        const char* e = getenv("OLF_GPU_DYN_QRELOC");
-        v = (e && e[0] == '1') ? 1 : 0;
+//
+// Auto-enabled per structure: a structure needs dynamic Q-relocation exactly when some element carries
+// an alternate Q row (a transformer/shunt voltage-controlled bus). qAlt lives at cbIdx[e*12+10/11] and
+// shIdx[e*5+4], set to a real row (>= 0) only for a controllable bus, -1 otherwise. When no element has
+// one, the union pattern is empty and every fill uses the frozen dest — so plain PF keeps the fast
+// path and only voltage-control structures pay the (tiny) per-output selector cost.
+static bool hasRelocatable(int ncb, const int* cbIdx, int nsh, const int* shIdx) {
+    for (int e = 0; e < ncb; e++) {
+        if (cbIdx[static_cast<size_t>(e) * 12 + 10] >= 0 || cbIdx[static_cast<size_t>(e) * 12 + 11] >= 0) {
+            return true;
+        }
     }
-    return v != 0;
+    for (int e = 0; e < nsh; e++) {
+        if (shIdx[static_cast<size_t>(e) * 5 + 4] >= 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // The alternate candidate Q row for a closed-branch output, or -1 if this output does not relocate
@@ -1171,7 +1182,7 @@ SharedStructure* buildStructure(int n,
     // ---- fixed CSR pattern (rows = permuted equations, cols = variables) ----
     std::vector<std::pair<int, int>> pat;
     collectPattern(ncb, cbIdx, 12, CB_SCATTER, CB_NOUT, resolveCb, pat);
-    bool dynReloc = dynQRelocEnabled();
+    bool dynReloc = hasRelocatable(ncb, cbIdx, nsh, shIdx);
     if (dynReloc) {
         collectCbAltPattern(ncb, cbIdx, pat);                // union the alternate Q rows into the pattern
     }
@@ -1211,15 +1222,6 @@ SharedStructure* buildStructure(int n,
         st->cb.altDest.upload(altDest.data(), altDest.size() * sizeof(int));
         st->cb.selRow.upload(selRow.data(), selRow.size() * sizeof(int));
         st->cb.dynReloc = true;
-        if (getenv("OLF_GPU_DYN_QRELOC_DEBUG")) {
-            int nSel = 0;
-            for (int v : selRow) {
-                if (v >= 0) {
-                    nSel++;
-                }
-            }
-            std::fprintf(stderr, "[DYN-QRELOC] ncb=%d relocatable-outputs=%d\n", ncb, nSel);
-        }
     }
     if (ncb) {                                               // per-element static trig (OLF's precomputed-trig shape)
         st->cbTrig.alloc(static_cast<size_t>(ncb) * 6 * sizeof(double));
@@ -1234,15 +1236,6 @@ SharedStructure* buildStructure(int n,
         st->sh.altDest.upload(shAltDest.data(), shAltDest.size() * sizeof(int));
         st->sh.selRow.upload(shSelRow.data(), shSelRow.size() * sizeof(int));
         st->sh.dynReloc = true;
-        if (getenv("OLF_GPU_DYN_QRELOC_DEBUG")) {
-            int nSel = 0;
-            for (int v : shSelRow) {
-                if (v >= 0) {
-                    nSel++;
-                }
-            }
-            std::fprintf(stderr, "[DYN-QRELOC] nsh=%d relocatable-outputs=%d\n", nsh, nSel);
-        }
     }
     setupFamily(st->hv, nhv, hvIn, 5, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pos);
 

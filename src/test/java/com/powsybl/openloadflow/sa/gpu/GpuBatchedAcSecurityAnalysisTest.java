@@ -1180,24 +1180,33 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
             return net.getVoltageLevel("VL_3").getBusView().getBusStream().findFirst().orElseThrow().getV();
         };
 
-        // (A) SOLVER IDENTITY: at a TIGHT convEps a plain post-contingency LF converges to THE solution, so
-        //     CPU and GPU must agree to ~machine precision (the inner Newton is bit-for-bit equivalent; the
-        //     ~1e-5 seen at DEFAULT convEps is only the stopping-tolerance band, not the solver).
+        // (A) SOLVER IDENTITY — with truly identical config the CPU and GPU plain LF converge to the SAME
+        //     post-contingency solution to MACHINE PRECISION, at DEFAULT convEps (1e-4) AND tight (1e-8):
+        //     ~1.4e-14 / ~7.1e-15. (An earlier ~1e-5 I saw was a config bug — OpenLoadFlowParameters.create
+        //     on already-extended params reset the TVC mode on one side — not a solver difference.)
+        double plCpuDef = plainLfV3.apply(1e-4, false);
+        double plGpuDef = plainLfV3.apply(1e-4, true);
         double plCpuTight = plainLfV3.apply(1e-8, false);
         double plGpuTight = plainLfV3.apply(1e-8, true);
-        System.err.printf("[SOLVER-IDENTITY] tight convEps: plainLF-CPU=%.10f plainLF-GPU=%.10f  d=%.3e%n",
-                plCpuTight, plGpuTight, Math.abs(plCpuTight - plGpuTight));
+        System.err.printf("[SOLVER] plainLF CPU-vs-GPU  DEFAULT convEps d=%.3e  |  TIGHT convEps d=%.3e (both machine precision)%n",
+                Math.abs(plCpuDef - plGpuDef), Math.abs(plCpuTight - plGpuTight));
+        org.junit.jupiter.api.Assertions.assertEquals(plCpuDef, plGpuDef, 1e-9,
+                "CPU and GPU plain LF must converge to the SAME solution at DEFAULT convEps (machine precision)");
         org.junit.jupiter.api.Assertions.assertEquals(plCpuTight, plGpuTight, 1e-9,
-                "CPU and GPU plain LF must agree to machine precision at tight convEps");
+                "and at tight convEps too (machine precision)");
 
-        // (B) The DEFAULT-convEps SA anomaly: the GPU batched SA reproduces a fresh DEFAULT-convEps LF; the
-        //     CPU SA does not (it diverges from its OWN plain LF). Compare all at the SAME default convEps.
-        double plGpuDef = plainLfV3.apply(1e-4, true);  // fresh-LF reference at default convEps
+        // (B) SA ORCHESTRATION difference (NOT the solver, proven identical above). Both SA implementations
+        //     warm-start each contingency from the base N state (the GPU batch tiles the base row as x0 —
+        //     olf_gpu_nr_jni.cu ~L2878 — so warm-start is NOT the differentiator). Yet, at the SAME default
+        //     convEps, the GPU batch converges each contingency close to the fresh LF while the CPU sequential
+        //     SA stops ~6e-3 short — a post-contingency outer-loop-convergence difference between the two SA
+        //     code paths (exact mechanism still under investigation), not a GPU error.
         java.util.function.Supplier<com.powsybl.loadflow.LoadFlowParameters> mkSaLfp = () -> {
             com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                     .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
             com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
-                    .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
+                    .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL)
+                    .setNewtonRaphsonConvEpsPerEq(1e-4);  // pin EXACTLY the fresh-LF convEps — no hidden mismatch
             return lfp;
         };
         Network saNet = baseNet.get();
@@ -1215,8 +1224,10 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         double saGpuV = saGpu.getPostContingencyResults().get(0).getNetworkResult().getBusResults().stream().filter(b -> b.getBusId().equals("BUS_3")).findFirst().orElseThrow().getV();
         System.err.printf("[SA-DEFAULT] freshLF=%.6f  SA-GPU=%.6f (d=%.3e)  SA-CPU=%.6f (d=%.3e, CPU-SA outlier)%n",
                 plGpuDef, saGpuV, Math.abs(plGpuDef - saGpuV), saCpuV, Math.abs(plGpuDef - saCpuV));
-        // The GPU batched SA reproduces a fresh post-contingency LF; the CPU SA diverges from its own plain
-        // LF (~6e-3). So the "GPU vs CPU SA" gap is a CPU-SA anomaly, not a GPU error.
+        // The GPU batch converges the contingency close to the fresh LF; the CPU sequential SA stops ~6e-3
+        // short. Both warm-start from the base N state, and the solvers are identical (A), so the ~6e-3
+        // "GPU vs CPU SA" gap is a post-contingency outer-loop-convergence difference between the two SA
+        // code paths, not a GPU error — and the GPU is the more accurate of the two SA implementations here.
         org.junit.jupiter.api.Assertions.assertEquals(plGpuDef, saGpuV, 1e-3, "GPU batched SA must reproduce a fresh post-contingency LF");
     }
 }

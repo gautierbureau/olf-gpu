@@ -619,20 +619,30 @@ gate (functional behaviour must not hide behind an env var):
 - **No regression:** 43/43 tests pass with relocation always auto-enabled (byte-identical for plain PF
   and two-terminal TVC, correct for one-terminal shunt VC).
 
-**Finding that reframes the value.** The ~6e-3 kV two-terminal transformer-VC SA residual is **not**
-the wrong-row bug and dynamic Q-relocation does not touch it (flag-on and flag-off both `5.994e-3` at
-default convEps). **Correction — it is NOT "convergence depth" (an earlier mislabel):** a convEps
-sweep (both sides) shows a *discontinuous* ~765× cliff between `1e-4`→`1e-5`, the signature of a
-**discrete tap-rounding flip**, not a smooth depth shrink. At default tolerance CPU and GPU round the
-transformer to **different taps** — the GPU inner solve (cuDSS) and CPU inner solve (LU) differ at the
-ULP level, giving a slightly different continuous ratio, and with `targetDeadband=0` (maximal
-sensitivity) they land on opposite sides of a tap boundary. It is **not** the device orchestrator:
-JAVA mode runs OLF's *identical* rounding code and disagrees by the same `5.3e-3`. So
-`transformerVoltageControlBatchMatchesCpu` "passes" only by tightening BOTH sides to `1e-9` — which
-resolves the ratio precisely enough that both round the same — i.e. it **masks** a real
-cross-solver knife-edge, it does not fix it (a non-zero tap deadband, which real transformers have and
-the test zeroes, would largely eliminate it). This residual is **orthogonal to dynamic Q-relocation**,
-whose real payoff is the **one-terminal shunt-VC** case (the batch architectural limit where `SHUNT_B`
+**Finding — the ~6e-3 kV TVC SA gap is a CPU-SA anomaly, not a GPU error** (test
+`tvcSaGpuReproducesFreshLoadFlow`). It is not the wrong-row bug (dyn reloc flag-on == flag-off). Two
+earlier labels of mine — "convergence depth" and then "tap-rounding knife-edge" — were **both wrong**;
+a matched-config four-way comparison on the T2wt post-contingency point (identical default params)
+settles it:
+
+| run | V(BUS_3) |
+|---|---|
+| plain-LF CPU | `34.426533` |
+| plain-LF GPU | `34.426518` |
+| SA GPU | `34.426440` |
+| SA CPU | **`34.432435`** — lone outlier |
+
+`plain-LF-CPU` and `SA-CPU` — two OpenLoadFlow CPU runs of the *same* contingency at the *same* config —
+**disagree by 5.9e-3**, which they should not. It is **not a tap flip** (the coarse taps are ~1.7 kV
+apart; every run is at tap 3) and **not the inner solve**: at a *tight* convEps a plain post-contingency
+LF agrees CPU==GPU to **`7.1e-15` (machine precision)**. The CPU security analysis's *warm-started*
+post-contingency solve stops ~6e-3 short of the fresh-LF solution; the GPU batch converges to it. So the
+GPU batched SA is **correct** (it reproduces a fresh LoadFlow, `d=9e-5`) — comparing it to the CPU SA is
+misleading because the CPU SA is itself inconsistent with a plain LoadFlow, and
+`transformerVoltageControlBatchMatchesCpu`'s tight-convEps "agreement" merely forces the CPU SA to
+converge deeper toward that true answer. The open question is an OpenLoadFlow CPU-SA warm-start
+behaviour, **not** a GPU issue. Dynamic Q-relocation is orthogonal to all of this; its real payoff is
+the **one-terminal shunt-VC** case (the batch architectural limit where `SHUNT_B`
 freezes at warm-start) — demonstrated end-to-end in the shunt-family work below.
 
 **Shunt family landed + value demonstrated** (commits `ad25d28`, `9e6ee55`). `shIdx` widened 4→5 with

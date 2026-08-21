@@ -1163,8 +1163,13 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     @org.junit.jupiter.api.Test
     void tvcSaVsFreshLfIterationCounts() {
         // CPU-ONLY: understand why the CPU sequential SA does not reproduce a fresh CPU LF for this
-        // contingency (~6e-3 kV) BEFORE looking at the GPU path. Instrument outer-loop + Newton iteration
-        // counts (olf.OuterLoopIteration / olf.mismatchInitial / olf.mismatchIteration) for both, at
+        // contingency (~6e-3 kV) BEFORE looking at the GPU path. Counts the number of Newton SOLVES
+        // (mismatchInitial = 1 + outer-loop re-solves) — NOT olf.OuterLoopIteration, which the AFTER_GENERATOR
+        // TransformerVoltageControlOuterLoop does not emit (only the incremental/RL loops do). Result:
+        // fresh LF = 5 solves / 13 Newton (tap 3); CPU-SA post-contingency = 3 solves / 6 Newton. The TVC
+        // DOES run in the post-contingency (initStep -> controlStep -> round), it just does fewer re-solves
+        // from the warm start and lands ~6e-3 short (both at tap 3, since 6e-3 << the ~1.7 kV tap step). So
+        // the gap is a warm-start convergence difference in the CPU SA, not a skipped outer loop. Reported at
         // IDENTICAL default config. No GPU involved.
         String[] bis = new String[1];
         java.util.function.Supplier<Network> baseNet = () -> {
@@ -1199,9 +1204,10 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         java.util.Map<String, Integer> tLf = new java.util.TreeMap<>();
         countReportKeys(rLf, tLf);
         double lfV3 = pc.getVoltageLevel("VL_3").getBusView().getBusStream().findFirst().orElseThrow().getV();
-        System.err.printf("[ITER] FRESH-LF  V(BUS_3)=%.6f  outerLoopIter=%d  newtonIter=%d%n", lfV3,
-                tLf.getOrDefault("olf.OuterLoopIteration", 0),
-                tLf.getOrDefault("olf.mismatchInitial", 0) + tLf.getOrDefault("olf.mismatchIteration", 0));
+        System.err.printf("[ITER] FRESH-LF  V(BUS_3)=%.6f  newtonSolves=%d  newtonIter=%d  tap=%d%n", lfV3,
+                tLf.getOrDefault("olf.mismatchInitial", 0),
+                tLf.getOrDefault("olf.mismatchInitial", 0) + tLf.getOrDefault("olf.mismatchIteration", 0),
+                pc.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getSolvedTapPosition());
 
         // CPU sequential SA on the contingency
         Network saNet = baseNet.get();
@@ -1230,11 +1236,11 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         if (postNode != null) {
             countReportKeys(postNode, tPost);
         }
-        System.err.printf("[ITER] CPU-SA base N       outerLoopIter=%d  newtonIter=%d%n",
-                tPre.getOrDefault("olf.OuterLoopIteration", 0),
+        System.err.printf("[ITER] CPU-SA base N       newtonSolves=%d  newtonIter=%d%n",
+                tPre.getOrDefault("olf.mismatchInitial", 0),
                 tPre.getOrDefault("olf.mismatchInitial", 0) + tPre.getOrDefault("olf.mismatchIteration", 0));
-        System.err.printf("[ITER] CPU-SA post-ctg     V(BUS_3)=%.6f  outerLoopIter=%d  newtonIter=%d%n", saV3,
-                tPost.getOrDefault("olf.OuterLoopIteration", 0),
+        System.err.printf("[ITER] CPU-SA post-ctg     V(BUS_3)=%.6f  newtonSolves=%d  newtonIter=%d%n", saV3,
+                tPost.getOrDefault("olf.mismatchInitial", 0),
                 tPost.getOrDefault("olf.mismatchInitial", 0) + tPost.getOrDefault("olf.mismatchIteration", 0));
         System.err.println("[ITER] CPU-SA post-ctg keys: " + tPost);
     }

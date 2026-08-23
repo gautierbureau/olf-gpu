@@ -1433,4 +1433,144 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         System.err.printf("[WARM-VS-FLAT] baseN tap=%d | FLAT V=%.6f tap=%d | WARM V=%.6f tap=%d | d(warm,flat)=%.3e%n",
                 baseTap, flatV, flatTap, warmV, warmTap, Math.abs(warmV - flatV));
     }
+
+    /** CPU-ONLY isolation: which outer loop makes the CPU SA post-contingency diverge from a plain LF of the
+     *  SAME operating point? Toggles TVC / distributed slack / reactive limits independently, at DEFAULT
+     *  tolerance (never tighten). For each combination prints plainLF vs CPU-SA V(BUS_3). */
+    @org.junit.jupiter.api.Test
+    void cpuSaVsPlainLfFeatureIsolation() {
+        java.util.function.Supplier<Network> baseNet = () -> {
+            Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
+            network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().setTargetDeadband(0).setRegulating(true)
+                    .setTapPosition(0).setRegulationTerminal(network.getTwoWindingsTransformer("T2wT").getTerminal2()).setTargetV(34.0);
+            com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+            network.newLine().setId(l0.getId() + "_BIS")
+                    .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                    .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                    .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
+            return network;
+        };
+        String bis = baseNet.get().getLines().iterator().next().getId() + "_BIS";
+        com.powsybl.loadflow.LoadFlow.Runner runner = new com.powsybl.loadflow.LoadFlow.Runner(new com.powsybl.openloadflow.OpenLoadFlowProvider(commonTestConfig.matrixFactory()));
+        boolean[][] combos = {{true, true, true}, {true, false, true}, {true, true, false}, {false, true, true}, {true, false, false}};
+        for (boolean[] c : combos) {
+            boolean tvc = c[0];
+            boolean ds = c[1];
+            boolean rl = c[2];
+            java.util.function.Supplier<com.powsybl.loadflow.LoadFlowParameters> mk = () -> {
+                com.powsybl.loadflow.LoadFlowParameters p = new com.powsybl.loadflow.LoadFlowParameters()
+                        .setTransformerVoltageControlOn(tvc).setDistributedSlack(ds).setUseReactiveLimits(rl);
+                com.powsybl.openloadflow.OpenLoadFlowParameters.create(p)
+                        .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
+                return p;   // DEFAULT convEps / slack mismatch
+            };
+            Network flat = baseNet.get();
+            flat.getLine(bis).getTerminal1().disconnect();
+            flat.getLine(bis).getTerminal2().disconnect();
+            runner.run(flat, mk.get());
+            double flatV = flat.getVoltageLevel("VL_3").getBusView().getBusStream().findFirst().orElseThrow().getV();
+            Network saNet = baseNet.get();
+            com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+            sap.setLoadFlowParameters(mk.get());
+            List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+                    com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(),
+                    saNet.getVoltageLevelStream().map(vl -> vl.getId()).collect(java.util.stream.Collectors.toSet()), java.util.Set.of()));
+            double saV = runSecurityAnalysis(saNet, List.of(new Contingency(bis, new BranchContingency(bis))), mon, sap)
+                    .getPostContingencyResults().get(0).getNetworkResult().getBusResults().stream()
+                    .filter(b -> b.getBusId().equals("BUS_3")).findFirst().orElseThrow().getV();
+            System.err.printf("[ISO] tvc=%-5b ds=%-5b rl=%-5b  plainLF=%.6f  CPU-SA=%.6f  d=%.3e%n",
+                    tvc, ds, rl, flatV, saV, Math.abs(flatV - saV));
+        }
+    }
+
+    /** CPU-ONLY: the DS mechanism. Compare the DISTRIBUTED ACTIVE POWER (and the resulting V) of a plain
+     *  post-contingency LF vs the CPU SA's post-contingency. Distributed slack stops inside a band
+     *  (slackBusPMaxMismatch, default 1 MW), so two paths reaching the contingency from DIFFERENT generation
+     *  splits (fresh vs base-distributed) legitimately stop at different points inside that band. */
+    @org.junit.jupiter.api.Test
+    void cpuSaDistributedPowerDiagnostic() {
+        java.util.function.Supplier<Network> baseNet = () -> {
+            Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
+            network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().setTargetDeadband(0).setRegulating(true)
+                    .setTapPosition(0).setRegulationTerminal(network.getTwoWindingsTransformer("T2wT").getTerminal2()).setTargetV(34.0);
+            com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+            network.newLine().setId(l0.getId() + "_BIS")
+                    .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                    .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                    .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
+            return network;
+        };
+        String bis = baseNet.get().getLines().iterator().next().getId() + "_BIS";
+        java.util.function.Supplier<com.powsybl.loadflow.LoadFlowParameters> mk = () -> {
+            com.powsybl.loadflow.LoadFlowParameters p = new com.powsybl.loadflow.LoadFlowParameters()
+                    .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+            com.powsybl.openloadflow.OpenLoadFlowParameters.create(p)
+                    .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
+            return p;
+        };
+        com.powsybl.loadflow.LoadFlow.Runner runner = new com.powsybl.loadflow.LoadFlow.Runner(new com.powsybl.openloadflow.OpenLoadFlowProvider(commonTestConfig.matrixFactory()));
+        // plain LF at the post-contingency point, from a FRESH network
+        Network flat = baseNet.get();
+        flat.getLine(bis).getTerminal1().disconnect();
+        flat.getLine(bis).getTerminal2().disconnect();
+        com.powsybl.loadflow.LoadFlowResult flatRes = runner.run(flat, mk.get());
+        System.err.printf("[DS] plain post-ctg LF: distributedActivePower=%.6f MW  V(BUS_3)=%.6f  genP=%s%n",
+                flatRes.getComponentResults().get(0).getDistributedActivePower(),
+                flat.getVoltageLevel("VL_3").getBusView().getBusStream().findFirst().orElseThrow().getV(),
+                flat.getGeneratorStream().map(g -> String.format("%s=%.4f", g.getId(), g.getTerminal().getP())).toList());
+        // CPU SA: base N + post-contingency
+        Network saNet = baseNet.get();
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(mk.get());
+        List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(),
+                saNet.getVoltageLevelStream().map(vl -> vl.getId()).collect(java.util.stream.Collectors.toSet()), java.util.Set.of()));
+        SecurityAnalysisResult sa = runSecurityAnalysis(saNet, List.of(new Contingency(bis, new BranchContingency(bis))), mon, sap);
+        System.err.printf("[DS] CPU-SA preContingency: distributedActivePower=%.6f MW%n",
+                sa.getPreContingencyResult().getDistributedActivePower());
+        System.err.printf("[DS] CPU-SA postContingency: distributedActivePower=%.6f MW  V(BUS_3)=%.6f%n",
+                sa.getPostContingencyResults().get(0).getDistributedActivePower(),
+                sa.getPostContingencyResults().get(0).getNetworkResult().getBusResults().stream()
+                        .filter(b -> b.getBusId().equals("BUS_3")).findFirst().orElseThrow().getV());
+        // Same measurement on the GPU SA paths — does the GPU distribute slack where the CPU SA distributes 0?
+        if (com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable()) {
+            securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+            SecurityAnalysisResult gDev = runSecurityAnalysis(baseNet.get(), List.of(new Contingency(bis, new BranchContingency(bis))), mon, sap);
+            System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY, "JAVA");
+            SecurityAnalysisResult gJava;
+            try {
+                gJava = runSecurityAnalysis(baseNet.get(), List.of(new Contingency(bis, new BranchContingency(bis))), mon, sap);
+            } finally {
+                System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
+                securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+            }
+            for (var e : java.util.Map.of("GPU-DEVICE", gDev, "GPU-JAVA", gJava).entrySet()) {
+                System.err.printf("[DS] %s postContingency: distributedActivePower=%.6f MW  V(BUS_3)=%.6f%n",
+                        e.getKey(), e.getValue().getPostContingencyResults().get(0).getDistributedActivePower(),
+                        e.getValue().getPostContingencyResults().get(0).getNetworkResult().getBusResults().stream()
+                                .filter(b -> b.getBusId().equals("BUS_3")).findFirst().orElseThrow().getV());
+            }
+            // CROSS-CHECK with distributed slack OFF: if GPU-SA == CPU-SA there, the whole GPU-vs-CPU SA
+            // discrepancy is DS-orchestration, and DS is the single thing to align.
+            com.powsybl.loadflow.LoadFlowParameters noDs = new com.powsybl.loadflow.LoadFlowParameters()
+                    .setTransformerVoltageControlOn(true).setDistributedSlack(false).setUseReactiveLimits(true);
+            com.powsybl.openloadflow.OpenLoadFlowParameters.create(noDs)
+                    .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
+            com.powsybl.security.SecurityAnalysisParameters sapNoDs = new com.powsybl.security.SecurityAnalysisParameters();
+            sapNoDs.setLoadFlowParameters(noDs);
+            double cpuNoDs = runSecurityAnalysis(baseNet.get(), List.of(new Contingency(bis, new BranchContingency(bis))), mon, sapNoDs)
+                    .getPostContingencyResults().get(0).getNetworkResult().getBusResults().stream()
+                    .filter(b -> b.getBusId().equals("BUS_3")).findFirst().orElseThrow().getV();
+            securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+            double gpuNoDs;
+            try {
+                gpuNoDs = runSecurityAnalysis(baseNet.get(), List.of(new Contingency(bis, new BranchContingency(bis))), mon, sapNoDs)
+                        .getPostContingencyResults().get(0).getNetworkResult().getBusResults().stream()
+                        .filter(b -> b.getBusId().equals("BUS_3")).findFirst().orElseThrow().getV();
+            } finally {
+                securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+            }
+            System.err.printf("[DS-OFF] CPU-SA=%.6f  GPU-SA=%.6f  d=%.3e%n", cpuNoDs, gpuNoDs, Math.abs(cpuNoDs - gpuNoDs));
+        }
+    }
 }

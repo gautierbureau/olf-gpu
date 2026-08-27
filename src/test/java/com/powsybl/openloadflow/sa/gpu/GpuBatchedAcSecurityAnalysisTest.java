@@ -1832,4 +1832,101 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         System.err.printf("[FIXPOINT] re-solved with tap FROZEN at %d: V=%.9f  (moved by %.3e)%n",
                 solvedTap, vFrozen, Math.abs(vFrozen - vTvc));
     }
+
+    /** Find a targetV where the CONTINGENCY MOVES THE TAP (base tap != post-contingency tap) — the case that
+     *  exercises the device pi-model refresh (a tap change alters R/X/Y/ksi in OLF's PiModelArray). */
+    @org.junit.jupiter.api.Test
+    void findTapMovingContingencyDiagnostic() {
+        java.util.function.BiFunction<Double, Boolean, int[]> run = (targetV, outage) -> {
+            Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
+            com.powsybl.iidm.network.TwoWindingsTransformer t = network.getTwoWindingsTransformer("T2wT");
+            t.getRatioTapChanger().setTargetDeadband(0).setRegulating(true).setTapPosition(0)
+                    .setRegulationTerminal(t.getTerminal2()).setTargetV(targetV);
+            com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+            network.newLine().setId(l0.getId() + "_BIS")
+                    .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                    .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                    .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
+            if (outage) {
+                network.getLine(l0.getId()).getTerminal1().disconnect();   // outage the ORIGINAL line (bigger change)
+                network.getLine(l0.getId()).getTerminal2().disconnect();
+            }
+            com.powsybl.loadflow.LoadFlowParameters p = new com.powsybl.loadflow.LoadFlowParameters()
+                    .setTransformerVoltageControlOn(true).setDistributedSlack(false).setUseReactiveLimits(true);
+            com.powsybl.openloadflow.OpenLoadFlowParameters.create(p)
+                    .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
+            new com.powsybl.loadflow.LoadFlow.Runner(new com.powsybl.openloadflow.OpenLoadFlowProvider(commonTestConfig.matrixFactory())).run(network, p);
+            return new int[] {network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getSolvedTapPosition()};
+        };
+        for (double tv : new double[] {30.0, 31.0, 32.0, 32.5, 33.0, 33.5, 34.0, 35.0, 36.0, 37.0, 38.0}) {
+            int baseTap = run.apply(tv, false)[0];
+            int ctgTap = run.apply(tv, true)[0];
+            System.err.printf("[TAPMOVE] targetV=%.1f  baseTap=%d  postCtgTap=%d %s%n",
+                    tv, baseTap, ctgTap, baseTap != ctgTap ? "  <== TAP MOVES" : "");
+        }
+    }
+
+    /** VALIDATES the device pi-model refresh: a contingency that MOVES THE TAP (2 -> 3) on a transformer whose
+     *  tap steps have DISTINCT R/X. OLF's PiModelArray returns R/X/Y/ksi from the current tap, so the tap move
+     *  changes the branch admittance; without refreshing the device row the batch would solve with the stale
+     *  extraction-time admittance. GPU (JAVA hybrid) must match the CPU SA at DEFAULT tolerance. */
+    @org.junit.jupiter.api.Test
+    void javaTvcTapMovingContingencyMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        java.util.function.Supplier<Network> mkNet = () -> {
+            Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
+            com.powsybl.iidm.network.TwoWindingsTransformer t = network.getTwoWindingsTransformer("T2wT");
+            // make every tap step's impedance DISTINCT so a tap move really changes R/X/Y/ksi
+            var rtc = t.getRatioTapChanger();
+            for (int i = rtc.getLowTapPosition(); i <= rtc.getHighTapPosition(); i++) {
+                double f = 1.0 + 0.6 * (i - rtc.getLowTapPosition());
+                rtc.getStep(i).setR(0.11 * f).setX(0.011 * f);
+            }
+            rtc.setTargetDeadband(0).setRegulating(true).setTapPosition(0)
+                    .setRegulationTerminal(t.getTerminal2()).setTargetV(33.5);
+            com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+            network.newLine().setId(l0.getId() + "_BIS")
+                    .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                    .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                    .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
+            return network;
+        };
+        String outaged = mkNet.get().getLines().iterator().next().getId();   // outage the ORIGINAL line
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(false).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
+        // report the tap move (base vs post-contingency) so the test documents that it exercises the refresh
+        com.powsybl.loadflow.LoadFlow.Runner runner = new com.powsybl.loadflow.LoadFlow.Runner(new com.powsybl.openloadflow.OpenLoadFlowProvider(commonTestConfig.matrixFactory()));
+        Network nb = mkNet.get();
+        runner.run(nb, lfp);
+        Network np = mkNet.get();
+        np.getLine(outaged).getTerminal1().disconnect();
+        np.getLine(outaged).getTerminal2().disconnect();
+        runner.run(np, lfp);
+        System.err.printf("[TAPFIX] baseTap=%d  postCtgTap=%d%n",
+                nb.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getSolvedTapPosition(),
+                np.getTwoWindingsTransformer("T2wT").getRatioTapChanger().getSolvedTapPosition());
+
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        List<Contingency> ctgs = List.of(new Contingency(outaged, new BranchContingency(outaged)));
+        List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(),
+                mkNet.get().getVoltageLevelStream().map(vl -> vl.getId()).collect(java.util.stream.Collectors.toSet()), java.util.Set.of()));
+        java.util.function.Function<SecurityAnalysisResult, Double> v3 = r -> r.getPostContingencyResults().get(0)
+                .getNetworkResult().getBusResults().stream().filter(b -> b.getBusId().equals("BUS_3")).findFirst().orElseThrow().getV();
+        double cpu = v3.apply(runSecurityAnalysis(mkNet.get(), ctgs, mon, sap));
+        System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY, "JAVA");
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        double gpu;
+        try {
+            gpu = v3.apply(runSecurityAnalysis(mkNet.get(), ctgs, mon, sap));
+        } finally {
+            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+        System.err.printf("[TAPFIX] tap-moving contingency: CPU=%.9f  GPU-JAVA=%.9f  d=%.3e%n", cpu, gpu, Math.abs(cpu - gpu));
+    }
 }

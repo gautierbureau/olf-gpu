@@ -66,6 +66,12 @@ public final class GpuHybridBatchOuterLoopEngine {
     private GpuHybridBatchOuterLoopEngine() {
     }
 
+    /** The branch's current static device row [y g1 g2 b1 b2 ksi r1 a1] — the cbIn packing. */
+    private static double[] cbRowOf(LfBranch branch) {
+        var pi = branch.getPiModel();
+        return new double[] {pi.getY(), pi.getG1(), pi.getG2(), pi.getB1(), pi.getB2(), pi.getKsi(), pi.getR1(), pi.getA1()};
+    }
+
     /**
      * Inputs to {@link #solve}. The caller owns the device {@code structure} (created once, destroyed after);
      * the engine owns the batch-context {@code handle} lifecycle (created / recreated on compaction / destroyed).
@@ -159,6 +165,22 @@ public final class GpuHybridBatchOuterLoopEngine {
             bridges[s] = new GpuHybridOuterLoopBridge(in.network(), in.es(), n, loops, ctxs);
         }
 
+        // Device pi-model tracking for the transformer controller branches. cbIn bakes the 8 static doubles
+        // [y g1 g2 b1 b2 ksi r1 a1] at extraction; OLF's PiModelArray returns R/X/Y/ksi from the CURRENT TAP,
+        // so a tap change in the Java transformer-VC loop changes the branch admittance on the network while
+        // the device would keep the extraction-time values (only the ratio follows, read from the state
+        // vector). Capture the base row per controller branch, and after each scenario's outer-loop step
+        // capture that scenario's row; any row that DIFFERS is pushed to the device as an r1Ov override (the
+        // same per-(scenario, element) full-row channel the DEVICE orchestrator uses).
+        List<LfBranch> tapTracked = in.transformerBranches().stream()
+                .filter(b -> in.mapper().getElementIndex(b) >= 0)
+                .toList();
+        double[][] baseCbRow = new double[tapTracked.size()][];
+        for (int b = 0; b < tapTracked.size(); b++) {
+            baseCbRow[b] = cbRowOf(tapTracked.get(b));
+        }
+        double[][][] scenCbRow = new double[nS][][];         // [scenario][controller branch][8], null = base row
+
         // per-scenario evolving state (isolated across scenarios via the compact snapshot + explicit targetP)
         HybridScenarioState baseCompact = new HybridScenarioState(in.ctrlBuses(), in.hvdcs(), in.transformerBranches());
         List<LfBranch> networkDisabled = new ArrayList<>();
@@ -222,6 +244,8 @@ public final class GpuHybridBatchOuterLoopEngine {
             boolean[][] disabledC = new boolean[nA][];
             List<Integer> ovIdx = new ArrayList<>();
             List<Double> ovVal = new ArrayList<>();
+            List<Integer> r1OvSlotElem = new ArrayList<>();  // per-scenario refreshed pi-model rows (tap changes)
+            List<Double> r1OvVal = new ArrayList<>();
             double[] x0C = round == 0 ? null : new double[nA * n];
             for (int i = 0; i < nA; i++) {
                 int s = active.get(i);
@@ -231,6 +255,18 @@ public final class GpuHybridBatchOuterLoopEngine {
                     if (scenTargets[s][r] != in.baseTargets()[r]) {
                         ovIdx.add(i * n + r);
                         ovVal.add(scenTargets[s][r]);
+                    }
+                }
+                // refresh any controller-branch pi-model row this scenario's outer loops moved off the base
+                if (scenCbRow[s] != null) {
+                    for (int b = 0; b < tapTracked.size(); b++) {
+                        if (scenCbRow[s][b] != null && !java.util.Arrays.equals(scenCbRow[s][b], baseCbRow[b])) {
+                            r1OvSlotElem.add(i);
+                            r1OvSlotElem.add(in.mapper().getElementIndex(tapTracked.get(b)));
+                            for (double v : scenCbRow[s][b]) {
+                                r1OvVal.add(v);
+                            }
+                        }
                     }
                 }
                 if (round > 0) {
@@ -246,7 +282,9 @@ public final class GpuHybridBatchOuterLoopEngine {
                     // CPU (RL/DS tols are moot here: the packs are empty and OLF's Java loops do DS/RL).
                     in.maxIterations(), in.tol(), in.reactiveLimitTol(), in.slackDistTol(), in.convEpsPerEq(),
                     in.lsMode(), in.lsMaxDv(), in.lsMaxDphi(), in.varType(), x0C,
-                    null, null, null, null, null, null,                  // shuntOv, rlStateIn/Out, r1Ov
+                    null, null, null, null,                              // shuntOv, rlStateIn/Out
+                    r1OvSlotElem.stream().mapToInt(Integer::intValue).toArray(),   // per-scenario pi-model refresh
+                    r1OvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                     30, 3, 0, 0, null, null);                            // maxOuterIterations (moot: DS pack empty), maxPqPvSwitch, ...
             tSolve += System.nanoTime() - ts0;
             for (int i = 0; i < nA; i++) {
@@ -300,6 +338,16 @@ public final class GpuHybridBatchOuterLoopEngine {
                 System.arraycopy(states[s], 0, st, 0, n);
                 long tj0 = System.nanoTime();
                 GpuAcActivation act = bridges[s].applyOuterLoopStep(st);  // load state -> OLF outer loops -> re-extract
+                // capture this scenario's controller-branch pi-model rows: the outer loops may have moved a tap,
+                // which changes R/X/Y/ksi on the network (PiModelArray reads them from the CURRENT tap) — the
+                // device row must follow, or the next round solves with a stale admittance.
+                if (!tapTracked.isEmpty()) {
+                    double[][] rows = new double[tapTracked.size()][];
+                    for (int b = 0; b < tapTracked.size(); b++) {
+                        rows[b] = cbRowOf(tapTracked.get(b));
+                    }
+                    scenCbRow[s] = rows;
+                }
                 rowMode[s] = act.rowMode();
                 scenTargets[s] = act.applyTargets(new AcTargetVector(in.network(), in.es()).getArray());
                 tJava += System.nanoTime() - tj0;

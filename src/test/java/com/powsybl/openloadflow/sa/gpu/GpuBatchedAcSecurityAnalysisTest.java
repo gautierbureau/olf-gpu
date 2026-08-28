@@ -1379,6 +1379,11 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         }
         System.err.printf("[DEFAULT] V(BUS_3)  CPU=%.6f  GPU-DEVICE=%.6f (d=%.3e)  GPU-JAVA=%.6f (d=%.3e)%n",
                 cpu, gpuDevice, Math.abs(cpu - gpuDevice), gpuJava, Math.abs(cpu - gpuJava));
+        // DEFAULT tolerance: the JAVA hybrid (OLF's own outer loops + OLF-faithful re-solve initialization)
+        // agrees with the CPU sequential SA. The DEVICE orchestrator still carries a known ~6e-3 warm-start
+        // gap (it does not re-initialize identity rows between its on-device rounds) — not asserted yet.
+        org.junit.jupiter.api.Assertions.assertEquals(cpu, gpuJava, 1e-4,
+                "JAVA hybrid must match the CPU SA at default tolerance");
     }
 
     @org.junit.jupiter.api.Test
@@ -1917,7 +1922,20 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 mkNet.get().getVoltageLevelStream().map(vl -> vl.getId()).collect(java.util.stream.Collectors.toSet()), java.util.Set.of()));
         java.util.function.Function<SecurityAnalysisResult, Double> v3 = r -> r.getPostContingencyResults().get(0)
                 .getNetworkResult().getBusResults().stream().filter(b -> b.getBusId().equals("BUS_3")).findFirst().orElseThrow().getV();
-        double cpu = v3.apply(runSecurityAnalysis(mkNet.get(), ctgs, mon, sap));
+        com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp).setReportedFeatures(
+                java.util.Set.of(com.powsybl.openloadflow.OpenLoadFlowParameters.ReportedFeatures.NEWTON_RAPHSON_SECURITY_ANALYSIS));
+        com.powsybl.commons.report.ReportNode rSa = com.powsybl.commons.report.ReportNode.newRootReportNode()
+                .withResourceBundles(com.powsybl.openloadflow.util.report.PowsyblOpenLoadFlowReportResourceBundle.BASE_NAME)
+                .withMessageTemplate("olf.securityAnalysis").build();
+        double cpu = v3.apply(runSecurityAnalysis(mkNet.get(), ctgs, mon, sap, rSa));
+        var postNode = findSubtree(rSa, "olf.postContingencySimulation");
+        java.util.Map<String, Integer> tPost = new java.util.TreeMap<>();
+        if (postNode != null) {
+            countReportKeys(postNode, tPost);
+        }
+        System.err.printf("[TAPFIX] CPU-SA post-ctg: newtonSolves=%d newtonIters=%d%n",
+                tPost.getOrDefault("olf.mismatchInitial", 0),
+                tPost.getOrDefault("olf.mismatchInitial", 0) + tPost.getOrDefault("olf.mismatchIteration", 0));
         System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY, "JAVA");
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         double gpu;
@@ -1927,6 +1945,12 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
             System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         }
-        System.err.printf("[TAPFIX] tap-moving contingency: CPU=%.9f  GPU-JAVA=%.9f  d=%.3e%n", cpu, gpu, Math.abs(cpu - gpu));
+        double plainV = np.getVoltageLevel("VL_3").getBusView().getBusStream().findFirst().orElseThrow().getV();
+        System.err.printf("[TAPFIX] plainLF(post-ctg)=%.9f | CPU-SA=%.9f (d=%.3e) | GPU-JAVA=%.9f (d=%.3e vs CPU, %.3e vs plainLF)%n",
+                plainV, cpu, Math.abs(plainV - cpu), gpu, Math.abs(cpu - gpu), Math.abs(plainV - gpu));
+        // DEFAULT tolerance (never tightened): the JAVA hybrid must agree with the CPU SA on a contingency
+        // whose tap MOVES (device pi-model refresh + OLF-faithful identity-row re-initialization).
+        org.junit.jupiter.api.Assertions.assertEquals(cpu, gpu, 1e-4,
+                "JAVA hybrid must match the CPU SA at default tolerance on a tap-moving contingency");
     }
 }

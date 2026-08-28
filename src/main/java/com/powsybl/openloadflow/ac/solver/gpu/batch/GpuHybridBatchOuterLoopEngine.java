@@ -350,6 +350,19 @@ public final class GpuHybridBatchOuterLoopEngine {
                 }
                 rowMode[s] = act.rowMode();
                 scenTargets[s] = act.applyTargets(new AcTargetVector(in.network(), in.es()).getArray());
+                // OLF-faithful re-solve initialization: between outer-loop re-solves OLF re-initializes the
+                // state from the NETWORK (PreviousValueVoltageInitializer) — so a variable the outer loop just
+                // pinned (e.g. BRANCH_RHO1 rounded to a tap, SHUNT_B dispatched to a section) starts the next
+                // Newton at EXACTLY its pinned value; the identity target equals that network value by
+                // construction (AcTargetVector reads it from the element). Warm-starting from the raw previous
+                // device state instead leaves the jump (continuous -> rounded) to be absorbed inside the next
+                // Newton iteration, whose second-order remainder then pollutes every other equation and can
+                // pass the stopping criterion ~1e-2 off the CPU. Mirror OLF: identity rows start AT target.
+                for (int r = 0; r < n; r++) {
+                    if (rowMode[s][r] == 0) {
+                        states[s][r] = scenTargets[s][r];
+                    }
+                }
                 tJava += System.nanoTime() - tj0;
                 nJavaCalls++;
 

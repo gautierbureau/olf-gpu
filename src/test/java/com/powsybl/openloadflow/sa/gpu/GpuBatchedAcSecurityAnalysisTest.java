@@ -1327,13 +1327,15 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         double saCpuV = saCpu.getPostContingencyResults().get(0).getNetworkResult().getBusResults().stream().filter(b -> b.getBusId().equals("BUS_3")).findFirst().orElseThrow().getV();
         double saGpuV = saGpu.getPostContingencyResults().get(0).getNetworkResult().getBusResults().stream().filter(b -> b.getBusId().equals("BUS_3")).findFirst().orElseThrow().getV();
-        System.err.printf("[SA-DEFAULT] freshLF=%.6f  SA-GPU=%.6f (d=%.3e)  SA-CPU=%.6f (d=%.3e, CPU-SA outlier)%n",
-                plGpuDef, saGpuV, Math.abs(plGpuDef - saGpuV), saCpuV, Math.abs(plGpuDef - saCpuV));
-        // The GPU batch converges the contingency close to the fresh LF; the CPU sequential SA stops ~6e-3
-        // short. Both warm-start from the base N state, and the solvers are identical (A), so the ~6e-3
-        // "GPU vs CPU SA" gap is a post-contingency outer-loop-convergence difference between the two SA
-        // code paths, not a GPU error — and the GPU is the more accurate of the two SA implementations here.
-        org.junit.jupiter.api.Assertions.assertEquals(plGpuDef, saGpuV, 1e-3, "GPU batched SA must reproduce a fresh post-contingency LF");
+        System.err.printf("[SA-DEFAULT] freshLF=%.6f  SA-GPU=%.6f  SA-CPU=%.6f (d(SA-GPU,SA-CPU)=%.3e)%n",
+                plGpuDef, saGpuV, saCpuV, Math.abs(saCpuV - saGpuV));
+        // (B) With the OLF-faithful orchestration landed (identity/pi-model re-initialization between outer
+        // re-solves + no re-solve on a STABLE phase transition), the GPU SA reproduces the CPU SA EXACTLY at
+        // default tolerance. The CPU SA legitimately differs from a FRESH LF here (~6e-3): its warm-started
+        // post-contingency mismatch stays below the distributed-slack band, so it distributes 0 where a fresh
+        // flat solve distributes the full amount — expected OLF SA behavior, faithfully reproduced by the GPU.
+        org.junit.jupiter.api.Assertions.assertEquals(saCpuV, saGpuV, 1e-9,
+                "GPU batched SA must reproduce the CPU SA at default tolerance (machine precision)");
     }
 
     @org.junit.jupiter.api.Test
@@ -1599,7 +1601,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         String bis = baseNet.get().getLines().iterator().next().getId() + "_BIS";
         List<Contingency> ctgs = List.of(new Contingency(bis, new BranchContingency(bis)));
         com.powsybl.loadflow.LoadFlow.Runner runner = new com.powsybl.loadflow.LoadFlow.Runner(new com.powsybl.openloadflow.OpenLoadFlowProvider(commonTestConfig.matrixFactory()));
-        boolean[][] combos = {{true, true, true}, {true, false, true}, {false, true, true}, {false, false, true}, {false, false, false}};
+        boolean[][] combos = {{true, true, true}, {true, false, true}, {false, true, true}, {false, true, false}, {false, false, true}, {false, false, false}};
         for (boolean[] c : combos) {
             boolean tvc = c[0];
             boolean ds = c[1];
@@ -1952,5 +1954,49 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         // whose tap MOVES (device pi-model refresh + OLF-faithful identity-row re-initialization).
         org.junit.jupiter.api.Assertions.assertEquals(cpu, gpu, 1e-4,
                 "JAVA hybrid must match the CPU SA at default tolerance on a tap-moving contingency");
+    }
+
+    /** DIAGNOSTIC (isolation only, not validation): does the device DS loop distribute when the CPU's band says
+     *  "do nothing"? Run the DS-only case with the DEFAULT band (1 MW) and with an effectively-infinite band
+     *  (1e6 MW, both sides identically). CPU distributes 0 in both -> identical CPU results. If DEVICE matches
+     *  CPU with the infinite band but not with the default band, its gate/distribution fires when OLF's does not. */
+    @org.junit.jupiter.api.Test
+    void deviceDsBandDiagnostic() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        java.util.function.Supplier<Network> baseNet = () -> {
+            Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
+            network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().setTargetDeadband(0).setRegulating(true)
+                    .setTapPosition(0).setRegulationTerminal(network.getTwoWindingsTransformer("T2wT").getTerminal2()).setTargetV(34.0);
+            com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+            network.newLine().setId(l0.getId() + "_BIS")
+                    .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                    .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                    .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
+            return network;
+        };
+        String bis = baseNet.get().getLines().iterator().next().getId() + "_BIS";
+        for (double band : new double[] {1.0, 1e6}) {
+            com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                    .setTransformerVoltageControlOn(false).setDistributedSlack(true).setUseReactiveLimits(true);
+            com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setSlackBusPMaxMismatch(band);
+            com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+            sap.setLoadFlowParameters(lfp);
+            List<Contingency> ctgs = List.of(new Contingency(bis, new BranchContingency(bis)));
+            List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+                    com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(),
+                    baseNet.get().getVoltageLevelStream().map(vl -> vl.getId()).collect(java.util.stream.Collectors.toSet()), java.util.Set.of()));
+            java.util.function.Function<SecurityAnalysisResult, Double> v3 = r -> r.getPostContingencyResults().get(0)
+                    .getNetworkResult().getBusResults().stream().filter(b -> b.getBusId().equals("BUS_3")).findFirst().orElseThrow().getV();
+            double cpu = v3.apply(runSecurityAnalysis(baseNet.get(), ctgs, mon, sap));
+            securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+            double dev;
+            try {
+                dev = v3.apply(runSecurityAnalysis(baseNet.get(), ctgs, mon, sap));
+            } finally {
+                securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+            }
+            System.err.printf("[DS-BAND] band=%.0e MW  CPU=%.9f  DEV=%.9f  d=%.3e%n", band, cpu, dev, Math.abs(cpu - dev));
+        }
     }
 }

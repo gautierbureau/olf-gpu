@@ -263,20 +263,18 @@ public final class GpuBatchTransformerControl {
                 }
                 rowMode[slot] = row;
             }
-            // OLF-faithful re-solve initialization (same fix as the JAVA hybrid engine): between outer-loop
-            // re-solves OLF re-initializes the state from the NETWORK, so a variable this orchestrator just
-            // pinned (a clamped/rounded ratio's identity at fixedR1) starts the next Newton EXACTLY at its
-            // pinned value. Warm-starting from the previous solve instead leaves the continuous->rounded jump
-            // to be absorbed inside the next Newton iteration, whose second-order remainder can pass the
-            // stopping criterion ~1e-2 off the CPU. Identity rows (mode 0) start AT their effective target.
-            java.util.Map<Integer, Double> effOv = new java.util.HashMap<>();
-            for (int k = 0; k < ovIdx.size(); k++) {
-                effOv.put(ovIdx.get(k), ovVal.get(k));       // later entries (per-slot deltas) win
-            }
+            // OLF-faithful re-solve initialization (same fix as the JAVA hybrid engine): OLF's re-solves
+            // re-read every variable from the NETWORK (PreviousValueVoltageInitializer) — which equals the
+            // previous state for everything EXCEPT what the outer loop just mutated. Here the only mutation is
+            // a clamped/rounded ratio, so re-initialize EXACTLY that: the rho variable starts the next Newton
+            // AT its pinned fixedR1 (the pi-model value the CPU would re-read). Snapping OTHER identity rows to
+            // their targets would deviate from OLF — the CPU keeps a long-pinned row at its previous value
+            // (target ± the stopping residual), and that difference alone leaves ~1e-6 vs the CPU's ~1e-13.
             for (int slot : affected) {
-                for (int r = 0; r < n; r++) {
-                    if (rowMode[slot][r] == 0) {
-                        x0Full[slot * n + r] = effOv.getOrDefault(slot * n + r, baseTargets[r]);
+                for (int c = 0; c < tcs.size(); c++) {
+                    double fixedR1 = rounded[slot * tcs.size() + c];
+                    if (!Double.isNaN(fixedR1)) {
+                        x0Full[slot * n + tcs.get(c).rhoRow()] = fixedR1;
                     }
                 }
             }

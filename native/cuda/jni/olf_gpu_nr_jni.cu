@@ -3009,6 +3009,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                                                              // counter capped busy chunks collectively (violation-diff
                                                              // root cause: a scenario solved solo matched the CPU
                                                              // exactly but diverged inside a full 500-chunk)
+    // A phase transition after a NO-SWITCH pass must NOT re-solve: OLF's runOuterLoop re-solves only on an
+    // UNSTABLE check — a STABLE loop is followed by checking the NEXT loop against the SAME state. The device
+    // Newton forces >=1 iteration per solve (matching OLF's per-run behavior), so an extra no-op pass would
+    // move an already-converged state off the CPU's by ~the stopping residual (measured 4e-4 kV on the
+    // DS->RL transition with a distributed base). solvePass=false skips the inner Newton for such a pass.
+    bool solvePass = true;
     for (int outer = 0; outer < maxOuter; outer++) {
     std::copy(active.begin(), active.end(), wasActive.begin());   // scenarios (re)solved in this inner pass
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
@@ -3016,6 +3022,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     for (char a : active) {
         if (a) nActive++;
     }
+    if (solvePass) {
 
     for (int it = 0; it <= maxIter && nActive > 0; it++) {
         // ---- batched fill for all active scenarios: J + F, or F-ONLY when this iteration
@@ -3331,6 +3338,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync
         }
     }   // ---- end inner Newton loop ----
+    }   // ---- end if (solvePass) ----
 
     if (!fullLoadflow) {
         break;                                              // fixed-iter / no controllers: one pass only
@@ -3425,6 +3433,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             active[s] = rlSwitched[s];                      // re-solve only the scenarios it changed, stay in this phase
         }
         seqChanged = true;
+        solvePass = true;                                   // mutated targets/modes -> a real re-solve is due
     } else {                                               // this outer loop stabilized
         if (inDsPhase && ctx->nrl > 0) {
             phase = 1;                                      // distributed slack done -> move to reactive limits
@@ -3436,8 +3445,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             phase = (ctx->nds > 0) ? 0 : 1;                 // restart the sequence at the first loop (distributed slack)
         }
         for (int s = 0; s < nS; s++) {
-            active[s] = live[s];                            // re-check every live scenario in the next phase
+            active[s] = live[s];                            // re-CHECK every live scenario in the next phase...
         }
+        solvePass = false;                                  // ...against the SAME state: STABLE never re-solves (OLF)
     }
     }   // ---- end sequential outer-loop driver ----
 

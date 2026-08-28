@@ -350,19 +350,21 @@ public final class GpuHybridBatchOuterLoopEngine {
                 }
                 rowMode[s] = act.rowMode();
                 scenTargets[s] = act.applyTargets(new AcTargetVector(in.network(), in.es()).getArray());
-                // OLF-faithful re-solve initialization: between outer-loop re-solves OLF re-initializes the
-                // state from the NETWORK (PreviousValueVoltageInitializer) — so a variable the outer loop just
-                // pinned (e.g. BRANCH_RHO1 rounded to a tap, SHUNT_B dispatched to a section) starts the next
-                // Newton at EXACTLY its pinned value; the identity target equals that network value by
-                // construction (AcTargetVector reads it from the element). Warm-starting from the raw previous
-                // device state instead leaves the jump (continuous -> rounded) to be absorbed inside the next
-                // Newton iteration, whose second-order remainder then pollutes every other equation and can
-                // pass the stopping criterion ~1e-2 off the CPU. Mirror OLF: identity rows start AT target.
-                for (int r = 0; r < n; r++) {
-                    if (rowMode[s][r] == 0) {
-                        states[s][r] = scenTargets[s][r];
-                    }
-                }
+                // OLF-faithful re-solve initialization — the EXACT call OLF's runOuterLoop makes before every
+                // re-solve: solver.run(new PreviousValueVoltageInitializer()) -> AcSolverUtil.initStateVector
+                // re-reads EVERY variable from the network (v/phi from the bus, rho/a1 from the pi-model — so a
+                // just-rounded ratio starts the next Newton EXACTLY at its pinned value — b from the shunt, and
+                // DUMMY_P/DUMMY_Q reset to 0). Warm-starting from the raw previous device state instead leaves
+                // the continuous->rounded jump to be absorbed inside the next Newton iteration, whose
+                // second-order remainder passes the stopping criterion ~1e-2 off the CPU; and any partial
+                // approximation of this call (e.g. only snapping identity rows to their targets) leaves a
+                // ~1e-6 residual vs the CPU where plain solves agree at ~1e-13. The bridge left the network
+                // holding this scenario's state (updateNetwork) + the outer loops' mutations, so the state
+                // vector after this call IS the CPU's x0, on the stable variable rows.
+                com.powsybl.openloadflow.ac.solver.AcSolverUtil.initStateVector(in.network(), in.es(),
+                        new com.powsybl.openloadflow.network.util.PreviousValueVoltageInitializer());
+                double[] cpuX0 = in.es().getStateVector().get();
+                System.arraycopy(cpuX0, 0, states[s], 0, n);
                 tJava += System.nanoTime() - tj0;
                 nJavaCalls++;
 

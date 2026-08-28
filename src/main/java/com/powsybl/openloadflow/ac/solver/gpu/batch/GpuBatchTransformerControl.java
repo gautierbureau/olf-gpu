@@ -263,6 +263,23 @@ public final class GpuBatchTransformerControl {
                 }
                 rowMode[slot] = row;
             }
+            // OLF-faithful re-solve initialization (same fix as the JAVA hybrid engine): between outer-loop
+            // re-solves OLF re-initializes the state from the NETWORK, so a variable this orchestrator just
+            // pinned (a clamped/rounded ratio's identity at fixedR1) starts the next Newton EXACTLY at its
+            // pinned value. Warm-starting from the previous solve instead leaves the continuous->rounded jump
+            // to be absorbed inside the next Newton iteration, whose second-order remainder can pass the
+            // stopping criterion ~1e-2 off the CPU. Identity rows (mode 0) start AT their effective target.
+            java.util.Map<Integer, Double> effOv = new java.util.HashMap<>();
+            for (int k = 0; k < ovIdx.size(); k++) {
+                effOv.put(ovIdx.get(k), ovVal.get(k));       // later entries (per-slot deltas) win
+            }
+            for (int slot : affected) {
+                for (int r = 0; r < n; r++) {
+                    if (rowMode[slot][r] == 0) {
+                        x0Full[slot * n + r] = effOv.getOrDefault(slot * n + r, baseTargets[r]);
+                    }
+                }
+            }
             double[][] r2 = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                     rowMode, baseRowMode, disabledMask,
                     ovIdx.stream().mapToInt(Integer::intValue).toArray(),

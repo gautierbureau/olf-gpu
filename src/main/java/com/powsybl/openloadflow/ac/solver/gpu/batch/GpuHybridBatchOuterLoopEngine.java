@@ -181,6 +181,23 @@ public final class GpuHybridBatchOuterLoopEngine {
         }
         double[][][] scenCbRow = new double[nS][][];         // [scenario][controller branch][8], null = base row
 
+        // Shunt analogue of the pi-model tracking: a discrete section move (IncrementalShuntVoltageControl)
+        // or dispatch (ShuntVoltageControl rounding) changes the controller shunt's (g, b). b follows via the
+        // pinned SHUNT_B variable (capability-based, target re-read per round), but g is a PACKED static —
+        // push per-scenario (dg, db) deltas through the shOv channel (db is harmless when SHUNT_B is a
+        // variable: the fill overwrites b from the state after applying the override).
+        List<com.powsybl.openloadflow.network.LfShunt> shuntTracked =
+                in.network().<com.powsybl.openloadflow.network.LfShunt>getControllerElements(
+                        com.powsybl.openloadflow.network.VoltageControl.Type.SHUNT).stream()
+                .filter(sh -> in.mapper().getElementIndex(sh) >= 0)
+                .toList();
+        int shPackOffset = in.mapper().getClosedBranchCount() + in.mapper().getOpenBranchCount();
+        double[][] baseShGb = new double[shuntTracked.size()][];
+        for (int c = 0; c < shuntTracked.size(); c++) {
+            baseShGb[c] = new double[] {shuntTracked.get(c).getG(), shuntTracked.get(c).getB()};
+        }
+        double[][][] scenShGb = new double[nS][][];
+
         // per-scenario evolving state (isolated across scenarios via the compact snapshot + explicit targetP)
         HybridScenarioState baseCompact = new HybridScenarioState(in.ctrlBuses(), in.hvdcs(), in.transformerBranches());
         List<LfBranch> networkDisabled = new ArrayList<>();
@@ -259,6 +276,13 @@ public final class GpuHybridBatchOuterLoopEngine {
                 }
                 scenCbRow[s] = rr;
             }
+            if (!shuntTracked.isEmpty()) {
+                double[][] gb = new double[shuntTracked.size()][];
+                for (int c = 0; c < shuntTracked.size(); c++) {
+                    gb[c] = new double[] {shuntTracked.get(c).getG(), shuntTracked.get(c).getB()};
+                }
+                scenShGb[s] = gb;
+            }
             snaps[s] = new HybridScenarioState(in.ctrlBuses(), in.hvdcs(), in.transformerBranches());
             genSnap[s] = in.gens().stream().mapToDouble(LfGenerator::getTargetP).toArray();
             loadSnapP[s] = loads.stream().mapToDouble(LfLoad::getTargetP).toArray();
@@ -293,6 +317,8 @@ public final class GpuHybridBatchOuterLoopEngine {
             List<Double> ovVal = new ArrayList<>();
             List<Integer> r1OvSlotElem = new ArrayList<>();  // per-scenario refreshed pi-model rows (tap changes)
             List<Double> r1OvVal = new ArrayList<>();
+            List<Integer> shOvSlotElem = new ArrayList<>();  // per-scenario controller-shunt (dg, db) refresh
+            List<Double> shOvGb = new ArrayList<>();
             double[] x0C = new double[nA * n];               // round 0 included: the pre-pass filled states[s]
             for (int i = 0; i < nA; i++) {
                 int s = active.get(i);
@@ -316,6 +342,17 @@ public final class GpuHybridBatchOuterLoopEngine {
                         }
                     }
                 }
+                // refresh any controller-shunt (g, b) this scenario's outer loops moved off the base
+                if (scenShGb[s] != null) {
+                    for (int c = 0; c < shuntTracked.size(); c++) {
+                        if (scenShGb[s][c] != null && !java.util.Arrays.equals(scenShGb[s][c], baseShGb[c])) {
+                            shOvSlotElem.add(i);
+                            shOvSlotElem.add(in.mapper().getElementIndex(shuntTracked.get(c)) - shPackOffset);
+                            shOvGb.add(scenShGb[s][c][0] - baseShGb[c][0]);
+                            shOvGb.add(scenShGb[s][c][1] - baseShGb[c][1]);
+                        }
+                    }
+                }
                 System.arraycopy(states[s], 0, x0C, i * n, n);
             }
             long ts0 = System.nanoTime();
@@ -327,7 +364,9 @@ public final class GpuHybridBatchOuterLoopEngine {
                     // CPU (RL/DS tols are moot here: the packs are empty and OLF's Java loops do DS/RL).
                     in.maxIterations(), in.tol(), in.reactiveLimitTol(), in.slackDistTol(), in.convEpsPerEq(),
                     in.lsMode(), in.lsMaxDv(), in.lsMaxDphi(), in.varType(), x0C,
-                    null, null, null, null,                              // shuntOv, rlStateIn/Out
+                    shOvSlotElem.stream().mapToInt(Integer::intValue).toArray(),
+                    shOvGb.stream().mapToDouble(Double::doubleValue).toArray(),
+                    null, null,                                          // rlStateIn/Out
                     r1OvSlotElem.stream().mapToInt(Integer::intValue).toArray(),   // per-scenario pi-model refresh
                     r1OvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                     30, 3, 0, 0, null, null);                            // maxOuterIterations (moot: DS pack empty), maxPqPvSwitch, ...
@@ -392,6 +431,13 @@ public final class GpuHybridBatchOuterLoopEngine {
                         rows[b] = cbRowOf(tapTracked.get(b));
                     }
                     scenCbRow[s] = rows;
+                }
+                if (!shuntTracked.isEmpty()) {
+                    double[][] gb = new double[shuntTracked.size()][];
+                    for (int c = 0; c < shuntTracked.size(); c++) {
+                        gb[c] = new double[] {shuntTracked.get(c).getG(), shuntTracked.get(c).getB()};
+                    }
+                    scenShGb[s] = gb;
                 }
                 rowMode[s] = act.rowMode();
                 scenTargets[s] = act.applyTargets(new AcTargetVector(in.network(), in.es()).getArray());

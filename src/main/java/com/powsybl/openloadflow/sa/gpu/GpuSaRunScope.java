@@ -212,7 +212,11 @@ final class GpuSaRunScope {
                     // SHUNT_B toggles — is auto-enabled in the CUDA structure whenever a controllable bus is
                     // present, so no gate is needed here (unsupported shunt shapes throw at extraction and the
                     // precompute falls back to CPU).
-                    || "ShuntVoltageControl".equals(name))
+                    || "ShuntVoltageControl".equals(name)
+                    // IncrementalShuntVoltageControl: moves discrete sections directly; b follows via the pinned
+                    // SHUNT_B variable (capability-based) and the per-scenario (g,b) shOv refresh carries any
+                    // section-driven g change to the device.
+                    || "IncrementalShuntVoltageControl".equals(name))
                     // conservative structural no-ops: allow the HVDC/SVC-touching loops only when they cannot
                     // fire yet (widen once JAVA's HVDC/SVC handling is validated — the snapshot already captures
                     // HvdcState, and SVCs are generator-voltage-control buses already in the controller set).

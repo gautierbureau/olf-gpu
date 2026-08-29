@@ -216,7 +216,14 @@ final class GpuSaRunScope {
                     // IncrementalShuntVoltageControl: moves discrete sections directly; b follows via the pinned
                     // SHUNT_B variable (capability-based) and the per-scenario (g,b) shOv refresh carries any
                     // section-driven g change to the device.
-                    || "IncrementalShuntVoltageControl".equals(name))
+                    || "IncrementalShuntVoltageControl".equals(name)
+                    // IncrementalPhaseControl / IncrementalTransformerReactivePowerControl: both move discrete
+                    // taps directly; a1/rho follow via their pinned variables (targets re-read per round +
+                    // faithful re-init) and the per-scenario pi-model refresh carries the tap's R/X/Y/ksi/a1.
+                    // (CONTINUOUS phase control — "PhaseControl" — stays unsupported: its BRANCH_TARGET_P row
+                    // has no device family and the activation extractor routes it to CPU by construction.)
+                    || "IncrementalPhaseControl".equals(name)
+                    || "IncrementalTransformerReactivePowerControl".equals(name))
                     // conservative structural no-ops: allow the HVDC/SVC-touching loops only when they cannot
                     // fire yet (widen once JAVA's HVDC/SVC handling is validated — the snapshot already captures
                     // HvdcState, and SVCs are generator-voltage-control buses already in the controller set).

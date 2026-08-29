@@ -114,13 +114,11 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         List<Contingency> contingencies = List.of(new Contingency(l0.getId() + "_BIS", new BranchContingency(l0.getId() + "_BIS")));
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
-        // Tighten BOTH sides' outer-loop convergence (narrow the distributed-slack band + deepen the inner-Newton
-        // stopping) so CPU and GPU settle to the SAME depth — then the only residual is inner-Newton precision, not
-        // the ~0.05 kV redistribution band the default tolerances leave. (1e-9 is at the GPU's feasible floor;
-        // tighter, e.g. 1e-11, drops below it and the base GPU LF falls back to CPU.)
+        // DEFAULT criteria and tolerance (the no-tighten rule): with the orchestration-fidelity fixes (OLF-
+        // faithful re-solve initialization, no re-solve on a STABLE phase, pi-model refresh) the DEVICE
+        // orchestrator reproduces the CPU SA at machine precision WITHOUT any tolerance alignment.
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
-                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL)
-                .setSlackBusPMaxMismatch(0.01).setNewtonRaphsonConvEpsPerEq(1e-9);
+                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
         // STATE-LEVEL comparison: monitor every voltage level. Status + violation-count parity is BLIND to a
@@ -149,10 +147,8 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 var gbv = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
                 assertEquals(cbv.size(), gbv.size());
                 for (int b = 0; b < cbv.size(); b++) {
-                    // With matched convergence depth the DEVICE batch agrees with the CPU SA to inner-Newton
-                    // precision (~1e-10 kV measured); 1e-6 kV is a tight guard far below any real solve error yet
-                    // robust to cross-platform float noise.
-                    org.junit.jupiter.api.Assertions.assertEquals(cbv.get(b).getV(), gbv.get(b).getV(), 1e-6,
+                    // machine-precision parity at DEFAULT tolerance (measured 0.0 / 7.1e-15)
+                    org.junit.jupiter.api.Assertions.assertEquals(cbv.get(b).getV(), gbv.get(b).getV(), 1e-12,
                             "transformer-VC bus voltage " + cbv.get(b).getBusId() + " for "
                                     + cpu.getPostContingencyResults().get(i).getContingency().getId());
                 }
@@ -198,7 +194,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 var gb = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
                 assertEquals(cb.size(), gb.size());
                 for (int b = 0; b < cb.size(); b++) {
-                    org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 0.05,
+                    org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-12,
                             "JAVA load-based-DS bus voltage " + cb.get(b).getBusId());
                 }
             }
@@ -258,7 +254,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 var gb = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
                 assertEquals(cb.size(), gb.size());
                 for (int b = 0; b < cb.size(); b++) {
-                    org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 0.05,
+                    org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-12,
                             "JAVA transformer-VC bus voltage " + cb.get(b).getBusId());
                 }
             }
@@ -314,7 +310,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 var gb = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
                 assertEquals(cb.size(), gb.size());
                 for (int b = 0; b < cb.size(); b++) {
-                    org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 0.05,
+                    org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-12,
                             "JAVA shunt-VC bus voltage " + cb.get(b).getBusId());
                 }
             }
@@ -540,6 +536,8 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
             var gb = gpuS.getNetworkResult().getBusResults();
             assertEquals(cb.size(), gb.size());
             for (int b = 0; b < cb.size(); b++) {
+                // DEVICE operator-strategy path: 0.05 kV documented contract (the composed-action scenarios
+                // re-solve on-device; candidate for the same orchestration-fidelity treatment later).
                 org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 0.05,
                         "strategy bus voltage " + cb.get(b).getBusId());
             }
@@ -629,6 +627,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                     }
                 }
                 for (int b = 0; b < cb.size(); b++) {
+                    // DEVICE operator-strategy path: 0.05 kV documented contract (see above).
                     org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 0.05,
                             "strategy bus voltage " + cb.get(b).getBusId());
                 }
@@ -1334,7 +1333,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         // default tolerance. The CPU SA legitimately differs from a FRESH LF here (~6e-3): its warm-started
         // post-contingency mismatch stays below the distributed-slack band, so it distributes 0 where a fresh
         // flat solve distributes the full amount — expected OLF SA behavior, faithfully reproduced by the GPU.
-        org.junit.jupiter.api.Assertions.assertEquals(saCpuV, saGpuV, 1e-9,
+        org.junit.jupiter.api.Assertions.assertEquals(saCpuV, saGpuV, 1e-12,
                 "GPU batched SA must reproduce the CPU SA at default tolerance (machine precision)");
     }
 
@@ -1384,7 +1383,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         // DEFAULT tolerance: the JAVA hybrid (OLF's own outer loops + OLF-faithful re-solve initialization)
         // agrees with the CPU sequential SA. The DEVICE orchestrator still carries a known ~6e-3 warm-start
         // gap (it does not re-initialize identity rows between its on-device rounds) — not asserted yet.
-        org.junit.jupiter.api.Assertions.assertEquals(cpu, gpuJava, 1e-4,
+        org.junit.jupiter.api.Assertions.assertEquals(cpu, gpuJava, 1e-12,
                 "JAVA hybrid must match the CPU SA at default tolerance");
     }
 
@@ -1952,7 +1951,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 plainV, cpu, Math.abs(plainV - cpu), gpu, Math.abs(cpu - gpu), Math.abs(plainV - gpu));
         // DEFAULT tolerance (never tightened): the JAVA hybrid must agree with the CPU SA on a contingency
         // whose tap MOVES (device pi-model refresh + OLF-faithful identity-row re-initialization).
-        org.junit.jupiter.api.Assertions.assertEquals(cpu, gpu, 1e-4,
+        org.junit.jupiter.api.Assertions.assertEquals(cpu, gpu, 1e-12,
                 "JAVA hybrid must match the CPU SA at default tolerance on a tap-moving contingency");
     }
 
@@ -2042,7 +2041,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 assertEquals(cb.size(), gb.size());
                 for (int b = 0; b < cb.size(); b++) {
                     worst = Math.max(worst, Math.abs(cb.get(b).getV() - gb.get(b).getV()));
-                    assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-9,
+                    assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-12,
                             mode + " bus " + cb.get(b).getBusId() + " ctg " + cpu.getPostContingencyResults().get(i).getContingency().getId());
                 }
             }
@@ -2106,7 +2105,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 assertEquals(cb.size(), gb.size());
                 for (int b = 0; b < cb.size(); b++) {
                     worst = Math.max(worst, Math.abs(cb.get(b).getV() - gb.get(b).getV()));
-                    assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-9,
+                    assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-12,
                             "bus " + cb.get(b).getBusId() + " ctg " + cpu.getPostContingencyResults().get(i).getContingency().getId());
                 }
             }
@@ -2115,5 +2114,95 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
             System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         }
+    }
+
+    private void assertJavaSaMatchesCpu(Network network, List<Contingency> ctgs,
+                                        com.powsybl.loadflow.LoadFlowParameters lfp, String tag) {
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(),
+                network.getVoltageLevelStream().map(vl -> vl.getId()).collect(java.util.stream.Collectors.toSet()), java.util.Set.of()));
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, ctgs, mon, sap);
+        System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY, "JAVA");
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            SecurityAnalysisResult gpu = runSecurityAnalysis(network, ctgs, mon, sap);
+            assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() > 0,
+                    tag + ": the JAVA run must ENGAGE the batch (guard fell back -> the loop is not exercised)");
+            assertEquals(cpu.getPostContingencyResults().size(), gpu.getPostContingencyResults().size());
+            double worst = 0;
+            for (int i = 0; i < cpu.getPostContingencyResults().size(); i++) {
+                assertEquals(cpu.getPostContingencyResults().get(i).getStatus(), gpu.getPostContingencyResults().get(i).getStatus());
+                var cb = cpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                var gb = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                assertEquals(cb.size(), gb.size());
+                for (int b = 0; b < cb.size(); b++) {
+                    worst = Math.max(worst, Math.abs(cb.get(b).getV() - gb.get(b).getV()));
+                    assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-12,
+                            tag + " bus " + cb.get(b).getBusId() + " ctg " + cpu.getPostContingencyResults().get(i).getContingency().getId());
+                }
+            }
+            System.err.printf("[%s] JAVA vs CPU max dV = %.3e (machine precision)%n", tag, worst);
+        } finally {
+            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
+    @org.junit.jupiter.api.Test
+    void javaIncrementalPhaseControlMatchesCpu() {
+        // INCREMENTAL phase-shifter control in JAVA mode: OLF's AcIncrementalPhaseControlOuterLoop moves the
+        // PST's discrete taps (a1 + per-tap R/X changes reach the device via the pi-model refresh; the pinned
+        // ALPHA1 variable's target follows via the activation re-extraction + faithful re-init).
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.TwoWindingsTransformer ps1 = network.getTwoWindingsTransformer("PS1");
+        ps1.getPhaseTapChanger().setRegulationMode(com.powsybl.iidm.network.PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL)
+                .setTargetDeadband(1).setRegulating(true).setTapPosition(1)
+                .setRegulationTerminal(ps1.getTerminal1()).setRegulationValue(83);
+        // parallel circuit to L1 so outaging the clone keeps the grid connected and shifts flows
+        com.powsybl.iidm.network.Line l1 = network.getLine("L1");
+        network.newLine().setId("L1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR() * 2).setX(l1.getX() * 2)
+                .setG1(l1.getG1()).setB1(l1.getB1()).setG2(l1.getG2()).setB2(l1.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("L1_BIS", new BranchContingency("L1_BIS")),
+                new Contingency("L1", new BranchContingency("L1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setPhaseShifterRegulationOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setPhaseShifterControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.PhaseShifterControlMode.INCREMENTAL);
+        assertJavaSaMatchesCpu(network, ctgs, lfp, "PHASE-INC");
+    }
+
+    @org.junit.jupiter.api.Test
+    void javaIncrementalTransformerReactivePowerControlMatchesCpu() {
+        // INCREMENTAL transformer reactive-power control in JAVA mode: the loop moves the RTC's discrete taps
+        // to control a branch's Q; rho is pinned (BRANCH_TARGET_RHO1 exists for reactive-power controllers)
+        // and per-tap R/X changes reach the device via the pi-model refresh.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.TwoWindingsTransformer t2wt = network.getTwoWindingsTransformer("T2wT");
+        t2wt.getRatioTapChanger()
+                .setTargetDeadband(0).setRegulating(true).setTapPosition(1)
+                .setRegulationMode(com.powsybl.iidm.network.RatioTapChanger.RegulationMode.REACTIVE_POWER)
+                .setRegulationTerminal(t2wt.getTerminal1()).setRegulationValue(-0.55);
+        com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+        network.newLine().setId(l0.getId() + "_BIS")
+                .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l0.getR() * 2).setX(l0.getX() * 2)
+                .setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency(l0.getId() + "_BIS", new BranchContingency(l0.getId() + "_BIS")),
+                new Contingency(l0.getId(), new BranchContingency(l0.getId())));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(false).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setTransformerReactivePowerControl(true);
+        assertJavaSaMatchesCpu(network, ctgs, lfp, "TRPC-INC");
     }
 }

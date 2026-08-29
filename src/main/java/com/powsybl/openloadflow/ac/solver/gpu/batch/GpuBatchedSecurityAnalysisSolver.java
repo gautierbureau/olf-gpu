@@ -449,7 +449,16 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 }
             }
             List<LfHvdc> hvdcs = network.getHvdcs();
-            List<LfBranch> transformerBranches = network.getControllerElements(VoltageControl.Type.TRANSFORMER);
+            // Tap-capable controller branches for the compact snapshot (BranchState: tap/r1/a1/control flags)
+            // and the per-scenario pi-model refresh: transformer VC controllers PLUS phase controllers PLUS
+            // transformer reactive-power controllers — the incremental loops move THEIR taps too, changing
+            // R/X/Y/ksi/a1 on the network, and the device row must follow.
+            List<LfBranch> transformerBranches = new ArrayList<>(network.<LfBranch>getControllerElements(VoltageControl.Type.TRANSFORMER));
+            for (LfBranch br : network.getBranches()) {
+                if ((br.isPhaseController() || br.isTransformerReactivePowerController()) && !transformerBranches.contains(br)) {
+                    transformerBranches.add(br);
+                }
+            }
             int[] varType = config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null;
             int maxOuter = context.getParameters().getMaxOuterLoopIterations();
 

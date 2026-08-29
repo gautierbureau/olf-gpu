@@ -2209,4 +2209,73 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .setTransformerReactivePowerControl(true);
         assertJavaSaMatchesCpu(network, ctgs, lfp, "TRPC-INC");
     }
+
+    @org.junit.jupiter.api.Test
+    void javaSecondaryVoltageControlMatchesCpu() {
+        // Secondary voltage control (pilot-point zone regulation) in JAVA mode: the loop adjusts control
+        // units' generator-VC TARGET VALUES to steer the pilot bus; the engine isolates those targets per
+        // scenario (vcSnap) and the activation re-extraction carries them to the device each round.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory.create14();
+        network.newExtension(com.powsybl.iidm.network.extensions.SecondaryVoltageControlAdder.class)
+                .newControlZone().withName("z1")
+                .newPilotPoint().withTargetV(13).withBusbarSectionsOrBusesIds(List.of("B10")).add()
+                .newControlUnit().withId("B6-G").add()
+                .newControlUnit().withId("B8-G").add()
+                .add().add();
+        List<Contingency> ctgs = List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("L2-3-1", new BranchContingency("L2-3-1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSecondaryVoltageControl(true).setMaxPlausibleTargetVoltage(1.6);
+        assertJavaSaMatchesCpu(network, ctgs, lfp, "SECONDARY-VC");
+    }
+
+    @org.junit.jupiter.api.Test
+    void javaHvdcAcEmulationMatchesCpu() {
+        // HVDC in AC emulation, JAVA mode, WITH the HVDC loops able to fire: the droop coupling solves on the
+        // device (hv family); a freeze/saturation decision by OLF's Java loops deactivates the coupling per
+        // scenario via the hv element's disabled bit, with the VSC injections entering through the re-read
+        // bus targets.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.HvdcNetworkFactory.createHvdcInAcEmulationInSymetricNetwork();
+        com.powsybl.iidm.network.Line l12 = network.getLine("l12");
+        network.newLine().setId("l12_BIS")
+                .setVoltageLevel1(l12.getTerminal1().getVoltageLevel().getId()).setBus1(l12.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l12.getTerminal2().getVoltageLevel().getId()).setBus2(l12.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l12.getR() * 2).setX(l12.getX() * 2)
+                .setG1(l12.getG1()).setB1(l12.getB1()).setG2(l12.getG2()).setB2(l12.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("l12_BIS", new BranchContingency("l12_BIS")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setHvdcAcEmulation(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp);
+        assertJavaSaMatchesCpu(network, ctgs, lfp, "HVDC-ACEMU");
+    }
+
+    @org.junit.jupiter.api.Test
+    void javaSvcVoltageMonitoringMatchesCpu() {
+        // SVC present (slope-less: a plain generator-VC bus on the device) with the VoltageMonitoring loop
+        // able to fire, JAVA mode: the loop's mutations (VC re-enable, VC target moves, SVC control type)
+        // are isolated per scenario via BusState + vcSnap.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithStaticVarCompensator();
+        network.getStaticVarCompensator("svc1")
+                .setVoltageSetpoint(385)
+                .setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE);
+        com.powsybl.iidm.network.Line l1 = network.getLine("l1");
+        network.newLine().setId("l1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR() * 2).setX(l1.getX() * 2)
+                .setG1(l1.getG1()).setB1(l1.getB1()).setG2(l1.getG2()).setB2(l1.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("l1_BIS", new BranchContingency("l1_BIS")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setSvcVoltageMonitoring(true);
+        assertJavaSaMatchesCpu(network, ctgs, lfp, "SVC-MON");
+    }
 }

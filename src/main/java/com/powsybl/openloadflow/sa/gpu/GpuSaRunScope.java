@@ -223,12 +223,23 @@ final class GpuSaRunScope {
                     // (CONTINUOUS phase control — "PhaseControl" — stays unsupported: its BRANCH_TARGET_P row
                     // has no device family and the activation extractor routes it to CPU by construction.)
                     || "IncrementalPhaseControl".equals(name)
-                    || "IncrementalTransformerReactivePowerControl".equals(name))
+                    || "IncrementalTransformerReactivePowerControl".equals(name)
+                    // SecondaryVoltageControl: adjusts GENERATOR-VC TARGET VALUES only (pilot-point regulation);
+                    // targets are re-read per round and the engine isolates every MAIN generator VC's target per
+                    // scenario (vcSnap), so the hybrid replays OLF's loop verbatim.
+                    || "SecondaryVoltageControl".equals(name))
                     // conservative structural no-ops: allow the HVDC/SVC-touching loops only when they cannot
                     // fire yet (widen once JAVA's HVDC/SVC handling is validated — the snapshot already captures
                     // HvdcState, and SVCs are generator-voltage-control buses already in the controller set).
-                    && !("VoltageMonitoring".equals(name) && !noSvc)
-                    && !(("AcHvdcAcEmulationLimits".equals(name) || "FreezingHvdcACEmulation".equals(name)) && !noHvdc);
+                    ;
+            // VoltageMonitoring now supported WITH SVCs present: the loop's mutations (re-enable generator VC,
+            // move VC targets, flip an SVC's generator control type) are all isolated per scenario — BusState
+            // captures generatorsControlType + VC-enabled, and the engine's vcSnap isolates VC target values.
+            // (An SVC with a voltage SLOPE creates equation terms outside the device whitelist — extraction
+            // rejects them and the precompute falls back to CPU by construction, so no gate is needed.)
+            // HVDC loops now supported WITH HVDCs present: a non-LINEAR AC-emulation status deactivates the
+            // hvdc coupling on the CPU; the engine mirrors it per scenario via the hv element's disabled bit
+            // (fillHvdcBatch honors it) and the re-read bus targets carry the frozen/saturated VSC injections.
             if (!ok) {
                 unsupported.add(name);
             }

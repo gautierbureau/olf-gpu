@@ -198,6 +198,16 @@ public final class GpuHybridBatchOuterLoopEngine {
         }
         double[][][] scenShGb = new double[nS][][];
 
+        // Packed AC-emulation HVDCs (the device hv family), in the packer's enumeration order. OLF's HVDC
+        // outer loops (FreezingHvdcACEmulation / AcHvdcAcEmulationLimits) flip the emulation status per
+        // scenario: any non-LINEAR status DEACTIVATES the hvdc P coupling terms on the CPU (the injections
+        // then enter through the bus targets, which are re-read every round) — mirror it on the device by
+        // setting the hv element's per-scenario DISABLED bit, which fillHvdcBatch honors.
+        List<LfHvdc> hvPacked = in.network().getHvdcs().stream()
+                .filter(h -> h.getBus1() != null && h.getBus2() != null && h.isAcEmulation())
+                .toList();
+        int hvOffset = in.nElements() - hvPacked.size();
+
         // per-scenario evolving state (isolated across scenarios via the compact snapshot + explicit targetP)
         HybridScenarioState baseCompact = new HybridScenarioState(in.ctrlBuses(), in.hvdcs(), in.transformerBranches());
         List<LfBranch> networkDisabled = new ArrayList<>();
@@ -210,6 +220,14 @@ public final class GpuHybridBatchOuterLoopEngine {
         List<LfLoad> loads = in.network().getBuses().stream().flatMap(b -> b.getLoads().stream()).toList();
         double[] baseLoadP = loads.stream().mapToDouble(LfLoad::getTargetP).toArray();
         double[] baseLoadQ = loads.stream().mapToDouble(LfLoad::getTargetQ).toArray();
+        // Secondary voltage control mutates GENERATOR-VC TARGET VALUES (vc.setTargetValue) — not captured by
+        // BusState — so isolate every MAIN generator voltage control's target per scenario, like gen/load targets.
+        List<com.powsybl.openloadflow.network.GeneratorVoltageControl> genVcs = in.network().getBuses().stream()
+                .flatMap(b -> b.getGeneratorVoltageControl().stream())
+                .filter(vc -> vc.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN)
+                .distinct().toList();
+        double[] baseVcTarget = genVcs.stream().mapToDouble(com.powsybl.openloadflow.network.GeneratorVoltageControl::getTargetValue).toArray();
+        double[][] vcSnap = new double[nS][];
         double[][] loadSnapP = new double[nS][];
         double[][] loadSnapQ = new double[nS][];
         int[][] rowMode = new int[nS][];
@@ -257,6 +275,9 @@ public final class GpuHybridBatchOuterLoopEngine {
                 loads.get(l).setTargetP(baseLoadP[l]);
                 loads.get(l).setTargetQ(baseLoadQ[l]);
             }
+            for (int v = 0; v < genVcs.size(); v++) {
+                genVcs.get(v).setTargetValue(baseVcTarget[v]);
+            }
             for (LfBranch b : in.ctgs().get(s).outagedBranches()) {
                 b.setDisabled(true);
             }
@@ -283,10 +304,15 @@ public final class GpuHybridBatchOuterLoopEngine {
                 }
                 scenShGb[s] = gb;
             }
+            for (int h = 0; h < hvPacked.size(); h++) {
+                disabled[s][hvOffset + h] = hvPacked.get(h).getAcEmulationControl().getAcEmulationStatus()
+                        != LfHvdc.AcEmulationControl.AcEmulationStatus.LINEAR_MODE;
+            }
             snaps[s] = new HybridScenarioState(in.ctrlBuses(), in.hvdcs(), in.transformerBranches());
             genSnap[s] = in.gens().stream().mapToDouble(LfGenerator::getTargetP).toArray();
             loadSnapP[s] = loads.stream().mapToDouble(LfLoad::getTargetP).toArray();
             loadSnapQ[s] = loads.stream().mapToDouble(LfLoad::getTargetQ).toArray();
+            vcSnap[s] = genVcs.stream().mapToDouble(com.powsybl.openloadflow.network.GeneratorVoltageControl::getTargetValue).toArray();
             tJava += System.nanoTime() - tj0;
             nJavaCalls++;
         }
@@ -398,6 +424,9 @@ public final class GpuHybridBatchOuterLoopEngine {
                         loads.get(l).setTargetP(loadSnapP[s][l]);
                         loads.get(l).setTargetQ(loadSnapQ[s][l]);
                     }
+                    for (int v = 0; v < genVcs.size(); v++) {
+                        genVcs.get(v).setTargetValue(vcSnap[s][v]);
+                    }
                 } else {
                     baseCompact.restore();
                     for (int g = 0; g < in.gens().size(); g++) {
@@ -406,6 +435,9 @@ public final class GpuHybridBatchOuterLoopEngine {
                     for (int l = 0; l < loads.size(); l++) {
                         loads.get(l).setTargetP(baseLoadP[l]);
                         loads.get(l).setTargetQ(baseLoadQ[l]);
+                    }
+                    for (int v = 0; v < genVcs.size(); v++) {
+                        genVcs.get(v).setTargetValue(baseVcTarget[v]);
                     }
                 }
                 // anchor initialTargetP at the ORIGINAL generation for the distributed-slack cumulative accounting.
@@ -438,6 +470,10 @@ public final class GpuHybridBatchOuterLoopEngine {
                         gb[c] = new double[] {shuntTracked.get(c).getG(), shuntTracked.get(c).getB()};
                     }
                     scenShGb[s] = gb;
+                }
+                for (int h = 0; h < hvPacked.size(); h++) {
+                    disabled[s][hvOffset + h] = hvPacked.get(h).getAcEmulationControl().getAcEmulationStatus()
+                            != LfHvdc.AcEmulationControl.AcEmulationStatus.LINEAR_MODE;
                 }
                 rowMode[s] = act.rowMode();
                 scenTargets[s] = act.applyTargets(new AcTargetVector(in.network(), in.es()).getArray());
@@ -480,6 +516,7 @@ public final class GpuHybridBatchOuterLoopEngine {
                     genSnap[s] = in.gens().stream().mapToDouble(LfGenerator::getTargetP).toArray();
                     loadSnapP[s] = loads.stream().mapToDouble(LfLoad::getTargetP).toArray();
                     loadSnapQ[s] = loads.stream().mapToDouble(LfLoad::getTargetQ).toArray();
+                    vcSnap[s] = genVcs.stream().mapToDouble(com.powsybl.openloadflow.network.GeneratorVoltageControl::getTargetValue).toArray();
                     tSnap += System.nanoTime() - tsv0;
                 }
             }

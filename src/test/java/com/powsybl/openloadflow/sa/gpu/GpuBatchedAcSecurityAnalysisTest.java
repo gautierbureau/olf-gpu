@@ -536,8 +536,11 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
             var gb = gpuS.getNetworkResult().getBusResults();
             assertEquals(cb.size(), gb.size());
             for (int b = 0; b < cb.size(); b++) {
-                // DEVICE operator-strategy path: 0.05 kV documented contract (the composed-action scenarios
-                // re-solve on-device; candidate for the same orchestration-fidelity treatment later).
+                // TEMPORARY tolerance — TO INVESTIGATE: the DEVICE operator-strategy path does NOT yet meet the
+                // 1e-12 machine-precision standard (measured ~5e-4..4e-3 vs CPU at default tolerance). The
+                // composed-action scenarios re-solve on-device and need the same orchestration-fidelity
+                // treatment as the main paths (OLF-faithful re-solve initialization / no re-solve on stable).
+                // Tighten to 1e-12 once fixed.
                 org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 0.05,
                         "strategy bus voltage " + cb.get(b).getBusId());
             }
@@ -627,7 +630,8 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                     }
                 }
                 for (int b = 0; b < cb.size(); b++) {
-                    // DEVICE operator-strategy path: 0.05 kV documented contract (see above).
+                    // TEMPORARY tolerance — TO INVESTIGATE (see the note above): tighten to 1e-12 once the
+                    // DEVICE strategy path gets the orchestration-fidelity treatment.
                     org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 0.05,
                             "strategy bus voltage " + cb.get(b).getBusId());
                 }

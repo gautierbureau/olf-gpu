@@ -1999,4 +1999,70 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
             System.err.printf("[DS-BAND] band=%.0e MW  CPU=%.9f  DEV=%.9f  d=%.3e%n", band, cpu, dev, Math.abs(cpu - dev));
         }
     }
+
+    private void runJavaTvcModeMatchesCpu(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode mode) {
+        // JAVA-mode SA with the given transformer-VC flavor must reproduce the CPU SA at MACHINE PRECISION,
+        // at DEFAULT criteria/tolerance (the standing rule: identical orchestration must agree exactly).
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
+        network.getTwoWindingsTransformer("T2wT").getRatioTapChanger().setTargetDeadband(0).setRegulating(true)
+                .setTapPosition(0).setRegulationTerminal(network.getTwoWindingsTransformer("T2wT").getTerminal2()).setTargetV(34.0);
+        com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+        String bis = l0.getId() + "_BIS";
+        network.newLine().setId(bis)
+                .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
+        // TWO contingencies: the weak clone outage AND the strong original-line outage (the tap-moving one),
+        // so the mode's discrete decisions are really exercised.
+        List<Contingency> ctgs = List.of(new Contingency(bis, new BranchContingency(bis)),
+                new Contingency(l0.getId(), new BranchContingency(l0.getId())));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setTransformerVoltageControlMode(mode);
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(),
+                network.getVoltageLevelStream().map(vl -> vl.getId()).collect(java.util.stream.Collectors.toSet()), java.util.Set.of()));
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, ctgs, mon, sap);
+        System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY, "JAVA");
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            SecurityAnalysisResult gpu = runSecurityAnalysis(network, ctgs, mon, sap);
+            assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() > 0,
+                    mode + ": the JAVA run must ENGAGE the batch (guard fell back -> the mode is not exercised)");
+            assertEquals(cpu.getPostContingencyResults().size(), gpu.getPostContingencyResults().size());
+            double worst = 0;
+            for (int i = 0; i < cpu.getPostContingencyResults().size(); i++) {
+                assertEquals(cpu.getPostContingencyResults().get(i).getStatus(), gpu.getPostContingencyResults().get(i).getStatus());
+                var cb = cpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                var gb = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                assertEquals(cb.size(), gb.size());
+                for (int b = 0; b < cb.size(); b++) {
+                    worst = Math.max(worst, Math.abs(cb.get(b).getV() - gb.get(b).getV()));
+                    assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-9,
+                            mode + " bus " + cb.get(b).getBusId() + " ctg " + cpu.getPostContingencyResults().get(i).getContingency().getId());
+                }
+            }
+            System.err.printf("[TVC-MODE] %s: JAVA vs CPU max dV = %.3e (machine precision)%n", mode, worst);
+        } finally {
+            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
+    @org.junit.jupiter.api.Test
+    void javaSimpleTransformerVoltageControlMatchesCpu() {
+        runJavaTvcModeMatchesCpu(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL);
+    }
+
+    @org.junit.jupiter.api.Test
+    void javaIncrementalTransformerVoltageControlMatchesCpu() {
+        // INCREMENTAL is OLF's DEFAULT transformer-VC mode: the loop moves discrete taps directly
+        // (sensitivity-guided), so the device sees only pi-model changes (via the r1Ov refresh) and
+        // pinned-ratio target updates — the highest-value flavor to support.
+        runJavaTvcModeMatchesCpu(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL);
+    }
 }

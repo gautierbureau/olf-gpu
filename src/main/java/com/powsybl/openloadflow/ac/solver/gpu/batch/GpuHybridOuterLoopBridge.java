@@ -113,6 +113,26 @@ public final class GpuHybridOuterLoopBridge {
     }
 
     /**
+     * Per-scenario initialization, faithful to OLF's engine setup: {@code createOuterLoopsAndContexts}
+     * {@code initialize()}s every outer loop BEFORE the initial solver run — and a loop's initialize can
+     * CHANGE the activation (e.g. {@code SimpleTransformerVoltageControlOuterLoop} enables continuous
+     * voltage control; {@code ShuntVoltageControlOuterLoop} likewise). The engine must therefore run this
+     * BEFORE the scenario's first device solve and solve round 0 under the returned activation — an extra
+     * pre-initialize solve is a round OLF never performs and shifts the trajectory (~1e-7 measured).
+     * Never checks any loop (OLF checks only after the initial solve).
+     */
+    public GpuAcActivation initializeScenario(double[] scenarioState) {
+        equationSystem.getStateVector().set(scenarioState);
+        AcSolverUtil.updateNetwork(network, equationSystem);
+        initialized = true;
+        for (int i = 0; i < outerLoops.size(); i++) {
+            outerLoops.get(i).initialize(outerLoopContexts.get(i));
+        }
+        lastStable = false;
+        return GpuAcActivationExtractor.extractActivation(network, equationSystem, n);
+    }
+
+    /**
      * One hybrid outer-loop step for a single scenario, faithful to OLF's NESTED {@code runOuterLoop}.
      *
      * <p>OLF's {@code AcloadFlowEngine.run()} does NOT check every outer loop once per Newton solve. It runs

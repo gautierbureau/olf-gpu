@@ -195,7 +195,16 @@ final class GpuSaRunScope {
                     // makes only the discrete tap DECISIONS, and the compact snapshot now isolates the transformer
                     // BranchState (tap/r1/VC-enabled) per scenario. Stage-1 scope (no generator VC under the
                     // transformer-controlled level) is enforced exactly like the DEVICE path.
-                    || "TransformerVoltageControl".equals(name) && GpuBatchTransformerControl.transformerControlSupported(lfNetwork)
+                    // ALL THREE transformer-VC loop flavors: AFTER_GENERATOR (TransformerVoltageControl),
+                    // WITH_GENERATOR (SimpleTransformerVoltageControl) and INCREMENTAL — OLF's DEFAULT mode —
+                    // (IncrementalTransformerVoltageControl). The JAVA engine replays OLF's real loop either
+                    // way; the continuous ratio (when the loop uses one) is a BRANCH_RHO1 variable solved
+                    // in-Newton, discrete tap moves reach the device via the per-scenario pi-model refresh
+                    // (r1Ov carries all 8 statics), and the OLF-faithful re-solve initialization starts a
+                    // just-pinned ratio exactly at its pinned value.
+                    || ("TransformerVoltageControl".equals(name) || "SimpleTransformerVoltageControl".equals(name)
+                            || "IncrementalTransformerVoltageControl".equals(name))
+                            && GpuBatchTransformerControl.transformerControlSupported(lfNetwork)
                     // ShuntVoltageControl: the JAVA engine runs OLF's real shunt VC loop; the continuous
                     // susceptance is solved INSIDE the device inner Newton (SHUNT_B is a variable in es) and the
                     // compact snapshot isolates the controller-shunt b + VC-enabled per scenario (BusState).

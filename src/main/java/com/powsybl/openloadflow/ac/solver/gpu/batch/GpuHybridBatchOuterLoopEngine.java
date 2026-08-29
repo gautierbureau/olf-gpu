@@ -220,6 +220,53 @@ public final class GpuHybridBatchOuterLoopEngine {
         long tJava = 0;
         long tSnap = 0;
         long nJavaCalls = 0;
+
+        // ---- OLF-faithful pre-round-0 initialization: OLF initialize()s every outer loop BEFORE the
+        // initial solver run, and a loop's initialize can CHANGE the activation (SimpleTransformerVoltageControl
+        // / ShuntVoltageControl enable continuous control there). Round 0 must solve under the POST-initialize
+        // activation and the PreviousValues x0 read from the post-initialize network — an extra pre-initialize
+        // solve is a round OLF never performs and shifts the trajectory (~1e-7 measured on Simple TVC). ----
+        for (int s = 0; s < nS; s++) {
+            long tj0 = System.nanoTime();
+            for (LfBranch b : networkDisabled) {
+                b.setDisabled(false);
+            }
+            baseCompact.restore();
+            for (int g = 0; g < in.gens().size(); g++) {
+                in.gens().get(g).setTargetP(in.baseGenP()[g]);
+                in.gens().get(g).setInitialTargetP(in.originalGenP()[g]);
+            }
+            for (int l = 0; l < loads.size(); l++) {
+                loads.get(l).setTargetP(baseLoadP[l]);
+                loads.get(l).setTargetQ(baseLoadQ[l]);
+            }
+            for (LfBranch b : in.ctgs().get(s).outagedBranches()) {
+                b.setDisabled(true);
+            }
+            networkDisabled = in.ctgs().get(s).outagedBranches();
+            GpuAcActivation act = bridges[s].initializeScenario(in.baseState());
+            rowMode[s] = act.rowMode();
+            scenTargets[s] = act.applyTargets(new AcTargetVector(in.network(), in.es()).getArray());
+            com.powsybl.openloadflow.ac.solver.AcSolverUtil.initStateVector(in.network(), in.es(),
+                    new com.powsybl.openloadflow.network.util.PreviousValueVoltageInitializer());
+            double[] x0 = in.es().getStateVector().get();
+            states[s] = new double[n + 3];
+            System.arraycopy(x0, 0, states[s], 0, n);
+            if (!tapTracked.isEmpty()) {                     // initialize may not move taps, but stay uniform
+                double[][] rr = new double[tapTracked.size()][];
+                for (int b = 0; b < tapTracked.size(); b++) {
+                    rr[b] = cbRowOf(tapTracked.get(b));
+                }
+                scenCbRow[s] = rr;
+            }
+            snaps[s] = new HybridScenarioState(in.ctrlBuses(), in.hvdcs(), in.transformerBranches());
+            genSnap[s] = in.gens().stream().mapToDouble(LfGenerator::getTargetP).toArray();
+            loadSnapP[s] = loads.stream().mapToDouble(LfLoad::getTargetP).toArray();
+            loadSnapQ[s] = loads.stream().mapToDouble(LfLoad::getTargetQ).toArray();
+            tJava += System.nanoTime() - tj0;
+            nJavaCalls++;
+        }
+
         for (int round = 0; round < MAX_ROUNDS; round++) {
             rounds = round + 1;
             // cross-round compaction: solve only still-active scenarios; recreate the (cheap, empty-pack) context
@@ -246,7 +293,7 @@ public final class GpuHybridBatchOuterLoopEngine {
             List<Double> ovVal = new ArrayList<>();
             List<Integer> r1OvSlotElem = new ArrayList<>();  // per-scenario refreshed pi-model rows (tap changes)
             List<Double> r1OvVal = new ArrayList<>();
-            double[] x0C = round == 0 ? null : new double[nA * n];
+            double[] x0C = new double[nA * n];               // round 0 included: the pre-pass filled states[s]
             for (int i = 0; i < nA; i++) {
                 int s = active.get(i);
                 rowModeC[i] = rowMode[s];
@@ -269,9 +316,7 @@ public final class GpuHybridBatchOuterLoopEngine {
                         }
                     }
                 }
-                if (round > 0) {
-                    System.arraycopy(states[s], 0, x0C, i * n, n);
-                }
+                System.arraycopy(states[s], 0, x0C, i * n, n);
             }
             long ts0 = System.nanoTime();
             double[][] statesC = GpuAcNewtonSolver.solveBatchContext(handle, in.baseState(), in.baseTargets(),

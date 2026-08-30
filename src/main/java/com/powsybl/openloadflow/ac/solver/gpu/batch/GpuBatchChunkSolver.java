@@ -116,6 +116,11 @@ final class GpuBatchChunkSolver {
         }
         int nrl = gpuData.rlVrow().length;
         java.util.Map<Integer, int[]> rlByIndex = new java.util.HashMap<>();    // ctg index -> its nrl RL-state slice
+        // ctg index -> its FINAL distributed-slack targets at the DS participant rows (the device DS mutates
+        // targets in place; read back after each ctg chunk). The pair phase re-anchors its distribution here,
+        // mirroring OLF's setGeneratorsInitialTargetPToTargetP before the strategy re-solve.
+        int nds = gpuData.dsPhiRow().length;
+        java.util.Map<Integer, double[]> dsTargetsByIndex = new java.util.HashMap<>();
         // Host-side base RL seed (mirrors initRlLimitTypeBatch) for PADDING slots of pair chunks.
         int[] baseRlSeed = new int[nrl];
         for (int i = 0; i < nrl; i++) {
@@ -278,6 +283,11 @@ final class GpuBatchChunkSolver {
                     // Pair phase: warm continuation from each parent contingency's state + RL pinning.
                     double[] x0Full = null;
                     int[] rlStateIn = null;
+                    // dsAnchorShift: DORMANT channel for the strategy-leg DS re-anchoring investigation (see the
+                    // TEMPORARY 0.05 kV tolerance note in the tests): the naive participant re-anchor at the
+                    // parent's distribution measured WORSE (4.7e-2 vs 4.0e-3), so nothing is passed until the
+                    // strategy-leg distribution semantics are pinned down against OLF ground truth.
+                    double[] dsAnchorShift = null;
                     if (pairPhase) {
                         x0Full = new double[chunkSize * n];
                         rlStateIn = nrl > 0 ? new int[chunkSize * nrl] : null;
@@ -305,7 +315,7 @@ final class GpuBatchChunkSolver {
                     int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl) && nrl > 0 ? new int[chunkSize * nrl] : null;
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
-                            dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                            dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift,
                             parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                             config.lsMode(), config.maxDv(), config.maxDphi(),
                             config.lsMode() == 2 ? varType : null, x0Full,
@@ -334,6 +344,17 @@ final class GpuBatchChunkSolver {
                             int[] slice = new int[nrl];
                             System.arraycopy(rlStateOut, s * nrl, slice, 0, nrl);
                             rlByIndex.put(group.get(chunkStart + s), slice);
+                        }
+                    }
+                    if (!pairPhase && nds > 0 && !pairIdxList.isEmpty()) {
+                        // capture each ctg's FINAL distributed targets at the DS rows for its pairs' re-anchoring
+                        double[] finalTargets = GpuAcNewtonSolver.readBatchTargets(handle);
+                        for (int s = 0; s < realCount; s++) {
+                            double[] slice = new double[nds];
+                            for (int i = 0; i < nds; i++) {
+                                slice[i] = finalTargets[s * n + gpuData.dsPhiRow()[i]];
+                            }
+                            dsTargetsByIndex.put(group.get(chunkStart + s), slice);
                         }
                     }
                     if (transformerControllers != null && !transformerControllers.isEmpty()) {

@@ -2278,4 +2278,95 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setSvcVoltageMonitoring(true);
         assertJavaSaMatchesCpu(network, ctgs, lfp, "SVC-MON");
     }
+
+    /** DIAGNOSTIC for the DEVICE operator-strategy TEMPORARY tolerance: which leg diverges — the
+     *  post-contingency solve (should be machine-exact after the fidelity fixes) or the STRATEGY leg
+     *  (warm-continued pair scenario)? Prints per-leg CPU-vs-GPU max dV. Default tolerance. */
+    @org.junit.jupiter.api.Test
+    void deviceStrategyLegIsolationDiagnostic() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        String lineId = network.getLineStream()
+                .filter(l -> !l.getId().contains("7") && !l.getId().contains("8"))
+                .skip(1).findFirst().orElseThrow().getId();
+        com.powsybl.iidm.network.Load load12 = network.getLoadStream()
+                .filter(l -> "B12".equals(l.getTerminal().getBusBreakerView().getBus().getId()))
+                .findFirst().orElseThrow();
+        List<Contingency> contingencies = List.of(new Contingency(lineId, new BranchContingency(lineId)));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.LoadActionBuilder().withId("shed12").withLoadId(load12.getId())
+                        .withRelativeValue(false).withActivePowerValue(load12.getP0() / 2).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("s1",
+                        com.powsybl.contingency.ContingencyContext.specificContingency(lineId),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("shed12")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(),
+                network.getBranchStream().map(br -> br.getId()).collect(java.util.stream.Collectors.toSet()),
+                network.getVoltageLevelStream().map(vl -> vl.getId()).collect(java.util.stream.Collectors.toSet()), java.util.Set.of()));
+        if (System.getenv("OLF_GPU_DBG_RL") != null) {
+            ch.qos.logback.classic.Logger rlLog = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                    .getLogger("com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop");
+            rlLog.setLevel(ch.qos.logback.classic.Level.TRACE);
+            ch.qos.logback.classic.Logger root = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                    .getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+            if (!root.iteratorForAppenders().hasNext()) {
+                ch.qos.logback.classic.encoder.PatternLayoutEncoder enc = new ch.qos.logback.classic.encoder.PatternLayoutEncoder();
+                enc.setContext(root.getLoggerContext());
+                enc.setPattern("%msg%n");
+                enc.start();
+                ch.qos.logback.core.ConsoleAppender<ch.qos.logback.classic.spi.ILoggingEvent> ca = new ch.qos.logback.core.ConsoleAppender<>();
+                ca.setContext(root.getLoggerContext());
+                ca.setEncoder(enc);
+                ca.start();
+                rlLog.addAppender(ca);
+            }
+        }
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, mon, sap, strategies, actions,
+                com.powsybl.commons.report.ReportNode.NO_OP);
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        SecurityAnalysisResult gpu;
+        try {
+            gpu = runSecurityAnalysis(network, contingencies, mon, sap, strategies, actions,
+                    com.powsybl.commons.report.ReportNode.NO_OP);
+        } finally {
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+        double worstCtg = 0;
+        var cb = cpu.getPostContingencyResults().get(0).getNetworkResult().getBusResults();
+        var gb = gpu.getPostContingencyResults().get(0).getNetworkResult().getBusResults();
+        for (int b = 0; b < cb.size(); b++) {
+            worstCtg = Math.max(worstCtg, Math.abs(cb.get(b).getV() - gb.get(b).getV()));
+        }
+        double worstStrat = 0;
+        var cs = cpu.getOperatorStrategyResults().get(0).getNetworkResult().getBusResults();
+        var gs = gpu.getOperatorStrategyResults().get(0).getNetworkResult().getBusResults();
+        for (int b = 0; b < cs.size(); b++) {
+            worstStrat = Math.max(worstStrat, Math.abs(cs.get(b).getV() - gs.get(b).getV()));
+        }
+        System.err.printf("[STRAT-ISO] post-ctg maxDV=%.3e | STRATEGY leg maxDV=%.3e%n", worstCtg, worstStrat);
+        for (var cbr : cpu.getOperatorStrategyResults().get(0).getNetworkResult().getBranchResults()) {
+            var gbr = gpu.getOperatorStrategyResults().get(0).getNetworkResult().getBranchResults().stream()
+                    .filter(x -> x.getBranchId().equals(cbr.getBranchId())).findFirst().orElse(null);
+            if (gbr != null && Math.abs(cbr.getP1() - gbr.getP1()) > 0.1) {
+                System.err.printf("[STRAT-ISO] branch %s P1 CPU=%.4f GPU=%.4f dP=%.4f MW%n",
+                        cbr.getBranchId(), cbr.getP1(), gbr.getP1(), cbr.getP1() - gbr.getP1());
+            }
+        }
+        System.err.printf("[STRAT-ISO] distributedP post-ctg CPU=%.6f GPU=%.6f MW%n",
+                cpu.getPostContingencyResults().get(0).getDistributedActivePower(),
+                gpu.getPostContingencyResults().get(0).getDistributedActivePower());
+        for (int b = 0; b < cs.size(); b++) {
+            double d = Math.abs(cs.get(b).getV() - gs.get(b).getV());
+            if (d > worstStrat * 0.3) {
+                System.err.printf("[STRAT-ISO] strategy %s CPU=%.6f GPU=%.6f d=%.3e%n",
+                        cs.get(b).getBusId(), cs.get(b).getV(), gs.get(b).getV(), d);
+            }
+        }
+    }
 }

@@ -237,7 +237,8 @@ public final class GpuAcNewtonSolver {
                                                        int[] targetOverrideIndex, double[] targetOverrideValue,
                                                        int[] dsOverrideBus, double[] dsOverrideFactorDelta,
                                                        double[] dsOverrideBaseDelta, double[] dsOverrideMaxDelta,
-                                                       double[] dsOverrideMinDelta, int maxIter, double tol,
+                                                       double[] dsOverrideMinDelta, double[] dsAnchorShift,
+                                                       int maxIter, double tol,
                                                        double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                                                        int lsMode, double maxDv, double maxDphi, int[] varType,
                                                        double[] x0PerScenario,
@@ -246,6 +247,11 @@ public final class GpuAcNewtonSolver {
                                                        int[] r1OvSlotElem, double[] r1OvVal,
                                                        int maxOuterIterations, int maxPqPvSwitch, int dsRejectResidual,
                                                        int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem);
+
+    /** Read back the batch context's per-scenario TARGET buffer (n * nScenarios) after a solve — the device
+     *  outer loops mutate targets in place; the strategy/pair phase re-anchors its slack distribution at the
+     *  PARENT contingency's final distributed targets (OLF's setGeneratorsInitialTargetPToTargetP). */
+    public static native double[] readBatchTargets(long handle);
 
     /** Release a batch context from {@link #createBatchContext} (idempotent for handle 0). */
     public static native void destroyBatchContext(long handle);
@@ -305,7 +311,7 @@ public final class GpuAcNewtonSolver {
             try {
                 // one-shot: no per-scenario gen-override flips, so any scenario's row mode IS the base row mode
                 return solveBatchContext(handle, x0Base, targetBase, rowMode, rowMode[0], disabledElementMask,
-                        new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0],
+                        new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null,
                         maxIter, tol, reactiveLimitTol, slackDistTol, 0.0, 0, 0.0, 0.0, null, null, null, null, null, null, null, null, 0, 0, 0, 0, null, null);
             } finally {
                 destroyBatchContext(handle);

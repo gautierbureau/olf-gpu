@@ -2193,7 +2193,8 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
                                    double oneMinusFactorSum, const int* dsPhiRow, const double* dsBaseTargetP,
                                    const double* target, const double* qBuf, const char* rlActive,
                                    double* retain,
-                                   const int* dsOvBus, const double* dsOvBaseDelta) {
+                                   const int* dsOvBus, const double* dsOvBaseDelta,
+                                   const double* dsAnchorShift) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     if (!rlActive[s]) return;
@@ -2205,8 +2206,11 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
         // or the retain math counts the override as absorbed slack and the waterfill CANCELS it
         // (measured: a +60 MW redispatch read back as a no-op, GeneratorAction drill 2026-07-19).
         double base = dsBaseTargetP[i];
-        if (ov == i) {
-            base -= dsOvBaseDelta[s];
+        if (dsAnchorShift != nullptr) {
+            base += dsAnchorShift[(size_t) s * nds + i];     // pair leg: cumulative reference re-anchored at the
+        }                                                    // PARENT contingency's distributed targets (OLF's
+        if (ov == i) {                                       // setGeneratorsInitialTargetPToTargetP before the
+            base -= dsOvBaseDelta[s];                        // strategy re-solve)
         }
         absorbed += target[(size_t) s * n + dsPhiRow[i]] - base;
     }
@@ -2223,7 +2227,7 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
 // different in-tolerance point than OLF.
 __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slackDistTol, double residueEps,
                                               int slackPhiRow, double slackTargetP, const int* dsPhiRow,
-                                              const double* dsFactor, const double* dsBaseTargetP,
+                                              const double* dsFactor, const double* dsBaseTargetP, const double* dsAnchorShift,
                                               const double* dsMaxDelta, const double* dsMinDelta, const double* dsRetain,
                                               const double* qBuf, const char* rlActive,
                                               const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
@@ -2244,6 +2248,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         double fsumActive = 0.0;                            // re-normalize factors over the still-unsaturated buses
         for (int i = 0; i < nds; i++) {
             double f = dsFactor[i], base = dsBaseTargetP[i], maxD = dsMaxDelta[i], minD = dsMinDelta[i];
+            if (dsAnchorShift != nullptr) { double sh = dsAnchorShift[(size_t) s * nds + i]; base += sh; maxD -= sh; minD -= sh; }
             if (ov == i) { f -= dsOvFactorDelta[s]; base -= dsOvBaseDelta[s]; maxD -= dsOvMaxDelta[s]; minD -= dsOvMinDelta[s]; }
             double cum = target[(size_t) s * n + dsPhiRow[i]] - base;
             bool sat = (rem > 0) ? (cum >= maxD) : (cum <= minD);
@@ -2257,6 +2262,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         double done = 0.0;
         for (int i = 0; i < nds; i++) {
             double f = dsFactor[i], base = dsBaseTargetP[i], maxD = dsMaxDelta[i], minD = dsMinDelta[i];
+            if (dsAnchorShift != nullptr) { double sh = dsAnchorShift[(size_t) s * nds + i]; base += sh; maxD -= sh; minD -= sh; }
             if (ov == i) { f -= dsOvFactorDelta[s]; base -= dsOvBaseDelta[s]; maxD -= dsOvMaxDelta[s]; minD -= dsOvMinDelta[s]; }
             size_t idx = (size_t) s * n + dsPhiRow[i];
             double cum = target[idx] - base;
@@ -2850,7 +2856,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               const int* rowMode, const int* baseRowMode, const char* disabled,
                               int nOv, const int* ovIndex, const double* ovValue,
                               const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
-                              const double* dsOvMaxDelta, const double* dsOvMinDelta, int maxIter, double tol,
+                              const double* dsOvMaxDelta, const double* dsOvMinDelta, const double* dsAnchorShift,
+                              int maxIter, double tol,
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                               int lsMode, double maxDv, double maxDphi, const int* varType,
                               const double* x0Full, int nShOv, const int* shOvSlotElem, const double* shOvGb,
@@ -2874,6 +2881,15 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // a per-scenario factor-sum drop so the other buses pick up that share. nullptr when no DS scenarios.
     DeviceBuf dDsOvBus, dDsOvFactorDelta, dDsOvBaseDelta, dDsOvMaxDelta, dDsOvMinDelta;
     bool hasDsOverride = (dsOvBus != nullptr && ctx->nds > 0);
+    // Per-scenario DS ANCHOR SHIFT (pair/strategy legs): shift_i = parent's final target at participant i
+    // minus the extraction-time base — re-anchors the water-fill's cumulative reference at the PARENT
+    // contingency's distribution, mirroring OLF's setGeneratorsInitialTargetPToTargetP before a strategy
+    // re-solve. nullptr = anchored at the base (plain contingencies).
+    DeviceBuf dDsAnchorShift;
+    bool hasDsAnchor = (dsAnchorShift != nullptr && ctx->nds > 0);
+    if (hasDsAnchor) {
+        dDsAnchorShift.upload(dsAnchorShift, static_cast<size_t>(nS) * ctx->nds * sizeof(double));
+    }
 
     // x0/target are the BASE row (length n), identical for every scenario: upload once and tile across
     // nS on-device. rowMode is PER-SCENARIO (length n*nS): a contingency can freeze islanded buses
@@ -3376,12 +3392,14 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     1.0 - ctx->dsFactorSum, ctx->dDsPhiRow.as<int>(), ctx->dDsBaseTargetP.as<double>(),
                     ctx->dTarget.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
                     ctx->dDsRetain.as<double>(),
-                    hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvBaseDelta.as<double>());
+                    hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvBaseDelta.as<double>(),
+                    hasDsAnchor ? dDsAnchorShift.as<double>() : nullptr);
             if (!ctx->dDsResidual.p) ctx->dDsResidual.alloc(nS * sizeof(char));
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsResidual.p, 0, nS * sizeof(char), ctx->stream));
             distributeSlackBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nds, nS, n, SLACK_DIST_TOL, P_RESIDUE_EPS,
                     ctx->dsSlackPhiRow, ctx->dsSlackTargetP, ctx->dDsPhiRow.as<int>(),
                     ctx->dDsFactor.as<double>(), ctx->dDsBaseTargetP.as<double>(),
+                    hasDsAnchor ? dDsAnchorShift.as<double>() : nullptr,
                     ctx->dDsMaxDelta.as<double>(), ctx->dDsMinDelta.as<double>(), ctx->dDsRetain.as<double>(),
                     ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
                     hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvFactorDelta.as<double>(),
@@ -3752,7 +3770,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jobjectArray jrowMode, jintArray jbaseRowMode, jobjectArray jdisabledMask,
         jintArray jtargetOverrideIndex, jdoubleArray jtargetOverrideValue,
         jintArray jdsOverrideBus, jdoubleArray jdsOverrideFactorDelta, jdoubleArray jdsOverrideBaseDelta,
-        jdoubleArray jdsOverrideMaxDelta, jdoubleArray jdsOverrideMinDelta, jint maxIter, jdouble tol,
+        jdoubleArray jdsOverrideMaxDelta, jdoubleArray jdsOverrideMinDelta, jdoubleArray jdsAnchorShift,
+        jint maxIter, jdouble tol,
         jdouble reactiveLimitTol, jdouble slackDistTol, jdouble convEpsPerEq,
         jint lsMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType, jdoubleArray jx0Full,
         jintArray jShuntOvSlotElem, jdoubleArray jShuntOvGb,
@@ -3884,11 +3903,17 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
             env->GetDoubleArrayRegion(jdsOverrideMaxDelta, 0, nDsOv, dsOvMaxDelta.data());
             env->GetDoubleArrayRegion(jdsOverrideMinDelta, 0, nDsOv, dsOvMinDelta.data());
         }
+        std::vector<double> dsAnchorVec;
+        if (jdsAnchorShift != nullptr) {
+            dsAnchorVec.resize(env->GetArrayLength(jdsAnchorShift));
+            env->GetDoubleArrayRegion(jdsAnchorShift, 0, static_cast<jsize>(dsAnchorVec.size()), dsAnchorVec.data());
+        }
 
         res = solveBatchContext(ctx, x0.data(), target.data(), rowMode.data(), baseRowMode.data(), disabled.data(),
                                 nOv, ovIndex.data(), ovValue.data(),
                                 nDsOv > 0 ? dsOvBus.data() : nullptr, dsOvFactorDelta.data(),
-                                dsOvBaseDelta.data(), dsOvMaxDelta.data(), dsOvMinDelta.data(), maxIter, tol,
+                                dsOvBaseDelta.data(), dsOvMaxDelta.data(), dsOvMinDelta.data(),
+                                dsAnchorVec.empty() ? nullptr : dsAnchorVec.data(), maxIter, tol,
                                 reactiveLimitTol, slackDistTol, convEpsPerEq,
                                 lsMode, maxDv, maxDphi, varTypeVec.empty() ? nullptr : varTypeVec.data(),
                                 x0FullVec.empty() ? nullptr : x0FullVec.data(),
@@ -3933,6 +3958,25 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         env->SetObjectArrayElement(out, s, row);
         env->DeleteLocalRef(row);
     }
+    return out;
+}
+
+// Read back the batch context's per-scenario TARGET buffer (n * nScenarios doubles) after a solve —
+// the device outer loops (distributed slack) mutate targets in place, and the strategy/pair phase needs
+// the PARENT contingency's final distributed targets to re-anchor its own distribution (OLF's
+// setGeneratorsInitialTargetPToTargetP semantics).
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchTargets(
+        JNIEnv* env, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return nullptr;
+    }
+    size_t nTot = static_cast<size_t>(ctx->n) * ctx->nScenarios;
+    std::vector<double> host(nTot);
+    cudaMemcpy(host.data(), ctx->dTarget.p, nTot * sizeof(double), cudaMemcpyDeviceToHost);
+    jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(nTot));
+    env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(nTot), host.data());
     return out;
 }
 

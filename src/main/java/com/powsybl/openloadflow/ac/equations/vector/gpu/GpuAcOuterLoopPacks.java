@@ -160,7 +160,7 @@ public final class GpuAcOuterLoopPacks {
     }
 
     static DsPack distributedSlackPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                       ExtractionColumns columns, boolean distributedSlack) {
+                                       ExtractionColumns columns, boolean distributedSlack, GpuDsParams dsParams) {
         int[] phiCol = columns.phiCol();
         // Distributed-slack pack: the single slack/reference bus (BUS_TARGET_PHI active, BUS_TARGET_P
         // inactive — its P is free) provides the mismatch; every OTHER bus with participating generators
@@ -196,9 +196,7 @@ public final class GpuAcOuterLoopPacks {
                 dsSlackPhiRow = phiCol[bn];
                 dsSlackTargetP = bus.getTargetP();
                 for (LfGenerator g : bus.getGenerators()) {
-                    if (g.isParticipating() && g.getDroop() != 0) {
-                        dsSlackFactor += g.getMaxP() / g.getDroop();
-                    }
+                    dsSlackFactor += dsParams.factor(g);
                 }
                 continue;
             }
@@ -209,8 +207,9 @@ public final class GpuAcOuterLoopPacks {
             double headroom = 0;
             double footroom = 0;
             for (LfGenerator g : bus.getGenerators()) {
-                if (g.isParticipating() && g.getDroop() != 0) {
-                    factor += g.getMaxP() / g.getDroop();
+                double gf = dsParams.factor(g);
+                if (gf != 0) {
+                    factor += gf;
                     double minTp = g.getMinTargetP();
                     double maxTp = g.getMaxTargetP();
                     double tp = g.getTargetP();
@@ -222,6 +221,10 @@ public final class GpuAcOuterLoopPacks {
                     headroom += maxTp - tp;
                     footroom += minTp - tp;
                 }
+            }
+            if (!dsParams.useActiveLimits()) {
+                headroom = Double.POSITIVE_INFINITY;                    // OLF: +-Double.MAX_VALUE bounds — the
+                footroom = Double.NEGATIVE_INFINITY;                    // water-fill clamp never saturates
             }
             if (factor > 0) {
                 dsPhiRow.add(phiCol[bn]);

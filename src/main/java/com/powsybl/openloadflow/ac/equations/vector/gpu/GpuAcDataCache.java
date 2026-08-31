@@ -33,7 +33,6 @@ import com.powsybl.openloadflow.network.TransformerVoltageControl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
@@ -59,22 +58,14 @@ public final class GpuAcDataCache {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuAcDataCache.class);
 
-    /** The (distributedSlack, reactiveLimits) extraction flavor — different outer-loop packs. */
-    private enum Flavor {
-        DS_RL, DS_ONLY, RL_ONLY, NONE;
-
-        static Flavor of(boolean distributedSlack, boolean reactiveLimits) {
-            if (distributedSlack) {
-                return reactiveLimits ? DS_RL : DS_ONLY;
-            }
-            return reactiveLimits ? RL_ONLY : NONE;
-        }
+    /** The (distributedSlack, reactiveLimits, dsParams) extraction flavor — different outer-loop packs. */
+    private record Flavor(boolean distributedSlack, boolean reactiveLimits, GpuDsParams dsParams) {
     }
 
     private static final class Entry implements EquationSystemIndexListener<AcVariableType, AcEquationType>, LfNetworkListener {
 
         private final LfNetwork network;
-        private final Map<Flavor, GpuAcData> byFlavor = new EnumMap<>(Flavor.class);
+        private final Map<Flavor, GpuAcData> byFlavor = new java.util.HashMap<>();
 
         private Entry(LfNetwork network) {
             this.network = network;
@@ -240,6 +231,13 @@ public final class GpuAcDataCache {
     public static synchronized GpuAcData extract(LfNetwork network,
                                                  EquationSystem<AcVariableType, AcEquationType> es,
                                                  boolean distributedSlack, boolean reactiveLimits) {
+        return extract(network, es, distributedSlack, reactiveLimits, GpuDsParams.DEFAULT);
+    }
+
+    public static synchronized GpuAcData extract(LfNetwork network,
+                                                 EquationSystem<AcVariableType, AcEquationType> es,
+                                                 boolean distributedSlack, boolean reactiveLimits,
+                                                 GpuDsParams dsParams) {
         Entry entry = ENTRIES.get(es);
         if (entry == null || entry.network != network) {
             entry = new Entry(network);
@@ -247,11 +245,12 @@ public final class GpuAcDataCache {
             network.addListener(entry);
             ENTRIES.put(es, entry);
         }
-        Flavor flavor = Flavor.of(distributedSlack, reactiveLimits);
+        Flavor flavor = new Flavor(distributedSlack, reactiveLimits, dsParams);
         synchronized (entry) {
             GpuAcData data = entry.byFlavor.get(flavor);
             if (data == null) {
-                data = GpuAcDataExtractor.extract(network, es, distributedSlack, reactiveLimits);
+                data = GpuAcDataExtractor.extract(network, es, distributedSlack, reactiveLimits,
+                        java.util.Set.of(), java.util.Set.of(), dsParams);
                 entry.byFlavor.put(flavor, data);
             } else {
                 LOGGER.debug("GPU extraction cache hit ({})", flavor);

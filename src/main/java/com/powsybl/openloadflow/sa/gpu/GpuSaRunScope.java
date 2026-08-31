@@ -90,11 +90,11 @@ final class GpuSaRunScope {
             // active limits — any other balance type or unlimited distribution must fall back whole-run.
             boolean dsLoopActive = acParameters.getOuterLoops().stream()
                     .anyMatch(ol -> DistributedSlackOuterLoop.NAME.equals(ol.getName()));
-            if (dsLoopActive && lfGuardParams.getBalanceType() != LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P_MAX) {
+            // The device DS pass models every STATIC-factor generation balance type (P_MAX, P,
+            // PARTICIPATION_FACTOR — see GpuDsParams) and both useActiveLimits settings. REMAINING_MARGIN
+            // (mismatch-sign-dependent factors) and the load-based types still fall back whole-run.
+            if (dsLoopActive && !com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams.supports(lfGuardParams.getBalanceType())) {
                 unsupportedOuterLoops.add("DistributedSlack[balanceType=" + lfGuardParams.getBalanceType() + "]");
-            }
-            if (dsLoopActive && !olfGuardParams.isUseActiveLimits()) {
-                unsupportedOuterLoops.add("DistributedSlack[useActiveLimits=false]");
             }
         }
         // Parameterization the device loops DO model — wire the run's values in place of the
@@ -149,7 +149,9 @@ final class GpuSaRunScope {
         }
         // Assemble the run's per-call batched config (replaces the solver's former JVM-global statics).
         BatchConfig batchConfig = new BatchConfig(cfgLsMode, cfgMaxDv, cfgMaxDphi,
-                cfgTransformerControl, cfgMaxOuterIterations, cfgMaxPqPvSwitch, cfgDsRejectResidual, outerLoopMode);
+                cfgTransformerControl, cfgMaxOuterIterations, cfgMaxPqPvSwitch, cfgDsRejectResidual, outerLoopMode,
+                new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams(
+                        lfGuardParams.getBalanceType(), olfGuardParams.isUseActiveLimits()));
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
     }

@@ -342,6 +342,55 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         return network;
     }
 
+    /** DEVICE DS balance type PROPORTIONAL_TO_GENERATION_P (TARGET factors = |targetP| at the anchor):
+     *  ieee14 line outages, GPU SA == CPU SA at machine precision. */
+    @org.junit.jupiter.api.Test
+    void deviceDsBalanceTypeTargetMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true)
+                .setBalanceType(com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P);
+        assertGpuMatchesCpu(network, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("L1-5-1", new BranchContingency("L1-5-1"))), 1e-12, lfp);
+    }
+
+    /** DEVICE DS balance type PROPORTIONAL_TO_GENERATION_PARTICIPATION_FACTOR (explicit per-generator
+     *  factors, ASYMMETRIC so a wrong split fails the state assert): GPU SA == CPU SA at machine precision. */
+    @org.junit.jupiter.api.Test
+    void deviceDsBalanceTypeParticipationFactorMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getGenerator("B1-G").newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                .withParticipate(true).withParticipationFactor(3.0).add();
+        network.getGenerator("B2-G").newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                .withParticipate(true).withParticipationFactor(1.0).add();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true)
+                .setBalanceType(com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_PARTICIPATION_FACTOR);
+        assertGpuMatchesCpu(network, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("L1-5-1", new BranchContingency("L1-5-1"))), 1e-12, lfp);
+    }
+
+    /** DEVICE DS with useActiveLimits=false (unbounded water-fill — the rooms are infinite): a generator
+     *  contingency (reweight path) plus line outages, GPU SA == CPU SA at machine precision. TIGHT maxP
+     *  on B2-G would saturate WITH limits, so the no-limits split is genuinely different — a limits leak
+     *  in the pack fails the state assert. */
+    @org.junit.jupiter.api.Test
+    void deviceDsNoActiveLimitsMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getGenerator("B2-G").setMaxP(40.5);          // headroom 0.5 MW: saturates under limits
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setUseActiveLimits(false);
+        assertGpuMatchesCpu(network, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("L1-5-1", new BranchContingency("L1-5-1"))), 1e-12, lfp);
+    }
+
     private void assertGpuMatchesCpu(Network network, List<Contingency> contingencies) {
         assertGpuMatchesCpu(network, contingencies, 0.5);
     }
@@ -356,8 +405,12 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
 
     private void assertGpuMatchesCpu(Network network, List<Contingency> contingencies, double vToleranceKv,
                                      boolean distributedSlack, boolean reactiveLimits) {
-        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
-                .setDistributedSlack(distributedSlack).setUseReactiveLimits(reactiveLimits);
+        assertGpuMatchesCpu(network, contingencies, vToleranceKv, new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(distributedSlack).setUseReactiveLimits(reactiveLimits));
+    }
+
+    private void assertGpuMatchesCpu(Network network, List<Contingency> contingencies, double vToleranceKv,
+                                     com.powsybl.loadflow.LoadFlowParameters lfp) {
         String convEps = System.getProperty("olf.gpu.test.convEps", System.getenv("OLF_GPU_DBG_CONV_EPS"));
         if (convEps != null) {
             com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)   // create() ATTACHES (get() would detach!)

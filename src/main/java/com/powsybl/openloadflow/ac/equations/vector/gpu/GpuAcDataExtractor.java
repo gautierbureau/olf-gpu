@@ -82,6 +82,14 @@ public final class GpuAcDataExtractor {
                                     boolean distributedSlack, boolean reactiveLimits,
                                     java.util.Set<String> baseOpenBranchIds,
                                     java.util.Set<String> baseOpenZiBranchIds) {
+        return extract(network, es, distributedSlack, reactiveLimits, baseOpenBranchIds, baseOpenZiBranchIds,
+                GpuDsParams.DEFAULT);
+    }
+
+    public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+                                    boolean distributedSlack, boolean reactiveLimits,
+                                    java.util.Set<String> baseOpenBranchIds,
+                                    java.util.Set<String> baseOpenZiBranchIds, GpuDsParams dsParams) {
         GpuAcValidation.validate(es);
         ExtractionColumns columns = ExtractionColumns.of(network, es);
         GpuAcFamilyPacker.Packs family = GpuAcFamilyPacker.pack(network, columns, baseOpenBranchIds, baseOpenZiBranchIds);
@@ -89,7 +97,7 @@ public final class GpuAcDataExtractor {
         GpuAcOuterLoopPacks.DrPack dr = GpuAcOuterLoopPacks.distrRhoPack(network, es, columns);
         GpuAcOuterLoopPacks.DsbPack dsb = GpuAcOuterLoopPacks.distrShuntBPack(network, es, columns);
         GpuAcOuterLoopPacks.RlPack rl = GpuAcOuterLoopPacks.reactiveLimitsPack(network, es, columns, reactiveLimits);
-        GpuAcOuterLoopPacks.DsPack ds = GpuAcOuterLoopPacks.distributedSlackPack(network, es, columns, distributedSlack);
+        GpuAcOuterLoopPacks.DsPack ds = GpuAcOuterLoopPacks.distributedSlackPack(network, es, columns, distributedSlack, dsParams);
         return new GpuAcData(
                 GpuAcArrays.flatD(family.cbIn(), 8), GpuAcArrays.flatI(family.cbIdx(), 12),
                 GpuAcArrays.flatD(family.obIn(), 7), GpuAcArrays.flatI(family.obIdx(), 6),

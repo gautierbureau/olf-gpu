@@ -285,9 +285,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 .filter(b -> b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC))
                 .map(LfBranch::getId)
                 .collect(java.util.stream.Collectors.toSet());
+        com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams = config.dsParams();
         GpuAcData gpuData = baseOpenIds.isEmpty() && baseOpenZiIds.isEmpty()
-                ? GpuAcDataCache.extract(network, equationSystem, distributedSlack, reactiveLimits)
-                : GpuAcDataExtractor.extract(network, equationSystem, distributedSlack, reactiveLimits, baseOpenIds, baseOpenZiIds);
+                ? GpuAcDataCache.extract(network, equationSystem, distributedSlack, reactiveLimits, dsParams)
+                : GpuAcDataExtractor.extract(network, equationSystem, distributedSlack, reactiveLimits, baseOpenIds, baseOpenZiIds, dsParams);
         GpuAcActivation baseActivation = GpuAcActivation.fromEquationSystem(network, equationSystem);
         GpuBatchElementMapper elementMapper = new GpuBatchElementMapper(network, baseOpenIds);
 
@@ -315,15 +316,13 @@ public final class GpuBatchedSecurityAnalysisSolver {
         if (distributedSlack) {                              // no slack distribution ⇒ no per-scenario DS reweight
             for (LfBus b : network.getBuses()) {
                 for (LfGenerator g : b.getGenerators()) {
-                    if (g.isParticipating() && g.getDroop() != 0) {
-                        dsSum += g.getMaxP() / g.getDroop();
-                    }
+                    dsSum += dsParams.factor(g);
                 }
             }
         }
         boolean slackParticipates = java.util.Arrays.stream(gpuData.dsFactor()).sum() < 1 - 1e-9;
         GpuBatchQualification.ScenarioPlan plan = GpuBatchQualification.planScenarios(contingencies, qualifications,
-                elementMapper, gpuData, equationSystem, dsSum, slackParticipates, distrRhoControllers);
+                elementMapper, gpuData, equationSystem, dsSum, slackParticipates, dsParams, distrRhoControllers);
         List<Integer> batchedIndices = plan.batchedIndices();
         int islandingCount = plan.islandingCount();
         int rejected = contingencies.size() - batchedIndices.size();

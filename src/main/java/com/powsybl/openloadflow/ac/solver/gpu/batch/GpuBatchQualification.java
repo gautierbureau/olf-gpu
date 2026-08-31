@@ -121,7 +121,8 @@ final class GpuBatchQualification {
             List<GpuBatchContingencyValidator.Qualification> qualifications,
             GpuBatchElementMapper elementMapper, GpuAcData gpuData,
             EquationSystem<AcVariableType, AcEquationType> es,
-            double dsSum, boolean slackParticipates, Set<LfBranch> distrRhoControllers) {
+            double dsSum, boolean slackParticipates,
+            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams, Set<LfBranch> distrRhoControllers) {
         List<Integer> batchedIndices = new ArrayList<>();
         int[][] frozenRowsByIndex = new int[contingencies.size()][];     // islanded buses' variable rows, per contingency
         int[][] islandedNumsByIndex = new int[contingencies.size()][];   // islanded LfBus nums (result-building excludes them)
@@ -175,7 +176,7 @@ final class GpuBatchQualification {
                     continue;                                // unpacked / DISTR_Q-contributing shunt — CPU
                 }
                 GenOutage[] gos = GpuBatchInjectionOutages.computeInjectionOutages(es, gpuData, dsSum, slackParticipates,
-                        c.lostGenerators(), c.lostLoads());
+                        dsParams, c.lostGenerators(), c.lostLoads());
                 if (gos == null) {                           // slack / >1 DS bus / remote gen — route to CPU
                     continue;
                 }

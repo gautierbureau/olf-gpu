@@ -2189,12 +2189,28 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
 // total instead makes the non-slack buses absorb exactly (1 − ρ)·total_final, matching OLF's per-pass
 // distribution of the full mismatch. ρ = 0 (non-participating slack, incl. all batched gen-loss scenarios)
 // ⇒ retain = 0, so this is a no-op there.
+// Slack-only distributed slack: the slack generator is the ONLY participant, so OLF's distribution
+// puts the whole mismatch into the slack gen's own target — no flow change, but the outer loop reports
+// UNSTABLE and triggers a re-solve that polishes the state by one more Newton run. Mirror it exactly:
+// track the absorbed total, flag a switch while the residual mismatch stays above the outer gate.
+__global__ void slackOnlyDsCheck(int nScenarios, int n, int slackPhiRow, double slackTargetP,
+                                 double slackDistTol, const double* qBuf, const char* rlActive,
+                                 double* absorbed, char* switched) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nScenarios || !rlActive[s]) return;
+    double m = qBuf[(size_t) s * n + slackPhiRow] - slackTargetP - absorbed[s];
+    if (fabs(m) > slackDistTol) {
+        absorbed[s] += m;
+        switched[s] = 1;
+    }
+}
+
 __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiRow, double slackTargetP,
                                    double oneMinusFactorSum, const int* dsPhiRow, const double* dsBaseTargetP,
                                    const double* target, const double* qBuf, const char* rlActive,
                                    double* retain,
                                    const int* dsOvBus, const double* dsOvBaseDelta,
-                                   const double* dsAnchorShift) {
+                                   const double* dsAnchorShift, const double* dsSlackShift) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     if (!rlActive[s]) return;
@@ -2214,7 +2230,8 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
         }
         absorbed += target[(size_t) s * n + dsPhiRow[i]] - base;
     }
-    retain[s] = oneMinusFactorSum * ((qBuf[(size_t) s * n + slackPhiRow] - slackTargetP) + absorbed);
+    double slackTgt = slackTargetP + (dsSlackShift != nullptr ? dsSlackShift[s] : 0.0);
+    retain[s] = oneMinusFactorSum * ((qBuf[(size_t) s * n + slackPhiRow] - slackTgt) + absorbed);
 }
 
 // Distribute the slack mismatch by FULL WATER-FILLING per scenario (one thread = one scenario), matching OLF's
@@ -2227,7 +2244,7 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
 // different in-tolerance point than OLF.
 __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slackDistTol, double residueEps,
                                               int slackPhiRow, double slackTargetP, const int* dsPhiRow,
-                                              const double* dsFactor, const double* dsBaseTargetP, const double* dsAnchorShift,
+                                              const double* dsFactor, const double* dsBaseTargetP, const double* dsAnchorShift, const double* dsSlackShift,
                                               const double* dsMaxDelta, const double* dsMinDelta, const double* dsRetain,
                                               const double* qBuf, const char* rlActive,
                                               const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
@@ -2238,11 +2255,23 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
     if (!rlActive[s]) return;
     // The participating buses share the mismatch in EXCESS of the slack's retained share (rem); only distribute
     // past the slackBusPMaxMismatch outer gate, exactly like OLF's DistributedSlackOuterLoop.check.
-    double rem = (qBuf[(size_t) s * n + slackPhiRow] - slackTargetP) - dsRetain[s];
-    if (fabs(rem) <= slackDistTol) {
+    double slackTgt = slackTargetP + (dsSlackShift != nullptr ? dsSlackShift[s] : 0.0);
+    double rem = (qBuf[(size_t) s * n + slackPhiRow] - slackTgt) - dsRetain[s];
+    int ov = (dsOvBus != nullptr) ? dsOvBus[s] : -1;        // the bus losing a participating gen (gen contingency), -1 = none
+    // rem is the NON-SLACK share of the CPU's slack mismatch: rem = (1 - rho) * m_cpu, with rho the slack's
+    // GLOBAL retained share (the same constant the retain kernel uses — a per-scenario participant reweight
+    // does not change it). OLF's outer gate tests |m_cpu| > slackBusPMaxMismatch, so the device gate scales
+    // by (1 - rho) = the GLOBAL participant factor sum: unscaled it is 1/(1-rho) looser and lets the device
+    // retire with up to (1/(1-rho) - 1) * tol still undistributed (measured 4.9e-4 kV on a 60 MW redispatch
+    // pair with a participating slack, 2x); scaling by the per-scenario EFFECTIVE sum instead over-tightens
+    // a gen-outage scenario with a non-participating slack and adds a round the CPU never runs (3.9e-4).
+    double fsGlobal = 0.0;
+    for (int i = 0; i < nds; i++) {
+        fsGlobal += dsFactor[i];
+    }
+    if (fsGlobal <= 0.0 || fabs(rem) <= fsGlobal * slackDistTol) {
         return;
     }
-    int ov = (dsOvBus != nullptr) ? dsOvBus[s] : -1;        // the bus losing a participating gen (gen contingency), -1 = none
     bool changed = false;
     for (int iter = 0; iter < nds && fabs(rem) > residueEps; iter++) {
         double fsumActive = 0.0;                            // re-normalize factors over the still-unsaturated buses
@@ -2282,7 +2311,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
     if (changed) {
         switched[s] = 1;
     }
-    if (fabs(rem) > slackDistTol) {
+    if (fabs(rem) > fsGlobal * slackDistTol) {
         dsResidual[s] = 1;                                   // saturated: residual stays at the slack — the host
     }                                                        // decides per the run's slackDistributionFailureBehavior
 }
@@ -2519,6 +2548,10 @@ struct BatchSolverContext {
     double dsFactorSum = 1.0;                              // Σ emitted factors (< 1 ⇒ slack participates, keeps 1−Σ)
     DeviceBuf dDsRetain;
     DeviceBuf dDsResidual;                                   // nS chars: waterfill left an out-of-tolerance residual                                   // per scenario (nS): frozen slack-retained mismatch share
+    bool dsSlackOnly = false;                                // DS enabled with the SLACK generator as the only participant:
+    DeviceBuf dDsSlackAbsorbed;                              // nS doubles — mismatch absorbed into the slack's own target so far
+                                                             // (OLF distributes into the slack gen and re-solves; no flow change,
+                                                             // but the extra polish run must happen to match the CPU trajectory)
     CudssCtx ds;
     bool analyzed = false;
     bool factored = false;                                   // first FACTORIZATION done (mode 2: then REFACTORIZE)
@@ -2740,6 +2773,10 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     ctx->nds = nds;
     ctx->dsSlackTargetP = dsSlackTargetP;
     ctx->dsSlackPhiRow = dsSlackPhiRow >= 0 ? rowMap[dsSlackPhiRow] : -1;
+    ctx->dsSlackOnly = (nds == 0 && ctx->dsSlackPhiRow >= 0);
+    if (ctx->dsSlackOnly) {
+        ctx->dDsSlackAbsorbed.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
+    }
     if (nds > 0) {
         std::vector<int> dsPhiRowM(nds);
         for (int i = 0; i < nds; i++) {
@@ -2857,7 +2894,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               int nOv, const int* ovIndex, const double* ovValue,
                               const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
                               const double* dsOvMaxDelta, const double* dsOvMinDelta, const double* dsAnchorShift,
-                              int maxIter, double tol,
+                              const double* dsSlackShift, int maxIter, double tol,
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                               int lsMode, double maxDv, double maxDphi, const int* varType,
                               const double* x0Full, int nShOv, const int* shOvSlotElem, const double* shOvGb,
@@ -2885,10 +2922,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // minus the extraction-time base — re-anchors the water-fill's cumulative reference at the PARENT
     // contingency's distribution, mirroring OLF's setGeneratorsInitialTargetPToTargetP before a strategy
     // re-solve. nullptr = anchored at the base (plain contingencies).
-    DeviceBuf dDsAnchorShift;
-    bool hasDsAnchor = (dsAnchorShift != nullptr && ctx->nds > 0);
+    DeviceBuf dDsAnchorShift, dDsSlackShift;
+    bool hasDsAnchor = (dsAnchorShift != nullptr && dsSlackShift != nullptr && ctx->nds > 0);
     if (hasDsAnchor) {
         dDsAnchorShift.upload(dsAnchorShift, static_cast<size_t>(nS) * ctx->nds * sizeof(double));
+        dDsSlackShift.upload(dsSlackShift, static_cast<size_t>(nS) * sizeof(double));
     }
 
     // x0/target are the BASE row (length n), identical for every scenario: upload once and tile across
@@ -2960,7 +2998,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // converge the inner Newton, switch any generator over its Q limit, re-converge the switched scenarios,
     // repeat until a pass switches nothing. Fixed-iter mode (tol <= 0, the throughput benchmark) and
     // family-free networks with no controllers do ONE pass (no outer loop) — byte-identical to before.
-    bool fullLoadflow = !deviceFixedIter && (ctx->nrl > 0 || ctx->nds > 0);
+    bool fullLoadflow = !deviceFixedIter && (ctx->nrl > 0 || ctx->nds > 0 || ctx->dsSlackOnly);
     const int RL_MAX_OUTER = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
     const int RL_MAX_SWITCH = rlMaxSwitch > 0 ? rlMaxSwitch : 3;   // per-bus PV→PQ count cap (OLF maxPqPvSwitch)
     // Outer-loop convergence tolerances (pu) — passed in so the device uses the SAME criteria as the CPU
@@ -3006,6 +3044,14 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (ctx->nds > 0) {                                  // slack-retained share: 0 until frozen at the first pass
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsRetain.p, 0, nS * sizeof(double), ctx->stream));
         }
+        if (ctx->dsSlackOnly) {
+            if (dsSlackShift != nullptr) {                   // strategy pairs: seed with the parent contingency's
+                CUDA_CHECK(cudaMemcpyAsync(ctx->dDsSlackAbsorbed.p, dsSlackShift,   // absorbed total (the device
+                        nS * sizeof(double), cudaMemcpyHostToDevice, ctx->stream)); // analogue of the CPU re-anchor)
+            } else {
+                CUDA_CHECK(cudaMemsetAsync(ctx->dDsSlackAbsorbed.p, 0, nS * sizeof(double), ctx->stream));
+            }
+        }
     }
 
     // SEQUENTIAL outer loops, exactly like OLF's AcloadFlowEngine: fully stabilize the reactive-limits loop
@@ -3018,7 +3064,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // engine stabilizes them in that order. Match it: phase 0 = distributed slack, phase 1 = reactive limits.
     // (Switching PV->PQ before the slack is balanced leaves a large active imbalance that the undamped device
     // Newton diverges on — DS must stabilize first.)
-    int phase = (ctx->nds > 0) ? 0 : 1;                      // start with distributed slack if present, else reactive limits
+    int phase = (ctx->nds > 0 || ctx->dsSlackOnly) ? 0 : 1;  // start with distributed slack if present, else reactive limits
     bool seqChanged = false;                                 // did any outer loop re-solve during the current RL->DS sequence
     std::vector<int> prodIters(nS, 0);                       // PER-SCENARIO productive outer iterations: OLF's
                                                              // maxOuterLoopIterations is a per-RUN budget — a global
@@ -3385,6 +3431,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // Apply ONLY the current phase's outer loop this pass (sequential, like OLF) — never both at once.
     bool inDsPhase = (phase == 0);
     if (inDsPhase) {                                       // distributed-slack outer loop: spread the slack mismatch
+        if (ctx->dsSlackOnly) {
+            slackOnlyDsCheck<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->dsSlackPhiRow, ctx->dsSlackTargetP,
+                    SLACK_DIST_TOL, ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
+                    ctx->dDsSlackAbsorbed.as<double>(), ctx->dRlSwitched.as<char>());
+        }
         if (ctx->nds > 0) {
             // Recompute the slack's retained share from the CURRENT total imbalance every pass (NOT frozen at
             // pass 0) so a participating slack tracks the loss change during redistribution.
@@ -3393,13 +3444,15 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dTarget.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
                     ctx->dDsRetain.as<double>(),
                     hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvBaseDelta.as<double>(),
-                    hasDsAnchor ? dDsAnchorShift.as<double>() : nullptr);
+                    hasDsAnchor ? dDsAnchorShift.as<double>() : nullptr,
+                    hasDsAnchor ? dDsSlackShift.as<double>() : nullptr);
             if (!ctx->dDsResidual.p) ctx->dDsResidual.alloc(nS * sizeof(char));
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsResidual.p, 0, nS * sizeof(char), ctx->stream));
             distributeSlackBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nds, nS, n, SLACK_DIST_TOL, P_RESIDUE_EPS,
                     ctx->dsSlackPhiRow, ctx->dsSlackTargetP, ctx->dDsPhiRow.as<int>(),
                     ctx->dDsFactor.as<double>(), ctx->dDsBaseTargetP.as<double>(),
                     hasDsAnchor ? dDsAnchorShift.as<double>() : nullptr,
+                    hasDsAnchor ? dDsSlackShift.as<double>() : nullptr,
                     ctx->dDsMaxDelta.as<double>(), ctx->dDsMinDelta.as<double>(), ctx->dDsRetain.as<double>(),
                     ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
                     hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvFactorDelta.as<double>(),
@@ -3417,6 +3470,19 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     CUDA_CHECK(cudaMemcpy(rlSwitched.data(), ctx->dRlSwitched.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
+    if (inDsPhase && ctx->nds > 0 && getenv("OLF_GPU_DS_DEBUG")) {
+        double slackP = 0.0;
+        double retain0 = 0.0;
+        double tgt0 = 0.0;
+        CUDA_CHECK(cudaMemcpy(&slackP, ctx->dQbuf.as<double>() + ctx->dsSlackPhiRow, sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&retain0, ctx->dDsRetain.as<double>(), sizeof(double), cudaMemcpyDeviceToHost));
+        int row0 = 0;
+        CUDA_CHECK(cudaMemcpy(&row0, ctx->dDsPhiRow.as<int>(), sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&tgt0, ctx->dTarget.as<double>() + row0, sizeof(double), cudaMemcpyDeviceToHost));
+        std::fprintf(stderr, "[DS-DEV] scen0 pass: slackP=%.6f slackTargetP=%.6f retain=%.6f rem=%.6f tol=%.1e part0Target=%.6f switched=%d\n",
+                slackP, ctx->dsSlackTargetP, retain0, (slackP - ctx->dsSlackTargetP) - retain0, SLACK_DIST_TOL,
+                tgt0, (int) rlSwitched[0]);
+    }
     if (inDsPhase && ctx->nds > 0 && dsRejectResidual) {
         // slackDistributionFailureBehavior != LEAVE_ON_SLACK_BUS: a scenario whose participants all
         // saturated must NOT be reported converged with the residual absorbed at the slack — route it
@@ -3460,7 +3526,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 break;                                      // a full DS->RL sequence re-solved nothing -> converged
             }
             seqChanged = false;
-            phase = (ctx->nds > 0) ? 0 : 1;                 // restart the sequence at the first loop (distributed slack)
+            phase = (ctx->nds > 0 || ctx->dsSlackOnly) ? 0 : 1;   // restart the sequence at the first loop (distributed slack)
         }
         for (int s = 0; s < nS; s++) {
             active[s] = live[s];                            // re-CHECK every live scenario in the next phase...
@@ -3771,7 +3837,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jintArray jtargetOverrideIndex, jdoubleArray jtargetOverrideValue,
         jintArray jdsOverrideBus, jdoubleArray jdsOverrideFactorDelta, jdoubleArray jdsOverrideBaseDelta,
         jdoubleArray jdsOverrideMaxDelta, jdoubleArray jdsOverrideMinDelta, jdoubleArray jdsAnchorShift,
-        jint maxIter, jdouble tol,
+        jdoubleArray jdsSlackShift, jint maxIter, jdouble tol,
         jdouble reactiveLimitTol, jdouble slackDistTol, jdouble convEpsPerEq,
         jint lsMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType, jdoubleArray jx0Full,
         jintArray jShuntOvSlotElem, jdoubleArray jShuntOvGb,
@@ -3908,12 +3974,18 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
             dsAnchorVec.resize(env->GetArrayLength(jdsAnchorShift));
             env->GetDoubleArrayRegion(jdsAnchorShift, 0, static_cast<jsize>(dsAnchorVec.size()), dsAnchorVec.data());
         }
+        std::vector<double> dsSlackShiftVec;
+        if (jdsSlackShift != nullptr) {
+            dsSlackShiftVec.resize(env->GetArrayLength(jdsSlackShift));
+            env->GetDoubleArrayRegion(jdsSlackShift, 0, static_cast<jsize>(dsSlackShiftVec.size()), dsSlackShiftVec.data());
+        }
 
         res = solveBatchContext(ctx, x0.data(), target.data(), rowMode.data(), baseRowMode.data(), disabled.data(),
                                 nOv, ovIndex.data(), ovValue.data(),
                                 nDsOv > 0 ? dsOvBus.data() : nullptr, dsOvFactorDelta.data(),
                                 dsOvBaseDelta.data(), dsOvMaxDelta.data(), dsOvMinDelta.data(),
-                                dsAnchorVec.empty() ? nullptr : dsAnchorVec.data(), maxIter, tol,
+                                dsAnchorVec.empty() ? nullptr : dsAnchorVec.data(),
+                                dsSlackShiftVec.empty() ? nullptr : dsSlackShiftVec.data(), maxIter, tol,
                                 reactiveLimitTol, slackDistTol, convEpsPerEq,
                                 lsMode, maxDv, maxDphi, varTypeVec.empty() ? nullptr : varTypeVec.data(),
                                 x0FullVec.empty() ? nullptr : x0FullVec.data(),
@@ -3977,6 +4049,23 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
     cudaMemcpy(host.data(), ctx->dTarget.p, nTot * sizeof(double), cudaMemcpyDeviceToHost);
     jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(nTot));
     env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(nTot), host.data());
+    return out;
+}
+
+// Per-scenario slack-only-DS absorbed totals after a solve (see slackOnlyDsCheck) — the pair phase
+// seeds its scenarios with the parent contingency's value (the device analogue of OLF's
+// setGeneratorsInitialTargetPToTargetP before a strategy re-solve). Null when not slack-only.
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchSlackAbsorbed(
+        JNIEnv* env, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || !ctx->dsSlackOnly) {
+        return nullptr;
+    }
+    std::vector<double> host(ctx->nScenarios);
+    cudaMemcpy(host.data(), ctx->dDsSlackAbsorbed.p, ctx->nScenarios * sizeof(double), cudaMemcpyDeviceToHost);
+    jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(ctx->nScenarios));
+    env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(ctx->nScenarios), host.data());
     return out;
 }
 

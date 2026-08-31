@@ -121,6 +121,8 @@ final class GpuBatchChunkSolver {
         // mirroring OLF's setGeneratorsInitialTargetPToTargetP before the strategy re-solve.
         int nds = gpuData.dsPhiRow().length;
         java.util.Map<Integer, double[]> dsTargetsByIndex = new java.util.HashMap<>();
+        java.util.Map<Integer, Double> slackAbsorbedByIndex = new java.util.HashMap<>();   // slack-only DS parents
+        boolean dsSlackOnly = gpuData.dsPhiRow().length == 0 && gpuData.dsSlackPhiRow() >= 0;
         // Host-side base RL seed (mirrors initRlLimitTypeBatch) for PADDING slots of pair chunks.
         int[] baseRlSeed = new int[nrl];
         for (int i = 0; i < nrl; i++) {
@@ -283,17 +285,38 @@ final class GpuBatchChunkSolver {
                     // Pair phase: warm continuation from each parent contingency's state + RL pinning.
                     double[] x0Full = null;
                     int[] rlStateIn = null;
-                    // dsAnchorShift: DORMANT channel for the strategy-leg DS re-anchoring investigation (see the
-                    // TEMPORARY 0.05 kV tolerance note in the tests): the naive participant re-anchor at the
-                    // parent's distribution measured WORSE (4.7e-2 vs 4.0e-3), so nothing is passed until the
-                    // strategy-leg distribution semantics are pinned down against OLF ground truth.
+                    // Strategy-leg DS re-anchoring: OLF's processContingency calls
+                    // setGeneratorsInitialTargetPToTargetP() before the strategy re-solve, so the CPU's strategy
+                    // leg distributes only the INCREMENT from the parent contingency's already-distributed
+                    // targets. The device mirrors this with three coupled pieces (each alone is wrong —
+                    // participant shifts without the slack shift leave the band check measured against the
+                    // pre-distribution slack target, which kills the distribution):
+                    //  - dsAnchorShift: participant water-fill anchors moved to the parent's final DS targets;
+                    //  - dsSlackShift: the slack bus's own absorbed share of the parent's distribution
+                    //    ((1-fs)/fs x the participants' absorbed sum), so the mismatch/band is measured against
+                    //    the parent's slack target exactly as the CPU leg measures it;
+                    //  - DS-row target seeds at the parent values, so the first inner solve runs at the CPU
+                    //    leg's starting operating point (losses are nonlinear along the path).
                     double[] dsAnchorShift = null;
+                    double[] dsSlackShift = null;
                     if (pairPhase) {
                         x0Full = new double[chunkSize * n];
                         rlStateIn = nrl > 0 ? new int[chunkSize * nrl] : null;
+                        if (nds > 0) {
+                            dsAnchorShift = new double[chunkSize * nds];
+                            dsSlackShift = new double[chunkSize];
+                        } else if (dsSlackOnly) {
+                            dsSlackShift = new double[chunkSize];    // absorbed-total seeds (no participant anchors)
+                        }
+                        double dsFactorSum = 0;
+                        for (double fv : gpuData.dsFactor()) {
+                            dsFactorSum += fv;
+                        }
                         for (int s = 0; s < chunkSize; s++) {
                             double[] parent = null;
                             int[] parentRl = null;
+                            double[] parentDs = null;
+                            Double parentSlackAbs = null;
                             if (s < realCount) {
                                 String pairId = contingencies.get(group.get(chunkStart + s)).contingencyId();
                                 Integer pIdx = indexById.get(pairId.substring(0, pairId.indexOf(GpuBatchStatus.STRATEGY_KEY_SEP)));
@@ -301,6 +324,8 @@ final class GpuBatchChunkSolver {
                                         && (int) resultsByIndex[pIdx][n + 2] == GpuBatchStatus.STATUS_CONVERGED) {
                                     parent = resultsByIndex[pIdx];
                                     parentRl = rlByIndex.get(pIdx);
+                                    parentDs = dsTargetsByIndex.get(pIdx);
+                                    parentSlackAbs = slackAbsorbedByIndex.get(pIdx);
                                 }
                             }
                             for (int i = 0; i < n; i++) {
@@ -309,13 +334,51 @@ final class GpuBatchChunkSolver {
                             if (rlStateIn != null) {
                                 System.arraycopy(parentRl != null ? parentRl : baseRlSeed, 0, rlStateIn, s * nrl, nrl);
                             }
+                            if (dsSlackOnly && dsSlackShift != null && parentSlackAbs != null) {
+                                dsSlackShift[s] = parentSlackAbs;    // seed the pair with the parent's absorbed total
+                            }
+                            if (parentDs != null && dsAnchorShift != null && dsFactorSum > 0) {
+                                // parentDs = [absorption per DS row..., parent factor sum] (captured after the
+                                // parent's solve). The anchor shift is the parent's PURE ABSORPTION — the part
+                                // of the parent's final DS target that its distribution added on top of the
+                                // parent's own effective base — which composes with the pair's own dsOvBaseDelta
+                                // in the kernel (base_eff = base - ovDelta + shift), so gen-outage parents and
+                                // action deltas are both handled without double counting.
+                                double absorbedSum = 0;
+                                for (int i = 0; i < nds; i++) {
+                                    int row = gpuData.dsPhiRow()[i];
+                                    double shift = parentDs[i];
+                                    dsAnchorShift[s * nds + i] = shift;
+                                    absorbedSum += shift;
+                                    // Seed the DS-row target at the CPU strategy leg's starting value — the
+                                    // parent-absorbed target plus the pair's own composed delta — so the first
+                                    // inner solve runs at the CPU leg's starting operating point (losses are
+                                    // nonlinear along the path). A pair override on the row (gen action /
+                                    // gen-outage pTarget) is base-referenced: add the parent absorption to it.
+                                    int flat = s * n + row;
+                                    int ovAt = ovIndexList.lastIndexOf(flat);
+                                    if (ovAt >= 0) {
+                                        ovValueList.set(ovAt, ovValueList.get(ovAt) + shift);
+                                    } else {
+                                        ovIndexList.add(flat);
+                                        ovValueList.add(baseTargets[row] + shift);
+                                    }
+                                }
+                                // the slack's own absorption in the parent's distribution, proportional to the
+                                // participants' share at the PARENT's factor sum (reweighted if the parent lost
+                                // a participating generator)
+                                double parentFs = parentDs[nds];
+                                dsSlackShift[s] = parentFs > 0 ? (1.0 - parentFs) / parentFs * absorbedSum : 0.0;
+                            }
                         }
+                        targetOverrideIndex = ovIndexList.stream().mapToInt(Integer::intValue).toArray();
+                        targetOverrideValue = ovValueList.stream().mapToDouble(Double::doubleValue).toArray();
                     }
                     boolean dbgPairRl = pairPhase && nrl > 0 && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_RL"));
                     int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl) && nrl > 0 ? new int[chunkSize * nrl] : null;
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
-                            dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift,
+                            dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
                             parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                             config.lsMode(), config.maxDv(), config.maxDphi(),
                             config.lsMode() == 2 ? varType : null, x0Full,
@@ -346,14 +409,33 @@ final class GpuBatchChunkSolver {
                             rlByIndex.put(group.get(chunkStart + s), slice);
                         }
                     }
+                    if (!pairPhase && dsSlackOnly && !pairIdxList.isEmpty()) {
+                        // capture each ctg's slack-only-DS absorbed total for its pairs' seeding
+                        double[] absorbed = GpuAcNewtonSolver.readBatchSlackAbsorbed(handle);
+                        if (absorbed != null) {
+                            for (int s = 0; s < realCount; s++) {
+                                slackAbsorbedByIndex.put(group.get(chunkStart + s), absorbed[s]);
+                            }
+                        }
+                    }
                     if (!pairPhase && nds > 0 && !pairIdxList.isEmpty()) {
-                        // capture each ctg's FINAL distributed targets at the DS rows for its pairs' re-anchoring
+                        // Capture each ctg's DS ABSORPTION (final distributed target minus the ctg's own
+                        // effective base per DS row) plus its factor sum, for its pairs' re-anchoring —
+                        // the device analogue of OLF's setGeneratorsInitialTargetPToTargetP before a
+                        // strategy re-solve.
                         double[] finalTargets = GpuAcNewtonSolver.readBatchTargets(handle);
                         for (int s = 0; s < realCount; s++) {
-                            double[] slice = new double[nds];
+                            double[] slice = new double[nds + 1];
+                            double fs = 0;
                             for (int i = 0; i < nds; i++) {
-                                slice[i] = finalTargets[s * n + gpuData.dsPhiRow()[i]];
+                                int row = gpuData.dsPhiRow()[i];
+                                double effBase = baseTargets[row]
+                                        - (dsOvBus[s] == i ? dsOvBaseDelta[s] : 0.0);
+                                slice[i] = finalTargets[s * n + row] - effBase;
+                                fs += gpuData.dsFactor()[i]
+                                        - (dsOvBus[s] == i ? dsOvFactorDelta[s] : 0.0);
                             }
+                            slice[nds] = fs;
                             dsTargetsByIndex.put(group.get(chunkStart + s), slice);
                         }
                     }

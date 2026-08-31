@@ -236,7 +236,12 @@ public final class GpuAcOuterLoopPacks {
         for (int i = 0; i < dsFactor.length; i++) {
             dsFactor[i] = dsFactorRaw.get(i) / dsSum;
         }
-        if (dsSlackPhiRow < 0 || dsPhiRow.isEmpty()) {                  // no slack or nobody to distribute to
+        // A pack with participants but no slack row is unusable; one with NEITHER participants nor a
+        // participating slack means DS never fires. But a PARTICIPATING SLACK ALONE is kept (nds == 0,
+        // dsSlackPhiRow >= 0): OLF then distributes the whole mismatch into the slack generator's own
+        // target — no flow change, but the outer loop reports UNSTABLE and re-solves, and the device
+        // must take that same extra polish run (slackOnlyDsCheck) to match the CPU trajectory.
+        if (dsSlackPhiRow < 0 || dsPhiRow.isEmpty() && dsSlackFactor <= 0) {
             dsPhiRow.clear();
             dsFactor = new double[0];
             dsBaseTargetP.clear();

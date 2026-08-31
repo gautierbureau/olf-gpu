@@ -385,7 +385,7 @@ public final class GpuHybridBatchOuterLoopEngine {
             double[][] statesC = GpuAcNewtonSolver.solveBatchContext(handle, in.baseState(), in.baseTargets(),
                     rowModeC, in.baseRowMode(), disabledC,
                     ovIdx.stream().mapToInt(Integer::intValue).toArray(), ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                    new int[0], new double[0], new double[0], new double[0], new double[0], null,
+                    new int[0], new double[0], new double[0], new double[0], new double[0], null, null,
                     // the RUN's inner-solve stopping criteria — convEpsPerEq drives the norm-2 stop, matching the
                     // CPU (RL/DS tols are moot here: the packs are empty and OLF's Java loops do DS/RL).
                     in.maxIterations(), in.tol(), in.reactiveLimitTol(), in.slackDistTol(), in.convEpsPerEq(),

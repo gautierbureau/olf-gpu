@@ -86,19 +86,18 @@ class GpuBatchedOlfCriterionTest {
         // The tight criterion reaches machine precision (the true root).
         assertTrue(tight.finalMismatch() < 1e-8, "the tight criterion must converge to the true root (||F||inf="
                 + tight.finalMismatch() + ")");
-        // CORRECTED behavior (2026-08-17): the batch device, like CPU NewtonRaphson / solveContext, always takes
-        // >=1 Newton iteration and never retires at it==0. So for this easy warm-started outage ONE step reaches
-        // the root at BOTH criteria — the loose (1e-4) and tight (1e-12) runs coincide at machine precision.
-        // The former assertion (loose stops at a LOOSER residual than tight) was validating the it==0
-        // early-retirement — the very defect that caused the batch-vs-CPU divergence: after an outer-loop switch
-        // flipped a PV row to an identity, a warm state already under the global 2-norm threshold got retired
-        // WITHOUT the one Newton step needed to pin that row. The `it > 0` guard in solveBatchContext fixes it
-        // (matching solveContext line ~1227) and eliminated the production onlyGPU divergence entirely.
-        assertTrue(loose.finalMismatch() < 1e-8,
-                "with the forced first iteration, the loose criterion also reaches the root for a 1-step warm "
-                        + "solve (matching CPU): loose=" + loose.finalMismatch() + " tight=" + tight.finalMismatch());
-        assertTrue(loose.iterations() <= tight.iterations(),
-                "the looser criterion must not take MORE iterations (loose=" + loose.iterations()
+        // CORRECTED behavior (2026-08-29): OLF re-solves only after an UNSTABLE outer-loop check — a STABLE
+        // phase transition re-CHECKS against the same state and never re-runs Newton. The device driver now
+        // matches that exactly (the solvePass skip). Under it, the loose (1e-4) run legitimately retires at
+        // its criterion — one warm step from the outage lands under the 2-norm threshold
+        // sqrt(convEpsPerEq^2 * n) — instead of being pushed to the root by a spurious extra forced
+        // iteration on the DS->RL phase transition (the pre-fix behavior this assertion used to encode:
+        // it made the loose and tight runs coincide at machine precision, which the CPU never does).
+        assertTrue(loose.finalMismatch() > tight.finalMismatch(),
+                "the loose criterion retires at its threshold, NOT at the root (loose=" + loose.finalMismatch()
+                        + " tight=" + tight.finalMismatch() + ")");
+        assertTrue(loose.iterations() < tight.iterations(),
+                "the looser criterion must stop in FEWER iterations (loose=" + loose.iterations()
                         + " tight=" + tight.iterations() + ")");
     }
 

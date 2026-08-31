@@ -282,7 +282,7 @@ public final class GpuBatchTransformerControl {
                     rowMode, baseRowMode, disabledMask,
                     ovIdx.stream().mapToInt(Integer::intValue).toArray(),
                     ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, null,
+                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, null, null,
                     parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                     config.lsMode(), config.maxDv(), config.maxDphi(),
                     config.lsMode() == 2 ? varType : null, x0Full, null, null, null, null, null, null,

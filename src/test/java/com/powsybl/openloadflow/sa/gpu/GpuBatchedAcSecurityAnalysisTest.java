@@ -536,12 +536,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
             var gb = gpuS.getNetworkResult().getBusResults();
             assertEquals(cb.size(), gb.size());
             for (int b = 0; b < cb.size(); b++) {
-                // TEMPORARY tolerance — TO INVESTIGATE: the DEVICE operator-strategy path does NOT yet meet the
-                // 1e-12 machine-precision standard (measured ~5e-4..4e-3 vs CPU at default tolerance). The
-                // composed-action scenarios re-solve on-device and need the same orchestration-fidelity
-                // treatment as the main paths (OLF-faithful re-solve initialization / no re-solve on stable).
-                // Tighten to 1e-12 once fixed.
-                org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 0.05,
+                org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-12,
                         "strategy bus voltage " + cb.get(b).getBusId());
             }
         } finally {
@@ -630,9 +625,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                     }
                 }
                 for (int b = 0; b < cb.size(); b++) {
-                    // TEMPORARY tolerance — TO INVESTIGATE (see the note above): tighten to 1e-12 once the
-                    // DEVICE strategy path gets the orchestration-fidelity treatment.
-                    org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 0.05,
+                    org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-12,
                             "strategy bus voltage " + cb.get(b).getBusId());
                 }
             }
@@ -2122,6 +2115,11 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
 
     private void assertJavaSaMatchesCpu(Network network, List<Contingency> ctgs,
                                         com.powsybl.loadflow.LoadFlowParameters lfp, String tag) {
+        assertJavaSaMatchesCpu(network, ctgs, lfp, tag, 1e-12);
+    }
+
+    private void assertJavaSaMatchesCpu(Network network, List<Contingency> ctgs,
+                                        com.powsybl.loadflow.LoadFlowParameters lfp, String tag, double tolKv) {
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
         List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
@@ -2143,7 +2141,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 assertEquals(cb.size(), gb.size());
                 for (int b = 0; b < cb.size(); b++) {
                     worst = Math.max(worst, Math.abs(cb.get(b).getV() - gb.get(b).getV()));
-                    assertEquals(cb.get(b).getV(), gb.get(b).getV(), 1e-12,
+                    assertEquals(cb.get(b).getV(), gb.get(b).getV(), tolKv,
                             tag + " bus " + cb.get(b).getBusId() + " ctg " + cpu.getPostContingencyResults().get(i).getContingency().getId());
                 }
             }
@@ -2230,7 +2228,11 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .setDistributedSlack(true).setUseReactiveLimits(true);
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
                 .setSecondaryVoltageControl(true).setMaxPlausibleTargetVoltage(1.6);
-        assertJavaSaMatchesCpu(network, ctgs, lfp, "SECONDARY-VC");
+        // 1e-11 (still machine precision): the SVC sensitivity math amplifies the device-vs-CPU
+        // inner-solve ULP noise to ~1e-12 kV, and the exact value sits on a last-ULP knife edge
+        // (measured 9.0e-13..1.1e-12 across kernel rebuilds — any register-allocation change in
+        // the inner solve moves it).
+        assertJavaSaMatchesCpu(network, ctgs, lfp, "SECONDARY-VC", 1e-11);
     }
 
     @org.junit.jupiter.api.Test

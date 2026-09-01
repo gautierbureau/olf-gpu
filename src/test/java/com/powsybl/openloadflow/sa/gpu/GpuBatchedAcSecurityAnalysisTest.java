@@ -642,6 +642,30 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** DEVICE-mode SecondaryVoltageControl (GpuBatchSecondaryVc): device-batched dV/dVtarget
+     *  sensitivities + OLF's zone system (A/K0/Jk/Jvpp + tiny LU) replayed per scenario on the host;
+     *  GPU SA == CPU SA (1e-11: the SVC math amplifies inner-solve ULP noise to ~1e-12, the JAVA-mode
+     *  knife edge — same tolerance rationale). */
+    @org.junit.jupiter.api.Test
+    void deviceSecondaryVoltageControlMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory.create14();
+        network.newExtension(com.powsybl.iidm.network.extensions.SecondaryVoltageControlAdder.class)
+                .newControlZone().withName("z1")
+                .newPilotPoint().withTargetV(13).withBusbarSectionsOrBusesIds(List.of("B10")).add()
+                .newControlUnit().withId("B6-G").add()
+                .newControlUnit().withId("B8-G").add()
+                .add().add();
+        List<Contingency> ctgs = List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("L2-3-1", new BranchContingency("L2-3-1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSecondaryVoltageControl(true).setMaxPlausibleTargetVoltage(1.6);
+        assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
+    }
+
     private void assertGpuMatchesCpu(Network network, List<Contingency> contingencies) {
         assertGpuMatchesCpu(network, contingencies, 0.5);
     }

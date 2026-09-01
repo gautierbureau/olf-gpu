@@ -59,6 +59,7 @@ final class GpuBatchChunkSolver {
                                                List<GpuBatchIncrementalFlowControl.Controller> incrementalFlowControllers,
                                                GpuBatchIncrementalFlowControl.EsContext esContext,
                                                List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers,
+                                               GpuBatchSecondaryVc.Controllers svcControllers,
                                                BatchConfig config) {
         int nb = batchedIndices.size();
         int chunkSize = GpuBatchContextCache.resolveChunkSize(nb, n, gpuData);
@@ -409,10 +410,12 @@ final class GpuBatchChunkSolver {
                         }
                     }
                     boolean dbgPairRl = pairPhase && nrl > 0 && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_RL"));
-                    int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl) && nrl > 0 ? new int[chunkSize * nrl] : null;
+                    boolean svcActive = svcControllers != null && !svcControllers.ctls().isEmpty();
+                    int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl || svcActive) && nrl > 0 ? new int[chunkSize * nrl] : null;
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
                             dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
+                            null, null,
                             parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                             config.lsMode(), config.maxDv(), config.maxDphi(),
                             config.lsMode() == 2 ? varType : null, x0Full,
@@ -509,6 +512,22 @@ final class GpuBatchChunkSolver {
                                 chunkResults, hvdcControllers, hvdcStatus, config.hvdcLimits(), esContext,
                                 rowModePerScenario, baseRowMode, disabledMask,
                                 preHvdcOvIdx, preHvdcOvVal,
+                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                                dsAnchorShift, dsSlackShift,
+                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                config.lsMode() == 2 ? varType : null, config);
+                    }
+                    if (svcActive && rlStateOut != null) {
+                        chunkResults = GpuBatchSecondaryVc.orchestrate(handle, chunkSize, realCount, n, nrl,
+                                chunkResults, svcControllers, rlStateOut,
+                                rowModePerScenario, baseRowMode, disabledMask,
+                                targetOverrideIndex, targetOverrideValue,
                                 dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
                                 dsAnchorShift, dsSlackShift,
                                 r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),

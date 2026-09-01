@@ -2099,8 +2099,21 @@ __global__ void initFBatch(int n, int nScenarios, const double* target, double* 
 // controller (mode 0) starts at limitType 0. For a base-PQ controller, v below its target ⇒ it is producing
 // max reactive yet cannot reach target ⇒ maxQ-pinned (2); v above target ⇒ minQ-pinned (1). switchCount
 // starts at 0 either way (a separate memset).
+// Per-scenario RL V-target override (secondary voltage control moves generator-VC targets): entries are
+// (slot, rl index) pairs with the REPLACEMENT target. Linear scan — the list is a handful of entries.
+__device__ inline double rlTargetOf(int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
+                                    int s, int i, double baseTarget) {
+    for (int k = 0; k < nRlVtOv; k++) {
+        if (rlVtOvSlotIdx[2 * k] == s && rlVtOvSlotIdx[2 * k + 1] == i) {
+            return rlVtOvVal[k];
+        }
+    }
+    return baseTarget;
+}
+
 __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* rlVrow,
-                                     const double* rlVtarget, const int* baseMode, const double* x, char* limitType) {
+                                     const double* rlVtarget, const int* baseMode, const double* x, char* limitType,
+                                     int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -2113,7 +2126,8 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
     // the reactive-limits switch-back leaves it PQ. Only a controller that is PQ in the BASE (an actual Q-limit
     // switch during the base loadflow) gets a pinned limit type so a relieving contingency can switch it back.
     if (baseMode[vrow] == 1) {                              // PQ in the base case (a real Q-limit switch)
-        limitType[st] = (x[idx] < rlVtarget[i]) ? 2 : 1;    // v below target ⇒ maxQ pinned; above ⇒ minQ pinned
+        double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, s, i, rlVtarget[i]);
+        limitType[st] = (x[idx] < vt) ? 2 : 1;              // v below target ⇒ maxQ pinned; above ⇒ minQ pinned
     } else {
         limitType[st] = 0;                                  // base PV (incl. a per-scenario gen-override flip)
     }
@@ -2133,7 +2147,8 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
                                     const int* rlVrow, const double* rlMinQ, const double* rlMaxQ,
                                     const double* rlLoadQ, const double* rlVtarget, const double* qBuf,
                                     const double* x, const char* rlActive, int* mode, double* target,
-                                    char* limitType, char* switchCount, char* switched) {
+                                    char* limitType, char* switchCount, char* switched,
+                                    int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -2159,11 +2174,12 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
         }
     } else if (limitType[st] != 0 && switchCount[st] < maxSwitch) {   // pinned at a limit — check switchback
         double v = x[idx];
-        bool back = (limitType[st] == 2 && v > rlVtarget[i])         // maxQ-pinned but v above target
-                 || (limitType[st] == 1 && v < rlVtarget[i]);        // minQ-pinned but v below target
+        double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, s, i, rlVtarget[i]);
+        bool back = (limitType[st] == 2 && v > vt)                   // maxQ-pinned but v above target
+                 || (limitType[st] == 1 && v < vt);                  // minQ-pinned but v below target
         if (back) {
             mode[idx] = 0;                                  // PQ → PV: resume voltage control
-            target[idx] = rlVtarget[i];
+            target[idx] = vt;
             limitType[st] = 0;
             switched[s] = 1;
         }
@@ -2971,7 +2987,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               int nOv, const int* ovIndex, const double* ovValue,
                               const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
                               const double* dsOvMaxDelta, const double* dsOvMinDelta, const double* dsAnchorShift,
-                              const double* dsSlackShift, int maxIter, double tol,
+                              const double* dsSlackShift,
+                              int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
+                              int maxIter, double tol,
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                               int lsMode, double maxDv, double maxDphi, const int* varType,
                               const double* x0Full, int nShOv, const int* shOvSlotElem, const double* shOvGb,
@@ -2999,6 +3017,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // minus the extraction-time base — re-anchors the water-fill's cumulative reference at the PARENT
     // contingency's distribution, mirroring OLF's setGeneratorsInitialTargetPToTargetP before a strategy
     // re-solve. nullptr = anchored at the base (plain contingencies).
+    DeviceBuf dRlVtOvSlotIdx, dRlVtOvVal;
+    if (nRlVtOv > 0) {
+        dRlVtOvSlotIdx.upload(rlVtOvSlotIdx, 2L * nRlVtOv * sizeof(int));
+        dRlVtOvVal.upload(rlVtOvVal, (size_t) nRlVtOv * sizeof(double));
+    }
     DeviceBuf dDsAnchorShift, dDsSlackShift;
     bool hasDsAnchor = (dsAnchorShift != nullptr && dsSlackShift != nullptr && ctx->nds > 0);
     if (hasDsAnchor) {
@@ -3115,7 +3138,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             if (ctx->nrl > 0) {                              // seed the pinned limit for base-PQ controllers (else all PV)
                 initRlLimitTypeBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n, ctx->dRlVrow.as<int>(),
                         ctx->dRlVtarget.as<double>(), dBaseMode.as<int>(), ctx->dX.as<double>(),
-                        ctx->dRlLimitType.as<char>());
+                        ctx->dRlLimitType.as<char>(),
+                        nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
+                        nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr);
             }
         }
         if (ctx->nds > 0) {                                  // slack-retained share: 0 until frozen at the first pass
@@ -3548,7 +3573,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dRlVrow.as<int>(), ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
                     ctx->dRlVtarget.as<double>(), ctx->dQbuf.as<double>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
                     ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
-                    ctx->dRlLimitType.as<char>(), ctx->dRlSwitchCount.as<char>(), ctx->dRlSwitched.as<char>());
+                    ctx->dRlLimitType.as<char>(), ctx->dRlSwitchCount.as<char>(), ctx->dRlSwitched.as<char>(),
+                    nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
+                    nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr);
         }
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -3927,7 +3954,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jintArray jtargetOverrideIndex, jdoubleArray jtargetOverrideValue,
         jintArray jdsOverrideBus, jdoubleArray jdsOverrideFactorDelta, jdoubleArray jdsOverrideBaseDelta,
         jdoubleArray jdsOverrideMaxDelta, jdoubleArray jdsOverrideMinDelta, jdoubleArray jdsAnchorShift,
-        jdoubleArray jdsSlackShift, jint maxIter, jdouble tol,
+        jdoubleArray jdsSlackShift, jintArray jrlVtOvSlotIdx, jdoubleArray jrlVtOvVal, jint maxIter, jdouble tol,
         jdouble reactiveLimitTol, jdouble slackDistTol, jdouble convEpsPerEq,
         jint lsMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType, jdoubleArray jx0Full,
         jintArray jShuntOvSlotElem, jdoubleArray jShuntOvGb,
@@ -4069,13 +4096,24 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
             dsSlackShiftVec.resize(env->GetArrayLength(jdsSlackShift));
             env->GetDoubleArrayRegion(jdsSlackShift, 0, static_cast<jsize>(dsSlackShiftVec.size()), dsSlackShiftVec.data());
         }
+        std::vector<int> rlVtOvSlotIdxVec;
+        std::vector<double> rlVtOvValVec;
+        if (jrlVtOvSlotIdx != nullptr && jrlVtOvVal != nullptr) {
+            rlVtOvSlotIdxVec.resize(env->GetArrayLength(jrlVtOvSlotIdx));
+            env->GetIntArrayRegion(jrlVtOvSlotIdx, 0, static_cast<jsize>(rlVtOvSlotIdxVec.size()), rlVtOvSlotIdxVec.data());
+            rlVtOvValVec.resize(env->GetArrayLength(jrlVtOvVal));
+            env->GetDoubleArrayRegion(jrlVtOvVal, 0, static_cast<jsize>(rlVtOvValVec.size()), rlVtOvValVec.data());
+        }
 
         res = solveBatchContext(ctx, x0.data(), target.data(), rowMode.data(), baseRowMode.data(), disabled.data(),
                                 nOv, ovIndex.data(), ovValue.data(),
                                 nDsOv > 0 ? dsOvBus.data() : nullptr, dsOvFactorDelta.data(),
                                 dsOvBaseDelta.data(), dsOvMaxDelta.data(), dsOvMinDelta.data(),
                                 dsAnchorVec.empty() ? nullptr : dsAnchorVec.data(),
-                                dsSlackShiftVec.empty() ? nullptr : dsSlackShiftVec.data(), maxIter, tol,
+                                dsSlackShiftVec.empty() ? nullptr : dsSlackShiftVec.data(),
+                                static_cast<int>(rlVtOvValVec.size()),
+                                rlVtOvSlotIdxVec.empty() ? nullptr : rlVtOvSlotIdxVec.data(),
+                                rlVtOvValVec.empty() ? nullptr : rlVtOvValVec.data(), maxIter, tol,
                                 reactiveLimitTol, slackDistTol, convEpsPerEq,
                                 lsMode, maxDv, maxDphi, varTypeVec.empty() ? nullptr : varTypeVec.data(),
                                 x0FullVec.empty() ? nullptr : x0FullVec.data(),

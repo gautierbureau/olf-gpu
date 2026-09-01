@@ -359,6 +359,11 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     config.hvdcFreezing() || config.hvdcLimits()
                             ? GpuBatchHvdcAcEmulation.buildControllers(network, equationSystem, nElements)
                             : null,
+                    config.secondaryVoltageControl()
+                            ? GpuBatchSecondaryVc.build(network, equationSystem, gpuData.rlVrow(),
+                                    new GpuBatchIncrementalFlowControl.EsContext(equationSystem.getStateVector(), n),
+                                    config.minPlausibleTargetV(), config.maxPlausibleTargetV())
+                            : null,
                     config);
         }
 

@@ -71,6 +71,10 @@ final class GpuSaRunScope {
         boolean incrementalTvcBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL
                 && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
+        // INCREMENTAL shunt VC: same per-scenario orchestrator pattern (GpuBatchIncrementalShuntVc)
+        // with in-kernel dV/dB sensitivities.
+        boolean incrementalShuntBatchable =
+                olfGuardParams.getShuntVoltageControlMode() == OpenLoadFlowParameters.ShuntVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL;
         boolean noSvc = lfNetwork.getBuses().stream()
                 .flatMap(b -> b.getGenerators().stream())
                 .noneMatch(g -> g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator);
@@ -89,6 +93,7 @@ final class GpuSaRunScope {
                             && !ReactiveLimitsOuterLoop.NAME.equals(name)
                             && !(transformerControlBatchable && "TransformerVoltageControl".equals(name))
                             && !(incrementalTvcBatchable && "IncrementalTransformerVoltageControl".equals(name))
+                            && !(incrementalShuntBatchable && "IncrementalShuntVoltageControl".equals(name))
                             && !(noHvdc && ("AcHvdcAcEmulationLimits".equals(name) || "FreezingHvdcACEmulation".equals(name)))
                             && !(noSvc && "VoltageMonitoring".equals(name)))
                     .toList());
@@ -133,6 +138,8 @@ final class GpuSaRunScope {
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "TransformerVoltageControl".equals(ol.getName()));
         boolean cfgIncrementalTvc = outerLoopMode == OuterLoopMode.DEVICE && incrementalTvcBatchable
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalTransformerVoltageControl".equals(ol.getName()));
+        boolean cfgIncrementalShunt = outerLoopMode == OuterLoopMode.DEVICE && incrementalShuntBatchable
+                && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalShuntVoltageControl".equals(ol.getName()));
         // Align the device outer-loop tolerances to the CPU loadflow's (per-unit on the 100 MVA base). The
         // reactive-limits PV→PQ switch threshold is NOT always maxReactivePowerMismatch: OLF derives it from the
         // stopping-criteria type exactly as AbstractAcOuterLoopConfig.createReactiveLimitsOuterLoop does —
@@ -168,7 +175,8 @@ final class GpuSaRunScope {
                 cfgTransformerControl, cfgMaxOuterIterations, cfgMaxPqPvSwitch, cfgDsRejectResidual, outerLoopMode,
                 new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams(
                         lfGuardParams.getBalanceType(), olfGuardParams.isUseActiveLimits()),
-                cfgIncrementalTvc, olfGuardParams.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift());
+                cfgIncrementalTvc, olfGuardParams.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift(),
+                cfgIncrementalShunt, olfGuardParams.getIncrementalShuntControlOuterLoopMaxSectionShift());
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
     }

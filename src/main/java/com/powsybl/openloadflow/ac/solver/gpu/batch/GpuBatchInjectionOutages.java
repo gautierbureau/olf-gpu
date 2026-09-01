@@ -83,6 +83,9 @@ final class GpuBatchInjectionOutages {
                 || es.getEquation(busNum, AcEquationType.DISTR_Q).isPresent()) {     // remote/distributed VC controller
             return null;
         }
+        if (dsParams.isLoadBased() && !lostLoads.isEmpty()) {
+            return null;                                     // a lost/shifted load changes the LOAD participation
+        }                                                    // factors — per-scenario load reweight not modeled: CPU
         java.util.Set<LfGenerator> lostSet = new java.util.HashSet<>(lost);
         int pRow = es.getVariableSet().getVariable(busNum, AcVariableType.BUS_PHI).getRow();
         int vRow = es.getVariableSet().getVariable(busNum, AcVariableType.BUS_V).getRow();
@@ -106,6 +109,9 @@ final class GpuBatchInjectionOutages {
             }
         }
         boolean lostParticipation = lost.stream().anyMatch(g -> dsParams.factor(g) != 0);
+        if (dsParams.isRemainingMargin() && dsBus >= 0 && lostParticipation) {
+            return null;                                     // RM margins reweight per scenario is not modeled — CPU
+        }
         if (dsBus >= 0 && lostParticipation && slackParticipates) {
             return null;                            // FACTOR reweight + participating slack: retain math doesn't hold
         }                                           // (a pure base shift keeps the factors — retain stays exact)

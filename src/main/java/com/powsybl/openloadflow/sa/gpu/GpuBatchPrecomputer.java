@@ -122,12 +122,14 @@ final class GpuBatchPrecomputer {
                         if (!GpuStrategyComposer.strategyApplies(strategy, pc.getContingency().getId())) {
                             continue;
                         }
-                        // No strategy pairs under PROPORTIONAL_TO_GENERATION_P (TARGET factors): the pair
-                        // phase re-anchors the DS water-fill at the parent's distributed targets, and OLF's
-                        // TARGET factors are |targetP| AT THAT MOVED ANCHOR — the device's static factors
-                        // would drift. Needs a per-scenario factor channel (like dsAnchorShift) first.
-                        // P_MAX and PARTICIPATION_FACTOR factors are anchor-independent — pairs batch fine.
-                        if (config.dsParams().balanceType() == com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P) {
+                        // Strategy pairs batch only under ANCHOR-INDEPENDENT factor types (P_MAX,
+                        // PARTICIPATION_FACTOR): the pair phase re-anchors the DS water-fill at the parent's
+                        // distributed targets, and TARGET (|targetP|) and the load-based factors are evaluated
+                        // AT THAT MOVED ANCHOR — the device's static factors would drift. Needs a per-scenario
+                        // factor channel (like dsAnchorShift) first.
+                        var pairBt = config.dsParams().balanceType();
+                        if (pairBt != com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P_MAX
+                                && pairBt != com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_PARTICIPATION_FACTOR) {
                             continue;                        // pair handled by the CPU per-strategy path
                         }
                         BatchContingency pair = GpuStrategyComposer.composeStrategyScenario(network, net, pc.getContingency().getId(), strategy, actions,

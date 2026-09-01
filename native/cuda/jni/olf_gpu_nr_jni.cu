@@ -2210,7 +2210,9 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
                                    const double* target, const double* qBuf, const char* rlActive,
                                    double* retain,
                                    const int* dsOvBus, const double* dsOvBaseDelta,
-                                   const double* dsAnchorShift, const double* dsSlackShift) {
+                                   const double* dsAnchorShift, const double* dsSlackShift,
+                                   int dsMode, const double* dsMarginUp, const double* dsMarginDown,
+                                   double slackMarginUp, double slackMarginDown) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     if (!rlActive[s]) return;
@@ -2231,7 +2233,28 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
         absorbed += target[(size_t) s * n + dsPhiRow[i]] - base;
     }
     double slackTgt = slackTargetP + (dsSlackShift != nullptr ? dsSlackShift[s] : 0.0);
-    retain[s] = oneMinusFactorSum * ((qBuf[(size_t) s * n + slackPhiRow] - slackTgt) + absorbed);
+    double tot = (qBuf[(size_t) s * n + slackPhiRow] - slackTgt) + absorbed;   // total-from-anchor, OLF's
+    double rho = oneMinusFactorSum;                                            // remainingMismatch at run() start
+    if (dsMode == 1) {
+        // REMAINING_MARGIN: the slack's retained share is its own margin share in the DIRECTION of the
+        // total-from-anchor (OLF evaluates the direction-dependent factors once per run at the anchor).
+        // Margins shift with a moved anchor: +delta of anchor target eats headroom, frees footroom.
+        double slackM = tot > 0 ? slackMarginUp : slackMarginDown;
+        if (dsSlackShift != nullptr) {
+            slackM = fmax(0.0, slackM - (tot > 0 ? dsSlackShift[s] : -dsSlackShift[s]));
+        }
+        double sum = slackM;
+        for (int i = 0; i < nds; i++) {
+            double m = tot > 0 ? dsMarginUp[i] : dsMarginDown[i];
+            if (dsAnchorShift != nullptr) {
+                double sh = dsAnchorShift[(size_t) s * nds + i];
+                m = fmax(0.0, m - (tot > 0 ? sh : -sh));
+            }
+            sum += m;
+        }
+        rho = sum > 0 ? slackM / sum : 0.0;
+    }
+    retain[s] = rho * tot;
 }
 
 // Distribute the slack mismatch by FULL WATER-FILLING per scenario (one thread = one scenario), matching OLF's
@@ -2249,6 +2272,8 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                                               const double* qBuf, const char* rlActive,
                                               const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
                                               const double* dsOvMaxDelta, const double* dsOvMinDelta,
+                                              int dsMode, const double* dsMarginUp, const double* dsMarginDown,
+                                              double slackMarginUp, double slackMarginDown,
                                               double* target, char* switched, char* dsResidual) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
@@ -2258,6 +2283,10 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
     double slackTgt = slackTargetP + (dsSlackShift != nullptr ? dsSlackShift[s] : 0.0);
     double rem = (qBuf[(size_t) s * n + slackPhiRow] - slackTgt) - dsRetain[s];
     int ov = (dsOvBus != nullptr) ? dsOvBus[s] : -1;        // the bus losing a participating gen (gen contingency), -1 = none
+    // REMAINING_MARGIN: factors are the per-bus margins in the DIRECTION of the pass's remaining mismatch,
+    // picked ONCE at entry (OLF evaluates them once per run at the anchor); a moved anchor (+delta) eats
+    // headroom and frees footroom symmetrically.
+    bool dirUp = rem > 0;
     // rem is the NON-SLACK share of the CPU's slack mismatch: rem = (1 - rho) * m_cpu, with rho the slack's
     // GLOBAL retained share (the same constant the retain kernel uses — a per-scenario participant reweight
     // does not change it). OLF's outer gate tests |m_cpu| > slackBusPMaxMismatch, so the device gate scales
@@ -2266,8 +2295,25 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
     // pair with a participating slack, 2x); scaling by the per-scenario EFFECTIVE sum instead over-tightens
     // a gen-outage scenario with a non-participating slack and adds a round the CPU never runs (3.9e-4).
     double fsGlobal = 0.0;
-    for (int i = 0; i < nds; i++) {
-        fsGlobal += dsFactor[i];
+    if (dsMode == 1) {
+        double sumM = 0.0;
+        for (int i = 0; i < nds; i++) {
+            double m = dirUp ? dsMarginUp[i] : dsMarginDown[i];
+            if (dsAnchorShift != nullptr) {
+                double sh = dsAnchorShift[(size_t) s * nds + i];
+                m = fmax(0.0, m - (dirUp ? sh : -sh));
+            }
+            sumM += m;
+        }
+        double slackM = dirUp ? slackMarginUp : slackMarginDown;
+        if (dsSlackShift != nullptr) {
+            slackM = fmax(0.0, slackM - (dirUp ? dsSlackShift[s] : -dsSlackShift[s]));
+        }
+        fsGlobal = sumM + slackM > 0 ? sumM / (sumM + slackM) : 0.0;
+    } else {
+        for (int i = 0; i < nds; i++) {
+            fsGlobal += dsFactor[i];
+        }
     }
     if (fsGlobal <= 0.0 || fabs(rem) <= fsGlobal * slackDistTol) {
         return;
@@ -2277,7 +2323,9 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         double fsumActive = 0.0;                            // re-normalize factors over the still-unsaturated buses
         for (int i = 0; i < nds; i++) {
             double f = dsFactor[i], base = dsBaseTargetP[i], maxD = dsMaxDelta[i], minD = dsMinDelta[i];
-            if (dsAnchorShift != nullptr) { double sh = dsAnchorShift[(size_t) s * nds + i]; base += sh; maxD -= sh; minD -= sh; }
+            double sh = dsAnchorShift != nullptr ? dsAnchorShift[(size_t) s * nds + i] : 0.0;
+            if (dsAnchorShift != nullptr) { base += sh; maxD -= sh; minD -= sh; }
+            if (dsMode == 1) { f = fmax(0.0, (dirUp ? dsMarginUp[i] : dsMarginDown[i]) - (dirUp ? sh : -sh)); }
             if (ov == i) { f -= dsOvFactorDelta[s]; base -= dsOvBaseDelta[s]; maxD -= dsOvMaxDelta[s]; minD -= dsOvMinDelta[s]; }
             double cum = target[(size_t) s * n + dsPhiRow[i]] - base;
             bool sat = (rem > 0) ? (cum >= maxD) : (cum <= minD);
@@ -2291,7 +2339,9 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         double done = 0.0;
         for (int i = 0; i < nds; i++) {
             double f = dsFactor[i], base = dsBaseTargetP[i], maxD = dsMaxDelta[i], minD = dsMinDelta[i];
-            if (dsAnchorShift != nullptr) { double sh = dsAnchorShift[(size_t) s * nds + i]; base += sh; maxD -= sh; minD -= sh; }
+            double sh = dsAnchorShift != nullptr ? dsAnchorShift[(size_t) s * nds + i] : 0.0;
+            if (dsAnchorShift != nullptr) { base += sh; maxD -= sh; minD -= sh; }
+            if (dsMode == 1) { f = fmax(0.0, (dirUp ? dsMarginUp[i] : dsMarginDown[i]) - (dirUp ? sh : -sh)); }
             if (ov == i) { f -= dsOvFactorDelta[s]; base -= dsOvBaseDelta[s]; maxD -= dsOvMaxDelta[s]; minD -= dsOvMinDelta[s]; }
             size_t idx = (size_t) s * n + dsPhiRow[i];
             double cum = target[idx] - base;
@@ -2546,6 +2596,9 @@ struct BatchSolverContext {
     DeviceBuf dDsPhiRow, dDsFactor;                        // per participating bus (nds)
     DeviceBuf dDsBaseTargetP, dDsMaxDelta, dDsMinDelta;   // per participating bus (nds): base P target + headroom/footroom
     double dsFactorSum = 1.0;                              // Σ emitted factors (< 1 ⇒ slack participates, keeps 1−Σ)
+    int dsMode = 0;                                        // 0 = static factors; 1 = REMAINING_MARGIN (direction-
+    DeviceBuf dDsMarginUp, dDsMarginDown;                  //   dependent per-bus margins, normalized in-kernel)
+    double dsSlackMarginUp = 0.0, dsSlackMarginDown = 0.0; //   the slack's own margins (its retained share)
     DeviceBuf dDsRetain;
     DeviceBuf dDsResidual;                                   // nS chars: waterfill left an out-of-tolerance residual                                   // per scenario (nS): frozen slack-retained mismatch share
     bool dsSlackOnly = false;                                // DS enabled with the SLACK generator as the only participant:
@@ -2716,7 +2769,9 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
                                        const double* rlMaxQ, const double* rlLoadQ, const double* rlVtarget,
                                        int nds, const int* dsPhiRow, const double* dsFactor,
                                        int dsSlackPhiRow, double dsSlackTargetP,
-                                       const double* dsBaseTargetP, const double* dsMaxDelta, const double* dsMinDelta) {
+                                       const double* dsBaseTargetP, const double* dsMaxDelta, const double* dsMinDelta,
+                                       int dsMode, const double* dsMarginUp, const double* dsMarginDown,
+                                       double dsSlackMarginUp, double dsSlackMarginDown) {
     auto ctx = std::make_unique<BatchSolverContext>();
     ctx->st = st;
     int n = st->n;
@@ -2772,6 +2827,13 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     }
     ctx->nds = nds;
     ctx->dsSlackTargetP = dsSlackTargetP;
+    ctx->dsMode = dsMode;
+    ctx->dsSlackMarginUp = dsSlackMarginUp;
+    ctx->dsSlackMarginDown = dsSlackMarginDown;
+    if (dsMode == 1 && nds > 0) {
+        ctx->dDsMarginUp.upload(dsMarginUp, nds * sizeof(double));
+        ctx->dDsMarginDown.upload(dsMarginDown, nds * sizeof(double));
+    }
     ctx->dsSlackPhiRow = dsSlackPhiRow >= 0 ? rowMap[dsSlackPhiRow] : -1;
     ctx->dsSlackOnly = (nds == 0 && ctx->dsSlackPhiRow >= 0);
     if (ctx->dsSlackOnly) {
@@ -3445,7 +3507,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dDsRetain.as<double>(),
                     hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvBaseDelta.as<double>(),
                     hasDsAnchor ? dDsAnchorShift.as<double>() : nullptr,
-                    hasDsAnchor ? dDsSlackShift.as<double>() : nullptr);
+                    hasDsAnchor ? dDsSlackShift.as<double>() : nullptr,
+                    ctx->dsMode, ctx->dsMode == 1 ? ctx->dDsMarginUp.as<double>() : nullptr,
+                    ctx->dsMode == 1 ? ctx->dDsMarginDown.as<double>() : nullptr,
+                    ctx->dsSlackMarginUp, ctx->dsSlackMarginDown);
             if (!ctx->dDsResidual.p) ctx->dDsResidual.alloc(nS * sizeof(char));
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsResidual.p, 0, nS * sizeof(char), ctx->stream));
             distributeSlackBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nds, nS, n, SLACK_DIST_TOL, P_RESIDUE_EPS,
@@ -3457,6 +3522,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
                     hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvFactorDelta.as<double>(),
                     dDsOvBaseDelta.as<double>(), dDsOvMaxDelta.as<double>(), dDsOvMinDelta.as<double>(),
+                    ctx->dsMode, ctx->dsMode == 1 ? ctx->dDsMarginUp.as<double>() : nullptr,
+                    ctx->dsMode == 1 ? ctx->dDsMarginDown.as<double>() : nullptr,
+                    ctx->dsSlackMarginUp, ctx->dsSlackMarginDown,
                     ctx->dTarget.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>());
         }
     } else {                                               // reactive-limits outer loop: switch PV->PQ over Q limit
@@ -3779,7 +3847,9 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBa
         jintArray jrlVrow, jdoubleArray jrlMinQ, jdoubleArray jrlMaxQ, jdoubleArray jrlLoadQ,
         jdoubleArray jrlVtarget, jintArray jdsPhiRow, jdoubleArray jdsFactor,
         jint jdsSlackPhiRow, jdouble jdsSlackTargetP,
-        jdoubleArray jdsBaseTargetP, jdoubleArray jdsMaxDelta, jdoubleArray jdsMinDelta) {
+        jdoubleArray jdsBaseTargetP, jdoubleArray jdsMaxDelta, jdoubleArray jdsMinDelta,
+        jint jdsMode, jdoubleArray jdsMarginUp, jdoubleArray jdsMarginDown,
+        jdouble jdsSlackMarginUp, jdouble jdsSlackMarginDown) {
     auto* st = reinterpret_cast<SharedStructurePtr*>(structureHandle);
     jint* rlVrow = env->GetIntArrayElements(jrlVrow, nullptr);
     jdouble* rlMinQ = env->GetDoubleArrayElements(jrlMinQ, nullptr);
@@ -3791,6 +3861,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBa
     jdouble* dsBaseTargetP = env->GetDoubleArrayElements(jdsBaseTargetP, nullptr);
     jdouble* dsMaxDelta = env->GetDoubleArrayElements(jdsMaxDelta, nullptr);
     jdouble* dsMinDelta = env->GetDoubleArrayElements(jdsMinDelta, nullptr);
+    jdouble* dsMarginUp = env->GetDoubleArrayElements(jdsMarginUp, nullptr);
+    jdouble* dsMarginDown = env->GetDoubleArrayElements(jdsMarginDown, nullptr);
 
     int nrl = env->GetArrayLength(jrlVrow);
     int nds = env->GetArrayLength(jdsPhiRow);
@@ -3804,7 +3876,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBa
         ctx = createBatchContext(*st, nScenarios, mode,
                                  nrl, rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget,
                                  nds, dsPhiRow, dsFactor, jdsSlackPhiRow, jdsSlackTargetP,
-                                 dsBaseTargetP, dsMaxDelta, dsMinDelta);
+                                 dsBaseTargetP, dsMaxDelta, dsMinDelta,
+                                 jdsMode, dsMarginUp, dsMarginDown, jdsSlackMarginUp, jdsSlackMarginDown);
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {
@@ -3821,6 +3894,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBa
     env->ReleaseDoubleArrayElements(jdsBaseTargetP, dsBaseTargetP, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jdsMaxDelta, dsMaxDelta, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jdsMinDelta, dsMinDelta, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jdsMarginUp, dsMarginUp, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jdsMarginDown, dsMarginDown, JNI_ABORT);
 
     if (!error.empty()) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),

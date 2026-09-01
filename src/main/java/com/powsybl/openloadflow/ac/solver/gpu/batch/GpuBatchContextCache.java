@@ -108,7 +108,9 @@ public final class GpuBatchContextCache {
         long handle = GpuAcNewtonSolver.createBatchContext(GpuAcStructures.handle(n, data), chunkSize, mode,
                 data.rlVrow(), data.rlMinQ(), data.rlMaxQ(), data.rlLoadQ(), data.rlVtarget(),
                 data.dsPhiRow(), data.dsFactor(), data.dsSlackPhiRow(), data.dsSlackTargetP(),
-                data.dsBaseTargetP(), data.dsMaxDelta(), data.dsMinDelta());
+                data.dsBaseTargetP(), data.dsMaxDelta(), data.dsMinDelta(),
+                data.dsMode(), data.dsMarginUp(), data.dsMarginDown(),
+                data.dsSlackMarginUp(), data.dsSlackMarginDown());
         cachedContext = new CachedBatchContext(handle, data, chunkSize, mode);
         return handle;
     }

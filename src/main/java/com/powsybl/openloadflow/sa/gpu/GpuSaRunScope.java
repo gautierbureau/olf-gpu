@@ -96,6 +96,13 @@ final class GpuSaRunScope {
             if (dsLoopActive && !com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams.supports(lfGuardParams.getBalanceType())) {
                 unsupportedOuterLoops.add("DistributedSlack[balanceType=" + lfGuardParams.getBalanceType() + "]");
             }
+            // loadPowerFactorConstant rescales each distributed load's targetQ alongside targetP — a per-round
+            // bus Q-target mutation the device DS pass does not model.
+            boolean loadBased = lfGuardParams.getBalanceType() == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD
+                    || lfGuardParams.getBalanceType() == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD;
+            if (dsLoopActive && loadBased && olfGuardParams.isLoadPowerFactorConstant()) {
+                unsupportedOuterLoops.add("DistributedSlack[loadPowerFactorConstant]");
+            }
         }
         // Parameterization the device loops DO model — wire the run's values in place of the
         // device defaults (maxOuterLoopIterations, reactiveLimitsMaxPqPvSwitch), and make a

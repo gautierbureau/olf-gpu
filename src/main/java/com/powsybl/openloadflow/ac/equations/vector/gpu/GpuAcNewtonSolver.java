@@ -200,7 +200,9 @@ public final class GpuAcNewtonSolver {
                                                   int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ,
                                                   double[] rlVtarget, int[] dsPhiRow, double[] dsFactor,
                                                   int dsSlackPhiRow, double dsSlackTargetP,
-                                                  double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta);
+                                                  double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
+                                                  int dsMode, double[] dsMarginUp, double[] dsMarginDown,
+                                                  double dsSlackMarginUp, double dsSlackMarginDown);
 
     /**
      * Run batched Newton-Raphson AC power flow on the GPU: one iteration loop over all
@@ -312,7 +314,7 @@ public final class GpuAcNewtonSolver {
         try {
             long handle = createBatchContext(structure, nScenarios, mode,
                     rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, dsPhiRow, dsFactor, dsSlackPhiRow, dsSlackTargetP,
-                    dsBaseTargetP, dsMaxDelta, dsMinDelta);
+                    dsBaseTargetP, dsMaxDelta, dsMinDelta, 0, new double[0], new double[0], 0, 0);
             try {
                 // one-shot: no per-scenario gen-override flips, so any scenario's row mode IS the base row mode
                 return solveBatchContext(handle, x0Base, targetBase, rowMode, rowMode[0], disabledElementMask,

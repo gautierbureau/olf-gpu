@@ -57,9 +57,14 @@ public final class GpuAcOuterLoopPacks {
     record RlPack(int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget) {
     }
 
-    /** Distributed-slack pack: per-participating-bus factor/headroom + the slack bus's own share. */
+    /** Distributed-slack pack: per-participating-bus factor/headroom + the slack bus's own share.
+     *  {@code dsMode} 0 = static factors ({@code dsFactor}); 1 = REMAINING_MARGIN (factors are the
+     *  direction-dependent per-bus margins {@code dsMarginUp}/{@code dsMarginDown} + the slack's own
+     *  {@code dsSlackMarginUp}/{@code Down}, normalized in-kernel per scenario and pass). */
     record DsPack(int[] dsPhiRow, double[] dsFactor, int dsSlackPhiRow, double dsSlackTargetP,
-                  double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta) {
+                  double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
+                  int dsMode, double[] dsMarginUp, double[] dsMarginDown,
+                  double dsSlackMarginUp, double dsSlackMarginDown) {
     }
 
     static DqPack distrQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
@@ -182,11 +187,15 @@ public final class GpuAcOuterLoopPacks {
         int dsSlackPhiRow = -1;
         double dsSlackTargetP = 0;
         double dsSlackFactor = 0;                                       // slack's own participation (denominator only)
+        double dsSlackMarginUp = 0;                                     // REMAINING_MARGIN: the slack's own margins
+        double dsSlackMarginDown = 0;
         List<Integer> dsPhiRow = new ArrayList<>();
         List<Double> dsFactorRaw = new ArrayList<>();
         List<Double> dsBaseTargetP = new ArrayList<>();                 // each bus's initial BUS_TARGET_P
         List<Double> dsMaxDelta = new ArrayList<>();                    // headroom ≥ 0
         List<Double> dsMinDelta = new ArrayList<>();                    // footroom ≤ 0
+        List<Double> dsMarginUp = new ArrayList<>();                    // REMAINING_MARGIN per-bus margins
+        List<Double> dsMarginDown = new ArrayList<>();
         for (LfBus bus : network.getBuses()) {
             if (!distributedSlack) {                                    // empty pack when the DS outer loop is disabled
                 break;
@@ -195,21 +204,22 @@ public final class GpuAcOuterLoopPacks {
             if (GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_PHI) >= 0) {       // the slack/reference bus
                 dsSlackPhiRow = phiCol[bn];
                 dsSlackTargetP = bus.getTargetP();
-                for (LfGenerator g : bus.getGenerators()) {
-                    dsSlackFactor += dsParams.factor(g);
+                dsSlackFactor = dsParams.busFactor(bus);
+                if (dsParams.isRemainingMargin()) {
+                    double[] m = dsParams.busMargins(bus);
+                    dsSlackMarginUp = m[0];
+                    dsSlackMarginDown = m[1];
                 }
                 continue;
             }
             if (GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) < 0) {
                 continue;                                               // no active P balance to retarget
             }
-            double factor = 0;
+            double factor = dsParams.busFactor(bus);
             double headroom = 0;
             double footroom = 0;
             for (LfGenerator g : bus.getGenerators()) {
-                double gf = dsParams.factor(g);
-                if (gf != 0) {
-                    factor += gf;
+                if (dsParams.factor(g) != 0) {
                     double minTp = g.getMinTargetP();
                     double maxTp = g.getMaxTargetP();
                     double tp = g.getTargetP();
@@ -222,16 +232,21 @@ public final class GpuAcOuterLoopPacks {
                     footroom += minTp - tp;
                 }
             }
-            if (!dsParams.useActiveLimits()) {
-                headroom = Double.POSITIVE_INFINITY;                    // OLF: +-Double.MAX_VALUE bounds — the
-                footroom = Double.NEGATIVE_INFINITY;                    // water-fill clamp never saturates
-            }
+            if (!dsParams.useActiveLimits() || dsParams.isLoadBased()) {
+                headroom = Double.POSITIVE_INFINITY;                    // OLF: +-Double.MAX_VALUE bounds (or loads,
+                footroom = Double.NEGATIVE_INFINITY;                    // which OLF rescales unbounded) — the
+            }                                                           // water-fill clamp never saturates
             if (factor > 0) {
                 dsPhiRow.add(phiCol[bn]);
                 dsFactorRaw.add(factor);
                 dsBaseTargetP.add(bus.getTargetP());
                 dsMaxDelta.add(headroom);
                 dsMinDelta.add(footroom);
+                if (dsParams.isRemainingMargin()) {
+                    double[] m = dsParams.busMargins(bus);
+                    dsMarginUp.add(m[0]);
+                    dsMarginDown.add(m[1]);
+                }
             }
         }
         double dsSum = dsFactorRaw.stream().mapToDouble(Double::doubleValue).sum() + dsSlackFactor;
@@ -250,11 +265,16 @@ public final class GpuAcOuterLoopPacks {
             dsBaseTargetP.clear();
             dsMaxDelta.clear();
             dsMinDelta.clear();
+            dsMarginUp.clear();
+            dsMarginDown.clear();
             dsSlackPhiRow = -1;
         }
         return new DsPack(GpuAcArrays.toIntArray(dsPhiRow), dsFactor, dsSlackPhiRow, dsSlackTargetP,
                 GpuAcArrays.toDoubleArray(dsBaseTargetP), GpuAcArrays.toDoubleArray(dsMaxDelta),
-                GpuAcArrays.toDoubleArray(dsMinDelta));
+                GpuAcArrays.toDoubleArray(dsMinDelta),
+                dsParams.isRemainingMargin() ? 1 : 0,
+                GpuAcArrays.toDoubleArray(dsMarginUp), GpuAcArrays.toDoubleArray(dsMarginDown),
+                dsSlackMarginUp, dsSlackMarginDown);
     }
 
     /**

@@ -391,6 +391,59 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 new Contingency("L1-5-1", new BranchContingency("L1-5-1"))), 1e-12, lfp);
     }
 
+    /** DEVICE DS balance type PROPORTIONAL_TO_LOAD: participants are the LOADS (per-bus factor = the
+     *  variable load share, unbounded absorption); GPU SA == CPU SA at machine precision. */
+    @org.junit.jupiter.api.Test
+    void deviceDsBalanceTypeLoadMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true)
+                .setBalanceType(com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD);
+        assertGpuMatchesCpu(network, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("L1-5-1", new BranchContingency("L1-5-1"))), 1e-12, lfp);
+    }
+
+    /** DEVICE DS balance type PROPORTIONAL_TO_CONFORM_LOAD: only each load's VARIABLE part participates
+     *  (LoadDetail extension, ASYMMETRIC fixed/variable splits so a plain-load factor mixup fails);
+     *  GPU SA == CPU SA at machine precision. */
+    @org.junit.jupiter.api.Test
+    void deviceDsBalanceTypeConformLoadMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        // give two big loads an explicit fixed/variable split; the others stay fully fixed under
+        // CONFORM (no LoadDetail => variablePart = 0), so the participating set itself changes too
+        network.getLoad("B3-L").newExtension(com.powsybl.iidm.network.extensions.LoadDetailAdder.class)
+                .withFixedActivePower(70).withVariableActivePower(24.2)
+                .withFixedReactivePower(19).withVariableReactivePower(0).add();
+        network.getLoad("B4-L").newExtension(com.powsybl.iidm.network.extensions.LoadDetailAdder.class)
+                .withFixedActivePower(10).withVariableActivePower(37.8)
+                .withFixedReactivePower(-3.9).withVariableReactivePower(0).add();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true)
+                .setBalanceType(com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD);
+        assertGpuMatchesCpu(network, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("L1-5-1", new BranchContingency("L1-5-1"))), 1e-12, lfp);
+    }
+
+    /** DEVICE DS balance type PROPORTIONAL_TO_GENERATION_REMAINING_MARGIN: direction-dependent margin
+     *  factors computed in-kernel (ASYMMETRIC margins via a tight maxP on B2-G, so a static-factor or
+     *  wrong-direction mixup fails); GPU SA == CPU SA at machine precision. */
+    @org.junit.jupiter.api.Test
+    void deviceDsBalanceTypeRemainingMarginMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getGenerator("B2-G").setMaxP(100);           // margin 60 MW vs B1-G's ~9767 — sharply asymmetric
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true)
+                .setBalanceType(com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_REMAINING_MARGIN);
+        assertGpuMatchesCpu(network, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("L1-5-1", new BranchContingency("L1-5-1"))), 1e-12, lfp);
+    }
+
     private void assertGpuMatchesCpu(Network network, List<Contingency> contingencies) {
         assertGpuMatchesCpu(network, contingencies, 0.5);
     }

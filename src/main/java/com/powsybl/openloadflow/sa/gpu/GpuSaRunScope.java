@@ -75,6 +75,11 @@ final class GpuSaRunScope {
         // with in-kernel dV/dB sensitivities.
         boolean incrementalShuntBatchable =
                 olfGuardParams.getShuntVoltageControlMode() == OpenLoadFlowParameters.ShuntVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL;
+        // SIMPLE (WITH_GENERATOR) TVC: continuous first solve (VC-on activation deltas) then a single
+        // round-to-closest-tap re-solve (GpuBatchSimpleTvc); same stage-1 structural scope.
+        boolean simpleTvcBatchable =
+                olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL
+                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
         boolean noSvc = lfNetwork.getBuses().stream()
                 .flatMap(b -> b.getGenerators().stream())
                 .noneMatch(g -> g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator);
@@ -94,6 +99,7 @@ final class GpuSaRunScope {
                             && !(transformerControlBatchable && "TransformerVoltageControl".equals(name))
                             && !(incrementalTvcBatchable && "IncrementalTransformerVoltageControl".equals(name))
                             && !(incrementalShuntBatchable && "IncrementalShuntVoltageControl".equals(name))
+                            && !(simpleTvcBatchable && "SimpleTransformerVoltageControl".equals(name))
                             && !"IncrementalPhaseControl".equals(name)
                             && !"IncrementalTransformerReactivePowerControl".equals(name)
                             && !(noHvdc && ("AcHvdcAcEmulationLimits".equals(name) || "FreezingHvdcACEmulation".equals(name)))
@@ -149,6 +155,8 @@ final class GpuSaRunScope {
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalTransformerReactivePowerControl".equals(ol.getName()));
         boolean cfgIncrementalPhase = outerLoopMode == OuterLoopMode.DEVICE
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalPhaseControl".equals(ol.getName()));
+        boolean cfgSimpleTvc = outerLoopMode == OuterLoopMode.DEVICE && simpleTvcBatchable
+                && acParameters.getOuterLoops().stream().anyMatch(ol -> "SimpleTransformerVoltageControl".equals(ol.getName()));
         // Align the device outer-loop tolerances to the CPU loadflow's (per-unit on the 100 MVA base). The
         // reactive-limits PV→PQ switch threshold is NOT always maxReactivePowerMismatch: OLF derives it from the
         // stopping-criteria type exactly as AbstractAcOuterLoopConfig.createReactiveLimitsOuterLoop does —
@@ -186,7 +194,7 @@ final class GpuSaRunScope {
                         lfGuardParams.getBalanceType(), olfGuardParams.isUseActiveLimits()),
                 cfgIncrementalTvc, olfGuardParams.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift(),
                 cfgIncrementalShunt, olfGuardParams.getIncrementalShuntControlOuterLoopMaxSectionShift(),
-                cfgIncrementalRpc, cfgIncrementalPhase);
+                cfgIncrementalRpc, cfgIncrementalPhase, cfgSimpleTvc);
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
     }

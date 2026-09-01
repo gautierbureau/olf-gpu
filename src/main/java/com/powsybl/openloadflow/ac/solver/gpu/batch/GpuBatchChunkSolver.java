@@ -269,6 +269,17 @@ final class GpuBatchChunkSolver {
                         }
                         // else: padding scenario = base case (no element disabled), discarded below
                     }
+                    // SIMPLE (WITH_GENERATOR) transformer VC: OLF's initialize() enables continuous VC
+                    // BEFORE the first solve — apply the VC-ON activation deltas now, and keep the
+                    // pre-TVC override lists for the round-to-tap re-solve.
+                    List<Integer> preTvcOvIdx = null;
+                    List<Double> preTvcOvVal = null;
+                    if (config.simpleTransformerControl() && transformerControllers != null && !transformerControllers.isEmpty()) {
+                        preTvcOvIdx = new ArrayList<>(ovIndexList);
+                        preTvcOvVal = new ArrayList<>(ovValueList);
+                        GpuBatchSimpleTvc.applyVcOn(realCount, n, transformerControllers,
+                                rowModePerScenario, baseRowMode, disabledMask, ovIndexList, ovValueList);
+                    }
                     int[] targetOverrideIndex = ovIndexList.stream().mapToInt(Integer::intValue).toArray();
                     double[] targetOverrideValue = ovValueList.stream().mapToDouble(Double::doubleValue).toArray();
                     if (pairPhase && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_OV"))) {
@@ -458,6 +469,21 @@ final class GpuBatchChunkSolver {
                                 baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                                 config.lsMode() == 2 ? varType : null, config);
                     }
+                    if (config.simpleTransformerControl() && transformerControllers != null && !transformerControllers.isEmpty()) {
+                        chunkResults = GpuBatchSimpleTvc.roundAndResolve(handle, chunkSize, realCount, n,
+                                chunkResults, transformerControllers, rowModePerScenario, baseRowMode, disabledMask,
+                                preTvcOvIdx, preTvcOvVal,
+                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                                dsAnchorShift, dsSlackShift,
+                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                config.lsMode() == 2 ? varType : null, config);
+                    }
                     if (incrementalFlowControllers != null && !incrementalFlowControllers.isEmpty()) {
                         chunkResults = GpuBatchIncrementalFlowControl.orchestrate(handle, chunkSize, realCount, n,
                                 chunkResults, incrementalFlowControllers, esContext, rowModePerScenario, baseRowMode, disabledMask,
@@ -488,7 +514,7 @@ final class GpuBatchChunkSolver {
                                 baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                                 config.lsMode() == 2 ? varType : null, config);
                     }
-                    if (transformerControllers != null && !transformerControllers.isEmpty()) {
+                    if (config.transformerControl() && transformerControllers != null && !transformerControllers.isEmpty()) {
                         chunkResults = GpuBatchTransformerControl.orchestrateTransformerControl(handle, chunkSize, realCount, n,
                                 chunkResults, transformerControllers, rowModePerScenario, baseRowMode, disabledMask,
                                 targetOverrideIndex, targetOverrideValue,

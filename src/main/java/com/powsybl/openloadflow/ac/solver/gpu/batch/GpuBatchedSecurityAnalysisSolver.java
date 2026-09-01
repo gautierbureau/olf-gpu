@@ -340,7 +340,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     baseTargets, baseActivation.rowMode(), plan.frozenRowsByIndex(), plan.frozenTargetsByIndex(), plan.genOutagesByIndex(),
                     n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                     config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
-                    config.transformerControl()
+                    config.transformerControl() || config.simpleTransformerControl()
                             ? GpuBatchTransformerControl.buildTransformerControllers(network, equationSystem, targetVector, baseActivation,
                                     baseTargets, elementMapper)
                             : null,

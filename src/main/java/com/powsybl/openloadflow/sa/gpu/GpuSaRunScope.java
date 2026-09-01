@@ -94,6 +94,8 @@ final class GpuSaRunScope {
                             && !(transformerControlBatchable && "TransformerVoltageControl".equals(name))
                             && !(incrementalTvcBatchable && "IncrementalTransformerVoltageControl".equals(name))
                             && !(incrementalShuntBatchable && "IncrementalShuntVoltageControl".equals(name))
+                            && !"IncrementalPhaseControl".equals(name)
+                            && !"IncrementalTransformerReactivePowerControl".equals(name)
                             && !(noHvdc && ("AcHvdcAcEmulationLimits".equals(name) || "FreezingHvdcACEmulation".equals(name)))
                             && !(noSvc && "VoltageMonitoring".equals(name)))
                     .toList());
@@ -140,6 +142,13 @@ final class GpuSaRunScope {
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalTransformerVoltageControl".equals(ol.getName()));
         boolean cfgIncrementalShunt = outerLoopMode == OuterLoopMode.DEVICE && incrementalShuntBatchable
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalShuntVoltageControl".equals(ol.getName()));
+        // The flow-observed incremental family (GpuBatchIncrementalFlowControl): rho -> branch Q, and
+        // a1 -> branch P / I. Both are decision-only loops over pinned identity rows — always batchable
+        // when their loop is configured (continuous "PhaseControl" stays CPU via the extraction guard).
+        boolean cfgIncrementalRpc = outerLoopMode == OuterLoopMode.DEVICE
+                && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalTransformerReactivePowerControl".equals(ol.getName()));
+        boolean cfgIncrementalPhase = outerLoopMode == OuterLoopMode.DEVICE
+                && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalPhaseControl".equals(ol.getName()));
         // Align the device outer-loop tolerances to the CPU loadflow's (per-unit on the 100 MVA base). The
         // reactive-limits PV→PQ switch threshold is NOT always maxReactivePowerMismatch: OLF derives it from the
         // stopping-criteria type exactly as AbstractAcOuterLoopConfig.createReactiveLimitsOuterLoop does —
@@ -176,7 +185,8 @@ final class GpuSaRunScope {
                 new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams(
                         lfGuardParams.getBalanceType(), olfGuardParams.isUseActiveLimits()),
                 cfgIncrementalTvc, olfGuardParams.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift(),
-                cfgIncrementalShunt, olfGuardParams.getIncrementalShuntControlOuterLoopMaxSectionShift());
+                cfgIncrementalShunt, olfGuardParams.getIncrementalShuntControlOuterLoopMaxSectionShift(),
+                cfgIncrementalRpc, cfgIncrementalPhase);
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
     }

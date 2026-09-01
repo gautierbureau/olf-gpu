@@ -244,6 +244,7 @@ final class GpuBatchIncrementalTvc {
 
             // ---- OLF decisions per out-of-deadband (scenario, bus) ----
             boolean anyMoved = false;
+            boolean[] affected = new boolean[chunkSize];
             List<int[]> moved = new ArrayList<>();           // {slot, ctrl}
             for (int[] sg : outOfDb) {
                 int slot = sg[0];
@@ -267,6 +268,7 @@ final class GpuBatchIncrementalTvc {
                     if (moveTap(ctrls.get(ci), holder, deltaR1, maxTapShift, ratchets[slot][ci]) != 0) {
                         tap[slot][ci] = holder[0];
                         anyMoved = true;
+                        affected[slot] = true;
                         moved.add(new int[] {slot, ci});
                     }
                 } else if (!live.isEmpty()) {
@@ -289,6 +291,7 @@ final class GpuBatchIncrementalTvc {
                                     remaining -= (ctrls.get(ci).r1(tap[slot][ci]) - prevR1) * sv;
                                     changed = true;
                                     anyMoved = true;
+                                    affected[slot] = true;
                                     moved.add(new int[] {slot, ci});
                                 }
                             }
@@ -346,7 +349,9 @@ final class GpuBatchIncrementalTvc {
                     config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(),
                     nziBase, ziOnSlotElem, ziOffSlotElem);
             for (int s = 0; s < realCount; s++) {
-                chunkResults[s] = r2[s];
+                if (affected[s]) {                           // untouched scenarios KEEP their converged state
+                    chunkResults[s] = r2[s];                 // (no extra Newton polish the CPU never runs)
+                }
             }
         }
         return chunkResults;

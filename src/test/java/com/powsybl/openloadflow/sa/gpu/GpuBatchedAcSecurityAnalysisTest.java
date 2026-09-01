@@ -491,6 +491,86 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** DEVICE-mode IncrementalPhaseControl (ACTIVE_POWER_CONTROL): a1 taps drive the controlled branch's
+     *  P via in-kernel dP/da1 sensitivities + OLF's own flow terms (GpuBatchIncrementalFlowControl);
+     *  the tap-moving strong-line outage included, GPU SA == CPU SA at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceIncrementalPhaseControlMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.TwoWindingsTransformer ps1 = network.getTwoWindingsTransformer("PS1");
+        ps1.getPhaseTapChanger().setRegulationMode(com.powsybl.iidm.network.PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL)
+                .setTargetDeadband(1).setRegulating(true).setTapPosition(1)
+                .setRegulationTerminal(ps1.getTerminal1()).setRegulationValue(83);
+        com.powsybl.iidm.network.Line l1 = network.getLine("L1");
+        network.newLine().setId("L1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR() * 2).setX(l1.getX() * 2)
+                .setG1(l1.getG1()).setB1(l1.getB1()).setG2(l1.getG2()).setB2(l1.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("L1_BIS", new BranchContingency("L1_BIS")),
+                new Contingency("L1", new BranchContingency("L1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setPhaseShifterRegulationOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setPhaseShifterControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.PhaseShifterControlMode.INCREMENTAL);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
+    /** DEVICE-mode IncrementalTransformerReactivePowerControl: rho taps drive the controlled branch's Q
+     *  via in-kernel dQ/drho sensitivities + OLF's own flow terms; GPU SA == CPU SA at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceIncrementalTransformerReactivePowerControlMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.TwoWindingsTransformer t2wt = network.getTwoWindingsTransformer("T2wT");
+        t2wt.getRatioTapChanger()
+                .setTargetDeadband(0).setRegulating(true).setTapPosition(1)
+                .setRegulationMode(com.powsybl.iidm.network.RatioTapChanger.RegulationMode.REACTIVE_POWER)
+                .setRegulationTerminal(t2wt.getTerminal1()).setRegulationValue(-0.55);
+        com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+        network.newLine().setId(l0.getId() + "_BIS")
+                .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l0.getR() * 2).setX(l0.getX() * 2)
+                .setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency(l0.getId() + "_BIS", new BranchContingency(l0.getId() + "_BIS")),
+                new Contingency(l0.getId(), new BranchContingency(l0.getId())));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(false).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setTransformerReactivePowerControl(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
+    /** DEVICE-mode IncrementalPhaseControl in CURRENT_LIMITER mode: one-sided i > limit checks and the
+     *  exceed-A1 tap walk (FirstTapPositionAboveFinder port); GPU SA == CPU SA at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceIncrementalPhaseControlCurrentLimiterMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.TwoWindingsTransformer ps1 = network.getTwoWindingsTransformer("PS1");
+        ps1.getPhaseTapChanger().setRegulationMode(com.powsybl.iidm.network.PhaseTapChanger.RegulationMode.CURRENT_LIMITER)
+                .setTargetDeadband(1).setRegulating(true).setTapPosition(1)
+                .setRegulationTerminal(ps1.getTerminal1()).setRegulationValue(100);
+        com.powsybl.iidm.network.Line l1 = network.getLine("L1");
+        network.newLine().setId("L1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR() * 2).setX(l1.getX() * 2)
+                .setG1(l1.getG1()).setB1(l1.getB1()).setG2(l1.getG2()).setB2(l1.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("L1_BIS", new BranchContingency("L1_BIS")),
+                new Contingency("L1", new BranchContingency("L1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setPhaseShifterRegulationOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setPhaseShifterControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.PhaseShifterControlMode.INCREMENTAL);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
     private void assertGpuMatchesCpu(Network network, List<Contingency> contingencies) {
         assertGpuMatchesCpu(network, contingencies, 0.5);
     }

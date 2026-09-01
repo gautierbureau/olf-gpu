@@ -257,6 +257,7 @@ final class GpuBatchIncrementalShuntVc {
             int m = obs.length;
 
             boolean anyMoved = false;
+            boolean[] affected = new boolean[chunkSize];
             for (int[] sg : outOfDb) {
                 int slot = sg[0];
                 int g = sg[1];
@@ -301,6 +302,9 @@ final class GpuBatchIncrementalShuntVc {
                     }
                 }
                 anyMoved |= roundMoved;
+                if (roundMoved) {
+                    affected[slot] = true;
+                }
             }
             if (!anyMoved) {
                 break;
@@ -358,7 +362,9 @@ final class GpuBatchIncrementalShuntVc {
                     config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(),
                     nziBase, ziOnSlotElem, ziOffSlotElem);
             for (int s = 0; s < realCount; s++) {
-                chunkResults[s] = r2[s];
+                if (affected[s]) {                           // untouched scenarios KEEP their converged state
+                    chunkResults[s] = r2[s];                 // (no extra Newton polish the CPU never runs)
+                }
             }
         }
         return chunkResults;

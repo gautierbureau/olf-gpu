@@ -256,6 +256,14 @@ public final class GpuAcNewtonSolver {
      *  PARENT contingency's final distributed targets (OLF's setGeneratorsInitialTargetPToTargetP). */
     public static native double[] readBatchTargets(long handle);
 
+    /** Batched SENSITIVITY solve for the incremental outer-loop family: J at the given per-scenario
+     *  states (same forward system as the Newton), unit RHS at each {@code unitRows} pinned-variable
+     *  identity row, the {@code observeCols} variable entries of each solution gathered per scenario.
+     *  Returns {@code [nScenarios * unitRows.length * observeCols.length]} laid out scenario-major.
+     *  MUST follow a solveBatchContext call on the same handle with the same per-scenario overrides. */
+    public static native double[] solveBatchSensitivities(long handle, double[] states,
+                                                          int[] unitRows, int[] observeCols);
+
     /** Per-scenario slack-only-DS absorbed totals after a solve, or null when the context is not
      *  slack-only — the pair phase seeds its scenarios with the parent contingency's value. */
     public static native double[] readBatchSlackAbsorbed(long handle);

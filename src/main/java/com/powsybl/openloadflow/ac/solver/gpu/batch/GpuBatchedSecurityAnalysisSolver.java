@@ -344,6 +344,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
                             ? GpuBatchTransformerControl.buildTransformerControllers(network, equationSystem, targetVector, baseActivation,
                                     baseTargets, elementMapper)
                             : null,
+                    config.incrementalTransformerControl()
+                            ? GpuBatchIncrementalTvc.buildControllers(network, equationSystem, elementMapper)
+                            : null,
                     config);
         }
 

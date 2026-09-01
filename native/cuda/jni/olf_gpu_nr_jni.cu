@@ -2189,6 +2189,21 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
 // total instead makes the non-slack buses absorb exactly (1 − ρ)·total_final, matching OLF's per-pass
 // distribution of the full mismatch. ρ = 0 (non-participating slack, incl. all batched gen-loss scenarios)
 // ⇒ retain = 0, so this is a no-op there.
+__global__ void setUnitRhsBatch(int n, int nScenarios, int unitRow, double* b) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n * nScenarios) return;
+    b[t] = (t % n == unitRow) ? 1.0 : 0.0;
+}
+
+__global__ void gatherSensiBatch(int n, int nScenarios, int k, int m, int ki, const int* observeCols,
+                                 const double* dx, double* out) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;                     // t = s*m + mi
+    if (t >= nScenarios * m) return;
+    int sIdx = t / m;
+    int mi = t % m;
+    out[(size_t) sIdx * k * m + (size_t) ki * m + mi] = dx[(size_t) sIdx * n + observeCols[mi]];
+}
+
 // Slack-only distributed slack: the slack generator is the ONLY participant, so OLF's distribution
 // puts the whole mismatch into the slack gen's own target — no flow change, but the outer loop reports
 // UNSTABLE and triggers a re-solve that polishes the state by one more Newton run. Mirror it exactly:
@@ -4125,6 +4140,107 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
     jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(nTot));
     env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(nTot), host.data());
     return out;
+}
+
+// Batched SENSITIVITY solve for the incremental outer-loop family (device port of OLF's
+// SensitivityContext): J at the given per-scenario states (the same forward system the Newton
+// solves — OLF's "solveTransposed" IS the forward direction in powsybl-math's transposed
+// storage), factorized once, solved for a unit RHS at each controller's pinned-variable
+// identity row (BRANCH_TARGET_RHO1 & co, storage row = rowMap[eqRow]); the requested variable
+// columns of each solution are gathered per scenario. MUST be called on a context that has just
+// completed solveBatchContext with the SAME per-scenario overrides/row modes — the fill reads
+// them from the live device buffers. UBATCH modes (3/4/5) only.
+std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const double* states,
+                                            int k, const int* unitEqRows, int m, const int* observeVarCols) {
+    if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5) {
+        throw std::runtime_error("solveBatchSensitivities: UBATCH modes (3/4/5) only");
+    }
+    int n = ctx->st->n;
+    int nS = ctx->nScenarios;
+    int nnz = ctx->st->nnz;
+
+    CUDA_CHECK(cudaMemcpyAsync(ctx->dX.p, states, (size_t) n * nS * sizeof(double), cudaMemcpyHostToDevice, ctx->stream));
+    std::vector<char> allActive(nS, 1);
+    CUDA_CHECK(cudaMemcpyAsync(ctx->dActive.p, allActive.data(), nS * sizeof(char), cudaMemcpyHostToDevice, ctx->stream));
+
+    // ---- J fill at the converged states (same launches as the solve loop's full fill) ----
+    CUDA_CHECK(cudaMemsetAsync(ctx->dVals.p, 0, (size_t) nnz * nS * sizeof(double), ctx->stream));
+    initFBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dTarget.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
+    if (ctx->st->cb.ne) {
+        fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0);
+    }
+    if (ctx->st->ob.ne) {
+        fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+    }
+    if (ctx->st->sh.ne) {
+        fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0);
+    }
+    if (ctx->st->hv.ne) {
+        fillHvdcBatch<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+    }
+    if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+    if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
+    if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
+    if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>());
+    applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
+
+    if (!ctx->analyzed) {
+        CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+        ctx->analyzed = true;
+    }
+    DeviceBuf dObs, dOut;
+    dObs.upload(observeVarCols, m * sizeof(int));
+    dOut.alloc((size_t) nS * k * m * sizeof(double));
+    for (int ki = 0; ki < k; ki++) {
+        int row = ctx->st->rowMap[unitEqRows[ki]];           // equation row -> CSR storage row
+        if (row < 0) {
+            throw std::runtime_error("solveBatchSensitivities: unit row not an active equation");
+        }
+        setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
+        int phase = CUDSS_PHASE_SOLVE | (ki == 0 ? CUDSS_PHASE_FACTORIZATION : 0);
+        CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+        gatherSensiBatch<<<grid(nS * m), BLOCK, 0, ctx->stream>>>(n, nS, k, m, ki, dObs.as<int>(),
+                ctx->dDx.as<double>(), dOut.as<double>());
+    }
+    ctx->factored = true;                                    // keep mode-5 REFACTORIZATION bookkeeping honest
+    std::vector<double> out((size_t) nS * k * m);
+    CUDA_CHECK(cudaMemcpyAsync(out.data(), dOut.p, out.size() * sizeof(double), cudaMemcpyDeviceToHost, ctx->stream));
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    return out;
+}
+
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBatchSensitivities(
+        JNIEnv* env, jclass, jlong handle, jdoubleArray jstates, jintArray junitRows, jintArray jobserveCols) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return nullptr;
+    }
+    std::vector<double> states(env->GetArrayLength(jstates));
+    env->GetDoubleArrayRegion(jstates, 0, (jsize) states.size(), states.data());
+    std::vector<int> unitRows(env->GetArrayLength(junitRows));
+    env->GetIntArrayRegion(junitRows, 0, (jsize) unitRows.size(), unitRows.data());
+    std::vector<int> observeCols(env->GetArrayLength(jobserveCols));
+    env->GetIntArrayRegion(jobserveCols, 0, (jsize) observeCols.size(), observeCols.data());
+    std::string error;
+    std::vector<double> out;
+    try {
+        if (states.size() != (size_t) ctx->st->n * ctx->nScenarios) {
+            throw std::runtime_error("states size mismatch");
+        }
+        out = solveBatchSensitivities(ctx, states.data(),
+                (int) unitRows.size(), unitRows.data(), (int) observeCols.size(), observeCols.data());
+    } catch (const std::exception& e) {
+        error = e.what();
+    }
+    if (!error.empty()) {
+        env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
+                      ("GPU batched sensitivity solve failed: " + error).c_str());
+        return nullptr;
+    }
+    jdoubleArray jout = env->NewDoubleArray((jsize) out.size());
+    env->SetDoubleArrayRegion(jout, 0, (jsize) out.size(), out.data());
+    return jout;
 }
 
 // Per-scenario slack-only-DS absorbed totals after a solve (see slackOnlyDsCheck) — the pair phase

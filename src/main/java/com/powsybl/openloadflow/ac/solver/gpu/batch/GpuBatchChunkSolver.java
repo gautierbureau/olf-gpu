@@ -58,6 +58,7 @@ final class GpuBatchChunkSolver {
                                                List<GpuBatchIncrementalShuntVc.Controller> incrementalShuntControllers,
                                                List<GpuBatchIncrementalFlowControl.Controller> incrementalFlowControllers,
                                                GpuBatchIncrementalFlowControl.EsContext esContext,
+                                               List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers,
                                                BatchConfig config) {
         int nb = batchedIndices.size();
         int chunkSize = GpuBatchContextCache.resolveChunkSize(nb, n, gpuData);
@@ -389,6 +390,24 @@ final class GpuBatchChunkSolver {
                         targetOverrideIndex = ovIndexList.stream().mapToInt(Integer::intValue).toArray();
                         targetOverrideValue = ovValueList.stream().mapToDouble(Double::doubleValue).toArray();
                     }
+                    // HVDC AC-emulation: snapshot the pre-freeze override lists (the round rebuild base),
+                    // then OLF's FreezingHvdcACEmulation freezes every live hvdc at its scenario's
+                    // WARM-START flows BEFORE the first solve.
+                    List<Integer> preHvdcOvIdx = null;
+                    List<Double> preHvdcOvVal = null;
+                    int[][] hvdcStatus = null;
+                    if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
+                        preHvdcOvIdx = new ArrayList<>(ovIndexList);
+                        preHvdcOvVal = new ArrayList<>(ovValueList);
+                        if (config.hvdcFreezing()) {
+                            hvdcStatus = GpuBatchHvdcAcEmulation.applyFreeze(chunkSize, realCount, n, hvdcControllers,
+                                    esContext, baseState, x0Full, disabledMask, baseTargets, ovIndexList, ovValueList);
+                            targetOverrideIndex = ovIndexList.stream().mapToInt(Integer::intValue).toArray();
+                            targetOverrideValue = ovValueList.stream().mapToDouble(Double::doubleValue).toArray();
+                        } else {
+                            hvdcStatus = new int[chunkSize][hvdcControllers.size()];
+                        }
+                    }
                     boolean dbgPairRl = pairPhase && nrl > 0 && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_RL"));
                     int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl) && nrl > 0 ? new int[chunkSize * nrl] : null;
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
@@ -458,6 +477,38 @@ final class GpuBatchChunkSolver {
                         chunkResults = GpuBatchIncrementalTvc.orchestrate(handle, chunkSize, realCount, n,
                                 chunkResults, incrementalTvcControllers, rowModePerScenario, baseRowMode, disabledMask,
                                 targetOverrideIndex, targetOverrideValue,
+                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                                dsAnchorShift, dsSlackShift,
+                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                config.lsMode() == 2 ? varType : null, config);
+                    }
+                    if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
+                        chunkResults = GpuBatchHvdcAcEmulation.orchestrate(handle, chunkSize, realCount, n,
+                                chunkResults, hvdcControllers, hvdcStatus, config.hvdcLimits(), esContext,
+                                rowModePerScenario, baseRowMode, disabledMask,
+                                preHvdcOvIdx, preHvdcOvVal,
+                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                                dsAnchorShift, dsSlackShift,
+                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                config.lsMode() == 2 ? varType : null, config);
+                    }
+                    if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
+                        chunkResults = GpuBatchHvdcAcEmulation.orchestrate(handle, chunkSize, realCount, n,
+                                chunkResults, hvdcControllers, hvdcStatus, config.hvdcLimits(), esContext,
+                                rowModePerScenario, baseRowMode, disabledMask,
+                                preHvdcOvIdx, preHvdcOvVal,
                                 dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
                                 dsAnchorShift, dsSlackShift,
                                 r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),

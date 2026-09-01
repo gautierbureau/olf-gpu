@@ -356,6 +356,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
                                     config.incTvcMaxTapShift(), config.incrementalRpcControl(), config.incrementalPhaseControl())
                             : null,
                     new GpuBatchIncrementalFlowControl.EsContext(equationSystem.getStateVector(), n),
+                    config.hvdcFreezing() || config.hvdcLimits()
+                            ? GpuBatchHvdcAcEmulation.buildControllers(network, equationSystem, nElements)
+                            : null,
                     config);
         }
 

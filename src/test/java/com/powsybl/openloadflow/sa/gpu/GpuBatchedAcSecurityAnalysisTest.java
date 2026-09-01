@@ -596,6 +596,52 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** DEVICE-mode HVDC AC emulation WITH HVDCs present (GpuBatchHvdcAcEmulation): the freeze /
+     *  unfreeze phases and the linear<->saturation limit transitions run per scenario around batched
+     *  solves — coupling via the hv disabled bit, VSC injections via converter-bus target overrides;
+     *  GPU SA == CPU SA at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceHvdcAcEmulationMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.HvdcNetworkFactory.createHvdcInAcEmulationInSymetricNetwork();
+        com.powsybl.iidm.network.Line l12 = network.getLine("l12");
+        network.newLine().setId("l12_BIS")
+                .setVoltageLevel1(l12.getTerminal1().getVoltageLevel().getId()).setBus1(l12.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l12.getTerminal2().getVoltageLevel().getId()).setBus2(l12.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l12.getR() * 2).setX(l12.getX() * 2)
+                .setG1(l12.getG1()).setB1(l12.getB1()).setG2(l12.getG2()).setB2(l12.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("l12_BIS", new BranchContingency("l12_BIS")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setHvdcAcEmulation(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
+    /** DEVICE-mode HVDC AC emulation with the FREEZE phase active (startWithFrozenACEmulation) AND a
+     *  tight pMax forcing LINEAR -> SATURATION transitions; GPU SA == CPU SA at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceHvdcAcEmulationFreezeAndSaturationMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.HvdcNetworkFactory.createHvdcInAcEmulationInSymetricNetwork();
+        // tighten the emulated-power range so the post-outage droop flow SATURATES
+        network.getHvdcLine("hvdc12").newExtension(com.powsybl.iidm.network.extensions.HvdcOperatorActivePowerRangeAdder.class)
+                .withOprFromCS1toCS2(1.4f).withOprFromCS2toCS1(1.4f).add();
+        com.powsybl.iidm.network.Line l12 = network.getLine("l12");
+        network.newLine().setId("l12_BIS")
+                .setVoltageLevel1(l12.getTerminal1().getVoltageLevel().getId()).setBus1(l12.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l12.getTerminal2().getVoltageLevel().getId()).setBus2(l12.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l12.getR() * 2).setX(l12.getX() * 2)
+                .setG1(l12.getG1()).setB1(l12.getB1()).setG2(l12.getG2()).setB2(l12.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("l12_BIS", new BranchContingency("l12_BIS")),
+                new Contingency("l12", new BranchContingency("l12")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setHvdcAcEmulation(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setStartWithFrozenACEmulation(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
     private void assertGpuMatchesCpu(Network network, List<Contingency> contingencies) {
         assertGpuMatchesCpu(network, contingencies, 0.5);
     }

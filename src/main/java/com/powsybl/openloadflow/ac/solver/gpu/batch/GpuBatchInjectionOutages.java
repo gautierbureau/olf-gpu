@@ -42,6 +42,7 @@ final class GpuBatchInjectionOutages {
      *  per-bus disqualification, returns null and the contingency routes to the CPU. */
     static GenOutage[] computeInjectionOutages(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,
                                                double dsSum, boolean slackParticipates,
+                                               com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams,
                                                List<LfGenerator> gens, List<LoadLoss> loads) {
         java.util.Map<LfBus, List<LfGenerator>> byBus = new java.util.LinkedHashMap<>();
         java.util.Map<LfBus, List<LoadLoss>> loadsByBus = new java.util.LinkedHashMap<>();
@@ -59,7 +60,7 @@ final class GpuBatchInjectionOutages {
         int k = 0;
         int dsBuses = 0;
         for (java.util.Map.Entry<LfBus, List<LfGenerator>> e : byBus.entrySet()) {
-            GenOutage go = computeBusGenOutage(es, gpuData, dsSum, slackParticipates, e.getKey(), e.getValue(),
+            GenOutage go = computeBusGenOutage(es, gpuData, dsSum, slackParticipates, dsParams, e.getKey(), e.getValue(),
                     loadsByBus.getOrDefault(e.getKey(), List.of()));
             if (go == null) {
                 return null;
@@ -74,13 +75,17 @@ final class GpuBatchInjectionOutages {
     }
 
     private static GenOutage computeBusGenOutage(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,
-                                                 double dsSum, boolean slackParticipates, LfBus bus,
+                                                 double dsSum, boolean slackParticipates,
+                                                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams, LfBus bus,
                                                  List<LfGenerator> lost, List<LoadLoss> lostLoads) {
         int busNum = bus.getNum();
         if (es.getEquation(busNum, AcEquationType.BUS_TARGET_PHI).isPresent()        // slack/reference: P is free
                 || es.getEquation(busNum, AcEquationType.DISTR_Q).isPresent()) {     // remote/distributed VC controller
             return null;
         }
+        if (dsParams.isLoadBased() && !lostLoads.isEmpty()) {
+            return null;                                     // a lost/shifted load changes the LOAD participation
+        }                                                    // factors — per-scenario load reweight not modeled: CPU
         java.util.Set<LfGenerator> lostSet = new java.util.HashSet<>(lost);
         int pRow = es.getVariableSet().getVariable(busNum, AcVariableType.BUS_PHI).getRow();
         int vRow = es.getVariableSet().getVariable(busNum, AcVariableType.BUS_V).getRow();
@@ -103,7 +108,10 @@ final class GpuBatchInjectionOutages {
                 }
             }
         }
-        boolean lostParticipation = lost.stream().anyMatch(g -> g.isParticipating() && g.getDroop() != 0);
+        boolean lostParticipation = lost.stream().anyMatch(g -> dsParams.factor(g) != 0);
+        if (dsParams.isRemainingMargin() && dsBus >= 0 && lostParticipation) {
+            return null;                                     // RM margins reweight per scenario is not modeled — CPU
+        }
         if (dsBus >= 0 && lostParticipation && slackParticipates) {
             return null;                            // FACTOR reweight + participating slack: retain math doesn't hold
         }                                           // (a pure base shift keeps the factors — retain stays exact)
@@ -147,18 +155,21 @@ final class GpuBatchInjectionOutages {
         if (dsBus >= 0) {
             dsBaseDelta = lostP - lostLoadP;                 // net DROP of the row target (load shed RAISES it)
             for (LfGenerator gen : lost) {                   // per-gen deltas compose additively
-                if (gen.isParticipating() && gen.getDroop() != 0) {
-                    dsFactorDelta += (gen.getMaxP() / gen.getDroop()) / dsSum;
-                    double minTp = gen.getMinTargetP();
-                    double maxTp = gen.getMaxTargetP();
-                    double tp = gen.getTargetP();
-                    if (tp < 0) {
-                        maxTp = Math.min(maxTp, 0);
-                    } else {
-                        minTp = Math.max(minTp, 0);
+                double gf = dsParams.factor(gen);
+                if (gf != 0) {
+                    dsFactorDelta += gf / dsSum;
+                    if (dsParams.useActiveLimits()) {        // rooms are +-infinity otherwise — a lost gen
+                        double minTp = gen.getMinTargetP();  // cannot change them (and inf - inf = NaN)
+                        double maxTp = gen.getMaxTargetP();
+                        double tp = gen.getTargetP();
+                        if (tp < 0) {
+                            maxTp = Math.min(maxTp, 0);
+                        } else {
+                            minTp = Math.max(minTp, 0);
+                        }
+                        dsMaxDelta += maxTp - tp;
+                        dsMinDelta += minTp - tp;
                     }
-                    dsMaxDelta += maxTp - tp;
-                    dsMinDelta += minTp - tp;
                 }
             }
         }

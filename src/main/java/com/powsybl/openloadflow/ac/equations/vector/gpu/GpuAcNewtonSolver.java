@@ -58,7 +58,7 @@ public final class GpuAcNewtonSolver {
      *
      * @param n     number of variables / equations
      * @param cbIn  closed branches, {@code ncb*8}: (y g1 g2 b1 b2 ksi r1 a1)
-     * @param cbIdx closed branches, {@code ncb*10}: (Prow1 Qrow1 Prow2 Qrow2 ph1col v1col ph2col v2col a1col r1col)
+     * @param cbIdx closed branches, {@code ncb*12}: (Prow1 Qrow1 Prow2 Qrow2 ph1col v1col ph2col v2col a1col r1col qAlt1 qAlt2)
      * @param obIn  open branches, {@code nob*7}: (y ksi g1 b1 g2 b2 r1)
      * @param obIdx open branches, {@code nob*6}: (Prow1 Qrow1 Prow2 Qrow2 v1col v2col)
      * @param shIn  shunts, {@code nsh*2}: (g b)
@@ -72,7 +72,8 @@ public final class GpuAcNewtonSolver {
                                               double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
                                               int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                                               double[] ziIn, int[] ziIdx,
-                                              int[] drRow, int[] drCol, double[] drCoef);
+                                              int[] drRow, int[] drCol, double[] drCoef,
+                                              int[] dbRow, int[] dbCol, double[] dbCoef);
 
     /**
      * Release a structure handle from {@link #createStructure} (idempotent for handle 0). Contexts
@@ -164,9 +165,10 @@ public final class GpuAcNewtonSolver {
                                  double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
                                  int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                                  double[] ziIn, int[] ziIdx,
-                                 int[] drRow, int[] drCol, double[] drCoef) {
+                                 int[] drRow, int[] drCol, double[] drCoef,
+                                 int[] dbRow, int[] dbCol, double[] dbCoef) {
         long structure = createStructure(x0.length, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
-                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef);
+                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef);
         try {
             long handle = createContext(structure);
             try {
@@ -198,7 +200,9 @@ public final class GpuAcNewtonSolver {
                                                   int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ,
                                                   double[] rlVtarget, int[] dsPhiRow, double[] dsFactor,
                                                   int dsSlackPhiRow, double dsSlackTargetP,
-                                                  double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta);
+                                                  double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
+                                                  int dsMode, double[] dsMarginUp, double[] dsMarginDown,
+                                                  double dsSlackMarginUp, double dsSlackMarginDown);
 
     /**
      * Run batched Newton-Raphson AC power flow on the GPU: one iteration loop over all
@@ -235,7 +239,10 @@ public final class GpuAcNewtonSolver {
                                                        int[] targetOverrideIndex, double[] targetOverrideValue,
                                                        int[] dsOverrideBus, double[] dsOverrideFactorDelta,
                                                        double[] dsOverrideBaseDelta, double[] dsOverrideMaxDelta,
-                                                       double[] dsOverrideMinDelta, int maxIter, double tol,
+                                                       double[] dsOverrideMinDelta, double[] dsAnchorShift,
+                                                       double[] dsSlackShift,
+                                                       int[] rlVtOvSlotIdx, double[] rlVtOvVal,
+                                                       int maxIter, double tol,
                                                        double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                                                        int lsMode, double maxDv, double maxDphi, int[] varType,
                                                        double[] x0PerScenario,
@@ -244,6 +251,23 @@ public final class GpuAcNewtonSolver {
                                                        int[] r1OvSlotElem, double[] r1OvVal,
                                                        int maxOuterIterations, int maxPqPvSwitch, int dsRejectResidual,
                                                        int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem);
+
+    /** Read back the batch context's per-scenario TARGET buffer (n * nScenarios) after a solve — the device
+     *  outer loops mutate targets in place; the strategy/pair phase re-anchors its slack distribution at the
+     *  PARENT contingency's final distributed targets (OLF's setGeneratorsInitialTargetPToTargetP). */
+    public static native double[] readBatchTargets(long handle);
+
+    /** Batched SENSITIVITY solve for the incremental outer-loop family: J at the given per-scenario
+     *  states (same forward system as the Newton), unit RHS at each {@code unitRows} pinned-variable
+     *  identity row, the {@code observeCols} variable entries of each solution gathered per scenario.
+     *  Returns {@code [nScenarios * unitRows.length * observeCols.length]} laid out scenario-major.
+     *  MUST follow a solveBatchContext call on the same handle with the same per-scenario overrides. */
+    public static native double[] solveBatchSensitivities(long handle, double[] states,
+                                                          int[] unitRows, int[] observeCols);
+
+    /** Per-scenario slack-only-DS absorbed totals after a solve, or null when the context is not
+     *  slack-only — the pair phase seeds its scenarios with the parent contingency's value. */
+    public static native double[] readBatchSlackAbsorbed(long handle);
 
     /** Release a batch context from {@link #createBatchContext} (idempotent for handle 0). */
     public static native void destroyBatchContext(long handle);
@@ -290,19 +314,20 @@ public final class GpuAcNewtonSolver {
                                          int dsSlackPhiRow, double dsSlackTargetP,
                                          double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
                                          int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
-                                         int[] drRow, int[] drCol, double[] drCoef, double[] ziIn, int[] ziIdx) {
+                                         int[] drRow, int[] drCol, double[] drCoef,
+                                         int[] dbRow, int[] dbCol, double[] dbCoef, double[] ziIn, int[] ziIdx) {
         int n = x0Base.length;
         int nScenarios = disabledElementMask.length;
         long structure = createStructure(n, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
-                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef);
+                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef);
         try {
             long handle = createBatchContext(structure, nScenarios, mode,
                     rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, dsPhiRow, dsFactor, dsSlackPhiRow, dsSlackTargetP,
-                    dsBaseTargetP, dsMaxDelta, dsMinDelta);
+                    dsBaseTargetP, dsMaxDelta, dsMinDelta, 0, new double[0], new double[0], 0, 0);
             try {
                 // one-shot: no per-scenario gen-override flips, so any scenario's row mode IS the base row mode
                 return solveBatchContext(handle, x0Base, targetBase, rowMode, rowMode[0], disabledElementMask,
-                        new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0],
+                        new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null,
                         maxIter, tol, reactiveLimitTol, slackDistTol, 0.0, 0, 0.0, 0.0, null, null, null, null, null, null, null, null, 0, 0, 0, 0, null, null);
             } finally {
                 destroyBatchContext(handle);

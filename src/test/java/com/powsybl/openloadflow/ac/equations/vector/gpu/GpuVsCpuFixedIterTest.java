@@ -128,7 +128,7 @@ class GpuVsCpuFixedIterTest {
                         d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
                         d.dqElem(), d.dqSide(), d.dqWeight(), d.dqRow(), d.dqKind(),
                         d.ziIn(), d.ziIdx(),
-                        d.drRow(), d.drCol(), d.drCoef());
+                        d.drRow(), d.drCol(), d.drCoef(), d.dbRow(), d.dbCol(), d.dbCoef());
                 double gpuNorm = out[n + 1];
                 double cpuNorm = cpuFixedK(p, x0, k, j);
                 double ratio = cpuNorm > 0 ? gpuNorm / cpuNorm : Double.NaN;

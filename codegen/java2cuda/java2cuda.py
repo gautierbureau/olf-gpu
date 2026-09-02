@@ -428,7 +428,7 @@ def render_fused(mod, temps, out, pool):
 # --------------------------------------------------------------------------------
 
 EQ_OFFSET = {"BUS_TARGET_P": 0, "BUS_TARGET_Q": 1}
-VAR_OFFSET = {"BUS_PHI": 0, "BUS_V": 1, "BRANCH_ALPHA1": 0, "BRANCH_RHO1": 1}
+VAR_OFFSET = {"BUS_PHI": 0, "BUS_V": 1, "BRANCH_ALPHA1": 0, "BRANCH_RHO1": 1, "SHUNT_B": 0}
 ENDPOINT_CODE = {"bus1": 0, "bus2": 1, "branch": 2, "bus": 0, "shunt": 2}
 ROLE_RESIDUAL, ROLE_JACOBIAN, ROLE_SKIP = 0, 1, 2
 

@@ -16,7 +16,9 @@ import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.LfShunt;
 import com.powsybl.openloadflow.network.LoadFlowModel;
+import com.powsybl.openloadflow.network.ShuntVoltageControl;
 import com.powsybl.openloadflow.network.TransformerVoltageControl;
 import com.powsybl.openloadflow.network.VoltageControl;
 
@@ -46,13 +48,23 @@ public final class GpuAcOuterLoopPacks {
     record DrPack(int[] drRow, int[] drCol, double[] drCoef) {
     }
 
+    /** DISTR_SHUNT_B contributions in the flat device layout: {@code {dbRow, dbCol}} per row + coefficient —
+     *  the shunt-susceptance analogue of {@link DrPack} (structurally identical linear distribution rows). */
+    record DsbPack(int[] dbRow, int[] dbCol, double[] dbCoef) {
+    }
+
     /** Reactive-limits (PV↔PQ) pack: one entry per voltage-capable controller bus. */
     record RlPack(int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget) {
     }
 
-    /** Distributed-slack pack: per-participating-bus factor/headroom + the slack bus's own share. */
+    /** Distributed-slack pack: per-participating-bus factor/headroom + the slack bus's own share.
+     *  {@code dsMode} 0 = static factors ({@code dsFactor}); 1 = REMAINING_MARGIN (factors are the
+     *  direction-dependent per-bus margins {@code dsMarginUp}/{@code dsMarginDown} + the slack's own
+     *  {@code dsSlackMarginUp}/{@code Down}, normalized in-kernel per scenario and pass). */
     record DsPack(int[] dsPhiRow, double[] dsFactor, int dsSlackPhiRow, double dsSlackTargetP,
-                  double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta) {
+                  double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
+                  int dsMode, double[] dsMarginUp, double[] dsMarginDown,
+                  double dsSlackMarginUp, double dsSlackMarginDown) {
     }
 
     static DqPack distrQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
@@ -92,6 +104,22 @@ public final class GpuAcOuterLoopPacks {
             drCoef[i] = drC.get(i);
         }
         return new DrPack(drRow, drCol, drCoef);
+    }
+
+    static DsbPack distrShuntBPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+                                   ExtractionColumns columns) {
+        List<int[]> db = new ArrayList<>();      // {dbRow, dbCol} per DISTR_SHUNT_B contribution
+        List<Double> dbC = new ArrayList<>();    // coefficient per contribution
+        buildDistrShuntBContributions(network, es, columns.shuntBCol(), db, dbC);
+        int[] dbRow = new int[db.size()];
+        int[] dbCol = new int[db.size()];
+        double[] dbCoef = new double[db.size()];
+        for (int i = 0; i < db.size(); i++) {
+            dbRow[i] = db.get(i)[0];
+            dbCol[i] = db.get(i)[1];
+            dbCoef[i] = dbC.get(i);
+        }
+        return new DsbPack(dbRow, dbCol, dbCoef);
     }
 
     static RlPack reactiveLimitsPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
@@ -137,7 +165,7 @@ public final class GpuAcOuterLoopPacks {
     }
 
     static DsPack distributedSlackPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                       ExtractionColumns columns, boolean distributedSlack) {
+                                       ExtractionColumns columns, boolean distributedSlack, GpuDsParams dsParams) {
         int[] phiCol = columns.phiCol();
         // Distributed-slack pack: the single slack/reference bus (BUS_TARGET_PHI active, BUS_TARGET_P
         // inactive — its P is free) provides the mismatch; every OTHER bus with participating generators
@@ -159,11 +187,15 @@ public final class GpuAcOuterLoopPacks {
         int dsSlackPhiRow = -1;
         double dsSlackTargetP = 0;
         double dsSlackFactor = 0;                                       // slack's own participation (denominator only)
+        double dsSlackMarginUp = 0;                                     // REMAINING_MARGIN: the slack's own margins
+        double dsSlackMarginDown = 0;
         List<Integer> dsPhiRow = new ArrayList<>();
         List<Double> dsFactorRaw = new ArrayList<>();
         List<Double> dsBaseTargetP = new ArrayList<>();                 // each bus's initial BUS_TARGET_P
         List<Double> dsMaxDelta = new ArrayList<>();                    // headroom ≥ 0
         List<Double> dsMinDelta = new ArrayList<>();                    // footroom ≤ 0
+        List<Double> dsMarginUp = new ArrayList<>();                    // REMAINING_MARGIN per-bus margins
+        List<Double> dsMarginDown = new ArrayList<>();
         for (LfBus bus : network.getBuses()) {
             if (!distributedSlack) {                                    // empty pack when the DS outer loop is disabled
                 break;
@@ -172,22 +204,22 @@ public final class GpuAcOuterLoopPacks {
             if (GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_PHI) >= 0) {       // the slack/reference bus
                 dsSlackPhiRow = phiCol[bn];
                 dsSlackTargetP = bus.getTargetP();
-                for (LfGenerator g : bus.getGenerators()) {
-                    if (g.isParticipating() && g.getDroop() != 0) {
-                        dsSlackFactor += g.getMaxP() / g.getDroop();
-                    }
+                dsSlackFactor = dsParams.busFactor(bus);
+                if (dsParams.isRemainingMargin()) {
+                    double[] m = dsParams.busMargins(bus);
+                    dsSlackMarginUp = m[0];
+                    dsSlackMarginDown = m[1];
                 }
                 continue;
             }
             if (GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) < 0) {
                 continue;                                               // no active P balance to retarget
             }
-            double factor = 0;
+            double factor = dsParams.busFactor(bus);
             double headroom = 0;
             double footroom = 0;
             for (LfGenerator g : bus.getGenerators()) {
-                if (g.isParticipating() && g.getDroop() != 0) {
-                    factor += g.getMaxP() / g.getDroop();
+                if (dsParams.factor(g) != 0) {
                     double minTp = g.getMinTargetP();
                     double maxTp = g.getMaxTargetP();
                     double tp = g.getTargetP();
@@ -200,12 +232,21 @@ public final class GpuAcOuterLoopPacks {
                     footroom += minTp - tp;
                 }
             }
+            if (!dsParams.useActiveLimits() || dsParams.isLoadBased()) {
+                headroom = Double.POSITIVE_INFINITY;                    // OLF: +-Double.MAX_VALUE bounds (or loads,
+                footroom = Double.NEGATIVE_INFINITY;                    // which OLF rescales unbounded) — the
+            }                                                           // water-fill clamp never saturates
             if (factor > 0) {
                 dsPhiRow.add(phiCol[bn]);
                 dsFactorRaw.add(factor);
                 dsBaseTargetP.add(bus.getTargetP());
                 dsMaxDelta.add(headroom);
                 dsMinDelta.add(footroom);
+                if (dsParams.isRemainingMargin()) {
+                    double[] m = dsParams.busMargins(bus);
+                    dsMarginUp.add(m[0]);
+                    dsMarginDown.add(m[1]);
+                }
             }
         }
         double dsSum = dsFactorRaw.stream().mapToDouble(Double::doubleValue).sum() + dsSlackFactor;
@@ -213,17 +254,27 @@ public final class GpuAcOuterLoopPacks {
         for (int i = 0; i < dsFactor.length; i++) {
             dsFactor[i] = dsFactorRaw.get(i) / dsSum;
         }
-        if (dsSlackPhiRow < 0 || dsPhiRow.isEmpty()) {                  // no slack or nobody to distribute to
+        // A pack with participants but no slack row is unusable; one with NEITHER participants nor a
+        // participating slack means DS never fires. But a PARTICIPATING SLACK ALONE is kept (nds == 0,
+        // dsSlackPhiRow >= 0): OLF then distributes the whole mismatch into the slack generator's own
+        // target — no flow change, but the outer loop reports UNSTABLE and re-solves, and the device
+        // must take that same extra polish run (slackOnlyDsCheck) to match the CPU trajectory.
+        if (dsSlackPhiRow < 0 || dsPhiRow.isEmpty() && dsSlackFactor <= 0) {
             dsPhiRow.clear();
             dsFactor = new double[0];
             dsBaseTargetP.clear();
             dsMaxDelta.clear();
             dsMinDelta.clear();
+            dsMarginUp.clear();
+            dsMarginDown.clear();
             dsSlackPhiRow = -1;
         }
         return new DsPack(GpuAcArrays.toIntArray(dsPhiRow), dsFactor, dsSlackPhiRow, dsSlackTargetP,
                 GpuAcArrays.toDoubleArray(dsBaseTargetP), GpuAcArrays.toDoubleArray(dsMaxDelta),
-                GpuAcArrays.toDoubleArray(dsMinDelta));
+                GpuAcArrays.toDoubleArray(dsMinDelta),
+                dsParams.isRemainingMargin() ? 1 : 0,
+                GpuAcArrays.toDoubleArray(dsMarginUp), GpuAcArrays.toDoubleArray(dsMarginDown),
+                dsSlackMarginUp, dsSlackMarginDown);
     }
 
     /**
@@ -337,6 +388,42 @@ public final class GpuAcOuterLoopPacks {
                     }
                     double coef = 1.0 / count - (gj == gk ? 1.0 : 0.0);
                     out.add(new int[] {drRow, branchRhoCol[gj.getNum()]});
+                    coefs.add(coef);
+                }
+            }
+        }
+    }
+
+    /**
+     * DISTR_SHUNT_B linear-distribution rows — the shunt-susceptance analogue of
+     * {@link #buildDistrRhoContributions}. For each shunt-voltage-controlled pilot bus, every controller shunt
+     * with an ACTIVE DISTR_SHUNT_B equation gets a row {@code b_k = (1/count)·Σ_j b_j} rewritten as
+     * {@code 0 = (1/count − 1)·b_k + Σ_{j≠k} b_j/count} over the {@code count} enabled controllers. The free
+     * controller (no DISTR_SHUNT_B) carries the pilot's Q balance via qRow.
+     */
+    private static void buildDistrShuntBContributions(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+                                                      int[] shuntBCol, List<int[]> out, List<Double> coefs) {
+        for (LfBus pilot : network.getBuses()) {
+            ShuntVoltageControl svc = pilot.getShuntVoltageControl()
+                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                    .filter(c -> pilot.isShuntVoltageControlled())
+                    .orElse(null);
+            if (svc == null) {
+                continue;
+            }
+            List<LfShunt> controllers = svc.getMergedControllerElements();
+            long count = controllers.stream().filter(c -> !c.isDisabled()).count();
+            for (LfShunt gk : controllers) {
+                if (GpuAcRowIndexing.row(es, gk.getNum(), AcEquationType.DISTR_SHUNT_B) < 0) {
+                    continue;                                // the free controller carries the pilot's Q, no DISTR_SHUNT_B
+                }
+                int dbRow = shuntBCol[gk.getNum()];
+                for (LfShunt gj : controllers) {
+                    if (gj.isDisabled()) {
+                        continue;
+                    }
+                    double coef = 1.0 / count - (gj == gk ? 1.0 : 0.0);
+                    out.add(new int[] {dbRow, shuntBCol[gj.getNum()]});
                     coefs.add(coef);
                 }
             }

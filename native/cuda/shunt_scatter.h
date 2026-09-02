@@ -24,7 +24,7 @@ constexpr ShScatter SH_SCATTER[SH_NOUT] = {
     {1, 0, 0, 0, 1},  // [1] dpdv
     {0, 0, 1, -1, -1},  // [2] q
     {1, 0, 1, 0, 1},  // [3] dqdv
-    {2, -1, -1, -1, -1},  // [4] dqdb
+    {1, 0, 1, 2, 0},  // [4] dqdb
 };
 
 }}  // namespace powsybl::openloadflow

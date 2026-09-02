@@ -45,11 +45,12 @@ public final class GpuAcActivationExtractor {
         java.util.Arrays.fill(targetMap, -1);
         int nBranches = network.getBranches().size();
         int[] branchRhoCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.BRANCH_RHO1);
+        int[] shuntBCol = GpuAcRowIndexing.branchVarCols(es, network.getShunts().size(), AcVariableType.SHUNT_B);
         int[] vCol = new int[network.getBuses().size()];
         for (LfBus bus : network.getBuses()) {
             vCol[bus.getNum()] = GpuAcRowIndexing.col(es, bus.getNum(), AcVariableType.BUS_V);
         }
-        int[] qRow = GpuAcRowIndexing.computeQRow(network, es, vCol, branchRhoCol);
+        int[] qRow = GpuAcRowIndexing.computeQRow(network, es, vCol, branchRhoCol, shuntBCol);
         for (LfBus bus : network.getBuses()) {
             int p = GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_P);
             if (p >= 0) {
@@ -66,6 +67,7 @@ public final class GpuAcActivationExtractor {
             AcVariableType powerRowVar = switch (e.getType()) {
                 case DISTR_Q -> AcVariableType.BUS_V;        // controller's BUS_V row
                 case DISTR_RHO -> AcVariableType.BRANCH_RHO1; // controller's BRANCH_RHO1 row
+                case DISTR_SHUNT_B -> AcVariableType.SHUNT_B; // controller's SHUNT_B row
                 case ZERO_V -> AcVariableType.DUMMY_P;       // zero-imp v1−rho·v2 sits on the DUMMY_P row
                 case ZERO_PHI -> AcVariableType.DUMMY_Q;     // zero-imp phi1−phi2 sits on the DUMMY_Q row
                 default -> null;
@@ -87,6 +89,7 @@ public final class GpuAcActivationExtractor {
                 // and it is NOT in this switch, so it hits the default throw below and the solver falls
                 // back to CPU for that solve. Safe by construction, never silently dropped.
                 case BRANCH_TARGET_ALPHA1 -> AcVariableType.BRANCH_ALPHA1;
+                case SHUNT_TARGET_B -> AcVariableType.SHUNT_B;           // susceptance held constant: b−target identity
                 case DUMMY_TARGET_P -> AcVariableType.DUMMY_P;           // non-tree zero-imp: dummyP held = 0
                 case DUMMY_TARGET_Q -> AcVariableType.DUMMY_Q;           // non-tree zero-imp: dummyQ held = 0
                 case BUS_TARGET_P, BUS_TARGET_Q -> null;     // power rows, mapped above

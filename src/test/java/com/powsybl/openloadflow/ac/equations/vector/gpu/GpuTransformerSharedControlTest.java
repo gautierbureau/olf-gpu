@@ -102,7 +102,7 @@ class GpuTransformerSharedControlTest {
                 d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
                 d.dqElem(), d.dqSide(), d.dqWeight(), d.dqRow(), d.dqKind(),
                 d.ziIn(), d.ziIdx(),
-                d.drRow(), d.drCol(), d.drCoef());
+                d.drRow(), d.drCol(), d.drCoef(), d.dbRow(), d.dbCol(), d.dbCoef());
         int iters = (int) out[n];
         double norm = out[n + 1];
 

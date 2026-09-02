@@ -263,11 +263,26 @@ public final class GpuBatchTransformerControl {
                 }
                 rowMode[slot] = row;
             }
+            // OLF-faithful re-solve initialization (same fix as the JAVA hybrid engine): OLF's re-solves
+            // re-read every variable from the NETWORK (PreviousValueVoltageInitializer) — which equals the
+            // previous state for everything EXCEPT what the outer loop just mutated. Here the only mutation is
+            // a clamped/rounded ratio, so re-initialize EXACTLY that: the rho variable starts the next Newton
+            // AT its pinned fixedR1 (the pi-model value the CPU would re-read). Snapping OTHER identity rows to
+            // their targets would deviate from OLF — the CPU keeps a long-pinned row at its previous value
+            // (target ± the stopping residual), and that difference alone leaves ~1e-6 vs the CPU's ~1e-13.
+            for (int slot : affected) {
+                for (int c = 0; c < tcs.size(); c++) {
+                    double fixedR1 = rounded[slot * tcs.size() + c];
+                    if (!Double.isNaN(fixedR1)) {
+                        x0Full[slot * n + tcs.get(c).rhoRow()] = fixedR1;
+                    }
+                }
+            }
             double[][] r2 = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                     rowMode, baseRowMode, disabledMask,
                     ovIdx.stream().mapToInt(Integer::intValue).toArray(),
                     ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, null, null, null, null,
                     parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                     config.lsMode(), config.maxDv(), config.maxDphi(),
                     config.lsMode() == 2 ? varType : null, x0Full, null, null, null, null, null, null,

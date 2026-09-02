@@ -31,17 +31,30 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
  *   <li>{@code dsRejectResidual}: a slackDistributionFailureBehavior other than LEAVE_ON_SLACK_BUS
  *       makes a saturated distribution REJECT the scenario (CPU fallback replays it with the real
  *       behavior) instead of silently leaving the residual at the slack.</li>
+ *   <li>{@code outerLoopMode}: {@link OuterLoopMode#DEVICE} (CUDA-kernel outer loops folded into the
+ *       device solve) or {@link OuterLoopMode#JAVA} (device inner solve only, OLF's Java outer loops
+ *       make the decisions per scenario via {@link GpuHybridBatchOuterLoopEngine}).</li>
  * </ul>
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean transformerControl,
-                          int maxOuterIterations, int maxPqPvSwitch, boolean dsRejectResidual) {
+                          int maxOuterIterations, int maxPqPvSwitch, boolean dsRejectResidual,
+                          OuterLoopMode outerLoopMode,
+                          com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams,
+                          boolean incrementalTransformerControl, int incTvcMaxTapShift,
+                          boolean incrementalShuntControl, int incShuntMaxSectionShift,
+                          boolean incrementalRpcControl, boolean incrementalPhaseControl,
+                          boolean simpleTransformerControl,
+                          boolean hvdcFreezing, boolean hvdcLimits,
+                          boolean secondaryVoltageControl, double minPlausibleTargetV, double maxPlausibleTargetV) {
 
     /** The device defaults — no state-vector scaling, no transformer control, device outer-loop
-     *  constants, and LEAVE_ON_SLACK_BUS behavior (never reject a saturated scenario). This is what
-     *  every non-provider entry point (tests, direct callers) uses. */
-    public static final BatchConfig DEVICE_DEFAULTS = new BatchConfig(0, 0, 0, false, 0, 0, false);
+     *  constants, LEAVE_ON_SLACK_BUS behavior (never reject a saturated scenario), and the DEVICE
+     *  outer-loop mode. This is what every non-provider entry point (tests, direct callers) uses. */
+    public static final BatchConfig DEVICE_DEFAULTS = new BatchConfig(0, 0, 0, false, 0, 0, false, OuterLoopMode.DEVICE,
+            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams.DEFAULT, false, 3, false, 3, false, false, false, false, false,
+            false, 0.8, 1.2);
 
     int dsRejectResidualFlag() {
         return dsRejectResidual ? 1 : 0;

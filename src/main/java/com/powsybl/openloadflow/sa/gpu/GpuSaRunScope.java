@@ -7,16 +7,19 @@
  */
 package com.powsybl.openloadflow.sa.gpu;
 
+import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
 import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor;
+import com.powsybl.openloadflow.ac.outerloop.AcOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.OuterLoopMode;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.util.PerUnit;
@@ -24,7 +27,9 @@ import com.powsybl.security.SecurityAnalysisParameters;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 /**
  * The GPU batched-SA run-scope decision (the DETECT-AND-FALLBACK safety gate): given the resolved
@@ -60,29 +65,72 @@ final class GpuSaRunScope {
         boolean transformerControlBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL
                 && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
+        // INCREMENTAL (OLF's default TVC mode): the DEVICE runs the loop's decisions per scenario around
+        // batched solves with in-kernel dV/drho sensitivities (GpuBatchIncrementalTvc); stage-1 scope is
+        // the same as the continuous port (no generator VC under the transformer-controlled level).
+        boolean incrementalTvcBatchable =
+                olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL
+                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
+        // INCREMENTAL shunt VC: same per-scenario orchestrator pattern (GpuBatchIncrementalShuntVc)
+        // with in-kernel dV/dB sensitivities.
+        boolean incrementalShuntBatchable =
+                olfGuardParams.getShuntVoltageControlMode() == OpenLoadFlowParameters.ShuntVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL;
+        // SIMPLE (WITH_GENERATOR) TVC: continuous first solve (VC-on activation deltas) then a single
+        // round-to-closest-tap re-solve (GpuBatchSimpleTvc); same stage-1 structural scope.
+        // HVDC AC-emulation loops WITH HVDCs present (GpuBatchHvdcAcEmulation): the device pack extracts
+        // the LINEAR coupling, so every AC-emu HVDC must start LINEAR (a saturated/frozen base -> CPU).
+        boolean hvdcBatchable = noHvdc
+                || com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchHvdcAcEmulation.allLinearAtBase(lfNetwork);
+        // Secondary voltage control (GpuBatchSecondaryVc): batched device sensitivities + the zone
+        // system replayed per scenario on the host; stage-1 scope is LOCAL generator VC only.
+        boolean svcBatchable = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSecondaryVc.supported(lfNetwork);
+        boolean simpleTvcBatchable =
+                olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL
+                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
         boolean noSvc = lfNetwork.getBuses().stream()
                 .flatMap(b -> b.getGenerators().stream())
                 .noneMatch(g -> g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator);
-        List<String> unsupportedOuterLoops = new java.util.ArrayList<>(acParameters.getOuterLoops().stream()
-                .map(ol -> ol.getName())
-                .filter(name -> !DistributedSlackOuterLoop.NAME.equals(name)
-                        && !ReactiveLimitsOuterLoop.NAME.equals(name)
-                        && !(transformerControlBatchable && "TransformerVoltageControl".equals(name))
-                        && !(noHvdc && ("AcHvdcAcEmulationLimits".equals(name) || "FreezingHvdcACEmulation".equals(name)))
-                        && !(noSvc && "VoltageMonitoring".equals(name)))
-                .toList());
-        // Parameterization corner cases the device DS loop does not model (see
-        // docs/gpu-vs-cpu-capabilities.md Part II §A): the device weights are always maxP/droop with
-        // active limits — any other balance type or unlimited distribution must fall back whole-run.
-        boolean dsLoopActive = acParameters.getOuterLoops().stream()
-                .anyMatch(ol -> DistributedSlackOuterLoop.NAME.equals(ol.getName()));
-        com.powsybl.loadflow.LoadFlowParameters lfGuardParams = securityAnalysisParameters.getLoadFlowParameters();
-        if (dsLoopActive && lfGuardParams.getBalanceType()
-                != com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P_MAX) {
-            unsupportedOuterLoops.add("DistributedSlack[balanceType=" + lfGuardParams.getBalanceType() + "]");
-        }
-        if (dsLoopActive && !olfGuardParams.isUseActiveLimits()) {
-            unsupportedOuterLoops.add("DistributedSlack[useActiveLimits=false]");
+        // DEVICE (CUDA outer loops) vs JAVA (OLF's Java outer loops per scenario) — §5.1 of the design.
+        OuterLoopMode outerLoopMode = readOuterLoopMode();
+        LoadFlowParameters lfGuardParams = securityAnalysisParameters.getLoadFlowParameters();
+        List<String> unsupportedOuterLoops;
+        if (outerLoopMode == OuterLoopMode.JAVA) {
+            // JAVA runs OLF's OWN outer-loop code per scenario, so there is no device-port parameterization
+            // limit — only not-yet-validated loops and config the compact snapshot cannot isolate fall back.
+            unsupportedOuterLoops = javaUnsupportedOuterLoops(lfNetwork, acParameters, noHvdc, noSvc);
+        } else {
+            unsupportedOuterLoops = new ArrayList<>(acParameters.getOuterLoops().stream()
+                    .map(AcOuterLoop::getName)
+                    .filter(name -> !DistributedSlackOuterLoop.NAME.equals(name)
+                            && !ReactiveLimitsOuterLoop.NAME.equals(name)
+                            && !(transformerControlBatchable && "TransformerVoltageControl".equals(name))
+                            && !(incrementalTvcBatchable && "IncrementalTransformerVoltageControl".equals(name))
+                            && !(incrementalShuntBatchable && "IncrementalShuntVoltageControl".equals(name))
+                            && !(simpleTvcBatchable && "SimpleTransformerVoltageControl".equals(name))
+                            && !(svcBatchable && "SecondaryVoltageControl".equals(name))
+                            && !"IncrementalPhaseControl".equals(name)
+                            && !"IncrementalTransformerReactivePowerControl".equals(name)
+                            && !(hvdcBatchable && ("AcHvdcAcEmulationLimits".equals(name) || "FreezingHvdcACEmulation".equals(name)))
+                            && !(noSvc && "VoltageMonitoring".equals(name)))
+                    .toList());
+            // Parameterization corner cases the device DS loop does not model (see
+            // docs/gpu-vs-cpu-capabilities.md Part II §A): the device weights are always maxP/droop with
+            // active limits — any other balance type or unlimited distribution must fall back whole-run.
+            boolean dsLoopActive = acParameters.getOuterLoops().stream()
+                    .anyMatch(ol -> DistributedSlackOuterLoop.NAME.equals(ol.getName()));
+            // The device DS pass models every STATIC-factor generation balance type (P_MAX, P,
+            // PARTICIPATION_FACTOR — see GpuDsParams) and both useActiveLimits settings. REMAINING_MARGIN
+            // (mismatch-sign-dependent factors) and the load-based types still fall back whole-run.
+            if (dsLoopActive && !com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams.supports(lfGuardParams.getBalanceType())) {
+                unsupportedOuterLoops.add("DistributedSlack[balanceType=" + lfGuardParams.getBalanceType() + "]");
+            }
+            // loadPowerFactorConstant rescales each distributed load's targetQ alongside targetP — a per-round
+            // bus Q-target mutation the device DS pass does not model.
+            boolean loadBased = lfGuardParams.getBalanceType() == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD
+                    || lfGuardParams.getBalanceType() == LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD;
+            if (dsLoopActive && loadBased && olfGuardParams.isLoadPowerFactorConstant()) {
+                unsupportedOuterLoops.add("DistributedSlack[loadPowerFactorConstant]");
+            }
         }
         // Parameterization the device loops DO model — wire the run's values in place of the
         // device defaults (maxOuterLoopIterations, reactiveLimitsMaxPqPvSwitch), and make a
@@ -100,8 +148,29 @@ final class GpuSaRunScope {
                 .anyMatch(ol -> DistributedSlackOuterLoop.NAME.equals(ol.getName()));
         boolean reactiveLimits = acParameters.getOuterLoops().stream()
                 .anyMatch(ol -> ReactiveLimitsOuterLoop.NAME.equals(ol.getName()));
-        boolean cfgTransformerControl = transformerControlBatchable
+        // TransformerVoltageControl is the one loop DEVICE batches that JAVA does not yet (§5.7) — so it is
+        // never wired when JAVA is selected (the JAVA gate above already routed such a run to CPU).
+        boolean cfgTransformerControl = outerLoopMode == OuterLoopMode.DEVICE && transformerControlBatchable
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "TransformerVoltageControl".equals(ol.getName()));
+        boolean cfgIncrementalTvc = outerLoopMode == OuterLoopMode.DEVICE && incrementalTvcBatchable
+                && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalTransformerVoltageControl".equals(ol.getName()));
+        boolean cfgIncrementalShunt = outerLoopMode == OuterLoopMode.DEVICE && incrementalShuntBatchable
+                && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalShuntVoltageControl".equals(ol.getName()));
+        // The flow-observed incremental family (GpuBatchIncrementalFlowControl): rho -> branch Q, and
+        // a1 -> branch P / I. Both are decision-only loops over pinned identity rows — always batchable
+        // when their loop is configured (continuous "PhaseControl" stays CPU via the extraction guard).
+        boolean cfgIncrementalRpc = outerLoopMode == OuterLoopMode.DEVICE
+                && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalTransformerReactivePowerControl".equals(ol.getName()));
+        boolean cfgIncrementalPhase = outerLoopMode == OuterLoopMode.DEVICE
+                && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalPhaseControl".equals(ol.getName()));
+        boolean cfgSimpleTvc = outerLoopMode == OuterLoopMode.DEVICE && simpleTvcBatchable
+                && acParameters.getOuterLoops().stream().anyMatch(ol -> "SimpleTransformerVoltageControl".equals(ol.getName()));
+        boolean cfgHvdcFreezing = outerLoopMode == OuterLoopMode.DEVICE && !noHvdc && hvdcBatchable
+                && acParameters.getOuterLoops().stream().anyMatch(ol -> "FreezingHvdcACEmulation".equals(ol.getName()));
+        boolean cfgHvdcLimits = outerLoopMode == OuterLoopMode.DEVICE && !noHvdc && hvdcBatchable
+                && acParameters.getOuterLoops().stream().anyMatch(ol -> "AcHvdcAcEmulationLimits".equals(ol.getName()));
+        boolean cfgSecondaryVc = outerLoopMode == OuterLoopMode.DEVICE && svcBatchable
+                && acParameters.getOuterLoops().stream().anyMatch(ol -> "SecondaryVoltageControl".equals(ol.getName()));
         // Align the device outer-loop tolerances to the CPU loadflow's (per-unit on the 100 MVA base). The
         // reactive-limits PV→PQ switch threshold is NOT always maxReactivePowerMismatch: OLF derives it from the
         // stopping-criteria type exactly as AbstractAcOuterLoopConfig.createReactiveLimitsOuterLoop does —
@@ -134,9 +203,112 @@ final class GpuSaRunScope {
         }
         // Assemble the run's per-call batched config (replaces the solver's former JVM-global statics).
         BatchConfig batchConfig = new BatchConfig(cfgLsMode, cfgMaxDv, cfgMaxDphi,
-                cfgTransformerControl, cfgMaxOuterIterations, cfgMaxPqPvSwitch, cfgDsRejectResidual);
+                cfgTransformerControl, cfgMaxOuterIterations, cfgMaxPqPvSwitch, cfgDsRejectResidual, outerLoopMode,
+                new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams(
+                        lfGuardParams.getBalanceType(), olfGuardParams.isUseActiveLimits()),
+                cfgIncrementalTvc, olfGuardParams.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift(),
+                cfgIncrementalShunt, olfGuardParams.getIncrementalShuntControlOuterLoopMaxSectionShift(),
+                cfgIncrementalRpc, cfgIncrementalPhase, cfgSimpleTvc, cfgHvdcFreezing, cfgHvdcLimits,
+                cfgSecondaryVc, olfGuardParams.getMinPlausibleTargetVoltage(), olfGuardParams.getMaxPlausibleTargetVoltage());
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
+    }
+
+    /** The outer-loop mode for this run, from the {@code olf.gpu.sa.outerLoopMode} system property
+     *  ({@code DEVICE}|{@code JAVA}, default {@link OuterLoopMode#DEVICE}). An unrecognized value logs and
+     *  defaults to DEVICE (never fails the run over a typo). */
+    static OuterLoopMode readOuterLoopMode() {
+        String prop = System.getProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
+        if (prop == null || prop.isBlank()) {
+            return OuterLoopMode.DEVICE;
+        }
+        try {
+            return OuterLoopMode.valueOf(prop.trim().toUpperCase(java.util.Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            LOGGER.warn("Unrecognized {}={} — defaulting to DEVICE (valid: DEVICE, JAVA)",
+                    GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY, prop);
+            return OuterLoopMode.DEVICE;
+        }
+    }
+
+    /** Outer loops the JAVA driver ({@link com.powsybl.openloadflow.ac.solver.gpu.batch.GpuHybridBatchOuterLoopEngine})
+     *  is VALIDATED to run today (endgame: all of them, §5.7). JAVA runs OLF's own loop code, so for these there is
+     *  NO device-port parameterization limit — the only constraints are (a) loops not yet validated and (b) config
+     *  that mutates network state the compact per-scenario snapshot (controller buses + HVDC + generator targetP)
+     *  does not yet capture. */
+    private static final Set<String> JAVA_SUPPORTED_LOOPS = Set.of(
+            DistributedSlackOuterLoop.NAME, ReactiveLimitsOuterLoop.NAME, "VoltageMonitoring",
+            "AcHvdcAcEmulationLimits", "FreezingHvdcACEmulation");
+
+    /** The JAVA-mode coverage gate (§5.6): the outer loops / config the JAVA driver cannot yet run, which route
+     *  the WHOLE run to the CPU fallback. TEMPORARY — shrinks to empty as coverage lands (§5.7). Differs from the
+     *  DEVICE gate: EVERY OLF balance type works (generation- AND load-based — the engine isolates both generator
+     *  and load targets per scenario), and no useActiveLimits requirement (JAVA runs OLF's own ActivePowerDistribution). */
+    private static List<String> javaUnsupportedOuterLoops(LfNetwork lfNetwork, AcLoadFlowParameters acParameters,
+                                                          boolean noHvdc, boolean noSvc) {
+        List<String> unsupported = new ArrayList<>();
+        for (AcOuterLoop ol : acParameters.getOuterLoops()) {
+            String name = ol.getName();
+            boolean ok = (JAVA_SUPPORTED_LOOPS.contains(name)
+                    // TransformerVoltageControl: the JAVA engine runs OLF's real transformer VC loop; the continuous
+                    // ratio is solved INSIDE the device inner Newton (rho is a BRANCH_RHO1 variable in es), the loop
+                    // makes only the discrete tap DECISIONS, and the compact snapshot now isolates the transformer
+                    // BranchState (tap/r1/VC-enabled) per scenario. Stage-1 scope (no generator VC under the
+                    // transformer-controlled level) is enforced exactly like the DEVICE path.
+                    // ALL THREE transformer-VC loop flavors: AFTER_GENERATOR (TransformerVoltageControl),
+                    // WITH_GENERATOR (SimpleTransformerVoltageControl) and INCREMENTAL — OLF's DEFAULT mode —
+                    // (IncrementalTransformerVoltageControl). The JAVA engine replays OLF's real loop either
+                    // way; the continuous ratio (when the loop uses one) is a BRANCH_RHO1 variable solved
+                    // in-Newton, discrete tap moves reach the device via the per-scenario pi-model refresh
+                    // (r1Ov carries all 8 statics), and the OLF-faithful re-solve initialization starts a
+                    // just-pinned ratio exactly at its pinned value.
+                    || ("TransformerVoltageControl".equals(name) || "SimpleTransformerVoltageControl".equals(name)
+                            || "IncrementalTransformerVoltageControl".equals(name))
+                            && GpuBatchTransformerControl.transformerControlSupported(lfNetwork)
+                    // ShuntVoltageControl: the JAVA engine runs OLF's real shunt VC loop; the continuous
+                    // susceptance is solved INSIDE the device inner Newton (SHUNT_B is a variable in es) and the
+                    // compact snapshot isolates the controller-shunt b + VC-enabled per scenario (BusState).
+                    // Dynamic Q-relocation (§11) — which keeps the shared structure correct as the one-terminal
+                    // SHUNT_B toggles — is auto-enabled in the CUDA structure whenever a controllable bus is
+                    // present, so no gate is needed here (unsupported shunt shapes throw at extraction and the
+                    // precompute falls back to CPU).
+                    || "ShuntVoltageControl".equals(name)
+                    // IncrementalShuntVoltageControl: moves discrete sections directly; b follows via the pinned
+                    // SHUNT_B variable (capability-based) and the per-scenario (g,b) shOv refresh carries any
+                    // section-driven g change to the device.
+                    || "IncrementalShuntVoltageControl".equals(name)
+                    // IncrementalPhaseControl / IncrementalTransformerReactivePowerControl: both move discrete
+                    // taps directly; a1/rho follow via their pinned variables (targets re-read per round +
+                    // faithful re-init) and the per-scenario pi-model refresh carries the tap's R/X/Y/ksi/a1.
+                    // (CONTINUOUS phase control — "PhaseControl" — stays unsupported: its BRANCH_TARGET_P row
+                    // has no device family and the activation extractor routes it to CPU by construction.)
+                    || "IncrementalPhaseControl".equals(name)
+                    || "IncrementalTransformerReactivePowerControl".equals(name)
+                    // SecondaryVoltageControl: adjusts GENERATOR-VC TARGET VALUES only (pilot-point regulation);
+                    // targets are re-read per round and the engine isolates every MAIN generator VC's target per
+                    // scenario (vcSnap), so the hybrid replays OLF's loop verbatim.
+                    || "SecondaryVoltageControl".equals(name))
+                    // conservative structural no-ops: allow the HVDC/SVC-touching loops only when they cannot
+                    // fire yet (widen once JAVA's HVDC/SVC handling is validated — the snapshot already captures
+                    // HvdcState, and SVCs are generator-voltage-control buses already in the controller set).
+                    ;
+            // VoltageMonitoring now supported WITH SVCs present: the loop's mutations (re-enable generator VC,
+            // move VC targets, flip an SVC's generator control type) are all isolated per scenario — BusState
+            // captures generatorsControlType + VC-enabled, and the engine's vcSnap isolates VC target values.
+            // (An SVC with a voltage SLOPE creates equation terms outside the device whitelist — extraction
+            // rejects them and the precompute falls back to CPU by construction, so no gate is needed.)
+            // HVDC loops now supported WITH HVDCs present: a non-LINEAR AC-emulation status deactivates the
+            // hvdc coupling on the CPU; the engine mirrors it per scenario via the hv element's disabled bit
+            // (fillHvdcBatch honors it) and the re-read bus targets carry the frozen/saturated VSC injections.
+            if (!ok) {
+                unsupported.add(name);
+            }
+        }
+        // Distributed slack: the JAVA engine isolates BOTH generator targetP AND load targetP/targetQ per scenario
+        // (explicit flat arrays), so every OLF balance type — generation-based AND load-based
+        // (PROPORTIONAL_TO_[CONFORM_]LOAD) — is safe. This is strictly beyond the DEVICE gate, which is
+        // PROPORTIONAL_TO_GENERATION_P_MAX-only. (No unsupported balance type remains for JAVA today.)
+        return unsupported;
     }
 
     /** True if the GPU full Newton-Raphson can solve this network — a throwaway extract (which VALIDATES and

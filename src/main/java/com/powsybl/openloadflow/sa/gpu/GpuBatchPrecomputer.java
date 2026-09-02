@@ -21,6 +21,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.LoadLoss;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.OuterLoopMode;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.ShuntShift;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
@@ -121,6 +122,16 @@ final class GpuBatchPrecomputer {
                         if (!GpuStrategyComposer.strategyApplies(strategy, pc.getContingency().getId())) {
                             continue;
                         }
+                        // Strategy pairs batch only under ANCHOR-INDEPENDENT factor types (P_MAX,
+                        // PARTICIPATION_FACTOR): the pair phase re-anchors the DS water-fill at the parent's
+                        // distributed targets, and TARGET (|targetP|) and the load-based factors are evaluated
+                        // AT THAT MOVED ANCHOR — the device's static factors would drift. Needs a per-scenario
+                        // factor channel (like dsAnchorShift) first.
+                        var pairBt = config.dsParams().balanceType();
+                        if (pairBt != com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P_MAX
+                                && pairBt != com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_PARTICIPATION_FACTOR) {
+                            continue;                        // pair handled by the CPU per-strategy path
+                        }
                         BatchContingency pair = GpuStrategyComposer.composeStrategyScenario(network, net, pc.getContingency().getId(), strategy, actions,
                                 ziOutages, branches, gens, loads, shifts);
                         if (pair != null) {
@@ -138,10 +149,14 @@ final class GpuBatchPrecomputer {
                 return PrecomputedBatch.empty();
             }
 
-            List<BatchScenarioResult> results = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                    net, baseState, batch, es, target, new NewtonRaphsonParameters(),
-                    distributedSlack, reactiveLimits,
-                    reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
+            List<BatchScenarioResult> results = config.outerLoopMode() == OuterLoopMode.JAVA
+                    ? GpuBatchedSecurityAnalysisSolver.solveBatchN1JavaOuterLoops(
+                            net, context, baseState, batch, es, target,
+                            reactiveLimitTol, slackDistTol, convEpsPerEq, config, reportNode)
+                    : GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                            net, baseState, batch, es, target, new NewtonRaphsonParameters(),
+                            distributedSlack, reactiveLimits,
+                            reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
             Map<String, double[]> states = new HashMap<>();
             Map<String, int[]> islandedBuses = new HashMap<>();
             for (BatchScenarioResult r : results) {

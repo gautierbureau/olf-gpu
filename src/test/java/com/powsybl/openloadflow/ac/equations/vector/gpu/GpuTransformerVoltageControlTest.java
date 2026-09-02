@@ -127,7 +127,7 @@ class GpuTransformerVoltageControlTest {
                 d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
                 d.dqElem(), d.dqSide(), d.dqWeight(), d.dqRow(), d.dqKind(),
                 d.ziIn(), d.ziIdx(),
-                d.drRow(), d.drCol(), d.drCoef());
+                d.drRow(), d.drCol(), d.drCoef(), d.dbRow(), d.dbCol(), d.dbCoef());
         int iters = (int) out[n];
         double norm = out[n + 1];
 
@@ -216,5 +216,62 @@ class GpuTransformerVoltageControlTest {
         // above. A wrong term/pairing would diverge well past this (and change the tap, asserted above).
         assertTrue(worstV < 2e-2, "bus voltages must match (max dV = " + worstV + " kV)");
         assertTrue(worstA < 2e-2, "bus angles must match (max dAngle = " + worstA + " deg)");
+    }
+
+    /**
+     * SHARED-STRUCTURE transformer VC (the batch condition), the two-terminal analogue of the shunt test:
+     * extract the structure with control OFF (the rounded base, as the SA does), then solve with the
+     * control-ON activation (continuous ratio: BRANCH_RHO1 free, BUS_TARGET_V active, Q relocated to the rho
+     * row). Compare against OLF's own continuous solve on the SAME equation system. If the shared structure
+     * mishandles the TVC toggle, the states diverge — which would explain the batch SA's ~5.5e-3.
+     */
+    @Test
+    void t2wtSharedStructureContinuousControl() {
+        Network iidm = VoltageControlNetworkFactory.createNetworkWithT2wt();
+        TwoWindingsTransformer t2wt = iidm.getTwoWindingsTransformer("T2wT");
+        t2wt.getRatioTapChanger().setTargetDeadband(0).setRegulating(true).setTapPosition(0)
+                .setRegulationTerminal(t2wt.getTerminal2()).setTargetV(34.0);
+        LfNetworkParameters params = new LfNetworkParameters()
+                .setSlackBusSelector(new FirstSlackBusSelector())
+                .setTransformerVoltageControl(true);
+        LfNetwork network = Networks.load(iidm, params).get(0);
+        EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(network).create();
+        int n = es.getIndex().getSortedVariablesToFind().size();
+
+        // (1) structure extracted with control OFF (rounded base state)
+        AcSolverUtil.initStateVector(network, es, new UniformValueVoltageInitializer());
+        double[] x0 = es.getStateVector().get().clone();
+        GpuAcData dOff = GpuAcDataExtractor.extract(network, es);
+
+        // (2) enable CONTINUOUS control, re-extract ACTIVATION only (the per-round toggle on a FIXED structure)
+        for (LfBranch b : network.<LfBranch>getControllerElements(VoltageControl.Type.TRANSFORMER)) {
+            if (b.isConnectedAtBothSides()) {
+                b.setVoltageControlEnabled(true);
+            }
+        }
+        network.fixTransformerVoltageControls();
+        GpuAcActivation onAct = GpuAcActivationExtractor.extractActivation(network, es, n);
+        AcTargetVector target = new AcTargetVector(network, es);
+        double[] onTargets = onAct.applyTargets(target.getArray());
+
+        // (3) solve the OFF structure with the ON activation
+        double[] out = GpuAcNewtonSolver.solve(x0, onTargets, onAct.rowMode(), MAX_ITER, TOL,
+                dOff.cbIn(), dOff.cbIdx(), dOff.obIn(), dOff.obIdx(), dOff.shIn(), dOff.shIdx(), dOff.hvIn(), dOff.hvIdx(),
+                dOff.dqElem(), dOff.dqSide(), dOff.dqWeight(), dOff.dqRow(), dOff.dqKind(),
+                dOff.ziIn(), dOff.ziIdx(),
+                dOff.drRow(), dOff.drCol(), dOff.drCoef(), dOff.dbRow(), dOff.dbCol(), dOff.dbCoef());
+        double norm = out[n + 1];
+
+        // (4) OLF's own continuous solve on the SAME system = the reference
+        StateVector sv = es.getStateVector();
+        EquationVector<AcVariableType, AcEquationType> eq = new EquationVector<>(es);
+        double[] xRef = cpuReference(es, target, eq, sv);
+        double worst = 0;
+        for (int i = 0; i < n; i++) {
+            worst = Math.max(worst, Math.abs(out[i] - xRef[i]));
+        }
+        System.out.printf("[TVC shared-structure] ||F||inf=%.2e  max|x_gpu - x_olf|=%.3e%n", norm, worst);
+        assertTrue(norm < TOL, "GPU Newton must converge on the shared structure (||F||inf=" + norm + ")");
+        assertTrue(worst < 1e-6, "shared-structure TVC must match OLF's continuous solve (max diff=" + worst + ")");
     }
 }

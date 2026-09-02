@@ -25,7 +25,7 @@ import com.powsybl.openloadflow.network.LfNetwork;
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] branchAlphaCol,
-                         int[] dummyPCol, int[] dummyQCol, int[] qRow) {
+                         int[] dummyPCol, int[] dummyQCol, int[] shuntBCol, int[] qRow, int[] qRowAlt) {
 
     static ExtractionColumns of(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es) {
         // Cache each bus's BUS_PHI/BUS_V column once: a bus appears in several branches (degree ~3),
@@ -48,7 +48,15 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         int[] branchAlphaCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.BRANCH_ALPHA1);
         int[] dummyPCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.DUMMY_P);
         int[] dummyQCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.DUMMY_Q);
-        int[] qRow = GpuAcRowIndexing.computeQRow(network, es, vCol, branchRhoCol);
-        return new ExtractionColumns(phiCol, vCol, branchRhoCol, branchAlphaCol, dummyPCol, dummyQCol, qRow);
+        // Per-shunt SHUNT_B variable column (indexed by LfShunt.getNum()), -1 when the shunt derives no voltage
+        // control. A controlling shunt's SHUNT_B column also becomes the controlled bus's Q-balance row (qRow),
+        // the exact analogue of the transformer rho pairing.
+        int nShunts = network.getShunts().size();
+        int[] shuntBCol = GpuAcRowIndexing.branchVarCols(es, nShunts, AcVariableType.SHUNT_B);
+        int[] qRow = GpuAcRowIndexing.computeQRow(network, es, vCol, branchRhoCol, shuntBCol);
+        // Dynamic Q-relocation: the OTHER candidate Q row of each transformer/shunt voltage-controlled
+        // bus, so the fill can follow a per-scenario control toggle on the shared structure (§11).
+        int[] qRowAlt = GpuAcRowIndexing.computeQRowAlt(network, es, vCol, branchRhoCol, shuntBCol, qRow);
+        return new ExtractionColumns(phiCol, vCol, branchRhoCol, branchAlphaCol, dummyPCol, dummyQCol, shuntBCol, qRow, qRowAlt);
     }
 }

@@ -159,6 +159,26 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
             contingencies = contingencies.stream().filter(c -> c.getId().equals(debugCtg)).toList();
             assumeTrue(!contingencies.isEmpty(), "contingency " + debugCtg + " not in the file");
         }
+        // OLF_GPU_DBG_RL: TRACE the CPU arm's ReactiveLimitsOuterLoop so every PV<->PQ switch (bus id, q,
+        // qLimit) is logged, to diff against the device batch's RLSWITCH trace and the RLMAP (vrow->bus).
+        if (System.getenv("OLF_GPU_DBG_RL") != null) {
+            ch.qos.logback.classic.Logger rlLog = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                    .getLogger("com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop");
+            rlLog.setLevel(ch.qos.logback.classic.Level.TRACE);
+            ch.qos.logback.classic.Logger root = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                    .getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+            if (!root.iteratorForAppenders().hasNext()) {       // no appender configured — attach a console one
+                ch.qos.logback.classic.encoder.PatternLayoutEncoder enc = new ch.qos.logback.classic.encoder.PatternLayoutEncoder();
+                enc.setContext(root.getLoggerContext());
+                enc.setPattern("%msg%n");
+                enc.start();
+                ch.qos.logback.core.ConsoleAppender<ch.qos.logback.classic.spi.ILoggingEvent> ca = new ch.qos.logback.core.ConsoleAppender<>();
+                ca.setContext(root.getLoggerContext());
+                ca.setEncoder(enc);
+                ca.start();
+                rlLog.addAppender(ca);
+            }
+        }
         // THE RTE production parameters, loaded from the JSON checked in at the repo root
         // (rte-loadflow-default-parameters.json): DC init, reactive limits, twt split shunt
         // admittance, HVDC AC emulation, transformer voltage control AFTER_GENERATOR_VOLTAGE_CONTROL,
@@ -172,18 +192,63 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
             com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp)
                     .setNewtonRaphsonConvEpsPerEq(Double.parseDouble(convEpsEnv));
         }
+        // OLF_GPU_SA_SLACK_TOL / OLF_GPU_SA_RL_TOL: override the outer-loop tolerances on BOTH arms (pu →
+        // MW/MVar, SB=100) with the inner eps left at the file value — isolates outer-loop trigger from
+        // inner-Newton stop as the source of the batch's production-tolerance gap.
+        String slackTolEnv = System.getenv("OLF_GPU_SA_SLACK_TOL");
+        if (slackTolEnv != null) {
+            lfp.setDistributedSlack(true);
+            com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp)
+                    .setSlackBusPMaxMismatch(Double.parseDouble(slackTolEnv) * 100.0);
+        }
+        String rlTolEnv = System.getenv("OLF_GPU_SA_RL_TOL");
+        if (rlTolEnv != null) {
+            com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp)
+                    .setMaxReactivePowerMismatch(Double.parseDouble(rlTolEnv) * 100.0);
+        }
+        // OLF_GPU_SA_MAX_OUTER: cap the outer-loop iterations on BOTH arms (trajectory tracing — stop
+        // after N outer passes and compare CPU vs GPU state to see where they first diverge). The GPU
+        // batch driver caps RL_MAX_OUTER by the same maxOuterLoopIterations.
+        String maxOuterEnv = System.getenv("OLF_GPU_SA_MAX_OUTER");
+        if (maxOuterEnv != null) {
+            com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp)
+                    .setMaxOuterLoopIterations(Integer.parseInt(maxOuterEnv));
+        }
+        // OLF_GPU_SA_NO_RL / OLF_GPU_SA_NO_DS: disable an outer loop on BOTH arms (stage isolation —
+        // inner-Newton-only vs +DS vs +DS+RL — to see which stage first introduces the CPU/GPU divergence).
+        if ("1".equals(System.getenv("OLF_GPU_SA_NO_RL"))) {
+            lfp.setUseReactiveLimits(false);
+        }
+        if ("1".equals(System.getenv("OLF_GPU_SA_NO_DS"))) {
+            lfp.setDistributedSlack(false);
+        }
         // OLF_GPU_SA_GPU_CONV_EPS: override the GPU arm's eps ONLY, leaving the CPU arm at its value.
         // This is the honest production framing: CPU runs the file's production criterion (1e-4) while
         // the GPU runs its fast operating point (1e-7, tighter → an at-least-as-converged answer). Same
         // run, same warmup, so the comparison has no cross-run machine-state drift. copy() is a full
         // JSON round-trip → an independent LoadFlowParameters preserving every file setting (30-iter
         // outer budget, MAX_VOLTAGE_CHANGE scaling, …), so only the eps differs between the arms.
+        // GPU-arm-only outer-loop tolerance knobs (root-cause: inner-Newton stop vs outer-loop trigger).
+        // OLF_GPU_SA_GPU_SLACK_TOL: distributed-slack tolerance in pu (→ slackBusPMaxMismatch MW, SB=100).
+        // OLF_GPU_SA_GPU_RL_TOL: reactive-limits tolerance in pu (→ maxReactivePowerMismatch MVar, SB=100).
         LoadFlowParameters lfpGpu = lfp;
         String gpuConvEpsEnv = System.getenv("OLF_GPU_SA_GPU_CONV_EPS");
-        if (gpuConvEpsEnv != null) {
+        String gpuSlackTolEnv = System.getenv("OLF_GPU_SA_GPU_SLACK_TOL");
+        String gpuRlTolEnv = System.getenv("OLF_GPU_SA_GPU_RL_TOL");
+        if (gpuConvEpsEnv != null || gpuSlackTolEnv != null || gpuRlTolEnv != null) {
             lfpGpu = lfp.copy();
-            com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfpGpu)
-                    .setNewtonRaphsonConvEpsPerEq(Double.parseDouble(gpuConvEpsEnv));
+            com.powsybl.openloadflow.OpenLoadFlowParameters gpuOlf =
+                    com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfpGpu);
+            if (gpuConvEpsEnv != null) {
+                gpuOlf.setNewtonRaphsonConvEpsPerEq(Double.parseDouble(gpuConvEpsEnv));
+            }
+            if (gpuSlackTolEnv != null) {
+                lfpGpu.setDistributedSlack(true);
+                gpuOlf.setSlackBusPMaxMismatch(Double.parseDouble(gpuSlackTolEnv) * 100.0);
+            }
+            if (gpuRlTolEnv != null) {
+                gpuOlf.setMaxReactivePowerMismatch(Double.parseDouble(gpuRlTolEnv) * 100.0);
+            }
         }
 
         // The FAIR production CPU arm is multithreaded — OLF SA parallelizes contingencies across
@@ -273,6 +338,7 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
         diffViolations(cpu, gpuCold);
         printMonitoredBus(cpu, "CPU");
         printMonitoredBus(gpuCold, "GPU");
+        printMonitorDiff(cpu, gpuCold);
         if (debugCtg != null && !debugCtg.isBlank()) {
             dumpAllViolations(cpu, "CPU", debugCtg);
             dumpAllViolations(gpuCold, "GPU", debugCtg);
@@ -295,6 +361,30 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
                 .flatMap(p -> p.getLimitViolationsResult().getLimitViolations().stream())
                 .forEach(v -> System.out.printf("  DEBUG %s | %s %s %s | value=%.9f limit=%.9f%n",
                         tag, v.getSubjectId(), v.getLimitType(), v.getSide(), v.getValue(), v.getLimit()));
+    }
+
+    /** High-precision per-stage CPU-vs-GPU monitored-bus state diff (trajectory tracing). */
+    private static void printMonitorDiff(SecurityAnalysisResult cpu, SecurityAnalysisResult gpu) {
+        Map<String, Double> g = new java.util.HashMap<>();
+        gpu.getPostContingencyResults().forEach(p -> p.getNetworkResult().getBusResults()
+                .forEach(b -> g.put(p.getContingency().getId() + "|" + b.getBusId(), b.getV())));
+        double max = 0;
+        String worst = null;
+        for (PostContingencyResult p : cpu.getPostContingencyResults()) {
+            for (com.powsybl.security.results.BusResult b : p.getNetworkResult().getBusResults()) {
+                Double gv = g.get(p.getContingency().getId() + "|" + b.getBusId());
+                if (gv != null) {
+                    double d = Math.abs(b.getV() - gv);
+                    System.out.printf("  MONDIFF %s %s |dV|=%.3e cpu=%.9f gpu=%.9f%n",
+                            p.getContingency().getId(), b.getBusId(), d, b.getV(), gv);
+                    if (d > max) {
+                        max = d;
+                        worst = b.getBusId();
+                    }
+                }
+            }
+        }
+        System.out.printf("  MONITOR-DIFF max|dV|=%.3e at %s%n", max, worst);
     }
 
     private static void printMonitoredBus(SecurityAnalysisResult r, String tag) {

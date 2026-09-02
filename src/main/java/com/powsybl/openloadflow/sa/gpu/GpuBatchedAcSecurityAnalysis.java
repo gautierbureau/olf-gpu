@@ -86,6 +86,12 @@ import java.util.Objects;
  */
 public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
 
+    /** System property selecting how the batched N-1 runs its OUTER loops: {@code DEVICE} (CUDA-kernel outer
+     *  loops folded into the device solve, the default) or {@code JAVA} (device inner solve only, OLF's Java
+     *  outer loops make the per-scenario decisions via {@code GpuHybridBatchOuterLoopEngine}). Matches the
+     *  module's other GPU toggles (there is no GPU parameters extension). Read in {@link GpuSaRunScope}. */
+    public static final String GPU_OUTER_LOOP_MODE_PROPERTY = "olf.gpu.sa.outerLoopMode";
+
     /** How many contingencies the LAST GpuBatchPrecomputer.precompute solved on the GPU device: {@code -1} when
      *  the batch was not attempted (no device, nothing to batch), {@code 0+} otherwise. Test-visibility hook
      *  to assert the GPU actually engaged on a device-equipped machine (vs a silent CPU fallback). */
@@ -173,7 +179,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // phase (so the batched contingency pass is warm). Skipped under multithreading (concurrent partition
         // load flows on the single-device sequential solver race in native code) and when the batch is
         // disabled by the outer-loop guard (then the provider behaves exactly like the stock CPU SA).
-        if (!scope.batchDisabled() && !multiThread && gpuBaseLoadFlowEnabled() && GpuAcNewtonSolver.isAvailable()
+        // startWithFrozenACEmulation freezes the HVDCs BEFORE the base solve — a configuration the
+        // SEQUENTIAL GPU solver path does not handle (the batch does, via the hv disabled bits);
+        // keep the base load flow on the CPU there, the batch still runs.
+        boolean frozenHvdcBase = !lfNetwork.getHvdcs().isEmpty()
+                && com.powsybl.openloadflow.OpenLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters())
+                        .isStartWithFrozenACEmulation();
+        if (!scope.batchDisabled() && !multiThread && gpuBaseLoadFlowEnabled() && !frozenHvdcBase
+                && GpuAcNewtonSolver.isAvailable()
                 && acParameters.getSolverFactory().getClass() == NewtonRaphsonFactory.class) {
             LOGGER.info("GPU-batched SA: running the base load flow on the GPU Newton-Raphson "
                     + "(absorbs CUDA init; CPU fallback inside the solver)");
@@ -206,7 +219,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // When the batch is disabled by the outer-loop guard, ALSO skip the solver swap: the provider then
         // behaves exactly like the stock CPU AcSecurityAnalysis (the safety contract), and the sequential
         // per-contingency runs avoid the GPU-inner-solver + outer-loop-switching path (open CME bug there).
-        if (!scope.batchDisabled() && gpuBaseLoadFlowEnabled() && GpuAcNewtonSolver.isAvailable() && GpuSaRunScope.gpuSupports(lfNetwork, acParameters)) {
+        if (!scope.batchDisabled() && gpuBaseLoadFlowEnabled() && !frozenHvdcBase
+                && GpuAcNewtonSolver.isAvailable() && GpuSaRunScope.gpuSupports(lfNetwork, acParameters)) {
             acParameters.setSolverFactory(new GpuNewtonRaphsonFactory(), securityAnalysisParameters.getLoadFlowParameters());
             LOGGER.info("GPU batched SA: base + fall-through load flows run on the GPU Newton-Raphson (CUDA pre-warm)");
         }

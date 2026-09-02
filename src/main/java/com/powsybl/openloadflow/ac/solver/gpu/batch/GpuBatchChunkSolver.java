@@ -54,6 +54,12 @@ final class GpuBatchChunkSolver {
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
                                                List<GpuBatchTransformerControl.TransformerController> transformerControllers,
+                                               List<GpuBatchIncrementalTvc.Controller> incrementalTvcControllers,
+                                               List<GpuBatchIncrementalShuntVc.Controller> incrementalShuntControllers,
+                                               List<GpuBatchIncrementalFlowControl.Controller> incrementalFlowControllers,
+                                               GpuBatchIncrementalFlowControl.EsContext esContext,
+                                               List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers,
+                                               GpuBatchSecondaryVc.Controllers svcControllers,
                                                BatchConfig config) {
         int nb = batchedIndices.size();
         int chunkSize = GpuBatchContextCache.resolveChunkSize(nb, n, gpuData);
@@ -116,6 +122,13 @@ final class GpuBatchChunkSolver {
         }
         int nrl = gpuData.rlVrow().length;
         java.util.Map<Integer, int[]> rlByIndex = new java.util.HashMap<>();    // ctg index -> its nrl RL-state slice
+        // ctg index -> its FINAL distributed-slack targets at the DS participant rows (the device DS mutates
+        // targets in place; read back after each ctg chunk). The pair phase re-anchors its distribution here,
+        // mirroring OLF's setGeneratorsInitialTargetPToTargetP before the strategy re-solve.
+        int nds = gpuData.dsPhiRow().length;
+        java.util.Map<Integer, double[]> dsTargetsByIndex = new java.util.HashMap<>();
+        java.util.Map<Integer, Double> slackAbsorbedByIndex = new java.util.HashMap<>();   // slack-only DS parents
+        boolean dsSlackOnly = gpuData.dsPhiRow().length == 0 && gpuData.dsSlackPhiRow() >= 0;
         // Host-side base RL seed (mirrors initRlLimitTypeBatch) for PADDING slots of pair chunks.
         int[] baseRlSeed = new int[nrl];
         for (int i = 0; i < nrl; i++) {
@@ -258,6 +271,17 @@ final class GpuBatchChunkSolver {
                         }
                         // else: padding scenario = base case (no element disabled), discarded below
                     }
+                    // SIMPLE (WITH_GENERATOR) transformer VC: OLF's initialize() enables continuous VC
+                    // BEFORE the first solve — apply the VC-ON activation deltas now, and keep the
+                    // pre-TVC override lists for the round-to-tap re-solve.
+                    List<Integer> preTvcOvIdx = null;
+                    List<Double> preTvcOvVal = null;
+                    if (config.simpleTransformerControl() && transformerControllers != null && !transformerControllers.isEmpty()) {
+                        preTvcOvIdx = new ArrayList<>(ovIndexList);
+                        preTvcOvVal = new ArrayList<>(ovValueList);
+                        GpuBatchSimpleTvc.applyVcOn(realCount, n, transformerControllers,
+                                rowModePerScenario, baseRowMode, disabledMask, ovIndexList, ovValueList);
+                    }
                     int[] targetOverrideIndex = ovIndexList.stream().mapToInt(Integer::intValue).toArray();
                     double[] targetOverrideValue = ovValueList.stream().mapToDouble(Double::doubleValue).toArray();
                     if (pairPhase && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_OV"))) {
@@ -278,12 +302,38 @@ final class GpuBatchChunkSolver {
                     // Pair phase: warm continuation from each parent contingency's state + RL pinning.
                     double[] x0Full = null;
                     int[] rlStateIn = null;
+                    // Strategy-leg DS re-anchoring: OLF's processContingency calls
+                    // setGeneratorsInitialTargetPToTargetP() before the strategy re-solve, so the CPU's strategy
+                    // leg distributes only the INCREMENT from the parent contingency's already-distributed
+                    // targets. The device mirrors this with three coupled pieces (each alone is wrong —
+                    // participant shifts without the slack shift leave the band check measured against the
+                    // pre-distribution slack target, which kills the distribution):
+                    //  - dsAnchorShift: participant water-fill anchors moved to the parent's final DS targets;
+                    //  - dsSlackShift: the slack bus's own absorbed share of the parent's distribution
+                    //    ((1-fs)/fs x the participants' absorbed sum), so the mismatch/band is measured against
+                    //    the parent's slack target exactly as the CPU leg measures it;
+                    //  - DS-row target seeds at the parent values, so the first inner solve runs at the CPU
+                    //    leg's starting operating point (losses are nonlinear along the path).
+                    double[] dsAnchorShift = null;
+                    double[] dsSlackShift = null;
                     if (pairPhase) {
                         x0Full = new double[chunkSize * n];
                         rlStateIn = nrl > 0 ? new int[chunkSize * nrl] : null;
+                        if (nds > 0) {
+                            dsAnchorShift = new double[chunkSize * nds];
+                            dsSlackShift = new double[chunkSize];
+                        } else if (dsSlackOnly) {
+                            dsSlackShift = new double[chunkSize];    // absorbed-total seeds (no participant anchors)
+                        }
+                        double dsFactorSum = 0;
+                        for (double fv : gpuData.dsFactor()) {
+                            dsFactorSum += fv;
+                        }
                         for (int s = 0; s < chunkSize; s++) {
                             double[] parent = null;
                             int[] parentRl = null;
+                            double[] parentDs = null;
+                            Double parentSlackAbs = null;
                             if (s < realCount) {
                                 String pairId = contingencies.get(group.get(chunkStart + s)).contingencyId();
                                 Integer pIdx = indexById.get(pairId.substring(0, pairId.indexOf(GpuBatchStatus.STRATEGY_KEY_SEP)));
@@ -291,6 +341,8 @@ final class GpuBatchChunkSolver {
                                         && (int) resultsByIndex[pIdx][n + 2] == GpuBatchStatus.STATUS_CONVERGED) {
                                     parent = resultsByIndex[pIdx];
                                     parentRl = rlByIndex.get(pIdx);
+                                    parentDs = dsTargetsByIndex.get(pIdx);
+                                    parentSlackAbs = slackAbsorbedByIndex.get(pIdx);
                                 }
                             }
                             for (int i = 0; i < n; i++) {
@@ -299,13 +351,71 @@ final class GpuBatchChunkSolver {
                             if (rlStateIn != null) {
                                 System.arraycopy(parentRl != null ? parentRl : baseRlSeed, 0, rlStateIn, s * nrl, nrl);
                             }
+                            if (dsSlackOnly && dsSlackShift != null && parentSlackAbs != null) {
+                                dsSlackShift[s] = parentSlackAbs;    // seed the pair with the parent's absorbed total
+                            }
+                            if (parentDs != null && dsAnchorShift != null && dsFactorSum > 0) {
+                                // parentDs = [absorption per DS row..., parent factor sum] (captured after the
+                                // parent's solve). The anchor shift is the parent's PURE ABSORPTION — the part
+                                // of the parent's final DS target that its distribution added on top of the
+                                // parent's own effective base — which composes with the pair's own dsOvBaseDelta
+                                // in the kernel (base_eff = base - ovDelta + shift), so gen-outage parents and
+                                // action deltas are both handled without double counting.
+                                double absorbedSum = 0;
+                                for (int i = 0; i < nds; i++) {
+                                    int row = gpuData.dsPhiRow()[i];
+                                    double shift = parentDs[i];
+                                    dsAnchorShift[s * nds + i] = shift;
+                                    absorbedSum += shift;
+                                    // Seed the DS-row target at the CPU strategy leg's starting value — the
+                                    // parent-absorbed target plus the pair's own composed delta — so the first
+                                    // inner solve runs at the CPU leg's starting operating point (losses are
+                                    // nonlinear along the path). A pair override on the row (gen action /
+                                    // gen-outage pTarget) is base-referenced: add the parent absorption to it.
+                                    int flat = s * n + row;
+                                    int ovAt = ovIndexList.lastIndexOf(flat);
+                                    if (ovAt >= 0) {
+                                        ovValueList.set(ovAt, ovValueList.get(ovAt) + shift);
+                                    } else {
+                                        ovIndexList.add(flat);
+                                        ovValueList.add(baseTargets[row] + shift);
+                                    }
+                                }
+                                // the slack's own absorption in the parent's distribution, proportional to the
+                                // participants' share at the PARENT's factor sum (reweighted if the parent lost
+                                // a participating generator)
+                                double parentFs = parentDs[nds];
+                                dsSlackShift[s] = parentFs > 0 ? (1.0 - parentFs) / parentFs * absorbedSum : 0.0;
+                            }
+                        }
+                        targetOverrideIndex = ovIndexList.stream().mapToInt(Integer::intValue).toArray();
+                        targetOverrideValue = ovValueList.stream().mapToDouble(Double::doubleValue).toArray();
+                    }
+                    // HVDC AC-emulation: snapshot the pre-freeze override lists (the round rebuild base),
+                    // then OLF's FreezingHvdcACEmulation freezes every live hvdc at its scenario's
+                    // WARM-START flows BEFORE the first solve.
+                    List<Integer> preHvdcOvIdx = null;
+                    List<Double> preHvdcOvVal = null;
+                    int[][] hvdcStatus = null;
+                    if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
+                        preHvdcOvIdx = new ArrayList<>(ovIndexList);
+                        preHvdcOvVal = new ArrayList<>(ovValueList);
+                        if (config.hvdcFreezing()) {
+                            hvdcStatus = GpuBatchHvdcAcEmulation.applyFreeze(chunkSize, realCount, n, hvdcControllers,
+                                    esContext, baseState, x0Full, disabledMask, baseTargets, ovIndexList, ovValueList);
+                            targetOverrideIndex = ovIndexList.stream().mapToInt(Integer::intValue).toArray();
+                            targetOverrideValue = ovValueList.stream().mapToDouble(Double::doubleValue).toArray();
+                        } else {
+                            hvdcStatus = new int[chunkSize][hvdcControllers.size()];
                         }
                     }
                     boolean dbgPairRl = pairPhase && nrl > 0 && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_RL"));
-                    int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl) && nrl > 0 ? new int[chunkSize * nrl] : null;
+                    boolean svcActive = svcControllers != null && !svcControllers.ctls().isEmpty();
+                    int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl || svcActive) && nrl > 0 ? new int[chunkSize * nrl] : null;
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
-                            dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                            dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
+                            null, null,
                             parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                             config.lsMode(), config.maxDv(), config.maxDphi(),
                             config.lsMode() == 2 ? varType : null, x0Full,
@@ -336,7 +446,145 @@ final class GpuBatchChunkSolver {
                             rlByIndex.put(group.get(chunkStart + s), slice);
                         }
                     }
-                    if (transformerControllers != null && !transformerControllers.isEmpty()) {
+                    if (!pairPhase && dsSlackOnly && !pairIdxList.isEmpty()) {
+                        // capture each ctg's slack-only-DS absorbed total for its pairs' seeding
+                        double[] absorbed = GpuAcNewtonSolver.readBatchSlackAbsorbed(handle);
+                        if (absorbed != null) {
+                            for (int s = 0; s < realCount; s++) {
+                                slackAbsorbedByIndex.put(group.get(chunkStart + s), absorbed[s]);
+                            }
+                        }
+                    }
+                    if (!pairPhase && nds > 0 && !pairIdxList.isEmpty()) {
+                        // Capture each ctg's DS ABSORPTION (final distributed target minus the ctg's own
+                        // effective base per DS row) plus its factor sum, for its pairs' re-anchoring —
+                        // the device analogue of OLF's setGeneratorsInitialTargetPToTargetP before a
+                        // strategy re-solve.
+                        double[] finalTargets = GpuAcNewtonSolver.readBatchTargets(handle);
+                        for (int s = 0; s < realCount; s++) {
+                            double[] slice = new double[nds + 1];
+                            double fs = 0;
+                            for (int i = 0; i < nds; i++) {
+                                int row = gpuData.dsPhiRow()[i];
+                                double effBase = baseTargets[row]
+                                        - (dsOvBus[s] == i ? dsOvBaseDelta[s] : 0.0);
+                                slice[i] = finalTargets[s * n + row] - effBase;
+                                fs += gpuData.dsFactor()[i]
+                                        - (dsOvBus[s] == i ? dsOvFactorDelta[s] : 0.0);
+                            }
+                            slice[nds] = fs;
+                            dsTargetsByIndex.put(group.get(chunkStart + s), slice);
+                        }
+                    }
+                    if (incrementalTvcControllers != null && !incrementalTvcControllers.isEmpty()) {
+                        chunkResults = GpuBatchIncrementalTvc.orchestrate(handle, chunkSize, realCount, n,
+                                chunkResults, incrementalTvcControllers, rowModePerScenario, baseRowMode, disabledMask,
+                                targetOverrideIndex, targetOverrideValue,
+                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                                dsAnchorShift, dsSlackShift,
+                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                config.lsMode() == 2 ? varType : null, config);
+                    }
+                    if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
+                        chunkResults = GpuBatchHvdcAcEmulation.orchestrate(handle, chunkSize, realCount, n,
+                                chunkResults, hvdcControllers, hvdcStatus, config.hvdcLimits(), esContext,
+                                rowModePerScenario, baseRowMode, disabledMask,
+                                preHvdcOvIdx, preHvdcOvVal,
+                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                                dsAnchorShift, dsSlackShift,
+                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                config.lsMode() == 2 ? varType : null, config);
+                    }
+                    if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
+                        chunkResults = GpuBatchHvdcAcEmulation.orchestrate(handle, chunkSize, realCount, n,
+                                chunkResults, hvdcControllers, hvdcStatus, config.hvdcLimits(), esContext,
+                                rowModePerScenario, baseRowMode, disabledMask,
+                                preHvdcOvIdx, preHvdcOvVal,
+                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                                dsAnchorShift, dsSlackShift,
+                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                config.lsMode() == 2 ? varType : null, config);
+                    }
+                    if (svcActive && rlStateOut != null) {
+                        chunkResults = GpuBatchSecondaryVc.orchestrate(handle, chunkSize, realCount, n, nrl,
+                                chunkResults, svcControllers, rlStateOut,
+                                rowModePerScenario, baseRowMode, disabledMask,
+                                targetOverrideIndex, targetOverrideValue,
+                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                                dsAnchorShift, dsSlackShift,
+                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                config.lsMode() == 2 ? varType : null, config);
+                    }
+                    if (config.simpleTransformerControl() && transformerControllers != null && !transformerControllers.isEmpty()) {
+                        chunkResults = GpuBatchSimpleTvc.roundAndResolve(handle, chunkSize, realCount, n,
+                                chunkResults, transformerControllers, rowModePerScenario, baseRowMode, disabledMask,
+                                preTvcOvIdx, preTvcOvVal,
+                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                                dsAnchorShift, dsSlackShift,
+                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                config.lsMode() == 2 ? varType : null, config);
+                    }
+                    if (incrementalFlowControllers != null && !incrementalFlowControllers.isEmpty()) {
+                        chunkResults = GpuBatchIncrementalFlowControl.orchestrate(handle, chunkSize, realCount, n,
+                                chunkResults, incrementalFlowControllers, esContext, rowModePerScenario, baseRowMode, disabledMask,
+                                targetOverrideIndex, targetOverrideValue,
+                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                                dsAnchorShift, dsSlackShift,
+                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                config.lsMode() == 2 ? varType : null, config);
+                    }
+                    if (incrementalShuntControllers != null && !incrementalShuntControllers.isEmpty()) {
+                        chunkResults = GpuBatchIncrementalShuntVc.orchestrate(handle, chunkSize, realCount, n,
+                                chunkResults, incrementalShuntControllers, rowModePerScenario, baseRowMode, disabledMask,
+                                targetOverrideIndex, targetOverrideValue,
+                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                                dsAnchorShift, dsSlackShift,
+                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                config.lsMode() == 2 ? varType : null, config);
+                    }
+                    if (config.transformerControl() && transformerControllers != null && !transformerControllers.isEmpty()) {
                         chunkResults = GpuBatchTransformerControl.orchestrateTransformerControl(handle, chunkSize, realCount, n,
                                 chunkResults, transformerControllers, rowModePerScenario, baseRowMode, disabledMask,
                                 targetOverrideIndex, targetOverrideValue,

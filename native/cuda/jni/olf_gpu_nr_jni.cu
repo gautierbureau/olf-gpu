@@ -29,7 +29,7 @@
 //       double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
 //       double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx, int[] idIdx)
 //     x0/target: length n (state by variable row / target by equation column)
-//     cbIn nbr*8  (y g1 g2 b1 b2 ksi r1 a1)   cbIdx nbr*10 (P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col)
+//     cbIn nbr*8  (y g1 g2 b1 b2 ksi r1 a1)   cbIdx nbr*12 (P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col qAlt1 qAlt2)
 //     obIn nob*7  (y ksi g1 b1 g2 b2 r1)      obIdx nob*6 (P1 Q1 P2 Q2 v1 v2)
 //     shIn nsh*2  (g b)                       shIdx nsh*3 (P Q v)
 //     hvIn nhv*5  (p0 k lf1 lf2 r)            hvIdx nhv*4 (P1 P2 ph1 ph2)
@@ -285,11 +285,13 @@ RC resolveOb(const ObScatter& s, const int* ix) {            // P1 Q1 P2 Q2 v1 v
     return rc;
 }
 
-RC resolveSh(const ShScatter& s, const int* ix) {            // P Q v
+RC resolveSh(const ShScatter& s, const int* ix) {            // P Q v bcol
     RC rc;
     if (s.role == 2) return rc;
     rc.row = ix[s.rowEq];                                    // single bus: rowEnd == 0
-    if (s.role == 1) rc.col = ix[2];
+    // col endpoint 0 = the bus (BUS_V at ix[2]); endpoint 2 = the shunt's own control col (SHUNT_B at
+    // ix[3]) — -1 when the shunt derives no voltage control, so dq/db resolves to absent and is skipped.
+    if (s.role == 1) rc.col = (s.colEnd == 2) ? ix[3] : ix[2];
     return rc;
 }
 
@@ -359,6 +361,139 @@ std::vector<int> buildDest(int ne, const int* idx, int stride, const S* table, i
     return dest;
 }
 
+// ---- Dynamic Q-relocation (production-design doc §11) ---------------------------------------
+// A transformer/shunt voltage-controlled bus has two possible reactive-balance rows across the
+// outer loop: its own BUS_V row (control OFF) and the free controller's BRANCH_RHO1 / SHUNT_B row
+// (control ON). The extractor freezes ONE into cbIdx; the alternate travels at cbIdx[10+rowEnd]
+// (packed by GpuAcFamilyPacker as qRowAlt, remapped through rowMap like every other row index).
+// When enabled, the closed-branch/shunt fill routes each controlled-bus q output to whichever of the
+// two candidate rows is FREE this scenario (row-mode != 0), so one shared batch structure follows a
+// per-scenario control toggle instead of solving a subtly wrong system.
+//
+// Auto-enabled per structure: a structure needs dynamic Q-relocation exactly when some element carries
+// an alternate Q row (a transformer/shunt voltage-controlled bus). qAlt lives at cbIdx[e*12+10/11] and
+// shIdx[e*5+4], set to a real row (>= 0) only for a controllable bus, -1 otherwise. When no element has
+// one, the union pattern is empty and every fill uses the frozen dest — so plain PF keeps the fast
+// path and only voltage-control structures pay the (tiny) per-output selector cost.
+static bool hasRelocatable(int ncb, const int* cbIdx, int nsh, const int* shIdx) {
+    for (int e = 0; e < ncb; e++) {
+        if (cbIdx[static_cast<size_t>(e) * 12 + 10] >= 0 || cbIdx[static_cast<size_t>(e) * 12 + 11] >= 0) {
+            return true;
+        }
+    }
+    for (int e = 0; e < nsh; e++) {
+        if (shIdx[static_cast<size_t>(e) * 5 + 4] >= 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The alternate candidate Q row for a closed-branch output, or -1 if this output does not relocate
+// (only Q rows, rowEq==1) or the endpoint bus has no second candidate (qRowAlt was -1).
+inline int cbAltRow(const CbScatter& s, const int* ix) {
+    return s.rowEq == 1 ? ix[10 + s.rowEnd] : -1;
+}
+
+// Union the alternate Q rows into the CSR pattern: for each closed-branch role-1 Q output emit an
+// extra (altRow, col) entry so buildDest can resolve a slot there. Deduped by the caller's unique().
+void collectCbAltPattern(int ncb, const int* cbIdx, std::vector<std::pair<int, int>>& pat) {
+    for (int e = 0; e < ncb; e++) {
+        const int* ix = cbIdx + static_cast<size_t>(e) * 12;
+        for (int k = 0; k < CB_NOUT; k++) {
+            const CbScatter& s = CB_SCATTER[k];
+            if (s.role != 1) {
+                continue;
+            }
+            RC rc = resolveCb(s, ix);
+            int altRow = cbAltRow(s, ix);
+            if (rc.col >= 0 && altRow >= 0 && altRow != rc.row) {
+                pat.emplace_back(altRow, rc.col);
+            }
+        }
+    }
+}
+
+// Per (closed branch, output): the alternate destination (CSR slot for a role-1 J entry, -2-row for
+// a role-0 F residual) and the FROZEN row to test the per-scenario row-mode against. selRow == -1
+// marks an output that never relocates (the fill then always uses the frozen dest). Sized ncb*CB_NOUT
+// like the frozen dest, so the fill indexes all three arrays identically.
+void buildCbDynDest(int ncb, const int* cbIdx, const CsrPattern& pos,
+                    std::vector<int>& altDest, std::vector<int>& selRow) {
+    altDest.assign(static_cast<size_t>(ncb) * CB_NOUT, -1);
+    selRow.assign(static_cast<size_t>(ncb) * CB_NOUT, -1);
+    for (int e = 0; e < ncb; e++) {
+        const int* ix = cbIdx + static_cast<size_t>(e) * 12;
+        for (int k = 0; k < CB_NOUT; k++) {
+            const CbScatter& s = CB_SCATTER[k];
+            RC rc = resolveCb(s, ix);
+            int altRow = cbAltRow(s, ix);
+            size_t o = static_cast<size_t>(e) * CB_NOUT + k;
+            if (altRow < 0 || altRow == rc.row) {
+                continue;                                    // not a relocatable output
+            }
+            if (s.role == 1 && rc.col >= 0) {
+                altDest[o] = pos.at(altRow, rc.col);
+                selRow[o] = rc.row;
+            } else if (s.role == 0) {
+                altDest[o] = -2 - altRow;
+                selRow[o] = rc.row;
+            }
+        }
+    }
+}
+
+// Shunt analogue of cbAltRow / collectCbAltPattern / buildCbDynDest. The alternate Q row of a
+// voltage-controlling shunt (its own bus's SHUNT_B row <-> bus-V row) travels at shIdx[4]. A fixed
+// shunt on a transformer/shunt-controlled bus also relocates (qRowAlt was set for that bus). This is
+// the one-terminal case dynamic relocation exists for: SHUNT_B has no second terminal to hold its
+// column, so a frozen structure freezes it at warm-start.
+inline int shAltRow(const ShScatter& s, const int* ix) {
+    return s.rowEq == 1 ? ix[4] : -1;
+}
+
+void collectShAltPattern(int nsh, const int* shIdx, std::vector<std::pair<int, int>>& pat) {
+    for (int e = 0; e < nsh; e++) {
+        const int* ix = shIdx + static_cast<size_t>(e) * 5;
+        for (int k = 0; k < SH_NOUT; k++) {
+            const ShScatter& s = SH_SCATTER[k];
+            if (s.role != 1) {
+                continue;
+            }
+            RC rc = resolveSh(s, ix);
+            int altRow = shAltRow(s, ix);
+            if (rc.col >= 0 && altRow >= 0 && altRow != rc.row) {
+                pat.emplace_back(altRow, rc.col);
+            }
+        }
+    }
+}
+
+void buildShDynDest(int nsh, const int* shIdx, const CsrPattern& pos,
+                    std::vector<int>& altDest, std::vector<int>& selRow) {
+    altDest.assign(static_cast<size_t>(nsh) * SH_NOUT, -1);
+    selRow.assign(static_cast<size_t>(nsh) * SH_NOUT, -1);
+    for (int e = 0; e < nsh; e++) {
+        const int* ix = shIdx + static_cast<size_t>(e) * 5;
+        for (int k = 0; k < SH_NOUT; k++) {
+            const ShScatter& s = SH_SCATTER[k];
+            RC rc = resolveSh(s, ix);
+            int altRow = shAltRow(s, ix);
+            size_t o = static_cast<size_t>(e) * SH_NOUT + k;
+            if (altRow < 0 || altRow == rc.row) {
+                continue;
+            }
+            if (s.role == 1 && rc.col >= 0) {
+                altDest[o] = pos.at(altRow, rc.col);
+                selRow[o] = rc.row;
+            } else if (s.role == 0) {
+                altDest[o] = -2 - altRow;
+                selRow[o] = rc.row;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------
 // Device: the four family fill kernels + the loop helpers
 // ---------------------------------------------------------------------------------
@@ -374,12 +509,29 @@ __device__ void scatterAdd(int nout, const int* dest, const double* o, double* v
     }
 }
 
+// Dynamic Q-relocation scatter: when an output's frozen Q row is an identity this scenario
+// (mode[selRow] == 0), route it to the alternate candidate row instead. mode is this scenario's
+// row-mode slice (length n). dest/altDest/selRow share the per-output layout of scatterAdd.
+__device__ void scatterAddDyn(int nout, const int* dest, const int* altDest, const int* selRow,
+                              const int* mode, const double* o, double* vals, double* F) {
+    for (int k = 0; k < nout; k++) {
+        int sr = selRow[k];
+        int d = (sr >= 0 && mode[sr] == 0) ? altDest[k] : dest[k];
+        if (d >= 0) {
+            atomicAdd(&vals[d], o[k]);
+        } else if (d <= -2) {
+            atomicAdd(&F[-2 - d], o[k]);
+        }
+    }
+}
+
 __global__ void fillClosedBranch(int ne, const double* in, const int* ix, const int* dest,
-                                 const double* x, double* vals, double* F) {
+                                 const double* x, double* vals, double* F,
+                                 const int* altDest, const int* selRow, const int* mode, int dynReloc) {
     int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= ne) return;
     const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
-    const int* q = ix + e * 10;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
+    const int* q = ix + e * 12;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     double v1 = x[q[5]], v2 = x[q[7]], ph1 = x[q[4]], ph2 = x[q[6]];
     // a controlling transformer's ratio/shift are STATE variables — read them from x at their
     // column; otherwise the fixed pi-model value from the input pack (q[8]/q[9] are -1 then).
@@ -390,7 +542,11 @@ __global__ void fillClosedBranch(int ne, const double* in, const int* ix, const 
                      o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
                      o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
                      o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
-    scatterAdd(CB_NOUT, dest + e * CB_NOUT, o, vals, F);
+    if (dynReloc) {
+        scatterAddDyn(CB_NOUT, dest + e * CB_NOUT, altDest + e * CB_NOUT, selRow + e * CB_NOUT, mode, o, vals, F);
+    } else {
+        scatterAdd(CB_NOUT, dest + e * CB_NOUT, o, vals, F);
+    }
 }
 
 __global__ void fillOpenBranch(int ne, const double* in, const int* ix, const int* dest,
@@ -408,14 +564,22 @@ __global__ void fillOpenBranch(int ne, const double* in, const int* ix, const in
 }
 
 __global__ void fillShunt(int ne, const double* in, const int* ix, const int* dest,
-                          const double* x, double* vals, double* F) {
+                          const double* x, double* vals, double* F,
+                          const int* altDest, const int* selRow, const int* mode, int dynReloc) {
     int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= ne) return;
     const double* p = in + e * 2;                            // g b
-    double v = x[ix[e * 3 + 2]];
+    // b is the SHUNT_B state variable when the shunt derives voltage control (bcol = ix[e*5+3] >= 0),
+    // else the fixed packed susceptance — exactly like a closed branch reads r1 from x[r1col] or cbIn.
+    double b = ix[e * 5 + 3] >= 0 ? x[ix[e * 5 + 3]] : p[1];
+    double v = x[ix[e * 5 + 2]];
     double o[SH_NOUT];
-    evalShunt(v, p[0], p[1], 0, o + 0, o + 1, o + 2, o + 3, o + 4);
-    scatterAdd(SH_NOUT, dest + e * SH_NOUT, o, vals, F);
+    evalShunt(v, p[0], b, 0, o + 0, o + 1, o + 2, o + 3, o + 4);
+    if (dynReloc) {
+        scatterAddDyn(SH_NOUT, dest + e * SH_NOUT, altDest + e * SH_NOUT, selRow + e * SH_NOUT, mode, o, vals, F);
+    } else {
+        scatterAdd(SH_NOUT, dest + e * SH_NOUT, o, vals, F);
+    }
 }
 
 __global__ void fillHvdc(int ne, const double* in, const int* ix, const int* dest,
@@ -447,8 +611,8 @@ __global__ void fillDistrQ(int ndq, const int* dqElem, const int* dqSide, const 
     double w = dqWeight[c];
     const int* dst = dqDest + c * 6;
     if (dqKind[c] == 1) {                                    // shunt q: {q value -> F, dq/dv -> J(row, vcol)}
-        const double* sp = shIn + e * 2;                     // g b
-        int vcol = shIx[e * 3 + 2];
+        const double* sp = shIn + e * 2;                     // g b (a DISTR_Q shunt contributor is always fixed)
+        int vcol = shIx[e * 5 + 2];
         double so[SH_NOUT];
         evalShunt(x[vcol], sp[0], sp[1], 0, so + 0, so + 1, so + 2, so + 3, so + 4);
         if (dst[0] <= -2) atomicAdd(&F[-2 - dst[0]], w * so[2]);    // q
@@ -476,7 +640,7 @@ __global__ void fillDistrQ(int ndq, const int* dqElem, const int* dqSide, const 
         return;
     }
     const double* p = cbIn + e * 8;                          // y g1 g2 b1 b2 ksi r1 a1
-    const int* q = cbIx + e * 10;                            // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
+    const int* q = cbIx + e * 12;                            // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     double v1 = x[q[5]], v2 = x[q[7]], ph1 = x[q[4]], ph2 = x[q[6]];
     double r1 = q[9] >= 0 ? x[q[9]] : p[6];
     double a1 = q[8] >= 0 ? x[q[8]] : p[7];
@@ -553,6 +717,18 @@ __global__ void fillDistrRho(int ndr, const int* drCol, const double* drCoef, co
     addAt(drDest[c * 2 + 1], coef, vals, F);                 // J(DISTR_RHO row, r1) += coef
 }
 
+// DISTR_SHUNT_B (shunt susceptance distribution): the SHUNT_B analogue of fillDistrRho. A controller's
+// DISTR_SHUNT_B row = (1/count)·Σ b − b_k, so each contribution is coef·b_j into the row's F + a constant
+// coef in J(row, b_j). dest[2] = {F row, J slot} (built host-side through the CSR pattern).
+__global__ void fillDistrShuntB(int ndb, const int* dbCol, const double* dbCoef, const int* dbDest,
+                                const double* x, double* vals, double* F) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= ndb) return;
+    double coef = dbCoef[c];
+    addAt(dbDest[c * 2 + 0], coef * x[dbCol[c]], vals, F);   // F[DISTR_SHUNT_B row] += coef * b
+    addAt(dbDest[c * 2 + 1], coef, vals, F);                 // J(DISTR_SHUNT_B row, b) += coef
+}
+
 // Slack/PV target identity rows, applied as a PER-SOLVE mask over the fixed superset
 // pattern: a row in identity mode (mode 0) is zeroed, its diagonal set to 1, and its
 // mismatch overwritten with x - target. The fill kernels may have scattered into it —
@@ -625,6 +801,8 @@ struct CudssCtx {
 struct Family {
     int ne = 0, instride = 0, ixstride = 0, nout = 0;
     DeviceBuf in, ix, dest;
+    DeviceBuf altDest, selRow;                               // Dynamic Q-relocation (cb only); empty when disabled
+    bool dynReloc = false;                                   // altDest/selRow populated and the fill should select
 };
 
 // Build one family's device-side data (inputs, indices, role-folded destinations).
@@ -677,7 +855,7 @@ std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const in
         }
     };
     for (int e = 0; e < ncb; e++) {                          // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
-        const int* ix = cbIdx + e * 10;
+        const int* ix = cbIdx + e * 12;
         pairRc(ix[0], ix[4]);                                // P1 -> ph1
         pairRc(ix[2], ix[6]);                                // P2 -> ph2
         // Q rows pair with their own stable index — its V col on an ordinary bus (Qrow==v col), the
@@ -710,9 +888,14 @@ std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const in
         claimMovedV(ix[1], ix[4]);
         claimMovedV(ix[3], ix[5]);
     }
-    for (int e = 0; e < nsh; e++) {                          // P Q v
-        pairRc(shIdx[e * 3 + 1], shIdx[e * 3 + 1]);          // Q self-pairs (v col, or rho col if controlled)
-        claimMovedV(shIdx[e * 3 + 1], shIdx[e * 3 + 2]);
+    for (int e = 0; e < nsh; e++) {                          // P Q v bcol
+        pairRc(shIdx[e * 5 + 1], shIdx[e * 5 + 1]);          // Q self-pairs (v col, or SHUNT_B col if controlled)
+        claimMovedV(shIdx[e * 5 + 1], shIdx[e * 5 + 2]);
+        if (shIdx[e * 5 + 3] >= 0) {
+            // claim the SHUNT_B row: its diagonal is the b col either way — dq/db when the susceptance is a
+            // free control, or the unit derivative of the b−target identity when it is held constant.
+            pairRc(shIdx[e * 5 + 3], shIdx[e * 5 + 3]);
+        }
     }
     for (int e = 0; e < nhv; e++) {                          // P1 P2 ph1 ph2
         const int* ix = hvIdx + e * 4;
@@ -755,19 +938,20 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
                           const int* cbIdx, const int* obIdx, const int* shIdx,
                           int ndq, const int* dqElem, const int* dqSide, const int* dqKind, const int* dqRow,
                           int ndr, const int* drRow, const int* drCol,
+                          int ndb, const int* dbRow, const int* dbCol,
                           int nzi, const int* ziIdx,
                           std::vector<std::pair<int, int>>& pat) {
     for (int c = 0; c < ndq; c++) {
         int mappedRow = rowMap[dqRow[c]];
         if (dqKind[c] == 1) {                                // shunt q: bus V column
-            pat.emplace_back(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 3 + 2]);
+            pat.emplace_back(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 5 + 2]);
         } else if (dqKind[c] == 2) {                         // half-open: connected-side V column
             const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
             pat.emplace_back(mappedRow, dqSide[c] == 0 ? oq[4] : oq[5]);
         } else if (dqKind[c] == 3) {                         // zero-imp DUMMY_Q column
             pat.emplace_back(mappedRow, dqElem[c]);
         } else {                                             // closed branch: v1 v2 ph1 ph2 r1
-            const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 10;
+            const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 12;
             pat.emplace_back(mappedRow, q[5]);
             pat.emplace_back(mappedRow, q[7]);
             pat.emplace_back(mappedRow, q[4]);
@@ -777,6 +961,9 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
     }
     for (int c = 0; c < ndr; c++) {                          // DISTR_RHO: controller r1 column in a DISTR_RHO row
         pat.emplace_back(rowMap[drRow[c]], drCol[c]);
+    }
+    for (int c = 0; c < ndb; c++) {                          // DISTR_SHUNT_B: controller b column in a DISTR_SHUNT_B row
+        pat.emplace_back(rowMap[dbRow[c]], dbCol[c]);
     }
     for (int e = 0; e < nzi; e++) {                          // zero-impedance: dummy couplings + (tree) ZERO_V/PHI
         const int* z = ziIdx + static_cast<size_t>(e) * 11;
@@ -838,6 +1025,8 @@ struct SharedStructure {
     DeviceBuf dZiIn, dZiIdx, dZiDest;                        // nzi (dZiIn) / nzi*11 (dZiIdx) / nzi*14 (dZiDest)
     int ndr = 0;                                             // DISTR_RHO linear contributions
     DeviceBuf dDrCol, dDrCoef, dDrDest;                      // ndr each (dDrDest is ndr*2)
+    int ndb = 0;                                             // DISTR_SHUNT_B linear contributions
+    DeviceBuf dDbCol, dDbCoef, dDbDest;                      // ndb each (dDbDest is ndb*2)
     DeviceBuf dRowPtr, dColIdx, dDiagPos;                    // device CSR pattern + guaranteed-diagonal slots
     double luBytes = 0.0;                                    // cached LU-probe footprint (0 = not probed yet)
 };
@@ -857,14 +1046,14 @@ static void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const st
             int mappedRow = rowMap[dqRow[c]];
             dqDest[c * 6 + 0] = -2 - mappedRow;              // q value -> F row
             if (dqKind[c] == 1) {                            // shunt: dq/dv on the bus V column
-                dqDest[c * 6 + 1] = pos.at(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 3 + 2]);
+                dqDest[c * 6 + 1] = pos.at(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 5 + 2]);
             } else if (dqKind[c] == 2) {                     // half-open: dq/dv on the connected-side V col
                 const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
                 dqDest[c * 6 + 1] = pos.at(mappedRow, dqSide[c] == 0 ? oq[4] : oq[5]);
             } else if (dqKind[c] == 3) {                     // zero-impedance: J slot on the dummyQ column
                 dqDest[c * 6 + 1] = pos.at(mappedRow, dqElem[c]);
             } else {                                         // closed branch
-                const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 10;
+                const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 12;
                 dqDest[c * 6 + 1] = pos.at(mappedRow, q[5]);     // dq/dv1
                 dqDest[c * 6 + 2] = pos.at(mappedRow, q[7]);     // dq/dv2
                 dqDest[c * 6 + 3] = pos.at(mappedRow, q[4]);     // dq/dph1
@@ -932,6 +1121,22 @@ static void buildDistrRhoDest(SharedStructure* st, const CsrPattern& pos, const 
     }
 }
 
+static void buildDistrShuntBDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
+                                 int ndb, const int* dbRow, const int* dbCol, const double* dbCoef) {
+    st->ndb = ndb;
+    if (ndb > 0) {
+        std::vector<int> dbDest(static_cast<size_t>(ndb) * 2);
+        for (int c = 0; c < ndb; c++) {
+            int mappedRow = rowMap[dbRow[c]];
+            dbDest[c * 2 + 0] = -2 - mappedRow;              // DISTR_SHUNT_B F row
+            dbDest[c * 2 + 1] = pos.at(mappedRow, dbCol[c]); // J slot
+        }
+        st->dDbCol.upload(dbCol, ndb * sizeof(int));
+        st->dDbCoef.upload(dbCoef, ndb * sizeof(double));
+        st->dDbDest.upload(dbDest.data(), dbDest.size() * sizeof(int));
+    }
+}
+
 SharedStructure* buildStructure(int n,
                                 int ncb, const double* cbIn, const int* cbIdx,
                                 int nob, const double* obIn, const int* obIdx,
@@ -940,7 +1145,8 @@ SharedStructure* buildStructure(int n,
                                 int ndq, const int* dqElem, const int* dqSide, const double* dqWeight,
                                 const int* dqRow, const int* dqKind,
                                 int nzi, const double* ziIn, const int* ziIdx,
-                                int ndr, const int* drRow, const int* drCol, const double* drCoef) {
+                                int ndr, const int* drRow, const int* drCol, const double* drCoef,
+                                int ndb, const int* dbRow, const int* dbCol, const double* dbCoef) {
     auto st = std::make_unique<SharedStructure>();
     st->n = n;
     st->nElements = ncb + nob + nsh + nhv;
@@ -964,9 +1170,9 @@ SharedStructure* buildStructure(int n,
         }
         return out;
     };
-    std::vector<int> cbIdxM = mapRows(cbIdx, ncb, 10, {0, 1, 2, 3});
+    std::vector<int> cbIdxM = mapRows(cbIdx, ncb, 12, {0, 1, 2, 3, 10, 11});
     std::vector<int> obIdxM = mapRows(obIdx, nob, 6, {0, 1, 2, 3});
-    std::vector<int> shIdxM = mapRows(shIdx, nsh, 3, {0, 1});
+    std::vector<int> shIdxM = mapRows(shIdx, nsh, 5, {0, 1, 4});
     std::vector<int> hvIdxM = mapRows(hvIdx, nhv, 4, {0, 1});
     cbIdx = cbIdxM.data();
     obIdx = obIdxM.data();
@@ -975,12 +1181,19 @@ SharedStructure* buildStructure(int n,
 
     // ---- fixed CSR pattern (rows = permuted equations, cols = variables) ----
     std::vector<std::pair<int, int>> pat;
-    collectPattern(ncb, cbIdx, 10, CB_SCATTER, CB_NOUT, resolveCb, pat);
+    collectPattern(ncb, cbIdx, 12, CB_SCATTER, CB_NOUT, resolveCb, pat);
+    bool dynReloc = hasRelocatable(ncb, cbIdx, nsh, shIdx);
+    if (dynReloc) {
+        collectCbAltPattern(ncb, cbIdx, pat);                // union the alternate Q rows into the pattern
+    }
     collectPattern(nob, obIdx, 6, OB_SCATTER, OB_NOUT, resolveOb, pat);
-    collectPattern(nsh, shIdx, 3, SH_SCATTER, SH_NOUT, resolveSh, pat);
+    collectPattern(nsh, shIdx, 5, SH_SCATTER, SH_NOUT, resolveSh, pat);
+    if (dynReloc) {
+        collectShAltPattern(nsh, shIdx, pat);                // union the shunt alternate Q rows
+    }
     collectPattern(nhv, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pat);
     collectFamilyPattern(rowMap, cbIdx, obIdx, shIdx, ndq, dqElem, dqSide, dqKind, dqRow,
-                         ndr, drRow, drCol, nzi, ziIdx, pat);
+                         ndr, drRow, drCol, ndb, dbRow, dbCol, nzi, ziIdx, pat);
     for (int r = 0; r < n; r++) {
         pat.emplace_back(r, r);                              // guaranteed diagonal: the per-solve
     }                                                        // row-mode mask writes 1.0 there
@@ -1001,13 +1214,29 @@ SharedStructure* buildStructure(int n,
     st->dColIdx.upload(st->colIdx.data(), st->nnz * sizeof(int));
 
     // ---- family device data (inputs, indices, role-folded destinations) + static trig ----
-    setupFamily(st->cb, ncb, cbIn, 8, cbIdx, 10, CB_SCATTER, CB_NOUT, resolveCb, pos);
+    setupFamily(st->cb, ncb, cbIn, 8, cbIdx, 12, CB_SCATTER, CB_NOUT, resolveCb, pos);
+    if (dynReloc && ncb) {                                   // Dynamic Q-relocation: alt-dest + frozen-row select map
+        std::vector<int> altDest;
+        std::vector<int> selRow;
+        buildCbDynDest(ncb, cbIdx, pos, altDest, selRow);
+        st->cb.altDest.upload(altDest.data(), altDest.size() * sizeof(int));
+        st->cb.selRow.upload(selRow.data(), selRow.size() * sizeof(int));
+        st->cb.dynReloc = true;
+    }
     if (ncb) {                                               // per-element static trig (OLF's precomputed-trig shape)
         st->cbTrig.alloc(static_cast<size_t>(ncb) * 6 * sizeof(double));
         initClosedBranchTrig<<<grid(ncb), BLOCK>>>(ncb, st->cb.in.as<double>(), st->cbTrig.as<double>());
     }
     setupFamily(st->ob, nob, obIn, 7, obIdx, 6, OB_SCATTER, OB_NOUT, resolveOb, pos);
-    setupFamily(st->sh, nsh, shIn, 2, shIdx, 3, SH_SCATTER, SH_NOUT, resolveSh, pos);
+    setupFamily(st->sh, nsh, shIn, 2, shIdx, 5, SH_SCATTER, SH_NOUT, resolveSh, pos);
+    if (dynReloc && nsh) {                                   // Dynamic Q-relocation: shunt alt-dest + selector
+        std::vector<int> shAltDest;
+        std::vector<int> shSelRow;
+        buildShDynDest(nsh, shIdx, pos, shAltDest, shSelRow);
+        st->sh.altDest.upload(shAltDest.data(), shAltDest.size() * sizeof(int));
+        st->sh.selRow.upload(shSelRow.data(), shSelRow.size() * sizeof(int));
+        st->sh.dynReloc = true;
+    }
     setupFamily(st->hv, nhv, hvIn, 5, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pos);
 
     // ---- DISTR_Q destinations: per contribution {F-row, dq/dv1, dq/dv2, dq/dph1, dq/dph2, dq/dr1}
@@ -1019,6 +1248,9 @@ SharedStructure* buildStructure(int n,
 
     // ---- DISTR_RHO destinations: per contribution {F row, J slot (row, r1 col)} ----
     buildDistrRhoDest(st.get(), pos, rowMap, ndr, drRow, drCol, drCoef);
+
+    // ---- DISTR_SHUNT_B destinations: per contribution {F row, J slot (row, b col)} ----
+    buildDistrShuntBDest(st.get(), pos, rowMap, ndb, dbRow, dbCol, dbCoef);
 
     std::vector<int> diagPos(n);
     for (int r = 0; r < n; r++) diagPos[r] = pos.at(r, r);
@@ -1089,7 +1321,7 @@ struct SolverContext {
     SharedStructurePtr st;                                   // shared with any batch context on the same extraction
     int n = 0;
     int nnz = 0;
-    int ndq = 0, nzi = 0, ndr = 0;                           // copies of the structure counts
+    int ndq = 0, nzi = 0, ndr = 0, ndb = 0;                  // copies of the structure counts
     std::vector<double> hF;                                  // host mismatch buffer
     DeviceBuf dX, dTarget, dF, dB, dDx, dVals, dMode;
     DeviceBuf dXprev;                                        // state before the last full step (line search)
@@ -1113,6 +1345,7 @@ SolverContext* createContext(const SharedStructurePtr& st) {
     ctx->ndq = st->ndq;
     ctx->nzi = st->nzi;
     ctx->ndr = st->ndr;
+    ctx->ndb = st->ndb;
     ctx->hF.resize(n);
 
     // ---- device state (persists across solves) ----
@@ -1160,13 +1393,14 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
     auto fillAndNorm = [&]() -> double {
         CUDA_CHECK(cudaMemsetAsync(ctx->dVals.p, 0, ctx->nnz * sizeof(double), ctx->stream));
         initF<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dTarget.as<double>(), ctx->dF.as<double>());
-        if (ctx->st->cb.ne) fillClosedBranch<<<grid(ctx->st->cb.ne), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        if (ctx->st->cb.ne) fillClosedBranch<<<grid(ctx->st->cb.ne), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0);
         if (ctx->st->ob.ne) fillOpenBranch<<<grid(ctx->st->ob.ne), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
-        if (ctx->st->sh.ne) fillShunt<<<grid(ctx->st->sh.ne), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        if (ctx->st->sh.ne) fillShunt<<<grid(ctx->st->sh.ne), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0);
         if (ctx->st->hv.ne) fillHvdc<<<grid(ctx->st->hv.ne), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->ndq) fillDistrQ<<<grid(ctx->ndq), BLOCK, 0, ctx->stream>>>(ctx->ndq, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->nzi) fillZeroImp<<<grid(ctx->nzi), BLOCK, 0, ctx->stream>>>(ctx->nzi, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->ndr) fillDistrRho<<<grid(ctx->ndr), BLOCK, 0, ctx->stream>>>(ctx->ndr, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        if (ctx->ndb) fillDistrShuntB<<<grid(ctx->ndb), BLOCK, 0, ctx->stream>>>(ctx->ndb, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         applyRowMode<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         CUDA_CHECK(cudaMemcpy(ctx->hF.data(), ctx->dF.p, n * sizeof(double), cudaMemcpyDeviceToHost));
@@ -1394,14 +1628,15 @@ __global__ void fillClosedBranchBatch(int ne, int nScenarios, int n, int nnz, in
                                       const double* in, const int* ix, const int* dest,
                                       const double* x, double* vals, double* F,
                                       const char* disabled, const char* active,
-                                      int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal) {
+                                      int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                                      const int* altDest, const int* selRow, const int* mode, int dynReloc) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ne * nScenarios) return;
     int e = tid % ne;
     int s = tid / ne;
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
     const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
-    const int* q = ix + e * 10;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
+    const int* q = ix + e * 12;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     double pOv[8];
     if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) {
         p = pOv;
@@ -1420,7 +1655,12 @@ __global__ void fillClosedBranchBatch(int ne, int nScenarios, int n, int nnz, in
                      o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
                      o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
                      o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
-    scatterAdd(CB_NOUT, dest + e * CB_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+    if (dynReloc) {
+        scatterAddDyn(CB_NOUT, dest + e * CB_NOUT, altDest + e * CB_NOUT, selRow + e * CB_NOUT,
+                      mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+    } else {
+        scatterAdd(CB_NOUT, dest + e * CB_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+    }
 }
 
 __global__ void fillOpenBranchBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
@@ -1460,7 +1700,8 @@ __global__ void fillShuntBatch(int ne, int nScenarios, int n, int nnz, int nElem
                                const double* in, const int* ix, const int* dest,
                                const double* x, double* vals, double* F,
                                const char* disabled, const char* active,
-                               int nShOv, const int* shOvSlotElem, const double* shOvGb) {
+                               int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                               const int* altDest, const int* selRow, const int* mode, int dynReloc) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ne * nScenarios) return;
     int e = tid % ne;
@@ -1470,10 +1711,19 @@ __global__ void fillShuntBatch(int ne, int nScenarios, int n, int nnz, int nElem
     double g = p[0];
     double b = p[1];
     applyShuntOverride(nShOv, shOvSlotElem, shOvGb, s, e, g, b);
-    double v = x[(size_t) s * n + ix[e * 3 + 2]];
+    // A voltage-controlling shunt (bcol >= 0) reads its susceptance from the per-scenario state vector; a
+    // fixed shunt keeps the packed value (+ any contingency shunt-shift override).
+    int bcol = ix[e * 5 + 3];
+    if (bcol >= 0) b = x[(size_t) s * n + bcol];
+    double v = x[(size_t) s * n + ix[e * 5 + 2]];
     double o[SH_NOUT];
     evalShunt(v, g, b, 0, o + 0, o + 1, o + 2, o + 3, o + 4);
-    scatterAdd(SH_NOUT, dest + e * SH_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+    if (dynReloc) {
+        scatterAddDyn(SH_NOUT, dest + e * SH_NOUT, altDest + e * SH_NOUT, selRow + e * SH_NOUT,
+                      mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+    } else {
+        scatterAdd(SH_NOUT, dest + e * SH_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+    }
 }
 
 __global__ void fillHvdcBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
@@ -1528,18 +1778,34 @@ __device__ void scatterAddF(int nres, const int* dest, const int* pos, const dou
     }
 }
 
+// Dynamic Q-relocation, residual-only variant: route each residual to its alternate F row when the
+// frozen row is an identity this scenario. dest/altDest/selRow are the element's per-output slices;
+// pos maps each of the nres residuals to its CB_NOUT output index.
+__device__ void scatterAddFDyn(int nres, const int* dest, const int* altDest, const int* selRow,
+                               const int* pos, const int* mode, const double* o, double* F) {
+    for (int k = 0; k < nres; k++) {
+        int idx = pos[k];
+        int sr = selRow[idx];
+        int d = (sr >= 0 && mode[sr] == 0) ? altDest[idx] : dest[idx];
+        if (d <= -2) {
+            atomicAdd(&F[-2 - d], o[k]);
+        }
+    }
+}
+
 __global__ void fillClosedBranchBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                        const double* in, const int* ix, const int* dest, const double* trig,
                                        const double* x, double* F,
                                        const char* disabled, const char* active,
-                                       int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal) {
+                                       int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                                       const int* altDest, const int* selRow, const int* mode, int dynReloc) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ne * nScenarios) return;
     int e = tid % ne;
     int s = tid / ne;
     if (!active[s] || disabled[s * nElements + elemOffset + e]) return;
     const double* p = in + e * 8;                            // y g1 g2 b1 b2 ksi r1 a1
-    const int* q = ix + e * 10;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
+    const int* q = ix + e * 12;                              // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
     double pOv[8];
     bool tapOv = findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv);
     if (tapOv) {
@@ -1562,7 +1828,12 @@ __global__ void fillClosedBranchBatchF(int ne, int nScenarios, int n, int nnz, i
                          sinKsi, sinTheta1, cosTheta1, cosKsi, sinTheta2, cosTheta2, 0,
                          o + 0, o + 1, o + 2, o + 3);
     const int pos[4] = {0, 7, 14, 21};
-    scatterAddF(4, dest + e * CB_NOUT, pos, o, F + (size_t) s * n);
+    if (dynReloc) {
+        scatterAddFDyn(4, dest + e * CB_NOUT, altDest + e * CB_NOUT, selRow + e * CB_NOUT,
+                       pos, mode + (size_t) s * n, o, F + (size_t) s * n);
+    } else {
+        scatterAddF(4, dest + e * CB_NOUT, pos, o, F + (size_t) s * n);
+    }
 }
 
 __global__ void fillOpenBranchBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
@@ -1589,7 +1860,8 @@ __global__ void fillShuntBatchF(int ne, int nScenarios, int n, int nnz, int nEle
                                 const double* in, const int* ix, const int* dest,
                                 const double* x, double* F,
                                 const char* disabled, const char* active,
-                                int nShOv, const int* shOvSlotElem, const double* shOvGb) {
+                                int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                                const int* altDest, const int* selRow, const int* mode, int dynReloc) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ne * nScenarios) return;
     int e = tid % ne;
@@ -1599,11 +1871,18 @@ __global__ void fillShuntBatchF(int ne, int nScenarios, int n, int nnz, int nEle
     double g = p[0];
     double b = p[1];
     applyShuntOverride(nShOv, shOvSlotElem, shOvGb, s, e, g, b);
-    double v = x[(size_t) s * n + ix[e * 3 + 2]];
+    int bcol = ix[e * 5 + 3];
+    if (bcol >= 0) b = x[(size_t) s * n + bcol];             // voltage-controlling shunt: b from state
+    double v = x[(size_t) s * n + ix[e * 5 + 2]];
     double o[2];
     evalShuntF(v, g, b, 0, o + 0, o + 1);
     const int pos[2] = {0, 2};
-    scatterAddF(2, dest + e * SH_NOUT, pos, o, F + (size_t) s * n);
+    if (dynReloc) {
+        scatterAddFDyn(2, dest + e * SH_NOUT, altDest + e * SH_NOUT, selRow + e * SH_NOUT,
+                       pos, mode + (size_t) s * n, o, F + (size_t) s * n);
+    } else {
+        scatterAddF(2, dest + e * SH_NOUT, pos, o, F + (size_t) s * n);
+    }
 }
 
 __global__ void fillHvdcBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
@@ -1650,7 +1929,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
 
     if (kind == 1) {                             // shunt q: {q -> F, dq/dv -> J(row, vcol)}
         const double* sp = shIn + e * 2;
-        int vcol = shIx[e * 3 + 2];
+        int vcol = shIx[e * 5 + 2];
         double so[SH_NOUT];
         evalShunt(xs[vcol], sp[0], sp[1], 0, so + 0, so + 1, so + 2, so + 3, so + 4);
         if (dst[0] <= -2) atomicAdd(&FS[-2 - dst[0]], w * so[2]);
@@ -1678,7 +1957,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
     }
     // kind 0: closed-branch q1/q2 + its derivatives
     const double* p = cbIn + e * 8;
-    const int* q = cbIx + e * 10;
+    const int* q = cbIx + e * 12;
     double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
     double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
     double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
@@ -1712,6 +1991,23 @@ __global__ void fillDistrRhoBatch(int ndr, int nScenarios, int n, int nnz,
     int dF = drDest[c * 2 + 0];
     int dJ = drDest[c * 2 + 1];
     if (dF <= -2) atomicAdd(&F[(size_t) s * n + (-2 - dF)], coef * x[(size_t) s * n + drCol[c]]);
+    if (dJ >= 0) atomicAdd(&vals[(size_t) s * nnz + dJ], coef);
+}
+
+// Batched DISTR_SHUNT_B fill: the SHUNT_B analogue of fillDistrRhoBatch. Linear coef*b into the controller's
+// SHUNT_B row, strided per scenario, active-gated.
+__global__ void fillDistrShuntBBatch(int ndb, int nScenarios, int n, int nnz,
+                                     const int* dbCol, const double* dbCoef, const int* dbDest,
+                                     const double* x, double* vals, double* F, const char* active) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= ndb * nScenarios) return;
+    int c = tid % ndb;
+    int s = tid / ndb;
+    if (!active[s]) return;
+    double coef = dbCoef[c];
+    int dF = dbDest[c * 2 + 0];
+    int dJ = dbDest[c * 2 + 1];
+    if (dF <= -2) atomicAdd(&F[(size_t) s * n + (-2 - dF)], coef * x[(size_t) s * n + dbCol[c]]);
     if (dJ >= 0) atomicAdd(&vals[(size_t) s * nnz + dJ], coef);
 }
 
@@ -1803,8 +2099,21 @@ __global__ void initFBatch(int n, int nScenarios, const double* target, double* 
 // controller (mode 0) starts at limitType 0. For a base-PQ controller, v below its target ⇒ it is producing
 // max reactive yet cannot reach target ⇒ maxQ-pinned (2); v above target ⇒ minQ-pinned (1). switchCount
 // starts at 0 either way (a separate memset).
+// Per-scenario RL V-target override (secondary voltage control moves generator-VC targets): entries are
+// (slot, rl index) pairs with the REPLACEMENT target. Linear scan — the list is a handful of entries.
+__device__ inline double rlTargetOf(int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
+                                    int s, int i, double baseTarget) {
+    for (int k = 0; k < nRlVtOv; k++) {
+        if (rlVtOvSlotIdx[2 * k] == s && rlVtOvSlotIdx[2 * k + 1] == i) {
+            return rlVtOvVal[k];
+        }
+    }
+    return baseTarget;
+}
+
 __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* rlVrow,
-                                     const double* rlVtarget, const int* baseMode, const double* x, char* limitType) {
+                                     const double* rlVtarget, const int* baseMode, const double* x, char* limitType,
+                                     int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -1817,7 +2126,8 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
     // the reactive-limits switch-back leaves it PQ. Only a controller that is PQ in the BASE (an actual Q-limit
     // switch during the base loadflow) gets a pinned limit type so a relieving contingency can switch it back.
     if (baseMode[vrow] == 1) {                              // PQ in the base case (a real Q-limit switch)
-        limitType[st] = (x[idx] < rlVtarget[i]) ? 2 : 1;    // v below target ⇒ maxQ pinned; above ⇒ minQ pinned
+        double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, s, i, rlVtarget[i]);
+        limitType[st] = (x[idx] < vt) ? 2 : 1;              // v below target ⇒ maxQ pinned; above ⇒ minQ pinned
     } else {
         limitType[st] = 0;                                  // base PV (incl. a per-scenario gen-override flip)
     }
@@ -1837,7 +2147,8 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
                                     const int* rlVrow, const double* rlMinQ, const double* rlMaxQ,
                                     const double* rlLoadQ, const double* rlVtarget, const double* qBuf,
                                     const double* x, const char* rlActive, int* mode, double* target,
-                                    char* limitType, char* switchCount, char* switched) {
+                                    char* limitType, char* switchCount, char* switched,
+                                    int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -1863,11 +2174,12 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
         }
     } else if (limitType[st] != 0 && switchCount[st] < maxSwitch) {   // pinned at a limit — check switchback
         double v = x[idx];
-        bool back = (limitType[st] == 2 && v > rlVtarget[i])         // maxQ-pinned but v above target
-                 || (limitType[st] == 1 && v < rlVtarget[i]);        // minQ-pinned but v below target
+        double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, s, i, rlVtarget[i]);
+        bool back = (limitType[st] == 2 && v > vt)                   // maxQ-pinned but v above target
+                 || (limitType[st] == 1 && v < vt);                  // minQ-pinned but v below target
         if (back) {
             mode[idx] = 0;                                  // PQ → PV: resume voltage control
-            target[idx] = rlVtarget[i];
+            target[idx] = vt;
             limitType[st] = 0;
             switched[s] = 1;
         }
@@ -1893,11 +2205,45 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
 // total instead makes the non-slack buses absorb exactly (1 − ρ)·total_final, matching OLF's per-pass
 // distribution of the full mismatch. ρ = 0 (non-participating slack, incl. all batched gen-loss scenarios)
 // ⇒ retain = 0, so this is a no-op there.
+__global__ void setUnitRhsBatch(int n, int nScenarios, int unitRow, double* b) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n * nScenarios) return;
+    b[t] = (t % n == unitRow) ? 1.0 : 0.0;
+}
+
+__global__ void gatherSensiBatch(int n, int nScenarios, int k, int m, int ki, const int* observeCols,
+                                 const double* dx, double* out) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;                     // t = s*m + mi
+    if (t >= nScenarios * m) return;
+    int sIdx = t / m;
+    int mi = t % m;
+    out[(size_t) sIdx * k * m + (size_t) ki * m + mi] = dx[(size_t) sIdx * n + observeCols[mi]];
+}
+
+// Slack-only distributed slack: the slack generator is the ONLY participant, so OLF's distribution
+// puts the whole mismatch into the slack gen's own target — no flow change, but the outer loop reports
+// UNSTABLE and triggers a re-solve that polishes the state by one more Newton run. Mirror it exactly:
+// track the absorbed total, flag a switch while the residual mismatch stays above the outer gate.
+__global__ void slackOnlyDsCheck(int nScenarios, int n, int slackPhiRow, double slackTargetP,
+                                 double slackDistTol, const double* qBuf, const char* rlActive,
+                                 double* absorbed, char* switched) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nScenarios || !rlActive[s]) return;
+    double m = qBuf[(size_t) s * n + slackPhiRow] - slackTargetP - absorbed[s];
+    if (fabs(m) > slackDistTol) {
+        absorbed[s] += m;
+        switched[s] = 1;
+    }
+}
+
 __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiRow, double slackTargetP,
                                    double oneMinusFactorSum, const int* dsPhiRow, const double* dsBaseTargetP,
                                    const double* target, const double* qBuf, const char* rlActive,
                                    double* retain,
-                                   const int* dsOvBus, const double* dsOvBaseDelta) {
+                                   const int* dsOvBus, const double* dsOvBaseDelta,
+                                   const double* dsAnchorShift, const double* dsSlackShift,
+                                   int dsMode, const double* dsMarginUp, const double* dsMarginDown,
+                                   double slackMarginUp, double slackMarginDown) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     if (!rlActive[s]) return;
@@ -1909,12 +2255,37 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
         // or the retain math counts the override as absorbed slack and the waterfill CANCELS it
         // (measured: a +60 MW redispatch read back as a no-op, GeneratorAction drill 2026-07-19).
         double base = dsBaseTargetP[i];
-        if (ov == i) {
-            base -= dsOvBaseDelta[s];
+        if (dsAnchorShift != nullptr) {
+            base += dsAnchorShift[(size_t) s * nds + i];     // pair leg: cumulative reference re-anchored at the
+        }                                                    // PARENT contingency's distributed targets (OLF's
+        if (ov == i) {                                       // setGeneratorsInitialTargetPToTargetP before the
+            base -= dsOvBaseDelta[s];                        // strategy re-solve)
         }
         absorbed += target[(size_t) s * n + dsPhiRow[i]] - base;
     }
-    retain[s] = oneMinusFactorSum * ((qBuf[(size_t) s * n + slackPhiRow] - slackTargetP) + absorbed);
+    double slackTgt = slackTargetP + (dsSlackShift != nullptr ? dsSlackShift[s] : 0.0);
+    double tot = (qBuf[(size_t) s * n + slackPhiRow] - slackTgt) + absorbed;   // total-from-anchor, OLF's
+    double rho = oneMinusFactorSum;                                            // remainingMismatch at run() start
+    if (dsMode == 1) {
+        // REMAINING_MARGIN: the slack's retained share is its own margin share in the DIRECTION of the
+        // total-from-anchor (OLF evaluates the direction-dependent factors once per run at the anchor).
+        // Margins shift with a moved anchor: +delta of anchor target eats headroom, frees footroom.
+        double slackM = tot > 0 ? slackMarginUp : slackMarginDown;
+        if (dsSlackShift != nullptr) {
+            slackM = fmax(0.0, slackM - (tot > 0 ? dsSlackShift[s] : -dsSlackShift[s]));
+        }
+        double sum = slackM;
+        for (int i = 0; i < nds; i++) {
+            double m = tot > 0 ? dsMarginUp[i] : dsMarginDown[i];
+            if (dsAnchorShift != nullptr) {
+                double sh = dsAnchorShift[(size_t) s * nds + i];
+                m = fmax(0.0, m - (tot > 0 ? sh : -sh));
+            }
+            sum += m;
+        }
+        rho = sum > 0 ? slackM / sum : 0.0;
+    }
+    retain[s] = rho * tot;
 }
 
 // Distribute the slack mismatch by FULL WATER-FILLING per scenario (one thread = one scenario), matching OLF's
@@ -1927,27 +2298,65 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
 // different in-tolerance point than OLF.
 __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slackDistTol, double residueEps,
                                               int slackPhiRow, double slackTargetP, const int* dsPhiRow,
-                                              const double* dsFactor, const double* dsBaseTargetP,
+                                              const double* dsFactor, const double* dsBaseTargetP, const double* dsAnchorShift, const double* dsSlackShift,
                                               const double* dsMaxDelta, const double* dsMinDelta, const double* dsRetain,
                                               const double* qBuf, const char* rlActive,
                                               const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
                                               const double* dsOvMaxDelta, const double* dsOvMinDelta,
+                                              int dsMode, const double* dsMarginUp, const double* dsMarginDown,
+                                              double slackMarginUp, double slackMarginDown,
                                               double* target, char* switched, char* dsResidual) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     if (!rlActive[s]) return;
     // The participating buses share the mismatch in EXCESS of the slack's retained share (rem); only distribute
     // past the slackBusPMaxMismatch outer gate, exactly like OLF's DistributedSlackOuterLoop.check.
-    double rem = (qBuf[(size_t) s * n + slackPhiRow] - slackTargetP) - dsRetain[s];
-    if (fabs(rem) <= slackDistTol) {
+    double slackTgt = slackTargetP + (dsSlackShift != nullptr ? dsSlackShift[s] : 0.0);
+    double rem = (qBuf[(size_t) s * n + slackPhiRow] - slackTgt) - dsRetain[s];
+    int ov = (dsOvBus != nullptr) ? dsOvBus[s] : -1;        // the bus losing a participating gen (gen contingency), -1 = none
+    // REMAINING_MARGIN: factors are the per-bus margins in the DIRECTION of the pass's remaining mismatch,
+    // picked ONCE at entry (OLF evaluates them once per run at the anchor); a moved anchor (+delta) eats
+    // headroom and frees footroom symmetrically.
+    bool dirUp = rem > 0;
+    // rem is the NON-SLACK share of the CPU's slack mismatch: rem = (1 - rho) * m_cpu, with rho the slack's
+    // GLOBAL retained share (the same constant the retain kernel uses — a per-scenario participant reweight
+    // does not change it). OLF's outer gate tests |m_cpu| > slackBusPMaxMismatch, so the device gate scales
+    // by (1 - rho) = the GLOBAL participant factor sum: unscaled it is 1/(1-rho) looser and lets the device
+    // retire with up to (1/(1-rho) - 1) * tol still undistributed (measured 4.9e-4 kV on a 60 MW redispatch
+    // pair with a participating slack, 2x); scaling by the per-scenario EFFECTIVE sum instead over-tightens
+    // a gen-outage scenario with a non-participating slack and adds a round the CPU never runs (3.9e-4).
+    double fsGlobal = 0.0;
+    if (dsMode == 1) {
+        double sumM = 0.0;
+        for (int i = 0; i < nds; i++) {
+            double m = dirUp ? dsMarginUp[i] : dsMarginDown[i];
+            if (dsAnchorShift != nullptr) {
+                double sh = dsAnchorShift[(size_t) s * nds + i];
+                m = fmax(0.0, m - (dirUp ? sh : -sh));
+            }
+            sumM += m;
+        }
+        double slackM = dirUp ? slackMarginUp : slackMarginDown;
+        if (dsSlackShift != nullptr) {
+            slackM = fmax(0.0, slackM - (dirUp ? dsSlackShift[s] : -dsSlackShift[s]));
+        }
+        fsGlobal = sumM + slackM > 0 ? sumM / (sumM + slackM) : 0.0;
+    } else {
+        for (int i = 0; i < nds; i++) {
+            fsGlobal += dsFactor[i];
+        }
+    }
+    if (fsGlobal <= 0.0 || fabs(rem) <= fsGlobal * slackDistTol) {
         return;
     }
-    int ov = (dsOvBus != nullptr) ? dsOvBus[s] : -1;        // the bus losing a participating gen (gen contingency), -1 = none
     bool changed = false;
     for (int iter = 0; iter < nds && fabs(rem) > residueEps; iter++) {
         double fsumActive = 0.0;                            // re-normalize factors over the still-unsaturated buses
         for (int i = 0; i < nds; i++) {
             double f = dsFactor[i], base = dsBaseTargetP[i], maxD = dsMaxDelta[i], minD = dsMinDelta[i];
+            double sh = dsAnchorShift != nullptr ? dsAnchorShift[(size_t) s * nds + i] : 0.0;
+            if (dsAnchorShift != nullptr) { base += sh; maxD -= sh; minD -= sh; }
+            if (dsMode == 1) { f = fmax(0.0, (dirUp ? dsMarginUp[i] : dsMarginDown[i]) - (dirUp ? sh : -sh)); }
             if (ov == i) { f -= dsOvFactorDelta[s]; base -= dsOvBaseDelta[s]; maxD -= dsOvMaxDelta[s]; minD -= dsOvMinDelta[s]; }
             double cum = target[(size_t) s * n + dsPhiRow[i]] - base;
             bool sat = (rem > 0) ? (cum >= maxD) : (cum <= minD);
@@ -1961,6 +2370,9 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         double done = 0.0;
         for (int i = 0; i < nds; i++) {
             double f = dsFactor[i], base = dsBaseTargetP[i], maxD = dsMaxDelta[i], minD = dsMinDelta[i];
+            double sh = dsAnchorShift != nullptr ? dsAnchorShift[(size_t) s * nds + i] : 0.0;
+            if (dsAnchorShift != nullptr) { base += sh; maxD -= sh; minD -= sh; }
+            if (dsMode == 1) { f = fmax(0.0, (dirUp ? dsMarginUp[i] : dsMarginDown[i]) - (dirUp ? sh : -sh)); }
             if (ov == i) { f -= dsOvFactorDelta[s]; base -= dsOvBaseDelta[s]; maxD -= dsOvMaxDelta[s]; minD -= dsOvMinDelta[s]; }
             size_t idx = (size_t) s * n + dsPhiRow[i];
             double cum = target[idx] - base;
@@ -1980,7 +2392,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
     if (changed) {
         switched[s] = 1;
     }
-    if (fabs(rem) > slackDistTol) {
+    if (fabs(rem) > fsGlobal * slackDistTol) {
         dsResidual[s] = 1;                                   // saturated: residual stays at the slack — the host
     }                                                        // decides per the run's slackDistributionFailureBehavior
 }
@@ -2177,7 +2589,7 @@ struct BatchSolverContext {
     int nScenarios = 0;
     int nElements = 0;
     int cbOffset = 0, obOffset = 0, shOffset = 0, hvOffset = 0;   // element-mask offsets per family
-    int ndq = 0, ndr = 0, nzi = 0;                           // copies of the structure counts
+    int ndq = 0, ndr = 0, ndb = 0, nzi = 0;                  // copies of the structure counts
     DeviceBuf dX, dTarget, dF, dB, dDx, dVals, dMode;        // per-scenario (n or nnz strided)
     bool clampStep = false;                                  // MAX_VOLTAGE_CHANGE per-scenario step clamp (set per solve)
     double maxDv = 0.0, maxDphi = 0.0;
@@ -2215,8 +2627,15 @@ struct BatchSolverContext {
     DeviceBuf dDsPhiRow, dDsFactor;                        // per participating bus (nds)
     DeviceBuf dDsBaseTargetP, dDsMaxDelta, dDsMinDelta;   // per participating bus (nds): base P target + headroom/footroom
     double dsFactorSum = 1.0;                              // Σ emitted factors (< 1 ⇒ slack participates, keeps 1−Σ)
+    int dsMode = 0;                                        // 0 = static factors; 1 = REMAINING_MARGIN (direction-
+    DeviceBuf dDsMarginUp, dDsMarginDown;                  //   dependent per-bus margins, normalized in-kernel)
+    double dsSlackMarginUp = 0.0, dsSlackMarginDown = 0.0; //   the slack's own margins (its retained share)
     DeviceBuf dDsRetain;
     DeviceBuf dDsResidual;                                   // nS chars: waterfill left an out-of-tolerance residual                                   // per scenario (nS): frozen slack-retained mismatch share
+    bool dsSlackOnly = false;                                // DS enabled with the SLACK generator as the only participant:
+    DeviceBuf dDsSlackAbsorbed;                              // nS doubles — mismatch absorbed into the slack's own target so far
+                                                             // (OLF distributes into the slack gen and re-solves; no flow change,
+                                                             // but the extra polish run must happen to match the CPU trajectory)
     CudssCtx ds;
     bool analyzed = false;
     bool factored = false;                                   // first FACTORIZATION done (mode 2: then REFACTORIZE)
@@ -2381,7 +2800,9 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
                                        const double* rlMaxQ, const double* rlLoadQ, const double* rlVtarget,
                                        int nds, const int* dsPhiRow, const double* dsFactor,
                                        int dsSlackPhiRow, double dsSlackTargetP,
-                                       const double* dsBaseTargetP, const double* dsMaxDelta, const double* dsMinDelta) {
+                                       const double* dsBaseTargetP, const double* dsMaxDelta, const double* dsMinDelta,
+                                       int dsMode, const double* dsMarginUp, const double* dsMarginDown,
+                                       double dsSlackMarginUp, double dsSlackMarginDown) {
     auto ctx = std::make_unique<BatchSolverContext>();
     ctx->st = st;
     int n = st->n;
@@ -2396,6 +2817,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     ctx->hvOffset = st->hvOffset;
     ctx->ndq = st->ndq;
     ctx->ndr = st->ndr;
+    ctx->ndb = st->ndb;
     ctx->nzi = st->nzi;
     const std::vector<int>& rowMap = st->rowMap;
     const std::vector<int>& rowPtr = st->rowPtr;
@@ -2436,7 +2858,18 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     }
     ctx->nds = nds;
     ctx->dsSlackTargetP = dsSlackTargetP;
+    ctx->dsMode = dsMode;
+    ctx->dsSlackMarginUp = dsSlackMarginUp;
+    ctx->dsSlackMarginDown = dsSlackMarginDown;
+    if (dsMode == 1 && nds > 0) {
+        ctx->dDsMarginUp.upload(dsMarginUp, nds * sizeof(double));
+        ctx->dDsMarginDown.upload(dsMarginDown, nds * sizeof(double));
+    }
     ctx->dsSlackPhiRow = dsSlackPhiRow >= 0 ? rowMap[dsSlackPhiRow] : -1;
+    ctx->dsSlackOnly = (nds == 0 && ctx->dsSlackPhiRow >= 0);
+    if (ctx->dsSlackOnly) {
+        ctx->dDsSlackAbsorbed.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
+    }
     if (nds > 0) {
         std::vector<int> dsPhiRowM(nds);
         for (int i = 0; i < nds; i++) {
@@ -2553,7 +2986,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               const int* rowMode, const int* baseRowMode, const char* disabled,
                               int nOv, const int* ovIndex, const double* ovValue,
                               const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
-                              const double* dsOvMaxDelta, const double* dsOvMinDelta, int maxIter, double tol,
+                              const double* dsOvMaxDelta, const double* dsOvMinDelta, const double* dsAnchorShift,
+                              const double* dsSlackShift,
+                              int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
+                              int maxIter, double tol,
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                               int lsMode, double maxDv, double maxDphi, const int* varType,
                               const double* x0Full, int nShOv, const int* shOvSlotElem, const double* shOvGb,
@@ -2577,6 +3013,21 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // a per-scenario factor-sum drop so the other buses pick up that share. nullptr when no DS scenarios.
     DeviceBuf dDsOvBus, dDsOvFactorDelta, dDsOvBaseDelta, dDsOvMaxDelta, dDsOvMinDelta;
     bool hasDsOverride = (dsOvBus != nullptr && ctx->nds > 0);
+    // Per-scenario DS ANCHOR SHIFT (pair/strategy legs): shift_i = parent's final target at participant i
+    // minus the extraction-time base — re-anchors the water-fill's cumulative reference at the PARENT
+    // contingency's distribution, mirroring OLF's setGeneratorsInitialTargetPToTargetP before a strategy
+    // re-solve. nullptr = anchored at the base (plain contingencies).
+    DeviceBuf dRlVtOvSlotIdx, dRlVtOvVal;
+    if (nRlVtOv > 0) {
+        dRlVtOvSlotIdx.upload(rlVtOvSlotIdx, 2L * nRlVtOv * sizeof(int));
+        dRlVtOvVal.upload(rlVtOvVal, (size_t) nRlVtOv * sizeof(double));
+    }
+    DeviceBuf dDsAnchorShift, dDsSlackShift;
+    bool hasDsAnchor = (dsAnchorShift != nullptr && dsSlackShift != nullptr && ctx->nds > 0);
+    if (hasDsAnchor) {
+        dDsAnchorShift.upload(dsAnchorShift, static_cast<size_t>(nS) * ctx->nds * sizeof(double));
+        dDsSlackShift.upload(dsSlackShift, static_cast<size_t>(nS) * sizeof(double));
+    }
 
     // x0/target are the BASE row (length n), identical for every scenario: upload once and tile across
     // nS on-device. rowMode is PER-SCENARIO (length n*nS): a contingency can freeze islanded buses
@@ -2647,7 +3098,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // converge the inner Newton, switch any generator over its Q limit, re-converge the switched scenarios,
     // repeat until a pass switches nothing. Fixed-iter mode (tol <= 0, the throughput benchmark) and
     // family-free networks with no controllers do ONE pass (no outer loop) — byte-identical to before.
-    bool fullLoadflow = !deviceFixedIter && (ctx->nrl > 0 || ctx->nds > 0);
+    bool fullLoadflow = !deviceFixedIter && (ctx->nrl > 0 || ctx->nds > 0 || ctx->dsSlackOnly);
     const int RL_MAX_OUTER = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
     const int RL_MAX_SWITCH = rlMaxSwitch > 0 ? rlMaxSwitch : 3;   // per-bus PV→PQ count cap (OLF maxPqPvSwitch)
     // Outer-loop convergence tolerances (pu) — passed in so the device uses the SAME criteria as the CPU
@@ -2687,11 +3138,21 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             if (ctx->nrl > 0) {                              // seed the pinned limit for base-PQ controllers (else all PV)
                 initRlLimitTypeBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n, ctx->dRlVrow.as<int>(),
                         ctx->dRlVtarget.as<double>(), dBaseMode.as<int>(), ctx->dX.as<double>(),
-                        ctx->dRlLimitType.as<char>());
+                        ctx->dRlLimitType.as<char>(),
+                        nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
+                        nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr);
             }
         }
         if (ctx->nds > 0) {                                  // slack-retained share: 0 until frozen at the first pass
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsRetain.p, 0, nS * sizeof(double), ctx->stream));
+        }
+        if (ctx->dsSlackOnly) {
+            if (dsSlackShift != nullptr) {                   // strategy pairs: seed with the parent contingency's
+                CUDA_CHECK(cudaMemcpyAsync(ctx->dDsSlackAbsorbed.p, dsSlackShift,   // absorbed total (the device
+                        nS * sizeof(double), cudaMemcpyHostToDevice, ctx->stream)); // analogue of the CPU re-anchor)
+            } else {
+                CUDA_CHECK(cudaMemsetAsync(ctx->dDsSlackAbsorbed.p, 0, nS * sizeof(double), ctx->stream));
+            }
         }
     }
 
@@ -2705,13 +3166,19 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // engine stabilizes them in that order. Match it: phase 0 = distributed slack, phase 1 = reactive limits.
     // (Switching PV->PQ before the slack is balanced leaves a large active imbalance that the undamped device
     // Newton diverges on — DS must stabilize first.)
-    int phase = (ctx->nds > 0) ? 0 : 1;                      // start with distributed slack if present, else reactive limits
+    int phase = (ctx->nds > 0 || ctx->dsSlackOnly) ? 0 : 1;  // start with distributed slack if present, else reactive limits
     bool seqChanged = false;                                 // did any outer loop re-solve during the current RL->DS sequence
     std::vector<int> prodIters(nS, 0);                       // PER-SCENARIO productive outer iterations: OLF's
                                                              // maxOuterLoopIterations is a per-RUN budget — a global
                                                              // counter capped busy chunks collectively (violation-diff
                                                              // root cause: a scenario solved solo matched the CPU
                                                              // exactly but diverged inside a full 500-chunk)
+    // A phase transition after a NO-SWITCH pass must NOT re-solve: OLF's runOuterLoop re-solves only on an
+    // UNSTABLE check — a STABLE loop is followed by checking the NEXT loop against the SAME state. The device
+    // Newton forces >=1 iteration per solve (matching OLF's per-run behavior), so an extra no-op pass would
+    // move an already-converged state off the CPU's by ~the stopping residual (measured 4e-4 kV on the
+    // DS->RL transition with a distributed base). solvePass=false skips the inner Newton for such a pass.
+    bool solvePass = true;
     for (int outer = 0; outer < maxOuter; outer++) {
     std::copy(active.begin(), active.end(), wasActive.begin());   // scenarios (re)solved in this inner pass
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
@@ -2719,6 +3186,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     for (char a : active) {
         if (a) nActive++;
     }
+    if (solvePass) {
 
     for (int it = 0; it <= maxIter && nActive > 0; it++) {
         // ---- batched fill for all active scenarios: J + F, or F-ONLY when this iteration
@@ -2734,9 +3202,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         initFBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dTarget.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (ctx->st->cb.ne) {
             if (fOnly) {
-                fillClosedBranchBatchF<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->st->cbTrig.as<double>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>());
+                fillClosedBranchBatchF<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->st->cbTrig.as<double>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0);
             } else {
-                fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>());
+                fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0);
             }
         }
         if (ctx->st->ob.ne) {
@@ -2748,9 +3216,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
         if (ctx->st->sh.ne) {
             if (fOnly) {
-                fillShuntBatchF<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>());
+                fillShuntBatchF<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0);
             } else {
-                fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>());
+                fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0);
             }
         }
         if (ctx->st->hv.ne) {
@@ -2762,6 +3230,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
         if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
         if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
+        if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>());
         applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: stream-ordered into the solve, no host sync
@@ -3033,6 +3502,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync
         }
     }   // ---- end inner Newton loop ----
+    }   // ---- end if (solvePass) ----
 
     if (!fullLoadflow) {
         break;                                              // fixed-iter / no controllers: one pass only
@@ -3049,9 +3519,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // bus reactive balance. Disabled branches are skipped (outage); dVals is scratch (the next inner
     // iteration memsets and refills it).
     CUDA_CHECK(cudaMemsetAsync(ctx->dQbuf.p, 0, nTot * sizeof(double), ctx->stream));
-    if (ctx->st->cb.ne) fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>());
+    // Reactive-limit Q buffer: physical bus-Q for PV-limit detection — keep the FROZEN routing
+    // (dynReloc=0), the relocation only concerns the Newton residual, not this diagnostic Q.
+    if (ctx->st->cb.ne) fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), nullptr, nullptr, nullptr, 0);
     if (ctx->st->ob.ne) fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>());
-    if (ctx->st->sh.ne) fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>());
+    if (ctx->st->sh.ne) fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), nullptr, nullptr, nullptr, 0);
     // Zero-impedance dummy transfers MUST be in the Q/P buffer too: the distributed-slack retain
     // reads the slack row's balance from dQbuf — without the coupler's dummy-P the DS sees a
     // phantom mismatch equal to the through-flow and distributes it FOREVER (measured: +392 MW
@@ -3061,6 +3533,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // Apply ONLY the current phase's outer loop this pass (sequential, like OLF) — never both at once.
     bool inDsPhase = (phase == 0);
     if (inDsPhase) {                                       // distributed-slack outer loop: spread the slack mismatch
+        if (ctx->dsSlackOnly) {
+            slackOnlyDsCheck<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->dsSlackPhiRow, ctx->dsSlackTargetP,
+                    SLACK_DIST_TOL, ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
+                    ctx->dDsSlackAbsorbed.as<double>(), ctx->dRlSwitched.as<char>());
+        }
         if (ctx->nds > 0) {
             // Recompute the slack's retained share from the CURRENT total imbalance every pass (NOT frozen at
             // pass 0) so a participating slack tracks the loss change during redistribution.
@@ -3068,16 +3545,26 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     1.0 - ctx->dsFactorSum, ctx->dDsPhiRow.as<int>(), ctx->dDsBaseTargetP.as<double>(),
                     ctx->dTarget.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
                     ctx->dDsRetain.as<double>(),
-                    hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvBaseDelta.as<double>());
+                    hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvBaseDelta.as<double>(),
+                    hasDsAnchor ? dDsAnchorShift.as<double>() : nullptr,
+                    hasDsAnchor ? dDsSlackShift.as<double>() : nullptr,
+                    ctx->dsMode, ctx->dsMode == 1 ? ctx->dDsMarginUp.as<double>() : nullptr,
+                    ctx->dsMode == 1 ? ctx->dDsMarginDown.as<double>() : nullptr,
+                    ctx->dsSlackMarginUp, ctx->dsSlackMarginDown);
             if (!ctx->dDsResidual.p) ctx->dDsResidual.alloc(nS * sizeof(char));
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsResidual.p, 0, nS * sizeof(char), ctx->stream));
             distributeSlackBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nds, nS, n, SLACK_DIST_TOL, P_RESIDUE_EPS,
                     ctx->dsSlackPhiRow, ctx->dsSlackTargetP, ctx->dDsPhiRow.as<int>(),
                     ctx->dDsFactor.as<double>(), ctx->dDsBaseTargetP.as<double>(),
+                    hasDsAnchor ? dDsAnchorShift.as<double>() : nullptr,
+                    hasDsAnchor ? dDsSlackShift.as<double>() : nullptr,
                     ctx->dDsMaxDelta.as<double>(), ctx->dDsMinDelta.as<double>(), ctx->dDsRetain.as<double>(),
                     ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
                     hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvFactorDelta.as<double>(),
                     dDsOvBaseDelta.as<double>(), dDsOvMaxDelta.as<double>(), dDsOvMinDelta.as<double>(),
+                    ctx->dsMode, ctx->dsMode == 1 ? ctx->dDsMarginUp.as<double>() : nullptr,
+                    ctx->dsMode == 1 ? ctx->dDsMarginDown.as<double>() : nullptr,
+                    ctx->dsSlackMarginUp, ctx->dsSlackMarginDown,
                     ctx->dTarget.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>());
         }
     } else {                                               // reactive-limits outer loop: switch PV->PQ over Q limit
@@ -3086,11 +3573,26 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dRlVrow.as<int>(), ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
                     ctx->dRlVtarget.as<double>(), ctx->dQbuf.as<double>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
                     ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
-                    ctx->dRlLimitType.as<char>(), ctx->dRlSwitchCount.as<char>(), ctx->dRlSwitched.as<char>());
+                    ctx->dRlLimitType.as<char>(), ctx->dRlSwitchCount.as<char>(), ctx->dRlSwitched.as<char>(),
+                    nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
+                    nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr);
         }
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     CUDA_CHECK(cudaMemcpy(rlSwitched.data(), ctx->dRlSwitched.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
+    if (inDsPhase && ctx->nds > 0 && getenv("OLF_GPU_DS_DEBUG")) {
+        double slackP = 0.0;
+        double retain0 = 0.0;
+        double tgt0 = 0.0;
+        CUDA_CHECK(cudaMemcpy(&slackP, ctx->dQbuf.as<double>() + ctx->dsSlackPhiRow, sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&retain0, ctx->dDsRetain.as<double>(), sizeof(double), cudaMemcpyDeviceToHost));
+        int row0 = 0;
+        CUDA_CHECK(cudaMemcpy(&row0, ctx->dDsPhiRow.as<int>(), sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&tgt0, ctx->dTarget.as<double>() + row0, sizeof(double), cudaMemcpyDeviceToHost));
+        std::fprintf(stderr, "[DS-DEV] scen0 pass: slackP=%.6f slackTargetP=%.6f retain=%.6f rem=%.6f tol=%.1e part0Target=%.6f switched=%d\n",
+                slackP, ctx->dsSlackTargetP, retain0, (slackP - ctx->dsSlackTargetP) - retain0, SLACK_DIST_TOL,
+                tgt0, (int) rlSwitched[0]);
+    }
     if (inDsPhase && ctx->nds > 0 && dsRejectResidual) {
         // slackDistributionFailureBehavior != LEAVE_ON_SLACK_BUS: a scenario whose participants all
         // saturated must NOT be reported converged with the residual absorbed at the slack — route it
@@ -3125,6 +3627,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             active[s] = rlSwitched[s];                      // re-solve only the scenarios it changed, stay in this phase
         }
         seqChanged = true;
+        solvePass = true;                                   // mutated targets/modes -> a real re-solve is due
     } else {                                               // this outer loop stabilized
         if (inDsPhase && ctx->nrl > 0) {
             phase = 1;                                      // distributed slack done -> move to reactive limits
@@ -3133,11 +3636,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 break;                                      // a full DS->RL sequence re-solved nothing -> converged
             }
             seqChanged = false;
-            phase = (ctx->nds > 0) ? 0 : 1;                 // restart the sequence at the first loop (distributed slack)
+            phase = (ctx->nds > 0 || ctx->dsSlackOnly) ? 0 : 1;   // restart the sequence at the first loop (distributed slack)
         }
         for (int s = 0; s < nS; s++) {
-            active[s] = live[s];                            // re-check every live scenario in the next phase
+            active[s] = live[s];                            // re-CHECK every live scenario in the next phase...
         }
+        solvePass = false;                                  // ...against the SAME state: STABLE never re-solves (OLF)
     }
     }   // ---- end sequential outer-loop driver ----
 
@@ -3186,7 +3690,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
         jdoubleArray jshIn, jintArray jshIdx, jdoubleArray jhvIn, jintArray jhvIdx,
         jintArray jdqElem, jintArray jdqSide, jdoubleArray jdqWeight, jintArray jdqRow, jintArray jdqKind,
         jdoubleArray jziIn, jintArray jziIdx,
-        jintArray jdrRow, jintArray jdrCol, jdoubleArray jdrCoef) {
+        jintArray jdrRow, jintArray jdrCol, jdoubleArray jdrCoef,
+        jintArray jdbRow, jintArray jdbCol, jdoubleArray jdbCoef) {
     jdouble* cbIn = env->GetDoubleArrayElements(jcbIn, nullptr);
     jint* cbIdx = env->GetIntArrayElements(jcbIdx, nullptr);
     jdouble* obIn = env->GetDoubleArrayElements(jobIn, nullptr);
@@ -3205,14 +3710,18 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
     jint* drRow = env->GetIntArrayElements(jdrRow, nullptr);
     jint* drCol = env->GetIntArrayElements(jdrCol, nullptr);
     jdouble* drCoef = env->GetDoubleArrayElements(jdrCoef, nullptr);
+    jint* dbRow = env->GetIntArrayElements(jdbRow, nullptr);
+    jint* dbCol = env->GetIntArrayElements(jdbCol, nullptr);
+    jdouble* dbCoef = env->GetDoubleArrayElements(jdbCoef, nullptr);
 
-    int ncb = env->GetArrayLength(jcbIdx) / 10;
+    int ncb = env->GetArrayLength(jcbIdx) / 12;             // cbIdx stride 12 (…a1col r1col qAlt1 qAlt2)
     int nob = env->GetArrayLength(jobIdx) / 6;
-    int nsh = env->GetArrayLength(jshIdx) / 3;
+    int nsh = env->GetArrayLength(jshIdx) / 5;             // shIdx stride 5 (P Q v bcol qAlt)
     int nhv = env->GetArrayLength(jhvIdx) / 4;
     int ndq = env->GetArrayLength(jdqElem);
     int nzi = env->GetArrayLength(jziIdx) / 11;
     int ndr = env->GetArrayLength(jdrRow);
+    int ndb = env->GetArrayLength(jdbRow);
 
     std::string error;
     SharedStructurePtr* st = nullptr;
@@ -3221,7 +3730,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
                                                    nsh, shIn, shIdx, nhv, hvIn, hvIdx,
                                                    ndq, dqElem, dqSide, dqWeight, dqRow, dqKind,
                                                    nzi, ziIn, ziIdx,
-                                                   ndr, drRow, drCol, drCoef));
+                                                   ndr, drRow, drCol, drCoef,
+                                                   ndb, dbRow, dbCol, dbCoef));
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {
@@ -3246,6 +3756,9 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
     env->ReleaseIntArrayElements(jdrRow, drRow, JNI_ABORT);
     env->ReleaseIntArrayElements(jdrCol, drCol, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jdrCoef, drCoef, JNI_ABORT);
+    env->ReleaseIntArrayElements(jdbRow, dbRow, JNI_ABORT);
+    env->ReleaseIntArrayElements(jdbCol, dbCol, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jdbCoef, dbCoef, JNI_ABORT);
 
     if (!error.empty()) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
@@ -3376,7 +3889,9 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBa
         jintArray jrlVrow, jdoubleArray jrlMinQ, jdoubleArray jrlMaxQ, jdoubleArray jrlLoadQ,
         jdoubleArray jrlVtarget, jintArray jdsPhiRow, jdoubleArray jdsFactor,
         jint jdsSlackPhiRow, jdouble jdsSlackTargetP,
-        jdoubleArray jdsBaseTargetP, jdoubleArray jdsMaxDelta, jdoubleArray jdsMinDelta) {
+        jdoubleArray jdsBaseTargetP, jdoubleArray jdsMaxDelta, jdoubleArray jdsMinDelta,
+        jint jdsMode, jdoubleArray jdsMarginUp, jdoubleArray jdsMarginDown,
+        jdouble jdsSlackMarginUp, jdouble jdsSlackMarginDown) {
     auto* st = reinterpret_cast<SharedStructurePtr*>(structureHandle);
     jint* rlVrow = env->GetIntArrayElements(jrlVrow, nullptr);
     jdouble* rlMinQ = env->GetDoubleArrayElements(jrlMinQ, nullptr);
@@ -3388,6 +3903,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBa
     jdouble* dsBaseTargetP = env->GetDoubleArrayElements(jdsBaseTargetP, nullptr);
     jdouble* dsMaxDelta = env->GetDoubleArrayElements(jdsMaxDelta, nullptr);
     jdouble* dsMinDelta = env->GetDoubleArrayElements(jdsMinDelta, nullptr);
+    jdouble* dsMarginUp = env->GetDoubleArrayElements(jdsMarginUp, nullptr);
+    jdouble* dsMarginDown = env->GetDoubleArrayElements(jdsMarginDown, nullptr);
 
     int nrl = env->GetArrayLength(jrlVrow);
     int nds = env->GetArrayLength(jdsPhiRow);
@@ -3401,7 +3918,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBa
         ctx = createBatchContext(*st, nScenarios, mode,
                                  nrl, rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget,
                                  nds, dsPhiRow, dsFactor, jdsSlackPhiRow, jdsSlackTargetP,
-                                 dsBaseTargetP, dsMaxDelta, dsMinDelta);
+                                 dsBaseTargetP, dsMaxDelta, dsMinDelta,
+                                 jdsMode, dsMarginUp, dsMarginDown, jdsSlackMarginUp, jdsSlackMarginDown);
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {
@@ -3418,6 +3936,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBa
     env->ReleaseDoubleArrayElements(jdsBaseTargetP, dsBaseTargetP, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jdsMaxDelta, dsMaxDelta, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jdsMinDelta, dsMinDelta, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jdsMarginUp, dsMarginUp, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jdsMarginDown, dsMarginDown, JNI_ABORT);
 
     if (!error.empty()) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
@@ -3433,7 +3953,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jobjectArray jrowMode, jintArray jbaseRowMode, jobjectArray jdisabledMask,
         jintArray jtargetOverrideIndex, jdoubleArray jtargetOverrideValue,
         jintArray jdsOverrideBus, jdoubleArray jdsOverrideFactorDelta, jdoubleArray jdsOverrideBaseDelta,
-        jdoubleArray jdsOverrideMaxDelta, jdoubleArray jdsOverrideMinDelta, jint maxIter, jdouble tol,
+        jdoubleArray jdsOverrideMaxDelta, jdoubleArray jdsOverrideMinDelta, jdoubleArray jdsAnchorShift,
+        jdoubleArray jdsSlackShift, jintArray jrlVtOvSlotIdx, jdoubleArray jrlVtOvVal, jint maxIter, jdouble tol,
         jdouble reactiveLimitTol, jdouble slackDistTol, jdouble convEpsPerEq,
         jint lsMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType, jdoubleArray jx0Full,
         jintArray jShuntOvSlotElem, jdoubleArray jShuntOvGb,
@@ -3565,11 +4086,34 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
             env->GetDoubleArrayRegion(jdsOverrideMaxDelta, 0, nDsOv, dsOvMaxDelta.data());
             env->GetDoubleArrayRegion(jdsOverrideMinDelta, 0, nDsOv, dsOvMinDelta.data());
         }
+        std::vector<double> dsAnchorVec;
+        if (jdsAnchorShift != nullptr) {
+            dsAnchorVec.resize(env->GetArrayLength(jdsAnchorShift));
+            env->GetDoubleArrayRegion(jdsAnchorShift, 0, static_cast<jsize>(dsAnchorVec.size()), dsAnchorVec.data());
+        }
+        std::vector<double> dsSlackShiftVec;
+        if (jdsSlackShift != nullptr) {
+            dsSlackShiftVec.resize(env->GetArrayLength(jdsSlackShift));
+            env->GetDoubleArrayRegion(jdsSlackShift, 0, static_cast<jsize>(dsSlackShiftVec.size()), dsSlackShiftVec.data());
+        }
+        std::vector<int> rlVtOvSlotIdxVec;
+        std::vector<double> rlVtOvValVec;
+        if (jrlVtOvSlotIdx != nullptr && jrlVtOvVal != nullptr) {
+            rlVtOvSlotIdxVec.resize(env->GetArrayLength(jrlVtOvSlotIdx));
+            env->GetIntArrayRegion(jrlVtOvSlotIdx, 0, static_cast<jsize>(rlVtOvSlotIdxVec.size()), rlVtOvSlotIdxVec.data());
+            rlVtOvValVec.resize(env->GetArrayLength(jrlVtOvVal));
+            env->GetDoubleArrayRegion(jrlVtOvVal, 0, static_cast<jsize>(rlVtOvValVec.size()), rlVtOvValVec.data());
+        }
 
         res = solveBatchContext(ctx, x0.data(), target.data(), rowMode.data(), baseRowMode.data(), disabled.data(),
                                 nOv, ovIndex.data(), ovValue.data(),
                                 nDsOv > 0 ? dsOvBus.data() : nullptr, dsOvFactorDelta.data(),
-                                dsOvBaseDelta.data(), dsOvMaxDelta.data(), dsOvMinDelta.data(), maxIter, tol,
+                                dsOvBaseDelta.data(), dsOvMaxDelta.data(), dsOvMinDelta.data(),
+                                dsAnchorVec.empty() ? nullptr : dsAnchorVec.data(),
+                                dsSlackShiftVec.empty() ? nullptr : dsSlackShiftVec.data(),
+                                static_cast<int>(rlVtOvValVec.size()),
+                                rlVtOvSlotIdxVec.empty() ? nullptr : rlVtOvSlotIdxVec.data(),
+                                rlVtOvValVec.empty() ? nullptr : rlVtOvValVec.data(), maxIter, tol,
                                 reactiveLimitTol, slackDistTol, convEpsPerEq,
                                 lsMode, maxDv, maxDphi, varTypeVec.empty() ? nullptr : varTypeVec.data(),
                                 x0FullVec.empty() ? nullptr : x0FullVec.data(),
@@ -3614,6 +4158,143 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         env->SetObjectArrayElement(out, s, row);
         env->DeleteLocalRef(row);
     }
+    return out;
+}
+
+// Read back the batch context's per-scenario TARGET buffer (n * nScenarios doubles) after a solve —
+// the device outer loops (distributed slack) mutate targets in place, and the strategy/pair phase needs
+// the PARENT contingency's final distributed targets to re-anchor its own distribution (OLF's
+// setGeneratorsInitialTargetPToTargetP semantics).
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchTargets(
+        JNIEnv* env, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return nullptr;
+    }
+    size_t nTot = static_cast<size_t>(ctx->n) * ctx->nScenarios;
+    std::vector<double> host(nTot);
+    cudaMemcpy(host.data(), ctx->dTarget.p, nTot * sizeof(double), cudaMemcpyDeviceToHost);
+    jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(nTot));
+    env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(nTot), host.data());
+    return out;
+}
+
+// Batched SENSITIVITY solve for the incremental outer-loop family (device port of OLF's
+// SensitivityContext): J at the given per-scenario states (the same forward system the Newton
+// solves — OLF's "solveTransposed" IS the forward direction in powsybl-math's transposed
+// storage), factorized once, solved for a unit RHS at each controller's pinned-variable
+// identity row (BRANCH_TARGET_RHO1 & co, storage row = rowMap[eqRow]); the requested variable
+// columns of each solution are gathered per scenario. MUST be called on a context that has just
+// completed solveBatchContext with the SAME per-scenario overrides/row modes — the fill reads
+// them from the live device buffers. UBATCH modes (3/4/5) only.
+std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const double* states,
+                                            int k, const int* unitEqRows, int m, const int* observeVarCols) {
+    if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5) {
+        throw std::runtime_error("solveBatchSensitivities: UBATCH modes (3/4/5) only");
+    }
+    int n = ctx->st->n;
+    int nS = ctx->nScenarios;
+    int nnz = ctx->st->nnz;
+
+    CUDA_CHECK(cudaMemcpyAsync(ctx->dX.p, states, (size_t) n * nS * sizeof(double), cudaMemcpyHostToDevice, ctx->stream));
+    std::vector<char> allActive(nS, 1);
+    CUDA_CHECK(cudaMemcpyAsync(ctx->dActive.p, allActive.data(), nS * sizeof(char), cudaMemcpyHostToDevice, ctx->stream));
+
+    // ---- J fill at the converged states (same launches as the solve loop's full fill) ----
+    CUDA_CHECK(cudaMemsetAsync(ctx->dVals.p, 0, (size_t) nnz * nS * sizeof(double), ctx->stream));
+    initFBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dTarget.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
+    if (ctx->st->cb.ne) {
+        fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0);
+    }
+    if (ctx->st->ob.ne) {
+        fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+    }
+    if (ctx->st->sh.ne) {
+        fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0);
+    }
+    if (ctx->st->hv.ne) {
+        fillHvdcBatch<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+    }
+    if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+    if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
+    if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
+    if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>());
+    applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
+
+    if (!ctx->analyzed) {
+        CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+        ctx->analyzed = true;
+    }
+    DeviceBuf dObs, dOut;
+    dObs.upload(observeVarCols, m * sizeof(int));
+    dOut.alloc((size_t) nS * k * m * sizeof(double));
+    for (int ki = 0; ki < k; ki++) {
+        int row = ctx->st->rowMap[unitEqRows[ki]];           // equation row -> CSR storage row
+        if (row < 0) {
+            throw std::runtime_error("solveBatchSensitivities: unit row not an active equation");
+        }
+        setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
+        int phase = CUDSS_PHASE_SOLVE | (ki == 0 ? CUDSS_PHASE_FACTORIZATION : 0);
+        CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+        gatherSensiBatch<<<grid(nS * m), BLOCK, 0, ctx->stream>>>(n, nS, k, m, ki, dObs.as<int>(),
+                ctx->dDx.as<double>(), dOut.as<double>());
+    }
+    ctx->factored = true;                                    // keep mode-5 REFACTORIZATION bookkeeping honest
+    std::vector<double> out((size_t) nS * k * m);
+    CUDA_CHECK(cudaMemcpyAsync(out.data(), dOut.p, out.size() * sizeof(double), cudaMemcpyDeviceToHost, ctx->stream));
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    return out;
+}
+
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBatchSensitivities(
+        JNIEnv* env, jclass, jlong handle, jdoubleArray jstates, jintArray junitRows, jintArray jobserveCols) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return nullptr;
+    }
+    std::vector<double> states(env->GetArrayLength(jstates));
+    env->GetDoubleArrayRegion(jstates, 0, (jsize) states.size(), states.data());
+    std::vector<int> unitRows(env->GetArrayLength(junitRows));
+    env->GetIntArrayRegion(junitRows, 0, (jsize) unitRows.size(), unitRows.data());
+    std::vector<int> observeCols(env->GetArrayLength(jobserveCols));
+    env->GetIntArrayRegion(jobserveCols, 0, (jsize) observeCols.size(), observeCols.data());
+    std::string error;
+    std::vector<double> out;
+    try {
+        if (states.size() != (size_t) ctx->st->n * ctx->nScenarios) {
+            throw std::runtime_error("states size mismatch");
+        }
+        out = solveBatchSensitivities(ctx, states.data(),
+                (int) unitRows.size(), unitRows.data(), (int) observeCols.size(), observeCols.data());
+    } catch (const std::exception& e) {
+        error = e.what();
+    }
+    if (!error.empty()) {
+        env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
+                      ("GPU batched sensitivity solve failed: " + error).c_str());
+        return nullptr;
+    }
+    jdoubleArray jout = env->NewDoubleArray((jsize) out.size());
+    env->SetDoubleArrayRegion(jout, 0, (jsize) out.size(), out.data());
+    return jout;
+}
+
+// Per-scenario slack-only-DS absorbed totals after a solve (see slackOnlyDsCheck) — the pair phase
+// seeds its scenarios with the parent contingency's value (the device analogue of OLF's
+// setGeneratorsInitialTargetPToTargetP before a strategy re-solve). Null when not slack-only.
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchSlackAbsorbed(
+        JNIEnv* env, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || !ctx->dsSlackOnly) {
+        return nullptr;
+    }
+    std::vector<double> host(ctx->nScenarios);
+    cudaMemcpy(host.data(), ctx->dDsSlackAbsorbed.p, ctx->nScenarios * sizeof(double), cudaMemcpyDeviceToHost);
+    jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(ctx->nScenarios));
+    env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(ctx->nScenarios), host.data());
     return out;
 }
 

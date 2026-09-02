@@ -105,6 +105,7 @@ class GpuBatchedReactiveLimitsTest {
                 new int[0], new double[0], -1, 0.0,    // distributed slack off (CPU reference has it off too)
                 new double[0], new double[0], new double[0],
                 new int[0], new int[0], new double[0], new int[0], new int[0],
+                new int[0], new int[0], new double[0],
                 new int[0], new int[0], new double[0], new double[0], new int[0]);
         int n = baseState.length;
         int status = (int) batch[0][n + 2];

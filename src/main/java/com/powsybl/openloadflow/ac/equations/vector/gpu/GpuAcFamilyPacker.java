@@ -56,7 +56,9 @@ final class GpuAcFamilyPacker {
         int[] branchAlphaCol = columns.branchAlphaCol();
         int[] dummyPCol = columns.dummyPCol();
         int[] dummyQCol = columns.dummyQCol();
+        int[] shuntBCol = columns.shuntBCol();
         int[] qRow = columns.qRow();
+        int[] qRowAlt = columns.qRowAlt();                   // Dynamic Q-relocation: 2nd candidate Q row per bus (§11)
         int nBuses = network.getBuses().size();
         int nBranches = network.getBranches().size();
 
@@ -119,7 +121,8 @@ final class GpuAcFamilyPacker {
                 // transformer's rho col when this bus is voltage-controlled). a1col/r1col carry the
                 // branch's own control columns, -1 when not derived (then those scatter rows skip).
                 cbIdx.add(new int[] {ph1, qRow[b1.getNum()], ph2, qRow[b2.getNum()],
-                    ph1, v1, ph2, v2, a1col, r1col});
+                    ph1, v1, ph2, v2, a1col, r1col,
+                    qRowAlt[b1.getNum()], qRowAlt[b2.getNum()]});    // [10],[11]: alternate Q rows (dyn reloc)
             } else if (b2 != null) {                       // side 1 open: p2/q2 at bus2, variable v2
                 obElemOf[br.getNum()] = obIn.size();
                 obIn.add(new double[] {pi.getY(), pi.getKsi(), pi.getG1(), pi.getB1(), pi.getG2(), pi.getB2(), pi.getR1()});
@@ -159,7 +162,8 @@ final class GpuAcFamilyPacker {
                 cbIn.add(new double[] {pi.getY(), pi.getG1(), pi.getG2(), pi.getB1(), pi.getB2(),
                     pi.getKsi(), pi.getR1(), pi.getA1()});
                 cbIdx.add(new int[] {ph1, qRow[b1.getNum()], ph2, qRow[b2.getNum()],
-                    ph1, v1, ph2, v2, -1, -1});              // no control columns on a disabled branch
+                    ph1, v1, ph2, v2, -1, -1,                // no control columns on a disabled branch
+                    qRowAlt[b1.getNum()], qRowAlt[b2.getNum()]});    // [10],[11]: alternate Q rows (dyn reloc)
             }
         }
 
@@ -205,11 +209,23 @@ final class GpuAcFamilyPacker {
         int[] shElemOf = new int[nBuses];                    // shunt element index per bus (-1 = none)
         java.util.Arrays.fill(shElemOf, -1);
         for (LfBus bus : network.getBuses()) {
+            // Fixed (non-controlling) shunt: b is a constant (bRow = -1, idx 3). shElemOf points DISTR_Q's
+            // reactive contribution at the fixed shunt.
             bus.getShunt().ifPresent(sh -> {
                 shElemOf[bus.getNum()] = shIn.size();
                 shIn.add(new double[] {sh.getG(), sh.getB()});
                 shIdx.add(new int[] {
-                    phiCol[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()]});
+                    phiCol[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], -1,
+                    qRowAlt[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
+            });
+            // Voltage-CONTROLLING shunt: its susceptance b is a SHUNT_B state variable (bRow >= 0, idx 3), so the
+            // device reads b from x and scatters dq/db onto the b column — the exact analogue of a transformer's
+            // BRANCH_RHO1. bRow = -1 degrades it to a fixed shunt (shunt voltage control off in the equation system).
+            bus.getControllerShunt().ifPresent(sh -> {
+                shIn.add(new double[] {sh.getG(), sh.getB()});
+                shIdx.add(new int[] {
+                    phiCol[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], shuntBCol[sh.getNum()],
+                    qRowAlt[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
             });
         }
 

@@ -227,6 +227,15 @@ final class GpuAcFamilyPacker {
                     phiCol[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], shuntBCol[sh.getNum()],
                     qRowAlt[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
             });
+            // SVC stand-by shunt (StandbyAutomaton b0): a permanent fixed susceptance the SVC injects
+            // whether standing by or active — a plain fixed-shunt element (silently dropping it was a
+            // 1.17 kV wrong answer on the monitoring network, found 2026-09-02).
+            bus.getSvcShunt().ifPresent(sh -> {
+                shIn.add(new double[] {sh.getG(), sh.getB()});
+                shIdx.add(new int[] {
+                    phiCol[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], -1,
+                    qRowAlt[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
+            });
         }
 
         List<double[]> hvIn = new ArrayList<>();

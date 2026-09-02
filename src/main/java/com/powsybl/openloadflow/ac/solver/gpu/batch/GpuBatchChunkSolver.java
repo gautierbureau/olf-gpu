@@ -60,6 +60,7 @@ final class GpuBatchChunkSolver {
                                                GpuBatchIncrementalFlowControl.EsContext esContext,
                                                List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers,
                                                GpuBatchSecondaryVc.Controllers svcControllers,
+                                               List<GpuBatchVoltageMonitoring.Ctl> monitoringControllers,
                                                BatchConfig config) {
         int nb = batchedIndices.size();
         int chunkSize = GpuBatchContextCache.resolveChunkSize(nb, n, gpuData);
@@ -411,7 +412,8 @@ final class GpuBatchChunkSolver {
                     }
                     boolean dbgPairRl = pairPhase && nrl > 0 && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_RL"));
                     boolean svcActive = svcControllers != null && !svcControllers.ctls().isEmpty();
-                    int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl || svcActive) && nrl > 0 ? new int[chunkSize * nrl] : null;
+                    boolean monActive = monitoringControllers != null && !monitoringControllers.isEmpty();
+                    int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl || svcActive || monActive) && nrl > 0 ? new int[chunkSize * nrl] : null;
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
                             dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
@@ -425,6 +427,10 @@ final class GpuBatchChunkSolver {
                             r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
                             config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(),
+                            // monitoring active: OLF checks VoltageMonitoring BEFORE ReactiveLimits — the main
+                            // solve surfaces the DS-stable / pre-RL state; the orchestrator then interleaves
+                            // and finishes with the full RL-enabled solves.
+                            monActive ? 1 : 0,
                             nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
                     if (dbgPairRl) {
@@ -512,6 +518,22 @@ final class GpuBatchChunkSolver {
                                 chunkResults, hvdcControllers, hvdcStatus, config.hvdcLimits(), esContext,
                                 rowModePerScenario, baseRowMode, disabledMask,
                                 preHvdcOvIdx, preHvdcOvVal,
+                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                                dsAnchorShift, dsSlackShift,
+                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                config.lsMode() == 2 ? varType : null, config);
+                    }
+                    if (monActive && rlStateOut != null) {
+                        chunkResults = GpuBatchVoltageMonitoring.orchestrate(handle, chunkSize, realCount, n, nrl,
+                                chunkResults, monitoringControllers, rlStateOut,
+                                rowModePerScenario, baseRowMode, disabledMask,
+                                targetOverrideIndex, targetOverrideValue,
                                 dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
                                 dsAnchorShift, dsSlackShift,
                                 r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),

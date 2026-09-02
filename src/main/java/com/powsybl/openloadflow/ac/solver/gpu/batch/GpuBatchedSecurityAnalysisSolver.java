@@ -364,6 +364,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
                                     new GpuBatchIncrementalFlowControl.EsContext(equationSystem.getStateVector(), n),
                                     config.minPlausibleTargetV(), config.maxPlausibleTargetV())
                             : null,
+                    config.voltageMonitoring()
+                            ? GpuBatchVoltageMonitoring.buildControllers(network, equationSystem, targetVector,
+                                    baseActivation, baseTargets, gpuData.rlVrow())
+                            : null,
                     config);
         }
 

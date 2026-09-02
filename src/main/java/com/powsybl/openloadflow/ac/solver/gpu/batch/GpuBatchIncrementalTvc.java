@@ -346,7 +346,7 @@ final class GpuBatchIncrementalTvc {
                     shOvSlotElem, shOvGb, null, null,
                     r1Slot.stream().mapToInt(Integer::intValue).toArray(),
                     r1Val.stream().mapToDouble(Double::doubleValue).toArray(),
-                    config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(),
+                    config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0,
                     nziBase, ziOnSlotElem, ziOffSlotElem);
             for (int s = 0; s < realCount; s++) {
                 if (affected[s]) {                           // untouched scenarios KEEP their converged state

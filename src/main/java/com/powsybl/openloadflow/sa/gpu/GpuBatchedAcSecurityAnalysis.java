@@ -185,7 +185,15 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         boolean frozenHvdcBase = !lfNetwork.getHvdcs().isEmpty()
                 && com.powsybl.openloadflow.OpenLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters())
                         .isStartWithFrozenACEmulation();
-        if (!scope.batchDisabled() && !multiThread && gpuBaseLoadFlowEnabled() && !frozenHvdcBase
+        // A MONITORING SVC can activate mid-run in the BASE load flow (VoltageMonitoring loop) — another
+        // configuration the SEQUENTIAL GPU solver path does not handle (the batch does, via the
+        // per-scenario activation deltas): keep the base on the CPU, the batch still runs.
+        boolean monitoringSvcBase = lfNetwork.getBuses().stream()
+                .flatMap(b -> b.getGenerators().stream())
+                .anyMatch(g -> g.getGeneratorControlType()
+                        == com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.MONITORING_VOLTAGE);
+        boolean cpuBaseOnly = frozenHvdcBase || monitoringSvcBase;
+        if (!scope.batchDisabled() && !multiThread && gpuBaseLoadFlowEnabled() && !cpuBaseOnly
                 && GpuAcNewtonSolver.isAvailable()
                 && acParameters.getSolverFactory().getClass() == NewtonRaphsonFactory.class) {
             LOGGER.info("GPU-batched SA: running the base load flow on the GPU Newton-Raphson "
@@ -219,7 +227,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // When the batch is disabled by the outer-loop guard, ALSO skip the solver swap: the provider then
         // behaves exactly like the stock CPU AcSecurityAnalysis (the safety contract), and the sequential
         // per-contingency runs avoid the GPU-inner-solver + outer-loop-switching path (open CME bug there).
-        if (!scope.batchDisabled() && gpuBaseLoadFlowEnabled() && !frozenHvdcBase
+        if (!scope.batchDisabled() && gpuBaseLoadFlowEnabled() && !cpuBaseOnly
                 && GpuAcNewtonSolver.isAvailable() && GpuSaRunScope.gpuSupports(lfNetwork, acParameters)) {
             acParameters.setSolverFactory(new GpuNewtonRaphsonFactory(), securityAnalysisParameters.getLoadFlowParameters());
             LOGGER.info("GPU batched SA: base + fall-through load flows run on the GPU Newton-Raphson (CUDA pre-warm)");

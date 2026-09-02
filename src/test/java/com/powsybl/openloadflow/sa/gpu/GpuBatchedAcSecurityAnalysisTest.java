@@ -666,6 +666,36 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
     }
 
+    /** DEVICE-mode VoltageMonitoring with a MONITORING SVC (stand-by automaton): the standing-by bus
+     *  seeds UNPINNED in the device RL pack (rlMonitored) and activates PQ->PV at the automaton
+     *  setpoint when a contingency pushes its V outside the threshold band (GpuBatchVoltageMonitoring);
+     *  GPU SA == CPU SA at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceSvcVoltageMonitoringMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithStaticVarCompensator();
+        com.powsybl.iidm.network.StaticVarCompensator svc1 = network.getStaticVarCompensator("svc1");
+        svc1.setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE)
+                .setRegulating(true);
+        svc1.newExtension(com.powsybl.iidm.network.extensions.StandbyAutomatonAdder.class)
+                .withHighVoltageThreshold(400).withLowVoltageThreshold(388)
+                .withLowVoltageSetpoint(389).withHighVoltageSetpoint(395)
+                .withB0(-0.001f).withStandbyStatus(true).add();
+        com.powsybl.iidm.network.Line l1 = network.getLine("l1");
+        network.newLine().setId("l1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR() * 2).setX(l1.getX() * 2)
+                .setG1(l1.getG1()).setB1(l1.getB1()).setG2(l1.getG2()).setB2(l1.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("l1_BIS", new BranchContingency("l1_BIS")),
+                new Contingency("l1", new BranchContingency("l1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setSvcVoltageMonitoring(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
     private void assertGpuMatchesCpu(Network network, List<Contingency> contingencies) {
         assertGpuMatchesCpu(network, contingencies, 0.5);
     }

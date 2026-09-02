@@ -2112,7 +2112,8 @@ __device__ inline double rlTargetOf(int nRlVtOv, const int* rlVtOvSlotIdx, const
 }
 
 __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* rlVrow,
-                                     const double* rlVtarget, const int* baseMode, const double* x, char* limitType,
+                                     const double* rlVtarget, const char* rlMonitored,
+                                     const int* baseMode, const double* x, char* limitType,
                                      int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
@@ -2125,7 +2126,9 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
     // PQ by a per-scenario gen-loss OVERRIDE (its generator is gone) has base mode 0 and must get limitType 0 so
     // the reactive-limits switch-back leaves it PQ. Only a controller that is PQ in the BASE (an actual Q-limit
     // switch during the base loadflow) gets a pinned limit type so a relieving contingency can switch it back.
-    if (baseMode[vrow] == 1) {                              // PQ in the base case (a real Q-limit switch)
+    if (baseMode[vrow] == 1 && rlMonitored[i] == 0) {       // PQ in the base case (a real Q-limit switch —
+        // NOT a monitoring SVC standing by: that one seeds UNPINNED so only the VoltageMonitoring
+        // orchestrator may activate it, exactly like the CPU's null qLimitType)
         double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, s, i, rlVtarget[i]);
         limitType[st] = (x[idx] < vt) ? 2 : 1;              // v below target ⇒ maxQ pinned; above ⇒ minQ pinned
     } else {
@@ -2617,6 +2620,7 @@ struct BatchSolverContext {
     // buffer); dRlActive marks which scenarios to RL-check this pass; dRlSwitched flags scenarios that switched.
     int nrl = 0;
     DeviceBuf dRlVrow, dRlMinQ, dRlMaxQ, dRlLoadQ, dRlVtarget;   // per controller (nrl)
+    DeviceBuf dRlMonitored;                                // per controller: 1 = MONITORING_VOLTAGE SVC standing by
     DeviceBuf dQbuf, dRlActive, dRlSwitched;               // dQbuf nS*n, dRlActive/dRlSwitched nS
     DeviceBuf dRlLimitType, dRlSwitchCount;               // per (controller, scenario): 0 PV / 1 minQ / 2 maxQ; PV→PQ count
     // Distributed slack: the (mapped) slack BUS_PHI row + its scheduled targetP give the per-scenario
@@ -2798,6 +2802,7 @@ static void setupBatchMatricesFallback(BatchSolverContext* ctx) {
 BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenarios, int mode,
                                        int nrl, const int* rlVrow, const double* rlMinQ,
                                        const double* rlMaxQ, const double* rlLoadQ, const double* rlVtarget,
+                                       const signed char* rlMonitored,
                                        int nds, const int* dsPhiRow, const double* dsFactor,
                                        int dsSlackPhiRow, double dsSlackTargetP,
                                        const double* dsBaseTargetP, const double* dsMaxDelta, const double* dsMinDelta,
@@ -2853,6 +2858,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
         ctx->dRlMaxQ.upload(rlMaxQ, nrl * sizeof(double));
         ctx->dRlLoadQ.upload(rlLoadQ, nrl * sizeof(double));
         ctx->dRlVtarget.upload(rlVtarget, nrl * sizeof(double));
+        ctx->dRlMonitored.upload(rlMonitored, nrl * sizeof(char));
         ctx->dRlLimitType.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(char));
         ctx->dRlSwitchCount.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(char));
     }
@@ -2995,7 +3001,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               const double* x0Full, int nShOv, const int* shOvSlotElem, const double* shOvGb,
                               const int* rlStateIn, int* rlStateOut,
                               int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                              int maxOuterProductive, int rlMaxSwitch, int dsRejectResidual,
+                              int maxOuterProductive, int rlMaxSwitch, int dsRejectResidual, int skipRlPhase,
                               int nziBase, int nZiOn, const int* ziOnSlotElem,
                               int nZiOff, const int* ziOffSlotElem) {
     int n = ctx->n;
@@ -3137,7 +3143,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitchCount.p, 0, static_cast<size_t>(ctx->nrl) * nS * sizeof(char), ctx->stream));
             if (ctx->nrl > 0) {                              // seed the pinned limit for base-PQ controllers (else all PV)
                 initRlLimitTypeBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n, ctx->dRlVrow.as<int>(),
-                        ctx->dRlVtarget.as<double>(), dBaseMode.as<int>(), ctx->dX.as<double>(),
+                        ctx->dRlVtarget.as<double>(), ctx->dRlMonitored.as<char>(), dBaseMode.as<int>(), ctx->dX.as<double>(),
                         ctx->dRlLimitType.as<char>(),
                         nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
                         nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr);
@@ -3568,7 +3574,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dTarget.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>());
         }
     } else {                                               // reactive-limits outer loop: switch PV->PQ over Q limit
-        if (ctx->nrl > 0) {
+        if (ctx->nrl > 0 && !skipRlPhase) {                  // skipRlPhase: a monitoring interleave solve — the
             reactiveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n, REACTIVE_LIMIT_TOL, RL_MAX_SWITCH,
                     ctx->dRlVrow.as<int>(), ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
                     ctx->dRlVtarget.as<double>(), ctx->dQbuf.as<double>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
@@ -3887,7 +3893,7 @@ extern "C" JNIEXPORT jlong JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBatchContext(
         JNIEnv* env, jclass, jlong structureHandle, jint nScenarios, jint mode,
         jintArray jrlVrow, jdoubleArray jrlMinQ, jdoubleArray jrlMaxQ, jdoubleArray jrlLoadQ,
-        jdoubleArray jrlVtarget, jintArray jdsPhiRow, jdoubleArray jdsFactor,
+        jdoubleArray jrlVtarget, jbyteArray jrlMonitored, jintArray jdsPhiRow, jdoubleArray jdsFactor,
         jint jdsSlackPhiRow, jdouble jdsSlackTargetP,
         jdoubleArray jdsBaseTargetP, jdoubleArray jdsMaxDelta, jdoubleArray jdsMinDelta,
         jint jdsMode, jdoubleArray jdsMarginUp, jdoubleArray jdsMarginDown,
@@ -3898,6 +3904,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBa
     jdouble* rlMaxQ = env->GetDoubleArrayElements(jrlMaxQ, nullptr);
     jdouble* rlLoadQ = env->GetDoubleArrayElements(jrlLoadQ, nullptr);
     jdouble* rlVtarget = env->GetDoubleArrayElements(jrlVtarget, nullptr);
+    jbyte* rlMonitored = env->GetByteArrayElements(jrlMonitored, nullptr);
     jint* dsPhiRow = env->GetIntArrayElements(jdsPhiRow, nullptr);
     jdouble* dsFactor = env->GetDoubleArrayElements(jdsFactor, nullptr);
     jdouble* dsBaseTargetP = env->GetDoubleArrayElements(jdsBaseTargetP, nullptr);
@@ -3916,7 +3923,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBa
             throw std::runtime_error("invalid structure handle");
         }
         ctx = createBatchContext(*st, nScenarios, mode,
-                                 nrl, rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget,
+                                 nrl, rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, rlMonitored,
                                  nds, dsPhiRow, dsFactor, jdsSlackPhiRow, jdsSlackTargetP,
                                  dsBaseTargetP, dsMaxDelta, dsMinDelta,
                                  jdsMode, dsMarginUp, dsMarginDown, jdsSlackMarginUp, jdsSlackMarginDown);
@@ -3931,6 +3938,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBa
     env->ReleaseDoubleArrayElements(jrlMaxQ, rlMaxQ, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jrlLoadQ, rlLoadQ, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jrlVtarget, rlVtarget, JNI_ABORT);
+    env->ReleaseByteArrayElements(jrlMonitored, rlMonitored, JNI_ABORT);
     env->ReleaseIntArrayElements(jdsPhiRow, dsPhiRow, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jdsFactor, dsFactor, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jdsBaseTargetP, dsBaseTargetP, JNI_ABORT);
@@ -3960,7 +3968,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jintArray jShuntOvSlotElem, jdoubleArray jShuntOvGb,
         jintArray jRlStateIn, jintArray jRlStateOut,
         jintArray jR1OvSlotElem, jdoubleArray jR1OvVal,
-        jint maxOuterProductive, jint rlMaxSwitch, jint dsRejectResidual,
+        jint maxOuterProductive, jint rlMaxSwitch, jint dsRejectResidual, jint skipRlPhase,
         jint nziBase, jintArray jZiOnSlotElem, jintArray jZiOffSlotElem) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     std::vector<int> r1OvSlotElemVec;
@@ -4125,7 +4133,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
                                 static_cast<int>(r1OvSlotElemVec.size() / 2),
                                 r1OvSlotElemVec.empty() ? nullptr : r1OvSlotElemVec.data(),
                                 r1OvValVec.empty() ? nullptr : r1OvValVec.data(),
-                                maxOuterProductive, rlMaxSwitch, dsRejectResidual,
+                                maxOuterProductive, rlMaxSwitch, dsRejectResidual, skipRlPhase,
                                 nziBase, static_cast<int>(ziOnSlotElemVec.size() / 2),
                                 ziOnSlotElemVec.empty() ? nullptr : ziOnSlotElemVec.data(),
                                 static_cast<int>(ziOffSlotElemVec.size() / 2),

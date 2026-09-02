@@ -286,7 +286,7 @@ public final class GpuBatchTransformerControl {
                     parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                     config.lsMode(), config.maxDv(), config.maxDphi(),
                     config.lsMode() == 2 ? varType : null, x0Full, null, null, null, null, null, null,
-                    config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0, null, null);
+                    config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0, 0, null, null);
             for (int slot : affected) {
                 chunkResults[slot] = r2[slot];
             }

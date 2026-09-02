@@ -84,6 +84,10 @@ final class GpuSaRunScope {
         // Secondary voltage control (GpuBatchSecondaryVc): batched device sensitivities + the zone
         // system replayed per scenario on the host; stage-1 scope is LOCAL generator VC only.
         boolean svcBatchable = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSecondaryVc.supported(lfNetwork);
+        // Voltage monitoring (SVC stand-by automatons, GpuBatchVoltageMonitoring): batchable when every
+        // monitoring SVC is local with an automaton — slope-less plain-VOLTAGE SVCs need no loop support
+        // (ordinary generator-VC buses on the device).
+        boolean monitoringBatchable = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.supported(lfNetwork);
         boolean simpleTvcBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL
                 && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
@@ -111,7 +115,7 @@ final class GpuSaRunScope {
                             && !"IncrementalPhaseControl".equals(name)
                             && !"IncrementalTransformerReactivePowerControl".equals(name)
                             && !(hvdcBatchable && ("AcHvdcAcEmulationLimits".equals(name) || "FreezingHvdcACEmulation".equals(name)))
-                            && !(noSvc && "VoltageMonitoring".equals(name)))
+                            && !(monitoringBatchable && "VoltageMonitoring".equals(name)))
                     .toList());
             // Parameterization corner cases the device DS loop does not model (see
             // docs/gpu-vs-cpu-capabilities.md Part II §A): the device weights are always maxP/droop with
@@ -171,6 +175,8 @@ final class GpuSaRunScope {
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "AcHvdcAcEmulationLimits".equals(ol.getName()));
         boolean cfgSecondaryVc = outerLoopMode == OuterLoopMode.DEVICE && svcBatchable
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "SecondaryVoltageControl".equals(ol.getName()));
+        boolean cfgVoltageMonitoring = outerLoopMode == OuterLoopMode.DEVICE && monitoringBatchable && !noSvc
+                && acParameters.getOuterLoops().stream().anyMatch(ol -> "VoltageMonitoring".equals(ol.getName()));
         // Align the device outer-loop tolerances to the CPU loadflow's (per-unit on the 100 MVA base). The
         // reactive-limits PV→PQ switch threshold is NOT always maxReactivePowerMismatch: OLF derives it from the
         // stopping-criteria type exactly as AbstractAcOuterLoopConfig.createReactiveLimitsOuterLoop does —
@@ -209,7 +215,8 @@ final class GpuSaRunScope {
                 cfgIncrementalTvc, olfGuardParams.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift(),
                 cfgIncrementalShunt, olfGuardParams.getIncrementalShuntControlOuterLoopMaxSectionShift(),
                 cfgIncrementalRpc, cfgIncrementalPhase, cfgSimpleTvc, cfgHvdcFreezing, cfgHvdcLimits,
-                cfgSecondaryVc, olfGuardParams.getMinPlausibleTargetVoltage(), olfGuardParams.getMaxPlausibleTargetVoltage());
+                cfgSecondaryVc, olfGuardParams.getMinPlausibleTargetVoltage(), olfGuardParams.getMaxPlausibleTargetVoltage(),
+                cfgVoltageMonitoring);
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
     }

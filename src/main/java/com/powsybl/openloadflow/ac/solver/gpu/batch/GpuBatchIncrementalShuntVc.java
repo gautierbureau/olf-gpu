@@ -359,7 +359,7 @@ final class GpuBatchIncrementalShuntVc {
                     shGb.stream().mapToDouble(Double::doubleValue).toArray(),
                     null, null,
                     baseR1OvSlotElem, baseR1OvVal,
-                    config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(),
+                    config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0,
                     nziBase, ziOnSlotElem, ziOffSlotElem);
             for (int s = 0; s < realCount; s++) {
                 if (affected[s]) {                           // untouched scenarios KEEP their converged state

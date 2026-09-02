@@ -422,7 +422,7 @@ public final class GpuBatchSecondaryVc {
                     config.lsMode() == 2 ? varType : null, statesFlat,
                     shOvSlotElem, shOvGb, rlState, rlStateOut,
                     r1OvSlotElem, r1OvVal,
-                    config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(),
+                    config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0,
                     nziBase, ziOnSlotElem, ziOffSlotElem);
             System.arraycopy(rlStateOut, 0, rlState, 0, rlStateOut.length);
             for (int s = 0; s < realCount; s++) {

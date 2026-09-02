@@ -140,7 +140,7 @@ public final class GpuHybridBatchOuterLoopEngine {
 
     private static long createHandle(long structure, int count, int mode, GpuAcData d) {
         return GpuAcNewtonSolver.createBatchContext(structure, count, mode,
-                d.rlVrow(), d.rlMinQ(), d.rlMaxQ(), d.rlLoadQ(), d.rlVtarget(),
+                d.rlVrow(), d.rlMinQ(), d.rlMaxQ(), d.rlLoadQ(), d.rlVtarget(), d.rlMonitored(),
                 d.dsPhiRow(), d.dsFactor(), d.dsSlackPhiRow(), d.dsSlackTargetP(),
                 d.dsBaseTargetP(), d.dsMaxDelta(), d.dsMinDelta(),
                 d.dsMode(), d.dsMarginUp(), d.dsMarginDown(), d.dsSlackMarginUp(), d.dsSlackMarginDown());
@@ -396,7 +396,7 @@ public final class GpuHybridBatchOuterLoopEngine {
                     null, null,                                          // rlStateIn/Out
                     r1OvSlotElem.stream().mapToInt(Integer::intValue).toArray(),   // per-scenario pi-model refresh
                     r1OvVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                    30, 3, 0, 0, null, null);                            // maxOuterIterations (moot: DS pack empty), maxPqPvSwitch, ...
+                    30, 3, 0, 0, 0, null, null);                         // maxOuterIterations (moot: DS pack empty), maxPqPvSwitch, ...
             tSolve += System.nanoTime() - ts0;
             for (int i = 0; i < nA; i++) {
                 states[active.get(i)] = statesC[i];

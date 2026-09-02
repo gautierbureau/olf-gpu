@@ -134,7 +134,7 @@ final class GpuBatchSimpleTvc {
                 config.lsMode() == 2 ? varType : null, x0Full,
                 shOvSlotElem, shOvGb, null, null,
                 r1OvSlotElem, r1OvVal,
-                config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(),
+                config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0,
                 nziBase, ziOnSlotElem, ziOffSlotElem);
         for (int s = 0; s < realCount; s++) {
             if (affected[s]) {

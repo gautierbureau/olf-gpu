@@ -198,7 +198,7 @@ public final class GpuAcNewtonSolver {
      */
     public static native long createBatchContext(long structureHandle, int nScenarios, int mode,
                                                   int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ,
-                                                  double[] rlVtarget, int[] dsPhiRow, double[] dsFactor,
+                                                  double[] rlVtarget, byte[] rlMonitored, int[] dsPhiRow, double[] dsFactor,
                                                   int dsSlackPhiRow, double dsSlackTargetP,
                                                   double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
                                                   int dsMode, double[] dsMarginUp, double[] dsMarginDown,
@@ -249,7 +249,7 @@ public final class GpuAcNewtonSolver {
                                                        int[] shuntOvSlotElem, double[] shuntOvGb,
                                                        int[] rlStateIn, int[] rlStateOut,
                                                        int[] r1OvSlotElem, double[] r1OvVal,
-                                                       int maxOuterIterations, int maxPqPvSwitch, int dsRejectResidual,
+                                                       int maxOuterIterations, int maxPqPvSwitch, int dsRejectResidual, int skipRlPhase,
                                                        int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem);
 
     /** Read back the batch context's per-scenario TARGET buffer (n * nScenarios) after a solve — the device
@@ -322,13 +322,13 @@ public final class GpuAcNewtonSolver {
                 dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef);
         try {
             long handle = createBatchContext(structure, nScenarios, mode,
-                    rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, dsPhiRow, dsFactor, dsSlackPhiRow, dsSlackTargetP,
+                    rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, new byte[rlVrow.length], dsPhiRow, dsFactor, dsSlackPhiRow, dsSlackTargetP,
                     dsBaseTargetP, dsMaxDelta, dsMinDelta, 0, new double[0], new double[0], 0, 0);
             try {
                 // one-shot: no per-scenario gen-override flips, so any scenario's row mode IS the base row mode
                 return solveBatchContext(handle, x0Base, targetBase, rowMode, rowMode[0], disabledElementMask,
                         new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null,
-                        maxIter, tol, reactiveLimitTol, slackDistTol, 0.0, 0, 0.0, 0.0, null, null, null, null, null, null, null, null, 0, 0, 0, 0, null, null);
+                        maxIter, tol, reactiveLimitTol, slackDistTol, 0.0, 0, 0.0, 0.0, null, null, null, null, null, null, null, null, 0, 0, 0, 0, 0, null, null);
             } finally {
                 destroyBatchContext(handle);
             }

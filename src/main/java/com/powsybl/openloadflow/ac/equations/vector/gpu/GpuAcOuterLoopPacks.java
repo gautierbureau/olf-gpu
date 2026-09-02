@@ -53,8 +53,12 @@ public final class GpuAcOuterLoopPacks {
     record DsbPack(int[] dbRow, int[] dbCol, double[] dbCoef) {
     }
 
-    /** Reactive-limits (PV↔PQ) pack: one entry per voltage-capable controller bus. */
-    record RlPack(int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget) {
+    /** Reactive-limits (PV↔PQ) pack: one entry per voltage-capable controller bus. {@code rlMonitored}
+     *  flags a bus whose base-PQ state is a MONITORING_VOLTAGE SVC standing by — NOT a Q-limit switch:
+     *  the device RL must seed it UNPINNED (no spontaneous switch-back; only the VoltageMonitoring
+     *  orchestrator may activate it). */
+    record RlPack(int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget,
+                  byte[] rlMonitored) {
     }
 
     /** Distributed-slack pack: per-participating-bus factor/headroom + the slack bus's own share.
@@ -142,6 +146,7 @@ public final class GpuAcOuterLoopPacks {
         List<Double> rlMaxQ = new ArrayList<>();
         List<Double> rlLoadQ = new ArrayList<>();
         List<Double> rlVtarget = new ArrayList<>();
+        List<Byte> rlMonitored = new ArrayList<>();
         if (reactiveLimits) {                                   // empty pack when the RL outer loop is disabled
             for (LfBus bus : network.getBuses()) {
                 int bn = bus.getNum();
@@ -151,17 +156,40 @@ public final class GpuAcOuterLoopPacks {
                 boolean basePqCapable = qActive && !vActive    // switched to PQ in the base case but still capable
                         && !bus.isGeneratorVoltageControlEnabled();
                 if (vCol[bn] >= 0 && bus.getGeneratorVoltageControl().isPresent() && (basePv || basePqCapable)) {
+                    LfGenerator monitoringSvc = bus.getGenerators().stream()
+                            .filter(g -> g.getGeneratorControlType() == LfGenerator.GeneratorControlType.MONITORING_VOLTAGE)
+                            .findFirst().orElse(null);
+                    double minQ;
+                    double maxQ;
+                    if (monitoringSvc != null) {
+                        // A standing-by monitored bus never reads its RL limits (mode 1, seeded unpinned) —
+                        // it reads them only AFTER the VoltageMonitoring activation turns it PV, when the
+                        // CPU evaluates them with the SVC in VOLTAGE control. Capture the ACTIVATED limits
+                        // (a standby capture of ~[0,0] would pin the bus right back, undoing the activation).
+                        monitoringSvc.setGeneratorControlType(LfGenerator.GeneratorControlType.VOLTAGE);
+                        minQ = bus.getMinQ();
+                        maxQ = bus.getMaxQ();
+                        monitoringSvc.setGeneratorControlType(LfGenerator.GeneratorControlType.MONITORING_VOLTAGE);
+                    } else {
+                        minQ = bus.getMinQ();
+                        maxQ = bus.getMaxQ();
+                    }
                     rlVrow.add(vCol[bn]);
-                    rlMinQ.add(bus.getMinQ());
-                    rlMaxQ.add(bus.getMaxQ());
+                    rlMinQ.add(minQ);
+                    rlMaxQ.add(maxQ);
                     rlLoadQ.add(bus.getLoadTargetQ());
                     rlVtarget.add(bus.getGeneratorVoltageControl().orElseThrow().getTargetValue());
+                    rlMonitored.add(monitoringSvc != null ? (byte) 1 : (byte) 0);
                 }
             }
         }
+        byte[] mon = new byte[rlMonitored.size()];
+        for (int i = 0; i < mon.length; i++) {
+            mon[i] = rlMonitored.get(i);
+        }
         return new RlPack(GpuAcArrays.toIntArray(rlVrow), GpuAcArrays.toDoubleArray(rlMinQ),
                 GpuAcArrays.toDoubleArray(rlMaxQ), GpuAcArrays.toDoubleArray(rlLoadQ),
-                GpuAcArrays.toDoubleArray(rlVtarget));
+                GpuAcArrays.toDoubleArray(rlVtarget), mon);
     }
 
     static DsPack distributedSlackPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,

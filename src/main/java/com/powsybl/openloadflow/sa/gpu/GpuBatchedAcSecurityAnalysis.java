@@ -192,7 +192,11 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 .flatMap(b -> b.getGenerators().stream())
                 .anyMatch(g -> g.getGeneratorControlType()
                         == com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.MONITORING_VOLTAGE);
-        boolean cpuBaseOnly = frozenHvdcBase || monitoringSvcBase;
+        // SLOPE-SVC rows (row mode 2) are a BATCH capability — the sequential GPU solver path does not
+        // implement them yet: keep the base on the CPU there too.
+        boolean slopeSvcBase = lfNetwork.getBuses().stream()
+                .anyMatch(com.powsybl.openloadflow.network.LfBus::hasGeneratorsWithSlope);
+        boolean cpuBaseOnly = frozenHvdcBase || monitoringSvcBase || slopeSvcBase;
         if (!scope.batchDisabled() && !multiThread && gpuBaseLoadFlowEnabled() && !cpuBaseOnly
                 && GpuAcNewtonSolver.isAvailable()
                 && acParameters.getSolverFactory().getClass() == NewtonRaphsonFactory.class) {

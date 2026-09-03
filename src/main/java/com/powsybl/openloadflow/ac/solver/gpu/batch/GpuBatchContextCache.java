@@ -106,7 +106,7 @@ public final class GpuBatchContextCache {
         // the shared structure comes from the per-extraction cache — when the base load flow ran
         // on the GPU with the same extraction (GpuAcDataCache hand-off), this is a device-side hit
         long handle = GpuAcNewtonSolver.createBatchContext(GpuAcStructures.handle(n, data), chunkSize, mode,
-                data.rlVrow(), data.rlMinQ(), data.rlMaxQ(), data.rlLoadQ(), data.rlVtarget(), data.rlMonitored(),
+                data.rlVrow(), data.rlMinQ(), data.rlMaxQ(), data.rlLoadQ(), data.rlVtarget(), data.rlMonitored(), data.rowSlope(),
                 data.dsPhiRow(), data.dsFactor(), data.dsSlackPhiRow(), data.dsSlackTargetP(),
                 data.dsBaseTargetP(), data.dsMaxDelta(), data.dsMinDelta(),
                 data.dsMode(), data.dsMarginUp(), data.dsMarginDown(),

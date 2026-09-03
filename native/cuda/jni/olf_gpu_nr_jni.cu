@@ -2071,18 +2071,29 @@ __global__ void fillZeroImpBatch(int nzi, int nScenarios, int n, int nnz,
 // which buses are PV/slack). Same mask semantics as the single-solve applyRowMode.
 __global__ void applyRowModeBatch(int n, int nScenarios, int nnz, const int* mode, const int* rowPtr,
                                   const int* diagPos, const double* x, const double* target,
-                                  double* vals, double* F, const char* active) {
+                                  double* vals, double* F, const char* active, const double* rowSlope) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n * nScenarios) return;
     int r = tid % n;
     int s = tid / n;
-    if (!active[s] || mode[(size_t) s * n + r] != 0) return;
+    if (!active[s]) return;
+    int m = mode[(size_t) s * n + r];
     double* valsS = vals + (size_t) s * nnz;
-    for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
-        valsS[k] = 0.0;
+    if (m == 0) {                                            // identity: v/phi/rho/a1/b pinned to target
+        for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
+            valsS[k] = 0.0;
+        }
+        valsS[diagPos[r]] = 1.0;
+        F[(size_t) s * n + r] = x[(size_t) s * n + r] - target[(size_t) s * n + r];
+    } else if (m == 2) {                                     // SLOPE-SVC: V + slope*sumQ = target — the natural
+        double slope = rowSlope[r];                          // reactive fill stands, scaled, plus the v term
+        for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
+            valsS[k] *= slope;
+        }
+        valsS[diagPos[r]] += 1.0;
+        size_t idx = (size_t) s * n + r;
+        F[idx] = slope * (F[idx] + target[idx]) + x[idx] - target[idx];
     }
-    valsS[diagPos[r]] = 1.0;
-    F[(size_t) s * n + r] = x[(size_t) s * n + r] - target[(size_t) s * n + r];
 }
 
 __global__ void initFBatch(int n, int nScenarios, const double* target, double* F, const char* active) {
@@ -2151,7 +2162,8 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
                                     const double* rlLoadQ, const double* rlVtarget, const double* qBuf,
                                     const double* x, const char* rlActive, int* mode, double* target,
                                     char* limitType, char* switchCount, char* switched,
-                                    int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal) {
+                                    int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
+                                    const double* rowSlope, double* savedTarget) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -2160,15 +2172,18 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
     int vrow = rlVrow[i];
     size_t idx = (size_t) s * n + vrow;
     size_t st = (size_t) s * nrl + i;
-    if (mode[idx] == 0 && limitType[st] == 0) {             // currently PV — check the reactive limits
+    bool slopeRow = rowSlope[vrow] != 0;                    // SLOPE-SVC bus: its PV form is row mode 2
+    if ((mode[idx] == 0 || mode[idx] == 2) && limitType[st] == 0) {   // currently PV — check the reactive limits
         double q = qBuf[idx] + rlLoadQ[i];
         if (q < rlMinQ[i] - tol) {
+            savedTarget[st] = target[idx];                   // remember the row target for the switch-back
             mode[idx] = 1;
             target[idx] = rlMinQ[i] - rlLoadQ[i];
             limitType[st] = 1;
             switchCount[st]++;
             switched[s] = 1;
         } else if (q > rlMaxQ[i] + tol) {
+            savedTarget[st] = target[idx];
             mode[idx] = 1;
             target[idx] = rlMaxQ[i] - rlLoadQ[i];
             limitType[st] = 2;
@@ -2181,8 +2196,8 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
         bool back = (limitType[st] == 2 && v > vt)                   // maxQ-pinned but v above target
                  || (limitType[st] == 1 && v < vt);                  // minQ-pinned but v below target
         if (back) {
-            mode[idx] = 0;                                  // PQ → PV: resume voltage control
-            target[idx] = vt;
+            mode[idx] = slopeRow ? 2 : 0;                   // PQ → PV: resume voltage control (slope form kept)
+            target[idx] = slopeRow ? savedTarget[st] : vt;  // the slope row's target is NOT the plain vtarget
             limitType[st] = 0;
             switched[s] = 1;
         }
@@ -2621,6 +2636,9 @@ struct BatchSolverContext {
     int nrl = 0;
     DeviceBuf dRlVrow, dRlMinQ, dRlMaxQ, dRlLoadQ, dRlVtarget;   // per controller (nrl)
     DeviceBuf dRlMonitored;                                // per controller: 1 = MONITORING_VOLTAGE SVC standing by
+    DeviceBuf dRowSlope;                                   // per row: SLOPE-SVC slope (mode-2 V rows), 0 elsewhere
+    DeviceBuf dRlSavedTarget;                              // per (controller, scenario): the row target saved at a
+                                                           // PV->PQ pin, restored on switch-back for mode-2 rows
     DeviceBuf dQbuf, dRlActive, dRlSwitched;               // dQbuf nS*n, dRlActive/dRlSwitched nS
     DeviceBuf dRlLimitType, dRlSwitchCount;               // per (controller, scenario): 0 PV / 1 minQ / 2 maxQ; PV→PQ count
     // Distributed slack: the (mapped) slack BUS_PHI row + its scheduled targetP give the per-scenario
@@ -2802,7 +2820,7 @@ static void setupBatchMatricesFallback(BatchSolverContext* ctx) {
 BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenarios, int mode,
                                        int nrl, const int* rlVrow, const double* rlMinQ,
                                        const double* rlMaxQ, const double* rlLoadQ, const double* rlVtarget,
-                                       const signed char* rlMonitored,
+                                       const signed char* rlMonitored, const double* rowSlope,
                                        int nds, const int* dsPhiRow, const double* dsFactor,
                                        int dsSlackPhiRow, double dsSlackTargetP,
                                        const double* dsBaseTargetP, const double* dsMaxDelta, const double* dsMinDelta,
@@ -2859,9 +2877,11 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
         ctx->dRlLoadQ.upload(rlLoadQ, nrl * sizeof(double));
         ctx->dRlVtarget.upload(rlVtarget, nrl * sizeof(double));
         ctx->dRlMonitored.upload(rlMonitored, nrl * sizeof(char));
+        ctx->dRlSavedTarget.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(double));
         ctx->dRlLimitType.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(char));
         ctx->dRlSwitchCount.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(char));
     }
+    ctx->dRowSlope.upload(rowSlope, n * sizeof(double));
     ctx->nds = nds;
     ctx->dsSlackTargetP = dsSlackTargetP;
     ctx->dsMode = dsMode;
@@ -3238,7 +3258,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>());
-        applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
+        applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>());
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: stream-ordered into the solve, no host sync
 
         // ---- residual check + retirement ----
@@ -3581,7 +3601,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
                     ctx->dRlLimitType.as<char>(), ctx->dRlSwitchCount.as<char>(), ctx->dRlSwitched.as<char>(),
                     nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
-                    nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr);
+                    nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
+                    ctx->dRowSlope.as<double>(), ctx->dRlSavedTarget.as<double>());
         }
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -3893,7 +3914,8 @@ extern "C" JNIEXPORT jlong JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBatchContext(
         JNIEnv* env, jclass, jlong structureHandle, jint nScenarios, jint mode,
         jintArray jrlVrow, jdoubleArray jrlMinQ, jdoubleArray jrlMaxQ, jdoubleArray jrlLoadQ,
-        jdoubleArray jrlVtarget, jbyteArray jrlMonitored, jintArray jdsPhiRow, jdoubleArray jdsFactor,
+        jdoubleArray jrlVtarget, jbyteArray jrlMonitored, jdoubleArray jrowSlope,
+        jintArray jdsPhiRow, jdoubleArray jdsFactor,
         jint jdsSlackPhiRow, jdouble jdsSlackTargetP,
         jdoubleArray jdsBaseTargetP, jdoubleArray jdsMaxDelta, jdoubleArray jdsMinDelta,
         jint jdsMode, jdoubleArray jdsMarginUp, jdoubleArray jdsMarginDown,
@@ -3905,6 +3927,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBa
     jdouble* rlLoadQ = env->GetDoubleArrayElements(jrlLoadQ, nullptr);
     jdouble* rlVtarget = env->GetDoubleArrayElements(jrlVtarget, nullptr);
     jbyte* rlMonitored = env->GetByteArrayElements(jrlMonitored, nullptr);
+    jdouble* rowSlope = env->GetDoubleArrayElements(jrowSlope, nullptr);
     jint* dsPhiRow = env->GetIntArrayElements(jdsPhiRow, nullptr);
     jdouble* dsFactor = env->GetDoubleArrayElements(jdsFactor, nullptr);
     jdouble* dsBaseTargetP = env->GetDoubleArrayElements(jdsBaseTargetP, nullptr);
@@ -3923,7 +3946,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBa
             throw std::runtime_error("invalid structure handle");
         }
         ctx = createBatchContext(*st, nScenarios, mode,
-                                 nrl, rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, rlMonitored,
+                                 nrl, rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, rlMonitored, rowSlope,
                                  nds, dsPhiRow, dsFactor, jdsSlackPhiRow, jdsSlackTargetP,
                                  dsBaseTargetP, dsMaxDelta, dsMinDelta,
                                  jdsMode, dsMarginUp, dsMarginDown, jdsSlackMarginUp, jdsSlackMarginDown);
@@ -3939,6 +3962,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBa
     env->ReleaseDoubleArrayElements(jrlLoadQ, rlLoadQ, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jrlVtarget, rlVtarget, JNI_ABORT);
     env->ReleaseByteArrayElements(jrlMonitored, rlMonitored, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jrowSlope, rowSlope, JNI_ABORT);
     env->ReleaseIntArrayElements(jdsPhiRow, dsPhiRow, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jdsFactor, dsFactor, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jdsBaseTargetP, dsBaseTargetP, JNI_ABORT);
@@ -4228,7 +4252,7 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
     if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
     if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
     if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>());
-    applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
+    applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>());
 
     if (!ctx->analyzed) {
         CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));

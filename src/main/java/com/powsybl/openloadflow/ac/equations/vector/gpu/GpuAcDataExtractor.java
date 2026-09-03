@@ -98,6 +98,17 @@ public final class GpuAcDataExtractor {
         GpuAcOuterLoopPacks.DsbPack dsb = GpuAcOuterLoopPacks.distrShuntBPack(network, es, columns);
         GpuAcOuterLoopPacks.RlPack rl = GpuAcOuterLoopPacks.reactiveLimitsPack(network, es, columns, reactiveLimits);
         GpuAcOuterLoopPacks.DsPack ds = GpuAcOuterLoopPacks.distributedSlackPack(network, es, columns, distributedSlack, dsParams);
+        // SLOPE-SVC rows (V + slope*sumQ = target, row mode 2): per-row slope, 0 everywhere else
+        double[] rowSlope = new double[es.getIndex().getSortedVariablesToFind().size()];
+        for (com.powsybl.openloadflow.network.LfBus bus : network.getBuses()) {
+            if (bus.hasGeneratorsWithSlope()) {
+                int vRow = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcRowIndexing.col(
+                        es, bus.getNum(), com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_V);
+                if (vRow >= 0) {
+                    rowSlope[vRow] = bus.getGeneratorsControllingVoltageWithSlope().get(0).getSlope();
+                }
+            }
+        }
         return new GpuAcData(
                 GpuAcArrays.flatD(family.cbIn(), 8), GpuAcArrays.flatI(family.cbIdx(), 12),
                 GpuAcArrays.flatD(family.obIn(), 7), GpuAcArrays.flatI(family.obIdx(), 6),
@@ -107,7 +118,7 @@ public final class GpuAcDataExtractor {
                 GpuAcArrays.flatD(family.ziIn(), 1), GpuAcArrays.flatI(family.ziIdx(), 11),
                 dr.drRow(), dr.drCol(), dr.drCoef(),
                 dsb.dbRow(), dsb.dbCol(), dsb.dbCoef(),
-                rl.rlVrow(), rl.rlMinQ(), rl.rlMaxQ(), rl.rlLoadQ(), rl.rlVtarget(), rl.rlMonitored(),
+                rl.rlVrow(), rl.rlMinQ(), rl.rlMaxQ(), rl.rlLoadQ(), rl.rlVtarget(), rl.rlMonitored(), rowSlope,
                 ds.dsPhiRow(), ds.dsFactor(), ds.dsSlackPhiRow(), ds.dsSlackTargetP(),
                 ds.dsBaseTargetP(), ds.dsMaxDelta(), ds.dsMinDelta(),
                 ds.dsMode(), ds.dsMarginUp(), ds.dsMarginDown(), ds.dsSlackMarginUp(), ds.dsSlackMarginDown(),

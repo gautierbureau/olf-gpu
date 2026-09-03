@@ -143,9 +143,14 @@ final class GpuAcValidation {
                 case BUS_TARGET_V, BUS_TARGET_PHI, BRANCH_TARGET_RHO1, BRANCH_TARGET_ALPHA1, SHUNT_TARGET_B -> {
                     // identity rows on a single variable (v−target, phi−target, r1−target when a
                     // transformer ratio is held constant, a1−target when a phase shift is, b−target when a
-                    // shunt susceptance is held constant) — applied device-side by the row-mode mask
+                    // shunt susceptance is held constant) — applied device-side by the row-mode mask.
+                    // EXCEPTION: a SLOPE-SVC BUS_TARGET_V additionally carries slope-scaled copies of the
+                    // bus's reactive flow terms (V + slope*sumQ = target) — re-assembled device-side by
+                    // scaling the natural reactive fill (row mode 2), so those terms are accepted.
                     for (SingleEquationTerm<AcVariableType, AcEquationType> t : e.getTerms()) {
-                        if (t.isActive() && !(t instanceof VariableEquationTerm)) {
+                        if (t.isActive() && !(t instanceof VariableEquationTerm)
+                                && !(e.getType() == AcEquationType.BUS_TARGET_V
+                                        && t.getClass().getSimpleName().contains("Multiply"))) {
                             throw new PowsyblException("GPU AC solver: unsupported equation term "
                                     + t.getClass().getSimpleName() + " in " + e.getType());
                         }

@@ -140,7 +140,7 @@ public final class GpuHybridBatchOuterLoopEngine {
 
     private static long createHandle(long structure, int count, int mode, GpuAcData d) {
         return GpuAcNewtonSolver.createBatchContext(structure, count, mode,
-                d.rlVrow(), d.rlMinQ(), d.rlMaxQ(), d.rlLoadQ(), d.rlVtarget(), d.rlMonitored(),
+                d.rlVrow(), d.rlMinQ(), d.rlMaxQ(), d.rlLoadQ(), d.rlVtarget(), d.rlMonitored(), d.rowSlope(),
                 d.dsPhiRow(), d.dsFactor(), d.dsSlackPhiRow(), d.dsSlackTargetP(),
                 d.dsBaseTargetP(), d.dsMaxDelta(), d.dsMinDelta(),
                 d.dsMode(), d.dsMarginUp(), d.dsMarginDown(), d.dsSlackMarginUp(), d.dsSlackMarginDown());

@@ -98,7 +98,11 @@ public final class GpuAcActivationExtractor {
             };
             if (vt != null) {
                 int r = GpuAcRowIndexing.col(es, e.getElementNum(), vt);
-                mode[r] = 0;
+                // SLOPE-SVC V row (V + slope*sumQ = target): the natural reactive fill STAYS in the row,
+                // scaled by the slope and completed with the +v diagonal (row mode 2) — not an identity.
+                boolean slopeRow = e.getType() == AcEquationType.BUS_TARGET_V
+                        && network.getBus(e.getElementNum()).hasGeneratorsWithSlope();
+                mode[r] = slopeRow ? 2 : 0;
                 targetMap[r] = e.getColumn();
             }
         }

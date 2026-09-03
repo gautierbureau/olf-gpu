@@ -83,6 +83,9 @@ final class GpuBatchInjectionOutages {
                 || es.getEquation(busNum, AcEquationType.DISTR_Q).isPresent()) {     // remote/distributed VC controller
             return null;
         }
+        if (bus.hasGeneratorsWithSlope()) {
+            return null;                                     // slope-SVC bus outage: the mode-2 row's fate on a
+        }                                                    // gen loss is not modeled — CPU
         if (dsParams.isLoadBased() && !lostLoads.isEmpty()) {
             return null;                                     // a lost/shifted load changes the LOAD participation
         }                                                    // factors — per-scenario load reweight not modeled: CPU

@@ -805,7 +805,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     private void assertGpuMatchesCpu(Network network, List<Contingency> contingencies) {
-        assertGpuMatchesCpu(network, contingencies, 0.5);
+        assertGpuMatchesCpu(network, contingencies, 1e-12);
     }
 
     private void assertGpuMatchesCpu(Network network, List<Contingency> contingencies, double vToleranceKv) {
@@ -883,7 +883,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                     org.junit.jupiter.api.Assertions.assertEquals(cpuBuses.get(b).getV(), gpuBuses.get(b).getV(), vToleranceKv,
                             "bus voltage " + cpuBuses.get(b).getBusId() + " for "
                                     + cpu.getPostContingencyResults().get(i).getContingency().getId()
-                                    + " (0.5 kV tolerance: criterion slack is far below, a Q-injection error far above)");
+                                    + " (" + vToleranceKv + " kV tolerance)");
                 }
             }
         } finally {
@@ -906,7 +906,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         // distributed slack OFF: gq would participate (PROPORTIONAL_TO_GENERATION_P_MAX includes
         // all gens) alongside a participating slack — the known DS fallback combo, orthogonal here.
         assertGpuMatchesCpu(network,
-                List.of(new Contingency("gq", new com.powsybl.contingency.GeneratorContingency("gq"))), 0.05, false);
+                List.of(new Contingency("gq", new com.powsybl.contingency.GeneratorContingency("gq"))), 1e-12, false);
     }
 
     @Test
@@ -921,7 +921,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .filter(l -> "B9".equals(l.getTerminal().getBusBreakerView().getBus().getId()))
                 .findFirst().orElseThrow().getId();
         assertGpuMatchesCpu(network,
-                List.of(new Contingency(loadId, new com.powsybl.contingency.LoadContingency(loadId))), 0.05, true);
+                List.of(new Contingency(loadId, new com.powsybl.contingency.LoadContingency(loadId))), 1e-12, true);
     }
 
     @Test
@@ -943,7 +943,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network,
                 List.of(new Contingency("combo", new BranchContingency(lineId),
                         new com.powsybl.contingency.GeneratorContingency("gq"),
-                        new com.powsybl.contingency.LoadContingency(loadId))), 0.05, false);
+                        new com.powsybl.contingency.LoadContingency(loadId))), 1e-12, false);
     }
 
     @Test
@@ -1202,7 +1202,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         vl2.getNodeBreakerView().newBreaker().setId("B6").setNode1(0).setNode2(4).add();
         network.newLine().setId("L3").setVoltageLevel1("VL1").setNode1(7).setVoltageLevel2("VL2").setNode2(4)
                 .setR(3).setX(33).setG1(0).setB1(0).setG2(0).setB2(0).add();
-        assertGpuMatchesCpu(network, List.of(new Contingency("L1", new BranchContingency("L1"))), 0.05, true);
+        assertGpuMatchesCpu(network, List.of(new Contingency("L1", new BranchContingency("L1"))), 1e-12, true);
     }
 
     @Test
@@ -1289,11 +1289,11 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         System.setProperty("olf.gpu.test.convEps", "1e-9");
         try {
             Network network = IeeeCdfNetworkFactory.create14();
-            assertGpuMatchesCpu(network, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1"))), 0.05, true);
+            assertGpuMatchesCpu(network, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1"))), 1e-12, true);
             Network network2 = IeeeCdfNetworkFactory.create14();
             network2.getVoltageLevel("VL10").newGenerator().setId("B10-GQ").setBus("B10").setConnectableBus("B10")
                     .setTargetP(5).setTargetQ(8).setVoltageRegulatorOn(false).setMinP(0).setMaxP(20).add();
-            assertGpuMatchesCpu(network2, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1"))), 0.05, true);
+            assertGpuMatchesCpu(network2, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1"))), 1e-12, true);
         } finally {
             System.clearProperty("olf.gpu.test.slackTol");
             System.clearProperty("olf.gpu.test.convEps");
@@ -1314,7 +1314,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         System.setProperty("olf.gpu.test.convEps", "1e-9");
         try {
             Network network = IeeeCdfNetworkFactory.create14();
-            assertGpuMatchesCpu(network, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1"))), 0.05, true);
+            assertGpuMatchesCpu(network, List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1"))), 1e-12, true);
         } finally {
             System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
             System.clearProperty("olf.gpu.test.slackTol");
@@ -1433,7 +1433,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         Network network = IeeeCdfNetworkFactory.create14();
         String shuntId = network.getShuntCompensatorStream().findFirst().orElseThrow().getId();
         assertGpuMatchesCpu(network,
-                List.of(new Contingency(shuntId, new com.powsybl.contingency.ShuntCompensatorContingency(shuntId))), 0.05, true);
+                List.of(new Contingency(shuntId, new com.powsybl.contingency.ShuntCompensatorContingency(shuntId))), 1e-12, true);
     }
 
     @Test
@@ -1452,7 +1452,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network,
                 List.of(new Contingency("combo23", new BranchContingency(lineId),
                         new com.powsybl.contingency.ShuntCompensatorContingency(shuntId),
-                        new com.powsybl.contingency.LoadContingency(loadId))), 0.05, true);
+                        new com.powsybl.contingency.LoadContingency(loadId))), 1e-12, true);
     }
 
     @Test

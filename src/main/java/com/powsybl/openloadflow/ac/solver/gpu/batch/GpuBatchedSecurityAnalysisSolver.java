@@ -338,6 +338,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         if (!batchedIndices.isEmpty()) {
             GpuBatchChunkSolver.solveQualifiedInChunks(batchedIndices, contingencies, elementMapper, gpuData, baseState,
                     baseTargets, baseActivation.rowMode(), plan.frozenRowsByIndex(), plan.frozenTargetsByIndex(), plan.genOutagesByIndex(),
+                    plan.activePowerLossByIndex(),
                     n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                     config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
                     config.transformerControl() || config.simpleTransformerControl()

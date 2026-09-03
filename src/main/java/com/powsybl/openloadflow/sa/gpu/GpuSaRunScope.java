@@ -151,6 +151,18 @@ final class GpuSaRunScope {
         int cfgMaxPqPvSwitch = olfGuardParams.getReactiveLimitsMaxPqPvSwitch();
         boolean cfgDsRejectResidual = olfGuardParams.getSlackDistributionFailureBehavior()
                 != com.powsybl.openloadflow.OpenLoadFlowParameters.SlackDistributionFailureBehavior.LEAVE_ON_SLACK_BUS;
+        // OLF's SA distributes each contingency's SCHEDULED active power loss BEFORE the post-contingency
+        // solve (ContingencyActivePowerLossDistribution SPI). The batch replays the "Default" impl
+        // host-side (GpuBatchLossPreDistribution); a custom SPI cannot be replayed -> whole-run CPU.
+        String lossDistName = com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters
+                .getOrDefault(securityAnalysisParameters).getContingencyActivePowerLossDistribution();
+        boolean defaultLossDist = com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters
+                .CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_DEFAULT_VALUE.equals(lossDistName);
+        boolean dsActive = acParameters.getOuterLoops().stream()
+                .anyMatch(ol -> DistributedSlackOuterLoop.NAME.equals(ol.getName()));
+        if (!defaultLossDist && dsActive) {
+            unsupportedOuterLoops.add("ContingencyActivePowerLossDistribution[" + lossDistName + "]");
+        }
         boolean batchDisabled = !unsupportedOuterLoops.isEmpty();
         // Capture which outer loops this run actually applies, so the batched device solver runs the
         // distributed-slack / reactive-limits passes only when OLF does (presence in the resolved outer-loop
@@ -225,7 +237,7 @@ final class GpuSaRunScope {
                 cfgIncrementalShunt, olfGuardParams.getIncrementalShuntControlOuterLoopMaxSectionShift(),
                 cfgIncrementalRpc, cfgIncrementalPhase, cfgSimpleTvc, cfgHvdcFreezing, cfgHvdcLimits,
                 cfgSecondaryVc, olfGuardParams.getMinPlausibleTargetVoltage(), olfGuardParams.getMaxPlausibleTargetVoltage(),
-                cfgVoltageMonitoring, cfgContinuousPhase);
+                cfgVoltageMonitoring, cfgContinuousPhase, defaultLossDist && dsActive);
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
     }

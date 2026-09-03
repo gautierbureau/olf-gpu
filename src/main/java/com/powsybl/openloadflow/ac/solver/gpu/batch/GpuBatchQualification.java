@@ -103,12 +103,36 @@ final class GpuBatchQualification {
         return true;
     }
 
+    /** The contingency's SCHEDULED active power loss (pu): mirror of LfContingency's
+     *  disconnectedGenerationActivePower - disconnectedLoadActivePower, incl. islanded buses'
+     *  injections (with the same non-AC-emulation HVDC generation exclusion). */
+    private static double scheduledActivePowerLoss(BatchContingency c, List<LfBus> islandedBuses) {
+        double loss = 0;
+        for (com.powsybl.openloadflow.network.LfGenerator g : c.lostGenerators()) {
+            loss += g.getTargetP();
+        }
+        for (LoadLoss ll : c.lostLoads()) {
+            loss -= ll.p();
+        }
+        for (LfBus bus : islandedBuses) {
+            double gen = bus.getGenerationTargetP();
+            gen -= bus.getHvdcs().stream()
+                    .filter(h -> !h.isAcEmulation())
+                    .map(h -> h.getBus1() == bus ? h.getConverterStation1() : h.getConverterStation2())
+                    .mapToDouble(com.powsybl.openloadflow.network.LfGenerator::getTargetP)
+                    .sum();
+            loss += gen - bus.getLoadTargetP();
+        }
+        return loss;
+    }
+
     /** The batched-scenario plan: which contingencies qualified ({@code batchedIndices}) and, per
      *  contingency, the frozen islanded-bus rows/targets, the islanded LfBus nums (excluded from result
      *  building), the merged per-bus generator outages (else null), and the count of on-GPU frozen islands. */
     record ScenarioPlan(List<Integer> batchedIndices, int[][] frozenRowsByIndex,
                         int[][] islandedNumsByIndex, double[][] frozenTargetsByIndex,
-                        GenOutage[][] genOutagesByIndex, int islandingCount) {
+                        GenOutage[][] genOutagesByIndex, int islandingCount,
+                        double[] activePowerLossByIndex) {
     }
 
     /**
@@ -128,6 +152,10 @@ final class GpuBatchQualification {
         int[][] islandedNumsByIndex = new int[contingencies.size()][];   // islanded LfBus nums (result-building excludes them)
         double[][] frozenTargetsByIndex = new double[contingencies.size()][];   // the clean value each frozen row holds (V=1, phi=0)
         GenOutage[][] genOutagesByIndex = new GenOutage[contingencies.size()][];   // per-bus merged outages, else null
+        // Per-contingency SCHEDULED active power loss (pu, CPU sign: lost generation - lost load,
+        // LfContingency.getActivePowerLoss incl. islanded buses) — drives the host replay of OLF's
+        // DefaultContingencyActivePowerLossDistribution (GpuBatchLossPreDistribution).
+        double[] activePowerLossByIndex = new double[contingencies.size()];
         int islandingCount = 0;
         for (int i = 0; i < qualifications.size(); i++) {
             GpuBatchContingencyValidator.Qualification q = qualifications.get(i);
@@ -213,6 +241,7 @@ final class GpuBatchQualification {
                     frozenTargetsByIndex[i] = NO_FROZEN_TARGETS;
                 }
                 genOutagesByIndex[i] = gos;
+                activePowerLossByIndex[i] = scheduledActivePowerLoss(c, q.islandedBuses());
                 batchedIndices.add(i);
             } else if (!c.outagedShunts().isEmpty()) {       // fixed-shunt disconnection: mask the shunt element
                 if (canBatchShuntOutage(c.outagedShunts(), elementMapper, gpuData)) {
@@ -231,12 +260,13 @@ final class GpuBatchQualification {
                 }
                 frozenRowsByIndex[i] = fi.rows();
                 frozenTargetsByIndex[i] = fi.targets();
+                activePowerLossByIndex[i] = scheduledActivePowerLoss(c, q.islandedBuses());
                 if (frozenRowsByIndex[i].length > 0) {
                     islandingCount++;
                 }
             }
         }
         return new ScenarioPlan(batchedIndices, frozenRowsByIndex, islandedNumsByIndex,
-                frozenTargetsByIndex, genOutagesByIndex, islandingCount);
+                frozenTargetsByIndex, genOutagesByIndex, islandingCount, activePowerLossByIndex);
     }
 }

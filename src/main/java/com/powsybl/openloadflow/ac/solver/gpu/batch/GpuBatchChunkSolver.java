@@ -49,7 +49,7 @@ final class GpuBatchChunkSolver {
                                                GpuBatchElementMapper elementMapper, GpuAcData gpuData,
                                                double[] baseState, double[] baseTargets, int[] baseRowMode,
                                                int[][] frozenRowsByIndex, double[][] frozenTargetsByIndex,
-                                               GenOutage[][] genOutagesByIndex,
+                                               GenOutage[][] genOutagesByIndex, double[] activePowerLossByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
@@ -159,6 +159,7 @@ final class GpuBatchChunkSolver {
                         java.util.Arrays.fill(dsOvMaxDelta, 0);
                         java.util.Arrays.fill(dsOvMinDelta, 0);
                     }
+                    double[] preLossBySlot = new double[chunkSize];   // scheduled active power loss per slot (plain phase)
                     for (int s = 0; s < chunkSize; s++) {
                         if (disabledIdx[s] != null) {        // clear this slot's outage(s) from the previous chunk
                             for (int ei : disabledIdx[s]) {
@@ -172,6 +173,9 @@ final class GpuBatchChunkSolver {
                         rowModePerScenario[s] = baseRowMode;     // default: base layout (padding + non-fragmenting)
                         if (s < realCount) {                 // real scenario: disable its outaged branch(es)
                             int ci = group.get(chunkStart + s);
+                            if (!pairPhase && activePowerLossByIndex != null) {
+                                preLossBySlot[s] = activePowerLossByIndex[ci];
+                            }
                             List<LfBranch> branches = contingencies.get(ci).outagedBranches();
                             List<LfShunt> shunts = contingencies.get(ci).outagedShunts();
                             int[] eis = new int[branches.size() + shunts.size()];
@@ -273,6 +277,63 @@ final class GpuBatchChunkSolver {
                         }
                         // else: padding scenario = base case (no element disabled), discarded below
                     }
+                    double[] dsAnchorShift = null;
+                    double[] dsSlackShift = null;
+                    if (!pairPhase && hasDs && config.contingencyLossPreDistribution()) {
+                        // CPU parity (DefaultContingencyActivePowerLossDistribution): with DS on, the
+                        // contingency's SCHEDULED lost active power is distributed ONCE over the
+                        // participating generators BEFORE the post-contingency solve — the CPU's DS loop
+                        // then only measures the loss-nonlinearity residual (usually inside the band, so
+                        // it never redistributes). Replay the same one-shot water-fill host-side
+                        // (GpuBatchLossPreDistribution) and hand it to the device as the strategy-pair
+                        // trio: participant target overrides + anchor shifts + the slack's own share.
+                        for (int s = 0; s < realCount; s++) {
+                            if (preLossBySlot[s] == 0) {
+                                continue;
+                            }
+                            boolean participantFrozen = false;   // islanded DS participant: CPU excludes a
+                            int ci = group.get(chunkStart + s);  // disabled bus — out of stage-1 scope, skip
+                            int[] frozen = frozenRowsByIndex[ci];
+                            for (int i = 0; i < nds && !participantFrozen; i++) {
+                                for (int fr : frozen) {
+                                    if (fr == gpuData.dsPhiRow()[i]) {
+                                        participantFrozen = true;
+                                    }
+                                }
+                            }
+                            if (participantFrozen) {
+                                continue;
+                            }
+                            double[] shares = GpuBatchLossPreDistribution.distribute(gpuData, preLossBySlot[s],
+                                    dsOvBus.length > 0 ? dsOvBus[s] : -1,
+                                    dsOvFactorDelta.length > 0 ? dsOvFactorDelta[s] : 0,
+                                    dsOvBaseDelta.length > 0 ? dsOvBaseDelta[s] : 0,
+                                    dsOvMaxDelta.length > 0 ? dsOvMaxDelta[s] : 0,
+                                    dsOvMinDelta.length > 0 ? dsOvMinDelta[s] : 0);
+                            if (shares == null) {
+                                continue;
+                            }
+                            if (dsAnchorShift == null) {
+                                dsAnchorShift = new double[chunkSize * nds];
+                                dsSlackShift = new double[chunkSize];
+                            }
+                            for (int i = 0; i < nds; i++) {
+                                if (shares[i] == 0) {
+                                    continue;
+                                }
+                                dsAnchorShift[s * nds + i] = shares[i];
+                                int flat = s * n + gpuData.dsPhiRow()[i];
+                                int ovAt = ovIndexList.lastIndexOf(flat);   // compose with a gen-outage override
+                                if (ovAt >= 0) {
+                                    ovValueList.set(ovAt, ovValueList.get(ovAt) + shares[i]);
+                                } else {
+                                    ovIndexList.add(flat);
+                                    ovValueList.add(baseTargets[gpuData.dsPhiRow()[i]] + shares[i]);
+                                }
+                            }
+                            dsSlackShift[s] = shares[nds];
+                        }
+                    }
                     // SIMPLE (WITH_GENERATOR) transformer VC: OLF's initialize() enables continuous VC
                     // BEFORE the first solve — apply the VC-ON activation deltas now, and keep the
                     // pre-TVC override lists for the round-to-tap re-solve.
@@ -326,8 +387,6 @@ final class GpuBatchChunkSolver {
                     //    the parent's slack target exactly as the CPU leg measures it;
                     //  - DS-row target seeds at the parent values, so the first inner solve runs at the CPU
                     //    leg's starting operating point (losses are nonlinear along the path).
-                    double[] dsAnchorShift = null;
-                    double[] dsSlackShift = null;
                     if (pairPhase) {
                         x0Full = new double[chunkSize * n];
                         rlStateIn = nrl > 0 ? new int[chunkSize * nrl] : null;

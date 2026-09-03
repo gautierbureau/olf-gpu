@@ -395,6 +395,61 @@ inline int cbAltRow(const CbScatter& s, const int* ix) {
     return s.rowEq == 1 ? ix[10 + s.rowEnd] : -1;
 }
 
+// CONTINUOUS PHASE CONTROL (BRANCH_TARGET_P): when a phase-controller branch's control is enabled
+// per scenario (row mode 3 on its a1-paired row), the controlled side's P-flow outputs are emitted
+// AGAIN at that row — the p-flow equation replacing the a1 identity. Union those (a1Row, col)
+// positions into the pattern; cbPcSide[e] = -1 none, 0 = side-1 P, 1 = side-2 P.
+void collectCbPhasePattern(int ncb, const int* cbIdx, const int* cbPcSide,
+                           const std::vector<int>& rowMap, std::vector<std::pair<int, int>>& pat) {
+    for (int e = 0; e < ncb; e++) {
+        int side = cbPcSide[e];
+        if (side < 0) {
+            continue;
+        }
+        const int* ix = cbIdx + static_cast<size_t>(e) * 12;
+        if (ix[8] < 0) {
+            continue;                                        // no a1 variable — cannot host the P row
+        }
+        int pcRow = rowMap[ix[8]];
+        int k0 = side == 0 ? 0 : 14;                         // p1 block / p2 block of CB_SCATTER
+        for (int k = k0 + 1; k <= k0 + 6; k++) {             // the 6 derivative outputs
+            RC rc = resolveCb(CB_SCATTER[k], ix);
+            if (rc.col >= 0) {
+                pat.emplace_back(pcRow, rc.col);
+            }
+        }
+    }
+}
+
+// Per (closed branch, output): the phase-row destination (J slot, or -2-row for the P residual) and
+// the a1 row whose per-scenario mode gates the emission (mode 3 = control enabled). -1 = no emission.
+void buildCbPhaseDest(int ncb, const int* cbIdx, const int* cbPcSide, const std::vector<int>& rowMap,
+                      const CsrPattern& pos, std::vector<int>& pcDest, std::vector<int>& pcSel) {
+    pcDest.assign(static_cast<size_t>(ncb) * CB_NOUT, -1);
+    pcSel.assign(static_cast<size_t>(ncb) * CB_NOUT, -1);
+    for (int e = 0; e < ncb; e++) {
+        int side = cbPcSide[e];
+        if (side < 0) {
+            continue;
+        }
+        const int* ix = cbIdx + static_cast<size_t>(e) * 12;
+        if (ix[8] < 0) {
+            continue;
+        }
+        int pcRow = rowMap[ix[8]];
+        int k0 = side == 0 ? 0 : 14;
+        pcDest[static_cast<size_t>(e) * CB_NOUT + k0] = -2 - pcRow;    // the P residual
+        pcSel[static_cast<size_t>(e) * CB_NOUT + k0] = ix[8];
+        for (int k = k0 + 1; k <= k0 + 6; k++) {
+            RC rc = resolveCb(CB_SCATTER[k], ix);
+            if (rc.col >= 0) {
+                pcDest[static_cast<size_t>(e) * CB_NOUT + k] = pos.at(pcRow, rc.col);
+                pcSel[static_cast<size_t>(e) * CB_NOUT + k] = ix[8];
+            }
+        }
+    }
+}
+
 // Union the alternate Q rows into the CSR pattern: for each closed-branch role-1 Q output emit an
 // extra (altRow, col) entry so buildDest can resolve a slot there. Deduped by the caller's unique().
 void collectCbAltPattern(int ncb, const int* cbIdx, std::vector<std::pair<int, int>>& pat) {
@@ -803,6 +858,8 @@ struct Family {
     DeviceBuf in, ix, dest;
     DeviceBuf altDest, selRow;                               // Dynamic Q-relocation (cb only); empty when disabled
     bool dynReloc = false;                                   // altDest/selRow populated and the fill should select
+    DeviceBuf pcDest, pcSel;                                 // Continuous phase control (cb only): P-flow row at a1
+    bool phaseCtl = false;                                   // pcDest/pcSel populated (mode-3 gated emission)
 };
 
 // Build one family's device-side data (inputs, indices, role-folded destinations).
@@ -1146,7 +1203,8 @@ SharedStructure* buildStructure(int n,
                                 const int* dqRow, const int* dqKind,
                                 int nzi, const double* ziIn, const int* ziIdx,
                                 int ndr, const int* drRow, const int* drCol, const double* drCoef,
-                                int ndb, const int* dbRow, const int* dbCol, const double* dbCoef) {
+                                int ndb, const int* dbRow, const int* dbCol, const double* dbCoef,
+                                const int* cbPcSide) {
     auto st = std::make_unique<SharedStructure>();
     st->n = n;
     st->nElements = ncb + nob + nsh + nhv;
@@ -1186,6 +1244,13 @@ SharedStructure* buildStructure(int n,
     if (dynReloc) {
         collectCbAltPattern(ncb, cbIdx, pat);                // union the alternate Q rows into the pattern
     }
+    bool phaseCtl = false;
+    for (int e = 0; e < ncb; e++) {
+        phaseCtl |= cbPcSide[e] >= 0;
+    }
+    if (phaseCtl) {
+        collectCbPhasePattern(ncb, cbIdx, cbPcSide, rowMap, pat);   // union the a1-row P-flow positions
+    }
     collectPattern(nob, obIdx, 6, OB_SCATTER, OB_NOUT, resolveOb, pat);
     collectPattern(nsh, shIdx, 5, SH_SCATTER, SH_NOUT, resolveSh, pat);
     if (dynReloc) {
@@ -1222,6 +1287,14 @@ SharedStructure* buildStructure(int n,
         st->cb.altDest.upload(altDest.data(), altDest.size() * sizeof(int));
         st->cb.selRow.upload(selRow.data(), selRow.size() * sizeof(int));
         st->cb.dynReloc = true;
+    }
+    if (phaseCtl) {                                          // continuous phase control: P-flow row at a1
+        std::vector<int> pcDest;
+        std::vector<int> pcSel;
+        buildCbPhaseDest(ncb, cbIdx, cbPcSide, rowMap, pos, pcDest, pcSel);
+        st->cb.pcDest.upload(pcDest.data(), pcDest.size() * sizeof(int));
+        st->cb.pcSel.upload(pcSel.data(), pcSel.size() * sizeof(int));
+        st->cb.phaseCtl = true;
     }
     if (ncb) {                                               // per-element static trig (OLF's precomputed-trig shape)
         st->cbTrig.alloc(static_cast<size_t>(ncb) * 6 * sizeof(double));
@@ -1629,7 +1702,8 @@ __global__ void fillClosedBranchBatch(int ne, int nScenarios, int n, int nnz, in
                                       const double* x, double* vals, double* F,
                                       const char* disabled, const char* active,
                                       int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                                      const int* altDest, const int* selRow, const int* mode, int dynReloc) {
+                                      const int* altDest, const int* selRow, const int* mode, int dynReloc,
+                                      const int* pcDest, const int* pcSel) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ne * nScenarios) return;
     int e = tid % ne;
@@ -1660,6 +1734,21 @@ __global__ void fillClosedBranchBatch(int ne, int nScenarios, int n, int nnz, in
                       mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n);
     } else {
         scatterAdd(CB_NOUT, dest + e * CB_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+    }
+    if (pcDest != nullptr) {                                 // continuous phase control: emit the controlled
+        const int* pd = pcDest + e * CB_NOUT;                // side's P outputs AGAIN at the a1 row when this
+        const int* psl = pcSel + e * CB_NOUT;                // scenario has the control enabled (row mode 3)
+        for (int k = 0; k < CB_NOUT; k++) {
+            int d = pd[k];
+            if (d == -1 || mode[(size_t) s * n + psl[k]] != 3) {
+                continue;
+            }
+            if (d >= 0) {
+                atomicAdd(vals + (size_t) s * nnz + d, o[k]);
+            } else {
+                atomicAdd(F + (size_t) s * n + (-2 - d), o[k]);
+            }
+        }
     }
 }
 
@@ -1798,7 +1887,8 @@ __global__ void fillClosedBranchBatchF(int ne, int nScenarios, int n, int nnz, i
                                        const double* x, double* F,
                                        const char* disabled, const char* active,
                                        int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                                       const int* altDest, const int* selRow, const int* mode, int dynReloc) {
+                                       const int* altDest, const int* selRow, const int* mode, int dynReloc,
+                                       const int* pcDest, const int* pcSel) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ne * nScenarios) return;
     int e = tid % ne;
@@ -1833,6 +1923,14 @@ __global__ void fillClosedBranchBatchF(int ne, int nScenarios, int n, int nnz, i
                        pos, mode + (size_t) s * n, o, F + (size_t) s * n);
     } else {
         scatterAddF(4, dest + e * CB_NOUT, pos, o, F + (size_t) s * n);
+    }
+    if (pcDest != nullptr) {                                 // continuous phase control: the P residual at a1
+        for (int j = 0; j < 4; j += 2) {                     // outputs 0 (p1) / 2 (p2) at table pos 0 / 14
+            int d = pcDest[e * CB_NOUT + pos[j]];
+            if (d < -1 && mode[(size_t) s * n + pcSel[e * CB_NOUT + pos[j]]] == 3) {
+                atomicAdd(F + (size_t) s * n + (-2 - d), o[j]);
+            }
+        }
     }
 }
 
@@ -3228,9 +3326,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         initFBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dTarget.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (ctx->st->cb.ne) {
             if (fOnly) {
-                fillClosedBranchBatchF<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->st->cbTrig.as<double>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0);
+                fillClosedBranchBatchF<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->st->cbTrig.as<double>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0, ctx->st->cb.phaseCtl ? ctx->st->cb.pcDest.as<int>() : nullptr, ctx->st->cb.phaseCtl ? ctx->st->cb.pcSel.as<int>() : nullptr);
             } else {
-                fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0);
+                fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0, ctx->st->cb.phaseCtl ? ctx->st->cb.pcDest.as<int>() : nullptr, ctx->st->cb.phaseCtl ? ctx->st->cb.pcSel.as<int>() : nullptr);
             }
         }
         if (ctx->st->ob.ne) {
@@ -3547,7 +3645,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     CUDA_CHECK(cudaMemsetAsync(ctx->dQbuf.p, 0, nTot * sizeof(double), ctx->stream));
     // Reactive-limit Q buffer: physical bus-Q for PV-limit detection — keep the FROZEN routing
     // (dynReloc=0), the relocation only concerns the Newton residual, not this diagnostic Q.
-    if (ctx->st->cb.ne) fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), nullptr, nullptr, nullptr, 0);
+    if (ctx->st->cb.ne) fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), nullptr, nullptr, nullptr, 0, nullptr, nullptr);
     if (ctx->st->ob.ne) fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>());
     if (ctx->st->sh.ne) fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), nullptr, nullptr, nullptr, 0);
     // Zero-impedance dummy transfers MUST be in the Q/P buffer too: the distributed-slack retain
@@ -3718,7 +3816,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
         jintArray jdqElem, jintArray jdqSide, jdoubleArray jdqWeight, jintArray jdqRow, jintArray jdqKind,
         jdoubleArray jziIn, jintArray jziIdx,
         jintArray jdrRow, jintArray jdrCol, jdoubleArray jdrCoef,
-        jintArray jdbRow, jintArray jdbCol, jdoubleArray jdbCoef) {
+        jintArray jdbRow, jintArray jdbCol, jdoubleArray jdbCoef, jintArray jcbPcSide) {
     jdouble* cbIn = env->GetDoubleArrayElements(jcbIn, nullptr);
     jint* cbIdx = env->GetIntArrayElements(jcbIdx, nullptr);
     jdouble* obIn = env->GetDoubleArrayElements(jobIn, nullptr);
@@ -3740,6 +3838,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
     jint* dbRow = env->GetIntArrayElements(jdbRow, nullptr);
     jint* dbCol = env->GetIntArrayElements(jdbCol, nullptr);
     jdouble* dbCoef = env->GetDoubleArrayElements(jdbCoef, nullptr);
+    jint* cbPcSide = env->GetIntArrayElements(jcbPcSide, nullptr);
 
     int ncb = env->GetArrayLength(jcbIdx) / 12;             // cbIdx stride 12 (…a1col r1col qAlt1 qAlt2)
     int nob = env->GetArrayLength(jobIdx) / 6;
@@ -3758,7 +3857,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
                                                    ndq, dqElem, dqSide, dqWeight, dqRow, dqKind,
                                                    nzi, ziIn, ziIdx,
                                                    ndr, drRow, drCol, drCoef,
-                                                   ndb, dbRow, dbCol, dbCoef));
+                                                   ndb, dbRow, dbCol, dbCoef, cbPcSide));
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {
@@ -3767,6 +3866,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
 
     env->ReleaseDoubleArrayElements(jcbIn, cbIn, JNI_ABORT);
     env->ReleaseIntArrayElements(jcbIdx, cbIdx, JNI_ABORT);
+    env->ReleaseIntArrayElements(jcbPcSide, cbPcSide, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jobIn, obIn, JNI_ABORT);
     env->ReleaseIntArrayElements(jobIdx, obIdx, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jshIn, shIn, JNI_ABORT);
@@ -4237,7 +4337,7 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
     CUDA_CHECK(cudaMemsetAsync(ctx->dVals.p, 0, (size_t) nnz * nS * sizeof(double), ctx->stream));
     initFBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dTarget.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
     if (ctx->st->cb.ne) {
-        fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0);
+        fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0, ctx->st->cb.phaseCtl ? ctx->st->cb.pcDest.as<int>() : nullptr, ctx->st->cb.phaseCtl ? ctx->st->cb.pcSel.as<int>() : nullptr);
     }
     if (ctx->st->ob.ne) {
         fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());

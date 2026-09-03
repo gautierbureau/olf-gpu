@@ -76,6 +76,21 @@ public final class GpuAcActivationExtractor {
                 targetMap[GpuAcRowIndexing.col(es, e.getElementNum(), powerRowVar)] = e.getColumn();
                 continue;
             }
+            if (e.getType() == AcEquationType.BRANCH_TARGET_P) {
+                // CONTINUOUS phase control enabled: the controlled branch's P-flow equation sits at the
+                // CONTROLLER's a1-paired row (row mode 3 — the cb family re-emits the P outputs there).
+                // Stage-1 scope: LOCAL control only (controller == controlled).
+                var branch = network.getBranchById(network.getBranches().stream()
+                        .filter(b -> b.getNum() == e.getElementNum()).findFirst().orElseThrow().getId());
+                var pc = branch.getPhaseControl().orElseThrow();
+                if (pc.getControllerBranch() != branch) {
+                    throw new PowsyblException("GPU AC solver: REMOTE continuous phase control not supported");
+                }
+                int a1r = GpuAcRowIndexing.col(es, branch.getNum(), AcVariableType.BRANCH_ALPHA1);
+                mode[a1r] = 3;
+                targetMap[a1r] = e.getColumn();
+                continue;
+            }
             // IDENTITY rows (mode 0): the device row-mode mask writes diag 1 and F = x − target.
             AcVariableType vt = switch (e.getType()) {
                 case BUS_TARGET_V -> AcVariableType.BUS_V;

@@ -67,13 +67,19 @@ public final class GpuAcNewtonSolver {
      * @param hvIdx HVDC AC emulation, {@code nhv*4}: (Prow1 Prow2 ph1col ph2col)
      * @return an opaque native handle; release it with {@link #destroyStructure}
      */
+    private static int[] noPcSide(int ncb) {
+        int[] a = new int[ncb];
+        java.util.Arrays.fill(a, -1);
+        return a;
+    }
+
     public static native long createStructure(int n,
                                               double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
                                               double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
                                               int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                                               double[] ziIn, int[] ziIdx,
                                               int[] drRow, int[] drCol, double[] drCoef,
-                                              int[] dbRow, int[] dbCol, double[] dbCoef);
+                                              int[] dbRow, int[] dbCol, double[] dbCoef, int[] cbPcSide);
 
     /**
      * Release a structure handle from {@link #createStructure} (idempotent for handle 0). Contexts
@@ -168,7 +174,8 @@ public final class GpuAcNewtonSolver {
                                  int[] drRow, int[] drCol, double[] drCoef,
                                  int[] dbRow, int[] dbCol, double[] dbCoef) {
         long structure = createStructure(x0.length, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
-                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef);
+                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
+                noPcSide(cbIdx.length / 12));
         try {
             long handle = createContext(structure);
             try {
@@ -320,7 +327,8 @@ public final class GpuAcNewtonSolver {
         int n = x0Base.length;
         int nScenarios = disabledElementMask.length;
         long structure = createStructure(n, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
-                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef);
+                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
+                noPcSide(cbIdx.length / 12));
         try {
             long handle = createBatchContext(structure, nScenarios, mode,
                     rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, new byte[rlVrow.length], new double[x0Base.length],

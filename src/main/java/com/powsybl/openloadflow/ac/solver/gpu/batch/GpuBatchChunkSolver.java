@@ -61,6 +61,7 @@ final class GpuBatchChunkSolver {
                                                List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers,
                                                GpuBatchSecondaryVc.Controllers svcControllers,
                                                List<GpuBatchVoltageMonitoring.Ctl> monitoringControllers,
+                                               List<GpuBatchContinuousPhase.Ctl> continuousPhaseControllers,
                                                BatchConfig config) {
         int nb = batchedIndices.size();
         int chunkSize = GpuBatchContextCache.resolveChunkSize(nb, n, gpuData);
@@ -275,6 +276,16 @@ final class GpuBatchChunkSolver {
                     // SIMPLE (WITH_GENERATOR) transformer VC: OLF's initialize() enables continuous VC
                     // BEFORE the first solve — apply the VC-ON activation deltas now, and keep the
                     // pre-TVC override lists for the round-to-tap re-solve.
+                    // CONTINUOUS phase control: OLF's initialize() enables the CONTROLLER-mode controls
+                    // BEFORE the first solve — keep the pre-enable override lists for the pinned re-solves.
+                    List<Integer> prePcOvIdx = null;
+                    List<Double> prePcOvVal = null;
+                    if (continuousPhaseControllers != null && !continuousPhaseControllers.isEmpty()) {
+                        prePcOvIdx = new ArrayList<>(ovIndexList);
+                        prePcOvVal = new ArrayList<>(ovValueList);
+                        GpuBatchContinuousPhase.applyPhaseOn(realCount, n, continuousPhaseControllers,
+                                rowModePerScenario, baseRowMode, disabledMask, ovIndexList, ovValueList);
+                    }
                     List<Integer> preTvcOvIdx = null;
                     List<Double> preTvcOvVal = null;
                     if (config.simpleTransformerControl() && transformerControllers != null && !transformerControllers.isEmpty()) {
@@ -550,6 +561,22 @@ final class GpuBatchChunkSolver {
                                 chunkResults, svcControllers, rlStateOut,
                                 rowModePerScenario, baseRowMode, disabledMask,
                                 targetOverrideIndex, targetOverrideValue,
+                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                                dsAnchorShift, dsSlackShift,
+                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                config.lsMode() == 2 ? varType : null, config);
+                    }
+                    if (continuousPhaseControllers != null && !continuousPhaseControllers.isEmpty()) {
+                        chunkResults = GpuBatchContinuousPhase.orchestrate(handle, chunkSize, realCount, n,
+                                chunkResults, continuousPhaseControllers, esContext,
+                                rowModePerScenario, baseRowMode, disabledMask,
+                                prePcOvIdx, prePcOvVal,
                                 dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
                                 dsAnchorShift, dsSlackShift,
                                 r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),

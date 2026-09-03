@@ -156,6 +156,10 @@ final class GpuAcValidation {
                         }
                     }
                 }
+                case BRANCH_TARGET_P -> {
+                    // CONTINUOUS phase control: the controlled branch's P-flow as its own equation row
+                    // (re-emitted by the cb family at the a1 row, row mode 3). Accept the flow term.
+                }
                 default -> throw new PowsyblException("GPU AC solver: unsupported equation type " + e.getType());
             }
         }

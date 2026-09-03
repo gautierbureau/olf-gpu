@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
  */
 class GpuBatchedSecurityAnalysisSolverTest {
 
-    private static final GpuAcData EMPTY = new GpuAcData(new double[0], new int[0], new double[0], new int[0],
+    private static final GpuAcData EMPTY = new GpuAcData(new double[0], new int[0], new int[0], new double[0], new int[0],
             new double[0], new int[0], new double[0], new int[0],
             new int[0], new int[0], new double[0], new int[0], new int[0],
             new double[0], new int[0],

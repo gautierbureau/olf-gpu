@@ -45,7 +45,7 @@ final class GpuAcFamilyPacker {
                  List<double[]> shIn, List<int[]> shIdx, List<double[]> hvIn, List<int[]> hvIdx,
                  List<double[]> ziIn, List<int[]> ziIdx, List<Integer> ziNums,
                  List<Integer> baseOpenCb, List<Integer> baseOpenZi, List<Integer> baseOpenZiNums,
-                 int[] cbElemOf, int[] obElemOf, int[] shElemOf) {
+                 int[] cbElemOf, int[] obElemOf, int[] shElemOf, List<Integer> cbPcSide) {
     }
 
     static Packs pack(LfNetwork network, ExtractionColumns columns,
@@ -73,6 +73,7 @@ final class GpuAcFamilyPacker {
 
         List<double[]> cbIn = new ArrayList<>();
         List<int[]> cbIdx = new ArrayList<>();
+        List<Integer> cbPcSide = new ArrayList<>();
         List<double[]> obIn = new ArrayList<>();
         List<int[]> obIdx = new ArrayList<>();
         int[] obElemOf = new int[nBranches];                 // open-branch element index per branch (-1 = none)
@@ -123,6 +124,16 @@ final class GpuAcFamilyPacker {
                 cbIdx.add(new int[] {ph1, qRow[b1.getNum()], ph2, qRow[b2.getNum()],
                     ph1, v1, ph2, v2, a1col, r1col,
                     qRowAlt[b1.getNum()], qRowAlt[b2.getNum()]});    // [10],[11]: alternate Q rows (dyn reloc)
+                // CONTINUOUS phase control (CONTROLLER mode, LOCAL): the controlled side whose P-flow is
+                // re-emitted at the a1 row when the control is enabled per scenario (row mode 3); -1 = none
+                int pcSide = -1;
+                var pcOpt = br.getPhaseControl();
+                if (a1col >= 0 && pcOpt.isPresent()
+                        && pcOpt.orElseThrow().getMode() == com.powsybl.openloadflow.network.TransformerPhaseControl.Mode.CONTROLLER
+                        && pcOpt.orElseThrow().getControlledBranch() == br) {
+                    pcSide = pcOpt.orElseThrow().getControlledSide() == com.powsybl.iidm.network.TwoSides.ONE ? 0 : 1;
+                }
+                cbPcSide.add(pcSide);
             } else if (b2 != null) {                       // side 1 open: p2/q2 at bus2, variable v2
                 obElemOf[br.getNum()] = obIn.size();
                 obIn.add(new double[] {pi.getY(), pi.getKsi(), pi.getG1(), pi.getB1(), pi.getG2(), pi.getB2(), pi.getR1()});
@@ -254,6 +265,6 @@ final class GpuAcFamilyPacker {
         }
 
         return new Packs(cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx, ziIn, ziIdx, ziNums,
-                baseOpenCb, baseOpenZi, baseOpenZiNums, cbElemOf, obElemOf, shElemOf);
+                baseOpenCb, baseOpenZi, baseOpenZiNums, cbElemOf, obElemOf, shElemOf, cbPcSide);
     }
 }

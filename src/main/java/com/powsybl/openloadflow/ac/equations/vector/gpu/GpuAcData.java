@@ -69,7 +69,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public record GpuAcData(double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
+public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obIn, int[] obIdx,
                         double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
                         int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                         double[] ziIn, int[] ziIdx,
@@ -155,6 +155,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
                 && java.util.Arrays.equals(dsMaxDelta, other.dsMaxDelta) && java.util.Arrays.equals(dsMinDelta, other.dsMinDelta)
                 && java.util.Arrays.equals(rlMonitored, other.rlMonitored)
                 && java.util.Arrays.equals(rowSlope, other.rowSlope)
+                && java.util.Arrays.equals(cbPcSide, other.cbPcSide)
                 && dsMode == other.dsMode
                 && java.util.Arrays.equals(dsMarginUp, other.dsMarginUp) && java.util.Arrays.equals(dsMarginDown, other.dsMarginDown)
                 && dsSlackMarginUp == other.dsSlackMarginUp && dsSlackMarginDown == other.dsSlackMarginDown;

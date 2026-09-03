@@ -571,6 +571,61 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** DEVICE-mode CONTINUOUS phase control (CONTINUOUS_WITH_DISCRETISATION, CONTROLLER): the first
+     *  solve runs with the a1 row flipped to the controlled P-flow equation (row mode 3), then the
+     *  loop rounds a1 to the closest tap and re-solves with the tap's full pi row pinned
+     *  (GpuBatchContinuousPhase); GPU SA == CPU SA at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceContinuousPhaseControlMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.TwoWindingsTransformer ps1 = network.getTwoWindingsTransformer("PS1");
+        ps1.getPhaseTapChanger().setRegulationMode(com.powsybl.iidm.network.PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL)
+                .setTargetDeadband(1).setRegulating(true).setTapPosition(1)
+                .setRegulationTerminal(ps1.getTerminal1()).setRegulationValue(83);
+        com.powsybl.iidm.network.Line l1 = network.getLine("L1");
+        network.newLine().setId("L1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR() * 2).setX(l1.getX() * 2)
+                .setG1(l1.getG1()).setB1(l1.getB1()).setG2(l1.getG2()).setB2(l1.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("L1_BIS", new BranchContingency("L1_BIS")),
+                new Contingency("L1", new BranchContingency("L1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setPhaseShifterRegulationOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setPhaseShifterControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.PhaseShifterControlMode.CONTINUOUS_WITH_DISCRETISATION);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
+    /** DEVICE-mode CONTINUOUS phase control in CURRENT_LIMITER mode: one tap shift per round while
+     *  I exceeds the limit, direction from the sign of dI/da1 on OLF's own current term
+     *  (GpuBatchContinuousPhase LIMITER branch); GPU SA == CPU SA at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceContinuousPhaseControlCurrentLimiterMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.TwoWindingsTransformer ps1 = network.getTwoWindingsTransformer("PS1");
+        ps1.getPhaseTapChanger().setRegulationMode(com.powsybl.iidm.network.PhaseTapChanger.RegulationMode.CURRENT_LIMITER)
+                .setTargetDeadband(1).setRegulating(true).setTapPosition(1)
+                .setRegulationTerminal(ps1.getTerminal1()).setRegulationValue(100);
+        com.powsybl.iidm.network.Line l1 = network.getLine("L1");
+        network.newLine().setId("L1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR() * 2).setX(l1.getX() * 2)
+                .setG1(l1.getG1()).setB1(l1.getB1()).setG2(l1.getG2()).setB2(l1.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("L1_BIS", new BranchContingency("L1_BIS")),
+                new Contingency("L1", new BranchContingency("L1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setPhaseShifterRegulationOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setPhaseShifterControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.PhaseShifterControlMode.CONTINUOUS_WITH_DISCRETISATION);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
     /** DEVICE-mode SimpleTransformerVoltageControl (WITH_GENERATOR): the first solve runs with the
      *  VC-ON activation deltas (continuous rho), then one round-to-closest-tap re-solve
      *  (GpuBatchSimpleTvc); GPU SA == CPU SA at 1e-12, tap-moving strong outage included. */

@@ -210,6 +210,15 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 varType = GpuAcActivationExtractor.extractVarType(equationSystem, n);
                 invalidation.activationDirty = false;
             }
+            // Row modes >= 2 (SLOPE-SVC = 2, continuous phase control = 3) are BATCH kernel capabilities —
+            // the single-scenario fill path has no alternate-destination scatter for them: fall back to CPU
+            // (the extractor no longer rejects these shapes, so guard here).
+            for (int mode : activation.rowMode()) {
+                if (mode >= 2) {
+                    throw new UnsupportedOperationException(
+                            "row mode " + mode + " (slope-SVC / continuous phase control) is batch-only");
+                }
+            }
             double[] target = activation.applyTargets(targetVector.getArray());
             double[] x0 = equationSystem.getStateVector().get().clone();
             // Device-side state-vector scaling: NONE = undamped Newton; LINE_SEARCH backtracks on the

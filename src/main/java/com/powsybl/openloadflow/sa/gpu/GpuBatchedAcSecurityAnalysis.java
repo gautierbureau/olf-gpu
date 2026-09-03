@@ -196,7 +196,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // implement them yet: keep the base on the CPU there too.
         boolean slopeSvcBase = lfNetwork.getBuses().stream()
                 .anyMatch(com.powsybl.openloadflow.network.LfBus::hasGeneratorsWithSlope);
-        boolean cpuBaseOnly = frozenHvdcBase || monitoringSvcBase || slopeSvcBase;
+        // A CONTROLLER-mode phase control activates its BRANCH_TARGET_P equation mid-run in the BASE
+        // load flow (PhaseControlOuterLoop.initialize) — the SEQUENTIAL GPU solver has no family for
+        // that row (mode 3 is a batch capability): keep the base on the CPU, the batch still runs.
+        boolean phaseControlBase = lfNetwork.getBranches().stream()
+                .anyMatch(b -> b.getPhaseControl()
+                        .map(pc -> pc.getMode() == com.powsybl.openloadflow.network.TransformerPhaseControl.Mode.CONTROLLER)
+                        .orElse(false));
+        boolean cpuBaseOnly = frozenHvdcBase || monitoringSvcBase || slopeSvcBase || phaseControlBase;
         if (!scope.batchDisabled() && !multiThread && gpuBaseLoadFlowEnabled() && !cpuBaseOnly
                 && GpuAcNewtonSolver.isAvailable()
                 && acParameters.getSolverFactory().getClass() == NewtonRaphsonFactory.class) {

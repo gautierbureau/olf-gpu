@@ -368,6 +368,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
                             ? GpuBatchVoltageMonitoring.buildControllers(network, equationSystem, targetVector,
                                     baseActivation, baseTargets, gpuData.rlVrow())
                             : null,
+                    config.continuousPhaseControl()
+                            ? GpuBatchContinuousPhase.buildControllers(network, equationSystem, targetVector,
+                                    baseActivation, baseTargets, elementMapper)
+                            : null,
                     config);
         }
 
@@ -489,7 +493,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     gpuData.shIn(), gpuData.shIdx(), gpuData.hvIn(), gpuData.hvIdx(),
                     gpuData.dqElem(), gpuData.dqSide(), gpuData.dqWeight(), gpuData.dqRow(), gpuData.dqKind(),
                     gpuData.ziIn(), gpuData.ziIdx(), gpuData.drRow(), gpuData.drCol(), gpuData.drCoef(),
-                    gpuData.dbRow(), gpuData.dbCol(), gpuData.dbCoef());
+                    gpuData.dbRow(), gpuData.dbCol(), gpuData.dbCoef(), gpuData.cbPcSide());
             // The engine drives OLF's Java outer loops on the SHARED network, mutating control-enabled flags
             // (shunt/transformer VC), taps, PV/PQ, distributed targetP, and the state vector across scenarios.
             // It restores the compact snapshot only BETWEEN scenarios, leaving the network in the last

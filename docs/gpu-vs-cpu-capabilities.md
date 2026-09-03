@@ -108,14 +108,14 @@ the stock CPU path (base + contingencies + strategies), logged.
 |---|---|---|
 | DistributedSlack | ✅ **2026-09-03** | every balance type ± useActiveLimits batched (GpuDsParams); water-filling with saturation + re-normalization matches CPU; failure behavior ≠ LEAVE_ON_SLACK_BUS handled via scenario rejection → CPU. SA parity detail: OLF's `DefaultContingencyActivePowerLossDistribution` distributes each contingency's SCHEDULED lost P BEFORE the post-contingency solve — the batch replays it host-side (`GpuBatchLossPreDistribution`) as anchor shifts + slack share + target overrides (a custom SPI name → whole-run CPU); without the replay, injection-loss scenarios land elsewhere INSIDE the 1 MW band (measured 4.2e-4 kV). §A |
 | ReactiveLimits | 🔶 | PV→PQ + PQ→PV back-switch + run's maxPqPvSwitch cap match CPU; deltas: no keep-strongest-PV guard, curve limits frozen at base P, no robust-mode realistic-V forcing. §B |
-| TransformerVoltageControl | 🔶 | AFTER_GENERATOR mode, only when the generator-freeze stage is structurally unnecessary (`transformerControlSupported`); per-controller (no shared-group ratio manager). §C |
-| AcHvdcAcEmulationLimits, FreezingHvdcACEmulation | 🔶 | tolerated as structural no-ops when the network has **no HVDC**; otherwise ⏩ |
-| VoltageMonitoring | 🔶 | tolerated when **no SVC**; otherwise ⏩ |
+| TransformerVoltageControl (all 3 flavors) | ✅ **2026-08** | AFTER_GENERATOR (GpuBatchTransformerControl), WITH_GENERATOR/Simple (GpuBatchSimpleTvc: VC-ON first solve + round-to-closest-tap re-solve) and INCREMENTAL (GpuBatchIncrementalTvc: in-kernel dV/drho sensitivities) all DEVICE-batched at 1e-12. Stage-1 scope: no generator VC under the transformer-controlled level (`transformerControlSupported`), per-controller (no shared-group ratio manager). §C |
+| AcHvdcAcEmulationLimits, FreezingHvdcACEmulation | ✅ **2026-08** | batched WITH HVDCs (GpuBatchHvdcAcEmulation: freeze-at-warm-flows pre-solve + limit/saturation rounds); every AC-emu HVDC must start LINEAR (saturated/frozen base → CPU); frozen-HVDC base LF stays on CPU (cpuBaseOnly) |
+| VoltageMonitoring | ✅ **2026-08** | batched WITH monitoring SVCs (GpuBatchVoltageMonitoring, two-phase pre-RL/full-solve; svcShunt b0 packed); monitoring-SVC base LF stays on CPU (cpuBaseOnly) |
 | PhaseControl / IncrementalPhaseControl | ✅ **2026-09-03** | BOTH batched on DEVICE. IncrementalPhaseControl (ACTIVE_POWER_CONTROL + CURRENT_LIMITER): decision loop over the pinned α1 identity with es-loaded flow terms (`GpuBatchIncrementalFlowControl`). Continuous PhaseControl (CONTINUOUS_WITH_DISCRETISATION): row mode 3 re-emits the controlled side's P block at the α1-paired row (cbPcSide/pcDest in the structure) so α1 solves free in the first pass; `GpuBatchContinuousPhase` then rounds to the closest tap (CONTROLLER) / one-tap I-capping steps (LIMITER) with r1Ov pi-row pins. LOCAL control only (remote → CPU via the extraction guard); the SA base LF stays on CPU for CONTROLLER mode (BRANCH_TARGET_P activates mid-run, sequential solver guards row modes ≥ 2). Both `MatchesCpu` at 1e-12. Semantic axes in §D |
-| IncrementalTransformerVoltageControl / Simple | ⏩ | §D |
-| TransformerReactivePowerControl (incremental) | ⏩ | §D |
-| ShuntVoltageControl (incl. incremental) | ⏩ | §D |
-| SecondaryVoltageControl | ⏩ (batched only) | **plain LF: ✅ validated 2026-07-20** — this loop owns NO solver variable and NO equation type. It builds its own dense side matrices, solves a small LU OUTSIDE the Newton system, and writes back only `GeneratorVoltageControl.setTargetValue()` — i.e. it mutates the RHS of existing BUS_TARGET_V rows and their active flags. On the sequential path (CPU outer loops around a GPU inner solve) it therefore needs NO packing support: `GpuSecondaryVoltageControlTest` drives the ieee14 z1 pilot point to 13.0000 kV with max dV 2.8e-14 vs CPU and ZERO CPU fallbacks. Still ⏩ for the BATCHED path. §D |
+| IncrementalTransformerVoltageControl / Simple | ✅ **2026-08** | folded into the TransformerVoltageControl row above |
+| TransformerReactivePowerControl (incremental) | ✅ **2026-08** | GpuBatchIncrementalFlowControl KIND_RPC (rho → branch Q, es-loaded flow terms), 1e-12 |
+| ShuntVoltageControl (incl. incremental) | ✅ **2026-08** | continuous (SHUNT_B in-Newton) + INCREMENTAL (GpuBatchIncrementalShuntVc, in-kernel dV/dB), 1e-12 |
+| SecondaryVoltageControl | ⏩ (batched only) | **plain LF: ✅ validated 2026-07-20** — this loop owns NO solver variable and NO equation type. It builds its own dense side matrices, solves a small LU OUTSIDE the Newton system, and writes back only `GeneratorVoltageControl.setTargetValue()` — i.e. it mutates the RHS of existing BUS_TARGET_V rows and their active flags. On the sequential path (CPU outer loops around a GPU inner solve) it therefore needs NO packing support: `GpuSecondaryVoltageControlTest` drives the ieee14 z1 pilot point to 13.0000 kV with max dV 2.8e-14 vs CPU and ZERO CPU fallbacks. BATCHED path ✅ **2026-08** (GpuBatchSecondaryVc: batched device sensitivities + host zone-system replay, 1e-11 — user-accepted machine precision on the pilot-point knife-edge); stage-1 scope LOCAL generator VC only. §D |
 | AreaInterchangeControl | ⏩ | §D |
 | AutomationSystem | ⏩ | §D |
 
@@ -208,8 +208,18 @@ element falls back to the stock per-strategy CPU path individually.
 
 ## 5. The gap list to full CPU replacement (ranked)
 
-1. **Remaining SA outer loops** — shunt voltage control and incremental transformer/phase
-   controls first (present in RTE parameter sets); the §D catalogue is the port checklist.
+1. **Remaining SA outer loops (2026-09-03: only TWO left, both modes)** — **AreaInterchangeControl**
+   (multi-area DS generalization; the anchor-shift/factor channels + the host water-fill of
+   `GpuBatchLossPreDistribution` are its building blocks) and **AutomationSystem** (overload
+   automatons: per-scenario branch-tripping decisions off monitored flows — the current-limiter
+   machinery is the closest template). Everything else is batched at 1e-12 (SecondaryVC 1e-11):
+   DS all balance types, RL, TVC ×3, incremental shunt/phase/RPC, Simple TVC, HVDC AC-emulation,
+   VoltageMonitoring, slope-SVC, continuous PhaseControl (both DEVICE and JAVA modes).
+   Stage-1 scope carve-outs (per-shape CPU fallback, not per-loop): remote phase/transformer
+   control, generator VC under a transformer-controlled level, strategy pairs under
+   anchor-dependent DS factor types (TARGET / load-based / REMAINING_MARGIN), an islanded DS
+   participant in the loss pre-distribution, a custom ContingencyActivePowerLossDistribution SPI,
+   loadPowerFactorConstant with load-based balance, ZIP loads for load losses.
 2. **HVDC + SVC packing** — extractor term/variable work; unblocks plain-LF coverage on
    those networks and their SA/action rows.
 3. **Node-breaker contingency propagation** — ✅ **landed 2026-07-20.** A propagated contingency

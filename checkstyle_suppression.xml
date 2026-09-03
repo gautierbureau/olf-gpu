@@ -26,4 +26,17 @@
          slots) that are all reused across chunks and mutated in lockstep. Splitting it would mean
          threading every buffer through a parameter object for no readability gain. -->
     <suppress files="[/\\]GpuBatchChunkSolver\.java" checks="MethodLength"/>
+
+    <!-- GpuHybridBatchOuterLoopEngine.solve replays OLF's engine loop (outer-loop iteration, snapshot
+         save/restore, device re-solve, status bookkeeping) as ONE state machine whose locals are the
+         engine state; GpuBatchSecondaryVc.orchestrate is the same shape for the zone-system replay.
+         Both are validated at 1e-12 against the CPU — splitting them means threading the full state
+         through parameter objects for no readability gain (same rationale as GpuBatchChunkSolver). -->
+    <suppress files="[/\\]GpuHybridBatchOuterLoopEngine\.java" checks="MethodLength"/>
+    <suppress files="[/\\]GpuBatchSecondaryVc\.java" checks="MethodLength"/>
+
+    <!-- GpuCpuPureInnerProbe is the frozen LINE-26-4231 diagnostic: its bare blocks deliberately
+         scope each probe stage's locals (saved loops, reset targets) so stages cannot leak into
+         each other. Kept verbatim as the investigation record. -->
+    <suppress files="[/\\]GpuCpuPureInnerProbe\.java" checks="AvoidNestedBlocks"/>
 </suppressions>

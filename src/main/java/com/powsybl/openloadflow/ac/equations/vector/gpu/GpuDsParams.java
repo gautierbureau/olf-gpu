@@ -115,8 +115,7 @@ public record GpuDsParams(LoadFlowParameters.BalanceType balanceType, boolean us
         return switch (balanceType) {
             case PROPORTIONAL_TO_GENERATION_P_MAX -> g.getDroop() != 0 ? g.getMaxP() / g.getDroop() : 0;
             case PROPORTIONAL_TO_GENERATION_P -> Math.abs(g.getTargetP());
-            case PROPORTIONAL_TO_GENERATION_PARTICIPATION_FACTOR ->
-                    g.getParticipationFactor() > 0 ? g.getParticipationFactor() : 0;
+            case PROPORTIONAL_TO_GENERATION_PARTICIPATION_FACTOR -> g.getParticipationFactor() > 0 ? g.getParticipationFactor() : 0;
             // REMAINING_MARGIN factors are direction-dependent and live in the margins (busMargins /
             // in-kernel); here the value is only a PARTICIPATION INDICATOR (pack membership, slack-only
             // detection, lost-participation checks — the gen-outage reweight is CPU-gated under RM).

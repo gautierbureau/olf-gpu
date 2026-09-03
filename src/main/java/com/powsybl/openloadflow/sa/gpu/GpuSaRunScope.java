@@ -277,7 +277,7 @@ final class GpuSaRunScope {
         List<String> unsupported = new ArrayList<>();
         for (AcOuterLoop ol : acParameters.getOuterLoops()) {
             String name = ol.getName();
-            boolean ok = (JAVA_SUPPORTED_LOOPS.contains(name)
+            boolean ok = JAVA_SUPPORTED_LOOPS.contains(name)
                     // TransformerVoltageControl: the JAVA engine runs OLF's real transformer VC loop; the continuous
                     // ratio is solved INSIDE the device inner Newton (rho is a BRANCH_RHO1 variable in es), the loop
                     // makes only the discrete tap DECISIONS, and the compact snapshot now isolates the transformer
@@ -308,18 +308,25 @@ final class GpuSaRunScope {
                     // IncrementalPhaseControl / IncrementalTransformerReactivePowerControl: both move discrete
                     // taps directly; a1/rho follow via their pinned variables (targets re-read per round +
                     // faithful re-init) and the per-scenario pi-model refresh carries the tap's R/X/Y/ksi/a1.
-                    // (CONTINUOUS phase control — "PhaseControl" — stays unsupported: its BRANCH_TARGET_P row
-                    // has no device family and the activation extractor routes it to CPU by construction.)
                     || "IncrementalPhaseControl".equals(name)
                     || "IncrementalTransformerReactivePowerControl".equals(name)
+                    // CONTINUOUS PhaseControl (2026-09-03): the loop's enable/disable of the CONTROLLER-mode
+                    // control toggles the BRANCH_TARGET_P row, which the activation extractor now maps to the
+                    // batch row mode 3 (the cb family re-emits the controlled side's P block at the α1 row) —
+                    // the hybrid re-extracts activation after every loop mutation, and the rounding/limiter
+                    // tap moves reach the device via the per-scenario pi-model refresh. LOCAL control only
+                    // (a remote CONTROLLER shape throws at activation extraction = CPU fallback anyway).
+                    || "PhaseControl".equals(name) && lfNetwork.getBranches().stream()
+                            .map(b -> b.getPhaseControl().orElse(null))
+                            .filter(java.util.Objects::nonNull)
+                            .allMatch(pc -> pc.getControlledBranch() == pc.getControllerBranch())
                     // SecondaryVoltageControl: adjusts GENERATOR-VC TARGET VALUES only (pilot-point regulation);
                     // targets are re-read per round and the engine isolates every MAIN generator VC's target per
                     // scenario (vcSnap), so the hybrid replays OLF's loop verbatim.
-                    || "SecondaryVoltageControl".equals(name))
-                    // conservative structural no-ops: allow the HVDC/SVC-touching loops only when they cannot
-                    // fire yet (widen once JAVA's HVDC/SVC handling is validated — the snapshot already captures
-                    // HvdcState, and SVCs are generator-voltage-control buses already in the controller set).
-                    ;
+                    || "SecondaryVoltageControl".equals(name);
+            // conservative structural no-ops: allow the HVDC/SVC-touching loops only when they cannot
+            // fire yet (widen once JAVA's HVDC/SVC handling is validated — the snapshot already captures
+            // HvdcState, and SVCs are generator-voltage-control buses already in the controller set).
             // VoltageMonitoring now supported WITH SVCs present: the loop's mutations (re-enable generator VC,
             // move VC targets, flip an SVC's generator control type) are all isolated per scenario — BusState
             // captures generatorsControlType + VC-enabled, and the engine's vcSnap isolates VC target values.

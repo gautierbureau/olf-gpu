@@ -31,7 +31,6 @@ import com.powsybl.openloadflow.equations.JacobianMatrix;
 import com.powsybl.openloadflow.equations.StateVector;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus;
-import com.powsybl.openloadflow.network.util.VoltageInitializer;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
@@ -39,6 +38,7 @@ import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfSynchronousNetwork;
 import com.powsybl.openloadflow.network.impl.LfNetworkLoaderImpl;
 import com.powsybl.openloadflow.network.util.PreviousValueVoltageInitializer;
+import com.powsybl.openloadflow.network.util.VoltageInitializer;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
@@ -159,8 +159,8 @@ class GpuCpuPureInnerProbe {
         System.out.printf("  [OUTER-LOOP ORDER] %s%n", acp.getOuterLoops().stream()
                 .map(o -> o.getClass().getSimpleName()).toList());
         for (String ln : new String[]{"com.powsybl.openloadflow.network.util.ActivePowerDistribution",
-                "com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop",
-                "com.powsybl.openloadflow.ac.solver.NewtonRaphson"}) {
+            "com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop",
+            "com.powsybl.openloadflow.ac.solver.NewtonRaphson"}) {
             ((ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(ln))
                     .setLevel(ch.qos.logback.classic.Level.DEBUG);
         }
@@ -415,7 +415,8 @@ class GpuCpuPureInnerProbe {
         AcSolverUtil.updateNetwork(network, es);
         AcLoadFlowContext ctgContext = new AcLoadFlowContext(network, acp);
         var result = new AcloadFlowEngine(ctgContext).run();
-        System.out.printf("  FULL outer-loop run (CPU-SA equiv, distributed base + %s out): solverStatus=%s solverIters=%d outerLoopIters=%d outerLoopStatus=%s distributedActivePower=%.4f pu (%.1f MW)%n",
+        System.out.printf("  FULL outer-loop run (CPU-SA equiv, distributed base + %s out): solverStatus=%s solverIters=%d"
+                + " outerLoopIters=%d outerLoopStatus=%s distributedActivePower=%.4f pu (%.1f MW)%n",
                 branchId, result.getSolverStatus(), result.getSolverIterations(), result.getOuterLoopIterations(),
                 result.getOuterLoopResult().status(), result.getDistributedActivePower(), result.getDistributedActivePower() * 100);
         reportSlack(network, branchId + " out, CPU FULL outer loops (from distributed base)");
@@ -432,7 +433,8 @@ class GpuCpuPureInnerProbe {
         acp.setVoltageInitializer(new PreviousValueVoltageInitializer());   // FORCE warm-start-from-base
         AcLoadFlowContext warmContext = new AcLoadFlowContext(network, acp);
         var warmResult = new AcloadFlowEngine(warmContext).run();
-        System.out.printf("  FULL outer-loop run WARM-from-base (PreviousValue init, %s out): solverStatus=%s solverIters=%d outerLoopIters=%d outerLoopStatus=%s distributedActivePower=%.4f pu (%.1f MW)%n",
+        System.out.printf("  FULL outer-loop run WARM-from-base (PreviousValue init, %s out): solverStatus=%s solverIters=%d"
+                + " outerLoopIters=%d outerLoopStatus=%s distributedActivePower=%.4f pu (%.1f MW)%n",
                 branchId, warmResult.getSolverStatus(), warmResult.getSolverIterations(), warmResult.getOuterLoopIterations(),
                 warmResult.getOuterLoopResult().status(), warmResult.getDistributedActivePower(), warmResult.getDistributedActivePower() * 100);
         reportSlack(network, branchId + " out, CPU FULL outer loops WARM-from-base");

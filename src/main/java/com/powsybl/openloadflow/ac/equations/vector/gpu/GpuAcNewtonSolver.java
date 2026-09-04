@@ -79,7 +79,8 @@ public final class GpuAcNewtonSolver {
                                               int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                                               double[] ziIn, int[] ziIdx,
                                               int[] drRow, int[] drCol, double[] drCoef,
-                                              int[] dbRow, int[] dbCol, double[] dbCoef, int[] cbPcSide);
+                                              int[] dbRow, int[] dbCol, double[] dbCoef, int[] cbPcSide,
+                                              double[] vdlIn, int[] vdlIdx);
 
     /**
      * Release a structure handle from {@link #createStructure} (idempotent for handle 0). Contexts
@@ -175,7 +176,7 @@ public final class GpuAcNewtonSolver {
                                  int[] dbRow, int[] dbCol, double[] dbCoef) {
         long structure = createStructure(x0.length, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
                 dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
-                noPcSide(cbIdx.length / 12));
+                noPcSide(cbIdx.length / 12), new double[0], new int[0]);
         try {
             long handle = createContext(structure);
             try {
@@ -328,7 +329,7 @@ public final class GpuAcNewtonSolver {
         int nScenarios = disabledElementMask.length;
         long structure = createStructure(n, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
                 dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
-                noPcSide(cbIdx.length / 12));
+                noPcSide(cbIdx.length / 12), new double[0], new int[0]);
         try {
             long handle = createBatchContext(structure, nScenarios, mode,
                     rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, new byte[rlVrow.length], new double[x0Base.length],

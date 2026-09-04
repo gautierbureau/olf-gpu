@@ -618,6 +618,10 @@ __global__ void fillOpenBranch(int ne, const double* in, const int* ix, const in
     scatterAdd(OB_NOUT, dest + e * OB_NOUT, o, vals, F);
 }
 
+__global__ void fillVdlBatch(int ne, int nScenarios, int n, int nnz,
+                             const double* in, const int* ix, const int* dest,
+                             const double* x, double* vals, double* F);
+
 __global__ void fillShunt(int ne, const double* in, const int* ix, const int* dest,
                           const double* x, double* vals, double* F,
                           const int* altDest, const int* selRow, const int* mode, int dynReloc) {
@@ -1084,6 +1088,8 @@ struct SharedStructure {
     DeviceBuf dDrCol, dDrCoef, dDrDest;                      // ndr each (dDrDest is ndr*2)
     int ndb = 0;                                             // DISTR_SHUNT_B linear contributions
     DeviceBuf dDbCol, dDbCoef, dDbDest;                      // ndb each (dDbDest is ndb*2)
+    int nvdl = 0;                                            // voltage-dependent load model terms (ZIP/exp)
+    DeviceBuf dVdlIn, dVdlIdx, dVdlDest;                     // nvdl*2 (coef, exponent) / nvdl*2 (row, vCol) / nvdl
     DeviceBuf dRowPtr, dColIdx, dDiagPos;                    // device CSR pattern + guaranteed-diagonal slots
     double luBytes = 0.0;                                    // cached LU-probe footprint (0 = not probed yet)
 };
@@ -1204,7 +1210,8 @@ SharedStructure* buildStructure(int n,
                                 int nzi, const double* ziIn, const int* ziIdx,
                                 int ndr, const int* drRow, const int* drCol, const double* drCoef,
                                 int ndb, const int* dbRow, const int* dbCol, const double* dbCoef,
-                                const int* cbPcSide) {
+                                const int* cbPcSide,
+                                int nvdl, const double* vdlIn, const int* vdlIdx) {
     auto st = std::make_unique<SharedStructure>();
     st->n = n;
     st->nElements = ncb + nob + nsh + nhv;
@@ -1232,6 +1239,8 @@ SharedStructure* buildStructure(int n,
     std::vector<int> obIdxM = mapRows(obIdx, nob, 6, {0, 1, 2, 3});
     std::vector<int> shIdxM = mapRows(shIdx, nsh, 5, {0, 1, 4});
     std::vector<int> hvIdxM = mapRows(hvIdx, nhv, 4, {0, 1});
+    std::vector<int> vdlIdxM = mapRows(vdlIdx, nvdl, 2, {0});
+    vdlIdx = vdlIdxM.data();
     cbIdx = cbIdxM.data();
     obIdx = obIdxM.data();
     shIdx = shIdxM.data();
@@ -1259,6 +1268,9 @@ SharedStructure* buildStructure(int n,
     collectPattern(nhv, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pat);
     collectFamilyPattern(rowMap, cbIdx, obIdx, shIdx, ndq, dqElem, dqSide, dqKind, dqRow,
                          ndr, drRow, drCol, ndb, dbRow, dbCol, nzi, ziIdx, pat);
+    for (int e = 0; e < nvdl; e++) {                         // voltage-dependent load: (row, own-V) slot
+        pat.emplace_back(vdlIdx[e * 2], vdlIdx[e * 2 + 1]);
+    }
     for (int r = 0; r < n; r++) {
         pat.emplace_back(r, r);                              // guaranteed diagonal: the per-solve
     }                                                        // row-mode mask writes 1.0 there
@@ -1324,6 +1336,18 @@ SharedStructure* buildStructure(int n,
 
     // ---- DISTR_SHUNT_B destinations: per contribution {F row, J slot (row, b col)} ----
     buildDistrShuntBDest(st.get(), pos, rowMap, ndb, dbRow, dbCol, dbCoef);
+
+    // ---- voltage-dependent load (ZIP/exponential) destinations: one J slot (row, own-V) per term ----
+    st->nvdl = nvdl;
+    if (nvdl > 0) {
+        std::vector<int> vdlDest(nvdl);
+        for (int e = 0; e < nvdl; e++) {
+            vdlDest[e] = pos.at(vdlIdx[e * 2], vdlIdx[e * 2 + 1]);
+        }
+        st->dVdlIn.upload(vdlIn, static_cast<size_t>(nvdl) * 2 * sizeof(double));
+        st->dVdlIdx.upload(vdlIdx, static_cast<size_t>(nvdl) * 2 * sizeof(int));
+        st->dVdlDest.upload(vdlDest.data(), static_cast<size_t>(nvdl) * sizeof(int));
+    }
 
     std::vector<int> diagPos(n);
     for (int r = 0; r < n; r++) diagPos[r] = pos.at(r, r);
@@ -1469,6 +1493,7 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
         if (ctx->st->cb.ne) fillClosedBranch<<<grid(ctx->st->cb.ne), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0);
         if (ctx->st->ob.ne) fillOpenBranch<<<grid(ctx->st->ob.ne), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->st->sh.ne) fillShunt<<<grid(ctx->st->sh.ne), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0);
+        if (ctx->st->nvdl) fillVdlBatch<<<grid(ctx->st->nvdl), BLOCK, 0, ctx->stream>>>(ctx->st->nvdl, 1, ctx->st->n, ctx->st->nnz, ctx->st->dVdlIn.as<double>(), ctx->st->dVdlIdx.as<int>(), ctx->st->dVdlDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->st->hv.ne) fillHvdc<<<grid(ctx->st->hv.ne), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->ndq) fillDistrQ<<<grid(ctx->ndq), BLOCK, 0, ctx->stream>>>(ctx->ndq, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->nzi) fillZeroImp<<<grid(ctx->nzi), BLOCK, 0, ctx->stream>>>(ctx->nzi, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
@@ -1952,6 +1977,28 @@ __global__ void fillOpenBranchBatchF(int ne, int nScenarios, int n, int nnz, int
     evalOpenBranchF(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0, o + 0, o + 1, o + 2, o + 3);
     const int pos[4] = {0, 2, 4, 6};
     scatterAddF(4, dest + e * OB_NOUT, pos, o, F + (size_t) s * n);
+}
+
+// Voltage-dependent load model terms (OLF AbstractLoadModelEquationTerm): per entry e,
+// F[row] += coef*v^n and J[(row, vOwn)] += coef*n*v^(n-1), coef = c_n * load target (pu),
+// exactly OLF's f()/dfdv() (the n = 0 constant part lives in the target vector, not here).
+// Identity rows are wiped by applyRowMode afterwards, so a PV bus's Q-row term vanishes
+// exactly like every other Q fill (and reappears when RL flips the bus PQ). vals == nullptr
+// makes it the residual-only (line-search) variant.
+__global__ void fillVdlBatch(int ne, int nScenarios, int n, int nnz,
+                             const double* in, const int* ix, const int* dest,
+                             const double* x, double* vals, double* F) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= ne * nScenarios) return;
+    int e = t % ne;
+    int s = t / ne;
+    double coef = in[e * 2];
+    double expn = in[e * 2 + 1];
+    double v = x[(size_t) s * n + ix[e * 2 + 1]];
+    atomicAdd(&F[(size_t) s * n + ix[e * 2]], coef * pow(v, expn));
+    if (vals != nullptr) {
+        atomicAdd(&vals[(size_t) s * nnz + dest[e]], coef * expn * pow(v, expn - 1.0));
+    }
 }
 
 __global__ void fillShuntBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
@@ -3345,6 +3392,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0);
             }
         }
+        // voltage-dependent load model: own guarded block (NOT inside the shunt guard — a modeled
+        // load needs no shunt present); residual always, Jacobian slot unless the F-only pass
+        if (ctx->st->nvdl) {
+            fillVdlBatch<<<grid(ctx->st->nvdl * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nvdl, nS, n, nnz, ctx->st->dVdlIn.as<double>(), ctx->st->dVdlIdx.as<int>(), ctx->st->dVdlDest.as<int>(), ctx->dX.as<double>(), fOnly ? nullptr : ctx->dVals.as<double>(), ctx->dF.as<double>());
+        }
         if (ctx->st->hv.ne) {
             if (fOnly) {
                 fillHvdcBatchF<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
@@ -3648,6 +3700,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     if (ctx->st->cb.ne) fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), nullptr, nullptr, nullptr, 0, nullptr, nullptr);
     if (ctx->st->ob.ne) fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>());
     if (ctx->st->sh.ne) fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), nullptr, nullptr, nullptr, 0);
+    if (ctx->st->nvdl) fillVdlBatch<<<grid(ctx->st->nvdl * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nvdl, nS, n, nnz, ctx->st->dVdlIn.as<double>(), ctx->st->dVdlIdx.as<int>(), ctx->st->dVdlDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>());
     // Zero-impedance dummy transfers MUST be in the Q/P buffer too: the distributed-slack retain
     // reads the slack row's balance from dQbuf — without the coupler's dummy-P the DS sees a
     // phantom mismatch equal to the through-flow and distributes it FOREVER (measured: +392 MW
@@ -3816,7 +3869,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
         jintArray jdqElem, jintArray jdqSide, jdoubleArray jdqWeight, jintArray jdqRow, jintArray jdqKind,
         jdoubleArray jziIn, jintArray jziIdx,
         jintArray jdrRow, jintArray jdrCol, jdoubleArray jdrCoef,
-        jintArray jdbRow, jintArray jdbCol, jdoubleArray jdbCoef, jintArray jcbPcSide) {
+        jintArray jdbRow, jintArray jdbCol, jdoubleArray jdbCoef, jintArray jcbPcSide,
+        jdoubleArray jvdlIn, jintArray jvdlIdx) {
     jdouble* cbIn = env->GetDoubleArrayElements(jcbIn, nullptr);
     jint* cbIdx = env->GetIntArrayElements(jcbIdx, nullptr);
     jdouble* obIn = env->GetDoubleArrayElements(jobIn, nullptr);
@@ -3839,6 +3893,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
     jint* dbCol = env->GetIntArrayElements(jdbCol, nullptr);
     jdouble* dbCoef = env->GetDoubleArrayElements(jdbCoef, nullptr);
     jint* cbPcSide = env->GetIntArrayElements(jcbPcSide, nullptr);
+    jdouble* vdlIn = env->GetDoubleArrayElements(jvdlIn, nullptr);
+    jint* vdlIdx = env->GetIntArrayElements(jvdlIdx, nullptr);
 
     int ncb = env->GetArrayLength(jcbIdx) / 12;             // cbIdx stride 12 (…a1col r1col qAlt1 qAlt2)
     int nob = env->GetArrayLength(jobIdx) / 6;
@@ -3848,6 +3904,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
     int nzi = env->GetArrayLength(jziIdx) / 11;
     int ndr = env->GetArrayLength(jdrRow);
     int ndb = env->GetArrayLength(jdbRow);
+    int nvdl = env->GetArrayLength(jvdlIdx) / 2;             // vdlIdx stride 2 (row, vCol)
 
     std::string error;
     SharedStructurePtr* st = nullptr;
@@ -3857,7 +3914,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
                                                    ndq, dqElem, dqSide, dqWeight, dqRow, dqKind,
                                                    nzi, ziIn, ziIdx,
                                                    ndr, drRow, drCol, drCoef,
-                                                   ndb, dbRow, dbCol, dbCoef, cbPcSide));
+                                                   ndb, dbRow, dbCol, dbCoef, cbPcSide,
+                                                   nvdl, vdlIn, vdlIdx));
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {
@@ -3886,6 +3944,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
     env->ReleaseIntArrayElements(jdbRow, dbRow, JNI_ABORT);
     env->ReleaseIntArrayElements(jdbCol, dbCol, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jdbCoef, dbCoef, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jvdlIn, vdlIn, JNI_ABORT);
+    env->ReleaseIntArrayElements(jvdlIdx, vdlIdx, JNI_ABORT);
 
     if (!error.empty()) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
@@ -4344,6 +4404,9 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
     }
     if (ctx->st->sh.ne) {
         fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0);
+    }
+    if (ctx->st->nvdl) {
+        fillVdlBatch<<<grid(ctx->st->nvdl * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nvdl, nS, n, nnz, ctx->st->dVdlIn.as<double>(), ctx->st->dVdlIdx.as<int>(), ctx->st->dVdlDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
     }
     if (ctx->st->hv.ne) {
         fillHvdcBatch<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());

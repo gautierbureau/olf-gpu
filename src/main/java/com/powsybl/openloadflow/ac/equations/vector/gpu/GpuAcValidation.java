@@ -52,7 +52,10 @@ final class GpuAcValidation {
             OpenBranchSide1ActiveFlowEquationTerm.class, OpenBranchSide1ReactiveFlowEquationTerm.class,
             OpenBranchSide2ActiveFlowEquationTerm.class, OpenBranchSide2ReactiveFlowEquationTerm.class,
             ShuntCompensatorActiveFlowEquationTerm.class, ShuntCompensatorReactiveFlowEquationTerm.class,
-            HvdcAcEmulationSide1ActiveFlowEquationTerm.class, HvdcAcEmulationSide2ActiveFlowEquationTerm.class);
+            HvdcAcEmulationSide1ActiveFlowEquationTerm.class, HvdcAcEmulationSide2ActiveFlowEquationTerm.class,
+            // voltage-dependent load model (ZIP/exponential): assembled by the GPU vdl family
+            com.powsybl.openloadflow.ac.equations.LoadModelActiveFlowEquationTerm.class,
+            com.powsybl.openloadflow.ac.equations.LoadModelReactiveFlowEquationTerm.class);
 
     // the closed-branch equation-term arrays of the VECTORIZED equation system
     // (AcVectorizedEquationSystemCreator) — the GPU covers exactly the same physics

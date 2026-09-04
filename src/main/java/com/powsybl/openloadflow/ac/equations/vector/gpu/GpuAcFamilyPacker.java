@@ -45,7 +45,8 @@ final class GpuAcFamilyPacker {
                  List<double[]> shIn, List<int[]> shIdx, List<double[]> hvIn, List<int[]> hvIdx,
                  List<double[]> ziIn, List<int[]> ziIdx, List<Integer> ziNums,
                  List<Integer> baseOpenCb, List<Integer> baseOpenZi, List<Integer> baseOpenZiNums,
-                 int[] cbElemOf, int[] obElemOf, int[] shElemOf, List<Integer> cbPcSide) {
+                 int[] cbElemOf, int[] obElemOf, int[] shElemOf, List<Integer> cbPcSide,
+                 List<double[]> vdlIn, List<int[]> vdlIdx) {
     }
 
     static Packs pack(LfNetwork network, ExtractionColumns columns,
@@ -217,6 +218,8 @@ final class GpuAcFamilyPacker {
 
         List<double[]> shIn = new ArrayList<>();
         List<int[]> shIdx = new ArrayList<>();
+        List<double[]> vdlIn = new ArrayList<>();
+        List<int[]> vdlIdx = new ArrayList<>();
         int[] shElemOf = new int[nBuses];                    // shunt element index per bus (-1 = none)
         java.util.Arrays.fill(shElemOf, -1);
         for (LfBus bus : network.getBuses()) {
@@ -247,6 +250,7 @@ final class GpuAcFamilyPacker {
                     phiCol[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], -1,
                     qRowAlt[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
             });
+            packLoadModels(bus, phiCol, qRow, vCol, vdlIn, vdlIdx);
         }
 
         List<double[]> hvIn = new ArrayList<>();
@@ -265,6 +269,39 @@ final class GpuAcFamilyPacker {
         }
 
         return new Packs(cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx, ziIn, ziIdx, ziNums,
-                baseOpenCb, baseOpenZi, baseOpenZiNums, cbElemOf, obElemOf, shElemOf, cbPcSide);
+                baseOpenCb, baseOpenZi, baseOpenZiNums, cbElemOf, obElemOf, shElemOf, cbPcSide,
+                vdlIn, vdlIdx);
     }
+
+    /** Voltage-dependent load model (ZIP/exponential): one vdl entry per NON-CONSTANT exp term,
+     *  f = c_n * target * V^n added to the bus P/Q row with the derivative on the own-V column —
+     *  exactly OLF's AbstractLoadModelEquationTerm (the n = 0 part lives in the target vector). */
+    private static void packLoadModels(com.powsybl.openloadflow.network.LfBus bus, int[] phiCol, int[] qRow, int[] vCol,
+                                       List<double[]> vdlIn, List<int[]> vdlIdx) {
+        for (com.powsybl.openloadflow.network.LfLoad load : bus.getLoads()) {
+            var lm = load.getLoadModel().orElse(null);
+            if (lm == null) {
+                continue;
+            }
+            if (bus.getControllerShunt().isPresent()) {
+                // dynamic Q-relocation can move this bus's Q row per scenario; the vdl Q slot is
+                // static — reject the combo to the CPU rather than emit at a stale row
+                throw new com.powsybl.commons.PowsyblException("GPU AC solver: load model on controller-shunt bus "
+                        + bus.getId() + " (dynamic Q-relocation) not supported");
+            }
+            for (var t : lm.getExpTermsP()) {
+                if (t.n() != 0) {
+                    vdlIn.add(new double[] {t.c() * load.getTargetP(), t.n()});
+                    vdlIdx.add(new int[] {phiCol[bus.getNum()], vCol[bus.getNum()]});
+                }
+            }
+            for (var t : lm.getExpTermsQ()) {
+                if (t.n() != 0) {
+                    vdlIn.add(new double[] {t.c() * load.getTargetQ(), t.n()});
+                    vdlIdx.add(new int[] {qRow[bus.getNum()], vCol[bus.getNum()]});
+                }
+            }
+        }
+    }
+
 }

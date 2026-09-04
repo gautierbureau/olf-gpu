@@ -226,8 +226,12 @@ element falls back to the stock per-strategy CPU path individually.
    anchor-dependent DS factor types (TARGET / load-based / REMAINING_MARGIN), an islanded DS
    participant in the loss pre-distribution, a custom ContingencyActivePowerLossDistribution SPI,
    loadPowerFactorConstant with load-based balance, ZIP loads for load losses.
-2. **HVDC + SVC packing** — extractor term/variable work; unblocks plain-LF coverage on
-   those networks and their SA/action rows.
+2. **HVDC packing remainder** — (audited 2026-09-04: the former "HVDC + SVC packing" item is
+   mostly landed — AC-emulation HVDC is packed with its batched loops, slope/monitoring SVCs
+   landed with modes 2/3.) Still open: **HVDC contingency** (likely cheap: the per-scenario hv
+   disabled bit exists — needs the precomputer mapping + non-AC-emu terminal-injection removal),
+   **HvdcAction** (a per-scenario hv-parameter override channel: droop/P0/status), LCC shapes,
+   and an HVDC with a missing bus end.
 3. **Node-breaker contingency propagation** — ✅ **landed 2026-07-20.** A propagated contingency
    opens the target's retained breakers alongside it (switches are LfBranches in breaker mode), so
    the naive shape was ">2 branches" and NOTHING batched on a node-breaker network. Now split: the
@@ -256,7 +260,12 @@ element falls back to the stock per-strategy CPU path individually.
    multi-slack components, realistic-voltage post-check on batched states. (DS balance
    types, useActiveLimits, failure behaviors, maxPqPvSwitch, maxOuterLoopIterations —
    closed 2026-07-18 by guard + parameter wiring.)
-6. **PerEquationTypeStoppingCriteria**; ZIP/exponential loads; ZI shapes without dummies.
+6. **PerEquationTypeStoppingCriteria**; ZI shapes without dummies. (ZIP/exponential loads:
+   ✅ **2026-09-04** — the vdl family adds c_n·target·V^n to the bus P/Q rows with the dJ/dV
+   slot, plain LF at ~1e-13 kV and batched SA at 1e-12 (`GpuLoadModelTest`,
+   `deviceZipLoadModelMatchesCpu`). Still CPU: load LOSSES of modeled loads (not a target
+   override), load-based DS with a load model (per-round coef rescale), a modeled load on a
+   controller-shunt bus (dynamic Q-relocation moves its Q row).)
 
 ---
 

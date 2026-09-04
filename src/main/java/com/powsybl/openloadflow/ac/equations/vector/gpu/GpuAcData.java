@@ -82,7 +82,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         int dsMode, double[] dsMarginUp, double[] dsMarginDown,
                         double dsSlackMarginUp, double dsSlackMarginDown,
                         int[] baseOpenCbElements, int[] baseOpenZiElements, int[] baseOpenZiBranchNums,
-                        int[] ziBranchNums) {
+                        int[] ziBranchNums, double[] vdlIn, int[] vdlIdx) {
 
     /**
      * Content equality over every array — true means a cached solver context built from
@@ -94,7 +94,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
         return sameStructureAs(other)
                 && java.util.Arrays.equals(cbIn, other.cbIn) && java.util.Arrays.equals(obIn, other.obIn)
                 && java.util.Arrays.equals(shIn, other.shIn) && java.util.Arrays.equals(hvIn, other.hvIn)
-                && java.util.Arrays.equals(ziIn, other.ziIn);
+                && java.util.Arrays.equals(ziIn, other.ziIn) && java.util.Arrays.equals(vdlIn, other.vdlIn);
         // drCoef is structural (qPct/count-derived); covered by sameStructureAs below.
     }
 
@@ -123,7 +123,8 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(drRow, other.drRow) && java.util.Arrays.equals(drCol, other.drCol)
                 && java.util.Arrays.equals(drCoef, other.drCoef)
                 && java.util.Arrays.equals(dbRow, other.dbRow) && java.util.Arrays.equals(dbCol, other.dbCol)
-                && java.util.Arrays.equals(dbCoef, other.dbCoef);
+                && java.util.Arrays.equals(dbCoef, other.dbCoef)
+                && java.util.Arrays.equals(vdlIn, other.vdlIn) && java.util.Arrays.equals(vdlIdx, other.vdlIdx);
     }
 
     /**

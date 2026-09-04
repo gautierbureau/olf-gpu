@@ -126,6 +126,7 @@ public final class GpuAcDataExtractor {
                 family.baseOpenCb().stream().mapToInt(Integer::intValue).toArray(),
                 family.baseOpenZi().stream().mapToInt(Integer::intValue).toArray(),
                 family.baseOpenZiNums().stream().mapToInt(Integer::intValue).toArray(),
-                family.ziNums().stream().mapToInt(Integer::intValue).toArray());
+                family.ziNums().stream().mapToInt(Integer::intValue).toArray(),
+                GpuAcArrays.flatD(family.vdlIn(), 2), GpuAcArrays.flatI(family.vdlIdx(), 2));
     }
 }

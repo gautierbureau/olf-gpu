@@ -678,6 +678,29 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** Voltage-dependent (ZIP) load model under batched SA: the vdl family evaluates
+     *  c_n*target*V^n on the bus P/Q rows per scenario; DS + RL on; parallel-line outage. */
+    @org.junit.jupiter.api.Test
+    void deviceZipLoadModelMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.EurostagFactory.fix(
+                com.powsybl.iidm.network.test.EurostagTutorialExample1Factory.create());
+        network.getVoltageLevel("VLLOAD").newLoad()
+                .setId("ZIPLOAD").setBus("NLOAD").setP0(50).setQ0(30)
+                .newZipModel()
+                    .setC0p(0.5).setC0q(0.55)
+                    .setC1p(0.3).setC1q(0.35)
+                    .setC2p(0.2).setC2q(0.1)
+                    .add()
+                .add();
+        List<Contingency> ctgs = List.of(new Contingency("NHV1_NHV2_1", new BranchContingency("NHV1_NHV2_1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setUseLoadModel(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
     /** DEVICE-mode SimpleTransformerVoltageControl (WITH_GENERATOR): the first solve runs with the
      *  VC-ON activation deltas (continuous rho), then one round-to-closest-tap re-solve
      *  (GpuBatchSimpleTvc); GPU SA == CPU SA at 1e-12, tap-moving strong outage included. */

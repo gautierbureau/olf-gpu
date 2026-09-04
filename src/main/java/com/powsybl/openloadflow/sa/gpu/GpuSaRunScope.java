@@ -142,6 +142,12 @@ final class GpuSaRunScope {
             if (dsLoopActive && loadBased && olfGuardParams.isLoadPowerFactorConstant()) {
                 unsupportedOuterLoops.add("DistributedSlack[loadPowerFactorConstant]");
             }
+            // Voltage-dependent load model + LOAD-based balance: distribution rescales each load's
+            // targetP, which scales the vdl term coefficients per round — static device coefs would
+            // go stale mid-run.
+            if (dsLoopActive && loadBased && olfGuardParams.isUseLoadModel()) {
+                unsupportedOuterLoops.add("DistributedSlack[useLoadModel+loadBased]");
+            }
         }
         // Parameterization the device loops DO model — wire the run's values in place of the
         // device defaults (maxOuterLoopIterations, reactiveLimitsMaxPqPvSwitch), and make a

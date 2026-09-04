@@ -103,6 +103,26 @@ final class GpuBatchQualification {
         return true;
     }
 
+    /** True when the islanded set touches a REMOTE / DISTRIBUTED (DISTR_Q) generator-VC group —
+     *  pilot bus or any controller (incl. the free controller carrying the pilot's Q row, which has
+     *  no DISTR_Q equation of its own). Islanding a member reforms the group's qPct weights / row
+     *  assignment, which the fixed batch pattern cannot represent (measured 0.47 kV wrong on the
+     *  tr1 outage of createWithGeneratorRemoteControl) — route to CPU, exactly like the DISTR_RHO
+     *  controller-outage rejection. */
+    private static boolean islandsRemoteVcMember(EquationSystem<AcVariableType, AcEquationType> es,
+                                                 List<LfBus> islandedBuses) {
+        for (LfBus bus : islandedBuses) {
+            if (es.getEquation(bus.getNum(), AcEquationType.DISTR_Q).isPresent()
+                    || bus.getGeneratorVoltageControl()
+                            .map(vc -> vc.getControlledBus() != bus
+                                    || vc.getControllerElements().stream().anyMatch(cb -> cb != bus))
+                            .orElse(false)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** The contingency's SCHEDULED active power loss (pu): mirror of LfContingency's
      *  disconnectedGenerationActivePower - disconnectedLoadActivePower, incl. islanded buses'
      *  injections (with the same non-AC-emulation HVDC generation exclusion). */
@@ -209,7 +229,8 @@ final class GpuBatchQualification {
                     continue;
                 }
                 if (!c.outagedBranches().isEmpty()) {        // COMBO: the branch part must also qualify
-                    if (c.outagedBranches().stream().anyMatch(distrRhoControllers::contains)) {
+                    if (c.outagedBranches().stream().anyMatch(distrRhoControllers::contains)
+                            || islandsRemoteVcMember(es, q.islandedBuses())) {
                         continue;
                     }
                     // conservative: a lost generator on an ISLANDED bus is out of combo scope
@@ -250,6 +271,9 @@ final class GpuBatchQualification {
                     frozenTargetsByIndex[i] = NO_FROZEN_TARGETS;
                 }                                            // else: not a packed fixed shunt / DISTR_Q contributor → CPU
             } else if (c.outagedBranches().stream().noneMatch(distrRhoControllers::contains)) {
+                if (islandsRemoteVcMember(es, q.islandedBuses())) {
+                    continue;                                // DISTR_Q group member islanded — CPU
+                }
                 batchedIndices.add(i);
                 FrozenIsland fi = islandedFrozen(es, q.islandedBuses());
                 islandedNumsByIndex[i] = q.islandedBuses().stream().mapToInt(LfBus::getNum).toArray();

@@ -129,7 +129,7 @@ Full predicate list in Part II §F.
 | Contingency element | Batched | Notes |
 |---|---|---|
 | Branch outage (N-1, N-2) | ✅ | ≤2 branches, both-sides opening; per-scenario element mask |
-| Fragmenting branch outage (islanding) | ✅ | islanded buses frozen to clean flat state; islanding the slack → ⏩ |
+| Fragmenting branch outage (islanding) | ✅ | islanded buses frozen to clean flat state; islanding the slack → ⏩; islanding a REMOTE/DISTR_Q VC group member (pilot or any controller) → ⏩ **2026-09-04** (stale qPct weights solved 0.47 kV wrong before the gate — `islandsRemoteVcMember`) |
 | Generator outage (single / multiple) | ✅ | per-BUS merged injection override; PV→PQ flip, Q-target shed, DS reweight; slack-bus loss / >1 DS bus / remote gens → ⏩ |
 | Load outage | ✅ | PowerShift deltas (Q-carrying load delta at a PV bus → ⏩) |
 | Shunt shift / reconnection | ✅ | admittance override; DISTR_Q-contributing or unpacked shunt → ⏩ |
@@ -216,7 +216,13 @@ element falls back to the stock per-strategy CPU path individually.
    DS all balance types, RL, TVC ×3, incremental shunt/phase/RPC, Simple TVC, HVDC AC-emulation,
    VoltageMonitoring, slope-SVC, continuous PhaseControl (both DEVICE and JAVA modes).
    Stage-1 scope carve-outs (per-shape CPU fallback, not per-loop): remote phase/transformer
-   control, generator VC under a transformer-controlled level, strategy pairs under
+   control, generator VC under a transformer-controlled level — but NOTE **2026-09-04**: plain
+   remote/distributed GENERATOR voltage control (DISTR_Q) is fully batched in SA (validated 1e-12
+   incl. an RL-pinned remote controller; deviceRemoteGeneratorControl* tests); "local only" now
+   applies ONLY to the SecondaryVC zone replay, SVC voltage monitoring, and continuous
+   PhaseControl orchestrators (OLF's own SecondaryVC loop is general — the port collapsed the
+   controller/controlled index sets, so remote there is orchestrator restructuring, no kernel
+   work) — strategy pairs under
    anchor-dependent DS factor types (TARGET / load-based / REMAINING_MARGIN), an islanded DS
    participant in the loss pre-distribution, a custom ContingencyActivePowerLossDistribution SPI,
    loadPowerFactorConstant with load-based balance, ZIP loads for load losses.

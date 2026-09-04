@@ -626,6 +626,58 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** PROBE: remote generator voltage control (DISTR_Q — three generators regulating one pilot bus)
+     *  under batched SA: parallel-line outage keeps all controllers live. DS+RL on. */
+    @org.junit.jupiter.api.Test
+    void deviceRemoteGeneratorControlMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
+        network.newLine().setId("L14")
+                .setVoltageLevel1("vl1").setBus1("b1").setVoltageLevel2("vl4").setBus2("b4")
+                .setR(1.5).setX(40).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        List<Contingency> ctgs = List.of(new Contingency("L14", new BranchContingency("L14")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
+    /** PROBE: remote control + TIGHT reactive limits so the RL loop pins a DISTR_Q controller
+     *  post-contingency — exercises the remote PV→PQ switching semantics. */
+    @org.junit.jupiter.api.Test
+    void deviceRemoteGeneratorControlReactiveLimitsMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
+        network.getGenerator("g2").newMinMaxReactiveLimits().setMinQ(-30).setMaxQ(30).add();
+        network.newLine().setId("L14")
+                .setVoltageLevel1("vl1").setBus1("b1").setVoltageLevel2("vl4").setBus2("b4")
+                .setR(1.5).setX(40).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        List<Contingency> ctgs = List.of(new Contingency("L14", new BranchContingency("L14")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
+    /** Outage of a DISTR_Q controller's transformer (tr1 — islands g1/b1 AND removes a controller
+     *  from the distribution group): the qualification gate must route it to the CPU (stale qPct
+     *  weights solved 0.47 kV wrong before the gate) while the batchable L14 outage still engages
+     *  the device; both must match the stock CPU SA exactly. */
+    @org.junit.jupiter.api.Test
+    void deviceRemoteGeneratorControlControllerOutageMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
+        network.newLine().setId("L14")
+                .setVoltageLevel1("vl1").setBus1("b1").setVoltageLevel2("vl4").setBus2("b4")
+                .setR(1.5).setX(40).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        List<Contingency> ctgs = List.of(new Contingency("L14", new BranchContingency("L14")),
+                new Contingency("tr1", new BranchContingency("tr1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
     /** DEVICE-mode SimpleTransformerVoltageControl (WITH_GENERATOR): the first solve runs with the
      *  VC-ON activation deltas (continuous rho), then one round-to-closest-tap re-solve
      *  (GpuBatchSimpleTvc); GPU SA == CPU SA at 1e-12, tap-moving strong outage included. */

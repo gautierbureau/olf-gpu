@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfGenerator;
+import com.powsybl.openloadflow.network.LfHvdc;
 import com.powsybl.openloadflow.network.LfShunt;
 
 import java.util.List;
@@ -25,7 +26,7 @@ import java.util.Objects;
 public record BatchContingency(String contingencyId, List<LfBranch> outagedBranches, List<LfGenerator> lostGenerators,
                                List<LoadLoss> lostLoads, List<ShuntShift> shuntShifts, List<TapR1Override> tapOverrides,
                                List<LfShunt> outagedShunts, List<LfBranch> reclosedBranches,
-                               List<LfBranch> outagedZiBranches) {
+                               List<LfBranch> outagedZiBranches, List<LfHvdc> outagedHvdcs) {
     public BatchContingency {
         Objects.requireNonNull(contingencyId);
         Objects.requireNonNull(outagedBranches);
@@ -35,7 +36,7 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
         Objects.requireNonNull(tapOverrides);
         Objects.requireNonNull(outagedShunts);
         boolean isInjection = !lostGenerators.isEmpty() || !lostLoads.isEmpty() || !shuntShifts.isEmpty()
-                || !tapOverrides.isEmpty();
+                || !tapOverrides.isEmpty() || !outagedHvdcs.isEmpty();
         boolean isShunt = !outagedShunts.isEmpty();
         boolean isBranch = !outagedBranches.isEmpty();
         // Batchable shapes: 1-2 branches, N generators, N loads, and branch+injection COMBOS
@@ -52,16 +53,17 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
         shuntShifts = List.copyOf(shuntShifts);
         tapOverrides = List.copyOf(tapOverrides);
         outagedShunts = List.copyOf(outagedShunts);
+        outagedHvdcs = List.copyOf(outagedHvdcs);
     }
 
     /** A branch outage (N-1 or N-2). */
     public BatchContingency(String contingencyId, List<LfBranch> outagedBranches) {
-        this(contingencyId, outagedBranches, List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
+        this(contingencyId, outagedBranches, List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
     }
 
     /** Convenience for the common single-branch (N-1) case. */
     public BatchContingency(String contingencyId, LfBranch outagedBranch) {
-        this(contingencyId, List.of(Objects.requireNonNull(outagedBranch)), List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
+        this(contingencyId, List.of(Objects.requireNonNull(outagedBranch)), List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
     }
 
     /** A combined branch + generator/load contingency. */
@@ -69,22 +71,30 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
                                                         List<LfGenerator> gens, List<LoadLoss> loads,
                                                         List<ShuntShift> shifts, List<TapR1Override> taps,
                                                         List<LfBranch> outagedZi) {
-        return new BatchContingency(contingencyId, branches, gens, loads, shifts, taps, List.of(), List.of(), outagedZi);
+        return new BatchContingency(contingencyId, branches, gens, loads, shifts, taps, List.of(), List.of(), outagedZi, List.of());
+    }
+
+    /** A combined branch + injection + AC-emulation-HVDC contingency. */
+    public static BatchContingency branchesInjectionsAndHvdcs(String contingencyId, List<LfBranch> branches,
+                                                              List<LfGenerator> gens, List<LoadLoss> loads,
+                                                              List<ShuntShift> shifts, List<TapR1Override> taps,
+                                                              List<LfBranch> outagedZi, List<LfHvdc> hvdcs) {
+        return new BatchContingency(contingencyId, branches, gens, loads, shifts, taps, List.of(), List.of(), outagedZi, hvdcs);
     }
 
     public static BatchContingency branchesAndInjections(String contingencyId, List<LfBranch> branches,
                                                          List<LfGenerator> gens, List<LoadLoss> loads,
                                                          List<ShuntShift> shifts, List<TapR1Override> taps) {
-        return new BatchContingency(contingencyId, branches, gens, loads, shifts, taps, List.of(), List.of(), List.of());
+        return new BatchContingency(contingencyId, branches, gens, loads, shifts, taps, List.of(), List.of(), List.of(), List.of());
     }
 
     /** A generator loss. */
     public static BatchContingency generator(String contingencyId, LfGenerator lostGenerator) {
-        return new BatchContingency(contingencyId, List.of(), List.of(Objects.requireNonNull(lostGenerator)), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
+        return new BatchContingency(contingencyId, List.of(), List.of(Objects.requireNonNull(lostGenerator)), List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
     }
 
     /** A fixed-shunt disconnection (the shunt element is masked off, like a branch outage). */
     public static BatchContingency shunt(String contingencyId, LfShunt outagedShunt) {
-        return new BatchContingency(contingencyId, List.of(), List.of(), List.of(), List.of(), List.of(), List.of(Objects.requireNonNull(outagedShunt)), List.of(), List.of());
+        return new BatchContingency(contingencyId, List.of(), List.of(), List.of(), List.of(), List.of(), List.of(Objects.requireNonNull(outagedShunt)), List.of(), List.of(), List.of());
     }
 }

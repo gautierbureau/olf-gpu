@@ -107,11 +107,14 @@ final class GpuBatchPrecomputer {
                 // section admittance): per-scenario admittance overrides, combinable with everything.
                 List<ShuntShift> shifts =
                         pc.getShuntIdsToShift().isEmpty() ? List.of() : GpuContingencyMapper.shuntShifts(net, pc);
-                if (branches != null && gens != null && loads != null && shifts != null
+                // AC-emulation HVDC outage: the hv element's per-scenario disabled bit (the stations'
+                // injection losses ride the generator channel above); unresolvable/setpoint -> CPU.
+                List<com.powsybl.openloadflow.network.LfHvdc> hvdcs = GpuContingencyMapper.hvdcOutages(net, pc);
+                if (branches != null && gens != null && loads != null && shifts != null && hvdcs != null
                         && (!branches.isEmpty() || !gens.isEmpty() || !loads.isEmpty() || !shifts.isEmpty()
-                            || !ziOutages.isEmpty())) {
-                    batch.add(BatchContingency.branchesAndInjections(pc.getContingency().getId(), branches, gens, loads,
-                            shifts, List.of(), ziOutages));
+                            || !ziOutages.isEmpty() || !hvdcs.isEmpty())) {
+                    batch.add(BatchContingency.branchesInjectionsAndHvdcs(pc.getContingency().getId(), branches, gens, loads,
+                            shifts, List.of(), ziOutages, hvdcs));
                     // Batched OPERATOR STRATEGIES stage 1: TrueCondition (always-applied) strategies
                     // matching this contingency become EXTRA batch scenarios — the (ctg, strategy)
                     // pair is just another BatchContingency with the actions COMPOSED onto the
@@ -133,7 +136,7 @@ final class GpuBatchPrecomputer {
                             continue;                        // pair handled by the CPU per-strategy path
                         }
                         BatchContingency pair = GpuStrategyComposer.composeStrategyScenario(network, net, pc.getContingency().getId(), strategy, actions,
-                                ziOutages, branches, gens, loads, shifts);
+                                ziOutages, branches, gens, loads, shifts, hvdcs);
                         if (pair != null) {
                             batch.add(pair);
                         }
@@ -173,6 +176,7 @@ final class GpuBatchPrecomputer {
             }
             LOGGER.info("GPU batched SA: precomputed {} of {} branch (N-1/N-2) contingencies on the device",
                     states.size(), batch.size());
+
             return new PrecomputedBatch(states, islandedBuses, baseVariableRows, es);
         } catch (Exception e) {
             LOGGER.warn("GPU batched SA precompute failed ({}); falling back to per-contingency CPU solves", e.toString());

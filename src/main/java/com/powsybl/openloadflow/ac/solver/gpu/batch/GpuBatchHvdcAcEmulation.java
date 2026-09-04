@@ -86,6 +86,20 @@ public final class GpuBatchHvdcAcEmulation {
         return out;
     }
 
+    /** The packed hv element index of every AC-emulation HVDC (the packer's exact enumeration order) —
+     *  for per-scenario outage masking of HVDC contingencies. */
+    static java.util.Map<LfHvdc, Integer> elementIndices(LfNetwork network, int nElements) {
+        List<LfHvdc> packed = network.getHvdcs().stream()
+                .filter(h -> h.getBus1() != null && h.getBus2() != null && h.isAcEmulation())
+                .toList();
+        java.util.Map<LfHvdc, Integer> out = new java.util.LinkedHashMap<>();
+        int hvOffset = nElements - packed.size();
+        for (int h = 0; h < packed.size(); h++) {
+            out.put(packed.get(h), hvOffset + h);
+        }
+        return out;
+    }
+
     /** True when every AC-emulation HVDC starts LINEAR (the device pack's extraction assumption). */
     public static boolean allLinearAtBase(LfNetwork network) {
         return network.getHvdcs().stream()
@@ -201,6 +215,14 @@ public final class GpuBatchHvdcAcEmulation {
                 unfreezePending |= status[s][h] == FROZEN;
             }
         }
+        // Contingency-outaged hvdcs: disabled at entry while still LINEAR (a freeze would have marked
+        // FROZEN) — their bit must survive every status-driven mask rebuild.
+        boolean[][] ctgOut = new boolean[realCount][nh];
+        for (int s = 0; s < realCount; s++) {
+            for (int h = 0; h < nh; h++) {
+                ctgOut[s][h] = status[s][h] == LINEAR && disabledMask[s][ctls.get(h).hvElemIndex()];
+            }
+        }
         try {
             for (int round = 0; round < maxRounds; round++) {
                 boolean[] affected = new boolean[chunkSize];
@@ -253,6 +275,9 @@ public final class GpuBatchHvdcAcEmulation {
                 for (int s = 0; s < realCount; s++) {
                     for (int h = 0; h < nh; h++) {
                         Ctl c = ctls.get(h);
+                        if (ctgOut[s][h]) {
+                            continue;                        // outaged by the contingency — the bit stays set
+                        }
                         if (status[s][h] == LINEAR) {
                             disabledMask[s][c.hvElemIndex()] = false;
                         } else {

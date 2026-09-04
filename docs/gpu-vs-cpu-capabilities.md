@@ -135,7 +135,9 @@ Full predicate list in Part II §F.
 | Shunt shift / reconnection | ✅ | admittance override; DISTR_Q-contributing or unpacked shunt → ⏩ |
 | Fixed-shunt disconnection | ✅ | element mask |
 | Branch+generator+load+shunt combos | ✅ | branch part ≤2; gen on islanded bus → ⏩ |
-| ≥3 branch outage, single-side opening, bus/busbar loss, HVDC contingency | ⏩ | |
+| HVDC contingency (AC-emulation) | ✅ **2026-09-04** | the hv element's per-scenario disabled bit removes the coupling; the VSC stations' losses ride the generator-outage channel (PropagatedContingency puts them there); solo + branch combos at 1e-12. Needs the olf-local-patches getHvdcIdsToOpen accessor (cbdb9bd90). Still ⏩: setpoint-mode/LCC hvdc outage (not an hv element), a station on the slack bus (slack-loss guard), islanded hv endpoint (hvdcsWithoutPower unmodeled) |
+| ≥3 branch outage, single-side opening, bus/busbar loss | ⏩ | |
+| ⚠️ OPEN: live-hvdc first-step divergence | — | on createHvdcLinkedByTwoLinesAndSwitch(VSC)+real impedances, the arms' FIRST Newton step differs materially (GPU b4 399.250 vs CPU 399.178 from flat; SEQUENTIAL path, pre-existing) though both converge to the bit-identical root — default-criterion stops can land ~4e-4 kV apart on shallow-stop scenarios. Formulas/inputs/dests verified identical; reproducer: GpuHvdcTrajectoryProbe; next: elementwise J/F dump at flat on the 10-var system |
 | Outage of a DISTR_RHO controller branch | ⏩ | outaging one member reforms the 1/count coupling — mask cannot represent it |
 | Node-breaker outage under contingency PROPAGATION | ✅ | 2026-07-20: the propagated retained-breaker openings are per-scenario ZERO-IMPEDANCE element outages (`ziOff` — identity row-mode flip, dummies pinned 0), the impedant part keeps the ≤2 mask rule, the dead stub is frozen by the islanding machinery. Switch outage leaving BOTH sides energized (zi spanning tree would change) → ⏩; outage ISOLATING THE SLACK → ⏩ (CPU relocates the slack, the batched pack anchors on the base slack row) |
 

@@ -112,6 +112,9 @@ final class GpuBatchQualification {
     private static boolean islandsRemoteVcMember(EquationSystem<AcVariableType, AcEquationType> es,
                                                  List<LfBus> islandedBuses) {
         for (LfBus bus : islandedBuses) {
+            if (!bus.getHvdcs().isEmpty()) {
+                return true;                                 // islanded HVDC endpoint: the CPU zeroes the pair's
+            }                                                // station targets (hvdcsWithoutPower) — unmodeled, CPU
             if (es.getEquation(bus.getNum(), AcEquationType.DISTR_Q).isPresent()
                     || bus.getGeneratorVoltageControl()
                             .map(vc -> vc.getControlledBus() != bus
@@ -185,7 +188,8 @@ final class GpuBatchQualification {
             BatchContingency c = contingencies.get(i);
             if (!c.lostGenerators().isEmpty() || !c.lostLoads().isEmpty() || !c.shuntShifts().isEmpty()
                     || !c.tapOverrides().isEmpty() || !c.reclosedBranches().isEmpty()
-                    || !c.outagedZiBranches().isEmpty()) {   // injection/shift/tap/reclose/switch-outage (or branch+)
+                    || !c.outagedZiBranches().isEmpty()
+                    || !c.outagedHvdcs().isEmpty()) {        // injection/shift/tap/reclose/switch/hvdc-outage (or branch+)
                 java.util.Set<Integer> baseOpenSet = java.util.Arrays.stream(gpuData.baseOpenCbElements())
                         .boxed().collect(java.util.stream.Collectors.toSet());
                 java.util.Map<Integer, Integer> ziElemByBranchNum = new java.util.HashMap<>();

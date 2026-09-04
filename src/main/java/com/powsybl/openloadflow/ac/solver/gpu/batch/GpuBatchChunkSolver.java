@@ -50,6 +50,7 @@ final class GpuBatchChunkSolver {
                                                double[] baseState, double[] baseTargets, int[] baseRowMode,
                                                int[][] frozenRowsByIndex, double[][] frozenTargetsByIndex,
                                                GenOutage[][] genOutagesByIndex, double[] activePowerLossByIndex,
+                                               java.util.Map<com.powsybl.openloadflow.network.LfHvdc, Integer> hvdcElemIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
@@ -178,7 +179,8 @@ final class GpuBatchChunkSolver {
                             }
                             List<LfBranch> branches = contingencies.get(ci).outagedBranches();
                             List<LfShunt> shunts = contingencies.get(ci).outagedShunts();
-                            int[] eis = new int[branches.size() + shunts.size()];
+                            List<com.powsybl.openloadflow.network.LfHvdc> hvdcs = contingencies.get(ci).outagedHvdcs();
+                            int[] eis = new int[branches.size() + shunts.size() + hvdcs.size()];
                             int ei = 0;
                             for (LfBranch branch : branches) {
                                 int idx = elementMapper.getElementIndex(branch);          // qualification guarantees >= 0
@@ -187,6 +189,11 @@ final class GpuBatchChunkSolver {
                             }
                             for (LfShunt shunt : shunts) {                                // fixed-shunt disconnection
                                 int idx = elementMapper.getElementIndex(shunt);          // qualification guarantees >= 0
+                                disabledMask[s][idx] = true;
+                                eis[ei++] = idx;
+                            }
+                            for (com.powsybl.openloadflow.network.LfHvdc hvdc : hvdcs) { // AC-emulation HVDC outage
+                                int idx = hvdcElemIndex.get(hvdc);                       // composition guarantees packed
                                 disabledMask[s][idx] = true;
                                 eis[ei++] = idx;
                             }

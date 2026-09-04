@@ -54,6 +54,26 @@ final class GpuContingencyMapper {
         return gens;
     }
 
+    /** The contingency's outaged AC-EMULATION hvdcs (per-scenario hv element disable), or null when
+     *  any is unresolvable or not device-packed (setpoint mode / missing bus end / LCC — the coupling
+     *  is then not an hv element and the outage is not expressible as a mask). The VSC stations'
+     *  injection losses ride the normal generator-outage channel (PropagatedContingency puts them in
+     *  generatorIdsToLose). */
+    static List<com.powsybl.openloadflow.network.LfHvdc> hvdcOutages(LfNetwork net, PropagatedContingency pc) {
+        if (pc.getHvdcIdsToOpen().isEmpty()) {
+            return List.of();
+        }
+        List<com.powsybl.openloadflow.network.LfHvdc> out = new java.util.ArrayList<>();
+        for (String id : pc.getHvdcIdsToOpen()) {
+            com.powsybl.openloadflow.network.LfHvdc hvdc = net.getHvdcById(id);
+            if (hvdc == null || hvdc.getBus1() == null || hvdc.getBus2() == null || !hvdc.isAcEmulation()) {
+                return null;                                 // not a packed hv element — CPU
+            }
+            out.add(hvdc);
+        }
+        return out;
+    }
+
     /** The contingency's lost loads as per-bus injection deltas (pu, from the propagation's PowerShift),
      *  or null when unresolvable. Guards: bus losses out of scope; the ZIP/voltage-dependent load model
      *  makes per-scenario load removal unrepresentable as a target override (checked by the caller). */

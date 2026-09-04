@@ -69,7 +69,8 @@ final class GpuStrategyComposer {
                                                     List<LfBranch> ctgBranches,
                                                     List<LfGenerator> ctgGens,
                                                     List<LoadLoss> ctgLoads,
-                                                    List<ShuntShift> ctgShifts) {
+                                                    List<ShuntShift> ctgShifts,
+                                                    List<com.powsybl.openloadflow.network.LfHvdc> ctgHvdcs) {
         List<LfBranch> branches = new java.util.ArrayList<>(ctgBranches);
         List<LoadLoss> loads = new java.util.ArrayList<>(ctgLoads);
         List<ShuntShift> shifts = new java.util.ArrayList<>(ctgShifts);
@@ -229,7 +230,7 @@ final class GpuStrategyComposer {
             return null;
         }
         return new BatchContingency(contingencyId + GpuBatchStatus.STRATEGY_KEY_SEP + strategy.getId(),
-                branches, ctgGens, loads, shifts, taps, List.of(), reclosed, ctgZiOutages);
+                branches, ctgGens, loads, shifts, taps, List.of(), reclosed, ctgZiOutages, ctgHvdcs);
     }
 
     /** Compiles a tap-position action (RTC or PST) into a per-scenario full-row override — the

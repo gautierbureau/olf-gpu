@@ -3460,6 +3460,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     }
                 }
                 bool converged = convEpsPerEq > 0.0 ? (std::sqrt(ssq) < olf2NormThreshold) : (norm < tol);
+                if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+                    std::fprintf(stderr, "BATCH_TRACE s=%d it=%d infnorm=%.17e norm2=%.17e thr=%.17e conv=%d\n",
+                                 s, it, norm, std::sqrt(ssq), olf2NormThreshold, converged ? 1 : 0);
+                }
                 res.iters[s] = it;
                 res.norm[s] = norm;
                 if (deviceFixedIter) {

@@ -336,10 +336,19 @@ public final class GpuBatchedSecurityAnalysisSolver {
         // uniform batched factorization holds an LU per scenario, so the footprint scales with the chunk).
         double[][] resultsByIndex = new double[contingencies.size()][];
         if (!batchedIndices.isEmpty()) {
+            // PER_EQUATION_TYPE stopping criterion: per-row thresholds from the equation system's
+            // variable pairing (null under UNIFORM_CRITERIA — the chunk solver then CLEARS the cached
+            // context's thresholds, since contexts survive across runs).
+            double[][] rowCriteria = config.perEqCriteria() != null
+                    ? GpuAcActivationExtractor.extractRowCriteria(equationSystem, n,
+                            config.perEqCriteria().p(), config.perEqCriteria().q(), config.perEqCriteria().v(),
+                            config.perEqCriteria().angle(), config.perEqCriteria().ratio(), config.perEqCriteria().b(),
+                            config.perEqCriteria().eps())
+                    : null;
             GpuBatchChunkSolver.solveQualifiedInChunks(batchedIndices, contingencies, elementMapper, gpuData, baseState,
                     baseTargets, baseActivation.rowMode(), plan.frozenRowsByIndex(), plan.frozenTargetsByIndex(), plan.genOutagesByIndex(),
                     plan.activePowerLossByIndex(),
-                    GpuBatchHvdcAcEmulation.elementIndices(network, nElements),
+                    GpuBatchHvdcAcEmulation.elementIndices(network, nElements), rowCriteria,
                     n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                     config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
                     config.transformerControl() || config.simpleTransformerControl()
@@ -511,7 +520,13 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         baseState, baseTargets, baseRowMode, qualified, mapper, gens, baseGenP, originalGenP,
                         ctrlBuses, hvdcs, transformerBranches, config.lsMode(), config.maxDv(), config.maxDphi(), varType,
                         30, maxOuter, 3,
-                        GpuNewtonRaphson.GPU_TOLERANCE, reactiveLimitTol, slackDistTol, convEpsPerEq));
+                        GpuNewtonRaphson.GPU_TOLERANCE, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                        config.perEqCriteria() != null
+                                ? GpuAcActivationExtractor.extractRowCriteria(equationSystem, n,
+                                        config.perEqCriteria().p(), config.perEqCriteria().q(), config.perEqCriteria().v(),
+                                        config.perEqCriteria().angle(), config.perEqCriteria().ratio(),
+                                        config.perEqCriteria().b(), config.perEqCriteria().eps())
+                                : null));
             } finally {
                 baseNetworkState.restore();
                 equationSystem.getStateVector().set(baseState.clone());

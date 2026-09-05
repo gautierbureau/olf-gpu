@@ -626,6 +626,75 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** PER_EQUATION_TYPE stopping criteria: the batch installs per-row thresholds
+     *  (setBatchRowCriteria — every row's |F| under its type threshold, OLF's
+     *  PerEquationTypeStoppingCriteria) and the base LF stays on the CPU; shallow explicit
+     *  thresholds make the stopping DECISION the thing under test. DS+RL on, ieee14. */
+    @org.junit.jupiter.api.Test
+    void devicePerEquationTypeCriteriaMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        List<Contingency> ctgs = List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("L1-5-1", new BranchContingency("L1-5-1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setNewtonRaphsonStoppingCriteriaType(
+                        com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA)
+                .setMaxActivePowerMismatch(1e-2).setMaxReactivePowerMismatch(1e-2)
+                .setMaxVoltageMismatch(1e-4).setMaxAngleMismatch(1e-4)
+                .setMaxRatioMismatch(1e-4).setMaxSusceptanceMismatch(1e-4);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
+    /** PER_EQUATION_TYPE criteria in JAVA hybrid mode: the hybrid's inner solves install the same
+     *  per-row thresholds, so OLF's Java loops see states stopped exactly where the CPU's would. */
+    @org.junit.jupiter.api.Test
+    void javaPerEquationTypeCriteriaMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        List<Contingency> ctgs = List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("L1-5-1", new BranchContingency("L1-5-1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setNewtonRaphsonStoppingCriteriaType(
+                        com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA)
+                .setMaxActivePowerMismatch(1e-2).setMaxReactivePowerMismatch(1e-2)
+                .setMaxVoltageMismatch(1e-4).setMaxAngleMismatch(1e-4)
+                .setMaxRatioMismatch(1e-4).setMaxSusceptanceMismatch(1e-4);
+        assertJavaSaMatchesCpu(network, ctgs, lfp, "PER-EQ-TYPE");
+    }
+
+    /** REMOTE continuous phase control (CONTROLLER mode): PS1's a1 drives the P flow of the PARALLEL
+     *  line L2 (controlled branch != controller) — the controlled element re-emits its P block at the
+     *  CONTROLLER's a1 row (cbPcSide encodes the controller's a1 column); GPU SA == CPU SA at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceRemoteContinuousPhaseControlMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.TwoWindingsTransformer ps1 = network.getTwoWindingsTransformer("PS1");
+        ps1.getPhaseTapChanger().setRegulationMode(com.powsybl.iidm.network.PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL)
+                .setTargetDeadband(1).setRegulating(true).setTapPosition(1)
+                .setRegulationTerminal(network.getLine("L2").getTerminal1()).setRegulationValue(40);
+        com.powsybl.iidm.network.Line l1 = network.getLine("L1");
+        network.newLine().setId("L1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR() * 2).setX(l1.getX() * 2)
+                .setG1(l1.getG1()).setB1(l1.getB1()).setG2(l1.getG2()).setB2(l1.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("L1_BIS", new BranchContingency("L1_BIS")),
+                new Contingency("L1", new BranchContingency("L1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setPhaseShifterRegulationOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setPhaseShifterControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.PhaseShifterControlMode.CONTINUOUS_WITH_DISCRETISATION);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
     /** PROBE: remote generator voltage control (DISTR_Q — three generators regulating one pilot bus)
      *  under batched SA: parallel-line outage keeps all controllers live. DS+RL on. */
     @org.junit.jupiter.api.Test
@@ -2804,6 +2873,32 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
                 .setPhaseShifterControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.PhaseShifterControlMode.CONTINUOUS_WITH_DISCRETISATION);
         assertJavaSaMatchesCpu(network, ctgs, lfp, "PHASE-CONT");
+    }
+
+    /** REMOTE continuous phase control in JAVA mode: OLF's own loop drives PS1's a1 against the
+     *  parallel line L2's P flow; mode-3 rows via activation re-extraction; tap-moving outage. */
+    @org.junit.jupiter.api.Test
+    void javaRemoteContinuousPhaseControlMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.TwoWindingsTransformer ps1 = network.getTwoWindingsTransformer("PS1");
+        ps1.getPhaseTapChanger().setRegulationMode(com.powsybl.iidm.network.PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL)
+                .setTargetDeadband(1).setRegulating(true).setTapPosition(1)
+                .setRegulationTerminal(network.getLine("L2").getTerminal1()).setRegulationValue(40);
+        com.powsybl.iidm.network.Line l1 = network.getLine("L1");
+        network.newLine().setId("L1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR() * 2).setX(l1.getX() * 2)
+                .setG1(l1.getG1()).setB1(l1.getB1()).setG2(l1.getG2()).setB2(l1.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("L1_BIS", new BranchContingency("L1_BIS")),
+                new Contingency("L1", new BranchContingency("L1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setPhaseShifterRegulationOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setPhaseShifterControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.PhaseShifterControlMode.CONTINUOUS_WITH_DISCRETISATION);
+        assertJavaSaMatchesCpu(network, ctgs, lfp, "PHASE-CONT-REMOTE");
     }
 
     /** CONTINUOUS phase control, CURRENT_LIMITER mode, in JAVA mode: one-tap shifts while I exceeds

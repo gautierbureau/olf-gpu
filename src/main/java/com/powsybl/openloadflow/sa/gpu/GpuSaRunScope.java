@@ -88,12 +88,14 @@ final class GpuSaRunScope {
         // monitoring SVC is local with an automaton — slope-less plain-VOLTAGE SVCs need no loop support
         // (ordinary generator-VC buses on the device).
         boolean monitoringBatchable = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.supported(lfNetwork);
-        // CONTINUOUS phase control (GpuBatchContinuousPhase): batchable when every phase control is LOCAL
-        // (controller == controlled) — the a1-row P-flow re-emission covers the local shape only.
+        // CONTINUOUS phase control (GpuBatchContinuousPhase): CONTROLLER mode batches LOCAL and REMOTE
+        // (2026-09-05 — cbPcSide carries the controller's a1 column); LIMITER must stay LOCAL (OLF's
+        // own loop reads the controller's I terms).
         boolean continuousPhaseBatchable = lfNetwork.getBranches().stream()
                 .map(b -> b.getPhaseControl().orElse(null))
                 .filter(java.util.Objects::nonNull)
-                .allMatch(pc -> pc.getControlledBranch() == pc.getControllerBranch());
+                .allMatch(pc -> pc.getMode() == com.powsybl.openloadflow.network.TransformerPhaseControl.Mode.CONTROLLER
+                        || pc.getControlledBranch() == pc.getControllerBranch());
         boolean simpleTvcBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL
                 && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
@@ -254,7 +256,14 @@ final class GpuSaRunScope {
                 cfgIncrementalShunt, olfGuardParams.getIncrementalShuntControlOuterLoopMaxSectionShift(),
                 cfgIncrementalRpc, cfgIncrementalPhase, cfgSimpleTvc, cfgHvdcFreezing, cfgHvdcLimits,
                 cfgSecondaryVc, olfGuardParams.getMinPlausibleTargetVoltage(), olfGuardParams.getMaxPlausibleTargetVoltage(),
-                cfgVoltageMonitoring, cfgContinuousPhase, defaultLossDist && dsActive);
+                cfgVoltageMonitoring, cfgContinuousPhase, defaultLossDist && dsActive,
+                olfParams.getNewtonRaphsonStoppingCriteriaType()
+                        == com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA
+                        ? new BatchConfig.PerEqCriteria(olfParams.getNewtonRaphsonConvEpsPerEq(),
+                                olfParams.getMaxActivePowerMismatch(), olfParams.getMaxReactivePowerMismatch(),
+                                olfParams.getMaxVoltageMismatch(), olfParams.getMaxAngleMismatch(),
+                                olfParams.getMaxRatioMismatch(), olfParams.getMaxSusceptanceMismatch())
+                        : null);
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
     }
@@ -328,15 +337,16 @@ final class GpuSaRunScope {
                     || "IncrementalPhaseControl".equals(name)
                     || "IncrementalTransformerReactivePowerControl".equals(name)
                     // CONTINUOUS PhaseControl (2026-09-03): the loop's enable/disable of the CONTROLLER-mode
-                    // control toggles the BRANCH_TARGET_P row, which the activation extractor now maps to the
+                    // control toggles the BRANCH_TARGET_P row, which the activation extractor maps to the
                     // batch row mode 3 (the cb family re-emits the controlled side's P block at the α1 row) —
                     // the hybrid re-extracts activation after every loop mutation, and the rounding/limiter
-                    // tap moves reach the device via the per-scenario pi-model refresh. LOCAL control only
-                    // (a remote CONTROLLER shape throws at activation extraction = CPU fallback anyway).
+                    // tap moves reach the device via the per-scenario pi-model refresh. CONTROLLER mode may
+                    // be REMOTE (2026-09-05); LIMITER stays local (OLF's own loop is local-only).
                     || "PhaseControl".equals(name) && lfNetwork.getBranches().stream()
                             .map(b -> b.getPhaseControl().orElse(null))
                             .filter(java.util.Objects::nonNull)
-                            .allMatch(pc -> pc.getControlledBranch() == pc.getControllerBranch())
+                            .allMatch(pc -> pc.getMode() == com.powsybl.openloadflow.network.TransformerPhaseControl.Mode.CONTROLLER
+                                    || pc.getControlledBranch() == pc.getControllerBranch())
                     // SecondaryVoltageControl: adjusts GENERATOR-VC TARGET VALUES only (pilot-point regulation);
                     // targets are re-read per round and the engine isolates every MAIN generator VC's target per
                     // scenario (vcSnap), so the hybrid replays OLF's loop verbatim.

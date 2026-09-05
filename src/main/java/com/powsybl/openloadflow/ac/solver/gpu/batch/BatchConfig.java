@@ -48,14 +48,20 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
                           boolean simpleTransformerControl,
                           boolean hvdcFreezing, boolean hvdcLimits,
                           boolean secondaryVoltageControl, double minPlausibleTargetV, double maxPlausibleTargetV,
-                          boolean voltageMonitoring, boolean continuousPhaseControl, boolean contingencyLossPreDistribution) {
+                          boolean voltageMonitoring, boolean continuousPhaseControl, boolean contingencyLossPreDistribution,
+                          PerEqCriteria perEqCriteria) {
+
+    /** PER_EQUATION_TYPE stopping thresholds (OLF PerEquationTypeStoppingCriteria ctor order;
+     *  p/q in MW/MVAr, the rest pu/rad); null = UNIFORM_CRITERIA. */
+    public record PerEqCriteria(double eps, double p, double q, double v, double angle, double ratio, double b) {
+    }
 
     /** The device defaults — no state-vector scaling, no transformer control, device outer-loop
      *  constants, LEAVE_ON_SLACK_BUS behavior (never reject a saturated scenario), and the DEVICE
      *  outer-loop mode. This is what every non-provider entry point (tests, direct callers) uses. */
     public static final BatchConfig DEVICE_DEFAULTS = new BatchConfig(0, 0, 0, false, 0, 0, false, OuterLoopMode.DEVICE,
             com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams.DEFAULT, false, 3, false, 3, false, false, false, false, false,
-            false, 0.8, 1.2, false, false, false);
+            false, 0.8, 1.2, false, false, false, null);
 
     int dsRejectResidualFlag() {
         return dsRejectResidual ? 1 : 0;

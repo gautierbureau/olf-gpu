@@ -43,8 +43,9 @@ import java.util.Map;
  *       off OLF's own current term), exactly {@code changeTapPositions}.</li>
  * </ul>
  *
- * <p>Stage-1 scope: LOCAL control only (controller == controlled — OLF's limiter itself supports
- * only local, and the extractor rejects remote CONTROLLER shapes to the CPU).
+ * <p>Scope: CONTROLLER mode supports LOCAL and REMOTE control (2026-09-05 — cbPcSide carries the
+ * controller's a1 column, so the controlled element emits at the right row); LIMITER stays local
+ * (OLF's own loop supports only local).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -82,7 +83,12 @@ final class GpuBatchContinuousPhase {
             Integer a1Row = a1Rows.get(branch.getNum());
             int elemIndex = elementMapper.getElementIndex(branch);
             double[][] tapRows = GpuBatchTransformerControl.tapModels(branch.getPiModel());
-            if (a1Row == null || elemIndex < 0 || tapRows.length == 0 || pc.getControlledBranch() != branch) {
+            // REMOTE control is fine for CONTROLLER mode (the activation diff + tap rounding live on
+            // the CONTROLLER; the P row re-emission is keyed by cbPcSide on the controlled element);
+            // LIMITER stays local-only — OLF's own loop reads the CONTROLLER's I terms.
+            boolean remoteLimiter = pc.getMode() == TransformerPhaseControl.Mode.LIMITER
+                    && pc.getControlledBranch() != branch;
+            if (a1Row == null || elemIndex < 0 || tapRows.length == 0 || remoteLimiter) {
                 LOGGER.info("Continuous phase controller {} not representable on the GPU batch — skipped", branch.getId());
                 continue;
             }

@@ -126,15 +126,22 @@ final class GpuAcFamilyPacker {
                     ph1, v1, ph2, v2, a1col, r1col,
                     qRowAlt[b1.getNum()], qRowAlt[b2.getNum()]});    // [10],[11]: alternate Q rows (dyn reloc)
                 // CONTINUOUS phase control (CONTROLLER mode, LOCAL): the controlled side whose P-flow is
-                // re-emitted at the a1 row when the control is enabled per scenario (row mode 3); -1 = none
-                int pcSide = -1;
+                // re-emitted at the CONTROLLER's a1 row when the control is enabled per scenario
+                // (row mode 3). Encoding: -1 = none, else (controllerA1Col << 1) | controlledSide —
+                // the entry sits on the CONTROLLED element (which, for REMOTE control, has no a1 of
+                // its own), and the emission row is the controller's a1-paired row.
+                int pcCode = -1;
                 var pcOpt = br.getPhaseControl();
-                if (a1col >= 0 && pcOpt.isPresent()
+                if (pcOpt.isPresent()
                         && pcOpt.orElseThrow().getMode() == com.powsybl.openloadflow.network.TransformerPhaseControl.Mode.CONTROLLER
                         && pcOpt.orElseThrow().getControlledBranch() == br) {
-                    pcSide = pcOpt.orElseThrow().getControlledSide() == com.powsybl.iidm.network.TwoSides.ONE ? 0 : 1;
+                    int ctlA1Col = branchAlphaCol[pcOpt.orElseThrow().getControllerBranch().getNum()];
+                    if (ctlA1Col >= 0) {
+                        pcCode = (ctlA1Col << 1)
+                                | (pcOpt.orElseThrow().getControlledSide() == com.powsybl.iidm.network.TwoSides.ONE ? 0 : 1);
+                    }
                 }
-                cbPcSide.add(pcSide);
+                cbPcSide.add(pcCode);
             } else if (b2 != null) {                       // side 1 open: p2/q2 at bus2, variable v2
                 obElemOf[br.getNum()] = obIn.size();
                 obIn.add(new double[] {pi.getY(), pi.getKsi(), pi.getG1(), pi.getB1(), pi.getG2(), pi.getB2(), pi.getR1()});

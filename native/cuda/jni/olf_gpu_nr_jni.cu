@@ -396,21 +396,20 @@ inline int cbAltRow(const CbScatter& s, const int* ix) {
 }
 
 // CONTINUOUS PHASE CONTROL (BRANCH_TARGET_P): when a phase-controller branch's control is enabled
-// per scenario (row mode 3 on its a1-paired row), the controlled side's P-flow outputs are emitted
-// AGAIN at that row — the p-flow equation replacing the a1 identity. Union those (a1Row, col)
-// positions into the pattern; cbPcSide[e] = -1 none, 0 = side-1 P, 1 = side-2 P.
+// per scenario (row mode 3 on the CONTROLLER's a1-paired row), the controlled side's P-flow outputs
+// are emitted AGAIN at that row — the p-flow equation replacing the a1 identity. Union those
+// (a1Row, col) positions into the pattern; cbPcSide[e] = -1 none, else (controllerA1Col << 1) | side
+// — the entry sits on the CONTROLLED element, whose own a1 may be absent (REMOTE control).
 void collectCbPhasePattern(int ncb, const int* cbIdx, const int* cbPcSide,
                            const std::vector<int>& rowMap, std::vector<std::pair<int, int>>& pat) {
     for (int e = 0; e < ncb; e++) {
-        int side = cbPcSide[e];
-        if (side < 0) {
+        if (cbPcSide[e] < 0) {
             continue;
         }
+        int side = cbPcSide[e] & 1;
+        int a1Col = cbPcSide[e] >> 1;
         const int* ix = cbIdx + static_cast<size_t>(e) * 12;
-        if (ix[8] < 0) {
-            continue;                                        // no a1 variable — cannot host the P row
-        }
-        int pcRow = rowMap[ix[8]];
+        int pcRow = rowMap[a1Col];
         int k0 = side == 0 ? 0 : 14;                         // p1 block / p2 block of CB_SCATTER
         for (int k = k0 + 1; k <= k0 + 6; k++) {             // the 6 derivative outputs
             RC rc = resolveCb(CB_SCATTER[k], ix);
@@ -428,23 +427,21 @@ void buildCbPhaseDest(int ncb, const int* cbIdx, const int* cbPcSide, const std:
     pcDest.assign(static_cast<size_t>(ncb) * CB_NOUT, -1);
     pcSel.assign(static_cast<size_t>(ncb) * CB_NOUT, -1);
     for (int e = 0; e < ncb; e++) {
-        int side = cbPcSide[e];
-        if (side < 0) {
+        if (cbPcSide[e] < 0) {
             continue;
         }
+        int side = cbPcSide[e] & 1;
+        int a1Col = cbPcSide[e] >> 1;
         const int* ix = cbIdx + static_cast<size_t>(e) * 12;
-        if (ix[8] < 0) {
-            continue;
-        }
-        int pcRow = rowMap[ix[8]];
+        int pcRow = rowMap[a1Col];
         int k0 = side == 0 ? 0 : 14;
         pcDest[static_cast<size_t>(e) * CB_NOUT + k0] = -2 - pcRow;    // the P residual
-        pcSel[static_cast<size_t>(e) * CB_NOUT + k0] = ix[8];
+        pcSel[static_cast<size_t>(e) * CB_NOUT + k0] = a1Col;          // mode-3 gate lives at the CONTROLLER's a1 row
         for (int k = k0 + 1; k <= k0 + 6; k++) {
             RC rc = resolveCb(CB_SCATTER[k], ix);
             if (rc.col >= 0) {
                 pcDest[static_cast<size_t>(e) * CB_NOUT + k] = pos.at(pcRow, rc.col);
-                pcSel[static_cast<size_t>(e) * CB_NOUT + k] = ix[8];
+                pcSel[static_cast<size_t>(e) * CB_NOUT + k] = a1Col;
             }
         }
     }
@@ -2650,13 +2647,16 @@ __global__ void axpy1BatchScaled(int n, int total, const double* dx, const doubl
 // exact vs the host loop; the ssq PARALLEL summation order differs from the host's sequential
 // sum by last-ulp amounts — borderline ||F||2 stopping decisions can flip at ulp level (same
 // class of effect as any reduction-order change; the criterion itself is unchanged).
-__global__ void residualNormsBatch(int n, const double* F, const char* active, double* out) {
+__global__ void residualNormsBatch(int n, const double* F, const char* active, double* out,
+                                   const double* thrIdent, const double* thrPower, const int* mode) {
     int s = blockIdx.x;
     __shared__ double smInf[BLOCK];
     __shared__ double smSsq[BLOCK];
+    __shared__ double smRat[BLOCK];
     __shared__ int smFin[BLOCK];
     double mInf = 0.0;
     double ssq = 0.0;
+    double mRat = 0.0;
     int fin = 1;
     if (active == nullptr || active[s]) {
         const double* f = F + (size_t) s * n;
@@ -2665,24 +2665,34 @@ __global__ void residualNormsBatch(int n, const double* F, const char* active, d
             if (!isfinite(v)) fin = 0;
             mInf = fmax(mInf, fabs(v));
             ssq += v * v;
+            if (thrIdent != nullptr) {
+                // PER_EQUATION_TYPE: identity/slope rows (mode 0/2) use the row's identity-type
+                // threshold; power rows (mode 1) and the phase P row (mode 3) the power-type one
+                int m = mode[(size_t) s * n + i];
+                double thr = (m == 1 || m == 3) ? thrPower[i] : thrIdent[i];
+                mRat = fmax(mRat, fabs(v) / thr);
+            }
         }
     }
     smInf[threadIdx.x] = mInf;
     smSsq[threadIdx.x] = ssq;
+    smRat[threadIdx.x] = mRat;
     smFin[threadIdx.x] = fin;
     __syncthreads();
     for (int off = blockDim.x / 2; off > 0; off >>= 1) {
         if (threadIdx.x < off) {
             smInf[threadIdx.x] = fmax(smInf[threadIdx.x], smInf[threadIdx.x + off]);
             smSsq[threadIdx.x] += smSsq[threadIdx.x + off];
+            smRat[threadIdx.x] = fmax(smRat[threadIdx.x], smRat[threadIdx.x + off]);
             smFin[threadIdx.x] &= smFin[threadIdx.x + off];
         }
         __syncthreads();
     }
     if (threadIdx.x == 0) {
-        out[s * 3 + 0] = smInf[0];
-        out[s * 3 + 1] = smSsq[0];
-        out[s * 3 + 2] = smFin[0] ? 1.0 : 0.0;
+        out[s * 4 + 0] = smInf[0];
+        out[s * 4 + 1] = smSsq[0];
+        out[s * 4 + 2] = smFin[0] ? 1.0 : 0.0;
+        out[s * 4 + 3] = smRat[0];                           // max |F_i|/thr_i (0 without thresholds)
     }
 }
 
@@ -2757,7 +2767,9 @@ struct BatchSolverContext {
     bool clampStep = false;                                  // MAX_VOLTAGE_CHANGE per-scenario step clamp (set per solve)
     double maxDv = 0.0, maxDphi = 0.0;
     DeviceBuf dVarType, dStepFactor;                         // n ints / nS factors (lazy, first clamped solve)
-    DeviceBuf dNorms;                                        // nS*3 device-side convergence norms (see residualNormsBatch)
+    DeviceBuf dNorms;                                        // nS*4 device-side convergence norms (see residualNormsBatch)
+    DeviceBuf dThrIdent, dThrPower;                          // n each: per-row PER_EQUATION_TYPE thresholds (empty = 2-norm/infnorm criterion)
+    bool perRowCriteria = false;
     int nShOv = 0;                                           // per-scenario shunt admittance overrides (set per solve)
     DeviceBuf dShOvSlotElem, dShOvGb;                        // nShOv*2 ints (slot, PACK elem) / nShOv*2 doubles (dG, dB)
     int nziBase = 0;                                         // zi elements [0,nziBase) always enabled; [nziBase,nzi) are
@@ -3000,7 +3012,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     ctx->dB.alloc(nS * sizeof(double));
     ctx->dDx.alloc(nS * sizeof(double));
     ctx->dVals.alloc(nnzS * sizeof(double));
-    ctx->dNorms.alloc(static_cast<size_t>(nScenarios) * 3 * sizeof(double));
+    ctx->dNorms.alloc(static_cast<size_t>(nScenarios) * 4 * sizeof(double));
     ctx->dMode.alloc(nS * sizeof(int));
     ctx->dDisabled.alloc(static_cast<size_t>(ctx->nElements) * nScenarios * sizeof(char));
     ctx->dActive.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
@@ -3424,8 +3436,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             std::vector<double> hNorms;
             if (!deviceFixedIter) {
                 // Device-side reduction: read back nS*3 norms, not the 70-MB mismatch.
-                residualNormsBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dNorms.as<double>());
-                hNorms.resize(static_cast<size_t>(nS) * 3);
+                residualNormsBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dNorms.as<double>(),
+                        ctx->perRowCriteria ? ctx->dThrIdent.as<double>() : nullptr,
+                        ctx->perRowCriteria ? ctx->dThrPower.as<double>() : nullptr, ctx->dMode.as<int>());
+                hNorms.resize(static_cast<size_t>(nS) * 4);
                 CUDA_CHECK(cudaMemcpy(hNorms.data(), ctx->dNorms.p, hNorms.size() * sizeof(double), cudaMemcpyDeviceToHost));
             } else {
                 CUDA_CHECK(cudaMemcpy(hF.data(), ctx->dF.p, nTot * sizeof(double), cudaMemcpyDeviceToHost));
@@ -3444,10 +3458,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 double norm = 0.0;
                 double ssq = 0.0;
                 bool finite = true;
+                double maxRatio = 0.0;
                 if (!deviceFixedIter) {
-                    norm = hNorms[(size_t) s * 3];
-                    ssq = hNorms[(size_t) s * 3 + 1];
-                    finite = hNorms[(size_t) s * 3 + 2] != 0.0;
+                    norm = hNorms[(size_t) s * 4];
+                    ssq = hNorms[(size_t) s * 4 + 1];
+                    finite = hNorms[(size_t) s * 4 + 2] != 0.0;
+                    maxRatio = hNorms[(size_t) s * 4 + 3];
                 } else {
                     for (int i = 0; i < n; i++) {
                         double v = hF[(size_t) s * n + i];
@@ -3459,7 +3475,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ssq += v * v;
                     }
                 }
-                bool converged = convEpsPerEq > 0.0 ? (std::sqrt(ssq) < olf2NormThreshold) : (norm < tol);
+                // PER_EQUATION_TYPE (per-row thresholds set on the context): OLF's
+                // PerEquationTypeStoppingCriteria — stop when EVERY row clears its type threshold.
+                bool converged = ctx->perRowCriteria ? (finite && maxRatio < 1.0)
+                        : convEpsPerEq > 0.0 ? (std::sqrt(ssq) < olf2NormThreshold) : (norm < tol);
                 if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
                     std::fprintf(stderr, "BATCH_TRACE s=%d it=%d infnorm=%.17e norm2=%.17e thr=%.17e conv=%d\n",
                                  s, it, norm, std::sqrt(ssq), olf2NormThreshold, converged ? 1 : 0);
@@ -4495,6 +4514,31 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
     jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(ctx->nScenarios));
     env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(ctx->nScenarios), host.data());
     return out;
+}
+
+// PER_EQUATION_TYPE stopping criterion: install (or clear, with nulls) the per-row threshold
+// arrays on a batch context — thrIdent for identity/slope rows, thrPower for power rows, both
+// length n. The convergence test then requires EVERY row's |F| under its threshold (OLF's
+// PerEquationTypeStoppingCriteria), replacing the 2-norm/infnorm rule for this context.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRowCriteria(
+        JNIEnv* env, jclass, jlong handle, jdoubleArray jThrIdent, jdoubleArray jThrPower) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jThrIdent == nullptr || jThrPower == nullptr) {
+        ctx->perRowCriteria = false;
+        return;
+    }
+    int n = ctx->st->n;
+    jdouble* thrIdent = env->GetDoubleArrayElements(jThrIdent, nullptr);
+    jdouble* thrPower = env->GetDoubleArrayElements(jThrPower, nullptr);
+    ctx->dThrIdent.upload(thrIdent, static_cast<size_t>(n) * sizeof(double));
+    ctx->dThrPower.upload(thrPower, static_cast<size_t>(n) * sizeof(double));
+    env->ReleaseDoubleArrayElements(jThrIdent, thrIdent, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jThrPower, thrPower, JNI_ABORT);
+    ctx->perRowCriteria = true;
 }
 
 extern "C" JNIEXPORT void JNICALL

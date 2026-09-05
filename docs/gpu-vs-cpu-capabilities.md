@@ -224,7 +224,9 @@ element falls back to the stock per-strategy CPU path individually.
    applies ONLY to the SecondaryVC zone replay, SVC voltage monitoring, and continuous
    PhaseControl orchestrators (OLF's own SecondaryVC loop is general — the port collapsed the
    controller/controlled index sets, so remote there is orchestrator restructuring, no kernel
-   work) — strategy pairs under
+   work). REMOTE continuous PhaseControl (CONTROLLER mode): ✅ **2026-09-05** — cbPcSide now encodes
+   the CONTROLLER's a1 column, so the controlled element emits its P block at the right row; LIMITER
+   stays local (OLF itself is local-only there); DEVICE + JAVA at 1e-12 — strategy pairs under
    anchor-dependent DS factor types (TARGET / load-based / REMAINING_MARGIN), an islanded DS
    participant in the loss pre-distribution, a custom ContingencyActivePowerLossDistribution SPI,
    loadPowerFactorConstant with load-based balance, ZIP loads for load losses.
@@ -262,7 +264,10 @@ element falls back to the stock per-strategy CPU path individually.
    multi-slack components, realistic-voltage post-check on batched states. (DS balance
    types, useActiveLimits, failure behaviors, maxPqPvSwitch, maxOuterLoopIterations —
    closed 2026-07-18 by guard + parameter wiring.)
-6. **PerEquationTypeStoppingCriteria**; ZI shapes without dummies. (ZIP/exponential loads:
+6. ~~PerEquationTypeStoppingCriteria~~ ✅ **2026-09-05** — per-row threshold arrays on the batch
+   context (`setBatchRowCriteria`; the norms kernel reduces max |F_i|/thr_i, thresholds follow the
+   live row mode; base LF stays CPU — the sequential solver still only implements the uniform
+   criterion); DEVICE + JAVA at 1e-12. ZI shapes without dummies still open. (ZIP/exponential loads:
    ✅ **2026-09-04** — the vdl family adds c_n·target·V^n to the bus P/Q rows with the dJ/dV
    slot, plain LF at ~1e-13 kV and batched SA at 1e-12 (`GpuLoadModelTest`,
    `deviceZipLoadModelMatchesCpu`). Still CPU: load LOSSES of modeled loads (not a target

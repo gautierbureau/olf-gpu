@@ -279,6 +279,13 @@ public final class GpuAcNewtonSolver {
     public static native double[] readBatchSlackAbsorbed(long handle);
 
     /** Release a batch context from {@link #createBatchContext} (idempotent for handle 0). */
+    /** Install (or clear, with nulls) the PER_EQUATION_TYPE per-row stopping thresholds on a batch
+     *  context: {@code thrIdent[r]} for identity/slope rows, {@code thrPower[r]} for power rows —
+     *  the convergence test then requires EVERY row's |F| under its threshold (OLF's
+     *  PerEquationTypeStoppingCriteria) instead of the 2-norm/infnorm rule. Contexts are CACHED, so
+     *  a run without the criterion must clear (null, null). */
+    public static native void setBatchRowCriteria(long handle, double[] thrIdent, double[] thrPower);
+
     public static native void destroyBatchContext(long handle);
 
     /**

@@ -51,6 +51,7 @@ final class GpuBatchChunkSolver {
                                                int[][] frozenRowsByIndex, double[][] frozenTargetsByIndex,
                                                GenOutage[][] genOutagesByIndex, double[] activePowerLossByIndex,
                                                java.util.Map<com.powsybl.openloadflow.network.LfHvdc, Integer> hvdcElemIndex,
+                                               double[][] rowCriteria,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
@@ -71,6 +72,10 @@ final class GpuBatchChunkSolver {
         // Reuse a cached analyzed context when the pattern/admittances/chunk/mode match (across
         // SA runs on the same network) — the context is NOT destroyed here, it stays cached.
         long handle = GpuBatchContextCache.acquireBatchContext(gpuData, chunkSize, GpuBatchContextCache.resolveBatchMode(), n);
+        // PER_EQUATION_TYPE criterion: install the per-row thresholds on the (possibly cached)
+        // context — or CLEAR a previous run's thresholds under UNIFORM_CRITERIA.
+        GpuAcNewtonSolver.setBatchRowCriteria(handle,
+                rowCriteria != null ? rowCriteria[0] : null, rowCriteria != null ? rowCriteria[1] : null);
 
         // The base state / targets are IDENTICAL for every scenario (a single-branch N-1 starts from the
         // same converged base operating point): passed as single length-n rows and tiled on-device. The

@@ -103,7 +103,8 @@ public final class GpuHybridBatchOuterLoopEngine {
                          List<LfBus> ctrlBuses, List<LfHvdc> hvdcs, List<LfBranch> transformerBranches,
                          int lsMode, double lsMaxDv, double lsMaxDphi, int[] varType,
                          int maxIterations, int maxOuter, int rejectRouteThreshold,
-                         double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq) {
+                         double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
+                         double[][] rowCriteria) {
     }
 
     /**
@@ -138,7 +139,16 @@ public final class GpuHybridBatchOuterLoopEngine {
         }
     }
 
-    private static long createHandle(long structure, int count, int mode, GpuAcData d) {
+    private static long createHandle(long structure, int count, int mode, GpuAcData d, double[][] rowCriteria) {
+        long h = createHandleRaw(structure, count, mode, d);
+        // PER_EQUATION_TYPE stopping criterion: install the per-row thresholds so the hybrid's
+        // inner solves stop exactly where OLF's PerEquationTypeStoppingCriteria would.
+        GpuAcNewtonSolver.setBatchRowCriteria(h,
+                rowCriteria != null ? rowCriteria[0] : null, rowCriteria != null ? rowCriteria[1] : null);
+        return h;
+    }
+
+    private static long createHandleRaw(long structure, int count, int mode, GpuAcData d) {
         return GpuAcNewtonSolver.createBatchContext(structure, count, mode,
                 d.rlVrow(), d.rlMinQ(), d.rlMaxQ(), d.rlLoadQ(), d.rlVtarget(), d.rlMonitored(), d.rowSlope(),
                 d.dsPhiRow(), d.dsFactor(), d.dsSlackPhiRow(), d.dsSlackTargetP(),
@@ -249,7 +259,7 @@ public final class GpuHybridBatchOuterLoopEngine {
         double[][] states = new double[nS][];
         double[][] round0States = null;
         int ctxSize = nS;
-        long handle = createHandle(in.structure(), nS, in.mode(), in.gpuData());
+        long handle = createHandle(in.structure(), nS, in.mode(), in.gpuData(), in.rowCriteria());
 
         int rounds = 0;
         long tSolve = 0;
@@ -334,7 +344,7 @@ public final class GpuHybridBatchOuterLoopEngine {
             int nA = active.size();
             if (nA != ctxSize) {
                 GpuAcNewtonSolver.destroyBatchContext(handle);
-                handle = createHandle(in.structure(), nA, in.mode(), in.gpuData());
+                handle = createHandle(in.structure(), nA, in.mode(), in.gpuData(), in.rowCriteria());
                 ctxSize = nA;
             }
             // compacted per-scenario inputs + sparse target overrides, indexed by the COMPACTED scenario index i.

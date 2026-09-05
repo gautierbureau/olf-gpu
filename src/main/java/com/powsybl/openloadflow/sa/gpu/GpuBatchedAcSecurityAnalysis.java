@@ -203,7 +203,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 .anyMatch(b -> b.getPhaseControl()
                         .map(pc -> pc.getMode() == com.powsybl.openloadflow.network.TransformerPhaseControl.Mode.CONTROLLER)
                         .orElse(false));
-        boolean cpuBaseOnly = frozenHvdcBase || monitoringSvcBase || slopeSvcBase || phaseControlBase;
+        // PER_EQUATION_TYPE stopping criteria: the SEQUENTIAL GPU solver only implements the uniform
+        // criterion (it solves deeper, then the CPU retest passes — a DEEPER-converged base state
+        // than the CPU arm's, breaking exact SA parity). Keep the base on the CPU; the batch has its
+        // own per-row criterion (setBatchRowCriteria).
+        boolean perEqCriteriaBase = com.powsybl.openloadflow.OpenLoadFlowParameters
+                .get(securityAnalysisParameters.getLoadFlowParameters()).getNewtonRaphsonStoppingCriteriaType()
+                == com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA;
+        boolean cpuBaseOnly = frozenHvdcBase || monitoringSvcBase || slopeSvcBase || phaseControlBase || perEqCriteriaBase;
         if (!scope.batchDisabled() && !multiThread && gpuBaseLoadFlowEnabled() && !cpuBaseOnly
                 && GpuAcNewtonSolver.isAvailable()
                 && acParameters.getSolverFactory().getClass() == NewtonRaphsonFactory.class) {

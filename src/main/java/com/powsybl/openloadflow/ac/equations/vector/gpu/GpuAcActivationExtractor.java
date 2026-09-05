@@ -78,15 +78,12 @@ public final class GpuAcActivationExtractor {
             }
             if (e.getType() == AcEquationType.BRANCH_TARGET_P) {
                 // CONTINUOUS phase control enabled: the controlled branch's P-flow equation sits at the
-                // CONTROLLER's a1-paired row (row mode 3 — the cb family re-emits the P outputs there).
-                // Stage-1 scope: LOCAL control only (controller == controlled).
+                // CONTROLLER's a1-paired row (row mode 3 — the cb family re-emits the P outputs there,
+                // cbPcSide carrying the controller's a1 column, LOCAL and REMOTE alike).
                 var branch = network.getBranchById(network.getBranches().stream()
                         .filter(b -> b.getNum() == e.getElementNum()).findFirst().orElseThrow().getId());
                 var pc = branch.getPhaseControl().orElseThrow();
-                if (pc.getControllerBranch() != branch) {
-                    throw new PowsyblException("GPU AC solver: REMOTE continuous phase control not supported");
-                }
-                int a1r = GpuAcRowIndexing.col(es, branch.getNum(), AcVariableType.BRANCH_ALPHA1);
+                int a1r = GpuAcRowIndexing.col(es, pc.getControllerBranch().getNum(), AcVariableType.BRANCH_ALPHA1);
                 mode[a1r] = 3;
                 targetMap[a1r] = e.getColumn();
                 continue;
@@ -131,6 +128,59 @@ public final class GpuAcActivationExtractor {
      * mirroring {@code MaxVoltageChangeStateVectorScaling} (which only inspects BUS_V / BUS_PHI). Indexed by
      * the variable row, which is the column index of the Newton step.
      */
+    /** PER_EQUATION_TYPE stopping thresholds per paired row, from the VARIABLE at each column (the
+     *  batch pairs every equation with its dominant variable): {@code [0][r]} = the identity/slope-row
+     *  threshold, {@code [1][r]} = the power-row threshold — mirroring OLF's
+     *  PerEquationTypeStoppingCriteria type switch (power values MW/MVAr -> pu /100; dummy columns:
+     *  identity = DUMMY_TARGET_P/Q power thresholds, coupled = ZERO_PHI/ZERO_V angle/voltage ones). */
+    @SuppressWarnings("java:S107")
+    public static double[][] extractRowCriteria(EquationSystem<AcVariableType, AcEquationType> es, int n,
+                                                double maxP, double maxQ, double maxV, double maxAngle,
+                                                double maxRatio, double maxSusceptance, double eps) {
+        double[] thrIdent = new double[n];
+        double[] thrPower = new double[n];
+        java.util.Arrays.fill(thrIdent, eps);
+        java.util.Arrays.fill(thrPower, eps);
+        double sb = 100.0;
+        for (var v : es.getIndex().getSortedVariablesToFind()) {
+            int r = v.getRow();
+            switch (v.getType()) {
+                case BUS_V -> {
+                    thrIdent[r] = maxV;                      // BUS_TARGET_V (incl. slope rows)
+                    thrPower[r] = maxQ / sb;                 // BUS_TARGET_Q / DISTR_Q
+                }
+                case BUS_PHI -> {
+                    thrIdent[r] = maxAngle;                  // BUS_TARGET_PHI (slack)
+                    thrPower[r] = maxP / sb;                 // BUS_TARGET_P / BUS_DISTR_SLACK_P
+                }
+                case BRANCH_ALPHA1 -> {
+                    thrIdent[r] = maxAngle;                  // BRANCH_TARGET_ALPHA1
+                    thrPower[r] = maxP / sb;                 // BRANCH_TARGET_P (row mode 3)
+                }
+                case BRANCH_RHO1 -> {
+                    thrIdent[r] = maxRatio;                  // BRANCH_TARGET_RHO1 / DISTR_RHO
+                    thrPower[r] = maxRatio;
+                }
+                case SHUNT_B -> {
+                    thrIdent[r] = maxSusceptance;            // SHUNT_TARGET_B / DISTR_SHUNT_B
+                    thrPower[r] = maxSusceptance;
+                }
+                case DUMMY_P -> {
+                    thrIdent[r] = maxP / sb;                 // DUMMY_TARGET_P (identity, pinned 0)
+                    thrPower[r] = maxAngle;                  // ZERO_PHI coupling (mode 1)
+                }
+                case DUMMY_Q -> {
+                    thrIdent[r] = maxQ / sb;                 // DUMMY_TARGET_Q
+                    thrPower[r] = maxV;                      // ZERO_V coupling
+                }
+                default -> {
+                    // convEpsPerEq for anything else — matches OLF's default case
+                }
+            }
+        }
+        return new double[][] {thrIdent, thrPower};
+    }
+
     public static int[] extractVarType(EquationSystem<AcVariableType, AcEquationType> es, int n) {
         int[] varType = new int[n];
         java.util.Arrays.fill(varType, 2);

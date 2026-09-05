@@ -194,8 +194,19 @@ final class GpuSaRunScope {
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalPhaseControl".equals(ol.getName()));
         boolean cfgSimpleTvc = outerLoopMode == OuterLoopMode.DEVICE && simpleTvcBatchable
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "SimpleTransformerVoltageControl".equals(ol.getName()));
+        // HVDC freezing applies to CONTINGENCY solves whenever the SA-LEVEL startWithFrozenACEmulation
+        // is on — and its DEFAULT IS TRUE (OpenSecurityAnalysisParameters), independently of the
+        // loadflow-level flag: AcSecurityAnalysis.applyGenericContingencyParameters injects the
+        // FreezingHvdcACEmulation loop into every post-contingency solve (freeze at the previous
+        // state's flows -> solve -> unfreeze -> re-solve). The base loop list does NOT show it, so
+        // keying on acParameters.getOuterLoops() alone silently skipped the freeze phase for the
+        // batch (found 2026-09-05: ~1e-4 kV plateau gaps on live-hvdc branch outages — the arms
+        // solved along different paths and stopped at different points inside the criterion).
+        boolean saContingencyFreeze = com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters
+                .getOrDefault(securityAnalysisParameters).isStartWithFrozenACEmulation();
         boolean cfgHvdcFreezing = outerLoopMode == OuterLoopMode.DEVICE && !noHvdc && hvdcBatchable
-                && acParameters.getOuterLoops().stream().anyMatch(ol -> "FreezingHvdcACEmulation".equals(ol.getName()));
+                && (saContingencyFreeze
+                    || acParameters.getOuterLoops().stream().anyMatch(ol -> "FreezingHvdcACEmulation".equals(ol.getName())));
         boolean cfgHvdcLimits = outerLoopMode == OuterLoopMode.DEVICE && !noHvdc && hvdcBatchable
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "AcHvdcAcEmulationLimits".equals(ol.getName()));
         boolean cfgSecondaryVc = outerLoopMode == OuterLoopMode.DEVICE && svcBatchable

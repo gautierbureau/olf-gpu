@@ -793,13 +793,12 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .setVoltageLevel2(l14.getTerminal2().getVoltageLevel().getId()).setBus2(l14.getTerminal2().getBusBreakerView().getBus().getId())
                 .setR(3).setX(25)
                 .setG1(l14.getG1()).setB1(l14.getB1()).setG2(l14.getG2()).setB2(l14.getB2()).add();
-        // NOTE the plain l14_BIS outage (hvdc coupling LIVE post-contingency) is deliberately NOT in
-        // this list: it reproduces a PRE-EXISTING hv-live iterate divergence, independent of the outage
-        // machinery under test here — first Newton step from flat differs materially between the arms
-        // (GPU b4 = 399.250 vs CPU 399.178 on the SEQUENTIAL path, isolated in GpuHvdcTrajectoryProbe);
-        // both converge to the identical root, but default-criterion stops land up to ~4e-4 kV apart.
-        // OPEN INVESTIGATION — see the capability doc's DS/HVDC row.
+        // l14_BIS (hvdc coupling LIVE post-contingency) once drifted ~1e-4 kV: the CPU SA freezes AC
+        // emulation for EVERY contingency solve by DEFAULT (SA-level startWithFrozenACEmulation=true,
+        // absent from the BASE outer-loop list) and the scope keyed on the base list only, skipping the
+        // batch's freeze phase. Fixed in GpuSaRunScope (2026-09-05); this scenario now guards it.
         List<Contingency> ctgs = List.of(
+                new Contingency("l14_BIS", new BranchContingency("l14_BIS")),
                 new Contingency("hvdc23", new com.powsybl.contingency.HvdcLineContingency("hvdc23")),
                 new Contingency("combo-l14bis-hvdc23", new BranchContingency("l14_BIS"),
                         new com.powsybl.contingency.HvdcLineContingency("hvdc23")));

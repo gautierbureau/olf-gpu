@@ -626,6 +626,28 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** Reactive capability CURVE limits at runtime P: B2's curve makes maxQ fall as DS RAISES its
+     *  targetP post-outage — the RL pin must use the limit at the MOVED P (rlCurveLimitsBatch), not
+     *  the base snapshot; a sloped curve segment spans the DS range so the two differ materially. */
+    @org.junit.jupiter.api.Test
+    void deviceCurveReactiveLimitsAtRuntimePMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        com.powsybl.iidm.network.Generator g2 = network.getGenerator("B2-G");
+        g2.newReactiveCapabilityCurve()
+                .beginPoint().setP(0).setMinQ(-40).setMaxQ(55).endPoint()
+                .beginPoint().setP(40).setMinQ(-40).setMaxQ(50).endPoint()
+                .beginPoint().setP(140).setMinQ(-40).setMaxQ(34).endPoint()
+                .add();
+        network.getGenerator("B1-G").newMinMaxReactiveLimits().setMinQ(-990).setMaxQ(990).add();
+        List<Contingency> ctgs = List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("L1-5-1", new BranchContingency("L1-5-1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
     /** PER_EQUATION_TYPE stopping criteria: the batch installs per-row thresholds
      *  (setBatchRowCriteria — every row's |F| under its type threshold, OLF's
      *  PerEquationTypeStoppingCriteria) and the base LF stays on the CPU; shallow explicit

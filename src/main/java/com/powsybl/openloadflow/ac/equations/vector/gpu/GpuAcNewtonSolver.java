@@ -286,6 +286,10 @@ public final class GpuAcNewtonSolver {
      *  a run without the criterion must clear (null, null). */
     public static native void setBatchRowCriteria(long handle, double[] thrIdent, double[] thrPower);
 
+    /** Install (or clear, with nulls) the reactive-capability-CURVE channel on a batch context —
+     *  per-scenario dynamic RL limits evaluated at the current targets (see GpuBatchRlCurves). */
+    public static native void setBatchRlCurves(long handle, int[] cvIdx, double[] cvIn, double[] cvPts);
+
     public static native void destroyBatchContext(long handle);
 
     /**

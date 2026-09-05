@@ -169,7 +169,8 @@ final class GpuBatchQualification {
             GpuBatchElementMapper elementMapper, GpuAcData gpuData,
             EquationSystem<AcVariableType, AcEquationType> es,
             double dsSum, boolean slackParticipates,
-            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams, Set<LfBranch> distrRhoControllers) {
+            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams, Set<LfBranch> distrRhoControllers,
+            int[] curvePRows) {
         List<Integer> batchedIndices = new ArrayList<>();
         int[][] frozenRowsByIndex = new int[contingencies.size()][];     // islanded buses' variable rows, per contingency
         int[][] islandedNumsByIndex = new int[contingencies.size()][];   // islanded LfBus nums (result-building excludes them)
@@ -232,6 +233,22 @@ final class GpuBatchQualification {
                 if (gos == null) {                           // slack / >1 DS bus / remote gen — route to CPU
                     continue;
                 }
+                // Curve-limits channel active: its p_now linkage models the DS delta ONLY. An injection
+                // override at a curve bus's P row, or a strategy PAIR (anchor shifts move every DS row),
+                // would skew the evaluated limits — CPU.
+                if (curvePRows != null) {
+                    boolean skewsCurve = c.contingencyId().indexOf(GpuBatchStatus.STRATEGY_KEY_SEP) >= 0;
+                    for (GenOutage go : gos) {
+                        for (int pr : curvePRows) {
+                            if (go.pRow() == pr) {
+                                skewsCurve = true;
+                            }
+                        }
+                    }
+                    if (skewsCurve) {
+                        continue;
+                    }
+                }
                 if (!c.outagedBranches().isEmpty()) {        // COMBO: the branch part must also qualify
                     if (c.outagedBranches().stream().anyMatch(distrRhoControllers::contains)
                             || islandsRemoteVcMember(es, q.islandedBuses())) {
@@ -277,6 +294,9 @@ final class GpuBatchQualification {
             } else if (c.outagedBranches().stream().noneMatch(distrRhoControllers::contains)) {
                 if (islandsRemoteVcMember(es, q.islandedBuses())) {
                     continue;                                // DISTR_Q group member islanded — CPU
+                }
+                if (curvePRows != null && c.contingencyId().indexOf(GpuBatchStatus.STRATEGY_KEY_SEP) >= 0) {
+                    continue;                                // pair anchor shifts skew the curve linkage — CPU
                 }
                 batchedIndices.add(i);
                 FrozenIsland fi = islandedFrozen(es, q.islandedBuses());

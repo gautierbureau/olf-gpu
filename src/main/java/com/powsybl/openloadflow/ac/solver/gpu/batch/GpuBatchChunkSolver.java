@@ -51,7 +51,7 @@ final class GpuBatchChunkSolver {
                                                int[][] frozenRowsByIndex, double[][] frozenTargetsByIndex,
                                                GenOutage[][] genOutagesByIndex, double[] activePowerLossByIndex,
                                                java.util.Map<com.powsybl.openloadflow.network.LfHvdc, Integer> hvdcElemIndex,
-                                               double[][] rowCriteria,
+                                               double[][] rowCriteria, GpuBatchRlCurves.Channel rlCurves,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
@@ -76,6 +76,11 @@ final class GpuBatchChunkSolver {
         // context — or CLEAR a previous run's thresholds under UNIFORM_CRITERIA.
         GpuAcNewtonSolver.setBatchRowCriteria(handle,
                 rowCriteria != null ? rowCriteria[0] : null, rowCriteria != null ? rowCriteria[1] : null);
+        // Curve limits at runtime P: install (or clear, for cached contexts) the per-gen curve channel.
+        GpuAcNewtonSolver.setBatchRlCurves(handle,
+                rlCurves != null ? rlCurves.cvIdx() : null,
+                rlCurves != null ? rlCurves.cvIn() : null,
+                rlCurves != null ? rlCurves.cvPts() : null);
 
         // The base state / targets are IDENTICAL for every scenario (a single-branch N-1 starts from the
         // same converged base operating point): passed as single length-n rows and tiled on-device. The

@@ -321,8 +321,19 @@ public final class GpuBatchedSecurityAnalysisSolver {
             }
         }
         boolean slackParticipates = java.util.Arrays.stream(gpuData.dsFactor()).sum() < 1 - 1e-9;
+        // Reactive capability CURVES at runtime P (GpuBatchRlCurves): built BEFORE planning — a
+        // contingency whose injection overrides touch a curve bus's P row (or any strategy pair,
+        // whose anchor shifts move every DS row) breaks the channel's DS-only linkage -> CPU.
+        GpuBatchRlCurves.Channel rlCurves = reactiveLimits
+                ? GpuBatchRlCurves.build(network, equationSystem, gpuData, config.dsParams(), distributedSlack, baseTargets)
+                : null;
+        int[] curvePRows = rlCurves != null
+                ? java.util.stream.IntStream.range(0, rlCurves.cvIdx().length / 4)
+                        .map(g -> rlCurves.cvIdx()[g * 4 + 1]).toArray()
+                : null;
         GpuBatchQualification.ScenarioPlan plan = GpuBatchQualification.planScenarios(contingencies, qualifications,
-                elementMapper, gpuData, equationSystem, dsSum, slackParticipates, dsParams, distrRhoControllers);
+                elementMapper, gpuData, equationSystem, dsSum, slackParticipates, dsParams, distrRhoControllers,
+                curvePRows);
         List<Integer> batchedIndices = plan.batchedIndices();
         int islandingCount = plan.islandingCount();
         int rejected = contingencies.size() - batchedIndices.size();
@@ -348,7 +359,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
             GpuBatchChunkSolver.solveQualifiedInChunks(batchedIndices, contingencies, elementMapper, gpuData, baseState,
                     baseTargets, baseActivation.rowMode(), plan.frozenRowsByIndex(), plan.frozenTargetsByIndex(), plan.genOutagesByIndex(),
                     plan.activePowerLossByIndex(),
-                    GpuBatchHvdcAcEmulation.elementIndices(network, nElements), rowCriteria,
+                    GpuBatchHvdcAcEmulation.elementIndices(network, nElements), rowCriteria, rlCurves,
                     n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                     config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
                     config.transformerControl() || config.simpleTransformerControl()

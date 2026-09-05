@@ -150,6 +150,12 @@ final class GpuSaRunScope {
             if (dsLoopActive && loadBased && olfGuardParams.isUseLoadModel()) {
                 unsupportedOuterLoops.add("DistributedSlack[useLoadModel+loadBased]");
             }
+            // Curve-limit extrapolation: the device curve evaluator implements the CLAMP branch only
+            // (OLF default); slope extrapolation outside [minP, maxP] -> CPU.
+            if (olfGuardParams.isExtrapolateReactiveLimits()
+                    && com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchRlCurves.hasCurveGenerators(lfNetwork)) {
+                unsupportedOuterLoops.add("ReactiveLimits[extrapolateReactiveLimits+curves]");
+            }
         }
         // Parameterization the device loops DO model — wire the run's values in place of the
         // device defaults (maxOuterLoopIterations, reactiveLimitsMaxPqPvSwitch), and make a

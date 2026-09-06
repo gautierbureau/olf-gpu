@@ -138,7 +138,7 @@ Full predicate list in Part II §F.
 | HVDC contingency (AC-emulation) | ✅ **2026-09-04** | the hv element's per-scenario disabled bit removes the coupling; the VSC stations' losses ride the generator-outage channel (PropagatedContingency puts them there); solo + branch combos at 1e-12. Needs the olf-local-patches getHvdcIdsToOpen accessor (cbdb9bd90). Still ⏩: setpoint-mode/LCC hvdc outage (not an hv element), a station on the slack bus (slack-loss guard), islanded hv endpoint (hvdcsWithoutPower unmodeled) |
 | ≥3 branch outage, single-side opening, bus/busbar loss | ⏩ | |
 | ~~live-hvdc first-step divergence~~ | ✅ **RESOLVED 2026-09-05** | NOT numerics (sequential trajectories are bit-identical once iteration counts align — the probe had an off-by-one, OLF's NR runs maxIterations+1). Root cause: the CPU SA freezes AC emulation for EVERY contingency solve by DEFAULT (SA-level `OpenSecurityAnalysisParameters.startWithFrozenACEmulation` = true, injected by `applyGenericContingencyParameters` — NOT visible in the base outer-loop list), and `GpuSaRunScope` keyed the batch's freeze phase on the base list only, skipping it. Scope now honors the SA-level flag; the once-drifting live-hvdc branch outage guards it at 1e-12 (`deviceHvdcContingencyBatchedMatchesCpu`) |
-| Outage of a DISTR_RHO controller branch | ⏩ | outaging one member reforms the 1/count coupling — mask cannot represent it |
+| Outage of a DISTR_RHO controller branch | ⏩ | outaging one member reforms the 1/count coupling — mask cannot represent it. **2026-09-06 audit**: the guard was SILENTLY BYPASSED at an AFTER_GENERATOR base (`isTransformerVoltageControlled()` false with control off emptied both the DISTR_RHO pack and the guard set — a member outage batched 3.7e-3 kV wrong); predicates now key on the equations EXISTING, and SHARED groups route the whole TVC run to CPU (`transformerControlSupported`) because the per-branch alone-toggle deltas cannot compose the group activation. On-device support plan: (1) group-level TransformerController (toggle ALL members for the ON-diff, per-member rounding), (2) pack DISTR_RHO at disabled-control bases, (3) drOv coefficient channel (analytic 1/count' renormalization — the CPU coefs are live suppliers over `!isDisabled()`), (4) disabled member = identity-pin its rho row (CPU re-activates BRANCH_TARGET_RHO1), (5) first-member outage shifts the FREE role → per-scenario activation, hardest last |
 | Node-breaker outage under contingency PROPAGATION | ✅ | 2026-07-20: the propagated retained-breaker openings are per-scenario ZERO-IMPEDANCE element outages (`ziOff` — identity row-mode flip, dummies pinned 0), the impedant part keeps the ≤2 mask rule, the dead stub is frozen by the islanding machinery. Switch outage leaving BOTH sides energized (zi spanning tree would change) → ⏩; outage ISOLATING THE SLACK → ⏩ (CPU relocates the slack, the batched pack anchors on the base slack row) |
 
 ### SA machinery parity
@@ -263,7 +263,9 @@ element falls back to the stock per-strategy CPU path individually.
    and the control-row pairing is understood), PST tap action under active phase control, non-linear
    shunt model, GeneratorAction touching targetV/targetQ/regulator rather than P.
 5. **⚠️ corner-case deltas inside supported scope** (Part II): keep-strongest-PV guard,
-   ~~curve-limits-at-runtime-P~~ (✅ 2026-09-05, §B), shared-control transformer groups (`useInitialTapPosition`),
+   ~~curve-limits-at-runtime-P~~ (✅ 2026-09-05, §B), shared-control transformer groups — now a
+   HARD GATE instead of a silent delta (2026-09-06: whole-run CPU; see the DISTR_RHO contingency
+   row for the audit and the 5-step on-device plan) (`useInitialTapPosition`),
    multi-slack components, realistic-voltage post-check on batched states. (DS balance
    types, useActiveLimits, failure behaviors, maxPqPvSwitch, maxOuterLoopIterations —
    closed 2026-07-18 by guard + parameter wiring.)

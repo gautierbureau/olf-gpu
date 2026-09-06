@@ -469,9 +469,12 @@ public final class GpuAcOuterLoopPacks {
                                                            EquationSystem<AcVariableType, AcEquationType> es) {
         Set<LfBranch> controllers = new java.util.HashSet<>();
         for (LfBus pilot : network.getBuses()) {
+            // NOTE: keyed on the DISTR_RHO equations EXISTING, NOT on isTransformerVoltageControlled()
+            // — at an AFTER_GENERATOR base the control is DISABLED and that predicate is false, which
+            // silently emptied this set and let a member outage batch with the coupling missing
+            // (measured 3.7e-3 kV wrong, 2026-09-06).
             TransformerVoltageControl tvc = pilot.getTransformerVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
-                    .filter(c -> pilot.isTransformerVoltageControlled())
                     .orElse(null);
             if (tvc == null) {
                 continue;

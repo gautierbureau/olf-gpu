@@ -65,6 +65,20 @@ public final class GpuBatchTransformerControl {
      *  the frozen-Q flip is stage 2 — until then a network that would NEED it must stay on the
      *  CPU path (the provider's guard calls this). */
     public static boolean transformerControlSupported(LfNetwork network) {
+        // SHARED control groups (several transformers regulating one bus, DISTR_RHO coupling): the
+        // orchestrators build per-BRANCH controllers whose ON-deltas are captured by toggling each
+        // control ALONE — for a group those deltas cannot compose into the all-enabled activation
+        // (the free-member role and the DISTR_RHO rows depend on the whole enabled set), and the
+        // AFTER_GENERATOR base packs no DISTR_RHO contributions at all. Whole-run CPU until the
+        // group-level controller lands (measured 3.7e-3 kV silently wrong without this gate).
+        boolean sharedGroup = network.getControlledBuses(com.powsybl.openloadflow.network.VoltageControl.Type.TRANSFORMER).stream()
+                .map(b -> b.getTransformerVoltageControl().orElse(null))
+                .filter(java.util.Objects::nonNull)
+                .anyMatch(vc -> vc.getMergedControllerElements().size() > 1);
+        if (sharedGroup) {
+            LOGGER.info("Shared transformer control group detected — batched TVC out of scope, CPU fallback");
+            return false;
+        }
         double maxControlledNominalV = network.<LfBranch>getControllerElements(com.powsybl.openloadflow.network.VoltageControl.Type.TRANSFORMER).stream()
                 .flatMap(b -> b.getVoltageControl().stream())
                 .map(vc -> vc.getControlledBus().getNominalV())

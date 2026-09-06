@@ -754,6 +754,68 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
      *  from the distribution group): the qualification gate must route it to the CPU (stale qPct
      *  weights solved 0.47 kV wrong before the gate) while the batchable L14 outage still engages
      *  the device; both must match the stock CPU SA exactly. */
+    /** SHARED transformer control group (two parallel T2wTs regulating one bus, DISTR_RHO coupling)
+     *  under AFTER_GENERATOR TVC: the per-branch alone-toggle deltas cannot compose the group's
+     *  activation and the base packs no DISTR_RHO physics — the scope gate must route the WHOLE RUN
+     *  to the CPU (it batched 3.7e-3 kV silently wrong before the gate, 2026-09-06); both the
+     *  parallel-line outage and the member outage then match exactly by construction. */
+    @org.junit.jupiter.api.Test
+    void deviceSharedTransformerControlFallsBackWholeRun() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithTransformerSharedRemoteControl();
+        for (String id : new String[] {"T2wT", "T2wT2"}) {
+            com.powsybl.iidm.network.TwoWindingsTransformer t = network.getTwoWindingsTransformer(id);
+            t.getRatioTapChanger().setTargetDeadband(0).setRegulating(true).setTapPosition(0)
+                    .setRegulationTerminal(t.getTerminal2()).setTargetV(34.0);
+        }
+        com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+        network.newLine().setId(l0.getId() + "_BIS")
+                .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l0.getR() * 2).setX(l0.getX() * 2)
+                .setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
+        List<Contingency> ctgs = List.of(
+                new Contingency(l0.getId() + "_BIS", new BranchContingency(l0.getId() + "_BIS")),
+                new Contingency("T2wT2", new BranchContingency("T2wT2")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
+        assertGpuFallsBackWholeRunAndMatchesCpu(network, ctgs, lfp);
+    }
+
+    /** The whole-run-fallback contract: the batch must NOT engage (the scope routed the run to the
+     *  stock CPU path) and the results must equal the plain CPU SA bit-for-bit. */
+    private void assertGpuFallsBackWholeRunAndMatchesCpu(Network network, List<Contingency> ctgs,
+                                                         com.powsybl.loadflow.LoadFlowParameters lfp) {
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        java.util.Set<String> allVls = network.getVoltageLevelStream().map(vl -> vl.getId())
+                .collect(java.util.stream.Collectors.toSet());
+        List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), allVls, java.util.Set.of()));
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, ctgs, mon, sap);
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            SecurityAnalysisResult gpu = runSecurityAnalysis(network, ctgs, mon, sap);
+            assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() <= 0,
+                    "the scope gate must route this run to the CPU (batching it was 3.7e-3 kV wrong)");
+            assertEquals(cpu.getPostContingencyResults().size(), gpu.getPostContingencyResults().size());
+            for (int i = 0; i < cpu.getPostContingencyResults().size(); i++) {
+                var cb = cpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                var gb = gpu.getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+                assertEquals(cb.size(), gb.size());
+                for (int b = 0; b < cb.size(); b++) {
+                    org.junit.jupiter.api.Assertions.assertEquals(cb.get(b).getV(), gb.get(b).getV(), 0.0,
+                            "bus " + cb.get(b).getBusId());
+                }
+            }
+        } finally {
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
     /** Generator outage AT a DISTR_Q controller bus that KEEPS another controller: the group's qPct
      *  weights are baked into the equation system on both arms, so the outage is a plain P-target
      *  drop + DS reweight — the former blanket DISTR_Q rejection was over-conservative. */

@@ -58,7 +58,7 @@ public final class GpuAcOuterLoopPacks {
      *  the device RL must seed it UNPINNED (no spontaneous switch-back; only the VoltageMonitoring
      *  orchestrator may activate it). */
     record RlPack(int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget,
-                  byte[] rlMonitored) {
+                  byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow) {
     }
 
     /** Distributed-slack pack: per-participating-bus factor/headroom + the slack bus's own share.
@@ -140,18 +140,42 @@ public final class GpuAcOuterLoopPacks {
         //    a bus at its base-case limit for every scenario — a real ~1e-3 error vs OLF when a contingency eased
         //    it (e.g. losing a nearby transformer). The device seeds the pinned limit type from the base state
         //    (v below target ⇒ maxQ-pinned, above ⇒ minQ-pinned) so the switch-back fires.
-        // No remote control here (the batch path rejects DISTR_Q), so every voltage-controlled bus is local.
+        // REMOTE group members (a MAIN generator voltage control whose controlled bus is NOT the member —
+        // plan-group-member-dynamics Part B): packed as rlRemote=1 entries with the PILOT's v column as the
+        // compare row (both RL switch conditions test the pilot's V against the GROUP target — verified B0).
+        // The kernel SKIPS remote entries until the B3 transition machinery lands; the whole-run scope gate
+        // still routes remote-pinnable runs to the CPU, so these entries are structurally inert today.
         List<Integer> rlVrow = new ArrayList<>();
         List<Double> rlMinQ = new ArrayList<>();
         List<Double> rlMaxQ = new ArrayList<>();
         List<Double> rlLoadQ = new ArrayList<>();
         List<Double> rlVtarget = new ArrayList<>();
         List<Byte> rlMonitored = new ArrayList<>();
+        List<Byte> rlRemote = new ArrayList<>();
+        List<Integer> rlCmpVrow = new ArrayList<>();
         if (reactiveLimits) {                                   // empty pack when the RL outer loop is disabled
             for (LfBus bus : network.getBuses()) {
                 int bn = bus.getNum();
                 boolean vActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_V) >= 0;
                 boolean qActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_Q) >= 0;
+                boolean remoteMember = bus.getGeneratorVoltageControl()
+                        .filter(c -> c.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN)
+                        .map(c -> c.getControlledBus() != bus).orElse(false);
+                if (remoteMember && vCol[bn] >= 0) {
+                    var vc = bus.getGeneratorVoltageControl().orElseThrow();
+                    int pilotV = vCol[vc.getControlledBus().getNum()];
+                    if (pilotV >= 0 && bus.getMinQ() < bus.getMaxQ()) {
+                        rlVrow.add(vCol[bn]);                  // transition WRITE row: the member's own bus row
+                        rlMinQ.add(bus.getMinQ());
+                        rlMaxQ.add(bus.getMaxQ());
+                        rlLoadQ.add(bus.getLoadTargetQ());
+                        rlVtarget.add(vc.getTargetValue());    // the GROUP target (pilot-referenced)
+                        rlMonitored.add((byte) 0);
+                        rlRemote.add((byte) 1);
+                        rlCmpVrow.add(pilotV);                 // switch conditions compare the PILOT's V
+                    }
+                    continue;                                  // never let a base-pinned remote member
+                }                                              // masquerade as a LOCAL basePqCapable entry
                 boolean basePv = vActive && !qActive;          // voltage-controlling in the base case
                 boolean basePqCapable = qActive && !vActive    // switched to PQ in the base case but still capable
                         && !bus.isGeneratorVoltageControlEnabled();
@@ -180,16 +204,20 @@ public final class GpuAcOuterLoopPacks {
                     rlLoadQ.add(bus.getLoadTargetQ());
                     rlVtarget.add(bus.getGeneratorVoltageControl().orElseThrow().getTargetValue());
                     rlMonitored.add(monitoringSvc != null ? (byte) 1 : (byte) 0);
+                    rlRemote.add((byte) 0);
+                    rlCmpVrow.add(vCol[bn]);                   // local: compare row = own row
                 }
             }
         }
         byte[] mon = new byte[rlMonitored.size()];
+        byte[] rem = new byte[rlRemote.size()];
         for (int i = 0; i < mon.length; i++) {
             mon[i] = rlMonitored.get(i);
+            rem[i] = rlRemote.get(i);
         }
         return new RlPack(GpuAcArrays.toIntArray(rlVrow), GpuAcArrays.toDoubleArray(rlMinQ),
                 GpuAcArrays.toDoubleArray(rlMaxQ), GpuAcArrays.toDoubleArray(rlLoadQ),
-                GpuAcArrays.toDoubleArray(rlVtarget), mon);
+                GpuAcArrays.toDoubleArray(rlVtarget), mon, rem, GpuAcArrays.toIntArray(rlCmpVrow));
     }
 
     static DsPack distributedSlackPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,

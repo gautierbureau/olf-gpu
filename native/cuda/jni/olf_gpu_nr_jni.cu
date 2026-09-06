@@ -2368,12 +2368,16 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
                                     const double* x, const char* rlActive, int* mode, double* target,
                                     char* limitType, char* switchCount, char* switched,
                                     int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
-                                    const double* rowSlope, double* savedTarget, int cvStride) {
+                                    const double* rowSlope, double* savedTarget, int cvStride,
+                                    const char* rlRemote) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
     int s = tid / nrl;
     if (!rlActive[s]) return;
+    if (rlRemote != nullptr && rlRemote[i]) return;          // REMOTE group member: pin/unpin dynamics land
+                                                             // with plan-B3 — until then the entry is inert
+                                                             // (the scope gate routes such runs to the CPU)
     int vrow = rlVrow[i];
     size_t idx = (size_t) s * n + vrow;
     size_t st = (size_t) s * nrl + i;
@@ -2886,6 +2890,9 @@ struct BatchSolverContext {
     std::vector<int> hNActive;
     DeviceBuf dRlMonitored;                                // per controller: 1 = MONITORING_VOLTAGE SVC standing by
     DeviceBuf dRowSlope;                                   // per row: SLOPE-SVC slope (mode-2 V rows), 0 elsewhere
+    int nRlRemote = 0;                                     // remote-member RL entries present (plan-B1): the RL
+    DeviceBuf dRlRemote;                                   // kernel skips rlRemote[i]!=0 entries until B3 lands
+    DeviceBuf dRlCmpVrow;                                  // per-entry compare row (PILOT v col for remote members)
     DeviceBuf dRlSavedTarget;                              // per (controller, scenario): the row target saved at a
                                                            // PV->PQ pin, restored on switch-back for mode-2 rows
     DeviceBuf dQbuf, dRlActive, dRlSwitched;               // dQbuf nS*n, dRlActive/dRlSwitched nS
@@ -3889,7 +3896,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dRlLimitType.as<char>(), ctx->dRlSwitchCount.as<char>(), ctx->dRlSwitched.as<char>(),
                     nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
                     nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
-                    ctx->dRowSlope.as<double>(), ctx->dRlSavedTarget.as<double>(), ctx->ncv > 0 ? 1 : 0);
+                    ctx->dRowSlope.as<double>(), ctx->dRlSavedTarget.as<double>(), ctx->ncv > 0 ? 1 : 0,
+                    ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr);
         }
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -4720,6 +4728,40 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     env->ReleaseDoubleArrayElements(jCvIn, cvIn, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jCvPts, cvPts, JNI_ABORT);
     ctx->ncv = ncv;
+}
+
+// Remote-member RL entries (plan-B1): install (or clear) the per-entry remote kinds + compare rows
+// on a batch context. The RL kernel SKIPS remote entries until the B3 transition machinery lands.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlRemote(
+        JNIEnv* env, jclass, jlong handle, jbyteArray jRemote, jintArray jCmpVrow) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jRemote == nullptr || jCmpVrow == nullptr || env->GetArrayLength(jRemote) == 0) {
+        ctx->nRlRemote = 0;
+        return;
+    }
+    int nr = env->GetArrayLength(jRemote);
+    if (nr != ctx->nrl || env->GetArrayLength(jCmpVrow) != ctx->nrl) {
+        env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
+                      "setBatchRlRemote: array length != nrl");
+        return;
+    }
+    jbyte* rem = env->GetByteArrayElements(jRemote, nullptr);
+    jint* cmp = env->GetIntArrayElements(jCmpVrow, nullptr);
+    int count = 0;
+    for (int i = 0; i < nr; i++) {
+        if (rem[i]) {
+            count++;
+        }
+    }
+    ctx->dRlRemote.upload(rem, static_cast<size_t>(nr) * sizeof(char));
+    ctx->dRlCmpVrow.upload(cmp, static_cast<size_t>(nr) * sizeof(int));
+    env->ReleaseByteArrayElements(jRemote, rem, JNI_ABORT);
+    env->ReleaseIntArrayElements(jCmpVrow, cmp, JNI_ABORT);
+    ctx->nRlRemote = count;
 }
 
 // DISTR_Q weight overrides: install (or clear, with nulls) the per-scenario qPct renormalization

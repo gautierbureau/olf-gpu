@@ -283,7 +283,12 @@ reject stays; group still batchable when only NON-free members are pinnable).
       enabled-non-free; proposed mode 4 = pinned (own q scatter to own row, target
       qLimit − loadQ, DISTR_Q emissions gated off); free member's v column carries the
       pilot's relocated Q (structure-time qRow today, per-scenario select = A6).
-- [ ] B1 RL pack extension
+- [x] B1 RL pack extension — 2026-09-06: remote members packed as `rlRemote=1` entries with
+      the PILOT's v column as the compare row (`rlCmpVrow`) and the GROUP target; write row
+      stays the member's own bus row; a base-pinned remote member no longer leaks into the
+      local basePqCapable shape. Channel: `setBatchRlRemote` (context-scoped setter); the RL
+      kernel SKIPS remote entries until B3 — structurally inert, gate still routes to CPU.
+      Pack acceptance: `remoteMembersPackedAsRlRemoteEntries` (host-only)
 - [ ] B2 mode-4 + alt-dest prototype on a 2-member group (sequential test first)
 - [ ] B3 kernel transitions + trace
 - [ ] B4 free-member pre-gate kept

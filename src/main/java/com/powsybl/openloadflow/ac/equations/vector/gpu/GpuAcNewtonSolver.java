@@ -290,6 +290,11 @@ public final class GpuAcNewtonSolver {
      *  per-scenario dynamic RL limits evaluated at the current targets (see GpuBatchRlCurves). */
     public static native void setBatchRlCurves(long handle, int[] cvIdx, double[] cvIn, double[] cvPts);
 
+    /** Remote-member RL entries (plan-B1): per-entry remote kinds + compare rows (PILOT v column for
+     *  remote group members — both RL switch conditions test the pilot's V against the GROUP target).
+     *  The RL kernel SKIPS remote entries until the B3 transition machinery lands; nulls clear. */
+    public static native void setBatchRlRemote(long handle, byte[] rlRemote, int[] rlCmpVrow);
+
     /** Install (or clear, with nulls) per-scenario DISTR_Q weight overrides on a batch context —
      *  {@code idx} = flat {scenario, contribution} pairs, {@code w} = the renormalized weight (a gen
      *  outage at a remote-VC controller bus re-runs updateReactiveKeys on the CPU). Per-chunk state. */

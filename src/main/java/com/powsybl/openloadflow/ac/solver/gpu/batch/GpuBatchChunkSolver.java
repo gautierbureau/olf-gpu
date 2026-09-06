@@ -83,6 +83,14 @@ final class GpuBatchChunkSolver {
                 rlCurves != null ? rlCurves.cvIdx() : null,
                 rlCurves != null ? rlCurves.cvIn() : null,
                 rlCurves != null ? rlCurves.cvPts() : null);
+        // Remote-member RL entries (plan-B1): install (or clear, on a cached context) the kinds.
+        boolean anyRlRemote = false;
+        for (byte b : gpuData.rlRemote()) {
+            anyRlRemote |= b != 0;
+        }
+        GpuAcNewtonSolver.setBatchRlRemote(handle,
+                anyRlRemote ? gpuData.rlRemote() : null,
+                anyRlRemote ? gpuData.rlCmpVrow() : null);
 
         // The base state / targets are IDENTICAL for every scenario (a single-branch N-1 starts from the
         // same converged base operating point): passed as single length-n rows and tiled on-device. The

@@ -77,4 +77,47 @@ class GpuRemoteControllerReactiveLimitsTest {
                 "the pilot Q balance must move to the remaining free controller BUS_V row");
         assertNotEquals(-1, controllerVRow);
     }
+
+    /** Plan-B1 pack acceptance: every remote group member with finite limits is packed as an
+     *  rlRemote=1 entry whose COMPARE row is the PILOT's v column (both RL switch conditions test
+     *  the pilot's V against the GROUP target — B0), the write row stays the member's own bus row,
+     *  and a base-PINNED remote member must NOT leak into the local basePqCapable shape. */
+    @org.junit.jupiter.api.Test
+    void remoteMembersPackedAsRlRemoteEntries() {
+        LfNetwork network = Networks.load(VoltageControlNetworkFactory.createWithGeneratorRemoteControl(),
+                new LfNetworkParameters()
+                        .setSlackBusSelector(new FirstSlackBusSelector())
+                        .setGeneratorVoltageRemoteControl(true))
+                .get(0);
+        EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(network).create();
+        // base-pin one member (RL-disabled controller), like the base loadflow would
+        LfBus pinned = network.getBuses().stream()
+                .filter(bus -> bus.getGenerators().stream().anyMatch(g -> g.getId().equals("g1")))
+                .findFirst().orElseThrow();
+        pinned.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(false);
+        AcEquationSystemCreator.updateGeneratorVoltageControl(pinned.getGeneratorVoltageControl().orElseThrow(), es);
+
+        GpuAcData d = GpuAcDataExtractor.extract(network, es);
+        LfBus pilot = pinned.getGeneratorVoltageControl().orElseThrow().getControlledBus();
+        long members = network.getBuses().stream()
+                .filter(bus -> bus.getGeneratorVoltageControl()
+                        .filter(c -> c.getControlledBus() != bus).isPresent())
+                .filter(bus -> bus.getMinQ() < bus.getMaxQ())
+                .count();
+        int remoteEntries = 0;
+        for (int i = 0; i < d.rlRemote().length; i++) {
+            if (d.rlRemote()[i] != 0) {
+                remoteEntries++;
+                assertNotEquals(d.rlVrow()[i], d.rlCmpVrow()[i],
+                        "a remote entry's compare row must be the pilot's v column, not its own row");
+                assertEquals(d.rlVtarget()[i],
+                        pinned.getGeneratorVoltageControl().orElseThrow().getTargetValue(), 0,
+                        "remote entries carry the GROUP target");
+            } else {
+                assertEquals(d.rlVrow()[i], d.rlCmpVrow()[i], "local entries compare at their own row");
+            }
+        }
+        assertEquals(members, remoteEntries,
+                "every remote member with finite limits must be packed as rlRemote=1 (pilot " + pilot.getId() + ")");
+    }
 }

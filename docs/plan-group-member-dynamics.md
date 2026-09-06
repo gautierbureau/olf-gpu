@@ -256,7 +256,31 @@ reject stays; group still batchable when only NON-free members are pinnable).
 - Both benches after (kernel-side changes! same-day A/B, cold first).
 
 ### Part B landing checklist
-- [ ] B0 read `getBusTargetV`/`getBusV` remote semantics; write the state table
+- [x] B0 read `getBusTargetV`/`getBusV` remote semantics; state table written — 2026-09-06:
+      **Both RL switch conditions test the PILOT, not the member**:
+      `getBusV(bus) = vc.getControlledBus().getV()` (the pilot's V) and
+      `getBusTargetV(bus) = vc.getTargetValue()` (the group target) — so B1's kernel
+      entries need the PILOT's v column + the group target for remote members (for a
+      local controller both coincide with today's own-row fields).
+      `updateRemoteVoltageControlEquations` (single source for DISTR_Q/BUS_TARGET_Q and
+      DISTR_RHO/RHO1) gives the exact activation table; "enabled" = `isControllerEnabled`
+      (an RL pin disables the controller, an outage disables the ELEMENT — both land in
+      the same OFF branch, but only the outage renormalizes qPct weights):
+
+      | member state                    | DISTR_Q | BUS_TARGET_Q                 | pilot vEq |
+      |---------------------------------|---------|------------------------------|-----------|
+      | enabled, FREE (first enabled)   | OFF     | OFF (v col carries pilot Q)  | ON        |
+      | enabled, non-free               | ON      | OFF                          | ON        |
+      | RL-pinned (controller disabled) | OFF     | ON, target = qLimit − loadQ  | ON if any enabled |
+      | element-disabled (outage)       | OFF     | ON, pin at current value     | ON if any enabled |
+      | no member enabled               | all OFF | all ON                       | OFF       |
+
+      Free role re-picks to the FIRST still-enabled member on every transition — pinning
+      the free member moves the pilot-Q carrier column (B4 reject until A6's select).
+      Device row-mode mapping for B2/B3: member row mode 1 + DISTR_Q emissions while
+      enabled-non-free; proposed mode 4 = pinned (own q scatter to own row, target
+      qLimit − loadQ, DISTR_Q emissions gated off); free member's v column carries the
+      pilot's relocated Q (structure-time qRow today, per-scenario select = A6).
 - [ ] B1 RL pack extension
 - [ ] B2 mode-4 + alt-dest prototype on a 2-member group (sequential test first)
 - [ ] B3 kernel transitions + trace

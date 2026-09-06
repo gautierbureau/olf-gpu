@@ -351,8 +351,10 @@ reject stays; group still batchable when only NON-free members are pinnable).
       through a strongly relieving load contingency — CPU stays pinned, exact), the converted
       deviceRemoteGeneratorControlReactiveLimitsMatchesCpu (previously whole-run-gated network now
       batches at 1e-12) + the B4 gate test. Still owed: benches after the B-work settles
-- [~] gate lifted for the DEVICE mode (ReactiveLimits[remoteGroupFreeMemberPinnable] only);
-      JAVA hybrid stays fully gated; docs updated 2026-09-06 — memory + benches owed
+- [x] gate lifted for the DEVICE mode (ReactiveLimits[remoteGroupFreeMemberPinnable] only);
+      JAVA hybrid stays fully gated; docs + memory updated 2026-09-06; bench row `13eb259`:
+      prod COLD 22.22 / warm 19.26 ms/ctg vs CPU-4t 27.12 (×1.41), viol 0/0/0, fixed-iter
+      7.58 / 4.47, 499/500 — the new channels are inert on pegase (no remote groups)
 
 ---
 

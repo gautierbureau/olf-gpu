@@ -361,6 +361,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     plan.activePowerLossByIndex(),
                     GpuBatchHvdcAcEmulation.elementIndices(network, nElements), rowCriteria, rlCurves,
                     plan.dqOvContribByIndex(), plan.dqOvWByIndex(),
+                    plan.drOvContribByIndex(), plan.drOvCByIndex(),
                     n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                     config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
                     config.transformerControl() || config.simpleTransformerControl()

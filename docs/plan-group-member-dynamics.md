@@ -139,7 +139,23 @@ this before A1–A5 are landed and benched.
 - [x] A4 deviceSharedTransformerControlMatchesCpu (AFTER_GENERATOR, engagement verified at targetV 33.0);
       gates now flavor-specific: AFTER_GENERATOR + WITH_GENERATOR lifted, INCREMENTAL /
       useInitialTapPosition / JAVA hybrid stay gated. WITH_GENERATOR shared-group SA test still owed
-- [ ] A5 drOv channel + member-outage tests (non-free batched / free CPU-routed)
+- [x] A5 drOv channel + member-outage tests (non-free batched / free CPU-routed) — 2026-09-06.
+      Landed alongside three coupled fixes the outage scenario exposed, each proven by trajectory
+      alignment against the CPU's per-iteration norms (temporary CPU_NR/CPU_ROUND stderr probes):
+      1. per-scenario nActive channel (`setBatchActiveRowCounts`) — the L2 stopping threshold uses
+         sqrt(eps²·nActive), CPU removes the outaged member's row (thr sqrt(8) vs sqrt(9) here);
+      2. rounded-tap FULL pi rows via r1Ov — CPU tap rounding switches per-step R/X/G/B, not just
+         rho; the machine and SimpleTvc now emit the closest tap's whole 8-double row (rounded
+         entries FIRST in the merged list: the device scan takes the first (slot, elem) match);
+      3. DS target carry in the machine — OLF targets are STATEFUL across outer-loop re-solves but
+         each device call re-uploads baseTargets, so the machine re-derived the whole 6.4e-2 pu
+         distribution from scratch each step and took extra Newton steps (1.7e-4 kV). Fixed with
+         the pair-phase triple (anchors = pure absorption, slack share = (1-fs)/fs·Σ, absolute
+         DS-row target seeds), captured via readBatchTargets after every solve (captureDsCarry).
+      TVC_TRACE stays (guarded by OLF_GPU_BATCH_TRACE, same keep-for-now decision as the env
+      hooks) — A6/Part B will reuse it. Still owed from this line: SimpleTvc (WITH_GENERATOR
+      twin) does NOT yet carry DS state into roundAndResolve — same bug class if a large in-call
+      distribution precedes it; covered by the WITH_GENERATOR shared-group test task below.
 - [ ] docs: capability rows + gap list; memory update; both benches (cold first)
 
 ---

@@ -757,22 +757,36 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
      *  from the distribution group): the qualification gate must route it to the CPU (stale qPct
      *  weights solved 0.47 kV wrong before the gate) while the batchable L14 outage still engages
      *  the device; both must match the stock CPU SA exactly. */
-    /** SHARED transformer control group (two parallel T2wTs regulating one bus, DISTR_RHO coupling)
-     *  under AFTER_GENERATOR TVC — BATCHED since plan A3/A4 (group-level toggle-diff controller;
-     *  it solved 3.7e-3 kV silently wrong pre-audit, then was whole-run gated): the parallel-line
-     *  outage orchestrates the group on the device at 1e-12 (engagement verified 2026-09-06: the
-     *  orchestrator enables 1 control on that scenario at targetV 33.0 — probed via stderr), and the
-     *  T2wT2 MEMBER outage is routed to the CPU per-contingency by the (now live, existence-keyed)
-     *  distrRhoControllers guard. */
+    /** SHARED transformer control group under AFTER_GENERATOR TVC, THREE parallel T2wTs regulating
+     *  one bus (DISTR_RHO coupling) — plan A3/A4/A5: the parallel-line outage orchestrates the full
+     *  group on the device; the T2wT2 (NON-free) MEMBER outage BATCHES with the survivors'
+     *  coefficients renormalized per scenario (drOv: 1/3-based -> 1/2-based, cross terms to the
+     *  outaged rho zeroed, its identity pinned at base — plan A5); the T2wT (FREE member) outage is
+     *  routed to the CPU per-contingency (role re-pick, plan A6). All at 1e-12. */
     @org.junit.jupiter.api.Test
     void deviceSharedTransformerControlMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithTransformerSharedRemoteControl();
-        for (String id : new String[] {"T2wT", "T2wT2"}) {
+        com.powsybl.iidm.network.TwoWindingsTransformer t2 = network.getTwoWindingsTransformer("T2wT2");
+        com.powsybl.iidm.network.TwoWindingsTransformer t3 = network.getSubstation("SUBSTATION").newTwoWindingsTransformer()
+                .setId("T2wT3").setRatedU1(t2.getRatedU1()).setRatedU2(t2.getRatedU2())
+                .setR(t2.getR() * 1.5).setX(t2.getX() * 1.5).setG(t2.getG()).setB(t2.getB())
+                .setBus1(t2.getTerminal1().getBusBreakerView().getBus().getId())
+                .setBus2(t2.getTerminal2().getBusBreakerView().getBus().getId()).add();
+        var rtc2 = t2.getRatioTapChanger();
+        var adder = t3.newRatioTapChanger();
+        for (int p = rtc2.getLowTapPosition(); p <= rtc2.getHighTapPosition(); p++) {
+            var step = rtc2.getStep(p);
+            adder.beginStep().setRho(step.getRho()).setR(step.getR()).setX(step.getX())
+                    .setG(step.getG()).setB(step.getB()).endStep();
+        }
+        adder.setLowTapPosition(rtc2.getLowTapPosition()).setTapPosition(0).setLoadTapChangingCapabilities(true).add();
+        for (String id : new String[] {"T2wT", "T2wT2", "T2wT3"}) {
             com.powsybl.iidm.network.TwoWindingsTransformer t = network.getTwoWindingsTransformer(id);
-            t.getRatioTapChanger().setTargetDeadband(0).setRegulating(true).setTapPosition(0)
-                    .setRegulationTerminal(t.getTerminal2()).setTargetV(33.0);
+            t.getRatioTapChanger().setTargetDeadband(0).setTapPosition(0)
+                    .setRegulationMode(com.powsybl.iidm.network.RatioTapChanger.RegulationMode.VOLTAGE)
+                    .setRegulationTerminal(t.getTerminal2()).setTargetV(33.0).setRegulating(true);
         }
         com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
         network.newLine().setId(l0.getId() + "_BIS")
@@ -782,7 +796,8 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
         List<Contingency> ctgs = List.of(
                 new Contingency(l0.getId() + "_BIS", new BranchContingency(l0.getId() + "_BIS")),
-                new Contingency("T2wT2", new BranchContingency("T2wT2")));
+                new Contingency("T2wT2", new BranchContingency("T2wT2")),
+                new Contingency("T2wT", new BranchContingency("T2wT")));
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)

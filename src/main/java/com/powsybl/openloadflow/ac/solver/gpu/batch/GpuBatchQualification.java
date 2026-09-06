@@ -103,6 +103,66 @@ final class GpuBatchQualification {
         return true;
     }
 
+    /** The renormalized DISTR_RHO coefficients after outaging shared-TVC group members among
+     *  {@code outaged} (plan A5). Returns {contribIdx[], newCoef[]} as double[][] — EMPTY arrays
+     *  when no group member is outaged; null (CPU route) when the FREE member (first enabled) is
+     *  outaged, more than one member of a group is, or no survivor would remain. Coefficients are
+     *  ANALYTIC: the CPU's are live 1/count suppliers over !isDisabled(), so survivors get
+     *  1/c' − (self ? 1 : 0) and anything touching the outaged member's rho goes to 0 (its cross
+     *  terms deactivate with the element; its own row flips back to the rho identity). */
+    private static double[][] distrRhoOverrides(EquationSystem<AcVariableType, AcEquationType> es,
+                                                GpuAcData gpuData, Set<LfBranch> distrRhoControllers,
+                                                List<LfBranch> outaged) {
+        List<LfBranch> members = outaged.stream().filter(distrRhoControllers::contains).toList();
+        if (members.isEmpty()) {
+            return new double[][] {new double[0], new double[0]};
+        }
+        if (members.size() > 1) {
+            return null;                                     // multi-member outage — CPU
+        }
+        LfBranch d = members.get(0);
+        var tvc = d.getVoltageControl().orElse(null);
+        if (tvc == null) {
+            return null;
+        }
+        List<LfBranch> group = tvc.getMergedControllerElements().stream()
+                .filter(b -> !b.isDisabled()).toList();
+        if (group.size() < 2 || group.get(0) == d) {
+            return null;                                     // FREE member (first) outaged / no survivor — CPU
+        }
+        java.util.Map<Integer, LfBranch> byRhoCol = new java.util.HashMap<>();
+        for (LfBranch b : group) {
+            var v = es.getVariableSet().getVariable(b.getNum(), AcVariableType.BRANCH_RHO1);
+            if (v == null) {
+                return null;
+            }
+            byRhoCol.put(v.getRow(), b);
+        }
+        int dCol = group.stream().filter(b -> b == d).findFirst()
+                .map(b -> es.getVariableSet().getVariable(b.getNum(), AcVariableType.BRANCH_RHO1).getRow())
+                .orElseThrow();
+        double cPrime = group.size() - 1.0;
+        List<Double> idx = new ArrayList<>();
+        List<Double> coefs = new ArrayList<>();
+        for (int k = 0; k < gpuData.drRow().length; k++) {
+            LfBranch rowOwner = byRhoCol.get(gpuData.drRow()[k]);
+            LfBranch colOwner = byRhoCol.get(gpuData.drCol()[k]);
+            if (rowOwner == null && colOwner == null) {
+                continue;                                    // another group's contribution
+            }
+            double coef;
+            if (rowOwner == d || colOwner == d || gpuData.drRow()[k] == dCol || gpuData.drCol()[k] == dCol) {
+                coef = 0;                                    // cross terms to the outaged member die with it
+            } else {
+                coef = 1.0 / cPrime - (gpuData.drRow()[k] == gpuData.drCol()[k] ? 1.0 : 0.0);
+            }
+            idx.add((double) k);
+            coefs.add(coef);
+        }
+        return new double[][] {idx.stream().mapToDouble(Double::doubleValue).toArray(),
+            coefs.stream().mapToDouble(Double::doubleValue).toArray()};
+    }
+
     /** True when the islanded set touches a REMOTE / DISTRIBUTED (DISTR_Q) generator-VC group —
      *  pilot bus or any controller (incl. the free controller carrying the pilot's Q row, which has
      *  no DISTR_Q equation of its own). Islanding a member reforms the group's qPct weights / row
@@ -210,7 +270,8 @@ final class GpuBatchQualification {
                         int[][] islandedNumsByIndex, double[][] frozenTargetsByIndex,
                         GenOutage[][] genOutagesByIndex, int islandingCount,
                         double[] activePowerLossByIndex,
-                        int[][] dqOvContribByIndex, double[][] dqOvWByIndex) {
+                        int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
+                        int[][] drOvContribByIndex, double[][] drOvCByIndex) {
     }
 
     /**
@@ -240,6 +301,12 @@ final class GpuBatchQualification {
         // updateReactiveKeys); replay the toggle host-side and diff the extracted weights.
         int[][] dqOvContribByIndex = new int[contingencies.size()][];
         double[][] dqOvWByIndex = new double[contingencies.size()][];
+        // Per-contingency DISTR_RHO coefficient overrides (plan A5): outaging a NON-FREE member of a
+        // shared-TVC group renormalizes the survivors' 1/count coefficients (the CPU's coefficients
+        // are live suppliers over !isDisabled) and zeroes every contribution touching the outaged
+        // member's rho; the FREE member's outage shifts the pilot-Q role — CPU (A6).
+        int[][] drOvContribByIndex = new int[contingencies.size()][];
+        double[][] drOvCByIndex = new double[contingencies.size()][];
         int islandingCount = 0;
         for (int i = 0; i < qualifications.size(); i++) {
             GpuBatchContingencyValidator.Qualification q = qualifications.get(i);
@@ -310,9 +377,16 @@ final class GpuBatchQualification {
                     }
                 }
                 if (!c.outagedBranches().isEmpty()) {        // COMBO: the branch part must also qualify
-                    if (c.outagedBranches().stream().anyMatch(distrRhoControllers::contains)
-                            || islandsRemoteVcMember(es, q.islandedBuses())) {
+                    if (islandsRemoteVcMember(es, q.islandedBuses())) {
                         continue;
+                    }
+                    double[][] drOv = distrRhoOverrides(es, gpuData, distrRhoControllers, c.outagedBranches());
+                    if (drOv == null) {
+                        continue;                            // free-member / multi-member group outage — CPU
+                    }
+                    if (drOv[0].length > 0) {
+                        drOvContribByIndex[i] = java.util.Arrays.stream(drOv[0]).mapToInt(d -> (int) d).toArray();
+                        drOvCByIndex[i] = drOv[1];
                     }
                     // conservative: a lost generator on an ISLANDED bus is out of combo scope
                     FrozenIsland fi = islandedFrozen(es, q.islandedBuses());
@@ -360,9 +434,17 @@ final class GpuBatchQualification {
                     frozenRowsByIndex[i] = NO_FROZEN_ROWS;
                     frozenTargetsByIndex[i] = NO_FROZEN_TARGETS;
                 }                                            // else: not a packed fixed shunt / DISTR_Q contributor → CPU
-            } else if (c.outagedBranches().stream().noneMatch(distrRhoControllers::contains)) {
+            } else {
                 if (islandsRemoteVcMember(es, q.islandedBuses())) {
                     continue;                                // DISTR_Q group member islanded — CPU
+                }
+                double[][] drOv = distrRhoOverrides(es, gpuData, distrRhoControllers, c.outagedBranches());
+                if (drOv == null) {
+                    continue;                                // free-member / multi-member group outage — CPU
+                }
+                if (drOv[0].length > 0) {
+                    drOvContribByIndex[i] = java.util.Arrays.stream(drOv[0]).mapToInt(d -> (int) d).toArray();
+                    drOvCByIndex[i] = drOv[1];
                 }
                 if (curvePRows != null && c.contingencyId().indexOf(GpuBatchStatus.STRATEGY_KEY_SEP) >= 0) {
                     continue;                                // pair anchor shifts skew the curve linkage — CPU
@@ -385,6 +467,6 @@ final class GpuBatchQualification {
         }
         return new ScenarioPlan(batchedIndices, frozenRowsByIndex, islandedNumsByIndex,
                 frozenTargetsByIndex, genOutagesByIndex, islandingCount, activePowerLossByIndex,
-                dqOvContribByIndex, dqOvWByIndex);
+                dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex);
     }
 }

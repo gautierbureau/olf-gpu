@@ -47,7 +47,7 @@ public final class GpuBatchTransformerControl {
      *  coefficients do NOT renormalize — the DISTR_RHO cross terms to a control-disabled member
      *  stay). {@code clampNeedsCpu}: clamping this member re-picks the group's FREE role (its
      *  off-delta touches other members' rows) — per-scenario CPU route, out of stage-1 scope. */
-    record Member(int rhoRow, double minR1, double maxR1, double[] taps, int elemIndex,
+    record Member(int rhoRow, double minR1, double maxR1, double[] taps, double[][] tapRows, int elemIndex,
                   int[] offDeltaRows, int[] offDeltaModes, double[] offDeltaTargets, boolean clampNeedsCpu) {
         double closestTap(double r1) {
             if (taps.length == 0) {
@@ -56,6 +56,23 @@ public final class GpuBatchTransformerControl {
             double best = taps[0];
             for (double t : taps) {
                 if (Math.abs(t - r1) < Math.abs(best - r1)) {
+                    best = t;
+                }
+            }
+            return best;
+        }
+
+        /** The FULL 8-double pi row of the tap whose r1 is closest to {@code r1}, or null without a
+         *  table. Rounding a tap on the CPU switches the branch's per-step R/X/G/B, not just rho —
+         *  pinning rho alone left the base impedance in the fills (a DIFFERENT model: 2.4e-4 kV on a
+         *  non-base tap, found via the shared-group member-outage test). */
+        double[] closestTapRow(double r1) {
+            if (tapRows.length == 0) {
+                return null;
+            }
+            double[] best = tapRows[0];
+            for (double[] t : tapRows) {
+                if (Math.abs(t[6] - r1) < Math.abs(best[6] - r1)) {
                     best = t;
                 }
             }
@@ -191,7 +208,8 @@ public final class GpuBatchTransformerControl {
                     offDeltaTargets[k] = mOffTargets[offDeltaRows[k]];
                 }
                 members[m] = new Member(rhoRow, branch.getPiModel().getMinR1(), branch.getPiModel().getMaxR1(),
-                        tapR1Values(branch.getPiModel()), elementMapper.getElementIndex(branch),
+                        tapR1Values(branch.getPiModel()), tapModels(branch.getPiModel()),
+                        elementMapper.getElementIndex(branch),
                         offDeltaRows, offDeltaModes, offDeltaTargets, cpuOnly);
             }
             for (int m = 0; m < memberBranches.size(); m++) {
@@ -255,6 +273,7 @@ public final class GpuBatchTransformerControl {
             int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
             int[] targetOverrideIndex, double[] targetOverrideValue,
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
+            int[] dsPhiRow, double[] dsFactor,
             double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
             double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, int[] varType,
             BatchConfig config) {
@@ -274,12 +293,8 @@ public final class GpuBatchTransformerControl {
             }
             for (int c = 0; c < tcs.size(); c++) {
                 TransformerController tc = tcs.get(c);
-                boolean memberOutaged = false;               // safety net — member outages are guard-rejected
-                for (Member m : tc.members()) {
-                    memberOutaged |= disabledMask[slot][m.elemIndex()];
-                }
-                if (memberOutaged) {
-                    continue;
+                if (disabledMask[slot][tc.members()[0].elemIndex()]) {
+                    continue;                                // FREE member outaged: guard-rejected — safety net
                 }
                 if (Math.abs(tc.targetV() - r[tc.vCol()]) > tc.halfDeadband()) {
                     enabled.add(new int[] {slot, c});
@@ -303,6 +318,21 @@ public final class GpuBatchTransformerControl {
         double[] rounded = new double[chunkSize * totalMembers];   // fixed r1 once clamped/rounded (NaN = still continuous)
         java.util.Arrays.fill(rounded, Double.NaN);
 
+        // DS target carry: OLF's targets are STATEFUL across outer-loop re-solves, but every device
+        // call re-uploads baseTargets — so the slack distribution applied by PREVIOUS solves on this
+        // handle must be carried into each machine step: water-fill anchors (pure absorption per
+        // participant), the slack's own absorbed share, and absolute DS-row target seeds (the same
+        // three coupled pieces as the strategy-leg re-anchoring in GpuBatchChunkSolver). Without it
+        // the VC-on solve re-derived the whole distribution from scratch and took an extra Newton
+        // step the CPU never takes (1.7e-4 kV drift on the shared-TVC member-outage scenario).
+        int nds = dsPhiRow != null ? dsPhiRow.length : 0;
+        double[] dsAnchorCarry = nds > 0 ? new double[chunkSize * nds] : null;
+        double[] dsSlackCarry = nds > 0 ? new double[chunkSize] : null;
+        double[] dsSeed = nds > 0 ? new double[chunkSize * nds] : null;
+        if (nds > 0) {
+            captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
+                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
+        }
         int[][] rowMode = new int[chunkSize][];
         for (int step = 0; step < 8; step++) {               // INITIAL solve, clamp iterations, final rounded solve
             ovIdx.clear();
@@ -311,7 +341,27 @@ public final class GpuBatchTransformerControl {
                 ovIdx.add(targetOverrideIndex[k]);
                 ovVal.add(targetOverrideValue[k]);
             }
+            if (nds > 0) {                                   // DS-row target seeds at the carried values
+                for (int slot = 0; slot < realCount; slot++) {
+                    double[] r = chunkResults[slot];
+                    if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
+                        continue;
+                    }
+                    for (int i = 0; i < nds; i++) {
+                        int flat = slot * n + dsPhiRow[i];
+                        int at = ovIdx.lastIndexOf(Integer.valueOf(flat));
+                        if (at >= 0) {
+                            ovVal.set(at, dsSeed[slot * nds + i]);
+                        } else {
+                            ovIdx.add(flat);
+                            ovVal.add(dsSeed[slot * nds + i]);
+                        }
+                    }
+                }
+            }
             double[] x0Full = new double[chunkSize * n];
+            List<Integer> r1OvSlotElem = new ArrayList<>();  // fixed members' FULL tap pi rows (per-step
+            List<Double> r1OvVal = new ArrayList<>();        // R/X/G/B follow the rounded tap, like the CPU)
             for (int slot = 0; slot < chunkSize; slot++) {
                 double[] r = slot < realCount ? chunkResults[slot] : null;
                 for (int i = 0; i < n; i++) {
@@ -323,42 +373,9 @@ public final class GpuBatchTransformerControl {
                 }
                 int[] row = rowModePerScenario[slot].clone();
                 for (int c = 0; c < tcs.size(); c++) {
-                    TransformerController tc = tcs.get(c);
-                    if (!on[slot][c]) {
-                        continue;
-                    }
-                    Member[] members = tc.members();
-                    boolean allFixed = true;
-                    for (int m = 0; m < members.length; m++) {
-                        allFixed &= !Double.isNaN(rounded[slot * totalMembers + memberBase[c] + m]);
-                    }
-                    if (!allFixed) {                         // control ACTIVE: the whole group's ON deltas
-                        for (int k = 0; k < tc.deltaRows().length; k++) {
-                            row[tc.deltaRows()[k]] = tc.deltaModesOn()[k];
-                            ovIdx.add(slot * n + tc.deltaRows()[k]);
-                            ovVal.add(tc.deltaTargetsOn()[k]);
-                        }
-                        for (int m = 0; m < members.length; m++) {   // clamped members: OFF-delta on top,
-                            double fixedR1 = rounded[slot * totalMembers + memberBase[c] + m];
-                            if (Double.isNaN(fixedR1)) {
-                                continue;
-                            }
-                            Member mem = members[m];
-                            for (int k = 0; k < mem.offDeltaRows().length; k++) {
-                                row[mem.offDeltaRows()[k]] = mem.offDeltaModes()[k];
-                                if (mem.offDeltaRows()[k] != mem.rhoRow()) {
-                                    ovIdx.add(slot * n + mem.offDeltaRows()[k]);
-                                    ovVal.add(mem.offDeltaTargets()[k]);
-                                }
-                            }
-                            ovIdx.add(slot * n + mem.rhoRow());      // ...with the rho identity pinned
-                            ovVal.add(fixedR1);                       // at the CLAMP value, not the base tap
-                        }
-                    } else {                                 // every member fixed: back to base rows + pins
-                        for (int m = 0; m < members.length; m++) {
-                            ovIdx.add(slot * n + members[m].rhoRow());
-                            ovVal.add(rounded[slot * totalMembers + memberBase[c] + m]);
-                        }
+                    if (on[slot][c]) {
+                        applyControlDeltas(slot, n, tcs.get(c), disabledMask, rounded, memberBase[c],
+                                totalMembers, baseState, row, ovIdx, ovVal, r1OvSlotElem, r1OvVal);
                     }
                 }
                 rowMode[slot] = row;
@@ -385,13 +402,23 @@ public final class GpuBatchTransformerControl {
                     rowMode, baseRowMode, disabledMask,
                     ovIdx.stream().mapToInt(Integer::intValue).toArray(),
                     ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, null, null, null, null,
+                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                    dsAnchorCarry, dsSlackCarry, null, null,
                     parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                     config.lsMode(), config.maxDv(), config.maxDphi(),
-                    config.lsMode() == 2 ? varType : null, x0Full, null, null, null, null, null, null,
+                    config.lsMode() == 2 ? varType : null, x0Full, null, null, null, null,
+                    r1OvSlotElem.isEmpty() ? null : r1OvSlotElem.stream().mapToInt(Integer::intValue).toArray(),
+                    r1OvVal.isEmpty() ? null : r1OvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                     config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0, 0, null, null);
             for (int slot : affected) {
                 chunkResults[slot] = r2[slot];
+            }
+            if (nds > 0) {                                   // this solve may have distributed further
+                captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
+                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
+            }
+            if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+                traceStep(step, affected, chunkResults, tcs, n, rounded, memberBase, totalMembers, disabledMask);
             }
             // CONTROL: clamp out-of-range continuous ratios; when none, ROUND the remaining ones.
             boolean anyClamped = false;
@@ -409,8 +436,9 @@ public final class GpuBatchTransformerControl {
                     Member[] members = tc.members();
                     for (int m = 0; m < members.length; m++) {
                         Member mem = members[m];
-                        if (!Double.isNaN(rounded[slot * totalMembers + memberBase[c] + m])) {
-                            continue;
+                        if (!Double.isNaN(rounded[slot * totalMembers + memberBase[c] + m])
+                                || disabledMask[slot][mem.elemIndex()]) {
+                            continue;                        // fixed already, or outaged (pinned at base)
                         }
                         double r1 = r[mem.rhoRow()];
                         if (r1 < mem.minR1() || r1 > mem.maxR1()) {
@@ -444,7 +472,8 @@ public final class GpuBatchTransformerControl {
                         }
                         Member[] members = tc.members();
                         for (int m = 0; m < members.length; m++) {
-                            if (Double.isNaN(rounded[slot * totalMembers + memberBase[c] + m])) {
+                            if (Double.isNaN(rounded[slot * totalMembers + memberBase[c] + m])
+                                    && !disabledMask[slot][members[m].elemIndex()]) {
                                 rounded[slot * totalMembers + memberBase[c] + m] = members[m].closestTap(r[members[m].rhoRow()]);
                             }
                         }
@@ -455,5 +484,142 @@ public final class GpuBatchTransformerControl {
             break;                                           // everything fixed and re-solved: done
         }
         return chunkResults;
+    }
+
+    /** Applies one control's per-step row/target deltas for one scenario: the group's ON deltas while
+     *  any member is still continuous (fixed/outaged members swapped to their OFF-deltas + rho pins),
+     *  or plain pins at the rounded taps once every member is fixed. Fixed members also emit their
+     *  rounded tap's FULL pi row as an r1 override — rounding to a non-base tap switches the CPU
+     *  branch's per-step R/X/G/B, not just rho. */
+    @SuppressWarnings("java:S107")
+    private static void applyControlDeltas(int slot, int n, TransformerController tc,
+            boolean[][] disabledMask, double[] rounded, int base, int totalMembers, double[] baseState,
+            int[] row, List<Integer> ovIdx, List<Double> ovVal, List<Integer> r1OvSlotElem, List<Double> r1OvVal) {
+        Member[] members = tc.members();
+        boolean allFixed = true;
+        for (int m = 0; m < members.length; m++) {
+            allFixed &= !Double.isNaN(rounded[slot * totalMembers + base + m])
+                    || disabledMask[slot][members[m].elemIndex()];
+        }
+        if (!allFixed) {                                     // control ACTIVE: the whole group's ON deltas
+            // rows owned by a FIXED (clamped) or OUTAGED member get their own override below —
+            // the same row must NEVER carry two target overrides (parallel scatter, no ordering)
+            java.util.Set<Integer> ownRows = new java.util.HashSet<>();
+            for (int m = 0; m < members.length; m++) {
+                if (!Double.isNaN(rounded[slot * totalMembers + base + m])
+                        || disabledMask[slot][members[m].elemIndex()]) {
+                    ownRows.add(members[m].rhoRow());
+                }
+            }
+            for (int k = 0; k < tc.deltaRows().length; k++) {
+                if (ownRows.contains(tc.deltaRows()[k])) {
+                    continue;
+                }
+                row[tc.deltaRows()[k]] = tc.deltaModesOn()[k];
+                ovIdx.add(slot * n + tc.deltaRows()[k]);
+                ovVal.add(tc.deltaTargetsOn()[k]);
+            }
+            for (int m = 0; m < members.length; m++) {       // clamped OR outaged members: OFF-delta
+                Member mem = members[m];
+                boolean outaged = disabledMask[slot][mem.elemIndex()];
+                double fixedR1 = rounded[slot * totalMembers + base + m];
+                if (Double.isNaN(fixedR1) && !outaged) {
+                    continue;
+                }
+                for (int k = 0; k < mem.offDeltaRows().length; k++) {
+                    row[mem.offDeltaRows()[k]] = mem.offDeltaModes()[k];
+                    if (mem.offDeltaRows()[k] != mem.rhoRow()) {
+                        ovIdx.add(slot * n + mem.offDeltaRows()[k]);
+                        ovVal.add(mem.offDeltaTargets()[k]);
+                    }
+                }
+                ovIdx.add(slot * n + mem.rhoRow());
+                // outaged: pin at the BASE-STATE rho — matching the warm start, so the row's
+                // residual is exactly 0 (the CPU REMOVES the equation; a captured stale target
+                // injected a unit residual that cost an extra Newton iterate — 2.4e-4 kV drift).
+                // clamped: pinned at the CLAMP value, not the base tap.
+                ovVal.add(outaged ? baseState[mem.rhoRow()] : fixedR1);
+                if (!outaged) {
+                    emitTapRow(slot, mem, fixedR1, r1OvSlotElem, r1OvVal);
+                }
+            }
+        } else {                                             // every member fixed: back to base rows + pins
+            for (int m = 0; m < members.length; m++) {
+                Member mem = members[m];
+                if (disabledMask[slot][mem.elemIndex()]) {
+                    continue;                                // outaged: base identity + base target already
+                }
+                double fixedR1 = rounded[slot * totalMembers + base + m];
+                ovIdx.add(slot * n + mem.rhoRow());
+                ovVal.add(fixedR1);
+                emitTapRow(slot, mem, fixedR1, r1OvSlotElem, r1OvVal);
+            }
+        }
+    }
+
+    @SuppressWarnings("java:S106")
+    private static void traceStep(int step, java.util.Set<Integer> affected, double[][] chunkResults,
+            List<TransformerController> tcs, int n, double[] rounded, int[] memberBase, int totalMembers,
+            boolean[][] disabledMask) {
+        for (int slot : affected) {
+            double[] r = chunkResults[slot];
+            StringBuilder sb = new StringBuilder("TVC_TRACE step=" + step + " slot=" + slot
+                    + " status=" + (r != null ? (int) r[n + 2] : -9));
+            for (int c = 0; c < tcs.size(); c++) {
+                for (int m = 0; m < tcs.get(c).members().length; m++) {
+                    Member mem = tcs.get(c).members()[m];
+                    sb.append(String.format(" m%d[r1=%.6f fx=%.6f out=%b]", m,
+                            r != null ? r[mem.rhoRow()] : Double.NaN,
+                            rounded[slot * totalMembers + memberBase[c] + m],
+                            disabledMask[slot][mem.elemIndex()]));
+                }
+            }
+            System.err.println(sb);
+        }
+    }
+
+    private static void emitTapRow(int slot, Member mem, double fixedR1,
+            List<Integer> r1OvSlotElem, List<Double> r1OvVal) {
+        double[] tapRow = mem.closestTapRow(fixedR1);
+        if (tapRow != null) {                                // the fixed tap's FULL pi row
+            r1OvSlotElem.add(slot);
+            r1OvSlotElem.add(mem.elemIndex());
+            for (double d : tapRow) {
+                r1OvVal.add(d);
+            }
+        }
+    }
+
+    /** Reads the LAST solve's final per-scenario targets off the context and derives the carried
+     *  distributed-slack state: per-participant pure absorption (final minus the scenario's own
+     *  effective base), the slack's own absorbed share at the scenario's effective factor sum, and
+     *  the absolute DS-row targets for seeding the next call. Dead or non-converged slots carry 0. */
+    @SuppressWarnings("java:S107")
+    private static void captureDsCarry(long handle, int chunkSize, int realCount, int n,
+            int[] dsPhiRow, double[] dsFactor, double[] baseTargets,
+            int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta,
+            double[][] chunkResults, double[] anchor, double[] slack, double[] seed) {
+        int nds = dsPhiRow.length;
+        double fsBase = 0;
+        for (double fv : dsFactor) {
+            fsBase += fv;
+        }
+        double[] finalTargets = GpuAcNewtonSolver.readBatchTargets(handle);
+        for (int s = 0; s < chunkSize; s++) {
+            boolean liveSlot = s < realCount && chunkResults[s] != null
+                    && (int) chunkResults[s][n + 2] == GpuBatchStatus.STATUS_CONVERGED;
+            double absorbedSum = 0;
+            for (int i = 0; i < nds; i++) {
+                int row = dsPhiRow[i];
+                double ovDelta = dsOvBus != null && dsOvBus[s] == i ? dsOvBaseDelta[s] : 0.0;
+                double effBase = baseTargets[row] - ovDelta;
+                double shift = liveSlot ? finalTargets[s * n + row] - effBase : 0.0;
+                anchor[s * nds + i] = shift;
+                absorbedSum += shift;
+                seed[s * nds + i] = effBase + shift;
+            }
+            double fs = fsBase - (dsOvBus != null && dsOvBus[s] >= 0 ? dsOvFactorDelta[s] : 0.0);
+            slack[s] = fs > 0 ? (1.0 - fs) / fs * absorbedSum : 0.0;
+        }
     }
 }

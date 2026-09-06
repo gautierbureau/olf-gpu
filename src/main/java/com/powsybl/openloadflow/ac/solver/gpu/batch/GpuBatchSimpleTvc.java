@@ -49,8 +49,8 @@ final class GpuBatchSimpleTvc {
                           List<Integer> ovIndexList, List<Double> ovValueList) {
         for (int slot = 0; slot < realCount; slot++) {
             for (GpuBatchTransformerControl.TransformerController tc : tcs) {
-                if (anyMemberOutaged(tc, disabledMask[slot])) {
-                    continue;                                // member outages are guard-rejected — safety net
+                if (disabledMask[slot][tc.members()[0].elemIndex()]) {
+                    continue;                                // FREE member outaged: guard-rejected — safety net
                 }
                 int[] row = rowModePerScenario[slot] == baseRowMode
                         ? baseRowMode.clone() : rowModePerScenario[slot];
@@ -59,18 +59,19 @@ final class GpuBatchSimpleTvc {
                     ovIndexList.add(slot * n + tc.deltaRows()[k]);
                     ovValueList.add(tc.deltaTargetsOn()[k]);
                 }
+                for (GpuBatchTransformerControl.Member m : tc.members()) {
+                    if (!disabledMask[slot][m.elemIndex()]) {
+                        continue;
+                    }
+                    for (int k = 0; k < m.offDeltaRows().length; k++) {   // outaged NON-free member: its
+                        row[m.offDeltaRows()[k]] = m.offDeltaModes()[k];  // rho identity pinned at base
+                        ovIndexList.add(slot * n + m.offDeltaRows()[k]);
+                        ovValueList.add(m.offDeltaTargets()[k]);
+                    }
+                }
                 rowModePerScenario[slot] = row;
             }
         }
-    }
-
-    private static boolean anyMemberOutaged(GpuBatchTransformerControl.TransformerController tc, boolean[] disabled) {
-        for (GpuBatchTransformerControl.Member m : tc.members()) {
-            if (disabled[m.elemIndex()]) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /** Post-solve rounding: read each scenario's continuous rho, round to the closest tap, restore
@@ -91,6 +92,12 @@ final class GpuBatchSimpleTvc {
         // rebuild the VC-OFF overrides: the ORIGINAL (pre-VC-on) list + one rho pin per live controller
         List<Integer> ovIdx = new ArrayList<>(baseOvIndexList);
         List<Double> ovVal = new ArrayList<>(baseOvValueList);
+        // rounding to a non-base tap switches the CPU branch's FULL per-step R/X/G/B, not just rho:
+        // extend the base r1 overrides with the rounded tap's whole pi row per (scenario, member).
+        // Rounded entries are collected FIRST — the device scan takes the first (slot, elem) match,
+        // and a rounded tap must win over a base tap-action override on the same transformer.
+        List<Integer> r1Se = new ArrayList<>();
+        List<Double> r1Vv = new ArrayList<>();
         double[] x0Full = new double[chunkSize * n];
         int[][] rowModeOff = new int[chunkSize][];
         boolean[] affected = new boolean[chunkSize];
@@ -107,8 +114,8 @@ final class GpuBatchSimpleTvc {
             }
             int[] row = null;
             for (GpuBatchTransformerControl.TransformerController tc : tcs) {
-                if (anyMemberOutaged(tc, disabledMask[s])) {
-                    continue;
+                if (disabledMask[s][tc.members()[0].elemIndex()]) {
+                    continue;                                // FREE member outaged — safety net
                 }
                 if (row == null) {
                     row = rowModePerScenario[s].clone();
@@ -117,10 +124,21 @@ final class GpuBatchSimpleTvc {
                     row[tc.deltaRows()[k]] = baseRowMode[tc.deltaRows()[k]];   // undo the VC-on flip
                 }
                 for (GpuBatchTransformerControl.Member m : tc.members()) {     // OLF roundR1ToClosestTap, per member
+                    if (disabledMask[s][m.elemIndex()]) {
+                        continue;                            // outaged: stays at its base identity
+                    }
                     double rounded = m.closestTap(chunkResults[s][m.rhoRow()]);
                     ovIdx.add(s * n + m.rhoRow());
                     ovVal.add(rounded);                      // the identity row pins rho at the rounded tap
                     x0Full[s * n + m.rhoRow()] = rounded;
+                    double[] tapRow = m.closestTapRow(rounded);
+                    if (tapRow != null) {                    // the rounded tap's FULL pi row
+                        r1Se.add(s);
+                        r1Se.add(m.elemIndex());
+                        for (double d : tapRow) {
+                            r1Vv.add(d);
+                        }
+                    }
                 }
                 affected[s] = true;
             }
@@ -135,6 +153,14 @@ final class GpuBatchSimpleTvc {
         if (!any) {
             return chunkResults;
         }
+        if (r1OvSlotElem != null) {                          // base overrides AFTER the rounded ones
+            for (int i : r1OvSlotElem) {
+                r1Se.add(i);
+            }
+            for (double d : r1OvVal) {
+                r1Vv.add(d);
+            }
+        }
         double[][] r2 = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                 rowModeOff, baseRowMode, disabledMask,
                 ovIdx.stream().mapToInt(Integer::intValue).toArray(),
@@ -144,7 +170,8 @@ final class GpuBatchSimpleTvc {
                 config.lsMode(), config.maxDv(), config.maxDphi(),
                 config.lsMode() == 2 ? varType : null, x0Full,
                 shOvSlotElem, shOvGb, null, null,
-                r1OvSlotElem, r1OvVal,
+                r1Se.isEmpty() ? null : r1Se.stream().mapToInt(Integer::intValue).toArray(),
+                r1Vv.isEmpty() ? null : r1Vv.stream().mapToDouble(Double::doubleValue).toArray(),
                 config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0,
                 nziBase, ziOnSlotElem, ziOffSlotElem);
         for (int s = 0; s < realCount; s++) {

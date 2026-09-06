@@ -295,6 +295,17 @@ public final class GpuAcNewtonSolver {
      *  outage at a remote-VC controller bus re-runs updateReactiveKeys on the CPU). Per-chunk state. */
     public static native void setBatchDqWeightOverrides(long handle, int[] idx, double[] w);
 
+    /** Install (or clear, with nulls) per-scenario DISTR_RHO coefficient overrides on a batch
+     *  context — {@code idx} = flat {scenario, contribution} pairs, {@code c} = the renormalized
+     *  1/count' coefficient (a shared-TVC group member outaged in that scenario). Per-chunk state. */
+    public static native void setBatchDrCoefOverrides(long handle, int[] idx, double[] c);
+
+    /** Install (or clear, with null) per-scenario ACTIVE equation counts for the L2 stopping
+     *  threshold sqrt(eps^2 * nActive) — the CPU removes equations for outaged variable-carrying
+     *  elements (rho/a1 identities) and islanded buses; the padded device n over-counts those rows
+     *  and skews the stop decision by the sqrt ratio. Per-chunk state. */
+    public static native void setBatchActiveRowCounts(long handle, int[] nActive);
+
     public static native void destroyBatchContext(long handle);
 
     /**

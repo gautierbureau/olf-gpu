@@ -76,7 +76,7 @@ class GpuBatchedDistrRhoTest {
     }
 
     @Test
-    void distrRhoBatchedN1RejectsControllerOutageAndMatchesCpu() {
+    void distrRhoBatchedN1MemberOutageMatchesCpuAndFreeMemberRejects() {
         Network gpuNet = sharedControlMeshed();
         LfNetwork net = load(gpuNet);
         EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(net).create();
@@ -113,9 +113,10 @@ class GpuBatchedDistrRhoTest {
             BatchContingency c = conts.get(i);
             BatchScenarioResult r = results.get(i);
             boolean isController = c.outagedBranches().stream().anyMatch(controllers::contains);
-            if (isController) {
-                assertTrue(r.needsCpuFallback(), "a controlling transformer outage (" + c.contingencyId()
-                        + ") must be rejected to the CPU (coefficients reform)");
+            if (isController && r.needsCpuFallback()) {
+                // FREE-member outage: the free role re-picks — per-scenario CPU route until A6.
+                // NON-free member outages batch since A5 (drOv analytic 1/c' renorm) and fall
+                // through to the same device-vs-CPU comparison as every other contingency.
                 controllerRejected++;
                 continue;
             }
@@ -160,7 +161,7 @@ class GpuBatchedDistrRhoTest {
         System.out.printf("GPU batched DISTR_RHO N-1 [transformer shared control]: %d dr contributions, "
                 + "%d controller outages rejected, %d checked, worst max|gpu - cpu| = %.2e%n",
                 d.getDistrRhoContributionCount(), controllerRejected, checked, worst);
-        assertTrue(controllerRejected >= 1, "must reject at least one controller-transformer outage");
+        assertTrue(controllerRejected >= 1, "the FREE-member outage must still be rejected to the CPU");
         assertTrue(checked >= 1, "must validate at least one non-controller DISTR_RHO contingency on the device");
         assertTrue(worst < 1e-12, "every GPU DISTR_RHO post-contingency state must match OLF's Newton (worst = " + worst + ")");
     }

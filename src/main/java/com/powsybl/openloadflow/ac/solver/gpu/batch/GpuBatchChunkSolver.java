@@ -53,6 +53,7 @@ final class GpuBatchChunkSolver {
                                                java.util.Map<com.powsybl.openloadflow.network.LfHvdc, Integer> hvdcElemIndex,
                                                double[][] rowCriteria, GpuBatchRlCurves.Channel rlCurves,
                                                int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
+                                               int[][] drOvContribByIndex, double[][] drOvCByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
@@ -160,6 +161,12 @@ final class GpuBatchChunkSolver {
                     ovValueList.clear();
                     List<Integer> dqOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_Q reweight)
                     List<Double> dqOvWList = new ArrayList<>();
+                    List<Integer> drOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_RHO renorm, plan A5)
+                    List<Double> drOvCList = new ArrayList<>();
+                    // per-scenario ACTIVE equation counts (L2 threshold parity — the CPU removes an
+                    // equation per frozen islanded row and per outaged element carrying a variable)
+                    int[] nActive = new int[chunkSize];
+                    java.util.Arrays.fill(nActive, n);
                     ziOffSlotElemList.clear();
                     ziOnSlotElemList.clear();
                     shOvSlotElemList.clear();
@@ -197,6 +204,13 @@ final class GpuBatchChunkSolver {
                                     dqOvWList.add(dqOvWByIndex[ci][k]);
                                 }
                             }
+                            if (drOvContribByIndex != null && drOvContribByIndex[ci] != null) {
+                                for (int k = 0; k < drOvContribByIndex[ci].length; k++) {
+                                    drOvIdxList.add(s);
+                                    drOvIdxList.add(drOvContribByIndex[ci][k]);
+                                    drOvCList.add(drOvCByIndex[ci][k]);
+                                }
+                            }
                             List<LfBranch> branches = contingencies.get(ci).outagedBranches();
                             List<LfShunt> shunts = contingencies.get(ci).outagedShunts();
                             List<com.powsybl.openloadflow.network.LfHvdc> hvdcs = contingencies.get(ci).outagedHvdcs();
@@ -218,6 +232,18 @@ final class GpuBatchChunkSolver {
                                 eis[ei++] = idx;
                             }
                             disabledIdx[s] = eis;
+                            nActive[s] -= frozenRowsByIndex[ci].length;  // islanded buses' equations leave the CPU index
+                            for (LfBranch branch : branches) {           // var-carrying outaged branches: the CPU drops
+                                int eIdx = elementMapper.getElementIndex(branch);   // the rho/a1 identity equations too
+                                if (eIdx >= 0 && eIdx < elementMapper.getClosedBranchCount()) {
+                                    if (gpuData.cbIdx()[eIdx * 12 + 9] >= 0) {
+                                        nActive[s]--;        // BRANCH_RHO1 variable + its identity leave the index
+                                    }
+                                    if (gpuData.cbIdx()[eIdx * 12 + 8] >= 0) {
+                                        nActive[s]--;        // BRANCH_ALPHA1 variable + its identity leave the index
+                                    }
+                                }
+                            }
                             int[] frozen = frozenRowsByIndex[ci];
                             if (frozen.length > 0) {         // fragmenting outage: freeze the islanded buses' rows
                                 int[] row = baseRowMode.clone();
@@ -516,6 +542,10 @@ final class GpuBatchChunkSolver {
                     GpuAcNewtonSolver.setBatchDqWeightOverrides(handle,
                             dqOvIdxList.isEmpty() ? null : dqOvIdxList.stream().mapToInt(Integer::intValue).toArray(),
                             dqOvWList.isEmpty() ? null : dqOvWList.stream().mapToDouble(Double::doubleValue).toArray());
+                    GpuAcNewtonSolver.setBatchDrCoefOverrides(handle,
+                            drOvIdxList.isEmpty() ? null : drOvIdxList.stream().mapToInt(Integer::intValue).toArray(),
+                            drOvCList.isEmpty() ? null : drOvCList.stream().mapToDouble(Double::doubleValue).toArray());
+                    GpuAcNewtonSolver.setBatchActiveRowCounts(handle, nActive);
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
                             dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
@@ -729,6 +759,7 @@ final class GpuBatchChunkSolver {
                                 chunkResults, transformerControllers, rowModePerScenario, baseRowMode, disabledMask,
                                 targetOverrideIndex, targetOverrideValue,
                                 dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
                                 baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, varType,
                                 config);
                     }

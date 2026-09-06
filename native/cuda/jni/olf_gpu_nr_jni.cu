@@ -2129,13 +2129,19 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
 // rejected to the CPU because the 1/count coefficients reform).
 __global__ void fillDistrRhoBatch(int ndr, int nScenarios, int n, int nnz,
                                   const int* drCol, const double* drCoef, const int* drDest,
-                                  const double* x, double* vals, double* F, const char* active) {
+                                  const double* x, double* vals, double* F, const char* active,
+                                  int nDrOv, const int* drOvIdx, const double* drOvC) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ndr * nScenarios) return;
     int c = tid % ndr;
     int s = tid / ndr;
     if (!active[s]) return;
     double coef = drCoef[c];
+    for (int k = 0; k < nDrOv; k++) {                        // per-scenario 1/count' renormalization
+        if (drOvIdx[k * 2] == s && drOvIdx[k * 2 + 1] == c) {
+            coef = drOvC[k];
+        }
+    }
     int dF = drDest[c * 2 + 0];
     int dJ = drDest[c * 2 + 1];
     if (dF <= -2) atomicAdd(&F[(size_t) s * n + (-2 - dF)], coef * x[(size_t) s * n + drCol[c]]);
@@ -2869,6 +2875,15 @@ struct BatchSolverContext {
     // bus renormalizes the group's qPct keys per scenario — {s, contrib} pairs + the new weight.
     int nDqOv = 0;
     DeviceBuf dDqOvIdx, dDqOvW;
+    // DISTR_RHO coefficient overrides (setBatchDrCoefOverrides): a member outage renormalizes the
+    // group's 1/count coefficients per scenario — {s, contrib} pairs + the new coefficient.
+    int nDrOv = 0;
+    DeviceBuf dDrOvIdx, dDrOvC;
+    // Per-scenario ACTIVE equation counts (setBatchActiveRowCounts): OLF's L2 stopping threshold is
+    // sqrt(eps^2 * nActive) and the CPU REMOVES equations for outaged elements carrying variables
+    // (rho/a1 identities) and islanded buses — the padded device n over-counts by those rows, a ~%
+    // threshold skew that lands stops up to the criterion apart. Empty = use n for every scenario.
+    std::vector<int> hNActive;
     DeviceBuf dRlMonitored;                                // per controller: 1 = MONITORING_VOLTAGE SVC standing by
     DeviceBuf dRowSlope;                                   // per row: SLOPE-SVC slope (mode-2 V rows), 0 elsewhere
     DeviceBuf dRlSavedTarget;                              // per (controller, scenario): the row target saved at a
@@ -3502,7 +3517,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             }
         }
         if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr);
-        if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
+        if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr);
         if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>());
         applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>());
@@ -3538,6 +3553,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             // system rows; for batched scenarios (no islanding — those go to the CPU) that equals OLF's active
             // equation count, since disabled-branch rows keep the bus equations and identity pads contribute 0.
             const double olf2NormThreshold = convEpsPerEq > 0.0 ? std::sqrt(convEpsPerEq * convEpsPerEq * n) : 0.0;
+            auto thr2Of = [&](int sIdx) {
+                return convEpsPerEq > 0.0 && !ctx->hNActive.empty()
+                        ? std::sqrt(convEpsPerEq * convEpsPerEq * ctx->hNActive[sIdx]) : olf2NormThreshold;
+            };
             for (int s = 0; s < nS; s++) {
                 if (!active[s]) continue;
                 double norm = 0.0;
@@ -3563,10 +3582,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 // PER_EQUATION_TYPE (per-row thresholds set on the context): OLF's
                 // PerEquationTypeStoppingCriteria — stop when EVERY row clears its type threshold.
                 bool converged = ctx->perRowCriteria ? (finite && maxRatio < 1.0)
-                        : convEpsPerEq > 0.0 ? (std::sqrt(ssq) < olf2NormThreshold) : (norm < tol);
+                        : convEpsPerEq > 0.0 ? (std::sqrt(ssq) < thr2Of(s)) : (norm < tol);
                 if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
                     std::fprintf(stderr, "BATCH_TRACE s=%d it=%d infnorm=%.17e norm2=%.17e thr=%.17e conv=%d\n",
-                                 s, it, norm, std::sqrt(ssq), olf2NormThreshold, converged ? 1 : 0);
+                                 s, it, norm, std::sqrt(ssq), thr2Of(s), converged ? 1 : 0);
                 }
                 res.iters[s] = it;
                 res.norm[s] = norm;
@@ -4563,7 +4582,7 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
         fillHvdcBatch<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
     }
     if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr);
-    if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
+    if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr);
     if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
     if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>());
     applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>());
@@ -4724,6 +4743,46 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     env->ReleaseIntArrayElements(jIdx, idx, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jW, w, JNI_ABORT);
     ctx->nDqOv = nOv;
+}
+
+// DISTR_RHO coefficient overrides: install (or clear, with nulls) the per-scenario 1/count'
+// renormalization pairs {s, contrib} + new coefficients on a batch context (a shared-TVC group
+// member outaged in that scenario — plan-group-member-dynamics A5).
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDrCoefOverrides(
+        JNIEnv* env, jclass, jlong handle, jintArray jIdx, jdoubleArray jC) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jIdx == nullptr || jC == nullptr || env->GetArrayLength(jC) == 0) {
+        ctx->nDrOv = 0;
+        return;
+    }
+    int nOv = env->GetArrayLength(jC);
+    jint* idx = env->GetIntArrayElements(jIdx, nullptr);
+    jdouble* c = env->GetDoubleArrayElements(jC, nullptr);
+    ctx->dDrOvIdx.upload(idx, static_cast<size_t>(nOv) * 2 * sizeof(int));
+    ctx->dDrOvC.upload(c, static_cast<size_t>(nOv) * sizeof(double));
+    env->ReleaseIntArrayElements(jIdx, idx, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jC, c, JNI_ABORT);
+    ctx->nDrOv = nOv;
+}
+
+// Per-scenario ACTIVE equation counts for the L2 stopping threshold (see hNActive). Per-chunk state.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchActiveRowCounts(
+        JNIEnv* env, jclass, jlong handle, jintArray jNActive) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->hNActive.clear();
+    if (jNActive != nullptr) {
+        int len = env->GetArrayLength(jNActive);
+        ctx->hNActive.resize(len);
+        env->GetIntArrayRegion(jNActive, 0, len, ctx->hNActive.data());
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL

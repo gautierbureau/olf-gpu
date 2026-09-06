@@ -20,6 +20,7 @@ import com.powsybl.openloadflow.equations.JacobianMatrix;
 import com.powsybl.openloadflow.equations.StateVector;
 import com.powsybl.openloadflow.network.FirstSlackBusSelector;
 import com.powsybl.openloadflow.network.LfBranch;
+import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfNetworkParameters;
 import com.powsybl.openloadflow.network.VoltageControl;
@@ -70,6 +71,52 @@ class GpuTransformerSharedControlTest {
             }
         }
         return sv.get().clone();
+    }
+
+    /** A2 (plan-group-member-dynamics): at a control-DISABLED base (the AFTER_GENERATOR shape) the
+     *  DISTR_RHO pack must STILL carry the group's all-enabled coupling (existence-keyed — the
+     *  e82290f audit found the activation-keyed pack silently empty), the packed rows must exclude
+     *  the FREE member (first enabled), and the toggled-ALL-ON activation must extract as: pilot V
+     *  row identity, non-free member rho rows mode 1 with the DISTR_RHO targets, the pilot's Q
+     *  remapped onto the free member's rho row. Host-only — no device needed. */
+    @Test
+    void sharedGroupPackAtDisabledBaseAndOnActivation() {
+        Network iidm = VoltageControlNetworkFactory.createWithTransformerSharedRemoteControl();
+        LfNetworkParameters params = new LfNetworkParameters()
+                .setSlackBusSelector(new FirstSlackBusSelector())
+                .setTransformerVoltageControl(true);
+        LfNetwork network = Networks.load(iidm, params).get(0);
+        EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(network).create();
+        java.util.List<LfBranch> members = network.<LfBranch>getControllerElements(VoltageControl.Type.TRANSFORMER)
+                .stream().filter(LfBranch::isConnectedAtBothSides).toList();
+        org.junit.jupiter.api.Assertions.assertEquals(2, members.size(), "two-member shared group expected");
+        // control DISABLED (the AFTER_GENERATOR base): the pack must still carry the coupling
+        members.forEach(b -> b.setVoltageControlEnabled(false));
+        GpuAcData d = GpuAcDataExtractor.extract(network, es);
+        org.junit.jupiter.api.Assertions.assertEquals(2, d.drRow().length,
+                "one non-free member row x 2 columns expected in the DISTR_RHO pack at a disabled base");
+        int n = es.getIndex().getSortedVariablesToFind().size();
+        int rhoColFree = es.getVariableSet().getVariable(members.get(0).getNum(), AcVariableType.BRANCH_RHO1).getRow();
+        int rhoColOther = es.getVariableSet().getVariable(members.get(1).getNum(), AcVariableType.BRANCH_RHO1).getRow();
+        for (int k = 0; k < d.drRow().length; k++) {
+            org.junit.jupiter.api.Assertions.assertEquals(rhoColOther, d.drRow()[k],
+                    "DISTR_RHO rows must sit on the NON-free member's rho column");
+        }
+        org.junit.jupiter.api.Assertions.assertEquals(-0.5, d.drCoef()[java.util.List.of(d.drCol()[0], d.drCol()[1]).indexOf(rhoColOther)],
+                1e-15, "self coefficient 1/2 - 1");
+        // toggled ALL-ON: activation must express the group state
+        members.forEach(b -> b.setVoltageControlEnabled(true));
+        network.fixTransformerVoltageControls();
+        GpuAcActivation on = GpuAcActivationExtractor.extractActivation(network, es, n);
+        LfBus pilot = members.get(0).getVoltageControl().orElseThrow().getControlledBus();
+        int pilotVCol = es.getVariableSet().getVariable(pilot.getNum(), AcVariableType.BUS_V).getRow();
+        org.junit.jupiter.api.Assertions.assertEquals(0, on.rowMode()[pilotVCol], "pilot V row = identity (V target)");
+        org.junit.jupiter.api.Assertions.assertEquals(1, on.rowMode()[rhoColOther], "non-free rho row = DISTR_RHO power row");
+        org.junit.jupiter.api.Assertions.assertEquals(1, on.rowMode()[rhoColFree], "free rho row = relocated pilot Q");
+        int pilotQEq = es.getEquation(pilot.getNum(), AcEquationType.BUS_TARGET_Q).orElseThrow().getColumn();
+        org.junit.jupiter.api.Assertions.assertEquals(pilotQEq, on.targetMap()[rhoColFree],
+                "the pilot's Q target must ride the FREE member's rho row");
+        members.forEach(b -> b.setVoltageControlEnabled(false));
     }
 
     @Test

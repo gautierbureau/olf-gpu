@@ -49,8 +49,8 @@ final class GpuBatchSimpleTvc {
                           List<Integer> ovIndexList, List<Double> ovValueList) {
         for (int slot = 0; slot < realCount; slot++) {
             for (GpuBatchTransformerControl.TransformerController tc : tcs) {
-                if (disabledMask[slot][tc.elemIndex()]) {
-                    continue;                                // the controller transformer itself is outaged
+                if (anyMemberOutaged(tc, disabledMask[slot])) {
+                    continue;                                // member outages are guard-rejected — safety net
                 }
                 int[] row = rowModePerScenario[slot] == baseRowMode
                         ? baseRowMode.clone() : rowModePerScenario[slot];
@@ -62,6 +62,15 @@ final class GpuBatchSimpleTvc {
                 rowModePerScenario[slot] = row;
             }
         }
+    }
+
+    private static boolean anyMemberOutaged(GpuBatchTransformerControl.TransformerController tc, boolean[] disabled) {
+        for (GpuBatchTransformerControl.Member m : tc.members()) {
+            if (disabled[m.elemIndex()]) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Post-solve rounding: read each scenario's continuous rho, round to the closest tap, restore
@@ -98,7 +107,7 @@ final class GpuBatchSimpleTvc {
             }
             int[] row = null;
             for (GpuBatchTransformerControl.TransformerController tc : tcs) {
-                if (disabledMask[s][tc.elemIndex()]) {
+                if (anyMemberOutaged(tc, disabledMask[s])) {
                     continue;
                 }
                 if (row == null) {
@@ -107,10 +116,12 @@ final class GpuBatchSimpleTvc {
                 for (int k = 0; k < tc.deltaRows().length; k++) {
                     row[tc.deltaRows()[k]] = baseRowMode[tc.deltaRows()[k]];   // undo the VC-on flip
                 }
-                double rounded = tc.closestTap(chunkResults[s][tc.rhoRow()]);  // OLF roundR1ToClosestTap
-                ovIdx.add(s * n + tc.rhoRow());
-                ovVal.add(rounded);                          // the identity row pins rho at the rounded tap
-                x0Full[s * n + tc.rhoRow()] = rounded;
+                for (GpuBatchTransformerControl.Member m : tc.members()) {     // OLF roundR1ToClosestTap, per member
+                    double rounded = m.closestTap(chunkResults[s][m.rhoRow()]);
+                    ovIdx.add(s * n + m.rhoRow());
+                    ovVal.add(rounded);                      // the identity row pins rho at the rounded tap
+                    x0Full[s * n + m.rhoRow()] = rounded;
+                }
                 affected[s] = true;
             }
             if (row != null) {

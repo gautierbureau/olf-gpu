@@ -758,19 +758,21 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
      *  weights solved 0.47 kV wrong before the gate) while the batchable L14 outage still engages
      *  the device; both must match the stock CPU SA exactly. */
     /** SHARED transformer control group (two parallel T2wTs regulating one bus, DISTR_RHO coupling)
-     *  under AFTER_GENERATOR TVC: the per-branch alone-toggle deltas cannot compose the group's
-     *  activation and the base packs no DISTR_RHO physics — the scope gate must route the WHOLE RUN
-     *  to the CPU (it batched 3.7e-3 kV silently wrong before the gate, 2026-09-06); both the
-     *  parallel-line outage and the member outage then match exactly by construction. */
+     *  under AFTER_GENERATOR TVC — BATCHED since plan A3/A4 (group-level toggle-diff controller;
+     *  it solved 3.7e-3 kV silently wrong pre-audit, then was whole-run gated): the parallel-line
+     *  outage orchestrates the group on the device at 1e-12 (engagement verified 2026-09-06: the
+     *  orchestrator enables 1 control on that scenario at targetV 33.0 — probed via stderr), and the
+     *  T2wT2 MEMBER outage is routed to the CPU per-contingency by the (now live, existence-keyed)
+     *  distrRhoControllers guard. */
     @org.junit.jupiter.api.Test
-    void deviceSharedTransformerControlFallsBackWholeRun() {
+    void deviceSharedTransformerControlMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithTransformerSharedRemoteControl();
         for (String id : new String[] {"T2wT", "T2wT2"}) {
             com.powsybl.iidm.network.TwoWindingsTransformer t = network.getTwoWindingsTransformer(id);
             t.getRatioTapChanger().setTargetDeadband(0).setRegulating(true).setTapPosition(0)
-                    .setRegulationTerminal(t.getTerminal2()).setTargetV(34.0);
+                    .setRegulationTerminal(t.getTerminal2()).setTargetV(33.0);
         }
         com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
         network.newLine().setId(l0.getId() + "_BIS")
@@ -785,7 +787,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
                 .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
-        assertGpuFallsBackWholeRunAndMatchesCpu(network, ctgs, lfp);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
     /** The whole-run-fallback contract: the batch must NOT engage (the scope routed the run to the

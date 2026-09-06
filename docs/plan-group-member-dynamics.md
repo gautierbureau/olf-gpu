@@ -132,10 +132,13 @@ consult `(altDest, selRow, mode)` — generalize the select to an index. Do NOT 
 this before A1–A5 are landed and benched.
 
 ### Part A landing checklist
-- [ ] A1 pack + nnz bench row
-- [ ] A2 extractor acceptance test (host-only)
-- [ ] A3 group controller + all TVC tests green at 1e-12
-- [ ] A4 shared-group SA tests (AFTER_GENERATOR + WITH_GENERATOR), gate lifted
+- [x] A1 pack (existence-keyed, all-enabled config, free = first) — 2026-09-06; nnz bench row still owed
+- [x] A2 extractor acceptance test (host-only: sharedGroupPackAtDisabledBaseAndOnActivation)
+- [x] A3 group controller (per-member off-deltas via subset toggling; free-member clamp -> STATUS_REJECTED
+      per-scenario CPU route; SimpleTvc converted) + all TVC tests green at 1e-12
+- [x] A4 deviceSharedTransformerControlMatchesCpu (AFTER_GENERATOR, engagement verified at targetV 33.0);
+      gates now flavor-specific: AFTER_GENERATOR + WITH_GENERATOR lifted, INCREMENTAL /
+      useInitialTapPosition / JAVA hybrid stay gated. WITH_GENERATOR shared-group SA test still owed
 - [ ] A5 drOv channel + member-outage tests (non-free batched / free CPU-routed)
 - [ ] docs: capability rows + gap list; memory update; both benches (cold first)
 

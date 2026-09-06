@@ -396,24 +396,28 @@ public final class GpuAcOuterLoopPacks {
     private static void buildDistrRhoContributions(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                                    int[] branchRhoCol, List<int[]> out, List<Double> coefs) {
         for (LfBus pilot : network.getBuses()) {
+            // ACTIVATION-INDEPENDENT (plan-group-member-dynamics A1): pack the ALL-ENABLED
+            // configuration of every group whose DISTR_RHO equations EXIST — never key on
+            // isTransformerVoltageControlled()/getColumn(), which are false/-1 at a control-OFF
+            // base (AFTER_GENERATOR) and silently emptied the pack (the e82290f audit). The FREE
+            // member is the FIRST enabled one — OLF's updateRemoteVoltageControlEquations pick and
+            // computeQRowAlt's, so its row carries the relocated pilot Q, never DISTR_RHO. Rows
+            // inactive in a scenario are identity-wiped by the row-mode pass (superset principle).
             TransformerVoltageControl tvc = pilot.getTransformerVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
-                    .filter(c -> pilot.isTransformerVoltageControlled())
                     .orElse(null);
             if (tvc == null) {
                 continue;
             }
-            List<LfBranch> controllers = tvc.getMergedControllerElements();
-            long count = controllers.stream().filter(c -> !c.isDisabled()).count();
-            for (LfBranch gk : controllers) {
-                if (GpuAcRowIndexing.row(es, gk.getNum(), AcEquationType.DISTR_RHO) < 0) {
-                    continue;                                // the free controller carries the pilot's Q, no DISTR_RHO
-                }
+            List<LfBranch> controllers = tvc.getMergedControllerElements().stream()
+                    .filter(c -> !c.isDisabled())
+                    .filter(c -> es.getEquation(c.getNum(), AcEquationType.DISTR_RHO).isPresent())
+                    .toList();
+            long count = controllers.size();
+            for (int k = 1; k < controllers.size(); k++) {   // k = 0 is the FREE member: no DISTR_RHO row
+                LfBranch gk = controllers.get(k);
                 int drRow = branchRhoCol[gk.getNum()];
                 for (LfBranch gj : controllers) {
-                    if (gj.isDisabled()) {
-                        continue;
-                    }
                     double coef = 1.0 / count - (gj == gk ? 1.0 : 0.0);
                     out.add(new int[] {drRow, branchRhoCol[gj.getNum()]});
                     coefs.add(coef);
@@ -480,7 +484,11 @@ public final class GpuAcOuterLoopPacks {
                 continue;
             }
             List<LfBranch> group = tvc.getMergedControllerElements();
-            boolean distrRho = group.stream().anyMatch(c -> GpuAcRowIndexing.row(es, c.getNum(), AcEquationType.DISTR_RHO) >= 0);
+            // EXISTENCE-keyed (row()/getColumn() is -1 for INACTIVE equations — the same trap):
+            // a shared group's equations exist whether or not the control is on at base.
+            boolean distrRho = group.stream().filter(c -> !c.isDisabled())
+                    .filter(c -> es.getEquation(c.getNum(), AcEquationType.DISTR_RHO).isPresent())
+                    .count() > 1;
             if (distrRho) {
                 controllers.addAll(group);
             }

@@ -62,15 +62,23 @@ final class GpuSaRunScope {
         // (AFTER_GENERATOR mode only; stage-1 scope = no generator voltage controls under the
         // transformer-controlled level — the solver checks). Anything else falls back.
         OpenLoadFlowParameters olfGuardParams = OpenLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters());
+        // Shared groups (plan-group-member-dynamics A3/A4): AFTER_GENERATOR and WITH_GENERATOR
+        // orchestrate them with group-level controllers; the useInitialTapPosition shared-ratio
+        // manager and the INCREMENTAL flavor are still out of scope, as is the JAVA hybrid
+        // (unvalidated) — those combinations stay whole-run CPU.
+        boolean sharedGroups = GpuBatchTransformerControl.sharedGroupPresent(lfNetwork);
+        boolean sharedUseInitial = sharedGroups && olfGuardParams.isTransformerVoltageControlUseInitialTapPosition();
         boolean transformerControlBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL
-                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
+                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork)
+                && !sharedUseInitial;
         // INCREMENTAL (OLF's default TVC mode): the DEVICE runs the loop's decisions per scenario around
         // batched solves with in-kernel dV/drho sensitivities (GpuBatchIncrementalTvc); stage-1 scope is
         // the same as the continuous port (no generator VC under the transformer-controlled level).
         boolean incrementalTvcBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL
-                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
+                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork)
+                && !sharedGroups;
         // INCREMENTAL shunt VC: same per-scenario orchestrator pattern (GpuBatchIncrementalShuntVc)
         // with in-kernel dV/dB sensitivities.
         boolean incrementalShuntBatchable =
@@ -98,7 +106,8 @@ final class GpuSaRunScope {
                         || pc.getControlledBranch() == pc.getControllerBranch());
         boolean simpleTvcBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL
-                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
+                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork)
+                && !sharedUseInitial;
         // REMOTE/DISTRIBUTED generator VC groups + reactive limits: the device RL pack has no entry
         // for an unpinned remote controller (it has no own BUS_TARGET_V), a base-pinned member's
         // switch-BACK would restore a v-identity instead of the group's DISTR_Q row, and the q-scatter
@@ -346,6 +355,7 @@ final class GpuSaRunScope {
                     || ("TransformerVoltageControl".equals(name) || "SimpleTransformerVoltageControl".equals(name)
                             || "IncrementalTransformerVoltageControl".equals(name))
                             && GpuBatchTransformerControl.transformerControlSupported(lfNetwork)
+                            && !GpuBatchTransformerControl.sharedGroupPresent(lfNetwork)
                     // ShuntVoltageControl: the JAVA engine runs OLF's real shunt VC loop; the continuous
                     // susceptance is solved INSIDE the device inner Newton (SHUNT_B is a variable in es) and the
                     // compact snapshot isolates the controller-shunt b + VC-enabled per scenario (BusState).

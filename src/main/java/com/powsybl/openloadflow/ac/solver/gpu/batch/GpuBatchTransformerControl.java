@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.TargetVector;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
+import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,13 +40,15 @@ public final class GpuBatchTransformerControl {
     private GpuBatchTransformerControl() {
     }
 
-    /** One voltage-controlling transformer, precomputed for the per-scenario orchestrator:
-     *  rho row (== r1 col, self-paired), controlled-bus V col, target/deadband, continuous r1
-     *  range, discrete tap r1 values, its element index (per-scenario outage check), and the
-     *  row-mode/target DELTAS between control-off (base) and control-on activations. */
-    record TransformerController(int rhoRow, int vCol, double targetV, double halfDeadband,
-                                 double minR1, double maxR1, double[] taps, int elemIndex,
-                                 int[] deltaRows, int[] deltaModesOn, double[] deltaTargetsOn) {
+    /** One member transformer of a (possibly shared) voltage control: rho row (== r1 col,
+     *  self-paired), continuous r1 range, discrete tap r1 values, element index (per-scenario
+     *  outage check), and the row-mode/target deltas that turn THIS member's control OFF while the
+     *  rest of the group stays ON (a clamp: OLF's roundR1ToExtremeTapPosition disables the member;
+     *  coefficients do NOT renormalize — the DISTR_RHO cross terms to a control-disabled member
+     *  stay). {@code clampNeedsCpu}: clamping this member re-picks the group's FREE role (its
+     *  off-delta touches other members' rows) — per-scenario CPU route, out of stage-1 scope. */
+    record Member(int rhoRow, double minR1, double maxR1, double[] taps, int elemIndex,
+                  int[] offDeltaRows, int[] offDeltaModes, double[] offDeltaTargets, boolean clampNeedsCpu) {
         double closestTap(double r1) {
             if (taps.length == 0) {
                 return r1;                                   // no tap table: keep the continuous ratio
@@ -60,25 +63,31 @@ public final class GpuBatchTransformerControl {
         }
     }
 
+    /** One voltage CONTROL (the group), precomputed for the per-scenario orchestrator:
+     *  controlled-bus V col, target/deadband, the row-mode/target DELTAS between control-off (base)
+     *  and ALL-members-on activations (plan-group-member-dynamics A3 — captured by toggling the
+     *  WHOLE group, never one member alone), and the members. */
+    record TransformerController(int vCol, double targetV, double halfDeadband,
+                                 int[] deltaRows, int[] deltaModesOn, double[] deltaTargetsOn,
+                                 Member[] members) {
+    }
+
     /** Stage-1 scope check: the CPU loop's GeneratorVoltageControlManager disables generator
      *  voltage controls at buses under the max transformer-controlled nominal voltage. Porting
      *  the frozen-Q flip is stage 2 — until then a network that would NEED it must stay on the
      *  CPU path (the provider's guard calls this). */
-    public static boolean transformerControlSupported(LfNetwork network) {
-        // SHARED control groups (several transformers regulating one bus, DISTR_RHO coupling): the
-        // orchestrators build per-BRANCH controllers whose ON-deltas are captured by toggling each
-        // control ALONE — for a group those deltas cannot compose into the all-enabled activation
-        // (the free-member role and the DISTR_RHO rows depend on the whole enabled set), and the
-        // AFTER_GENERATOR base packs no DISTR_RHO contributions at all. Whole-run CPU until the
-        // group-level controller lands (measured 3.7e-3 kV silently wrong without this gate).
-        boolean sharedGroup = network.getControlledBuses(com.powsybl.openloadflow.network.VoltageControl.Type.TRANSFORMER).stream()
+    /** True when any transformer voltage control has more than one merged controller (a SHARED
+     *  group, DISTR_RHO coupling). The AFTER_GENERATOR/WITH_GENERATOR orchestrators handle groups
+     *  since plan-group-member-dynamics A3 (group-level toggle-diff controllers); INCREMENTAL and
+     *  the useInitialTapPosition shared-ratio manager do not — the scope gates those combinations. */
+    public static boolean sharedGroupPresent(LfNetwork network) {
+        return network.getControlledBuses(com.powsybl.openloadflow.network.VoltageControl.Type.TRANSFORMER).stream()
                 .map(b -> b.getTransformerVoltageControl().orElse(null))
                 .filter(java.util.Objects::nonNull)
                 .anyMatch(vc -> vc.getMergedControllerElements().size() > 1);
-        if (sharedGroup) {
-            LOGGER.info("Shared transformer control group detected — batched TVC out of scope, CPU fallback");
-            return false;
-        }
+    }
+
+    public static boolean transformerControlSupported(LfNetwork network) {
         double maxControlledNominalV = network.<LfBranch>getControllerElements(com.powsybl.openloadflow.network.VoltageControl.Type.TRANSFORMER).stream()
                 .flatMap(b -> b.getVoltageControl().stream())
                 .map(vc -> vc.getControlledBus().getNominalV())
@@ -112,27 +121,34 @@ public final class GpuBatchTransformerControl {
                 branchR1Cols.put(v.getElementNum(), v.getRow());
             }
         }
-        for (LfBranch branch : network.<LfBranch>getControllerElements(com.powsybl.openloadflow.network.VoltageControl.Type.TRANSFORMER)) {
-            var vcOpt = branch.getVoltageControl();
-            if (vcOpt.isEmpty() || !branch.isConnectedAtBothSides()) {
+        for (LfBus controlled : network.getControlledBuses(com.powsybl.openloadflow.network.VoltageControl.Type.TRANSFORMER)) {
+            var vc = controlled.getTransformerVoltageControl()
+                    .filter(c -> c.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN)
+                    .orElse(null);
+            if (vc == null) {
                 continue;
             }
-            var vc = vcOpt.orElseThrow();
-            Integer r1Col = branchR1Cols.get(branch.getNum());
-            Integer vCol = busVCols.get(vc.getControlledBus().getNum());
-            int elemIndex = elementMapper.getElementIndex(branch);
-            if (r1Col == null || vCol == null || elemIndex < 0) {
-                LOGGER.info("Transformer controller {} not representable on the GPU batch — skipped (results follow the base tap)", branch.getId());
+            List<LfBranch> memberBranches = vc.getMergedControllerElements().stream()
+                    .filter(LfBranch::isConnectedAtBothSides)
+                    .filter(b -> !b.isDisabled())
+                    .toList();
+            Integer vCol = busVCols.get(controlled.getNum());
+            boolean representable = vCol != null && !memberBranches.isEmpty()
+                    && memberBranches.stream().allMatch(b -> branchR1Cols.get(b.getNum()) != null
+                            && elementMapper.getElementIndex(b) >= 0);
+            if (!representable) {
+                LOGGER.info("Transformer control of {} not representable on the GPU batch — skipped (results follow the base taps)",
+                        controlled.getId());
                 continue;
             }
-            double halfDeadband = vc.getTargetDeadband().orElse(0.1 / vc.getControlledBus().getNominalV()) / 2;
-            var piModel = branch.getPiModel();
-            double[] taps = tapR1Values(piModel);
-            boolean wasEnabled = branch.isVoltageControlEnabled();
-            branch.setVoltageControlEnabled(true);
+            double halfDeadband = vc.getTargetDeadband().orElse(0.1 / controlled.getNominalV()) / 2;
+            boolean[] wasEnabled = new boolean[memberBranches.size()];
+            for (int m = 0; m < memberBranches.size(); m++) {
+                wasEnabled[m] = memberBranches.get(m).isVoltageControlEnabled();
+                memberBranches.get(m).setVoltageControlEnabled(true);    // the WHOLE group ON (A3)
+            }
             GpuAcActivation onAct = GpuAcActivation.fromEquationSystem(network, es);
             double[] onTargets = onAct.applyTargets(targetVector.getArray());
-            branch.setVoltageControlEnabled(wasEnabled);
             List<Integer> dRows = new ArrayList<>();
             for (int r = 0; r < baseTargets.length; r++) {
                 if (onAct.rowMode()[r] != baseActivation.rowMode()[r] || onTargets[r] != baseTargets[r]) {
@@ -146,9 +162,43 @@ public final class GpuBatchTransformerControl {
                 deltaModesOn[k] = onAct.rowMode()[deltaRows[k]];
                 deltaTargetsOn[k] = onTargets[deltaRows[k]];
             }
-            out.add(new TransformerController(r1Col, vCol, vc.getTargetValue(), halfDeadband,
-                    piModel.getMinR1(), piModel.getMaxR1(), taps, elemIndex,
-                    deltaRows, deltaModesOn, deltaTargetsOn));
+            Member[] members = new Member[memberBranches.size()];
+            for (int m = 0; m < memberBranches.size(); m++) {
+                LfBranch branch = memberBranches.get(m);
+                // this member's control OFF while the rest stays ON — the CLAMP activation (OLF's
+                // roundR1ToExtremeTapPosition disables the member; the group keeps distributing)
+                branch.setVoltageControlEnabled(false);
+                GpuAcActivation mOff = GpuAcActivation.fromEquationSystem(network, es);
+                double[] mOffTargets = mOff.applyTargets(targetVector.getArray());
+                branch.setVoltageControlEnabled(true);
+                List<Integer> oRows = new ArrayList<>();
+                for (int r = 0; r < baseTargets.length; r++) {
+                    if (mOff.rowMode()[r] != onAct.rowMode()[r] || mOffTargets[r] != onTargets[r]) {
+                        oRows.add(r);
+                    }
+                }
+                int rhoRow = branchR1Cols.get(branch.getNum());
+                // a clamp that only flips THIS member's rho row is expressible; anything wider means
+                // the FREE role re-picked (or a single-member group turning fully off, which reverts
+                // the whole group delta — also expressible)
+                boolean cpuOnly = memberBranches.size() > 1
+                        && oRows.stream().anyMatch(r -> r != rhoRow);
+                int[] offDeltaRows = oRows.stream().mapToInt(Integer::intValue).toArray();
+                int[] offDeltaModes = new int[offDeltaRows.length];
+                double[] offDeltaTargets = new double[offDeltaRows.length];
+                for (int k = 0; k < offDeltaRows.length; k++) {
+                    offDeltaModes[k] = mOff.rowMode()[offDeltaRows[k]];
+                    offDeltaTargets[k] = mOffTargets[offDeltaRows[k]];
+                }
+                members[m] = new Member(rhoRow, branch.getPiModel().getMinR1(), branch.getPiModel().getMaxR1(),
+                        tapR1Values(branch.getPiModel()), elementMapper.getElementIndex(branch),
+                        offDeltaRows, offDeltaModes, offDeltaTargets, cpuOnly);
+            }
+            for (int m = 0; m < memberBranches.size(); m++) {
+                memberBranches.get(m).setVoltageControlEnabled(wasEnabled[m]);
+            }
+            out.add(new TransformerController(vCol, vc.getTargetValue(), halfDeadband,
+                    deltaRows, deltaModesOn, deltaTargetsOn, members));
         }
         return out;
     }
@@ -208,8 +258,15 @@ public final class GpuBatchTransformerControl {
             double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
             double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, int[] varType,
             BatchConfig config) {
-        // INITIAL: which (slot, controller) pairs are out of deadband on the converged first solve?
-        List<int[]> enabled = new ArrayList<>();             // {slot, controllerIdx}
+        // per-member flat indexing across all controls: memberBase[c] + m
+        int[] memberBase = new int[tcs.size()];
+        int totalMembers = 0;
+        for (int c = 0; c < tcs.size(); c++) {
+            memberBase[c] = totalMembers;
+            totalMembers += tcs.get(c).members().length;
+        }
+        // INITIAL: which (slot, CONTROL) pairs are out of deadband on the converged first solve?
+        List<int[]> enabled = new ArrayList<>();             // {slot, controlIdx}
         for (int slot = 0; slot < realCount; slot++) {
             double[] r = chunkResults[slot];
             if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
@@ -217,8 +274,12 @@ public final class GpuBatchTransformerControl {
             }
             for (int c = 0; c < tcs.size(); c++) {
                 TransformerController tc = tcs.get(c);
-                if (disabledMask[slot][tc.elemIndex()]) {
-                    continue;                                // the controller transformer itself is outaged
+                boolean memberOutaged = false;               // safety net — member outages are guard-rejected
+                for (Member m : tc.members()) {
+                    memberOutaged |= disabledMask[slot][m.elemIndex()];
+                }
+                if (memberOutaged) {
+                    continue;
                 }
                 if (Math.abs(tc.targetV() - r[tc.vCol()]) > tc.halfDeadband()) {
                     enabled.add(new int[] {slot, c});
@@ -239,7 +300,7 @@ public final class GpuBatchTransformerControl {
         // Base per-scenario overrides (islanding/gen-outage) are kept and extended per call.
         List<Integer> ovIdx = new ArrayList<>();
         List<Double> ovVal = new ArrayList<>();
-        double[] rounded = new double[chunkSize * tcs.size()];   // fixed r1 once clamped/rounded (NaN = still continuous)
+        double[] rounded = new double[chunkSize * totalMembers];   // fixed r1 once clamped/rounded (NaN = still continuous)
         java.util.Arrays.fill(rounded, Double.NaN);
 
         int[][] rowMode = new int[chunkSize][];
@@ -263,16 +324,41 @@ public final class GpuBatchTransformerControl {
                 int[] row = rowModePerScenario[slot].clone();
                 for (int c = 0; c < tcs.size(); c++) {
                     TransformerController tc = tcs.get(c);
-                    double fixedR1 = rounded[slot * tcs.size() + c];
-                    if (on[slot][c] && Double.isNaN(fixedR1)) {          // control ACTIVE: apply the ON deltas
+                    if (!on[slot][c]) {
+                        continue;
+                    }
+                    Member[] members = tc.members();
+                    boolean allFixed = true;
+                    for (int m = 0; m < members.length; m++) {
+                        allFixed &= !Double.isNaN(rounded[slot * totalMembers + memberBase[c] + m]);
+                    }
+                    if (!allFixed) {                         // control ACTIVE: the whole group's ON deltas
                         for (int k = 0; k < tc.deltaRows().length; k++) {
                             row[tc.deltaRows()[k]] = tc.deltaModesOn()[k];
                             ovIdx.add(slot * n + tc.deltaRows()[k]);
                             ovVal.add(tc.deltaTargetsOn()[k]);
                         }
-                    } else if (!Double.isNaN(fixedR1)) {                 // clamped/rounded: identity at the fixed r1
-                        ovIdx.add(slot * n + tc.rhoRow());
-                        ovVal.add(fixedR1);
+                        for (int m = 0; m < members.length; m++) {   // clamped members: OFF-delta on top,
+                            double fixedR1 = rounded[slot * totalMembers + memberBase[c] + m];
+                            if (Double.isNaN(fixedR1)) {
+                                continue;
+                            }
+                            Member mem = members[m];
+                            for (int k = 0; k < mem.offDeltaRows().length; k++) {
+                                row[mem.offDeltaRows()[k]] = mem.offDeltaModes()[k];
+                                if (mem.offDeltaRows()[k] != mem.rhoRow()) {
+                                    ovIdx.add(slot * n + mem.offDeltaRows()[k]);
+                                    ovVal.add(mem.offDeltaTargets()[k]);
+                                }
+                            }
+                            ovIdx.add(slot * n + mem.rhoRow());      // ...with the rho identity pinned
+                            ovVal.add(fixedR1);                       // at the CLAMP value, not the base tap
+                        }
+                    } else {                                 // every member fixed: back to base rows + pins
+                        for (int m = 0; m < members.length; m++) {
+                            ovIdx.add(slot * n + members[m].rhoRow());
+                            ovVal.add(rounded[slot * totalMembers + memberBase[c] + m]);
+                        }
                     }
                 }
                 rowMode[slot] = row;
@@ -286,9 +372,12 @@ public final class GpuBatchTransformerControl {
             // (target ± the stopping residual), and that difference alone leaves ~1e-6 vs the CPU's ~1e-13.
             for (int slot : affected) {
                 for (int c = 0; c < tcs.size(); c++) {
-                    double fixedR1 = rounded[slot * tcs.size() + c];
-                    if (!Double.isNaN(fixedR1)) {
-                        x0Full[slot * n + tcs.get(c).rhoRow()] = fixedR1;
+                    Member[] members = tcs.get(c).members();
+                    for (int m = 0; m < members.length; m++) {
+                        double fixedR1 = rounded[slot * totalMembers + memberBase[c] + m];
+                        if (!Double.isNaN(fixedR1)) {
+                            x0Full[slot * n + members[m].rhoRow()] = fixedR1;
+                        }
                     }
                 }
             }
@@ -314,15 +403,28 @@ public final class GpuBatchTransformerControl {
                 }
                 for (int c = 0; c < tcs.size(); c++) {
                     TransformerController tc = tcs.get(c);
-                    if (!on[slot][c] || !Double.isNaN(rounded[slot * tcs.size() + c])) {
+                    if (!on[slot][c]) {
                         continue;
                     }
-                    double r1 = r[tc.rhoRow()];
-                    if (r1 < tc.minR1() || r1 > tc.maxR1()) {
-                        rounded[slot * tcs.size() + c] = Math.max(tc.minR1(), Math.min(tc.maxR1(), r1));
-                        anyClamped = true;
-                    } else {
-                        anyContinuous = true;
+                    Member[] members = tc.members();
+                    for (int m = 0; m < members.length; m++) {
+                        Member mem = members[m];
+                        if (!Double.isNaN(rounded[slot * totalMembers + memberBase[c] + m])) {
+                            continue;
+                        }
+                        double r1 = r[mem.rhoRow()];
+                        if (r1 < mem.minR1() || r1 > mem.maxR1()) {
+                            if (mem.clampNeedsCpu()) {
+                                // clamping this member re-picks the group's FREE role — per-scenario
+                                // CPU route (never wrong, only un-accelerated)
+                                chunkResults[slot][n + 2] = GpuBatchStatus.STATUS_REJECTED;
+                                continue;
+                            }
+                            rounded[slot * totalMembers + memberBase[c] + m] = Math.max(mem.minR1(), Math.min(mem.maxR1(), r1));
+                            anyClamped = true;
+                        } else {
+                            anyContinuous = true;
+                        }
                     }
                 }
             }
@@ -332,13 +434,19 @@ public final class GpuBatchTransformerControl {
             if (anyContinuous) {                             // round ALL remaining continuous ratios, one final solve
                 for (int slot : affected) {
                     double[] r = chunkResults[slot];
-                    if (r == null) {
+                    if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
                         continue;
                     }
                     for (int c = 0; c < tcs.size(); c++) {
                         TransformerController tc = tcs.get(c);
-                        if (on[slot][c] && Double.isNaN(rounded[slot * tcs.size() + c])) {
-                            rounded[slot * tcs.size() + c] = tc.closestTap(r[tc.rhoRow()]);
+                        if (!on[slot][c]) {
+                            continue;
+                        }
+                        Member[] members = tc.members();
+                        for (int m = 0; m < members.length; m++) {
+                            if (Double.isNaN(rounded[slot * totalMembers + memberBase[c] + m])) {
+                                rounded[slot * totalMembers + memberBase[c] + m] = members[m].closestTap(r[members[m].rhoRow()]);
+                            }
                         }
                     }
                 }

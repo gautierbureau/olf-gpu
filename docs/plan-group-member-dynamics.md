@@ -290,6 +290,28 @@ reject stays; group still batchable when only NON-free members are pinnable).
       kernel SKIPS remote entries until B3 — structurally inert, gate still routes to CPU.
       Pack acceptance: `remoteMembersPackedAsRlRemoteEntries` (host-only)
 - [ ] B2 mode-4 + alt-dest prototype on a 2-member group (sequential test first)
+      Design refined 2026-09-06 (from reading scatterAddDyn/buildCbDynDest/collectCbAltPattern):
+      * CANONICAL remote-member encoding, independent of base pin state: `computeQRow` returns
+        SUPPRESSED (−1) for a remote member even when base-pinned; `computeQRowAlt` returns the
+        member's OWN row; per-scenario row mode selects — mode 4 = "member row hosts its own Q
+        balance" (pinned), mode 1 = DISTR_Q (unpinned). One encoding, no per-state structures.
+      * `scatterAddDyn` predicate extends from `mode[sel]==0` to `mode[sel]∈{0,4}`; for entries
+        whose frozen row is suppressed, `buildCbDynDest` must set `selRow = altRow` (the member
+        row) — today it sets `selRow = rc.row`, which is −1 there. TVC entries keep rc.row and
+        never see mode 4, so the shared predicate is safe.
+      * The activation extractor emits mode 4 (not 1) for an ACTIVE BUS_TARGET_Q row at a remote
+        member bus, and `seedRlModeFromState` writes 4 for remote entries — every mode consumer
+        (applyRowModeBatch, residualNormsBatch per-row criteria, host-side mode comparisons)
+        must treat 4 as 1; AUDIT all `mode == 1`-style checks before flipping the extractor.
+      * `fillDistrQBatch` gates each emission on `mode[destRow] != 4` (the pinned member's own
+        DISTR_Q row is replaced; OTHER members' sums keep the pinned member's q terms — CPU only
+        deactivates terms on element DISABLE, not on controller disable).
+      * B3's member-q problem (qBuf at a member row holds the DISTR_Q residual, not bus q):
+        add a tiny twin pass over the EXISTING dq lists (dqElem/dqSide) with weight 1 writing
+        each member's own q into dQbuf at its row — that slot is free because the main qBuf fill
+        suppresses member rows; the RL kernel's `q = qBuf[idx] + loadQ` then works verbatim.
+      * Islanded member row (mode 0) hits the alt path harmlessly: fills at disabled elements
+        are skipped, and applyRowModeBatch wipes identity rows after the fills anyway.
 - [ ] B3 kernel transitions + trace
 - [ ] B4 free-member pre-gate kept
 - [ ] B5 tests (post-contingency pin / unpin / all-pinned / hybrid) + benches

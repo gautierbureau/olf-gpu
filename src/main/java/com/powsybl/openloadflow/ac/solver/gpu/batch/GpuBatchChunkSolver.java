@@ -90,7 +90,20 @@ final class GpuBatchChunkSolver {
         }
         GpuAcNewtonSolver.setBatchRlRemote(handle,
                 anyRlRemote ? gpuData.rlRemote() : null,
-                anyRlRemote ? gpuData.rlCmpVrow() : null);
+                anyRlRemote ? gpuData.rlCmpVrow() : null,
+                anyRlRemote ? gpuData.rmqRow() : null,
+                anyRlRemote ? gpuData.rmqElem() : null,
+                anyRlRemote ? gpuData.rmqSide() : null,
+                anyRlRemote ? gpuData.rmqKind() : null,
+                anyRlRemote ? gpuData.rmqWeight() : null,
+                anyRlRemote ? gpuData.dqKMember() : null,
+                anyRlRemote ? gpuData.dqJMember() : null,
+                anyRlRemote ? gpuData.dqMemberKey() : null,
+                anyRlRemote ? gpuData.dqMemberRlEntry() : null,
+                anyRlRemote ? gpuData.dqMemberGroupStart() : null,
+                anyRlRemote ? gpuData.dqMemberGroupCount() : null,
+                anyRlRemote ? gpuData.dqMemberRow() : null,
+                anyRlRemote ? gpuData.dqMemberHasRow() : null);
 
         // The base state / targets are IDENTICAL for every scenario (a single-branch N-1 starts from the
         // same converged base operating point): passed as single length-n rows and tiled on-device. The
@@ -156,7 +169,19 @@ final class GpuBatchChunkSolver {
         int[] baseRlSeed = new int[nrl];
         for (int i = 0; i < nrl; i++) {
             int vrow = gpuData.rlVrow()[i];
-            baseRlSeed[i] = baseRowMode[vrow] == 1 ? (baseState[vrow] < gpuData.rlVtarget()[i] ? 2 : 1) : 0;
+            // remote entries (plan-B3): base mode 1 = UNPINNED DISTR_Q share; only mode 4 is a pin.
+            // The pilot's V equals the group target at the base (degenerate) — key the direction on
+            // WHICH limit the extracted BUS_TARGET_Q target equals instead.
+            boolean remote = gpuData.rlRemote().length > i && gpuData.rlRemote()[i] != 0;
+            if (remote) {
+                double tgt = baseTargets[vrow];
+                baseRlSeed[i] = baseRowMode[vrow] == 4
+                        ? (Math.abs(tgt - (gpuData.rlMaxQ()[i] - gpuData.rlLoadQ()[i]))
+                           <= Math.abs(tgt - (gpuData.rlMinQ()[i] - gpuData.rlLoadQ()[i])) ? 2 : 1)
+                        : 0;
+            } else {
+                baseRlSeed[i] = baseRowMode[vrow] == 1 ? (baseState[vrow] < gpuData.rlVtarget()[i] ? 2 : 1) : 0;
+            }
         }
         try {
             long startTime = System.currentTimeMillis();

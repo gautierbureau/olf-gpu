@@ -293,7 +293,12 @@ public final class GpuAcNewtonSolver {
     /** Remote-member RL entries (plan-B1): per-entry remote kinds + compare rows (PILOT v column for
      *  remote group members — both RL switch conditions test the pilot's V against the GROUP target).
      *  The RL kernel SKIPS remote entries until the B3 transition machinery lands; nulls clear. */
-    public static native void setBatchRlRemote(long handle, byte[] rlRemote, int[] rlCmpVrow);
+    public static native void setBatchRlRemote(long handle, byte[] rlRemote, int[] rlCmpVrow,
+                                               int[] rmqRow, int[] rmqElem, int[] rmqSide, int[] rmqKind,
+                                               double[] rmqWeight,
+                                               int[] dqKMember, int[] dqJMember, double[] dqMemberKey,
+                                               int[] dqMemberRlEntry, int[] dqMemberGroupStart,
+                                               int[] dqMemberGroupCount, int[] dqMemberRow, byte[] dqMemberHasRow);
 
     /** Install (or clear, with nulls) per-scenario DISTR_Q weight overrides on a batch context —
      *  {@code idx} = flat {scenario, contribution} pairs, {@code w} = the renormalized weight (a gen

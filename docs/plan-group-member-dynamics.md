@@ -322,10 +322,37 @@ reject stays; group still batchable when only NON-free members are pinnable).
         suppresses member rows; the RL kernel's `q = qBuf[idx] + loadQ` then works verbatim.
       * Islanded member row (mode 0) hits the alt path harmlessly: fills at disabled elements
         are skipped, and applyRowModeBatch wipes identity rows after the fills anyway.
-- [ ] B3 kernel transitions + trace
-- [ ] B4 free-member pre-gate kept
-- [ ] B5 tests (post-contingency pin / unpin / all-pinned / hybrid) + benches
-- [ ] gate lifted; docs + memory updated
+- [x] B3 kernel transitions — 2026-09-06, LANDED with B5 tests at 1e-12. The CPU model turned
+      out richer than the B0 note (which was WRONG on one point): an RL pin (controller disable)
+      DOES renormalize the reactive keys (updateReactiveKeys zeroes a !isControllerEnabled
+      member's key), the pinned member's q TERMS STAY in every survivor's row (weight = the row
+      owner's renormalized qPct), and the pin is balanced on the TARGET side —
+      getGeneratorReactivePowerDistributionTarget adds qPct_k x targetQ_j per frozen member j.
+      Device pieces: dynamic per-scenario DISTR_Q weights recomputed in-kernel from the RAW keys
+      (Control.createReactiveKeys, exposed by OLF patch 3ddde4293) + per-(entry, scenario)
+      limitType, replicating OLF's zero-then-sum member-order arithmetic; the
+      updateDistrQTargetsBatch kernel keeps the survivors' row targets in step with the pin
+      states each RL pass; fillRemoteMemberQBatch accumulates each member's OWN q into its
+      (suppressed, hence free) qBuf row so the RL kernel evaluates remote entries like local
+      ones; the RL kernel's remote branch pins/unpins mode 4 with PILOT-referenced switch
+      conditions; initRlLimitTypeBatch and the Java baseRlSeed key remote base pins on mode 4
+      (the pilot's V equals the target at the base — the v-vs-target heuristic is degenerate) and
+      derive the direction from WHICH limit the extracted target equals. DISTR_Q contribution
+      rows are EXISTENCE-keyed (the A1 lesson): a base-pinned member's row is packed so an
+      in-flight unpin can re-activate it; the mode-4 fill gate shows the right face per scenario.
+      NOTE the remote V-based switch-back is inherently knife-edge while the group keeps control
+      (survivors hold the pilot AT target): the CPU only unpins decisively when control margin is
+      lost, which the B4 pre-gate keeps on the CPU — the base-pinned-relief test pins that down.
+- [x] B4 free-member pre-gate — 2026-09-06: the DEVICE gate rejects only a group whose FREE
+      member (first controller-enabled) has finite limits (deviceRemoteFreeMemberPinnableFallsBackWholeRun);
+      the JAVA hybrid keeps the any-member-pinnable gate
+- [x] B5 tests — 2026-09-06: deviceRemoteMemberPostContingencyPinMatchesCpu (in-flight pin of a
+      NON-free member, 1e-12), deviceRemoteMemberBasePinnedReliefMatchesCpu (base-pinned member
+      through a strongly relieving load contingency — CPU stays pinned, exact), the converted
+      deviceRemoteGeneratorControlReactiveLimitsMatchesCpu (previously whole-run-gated network now
+      batches at 1e-12) + the B4 gate test. Still owed: benches after the B-work settles
+- [~] gate lifted for the DEVICE mode (ReactiveLimits[remoteGroupFreeMemberPinnable] only);
+      JAVA hybrid stays fully gated; docs updated 2026-09-06 — memory + benches owed
 
 ---
 

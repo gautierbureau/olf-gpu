@@ -182,6 +182,9 @@ final class GpuBatchPrecomputer {
             // full stack at WARN: a swallowed exception here silently un-accelerates the whole run —
             // the 2026-09-06 bridge AIOOBE hid behind the message-only log for days
             LOGGER.warn("GPU batched SA precompute failed; falling back to per-contingency CPU solves", e);
+            if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+                e.printStackTrace();                         // the test harness's logback appenders are broken
+            }                                                // (core/classic version mismatch) — surface it here
             return PrecomputedBatch.empty();
         }
     }

@@ -72,11 +72,15 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obIn, int[] obIdx,
                         double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
                         int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
+                        int[] dqKMember, int[] dqJMember, double[] dqMemberKey, int[] dqMemberRlEntry,
+                        int[] dqMemberGroupStart, int[] dqMemberGroupCount, int[] dqMemberRow, byte[] dqMemberHasRow,
                         double[] ziIn, int[] ziIdx,
                         int[] drRow, int[] drCol, double[] drCoef,
                         int[] dbRow, int[] dbCol, double[] dbCoef,
                         int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget,
-                        byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow, double[] rowSlope,
+                        byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow,
+                        int[] rmqRow, int[] rmqElem, int[] rmqSide, int[] rmqKind, double[] rmqWeight,
+                        double[] rowSlope,
                         int[] dsPhiRow, double[] dsFactor, int dsSlackPhiRow, double dsSlackTargetP,
                         double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
                         int dsMode, double[] dsMarginUp, double[] dsMarginDown,
@@ -159,6 +163,16 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(rlMonitored, other.rlMonitored)
                 && java.util.Arrays.equals(rlRemote, other.rlRemote)
                 && java.util.Arrays.equals(rlCmpVrow, other.rlCmpVrow)
+                && java.util.Arrays.equals(dqKMember, other.dqKMember) && java.util.Arrays.equals(dqJMember, other.dqJMember)
+                && java.util.Arrays.equals(dqMemberKey, other.dqMemberKey)
+                && java.util.Arrays.equals(dqMemberRlEntry, other.dqMemberRlEntry)
+                && java.util.Arrays.equals(dqMemberGroupStart, other.dqMemberGroupStart)
+                && java.util.Arrays.equals(dqMemberGroupCount, other.dqMemberGroupCount)
+                && java.util.Arrays.equals(dqMemberRow, other.dqMemberRow)
+                && java.util.Arrays.equals(dqMemberHasRow, other.dqMemberHasRow)
+                && java.util.Arrays.equals(rmqRow, other.rmqRow) && java.util.Arrays.equals(rmqElem, other.rmqElem)
+                && java.util.Arrays.equals(rmqSide, other.rmqSide) && java.util.Arrays.equals(rmqKind, other.rmqKind)
+                && java.util.Arrays.equals(rmqWeight, other.rmqWeight)
                 && java.util.Arrays.equals(rowSlope, other.rowSlope)
                 && java.util.Arrays.equals(cbPcSide, other.cbPcSide)
                 && dsMode == other.dsMode

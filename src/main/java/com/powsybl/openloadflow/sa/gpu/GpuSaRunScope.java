@@ -124,6 +124,21 @@ final class GpuSaRunScope {
                 .distinct()
                 .flatMap(vc -> vc.getMergedControllerElements().stream())
                 .anyMatch(ctl -> ctl.getMinQ() > -1e9 || ctl.getMaxQ() < 1e9);
+        // DEVICE-mode remote pin dynamics (plan-B3): NON-free members pin/unpin on-device (mode-4
+        // transitions + own-q accumulation); only a group whose FREE member (first controller-enabled
+        // — the pilot-Q carrier, whose pin would re-pick the free role: A6 territory) is itself
+        // pinnable still routes the whole run to the CPU (plan-B4 pre-gate).
+        boolean freeRemoteRlPinnable = lfNetwork.getBuses().stream()
+                .map(b -> b.getGeneratorVoltageControl()
+                        .filter(vc -> vc.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN
+                                && !vc.isLocalControl())
+                        .orElse(null))
+                .filter(java.util.Objects::nonNull)
+                .distinct()
+                .map(vc -> vc.getMergedControllerElements().stream()
+                        .filter(vc::isControllerEnabled).findFirst().orElse(null))
+                .filter(java.util.Objects::nonNull)
+                .anyMatch(free -> free.getMinQ() > -1e9 || free.getMaxQ() < 1e9);
         boolean noSvc = lfNetwork.getBuses().stream()
                 .flatMap(b -> b.getGenerators().stream())
                 .noneMatch(g -> g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator);
@@ -175,9 +190,9 @@ final class GpuSaRunScope {
             if (dsLoopActive && loadBased && olfGuardParams.isUseLoadModel()) {
                 unsupportedOuterLoops.add("DistributedSlack[useLoadModel+loadBased]");
             }
-            if (remoteRlPinnable && acParameters.getOuterLoops().stream()
+            if (freeRemoteRlPinnable && acParameters.getOuterLoops().stream()
                     .anyMatch(ol -> ReactiveLimitsOuterLoop.NAME.equals(ol.getName()))) {
-                unsupportedOuterLoops.add("ReactiveLimits[remoteGroupPinDynamics]");
+                unsupportedOuterLoops.add("ReactiveLimits[remoteGroupFreeMemberPinnable]");
             }
             // Curve-limit extrapolation: the device curve evaluator implements the CLAMP branch only
             // (OLF default); slope extrapolation outside [minP, maxP] -> CPU.

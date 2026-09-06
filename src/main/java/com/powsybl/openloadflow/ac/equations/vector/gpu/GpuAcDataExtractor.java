@@ -93,10 +93,12 @@ public final class GpuAcDataExtractor {
         GpuAcValidation.validate(es);
         ExtractionColumns columns = ExtractionColumns.of(network, es);
         GpuAcFamilyPacker.Packs family = GpuAcFamilyPacker.pack(network, columns, baseOpenBranchIds, baseOpenZiBranchIds);
-        GpuAcOuterLoopPacks.DqPack dq = GpuAcOuterLoopPacks.distrQPack(network, es, columns, family);
+        GpuAcOuterLoopPacks.RlPack rl = GpuAcOuterLoopPacks.reactiveLimitsPack(network, es, columns, reactiveLimits);
+        GpuAcOuterLoopPacks.DqPack dq = GpuAcOuterLoopPacks.distrQPack(network, es, columns, family, rl);
         GpuAcOuterLoopPacks.DrPack dr = GpuAcOuterLoopPacks.distrRhoPack(network, es, columns);
         GpuAcOuterLoopPacks.DsbPack dsb = GpuAcOuterLoopPacks.distrShuntBPack(network, es, columns);
-        GpuAcOuterLoopPacks.RlPack rl = GpuAcOuterLoopPacks.reactiveLimitsPack(network, es, columns, reactiveLimits);
+
+        GpuAcOuterLoopPacks.RmqPack rmq = GpuAcOuterLoopPacks.remoteMemberQPack(network, es, columns, family, reactiveLimits);
         GpuAcOuterLoopPacks.DsPack ds = GpuAcOuterLoopPacks.distributedSlackPack(network, es, columns, distributedSlack, dsParams);
         // SLOPE-SVC rows (V + slope*sumQ = target, row mode 2): per-row slope, 0 everywhere else
         double[] rowSlope = new double[es.getIndex().getSortedVariablesToFind().size()];
@@ -116,11 +118,14 @@ public final class GpuAcDataExtractor {
                 GpuAcArrays.flatD(family.shIn(), 2), GpuAcArrays.flatI(family.shIdx(), 5),
                 GpuAcArrays.flatD(family.hvIn(), 5), GpuAcArrays.flatI(family.hvIdx(), 4),
                 dq.dqElem(), dq.dqSide(), dq.dqWeight(), dq.dqRow(), dq.dqKind(),
+                dq.dqKMember(), dq.dqJMember(), dq.dqMemberKey(), dq.dqMemberRlEntry(),
+                dq.dqMemberGroupStart(), dq.dqMemberGroupCount(), dq.dqMemberRow(), dq.dqMemberHasRow(),
                 GpuAcArrays.flatD(family.ziIn(), 1), GpuAcArrays.flatI(family.ziIdx(), 11),
                 dr.drRow(), dr.drCol(), dr.drCoef(),
                 dsb.dbRow(), dsb.dbCol(), dsb.dbCoef(),
                 rl.rlVrow(), rl.rlMinQ(), rl.rlMaxQ(), rl.rlLoadQ(), rl.rlVtarget(), rl.rlMonitored(),
-                rl.rlRemote(), rl.rlCmpVrow(), rowSlope,
+                rl.rlRemote(), rl.rlCmpVrow(),
+                rmq.row(), rmq.elem(), rmq.side(), rmq.kind(), rmq.weight(), rowSlope,
                 ds.dsPhiRow(), ds.dsFactor(), ds.dsSlackPhiRow(), ds.dsSlackTargetP(),
                 ds.dsBaseTargetP(), ds.dsMaxDelta(), ds.dsMinDelta(),
                 ds.dsMode(), ds.dsMarginUp(), ds.dsMarginDown(), ds.dsSlackMarginUp(), ds.dsSlackMarginDown(),

@@ -2061,7 +2061,10 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
                                 const double* x, double* vals, double* F,
                                 const char* disabled, const char* active,
                                 int nDqOv, const int* dqOvIdx, const double* dqOvW,
-                                const int* mode) {
+                                const int* mode,
+                                const int* dqKMember, const int* dqJMember, const double* mKey,
+                                const int* mRlEntry, const int* mGroupStart, const int* mGroupCount,
+                                const char* limitType, int nrl) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ndq * nScenarios) return;
     int c = tid % ndq;
@@ -2078,7 +2081,29 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
     if (kind == 0 && disabled[s * nElements + cbOffset + e]) return;   // outaged closed contributor
     if (kind == 2 && disabled[s * nElements + obOffset + e]) return;   // outaged open contributor
     double w = dqWeight[c];
-    for (int k = 0; k < nDqOv; k++) {                        // per-scenario qPct renormalization
+    int kM = dqKMember != nullptr ? dqKMember[c] : -1;
+    if (kM >= 0) {
+        // DYNAMIC reactive keys (plan-B3): an RL pin disables the member's controller, which zeroes
+        // its key and renormalizes qPct over the survivors (updateReactiveKeys). Replicate OLF's
+        // zero-then-sum arithmetic in member order, driven by the per-(entry, scenario) limitType.
+        int gs = mGroupStart[kM];
+        int gc = mGroupCount[kM];
+        double sum = 0.0;
+        for (int m = gs; m < gs + gc; m++) {
+            int re = mRlEntry[m];
+            bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != 0;
+            sum += pinned ? 0.0 : mKey[m];
+        }
+        // the PINNED member's q terms STAY in every survivor's row (weight = the renormalized
+        // qPct of the ROW OWNER); the pin is balanced on the TARGET side instead — OLF's
+        // getGeneratorReactivePowerDistributionTarget adds qPct_k * targetQ_j for each frozen j
+        // (updateDistrQTargetsBatch keeps the per-scenario targets in step with the pin states)
+        int reK = mRlEntry[kM];
+        bool kPinned = reK >= 0 && limitType[(size_t) s * nrl + reK] != 0;
+        double qpk = (sum == 0.0 || kPinned) ? 0.0 : mKey[kM] / sum;
+        w = qpk - (dqJMember[c] == kM ? 1.0 : 0.0);
+    }
+    for (int k = 0; k < nDqOv; k++) {                        // per-scenario qPct renormalization (gen outage)
         if (dqOvIdx[k * 2] == s && dqOvIdx[k * 2 + 1] == c) {
             w = dqOvW[k];
         }
@@ -2292,7 +2317,10 @@ __device__ inline double rlTargetOf(int nRlVtOv, const int* rlVtOvSlotIdx, const
 __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* rlVrow,
                                      const double* rlVtarget, const char* rlMonitored,
                                      const int* baseMode, const double* x, char* limitType,
-                                     int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal) {
+                                     int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
+                                     const char* rlRemote, const int* rlCmpVrow,
+                                     const double* target, const double* rlMinQb, const double* rlMaxQb,
+                                     const double* rlLoadQb) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -2300,6 +2328,20 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
     int vrow = rlVrow[i];
     size_t idx = (size_t) s * n + vrow;
     size_t st = (size_t) s * nrl + i;
+    if (rlRemote != nullptr && rlRemote[i]) {
+        // REMOTE group member (plan-B3): base mode 1 at its row is the UNPINNED DISTR_Q share —
+        // only the canonical mode 4 marks a base pin. The pilot's V equals the group target at the
+        // base solution (the survivors keep controlling), so the v-vs-target heuristic is
+        // DEGENERATE here — key the direction on WHICH limit the extracted BUS_TARGET_Q target
+        // equals instead (target = limit − loadQ was written by the base activation).
+        limitType[st] = 0;
+        if (baseMode[vrow] == 4) {
+            double tgt = target[idx];
+            limitType[st] = fabs(tgt - (rlMaxQb[i] - rlLoadQb[i])) <= fabs(tgt - (rlMinQb[i] - rlLoadQb[i]))
+                    ? 2 : 1;
+        }
+        return;
+    }
     // Read the BASE row mode (length n, contingency-free) — NOT the per-scenario mode: a controller flipped to
     // PQ by a per-scenario gen-loss OVERRIDE (its generator is gone) has base mode 0 and must get limitType 0 so
     // the reactive-limits switch-back leaves it PQ. Only a controller that is PQ in the BASE (an actual Q-limit
@@ -2375,6 +2417,124 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n,
     maxQDyn[(size_t) s * nrl + i] = mx;
 }
 
+// DISTR_Q target compensation (plan-B3): OLF's DISTR_Q row target is
+// (qPct_k - 1)*targetQ_k + qPct_k*sum_{j!=k} targetQ_j, and targetQ_j is nonzero exactly for a
+// FROZEN member (pinned at a limit). Recompute every UNPINNED member row's target from the
+// per-scenario limitType so an in-flight pin/unpin keeps the targets consistent with the live
+// renormalized weights. Idempotent per pass; one thread per (member, scenario).
+__global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, int nrl,
+                                         const double* mKey, const int* mRlEntry,
+                                         const int* mGroupStart, const int* mGroupCount,
+                                         const int* mRow, const char* mHasRow,
+                                         const int* rlVrowArr, const double* rlMinQ, const double* rlMaxQ,
+                                         const double* rlLoadQ, const char* limitType, int cvStride,
+                                         double* target, const char* rlActive) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nMembers * nScenarios) return;
+    int k = tid % nMembers;
+    int s = tid / nMembers;
+    if (!rlActive[s] || !mHasRow[k]) return;                 // only members owning a packed DISTR_Q row
+    int reK = mRlEntry[k];
+    if (reK >= 0 && limitType[(size_t) s * nrl + reK] != 0) return;   // pinned: the RL kernel owns its row
+    int gs = mGroupStart[k];
+    int gc = mGroupCount[k];
+    double sum = 0.0;
+    double frozen = 0.0;
+    for (int m = gs; m < gs + gc; m++) {
+        int re = mRlEntry[m];
+        bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != 0;
+        sum += pinned ? 0.0 : mKey[m];
+        if (pinned) {
+            size_t li = cvStride ? (size_t) s * nrl + re : (size_t) re;
+            char lt = limitType[(size_t) s * nrl + re];
+            frozen += (lt == 1 ? rlMinQ[li] : rlMaxQ[li]) - rlLoadQ[re];
+        }
+    }
+    double qpk = sum == 0.0 ? 0.0 : mKey[k] / sum;
+    target[(size_t) s * n + mRow[k]] = qpk * frozen;         // 0 when nothing is frozen (the base DISTR_Q target)
+}
+
+// Remote-member OWN reactive injection (plan-B3): accumulate each remote member's own bus q into
+// the diagnostic Q buffer at its OWN row (suppressed by the main qBuf fill), so the RL kernel's
+// q = qBuf[row] + loadQ works verbatim for remote entries. Same family evaluation as fillDistrQBatch
+// with weight 1 (±1 for zero-impedance DUMMY_Q terms), residual value only (no Jacobian).
+__global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nElements,
+                                       int cbOffset, int obOffset,
+                                       const int* rmqRow, const int* rmqElem, const int* rmqSide,
+                                       const int* rmqKind, const double* rmqWeight,
+                                       const double* cbIn, const int* cbIx, const double* shIn, const int* shIx,
+                                       const double* obIn, const int* obIx,
+                                       const double* x, double* qBuf,
+                                       const char* disabled, const char* rlActive,
+                                       int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                                       int nShOv, const int* shOvSlotElem, const double* shOvGb) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nrmq * nScenarios) return;
+    int c = tid % nrmq;
+    int s = tid / nrmq;
+    if (!rlActive[s]) return;
+    int e = rmqElem[c];
+    int kind = rmqKind[c];
+    if (kind == 0 && disabled[s * nElements + cbOffset + e]) return;
+    if (kind == 2 && disabled[s * nElements + obOffset + e]) return;
+    double w = rmqWeight[c];
+    const double* xs = x + (size_t) s * n;
+    double* q = qBuf + (size_t) s * n + rmqRow[c];
+    if (kind == 1) {                                         // fixed shunt q at the member bus
+        const double* sp = shIn + e * 2;
+        double g = sp[0];
+        double b = sp[1];
+        applyShuntOverride(nShOv, shOvSlotElem, shOvGb, s, e, g, b);
+        int vcol = shIx[e * 5 + 2];
+        double so[SH_NOUT];
+        evalShunt(xs[vcol], g, b, 0, so + 0, so + 1, so + 2, so + 3, so + 4);
+        atomicAdd(q, w * so[2]);
+        return;
+    }
+    if (kind == 3) {                                         // zero-impedance DUMMY_Q linear term
+        atomicAdd(q, w * xs[e]);
+        return;
+    }
+    if (kind == 2) {                                         // half-open branch, connected side
+        const double* op = obIn + e * 7;
+        const int* oq = obIx + e * 6;
+        int vcol = rmqSide[c] == 0 ? oq[4] : oq[5];
+        double v1 = rmqSide[c] == 0 ? xs[vcol] : 1.0;
+        double v2 = rmqSide[c] == 1 ? xs[vcol] : 1.0;
+        double oo[OB_NOUT];
+        evalOpenBranch(op[0], op[1], op[2], op[3], op[4], op[5], v1, op[6], v2, 0,
+                       oo + 0, oo + 1, oo + 2, oo + 3, oo + 4, oo + 5, oo + 6, oo + 7);
+        atomicAdd(q, w * oo[rmqSide[c] == 0 ? 6 : 2]);
+        return;
+    }
+    // kind 0: closed branch q at the member's side (full pi row honors the tap override channel)
+    const double* p0 = cbIn + e * 8;
+    double p[8];
+    for (int i = 0; i < 8; i++) {
+        p[i] = p0[i];
+    }
+    double pOv[8];
+    if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) {
+        for (int i = 0; i < 8; i++) {
+            p[i] = pOv[i];
+        }
+    }
+    const int* qx = cbIx + e * 12;
+    double v1 = xs[qx[5]];
+    double v2 = xs[qx[7]];
+    double ph1 = xs[qx[4]];
+    double ph2 = xs[qx[6]];
+    double r1 = qx[9] >= 0 ? xs[qx[9]] : p[6];
+    double a1 = qx[8] >= 0 ? xs[qx[8]] : p[7];
+    double o[CB_NOUT];
+    evalClosedBranch(p[0], p[1], p[2], p[3], p[4], v1, r1, v2, p[5], a1, ph1, ph2, 0,
+                     o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
+                     o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
+                     o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
+    atomicAdd(q, w * o[rmqSide[c] == 0 ? 7 : 21]);           // q1 / q2 residual outputs
+    return;
+}
+
 __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, int maxSwitch,
                                     const int* rlVrow, const double* rlMinQ, const double* rlMaxQ,
                                     const double* rlLoadQ, const double* rlVtarget, const double* qBuf,
@@ -2382,15 +2542,60 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
                                     char* limitType, char* switchCount, char* switched,
                                     int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
                                     const double* rowSlope, double* savedTarget, int cvStride,
-                                    const char* rlRemote) {
+                                    const char* rlRemote, const int* rlCmpVrow) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
     int s = tid / nrl;
     if (!rlActive[s]) return;
-    if (rlRemote != nullptr && rlRemote[i]) return;          // REMOTE group member: pin/unpin dynamics land
-                                                             // with plan-B3 — until then the entry is inert
-                                                             // (the scope gate routes such runs to the CPU)
+    if (rlRemote != nullptr && rlRemote[i]) {
+        // REMOTE group member (plan-B3). Unpinned = its DISTR_Q row (mode 1, limitType 0);
+        // pinned = mode 4 ("row hosts its own Q balance"). BOTH switch conditions test the
+        // PILOT's voltage (rlCmpVrow) against the GROUP target — B0-verified CPU semantics.
+        // qPct weights do NOT renormalize on a pin (only on element disable). The FREE member
+        // never reaches here (the B4 pre-gate rejects groups whose free member is pinnable),
+        // so the pilot's vEq never flips and at least one member stays enabled.
+        size_t ridx = (size_t) s * n + rlVrow[i];
+        size_t rst = (size_t) s * nrl + i;
+        size_t rli = cvStride ? rst : (size_t) i;
+        if (limitType[rst] == 0) {
+            if (mode[ridx] != 1) return;                     // islanded / frozen this scenario
+            double q = qBuf[ridx] + rlLoadQ[i];              // own q via fillRemoteMemberQBatch
+            if (q < rlMinQ[rli] - tol) {
+                savedTarget[rst] = target[ridx];             // the DISTR_Q row target (0)
+                mode[ridx] = 4;
+                target[ridx] = rlMinQ[rli] - rlLoadQ[i];
+                limitType[rst] = 1;
+                switchCount[rst]++;
+                switched[s] = 1;
+            } else if (q > rlMaxQ[rli] + tol) {
+                savedTarget[rst] = target[ridx];
+                mode[ridx] = 4;
+                target[ridx] = rlMaxQ[rli] - rlLoadQ[i];
+                limitType[rst] = 2;
+                switchCount[rst]++;
+                switched[s] = 1;
+            }
+        } else if (switchCount[rst] < maxSwitch) {           // pinned — switch-back tests the PILOT
+            double v = x[(size_t) s * n + rlCmpVrow[i]];
+            double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, s, i, rlVtarget[i]);
+            bool back = (limitType[rst] == 2 && v > vt)
+                     || (limitType[rst] == 1 && v < vt);
+            if (back) {
+                mode[ridx] = 1;                              // back to the DISTR_Q share row
+                target[ridx] = savedTarget[rst];
+                limitType[rst] = 0;
+                switched[s] = 1;
+            } else if (cvStride) {                           // curve-limit drift while pinned
+                double lim = limitType[rst] == 1 ? rlMinQ[rli] : rlMaxQ[rli];
+                if (fabs(lim - (target[ridx] + rlLoadQ[i])) > tol) {
+                    target[ridx] = lim - rlLoadQ[i];
+                    switched[s] = 1;
+                }
+            }
+        }
+        return;
+    }
     int vrow = rlVrow[i];
     size_t idx = (size_t) s * n + vrow;
     size_t st = (size_t) s * nrl + i;
@@ -2667,7 +2872,8 @@ __global__ void negateIntoBatch(int total, const double* F, double* b) {  // b =
 // else the solve holds the PV setpoint while the RL bookkeeping thinks the bus is at a limit.
 __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* rlVrow,
                                     const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
-                                    const char* limitType, int* mode, double* target, int cvStride) {
+                                    const char* limitType, int* mode, double* target, int cvStride,
+                                    const char* rlRemote) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -2676,7 +2882,8 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
     if (lt != 0) {
         size_t idx = (size_t) s * n + rlVrow[i];
         size_t li = cvStride ? (size_t) s * nrl + i : (size_t) i;
-        mode[idx] = 1;
+        // a pinned REMOTE member's row is mode 4 (own Q balance), a pinned local one mode 1
+        mode[idx] = (rlRemote != nullptr && rlRemote[i]) ? 4 : 1;
         target[idx] = (lt == 1 ? rlMinQ[li] : rlMaxQ[li]) - rlLoadQ[i];
     }
 }
@@ -2904,9 +3111,25 @@ struct BatchSolverContext {
     std::vector<int> hNActive;
     DeviceBuf dRlMonitored;                                // per controller: 1 = MONITORING_VOLTAGE SVC standing by
     DeviceBuf dRowSlope;                                   // per row: SLOPE-SVC slope (mode-2 V rows), 0 elsewhere
-    int nRlRemote = 0;                                     // remote-member RL entries present (plan-B1): the RL
-    DeviceBuf dRlRemote;                                   // kernel skips rlRemote[i]!=0 entries until B3 lands
+    int nRlRemote = 0;                                     // remote-member RL entries present (plan-B1/B3)
+    DeviceBuf dRlRemote;                                   // per-entry remote kind (1 = remote group member)
     DeviceBuf dRlCmpVrow;                                  // per-entry compare row (PILOT v col for remote members)
+    int nDqDyn = 0;                                        // dynamic reactive keys (plan-B3): an RL pin zeroes the
+    DeviceBuf dDqKMember;                                  // pinned member's key and renormalizes the DISTR_Q
+    DeviceBuf dDqJMember;                                  // weights over the survivors (updateReactiveKeys) — the
+    DeviceBuf dDqMemberKey;                                // kernel recomputes each contribution's weight from the
+    DeviceBuf dDqMemberRlEntry;                            // RAW keys + the per-(entry, scenario) limitType,
+    DeviceBuf dDqMemberGroupStart;                         // zero-then-sum in member order (bit-exact vs OLF)
+    DeviceBuf dDqMemberGroupCount;
+    DeviceBuf dDqMemberRow;                                // per member: its own row (vCol) + whether it OWNS a
+    DeviceBuf dDqMemberHasRow;                             // packed DISTR_Q row (non-free with existing equation)
+    int nDqMembers = 0;
+    int nRmq = 0;                                          // remote-member OWN-q contributions (plan-B3): a twin
+    DeviceBuf dRmqRow;                                     // of the DISTR_Q assembly accumulating each member's own
+    DeviceBuf dRmqElem;                                    // bus q into dQbuf at its own row (that slot is free —
+    DeviceBuf dRmqSide;                                    // the main qBuf fill suppresses member rows)
+    DeviceBuf dRmqKind;
+    DeviceBuf dRmqWeight;
     DeviceBuf dRlSavedTarget;                              // per (controller, scenario): the row target saved at a
                                                            // PV->PQ pin, restored on switch-back for mode-2 rows
     DeviceBuf dQbuf, dRlActive, dRlSwitched;               // dQbuf nS*n, dRlActive/dRlSwitched nS
@@ -3436,7 +3659,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->ncv > 0 ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
                     ctx->ncv > 0 ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
                     ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(),
-                    ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->ncv > 0 ? 1 : 0);
+                    ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->ncv > 0 ? 1 : 0,
+                    ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr);
         } else {
             CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitchCount.p, 0, static_cast<size_t>(ctx->nrl) * nS * sizeof(char), ctx->stream));
             if (ctx->nrl > 0) {                              // seed the pinned limit for base-PQ controllers (else all PV)
@@ -3444,7 +3668,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->dRlVtarget.as<double>(), ctx->dRlMonitored.as<char>(), dBaseMode.as<int>(), ctx->dX.as<double>(),
                         ctx->dRlLimitType.as<char>(),
                         nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
-                        nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr);
+                        nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
+                        ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
+                        ctx->nRlRemote > 0 ? ctx->dRlCmpVrow.as<int>() : nullptr,
+                        ctx->dTarget.as<double>(), ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(),
+                        ctx->dRlLoadQ.as<double>());
             }
         }
         if (ctx->nds > 0) {                                  // slack-retained share: 0 until frozen at the first pass
@@ -3537,7 +3765,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 fillHvdcBatch<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
             }
         }
-        if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>());
+        if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl);
         if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr);
         if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>());
@@ -3854,6 +4082,19 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // phantom mismatch equal to the through-flow and distributes it FOREVER (measured: +392 MW
     // runaway on the first switch-close scenario until the per-scenario budget rejected it).
     if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>());
+    // Remote-member OWN q (plan-B3): fill each member's own reactive injection into its (suppressed,
+    // hence free) qBuf row so the RL kernel evaluates remote entries like local ones.
+    if (ctx->nRmq > 0) {
+        fillRemoteMemberQBatch<<<grid(ctx->nRmq * nS), BLOCK, 0, ctx->stream>>>(ctx->nRmq, nS, n,
+                ctx->nElements, ctx->cbOffset, ctx->obOffset,
+                ctx->dRmqRow.as<int>(), ctx->dRmqElem.as<int>(), ctx->dRmqSide.as<int>(),
+                ctx->dRmqKind.as<int>(), ctx->dRmqWeight.as<double>(),
+                ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(),
+                ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(),
+                ctx->dX.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(),
+                ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+                ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>());
+    }
     CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitched.p, 0, nS * sizeof(char), ctx->stream));
     // Apply ONLY the current phase's outer loop this pass (sequential, like OLF) — never both at once.
     bool inDsPhase = (phase == 0);
@@ -3911,11 +4152,39 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
                     nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
                     ctx->dRowSlope.as<double>(), ctx->dRlSavedTarget.as<double>(), ctx->ncv > 0 ? 1 : 0,
-                    ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr);
+                    ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
+                    ctx->nRlRemote > 0 ? ctx->dRlCmpVrow.as<int>() : nullptr);
+            if (ctx->nRlRemote > 0 && ctx->nDqMembers > 0) {
+                // keep the survivors' DISTR_Q row targets in step with the pin states (plan-B3)
+                updateDistrQTargetsBatch<<<grid(ctx->nDqMembers * nS), BLOCK, 0, ctx->stream>>>(
+                        ctx->nDqMembers, nS, n, ctx->nrl,
+                        ctx->dDqMemberKey.as<double>(), ctx->dDqMemberRlEntry.as<int>(),
+                        ctx->dDqMemberGroupStart.as<int>(), ctx->dDqMemberGroupCount.as<int>(),
+                        ctx->dDqMemberRow.as<int>(), ctx->dDqMemberHasRow.as<char>(),
+                        ctx->dRlVrow.as<int>(),
+                        ctx->ncv > 0 ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
+                        ctx->ncv > 0 ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
+                        ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(), ctx->ncv > 0 ? 1 : 0,
+                        ctx->dTarget.as<double>(), ctx->dRlActive.as<char>());
+            }
         }
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     CUDA_CHECK(cudaMemcpy(rlSwitched.data(), ctx->dRlSwitched.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
+    if (!inDsPhase && ctx->nRlRemote > 0 && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {   // TEMP remote-RL trace
+        std::vector<char> lt(static_cast<size_t>(ctx->nrl) * nS);
+        std::vector<char> rem(ctx->nrl);
+        CUDA_CHECK(cudaMemcpy(lt.data(), ctx->dRlLimitType.p, lt.size(), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(rem.data(), ctx->dRlRemote.p, rem.size(), cudaMemcpyDeviceToHost));
+        for (int s2 = 0; s2 < nS; s2++) {
+            for (int i2 = 0; i2 < ctx->nrl; i2++) {
+                if (rem[i2]) {
+                    std::fprintf(stderr, "RLREMOTE_TRACE s=%d entry=%d lt=%d switched=%d\n",
+                                 s2, i2, (int) lt[(size_t) s2 * ctx->nrl + i2], (int) rlSwitched[s2]);
+                }
+            }
+        }
+    }
     if (inDsPhase && ctx->nds > 0 && getenv("OLF_GPU_DS_DEBUG")) {
         double slackP = 0.0;
         double retain0 = 0.0;
@@ -4603,7 +4872,7 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
     if (ctx->st->hv.ne) {
         fillHvdcBatch<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
     }
-    if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>());
+    if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl);
     if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr);
     if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
     if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>());
@@ -4748,13 +5017,18 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // on a batch context. The RL kernel SKIPS remote entries until the B3 transition machinery lands.
 extern "C" JNIEXPORT void JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlRemote(
-        JNIEnv* env, jclass, jlong handle, jbyteArray jRemote, jintArray jCmpVrow) {
+        JNIEnv* env, jclass, jlong handle, jbyteArray jRemote, jintArray jCmpVrow,
+        jintArray jRmqRow, jintArray jRmqElem, jintArray jRmqSide, jintArray jRmqKind, jdoubleArray jRmqWeight,
+        jintArray jDqKMember, jintArray jDqJMember, jdoubleArray jMKey, jintArray jMRlEntry,
+        jintArray jMGroupStart, jintArray jMGroupCount, jintArray jMRow, jbyteArray jMHasRow) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
     }
     if (jRemote == nullptr || jCmpVrow == nullptr || env->GetArrayLength(jRemote) == 0) {
         ctx->nRlRemote = 0;
+        ctx->nRmq = 0;
+        ctx->nDqDyn = 0;
         return;
     }
     int nr = env->GetArrayLength(jRemote);
@@ -4776,6 +5050,57 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     env->ReleaseByteArrayElements(jRemote, rem, JNI_ABORT);
     env->ReleaseIntArrayElements(jCmpVrow, cmp, JNI_ABORT);
     ctx->nRlRemote = count;
+    ctx->nRmq = 0;
+    if (jRmqRow != nullptr && env->GetArrayLength(jRmqRow) > 0) {
+        int nq = env->GetArrayLength(jRmqRow);
+        jint* qr = env->GetIntArrayElements(jRmqRow, nullptr);
+        jint* qe = env->GetIntArrayElements(jRmqElem, nullptr);
+        jint* qsd = env->GetIntArrayElements(jRmqSide, nullptr);
+        jint* qk = env->GetIntArrayElements(jRmqKind, nullptr);
+        jdouble* qw = env->GetDoubleArrayElements(jRmqWeight, nullptr);
+        ctx->dRmqRow.upload(qr, static_cast<size_t>(nq) * sizeof(int));
+        ctx->dRmqElem.upload(qe, static_cast<size_t>(nq) * sizeof(int));
+        ctx->dRmqSide.upload(qsd, static_cast<size_t>(nq) * sizeof(int));
+        ctx->dRmqKind.upload(qk, static_cast<size_t>(nq) * sizeof(int));
+        ctx->dRmqWeight.upload(qw, static_cast<size_t>(nq) * sizeof(double));
+        env->ReleaseIntArrayElements(jRmqRow, qr, JNI_ABORT);
+        env->ReleaseIntArrayElements(jRmqElem, qe, JNI_ABORT);
+        env->ReleaseIntArrayElements(jRmqSide, qsd, JNI_ABORT);
+        env->ReleaseIntArrayElements(jRmqKind, qk, JNI_ABORT);
+        env->ReleaseDoubleArrayElements(jRmqWeight, qw, JNI_ABORT);
+        ctx->nRmq = nq;
+    }
+    ctx->nDqDyn = 0;
+    if (jDqKMember != nullptr && env->GetArrayLength(jDqKMember) > 0 && env->GetArrayLength(jMKey) > 0) {
+        int ndqc = env->GetArrayLength(jDqKMember);
+        int nm = env->GetArrayLength(jMKey);
+        jint* km = env->GetIntArrayElements(jDqKMember, nullptr);
+        jint* jm = env->GetIntArrayElements(jDqJMember, nullptr);
+        jdouble* mk = env->GetDoubleArrayElements(jMKey, nullptr);
+        jint* mre = env->GetIntArrayElements(jMRlEntry, nullptr);
+        jint* mgs = env->GetIntArrayElements(jMGroupStart, nullptr);
+        jint* mgc = env->GetIntArrayElements(jMGroupCount, nullptr);
+        jint* mrw = env->GetIntArrayElements(jMRow, nullptr);
+        jbyte* mhr = env->GetByteArrayElements(jMHasRow, nullptr);
+        ctx->dDqMemberRow.upload(mrw, static_cast<size_t>(nm) * sizeof(int));
+        ctx->dDqMemberHasRow.upload(mhr, static_cast<size_t>(nm) * sizeof(char));
+        env->ReleaseIntArrayElements(jMRow, mrw, JNI_ABORT);
+        env->ReleaseByteArrayElements(jMHasRow, mhr, JNI_ABORT);
+        ctx->nDqMembers = nm;
+        ctx->dDqKMember.upload(km, static_cast<size_t>(ndqc) * sizeof(int));
+        ctx->dDqJMember.upload(jm, static_cast<size_t>(ndqc) * sizeof(int));
+        ctx->dDqMemberKey.upload(mk, static_cast<size_t>(nm) * sizeof(double));
+        ctx->dDqMemberRlEntry.upload(mre, static_cast<size_t>(nm) * sizeof(int));
+        ctx->dDqMemberGroupStart.upload(mgs, static_cast<size_t>(nm) * sizeof(int));
+        ctx->dDqMemberGroupCount.upload(mgc, static_cast<size_t>(nm) * sizeof(int));
+        env->ReleaseIntArrayElements(jDqKMember, km, JNI_ABORT);
+        env->ReleaseIntArrayElements(jDqJMember, jm, JNI_ABORT);
+        env->ReleaseDoubleArrayElements(jMKey, mk, JNI_ABORT);
+        env->ReleaseIntArrayElements(jMRlEntry, mre, JNI_ABORT);
+        env->ReleaseIntArrayElements(jMGroupStart, mgs, JNI_ABORT);
+        env->ReleaseIntArrayElements(jMGroupCount, mgc, JNI_ABORT);
+        ctx->nDqDyn = ndqc;
+  }
 }
 
 // DISTR_Q weight overrides: install (or clear, with nulls) the per-scenario qPct renormalization

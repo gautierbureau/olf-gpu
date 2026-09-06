@@ -41,7 +41,22 @@ public final class GpuAcOuterLoopPacks {
     }
 
     /** DISTR_Q contributions in the flat device layout: {@code {elem, side, dqRow, kind}} per row + weight. */
-    record DqPack(int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind) {
+    record DqPack(int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
+                  int[] dqKMember, int[] dqJMember,
+                  double[] dqMemberKey, int[] dqMemberRlEntry, int[] dqMemberGroupStart, int[] dqMemberGroupCount,
+                  int[] dqMemberRow, byte[] dqMemberHasRow) {
+    }
+
+    /** Per-group member table for the IN-KERNEL reactive-key renormalization on a remote RL pin
+     *  (plan-B3): OLF's updateReactiveKeys zeroes a controller-DISABLED member's key and
+     *  renormalizes over the survivors — so the DISTR_Q weights are PIN-STATE-DEPENDENT and the
+     *  kernel recomputes them per scenario from the RAW keys (Control.createReactiveKeys) and the
+     *  per-(entry, scenario) limitType, replicating the CPU's zero-then-sum-in-member-order
+     *  arithmetic bit-for-bit. dqKMember/dqJMember are −1 for non-group contributions. */
+    private record MemberTables(java.util.Map<Integer, Integer> memberIdxByBusNum,
+                                List<Double> key, List<Integer> rlEntry,
+                                List<Integer> groupStart, List<Integer> groupCount,
+                                List<Integer> row, List<Byte> hasRow) {
     }
 
     /** DISTR_RHO contributions in the flat device layout: {@code {drRow, drCol}} per row + coefficient. */
@@ -58,7 +73,76 @@ public final class GpuAcOuterLoopPacks {
      *  the device RL must seed it UNPINNED (no spontaneous switch-back; only the VoltageMonitoring
      *  orchestrator may activate it). */
     record RlPack(int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget,
-                  byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow) {
+                  byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow, int[] rlBusNum) {
+    }
+
+    /** Remote-member OWN reactive-injection contributors (plan-B3): per contribution, the member's
+     *  own row ({@code row}), the family element + side + kind (same encoding as the DISTR_Q pack)
+     *  and a weight (1, or ±1 for a zero-impedance DUMMY_Q term). A twin of the DISTR_Q assembly
+     *  accumulates each member's own bus q into the diagnostic Q buffer at its own row — that slot
+     *  is free because the main qBuf fill suppresses member rows — so the RL kernel's
+     *  {@code q = qBuf[row] + loadQ} works verbatim for remote entries. */
+    record RmqPack(int[] row, int[] elem, int[] side, int[] kind, double[] weight) {
+    }
+
+    static RmqPack remoteMemberQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+                                     ExtractionColumns columns, GpuAcFamilyPacker.Packs family, boolean reactiveLimits) {
+        List<int[]> out = new ArrayList<>();
+        List<Double> w = new ArrayList<>();
+        int[] vCol = columns.vCol();
+        if (reactiveLimits) {
+            for (LfBus bus : network.getBuses()) {
+                boolean member = GpuAcRowIndexing.isRemoteGenVcMember(bus);
+                if (!member || vCol[bus.getNum()] < 0 || !(bus.getMinQ() < bus.getMaxQ())) {
+                    continue;                                // mirror the RL pack's remote-entry condition
+                }
+                var vc = bus.getGeneratorVoltageControl().orElseThrow();
+                if (vCol[vc.getControlledBus().getNum()] < 0) {
+                    continue;
+                }
+                int row = vCol[bus.getNum()];
+                if (bus.getShunt().isPresent()) {
+                    out.add(new int[] {row, family.shElemOf()[bus.getNum()], 0, 1});
+                    w.add(1.0);
+                }
+                for (LfBranch br : bus.getBranches()) {
+                    if (br.isDisabled()) {
+                        continue;
+                    }
+                    int side = br.getBus1() == bus ? 0 : 1;
+                    int e = family.cbElemOf()[br.getNum()];
+                    if (e >= 0) {
+                        out.add(new int[] {row, e, side, 0});
+                        w.add(1.0);
+                        continue;
+                    }
+                    int oe = family.obElemOf()[br.getNum()];
+                    if (oe >= 0) {
+                        out.add(new int[] {row, oe, side, 2});
+                        w.add(1.0);
+                        continue;
+                    }
+                    if (br.isZeroImpedance(LoadFlowModel.AC) && br.isSpanningTreeEdge(LoadFlowModel.AC)) {
+                        int dqCol = columns.dummyQCol()[br.getNum()];
+                        if (dqCol >= 0) {
+                            out.add(new int[] {row, dqCol, side, 3});
+                            w.add(side == 0 ? 1.0 : -1.0);
+                        }
+                    }
+                }
+            }
+        }
+        int[] row = new int[out.size()];
+        int[] elem = new int[out.size()];
+        int[] side = new int[out.size()];
+        int[] kind = new int[out.size()];
+        for (int i = 0; i < out.size(); i++) {
+            row[i] = out.get(i)[0];
+            elem[i] = out.get(i)[1];
+            side[i] = out.get(i)[2];
+            kind[i] = out.get(i)[3];
+        }
+        return new RmqPack(row, elem, side, kind, GpuAcArrays.toDoubleArray(w));
     }
 
     /** Distributed-slack pack: per-participating-bus factor/headroom + the slack bus's own share.
@@ -72,26 +156,73 @@ public final class GpuAcOuterLoopPacks {
     }
 
     static DqPack distrQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                             ExtractionColumns columns, GpuAcFamilyPacker.Packs family) {
-        List<int[]> dq = new ArrayList<>();      // {elem, side, dqRow, kind} per DISTR_Q contribution
+                             ExtractionColumns columns, GpuAcFamilyPacker.Packs family, RlPack rl) {
+        // member tables (plan-B3): raw keys + RL-entry mapping + group ranges, in group member order
+        MemberTables mt = new MemberTables(new java.util.HashMap<>(), new ArrayList<>(), new ArrayList<>(),
+                new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>());
+        java.util.Map<Integer, Integer> rlEntryByBusNum = new java.util.HashMap<>();
+        for (int i = 0; i < rl.rlBusNum().length; i++) {
+            rlEntryByBusNum.put(rl.rlBusNum()[i], i);
+        }
+        for (LfBus pilot : network.getBuses()) {
+            GeneratorVoltageControl gvc = pilot.getGeneratorVoltageControl()
+                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                    .filter(c -> pilot.isGeneratorVoltageControlled() && !c.isLocalControl())
+                    .orElse(null);
+            if (gvc == null) {
+                continue;
+            }
+            List<LfBus> controllers = gvc.getMergedControllerElements();
+            double[] rawKeys = com.powsybl.openloadflow.network.Control.createReactiveKeys(
+                    controllers, com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.VOLTAGE);
+            int start = mt.key().size();
+            LfBus freeMember = controllers.stream().filter(gvc::isControllerEnabled).findFirst().orElse(null);
+            for (int i = 0; i < controllers.size(); i++) {
+                LfBus m = controllers.get(i);
+                mt.memberIdxByBusNum().put(m.getNum(), mt.key().size());
+                mt.key().add(rawKeys[i]);
+                mt.rlEntry().add(rlEntryByBusNum.getOrDefault(m.getNum(), -1));
+                mt.row().add(columns.vCol()[m.getNum()]);
+                // a member OWNS a DISTR_Q row when the equation EXISTS and it is not the FREE
+                // member (whose row carries the pilot's relocated Q; free-role changes are B4-gated)
+                mt.hasRow().add((byte) (m != freeMember
+                        && es.getEquation(m.getNum(), AcEquationType.DISTR_Q).isPresent() ? 1 : 0));
+            }
+            for (int i = 0; i < controllers.size(); i++) {
+                mt.groupStart().add(start);
+                mt.groupCount().add(controllers.size());
+            }
+        }
+        List<int[]> dq = new ArrayList<>();      // {elem, side, dqRow, kind, kMember, jMember} per DISTR_Q contribution
         List<Double> dqW = new ArrayList<>();    // weight per contribution
         buildDistrQContributions(network, es, columns.vCol(), family.cbElemOf(), family.shElemOf(),
-                family.obElemOf(), columns.dummyQCol(), dq, dqW);
-        int[] dqElem = new int[dq.size()];
-        int[] dqSide = new int[dq.size()];
-        int[] dqRow = new int[dq.size()];
+                family.obElemOf(), columns.dummyQCol(), dq, dqW, mt.memberIdxByBusNum());
         // dqKind: 0 = closed-branch q1/q2, 1 = shunt q, 2 = open-branch q,
         // 3 = zero-impedance DUMMY_Q (linear, elem holds the var column)
         int[] dqKind = new int[dq.size()];
+        int[] dqKMember = new int[dq.size()];
+        int[] dqJMember = new int[dq.size()];
+        int[] dqElem = new int[dq.size()];
+        int[] dqSide = new int[dq.size()];
+        int[] dqRow = new int[dq.size()];
         double[] dqWeight = new double[dq.size()];
         for (int i = 0; i < dq.size(); i++) {
             dqElem[i] = dq.get(i)[0];
             dqSide[i] = dq.get(i)[1];
             dqRow[i] = dq.get(i)[2];
             dqKind[i] = dq.get(i)[3];
+            dqKMember[i] = dq.get(i)[4];
+            dqJMember[i] = dq.get(i)[5];
             dqWeight[i] = dqW.get(i);
         }
-        return new DqPack(dqElem, dqSide, dqWeight, dqRow, dqKind);
+        byte[] hasRow = new byte[mt.hasRow().size()];
+        for (int i = 0; i < hasRow.length; i++) {
+            hasRow[i] = mt.hasRow().get(i);
+        }
+        return new DqPack(dqElem, dqSide, dqWeight, dqRow, dqKind, dqKMember, dqJMember,
+                GpuAcArrays.toDoubleArray(mt.key()), GpuAcArrays.toIntArray(mt.rlEntry()),
+                GpuAcArrays.toIntArray(mt.groupStart()), GpuAcArrays.toIntArray(mt.groupCount()),
+                GpuAcArrays.toIntArray(mt.row()), hasRow);
     }
 
     static DrPack distrRhoPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
@@ -153,6 +284,7 @@ public final class GpuAcOuterLoopPacks {
         List<Byte> rlMonitored = new ArrayList<>();
         List<Byte> rlRemote = new ArrayList<>();
         List<Integer> rlCmpVrow = new ArrayList<>();
+        List<Integer> rlBusNum = new ArrayList<>();
         if (reactiveLimits) {                                   // empty pack when the RL outer loop is disabled
             for (LfBus bus : network.getBuses()) {
                 int bn = bus.getNum();
@@ -173,6 +305,7 @@ public final class GpuAcOuterLoopPacks {
                         rlMonitored.add((byte) 0);
                         rlRemote.add((byte) 1);
                         rlCmpVrow.add(pilotV);                 // switch conditions compare the PILOT's V
+                        rlBusNum.add(bn);
                     }
                     continue;                                  // never let a base-pinned remote member
                 }                                              // masquerade as a LOCAL basePqCapable entry
@@ -206,6 +339,7 @@ public final class GpuAcOuterLoopPacks {
                     rlMonitored.add(monitoringSvc != null ? (byte) 1 : (byte) 0);
                     rlRemote.add((byte) 0);
                     rlCmpVrow.add(vCol[bn]);                   // local: compare row = own row
+                    rlBusNum.add(bn);
                 }
             }
         }
@@ -217,7 +351,8 @@ public final class GpuAcOuterLoopPacks {
         }
         return new RlPack(GpuAcArrays.toIntArray(rlVrow), GpuAcArrays.toDoubleArray(rlMinQ),
                 GpuAcArrays.toDoubleArray(rlMaxQ), GpuAcArrays.toDoubleArray(rlLoadQ),
-                GpuAcArrays.toDoubleArray(rlVtarget), mon, rem, GpuAcArrays.toIntArray(rlCmpVrow));
+                GpuAcArrays.toDoubleArray(rlVtarget), mon, rem, GpuAcArrays.toIntArray(rlCmpVrow),
+                GpuAcArrays.toIntArray(rlBusNum));
     }
 
     static DsPack distributedSlackPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
@@ -346,7 +481,8 @@ public final class GpuAcOuterLoopPacks {
      */
     private static void buildDistrQContributions(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                                  int[] vCol, int[] cbElemOf, int[] shElemOf, int[] obElemOf,
-                                                 int[] dummyQCol, List<int[]> out, List<Double> weights) {
+                                                 int[] dummyQCol, List<int[]> out, List<Double> weights,
+                                                 java.util.Map<Integer, Integer> memberIdxByBusNum) {
         for (LfBus pilot : network.getBuses()) {
             GeneratorVoltageControl gvc = pilot.getGeneratorVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
@@ -356,20 +492,28 @@ public final class GpuAcOuterLoopPacks {
                 continue;
             }
             List<LfBus> controllers = gvc.getMergedControllerElements();
+            LfBus freeCtl = controllers.stream()
+                    .filter(b -> gvc.isControllerEnabled(b)).findFirst().orElse(null);
             for (LfBus gk : controllers) {
-                if (GpuAcRowIndexing.row(es, gk.getNum(), AcEquationType.DISTR_Q) < 0) {
-                    continue;                                // the free controller carries the pilot's Q, no DISTR_Q
+                // EXISTENCE-keyed (the A1 lesson): pack every non-free member whose DISTR_Q equation
+                // EXISTS — a base-PINNED member's row is inactive (mode 4, own Q) but an in-flight
+                // UNPIN re-activates it, and the union pattern must already hold its slots. The row-
+                // mode/fill gates decide per scenario which face the row shows.
+                if (gk == freeCtl || es.getEquation(gk.getNum(), AcEquationType.DISTR_Q).isEmpty()) {
+                    continue;                                // the free controller carries the pilot's Q
                 }
                 int dqRow = vCol[gk.getNum()];
                 double qpk = gk.getRemoteControlReactivePercent();
+                int kIdx = memberIdxByBusNum.getOrDefault(gk.getNum(), -1);
                 for (LfBus gj : controllers) {
                     double weight = qpk - (gj == gk ? 1.0 : 0.0);
+                    int jIdx = memberIdxByBusNum.getOrDefault(gj.getNum(), -1);
                     if (gj.getControllerShunt().isPresent()) {
                         throw new PowsyblException("GPU AC solver: DISTR_Q controller " + gj.getId()
                                 + " has a voltage-controlling shunt (SHUNT_B) reactive contribution (not supported)");
                     }
                     if (gj.getShunt().isPresent()) {         // a fixed shunt's reactive joins the q sum
-                        out.add(new int[] {shElemOf[gj.getNum()], 0, dqRow, 1});
+                        out.add(new int[] {shElemOf[gj.getNum()], 0, dqRow, 1, kIdx, jIdx});
                         weights.add(weight);
                     }
                     for (LfBranch brj : gj.getBranches()) {
@@ -379,14 +523,14 @@ public final class GpuAcOuterLoopPacks {
                         int side = brj.getBus1() == gj ? 0 : 1;
                         int e = cbElemOf[brj.getNum()];
                         if (e >= 0) {                        // closed branch: weighted q1/q2 (kind 0)
-                            out.add(new int[] {e, side, dqRow, 0});
+                            out.add(new int[] {e, side, dqRow, 0, kIdx, jIdx});
                             weights.add(weight);
                             continue;
                         }
                         int oe = obElemOf[brj.getNum()];
                         if (oe >= 0) {                       // half-open branch incident on the controller:
                             // its connected-side reactive flow (shunt + series) joins the q sum (kind 2)
-                            out.add(new int[] {oe, side, dqRow, 2});
+                            out.add(new int[] {oe, side, dqRow, 2, kIdx, jIdx});
                             weights.add(weight);
                             continue;
                         }
@@ -402,7 +546,7 @@ public final class GpuAcOuterLoopPacks {
                                 throw new PowsyblException("GPU AC solver: DISTR_Q controller " + gj.getId()
                                         + " has a zero-impedance branch " + brj.getId() + " without a DUMMY_Q variable");
                             }
-                            out.add(new int[] {dqCol, side, dqRow, 3});  // elem slot holds the DUMMY_Q var column
+                            out.add(new int[] {dqCol, side, dqRow, 3, kIdx, jIdx});  // elem = the DUMMY_Q var column
                             weights.add(weight * (side == 0 ? 1.0 : -1.0));
                             continue;
                         }

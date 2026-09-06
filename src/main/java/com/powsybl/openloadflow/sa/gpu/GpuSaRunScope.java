@@ -99,6 +99,22 @@ final class GpuSaRunScope {
         boolean simpleTvcBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL
                 && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
+        // REMOTE/DISTRIBUTED generator VC groups + reactive limits: the device RL pack has no entry
+        // for an unpinned remote controller (it has no own BUS_TARGET_V), a base-pinned member's
+        // switch-BACK would restore a v-identity instead of the group's DISTR_Q row, and the q-scatter
+        // routing (qRow suppression, free-controller role) is a per-structure SNAPSHOT of the base pin
+        // state — so any scenario that could change a remote member's pin state is unrepresentable in
+        // BOTH modes (the hybrid re-extracts activation only, never the scatter routing). A member can
+        // change state only if its bus's Q limits are FINITE (an unlimited bus never pins); gate on that.
+        boolean remoteRlPinnable = lfNetwork.getBuses().stream()
+                .map(b -> b.getGeneratorVoltageControl()
+                        .filter(vc -> vc.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN
+                                && !vc.isLocalControl())
+                        .orElse(null))
+                .filter(java.util.Objects::nonNull)
+                .distinct()
+                .flatMap(vc -> vc.getMergedControllerElements().stream())
+                .anyMatch(ctl -> ctl.getMinQ() > -1e9 || ctl.getMaxQ() < 1e9);
         boolean noSvc = lfNetwork.getBuses().stream()
                 .flatMap(b -> b.getGenerators().stream())
                 .noneMatch(g -> g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator);
@@ -109,7 +125,7 @@ final class GpuSaRunScope {
         if (outerLoopMode == OuterLoopMode.JAVA) {
             // JAVA runs OLF's OWN outer-loop code per scenario, so there is no device-port parameterization
             // limit — only not-yet-validated loops and config the compact snapshot cannot isolate fall back.
-            unsupportedOuterLoops = javaUnsupportedOuterLoops(lfNetwork, acParameters, noHvdc, noSvc);
+            unsupportedOuterLoops = javaUnsupportedOuterLoops(lfNetwork, acParameters, noHvdc, noSvc, remoteRlPinnable);
         } else {
             unsupportedOuterLoops = new ArrayList<>(acParameters.getOuterLoops().stream()
                     .map(AcOuterLoop::getName)
@@ -149,6 +165,10 @@ final class GpuSaRunScope {
             // go stale mid-run.
             if (dsLoopActive && loadBased && olfGuardParams.isUseLoadModel()) {
                 unsupportedOuterLoops.add("DistributedSlack[useLoadModel+loadBased]");
+            }
+            if (remoteRlPinnable && acParameters.getOuterLoops().stream()
+                    .anyMatch(ol -> ReactiveLimitsOuterLoop.NAME.equals(ol.getName()))) {
+                unsupportedOuterLoops.add("ReactiveLimits[remoteGroupPinDynamics]");
             }
             // Curve-limit extrapolation: the device curve evaluator implements the CLAMP branch only
             // (OLF default); slope extrapolation outside [minP, maxP] -> CPU.
@@ -305,11 +325,12 @@ final class GpuSaRunScope {
      *  DEVICE gate: EVERY OLF balance type works (generation- AND load-based — the engine isolates both generator
      *  and load targets per scenario), and no useActiveLimits requirement (JAVA runs OLF's own ActivePowerDistribution). */
     private static List<String> javaUnsupportedOuterLoops(LfNetwork lfNetwork, AcLoadFlowParameters acParameters,
-                                                          boolean noHvdc, boolean noSvc) {
+                                                          boolean noHvdc, boolean noSvc, boolean remoteRlPinnableJava) {
         List<String> unsupported = new ArrayList<>();
         for (AcOuterLoop ol : acParameters.getOuterLoops()) {
             String name = ol.getName();
             boolean ok = JAVA_SUPPORTED_LOOPS.contains(name)
+                    && !(ReactiveLimitsOuterLoop.NAME.equals(name) && remoteRlPinnableJava)
                     // TransformerVoltageControl: the JAVA engine runs OLF's real transformer VC loop; the continuous
                     // ratio is solved INSIDE the device inner Newton (rho is a BRANCH_RHO1 variable in es), the loop
                     // makes only the discrete tap DECISIONS, and the compact snapshot now isolates the transformer

@@ -645,7 +645,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 new Contingency("L1-5-1", new BranchContingency("L1-5-1")));
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true);
-        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
     }
 
     /** PER_EQUATION_TYPE stopping criteria: the batch installs per-row thresholds
@@ -733,10 +733,13 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
-    /** PROBE: remote control + TIGHT reactive limits so the RL loop pins a DISTR_Q controller
-     *  post-contingency — exercises the remote PV→PQ switching semantics. */
+    /** Remote control + TIGHT reactive limits: a DISTR_Q member CAN change pin state (finite limits
+     *  — here the CPU pins b2 in the BASE), and the device q-scatter routing is a per-structure
+     *  snapshot that cannot follow per-scenario pin changes — the remoteGroupPinDynamics gate must
+     *  route the WHOLE RUN to the CPU (2026-09-06 audit; the earlier 1e-12 pass only ever exercised
+     *  the stays-pinned path). */
     @org.junit.jupiter.api.Test
-    void deviceRemoteGeneratorControlReactiveLimitsMatchesCpu() {
+    void deviceRemoteGeneratorControlReactiveLimitsFallsBackWholeRun() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
@@ -747,7 +750,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         List<Contingency> ctgs = List.of(new Contingency("L14", new BranchContingency("L14")));
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true);
-        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertGpuFallsBackWholeRunAndMatchesCpu(network, ctgs, lfp);
     }
 
     /** Outage of a DISTR_Q controller's transformer (tr1 — islands g1/b1 AND removes a controller

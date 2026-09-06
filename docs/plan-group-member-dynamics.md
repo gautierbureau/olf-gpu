@@ -132,13 +132,18 @@ consult `(altDest, selRow, mode)` — generalize the select to an index. Do NOT 
 this before A1–A5 are landed and benched.
 
 ### Part A landing checklist
-- [x] A1 pack (existence-keyed, all-enabled config, free = first) — 2026-09-06; nnz bench row still owed
+- [x] A1 pack (existence-keyed, all-enabled config, free = first) — 2026-09-06; nnz growth measured
+      2026-09-06: +2 union-pattern slots on the 2-member shared network (one per DISTR_RHO
+      contribution), and **0 on case9241pegase** — the production bench case has NO shared RTC
+      groups (drContributions=0), so the all-enabled pack costs the bench pattern nothing
 - [x] A2 extractor acceptance test (host-only: sharedGroupPackAtDisabledBaseAndOnActivation)
 - [x] A3 group controller (per-member off-deltas via subset toggling; free-member clamp -> STATUS_REJECTED
       per-scenario CPU route; SimpleTvc converted) + all TVC tests green at 1e-12
 - [x] A4 deviceSharedTransformerControlMatchesCpu (AFTER_GENERATOR, engagement verified at targetV 33.0);
       gates now flavor-specific: AFTER_GENERATOR + WITH_GENERATOR lifted, INCREMENTAL /
-      useInitialTapPosition / JAVA hybrid stay gated. WITH_GENERATOR shared-group SA test still owed
+      useInitialTapPosition / JAVA hybrid stay gated. WITH_GENERATOR twin landed 2026-09-06
+      (deviceSharedSimpleTransformerControlMatchesCpu at 1e-12, after fixing applyVcOn's
+      double-override + stale rho target and adding the DS carry to roundAndResolve)
 - [x] A5 drOv channel + member-outage tests (non-free batched / free CPU-routed) — 2026-09-06.
       Landed alongside three coupled fixes the outage scenario exposed, each proven by trajectory
       alignment against the CPU's per-iteration norms (temporary CPU_NR/CPU_ROUND stderr probes):

@@ -595,7 +595,7 @@ public final class GpuBatchTransformerControl {
      *  effective base), the slack's own absorbed share at the scenario's effective factor sum, and
      *  the absolute DS-row targets for seeding the next call. Dead or non-converged slots carry 0. */
     @SuppressWarnings("java:S107")
-    private static void captureDsCarry(long handle, int chunkSize, int realCount, int n,
+    static void captureDsCarry(long handle, int chunkSize, int realCount, int n,
             int[] dsPhiRow, double[] dsFactor, double[] baseTargets,
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta,
             double[][] chunkResults, double[] anchor, double[] slack, double[] seed) {

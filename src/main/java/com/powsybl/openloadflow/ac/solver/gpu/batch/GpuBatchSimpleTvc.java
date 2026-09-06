@@ -46,7 +46,7 @@ final class GpuBatchSimpleTvc {
      *  solve). Returns the extended override lists to hand to the first batch pass. */
     static void applyVcOn(int realCount, int n, List<GpuBatchTransformerControl.TransformerController> tcs,
                           int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
-                          List<Integer> ovIndexList, List<Double> ovValueList) {
+                          double[] baseState, List<Integer> ovIndexList, List<Double> ovValueList) {
         for (int slot = 0; slot < realCount; slot++) {
             for (GpuBatchTransformerControl.TransformerController tc : tcs) {
                 if (disabledMask[slot][tc.members()[0].elemIndex()]) {
@@ -54,7 +54,18 @@ final class GpuBatchSimpleTvc {
                 }
                 int[] row = rowModePerScenario[slot] == baseRowMode
                         ? baseRowMode.clone() : rowModePerScenario[slot];
+                // rows owned by an OUTAGED member get their own override below — the same row must
+                // NEVER carry two target overrides (parallel scatter, no ordering)
+                java.util.Set<Integer> ownRows = new java.util.HashSet<>();
+                for (GpuBatchTransformerControl.Member m : tc.members()) {
+                    if (disabledMask[slot][m.elemIndex()]) {
+                        ownRows.add(m.rhoRow());
+                    }
+                }
                 for (int k = 0; k < tc.deltaRows().length; k++) {
+                    if (ownRows.contains(tc.deltaRows()[k])) {
+                        continue;
+                    }
                     row[tc.deltaRows()[k]] = tc.deltaModesOn()[k];
                     ovIndexList.add(slot * n + tc.deltaRows()[k]);
                     ovValueList.add(tc.deltaTargetsOn()[k]);
@@ -63,11 +74,18 @@ final class GpuBatchSimpleTvc {
                     if (!disabledMask[slot][m.elemIndex()]) {
                         continue;
                     }
-                    for (int k = 0; k < m.offDeltaRows().length; k++) {   // outaged NON-free member: its
-                        row[m.offDeltaRows()[k]] = m.offDeltaModes()[k];  // rho identity pinned at base
-                        ovIndexList.add(slot * n + m.offDeltaRows()[k]);
-                        ovValueList.add(m.offDeltaTargets()[k]);
+                    for (int k = 0; k < m.offDeltaRows().length; k++) {   // outaged NON-free member
+                        row[m.offDeltaRows()[k]] = m.offDeltaModes()[k];
+                        if (m.offDeltaRows()[k] != m.rhoRow()) {
+                            ovIndexList.add(slot * n + m.offDeltaRows()[k]);
+                            ovValueList.add(m.offDeltaTargets()[k]);
+                        }
                     }
+                    // pin the re-activated rho identity at the BASE-STATE rho — matching the warm
+                    // start, so the row's residual is exactly 0 (the CPU REMOVES the equation; the
+                    // captured stale target injected a UNIT residual and an extra Newton iterate)
+                    ovIndexList.add(slot * n + m.rhoRow());
+                    ovValueList.add(baseState[m.rhoRow()]);
                 }
                 rowModePerScenario[slot] = row;
             }
@@ -83,7 +101,7 @@ final class GpuBatchSimpleTvc {
             int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
             List<Integer> baseOvIndexList, List<Double> baseOvValueList,
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
-            double[] dsAnchorShift, double[] dsSlackShift,
+            double[] dsAnchorShift, double[] dsSlackShift, int[] dsPhiRow, double[] dsFactor,
             int[] r1OvSlotElem, double[] r1OvVal, int[] shOvSlotElem, double[] shOvGb,
             int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem,
             double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
@@ -92,6 +110,36 @@ final class GpuBatchSimpleTvc {
         // rebuild the VC-OFF overrides: the ORIGINAL (pre-VC-on) list + one rho pin per live controller
         List<Integer> ovIdx = new ArrayList<>(baseOvIndexList);
         List<Double> ovVal = new ArrayList<>(baseOvValueList);
+        // DS target carry (same three coupled pieces as the AFTER_GENERATOR machine): the main
+        // solve's slack distribution must be carried into this re-solve, or the kernel re-derives
+        // it from the re-uploaded baseTargets and takes Newton steps the CPU never takes.
+        int nds = dsPhiRow != null ? dsPhiRow.length : 0;
+        double[] dsAnchorUse = dsAnchorShift;
+        double[] dsSlackUse = dsSlackShift;
+        if (nds > 0) {
+            double[] anchor = new double[chunkSize * nds];
+            double[] slackC = new double[chunkSize];
+            double[] seed = new double[chunkSize * nds];
+            GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor,
+                    baseTargets, dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, anchor, slackC, seed);
+            dsAnchorUse = anchor;
+            dsSlackUse = slackC;
+            for (int s = 0; s < realCount; s++) {
+                if (chunkResults[s] == null || (int) chunkResults[s][n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
+                    continue;
+                }
+                for (int i = 0; i < nds; i++) {              // absolute DS-row target seeds
+                    int flat = s * n + dsPhiRow[i];
+                    int at = ovIdx.lastIndexOf(Integer.valueOf(flat));
+                    if (at >= 0) {
+                        ovVal.set(at, seed[s * nds + i]);
+                    } else {
+                        ovIdx.add(flat);
+                        ovVal.add(seed[s * nds + i]);
+                    }
+                }
+            }
+        }
         // rounding to a non-base tap switches the CPU branch's FULL per-step R/X/G/B, not just rho:
         // extend the base r1 overrides with the rounded tap's whole pi row per (scenario, member).
         // Rounded entries are collected FIRST — the device scan takes the first (slot, elem) match,
@@ -165,7 +213,7 @@ final class GpuBatchSimpleTvc {
                 rowModeOff, baseRowMode, disabledMask,
                 ovIdx.stream().mapToInt(Integer::intValue).toArray(),
                 ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift, null, null,
+                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorUse, dsSlackUse, null, null,
                 parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                 config.lsMode(), config.maxDv(), config.maxDphi(),
                 config.lsMode() == 2 ? varType : null, x0Full,

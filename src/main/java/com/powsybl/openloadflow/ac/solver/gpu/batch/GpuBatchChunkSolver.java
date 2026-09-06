@@ -406,7 +406,7 @@ final class GpuBatchChunkSolver {
                         preTvcOvIdx = new ArrayList<>(ovIndexList);
                         preTvcOvVal = new ArrayList<>(ovValueList);
                         GpuBatchSimpleTvc.applyVcOn(realCount, n, transformerControllers,
-                                rowModePerScenario, baseRowMode, disabledMask, ovIndexList, ovValueList);
+                                rowModePerScenario, baseRowMode, disabledMask, baseState, ovIndexList, ovValueList);
                     }
                     int[] targetOverrideIndex = ovIndexList.stream().mapToInt(Integer::intValue).toArray();
                     double[] targetOverrideValue = ovValueList.stream().mapToDouble(Double::doubleValue).toArray();
@@ -715,6 +715,7 @@ final class GpuBatchChunkSolver {
                                 preTvcOvIdx, preTvcOvVal,
                                 dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
                                 dsAnchorShift, dsSlackShift,
+                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
                                 r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                                 r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
                                 shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),

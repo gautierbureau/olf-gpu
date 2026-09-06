@@ -161,7 +161,9 @@ this before A1–A5 are landed and benched.
       hooks) — A6/Part B will reuse it. Still owed from this line: SimpleTvc (WITH_GENERATOR
       twin) does NOT yet carry DS state into roundAndResolve — same bug class if a large in-call
       distribution precedes it; covered by the WITH_GENERATOR shared-group test task below.
-- [ ] docs: capability rows + gap list; memory update; both benches (cold first)
+- [x] docs: capability rows + gap list; memory update; both benches — 2026-09-06 row `62b6820`:
+      prod COLD 22.91 / warm 19.84 ms/ctg vs CPU-4t 26.69 (×1.35), viol diff 0/0/0, fixed-iter
+      cold 7.81 / warm 4.49 ms/scn, 499/500 — no regression from the A5 kernel channels
 
 ---
 

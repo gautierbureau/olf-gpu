@@ -130,7 +130,7 @@ Full predicate list in Part II §F.
 |---|---|---|
 | Branch outage (N-1, N-2) | ✅ | ≤2 branches, both-sides opening; per-scenario element mask |
 | Fragmenting branch outage (islanding) | ✅ | islanded buses frozen to clean flat state; islanding the slack → ⏩; islanding a REMOTE/DISTR_Q VC group member (pilot or any controller) → ⏩ **2026-09-04** (stale qPct weights solved 0.47 kV wrong before the gate — `islandsRemoteVcMember`) |
-| Generator outage (single / multiple) | ✅ | per-BUS merged injection override; PV→PQ flip, Q-target shed, DS reweight; slack-bus loss / >1 DS bus / remote gens → ⏩ |
+| Generator outage (single / multiple) | ✅ | per-BUS merged injection override; PV→PQ flip, Q-target shed, DS reweight. **2026-09-06**: a gen outage AT a DISTR_Q controller bus that KEEPS another controller is batched — the CPU's updateReactiveKeys renormalization is replayed host-side (toggle-OFF + re-extract + diff) and installed as per-scenario weight overrides (`setBatchDqWeightOverrides`); losing the bus's LAST controller (group restructure) / slack-bus loss / >1 DS bus / remote single-controller shapes → ⏩ |
 | Load outage | ✅ | PowerShift deltas (Q-carrying load delta at a PV bus → ⏩) |
 | Shunt shift / reconnection | ✅ | admittance override; DISTR_Q-contributing or unpacked shunt → ⏩ |
 | Fixed-shunt disconnection | ✅ | element mask |
@@ -230,6 +230,9 @@ element falls back to the stock per-strategy CPU path individually.
    anchor-dependent DS factor types (TARGET / load-based / REMAINING_MARGIN), an islanded DS
    participant in the loss pre-distribution, a custom ContingencyActivePowerLossDistribution SPI,
    loadPowerFactorConstant with load-based balance, ZIP loads for load losses.
+1b. ~~generator outage at a DISTR_Q bus~~ / ~~remote continuous phase~~ /
+   ~~PerEquationTypeStoppingCriteria~~ / ~~curve limits at runtime P~~ / ~~ZIP loads~~ — the whole
+   "time plus new kernels/channels" tier ✅ **landed 2026-09-04..06** (see the rows above and §B).
 2. **HVDC packing remainder** — (audited 2026-09-04: the former "HVDC + SVC packing" item is
    mostly landed — AC-emulation HVDC is packed with its batched loops, slope/monitoring SVCs
    landed with modes 2/3.) Still open: **HVDC contingency** (likely cheap: the per-scenario hv

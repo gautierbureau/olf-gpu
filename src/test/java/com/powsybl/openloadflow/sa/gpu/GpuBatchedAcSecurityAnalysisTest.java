@@ -754,6 +754,29 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
      *  from the distribution group): the qualification gate must route it to the CPU (stale qPct
      *  weights solved 0.47 kV wrong before the gate) while the batchable L14 outage still engages
      *  the device; both must match the stock CPU SA exactly. */
+    /** Generator outage AT a DISTR_Q controller bus that KEEPS another controller: the group's qPct
+     *  weights are baked into the equation system on both arms, so the outage is a plain P-target
+     *  drop + DS reweight — the former blanket DISTR_Q rejection was over-conservative. */
+    @org.junit.jupiter.api.Test
+    void deviceGenOutageAtDistrQBusMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
+        com.powsybl.iidm.network.Generator g1 = network.getGenerator("g1");
+        network.getVoltageLevel("vl1").newGenerator().setId("g1b").setBus("b1").setConnectableBus("b1")
+                .setMinP(0).setMaxP(100).setTargetP(30).setTargetV(g1.getTargetV()).setVoltageRegulatorOn(true)
+                .setRegulatingTerminal(g1.getRegulatingTerminal()).add();
+        List<Contingency> ctgs = List.of(
+                new Contingency("g1b", new com.powsybl.contingency.GeneratorContingency("g1b")),
+                // BOTH of b1's controllers: the group restructures (free-controller reassignment) —
+                // the weight rediff detects the structural drift and routes to the CPU, exact either way
+                new Contingency("g1+g1b", new com.powsybl.contingency.GeneratorContingency("g1"),
+                        new com.powsybl.contingency.GeneratorContingency("g1b")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
     @org.junit.jupiter.api.Test
     void deviceRemoteGeneratorControlControllerOutageMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(

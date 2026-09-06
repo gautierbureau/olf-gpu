@@ -126,6 +126,60 @@ final class GpuBatchQualification {
         return false;
     }
 
+    /** The renormalized DISTR_Q weights after losing {@code lost}: replay the CPU's
+     *  LfContingency.processLostGenerators reactive-key update (control type -> OFF +
+     *  updateReactiveKeys), re-extract the dq pack, and diff against the base weights.
+     *  Returns {contribIdx[], newWeight[]} (as double[][]), or null when not replayable. */
+    private static double[][] distrQWeightOverrides(EquationSystem<AcVariableType, AcEquationType> es,
+                                                    GpuAcData gpuData,
+                                                    List<com.powsybl.openloadflow.network.LfGenerator> lost) {
+        var network = lost.get(0).getBus().getNetwork();
+        List<com.powsybl.openloadflow.network.LfGenerator> toggled = new ArrayList<>();
+        java.util.Set<LfBus> touched = new java.util.LinkedHashSet<>();
+        try {
+            for (var g : lost) {
+                if (g.getGeneratorControlType() == com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.VOLTAGE
+                        && g.getBus() != null
+                        && es.getEquation(g.getBus().getNum(), AcEquationType.DISTR_Q).isPresent()) {
+                    g.setGeneratorControlType(com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.OFF);
+                    toggled.add(g);
+                    touched.add(g.getBus());
+                }
+            }
+            if (toggled.isEmpty()) {
+                return new double[][] {new double[0], new double[0]};
+            }
+            for (LfBus bus : touched) {
+                bus.getGeneratorVoltageControl().ifPresent(
+                        com.powsybl.openloadflow.network.GeneratorVoltageControl::updateReactiveKeys);
+            }
+            double[] newW = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
+                    .extract(network, es, false, false).dqWeight();
+            double[] baseW = gpuData.dqWeight();
+            if (newW.length != baseW.length) {
+                return null;                                 // structural drift — not a pure reweight
+            }
+            List<Double> idx = new ArrayList<>();
+            List<Double> w = new ArrayList<>();
+            for (int k = 0; k < newW.length; k++) {
+                if (newW[k] != baseW[k]) {
+                    idx.add((double) k);
+                    w.add(newW[k]);
+                }
+            }
+            return new double[][] {idx.stream().mapToDouble(Double::doubleValue).toArray(),
+                w.stream().mapToDouble(Double::doubleValue).toArray()};
+        } finally {
+            for (var g : toggled) {
+                g.setGeneratorControlType(com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.VOLTAGE);
+            }
+            for (LfBus bus : touched) {
+                bus.getGeneratorVoltageControl().ifPresent(
+                        com.powsybl.openloadflow.network.GeneratorVoltageControl::updateReactiveKeys);
+            }
+        }
+    }
+
     /** The contingency's SCHEDULED active power loss (pu): mirror of LfContingency's
      *  disconnectedGenerationActivePower - disconnectedLoadActivePower, incl. islanded buses'
      *  injections (with the same non-AC-emulation HVDC generation exclusion). */
@@ -155,7 +209,8 @@ final class GpuBatchQualification {
     record ScenarioPlan(List<Integer> batchedIndices, int[][] frozenRowsByIndex,
                         int[][] islandedNumsByIndex, double[][] frozenTargetsByIndex,
                         GenOutage[][] genOutagesByIndex, int islandingCount,
-                        double[] activePowerLossByIndex) {
+                        double[] activePowerLossByIndex,
+                        int[][] dqOvContribByIndex, double[][] dqOvWByIndex) {
     }
 
     /**
@@ -180,6 +235,11 @@ final class GpuBatchQualification {
         // LfContingency.getActivePowerLoss incl. islanded buses) — drives the host replay of OLF's
         // DefaultContingencyActivePowerLossDistribution (GpuBatchLossPreDistribution).
         double[] activePowerLossByIndex = new double[contingencies.size()];
+        // Per-contingency DISTR_Q weight overrides: a gen outage at a remote-VC controller bus makes
+        // the CPU renormalize the group's qPct keys (LfContingency.processLostGenerators ->
+        // updateReactiveKeys); replay the toggle host-side and diff the extracted weights.
+        int[][] dqOvContribByIndex = new int[contingencies.size()][];
+        double[][] dqOvWByIndex = new double[contingencies.size()][];
         int islandingCount = 0;
         for (int i = 0; i < qualifications.size(); i++) {
             GpuBatchContingencyValidator.Qualification q = qualifications.get(i);
@@ -282,6 +342,15 @@ final class GpuBatchQualification {
                     frozenRowsByIndex[i] = NO_FROZEN_ROWS;
                     frozenTargetsByIndex[i] = NO_FROZEN_TARGETS;
                 }
+                if (c.lostGenerators().stream().anyMatch(g -> g.getBus() != null
+                        && es.getEquation(g.getBus().getNum(), AcEquationType.DISTR_Q).isPresent())) {
+                    double[][] ov = distrQWeightOverrides(es, gpuData, c.lostGenerators());
+                    if (ov == null) {
+                        continue;                            // weight rediff unavailable — CPU
+                    }
+                    dqOvContribByIndex[i] = java.util.Arrays.stream(ov[0]).mapToInt(d -> (int) d).toArray();
+                    dqOvWByIndex[i] = ov[1];
+                }
                 genOutagesByIndex[i] = gos;
                 activePowerLossByIndex[i] = scheduledActivePowerLoss(c, q.islandedBuses());
                 batchedIndices.add(i);
@@ -315,6 +384,7 @@ final class GpuBatchQualification {
             }
         }
         return new ScenarioPlan(batchedIndices, frozenRowsByIndex, islandedNumsByIndex,
-                frozenTargetsByIndex, genOutagesByIndex, islandingCount, activePowerLossByIndex);
+                frozenTargetsByIndex, genOutagesByIndex, islandingCount, activePowerLossByIndex,
+                dqOvContribByIndex, dqOvWByIndex);
     }
 }

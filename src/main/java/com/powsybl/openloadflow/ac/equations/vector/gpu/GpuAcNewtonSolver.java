@@ -290,6 +290,11 @@ public final class GpuAcNewtonSolver {
      *  per-scenario dynamic RL limits evaluated at the current targets (see GpuBatchRlCurves). */
     public static native void setBatchRlCurves(long handle, int[] cvIdx, double[] cvIn, double[] cvPts);
 
+    /** Install (or clear, with nulls) per-scenario DISTR_Q weight overrides on a batch context —
+     *  {@code idx} = flat {scenario, contribution} pairs, {@code w} = the renormalized weight (a gen
+     *  outage at a remote-VC controller bus re-runs updateReactiveKeys on the CPU). Per-chunk state. */
+    public static native void setBatchDqWeightOverrides(long handle, int[] idx, double[] w);
+
     public static native void destroyBatchContext(long handle);
 
     /**

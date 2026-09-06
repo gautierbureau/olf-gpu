@@ -52,6 +52,7 @@ final class GpuBatchChunkSolver {
                                                GenOutage[][] genOutagesByIndex, double[] activePowerLossByIndex,
                                                java.util.Map<com.powsybl.openloadflow.network.LfHvdc, Integer> hvdcElemIndex,
                                                double[][] rowCriteria, GpuBatchRlCurves.Channel rlCurves,
+                                               int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
@@ -157,6 +158,8 @@ final class GpuBatchChunkSolver {
                     int realCount = Math.min(chunkSize, nbg - chunkStart);
                     ovIndexList.clear();
                     ovValueList.clear();
+                    List<Integer> dqOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_Q reweight)
+                    List<Double> dqOvWList = new ArrayList<>();
                     ziOffSlotElemList.clear();
                     ziOnSlotElemList.clear();
                     shOvSlotElemList.clear();
@@ -186,6 +189,13 @@ final class GpuBatchChunkSolver {
                             int ci = group.get(chunkStart + s);
                             if (!pairPhase && activePowerLossByIndex != null) {
                                 preLossBySlot[s] = activePowerLossByIndex[ci];
+                            }
+                            if (dqOvContribByIndex != null && dqOvContribByIndex[ci] != null) {
+                                for (int k = 0; k < dqOvContribByIndex[ci].length; k++) {
+                                    dqOvIdxList.add(s);
+                                    dqOvIdxList.add(dqOvContribByIndex[ci][k]);
+                                    dqOvWList.add(dqOvWByIndex[ci][k]);
+                                }
                             }
                             List<LfBranch> branches = contingencies.get(ci).outagedBranches();
                             List<LfShunt> shunts = contingencies.get(ci).outagedShunts();
@@ -501,6 +511,11 @@ final class GpuBatchChunkSolver {
                     boolean svcActive = svcControllers != null && !svcControllers.ctls().isEmpty();
                     boolean monActive = monitoringControllers != null && !monitoringControllers.isEmpty();
                     int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl || svcActive || monActive) && nrl > 0 ? new int[chunkSize * nrl] : null;
+                    // DISTR_Q weight overrides: per-chunk context state (orchestrator re-solves keep
+                    // the slot assignment); cleared when the chunk has none.
+                    GpuAcNewtonSolver.setBatchDqWeightOverrides(handle,
+                            dqOvIdxList.isEmpty() ? null : dqOvIdxList.stream().mapToInt(Integer::intValue).toArray(),
+                            dqOvWList.isEmpty() ? null : dqOvWList.stream().mapToDouble(Double::doubleValue).toArray());
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
                             dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,

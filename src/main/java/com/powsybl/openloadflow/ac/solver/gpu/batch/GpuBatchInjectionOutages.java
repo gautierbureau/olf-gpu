@@ -79,9 +79,23 @@ final class GpuBatchInjectionOutages {
                                                  com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams, LfBus bus,
                                                  List<LfGenerator> lost, List<LoadLoss> lostLoads) {
         int busNum = bus.getNum();
-        if (es.getEquation(busNum, AcEquationType.BUS_TARGET_PHI).isPresent()        // slack/reference: P is free
-                || es.getEquation(busNum, AcEquationType.DISTR_Q).isPresent()) {     // remote/distributed VC controller
+        if (es.getEquation(busNum, AcEquationType.BUS_TARGET_PHI).isPresent()) {     // slack/reference: P is free
             return null;
+        }
+        // DISTR_Q controller bus (remote/distributed VC): the qPct weights are BAKED into the
+        // equation system at creation — the CPU does not rebuild them on a gen loss either. When the
+        // bus KEEPS another voltage-controlling generator the group is unchanged on both arms and the
+        // outage is a plain P-target drop (no PV->PQ flip, no Q override — the distribution absorbs);
+        // losing the bus's LAST controller restructures the group -> CPU.
+        boolean distrQBus = es.getEquation(busNum, AcEquationType.DISTR_Q).isPresent();
+        if (distrQBus) {
+            java.util.Set<LfGenerator> lostHere = new java.util.HashSet<>(lost);
+            boolean keepsController = bus.getGenerators().stream()
+                    .anyMatch(g -> !lostHere.contains(g)
+                            && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
+            if (!keepsController || !lostLoads.isEmpty()) {
+                return null;                                 // group restructure / Q-carrying load shape — CPU
+            }
         }
         if (bus.hasGeneratorsWithSlope()) {
             return null;                                     // slope-SVC bus outage: the mode-2 row's fate on a
@@ -118,10 +132,10 @@ final class GpuBatchInjectionOutages {
         if (dsBus >= 0 && lostParticipation && slackParticipates) {
             return null;                            // FACTOR reweight + participating slack: retain math doesn't hold
         }                                           // (a pure base shift keeps the factors — retain stays exact)
-        if (bus.getGeneratorVoltageControl().map(vc -> vc.getControlledBus() != null
+        if (!distrQBus && bus.getGeneratorVoltageControl().map(vc -> vc.getControlledBus() != null
                 && vc.getControlledBus().getNum() != busNum).orElse(false)) {
-            return null;                                                            // remote voltage control
-        }
+            return null;                            // remote SINGLE-controller shape (pilot-Q remap, no DISTR_Q row
+        }                                           // at this bus): its q accounting is not modeled — CPU
         double lostP = lost.stream().mapToDouble(LfGenerator::getTargetP).sum();
         double lostLoadP = lostLoads.stream().mapToDouble(LoadLoss::p).sum();
         double lostLoadQ = lostLoads.stream().mapToDouble(LoadLoss::q).sum();
@@ -137,6 +151,9 @@ final class GpuBatchInjectionOutages {
         boolean otherController = bus.getGenerators().stream()
                 .anyMatch(g -> !lostSet.contains(g) && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
         boolean toPq = busPv && lostControls && !otherController;
+        // distrQBus with keepsController: otherController is true by the guard above, so toPq stays
+        // false and qOverride below stays false (busPv true) — the group's distribution re-balances
+        // the lost reactive share on both arms; only the P target drop and DS reweight apply.
         // The bus Q TARGET must shed the lost gens' targetQ whenever the V row solves the reactive
         // equation in the scenario: on the PV->PQ flip AND on an ALREADY-PQ bus losing fixed-Q
         // generation (task #21 — the flip-only version silently kept the lost Q injected; measured

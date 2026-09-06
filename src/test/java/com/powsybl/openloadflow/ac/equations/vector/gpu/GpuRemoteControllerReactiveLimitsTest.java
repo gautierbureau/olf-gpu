@@ -120,4 +120,34 @@ class GpuRemoteControllerReactiveLimitsTest {
         assertEquals(members, remoteEntries,
                 "every remote member with finite limits must be packed as rlRemote=1 (pilot " + pilot.getId() + ")");
     }
+
+    /** Plan-B2 engagement proof (the deadband-vacuous lesson: never trust a pass without showing
+     *  the machinery FIRED): on the remote group with one member base-pinned, the canonical
+     *  encoding must be in force — the pinned member's frozen q dest SUPPRESSED, its own row the
+     *  ALTERNATE, and the activation extractor emitting row mode 4 there (not 1). */
+    @org.junit.jupiter.api.Test
+    void canonicalRemoteMemberEncodingEngages() {
+        LfNetwork network = Networks.load(VoltageControlNetworkFactory.createWithGeneratorRemoteControl(),
+                new LfNetworkParameters()
+                        .setSlackBusSelector(new FirstSlackBusSelector())
+                        .setGeneratorVoltageRemoteControl(true))
+                .get(0);
+        EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(network).create();
+        LfBus pinned = network.getBuses().stream()
+                .filter(bus -> bus.getGenerators().stream().anyMatch(g -> g.getId().equals("g2")))
+                .findFirst().orElseThrow();
+        pinned.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(false);
+        AcEquationSystemCreator.updateGeneratorVoltageControl(pinned.getGeneratorVoltageControl().orElseThrow(), es);
+
+        int n = es.getIndex().getSortedVariablesToFind().size();     // force the index (row assignment)
+        ExtractionColumns cols = ExtractionColumns.of(network, es);
+        int bn = pinned.getNum();
+        int vColPinned = cols.vCol()[bn];
+        assertEquals(-1, cols.qRow()[bn], "canonical: the pinned member's frozen q dest is SUPPRESSED");
+        assertEquals(vColPinned, cols.qRowAlt()[bn], "canonical: the member's own row is the ALTERNATE");
+
+        GpuAcActivation act = GpuAcActivationExtractor.extractActivation(network, es, n);
+        assertEquals(4, act.rowMode()[vColPinned],
+                "an active BUS_TARGET_Q at a non-free remote member must extract as row mode 4");
+    }
 }

@@ -59,6 +59,12 @@ public final class GpuAcActivationExtractor {
             int q = GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_Q);
             if (q >= 0) {
                 targetMap[qRow[bus.getNum()]] = q;          // Q row = V row, or the controlling rho row
+                // ACTIVE own-Q balance at a (non-free) remote gen-VC member = the RL-PINNED state:
+                // row mode 4, so the family fills route the member's own q here (the frozen dest is
+                // canonically SUPPRESSED) and the DISTR_Q emissions at this row gate off (plan-B2).
+                if (GpuAcRowIndexing.isRemoteGenVcMember(bus) && !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) {
+                    mode[qRow[bus.getNum()]] = 4;
+                }
             }
         }
         for (SingleEquation<AcVariableType, AcEquationType> e : es.getIndex().getSortedSingleEquationsToSolve()) {

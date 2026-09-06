@@ -289,7 +289,17 @@ reject stays; group still batchable when only NON-free members are pinnable).
       local basePqCapable shape. Channel: `setBatchRlRemote` (context-scoped setter); the RL
       kernel SKIPS remote entries until B3 — structurally inert, gate still routes to CPU.
       Pack acceptance: `remoteMembersPackedAsRlRemoteEntries` (host-only)
-- [ ] B2 mode-4 + alt-dest prototype on a 2-member group (sequential test first)
+- [~] B2 mode-4 + alt-dest — SEQUENTIAL MILESTONE LANDED 2026-09-06: the canonical encoding
+      is live everywhere (ExtractionColumns canonicalizes non-free remote members to
+      suppressed-dest + own-row-alternate; the activation extractor emits mode 4 for an active
+      BUS_TARGET_Q at such a member; scatterAddDyn selects alt on mode∈{0,4} with
+      selRow=altRow when the frozen dest is suppressed; fillDistrQ/fillDistrQBatch gate
+      emissions into mode-4 rows; per-row criteria treat 4 as power). All 8 remote-VC
+      sequential tests pass on the new encoding INCLUDING the base-pinned member case, with
+      an explicit engagement test (canonicalRemoteMemberEncodingEngages). REMAINING for B2/B3:
+      the per-scenario transitions (RL kernel remote branch, member-own-q twin pass into
+      dQbuf, seedRlModeFromState writing 4 for remote entries) — the batch never yet FLIPS a
+      member's pin state in-flight.
       Design refined 2026-09-06 (from reading scatterAddDyn/buildCbDynDest/collectCbAltPattern):
       * CANONICAL remote-member encoding, independent of base pin state: `computeQRow` returns
         SUPPRESSED (−1) for a remote member even when base-pinned; `computeQRowAlt` returns the

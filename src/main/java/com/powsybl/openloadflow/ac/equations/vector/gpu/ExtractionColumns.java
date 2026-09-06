@@ -57,6 +57,19 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         // Dynamic Q-relocation: the OTHER candidate Q row of each transformer/shunt voltage-controlled
         // bus, so the fill can follow a per-scenario control toggle on the shared structure (§11).
         int[] qRowAlt = GpuAcRowIndexing.computeQRowAlt(network, es, vCol, branchRhoCol, shuntBCol, qRow);
+        // Remote gen-VC group members (plan-B2), CANONICAL encoding independent of the base pin
+        // state: the frozen q dest is SUPPRESSED and the member's OWN row is the ALTERNATE,
+        // selected per scenario by row mode 4 ("member row hosts its own Q balance" — RL pinned).
+        // The FREE member is excluded: its row carries the pilot's relocated Q (B4 rejects free
+        // pins until A6's generalized select).
+        for (LfBus bus : network.getBuses()) {
+            int bn = bus.getNum();
+            if (vCol[bn] >= 0 && GpuAcRowIndexing.isRemoteGenVcMember(bus)
+                    && !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) {
+                qRow[bn] = -1;
+                qRowAlt[bn] = vCol[bn];
+            }
+        }
         return new ExtractionColumns(phiCol, vCol, branchRhoCol, branchAlphaCol, dummyPCol, dummyQCol, shuntBCol, qRow, qRowAlt);
     }
 }

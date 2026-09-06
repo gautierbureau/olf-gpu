@@ -159,6 +159,25 @@ final class GpuAcRowIndexing {
      * always resolvable. The free controller is selected identically to {@link #computeQRow}: the one
      * whose distribution equation is inactive (with all inactive, the first — stable across states).
      */
+    /** True when {@code bus} is a member of a MAIN remote generator voltage-control group (its
+     *  controlled bus is another bus). The FREE member (first controller-ENABLED, matching
+     *  updateRemoteVoltageControlEquations) is the group's pilot-Q carrier and keeps the
+     *  structure-frozen encoding; the others take the canonical suppressed-dest/mode-4 one. */
+    static boolean isRemoteGenVcMember(LfBus bus) {
+        return bus.getGeneratorVoltageControl()
+                .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                .map(c -> c.getControlledBus() != bus)
+                .orElse(false);
+    }
+
+    static boolean isFreeRemoteGenVcMember(LfBus bus) {
+        return bus.getGeneratorVoltageControl()
+                .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                .map(c -> c.getMergedControllerElements().stream()
+                        .filter(c::isControllerEnabled).findFirst().map(m -> m == bus).orElse(false))
+                .orElse(false);
+    }
+
     static int[] computeQRowAlt(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                 int[] vCol, int[] branchRhoCol, int[] shuntBCol, int[] qRow) {
         int[] alt = new int[vCol.length];

@@ -160,6 +160,14 @@ public final class GpuHybridOuterLoopBridge {
         // 1. load the batched inner-solve state so LfBus V/φ/Q reflect this scenario
         equationSystem.getStateVector().set(scenarioState);
         AcSolverUtil.updateNetwork(network, equationSystem);
+        if (outerLoops.isEmpty()) {
+            // no applicable outer loop for this scenario (e.g. every configured loop's isNeeded()
+            // is false): the inner solve IS the result — stable immediately. Without this,
+            // outerLoops.get(0) threw AIOOBE and the swallowed exception silently routed the WHOLE
+            // run to the CPU (the order-dependent baseOpenBranchReclose flake, found 2026-09-06).
+            lastStable = true;
+            return GpuAcActivationExtractor.extractActivation(network, equationSystem, n);
+        }
 
         // 1b. FIRST step for this scenario: initialize() every outer loop exactly as OLF's runOuterLoop does
         //     before its first check — some loops set up required context data (DistributedSlack/ReactiveLimits)

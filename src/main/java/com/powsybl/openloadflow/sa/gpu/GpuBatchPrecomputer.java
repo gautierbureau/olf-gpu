@@ -179,7 +179,9 @@ final class GpuBatchPrecomputer {
 
             return new PrecomputedBatch(states, islandedBuses, baseVariableRows, es);
         } catch (Exception e) {
-            LOGGER.warn("GPU batched SA precompute failed ({}); falling back to per-contingency CPU solves", e.toString());
+            // full stack at WARN: a swallowed exception here silently un-accelerates the whole run —
+            // the 2026-09-06 bridge AIOOBE hid behind the message-only log for days
+            LOGGER.warn("GPU batched SA precompute failed; falling back to per-contingency CPU solves", e);
             return PrecomputedBatch.empty();
         }
     }

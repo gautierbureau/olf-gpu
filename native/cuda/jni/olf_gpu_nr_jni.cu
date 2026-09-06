@@ -4026,6 +4026,40 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
     std::string error;
     SharedStructurePtr* st = nullptr;
     try {
+        // DEFENSIVE input validation (an intermittent SIGSEGV at buildStructure+0xe43 — three
+        // hs_err logs 2026-09-06 — is a one-past-the-end host read that only faults at a page
+        // boundary; a named exception routes to the CPU fallback and identifies the bad input).
+        auto checkRange = [&](const char* what, const jint* a, size_t len, size_t stride,
+                              std::initializer_list<size_t> slots, int lo, int hi) {
+            for (size_t e = 0; e < len; e++) {
+                for (size_t sl : slots) {
+                    int v = a[e * stride + sl];
+                    if (v < lo || v >= hi) {
+                        throw std::runtime_error(std::string("bad ") + what + " at elem " + std::to_string(e)
+                                + " slot " + std::to_string(sl) + ": " + std::to_string(v)
+                                + " (allowed [" + std::to_string(lo) + ", " + std::to_string(hi) + "))");
+                    }
+                }
+            }
+        };
+        // rows/cols may be -1 = absent; anything else must be a valid row/col index < n
+        checkRange("cbIdx", cbIdx, ncb, 12, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, -1, n);
+        checkRange("obIdx", obIdx, nob, 6, {0, 1, 2, 3, 4, 5}, -1, n);
+        checkRange("shIdx", shIdx, nsh, 5, {0, 1, 2, 3, 4}, -1, n);
+        checkRange("hvIdx", hvIdx, nhv, 4, {0, 1, 2, 3}, -1, n);
+        checkRange("dqRow", dqRow, ndq, 1, {0}, 0, n);
+        checkRange("ziIdx", ziIdx, nzi, 11, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, -1, n);
+        checkRange("drRow", drRow, ndr, 1, {0}, 0, n);
+        checkRange("drCol", drCol, ndr, 1, {0}, 0, n);
+        checkRange("dbRow", dbRow, ndb, 1, {0}, 0, n);
+        checkRange("dbCol", dbCol, ndb, 1, {0}, 0, n);
+        checkRange("vdlIdx", vdlIdx, nvdl, 2, {0, 1}, 0, n);
+        for (int e = 0; e < ncb; e++) {                      // encoded (a1Col << 1) | side, or -1
+            if (cbPcSide[e] >= 0 && (cbPcSide[e] >> 1) >= n) {
+                throw std::runtime_error("bad cbPcSide at elem " + std::to_string(e)
+                        + ": a1Col " + std::to_string(cbPcSide[e] >> 1) + " >= n " + std::to_string(n));
+            }
+        }
         st = new SharedStructurePtr(buildStructure(n, ncb, cbIn, cbIdx, nob, obIn, obIdx,
                                                    nsh, shIn, shIdx, nhv, hvIn, hvIdx,
                                                    ndq, dqElem, dqSide, dqWeight, dqRow, dqKind,

@@ -183,6 +183,10 @@ final class GpuAcFamilyPacker {
                 cbIdx.add(new int[] {ph1, qRow[b1.getNum()], ph2, qRow[b2.getNum()],
                     ph1, v1, ph2, v2, -1, -1,                // no control columns on a disabled branch
                     qRowAlt[b1.getNum()], qRowAlt[b2.getNum()]});    // [10],[11]: alternate Q rows (dyn reloc)
+                cbPcSide.add(-1);                            // EVERY cb element needs its entry: this list
+                // was NOT appended here when cbPcSide landed (d131ec7), so base-open runs read PAST
+                // the array in native code — the 4x SIGSEGV-at-buildStructure+0xe43 root cause,
+                // caught 2026-09-06 by the JNI input validation ("bad cbPcSide at elem 4")
             }
         }
 

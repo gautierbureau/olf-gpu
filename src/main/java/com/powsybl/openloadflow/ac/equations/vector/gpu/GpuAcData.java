@@ -124,7 +124,9 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(drCoef, other.drCoef)
                 && java.util.Arrays.equals(dbRow, other.dbRow) && java.util.Arrays.equals(dbCol, other.dbCol)
                 && java.util.Arrays.equals(dbCoef, other.dbCoef)
-                && java.util.Arrays.equals(vdlIn, other.vdlIn) && java.util.Arrays.equals(vdlIdx, other.vdlIdx);
+                && java.util.Arrays.equals(vdlIn, other.vdlIn) && java.util.Arrays.equals(vdlIdx, other.vdlIdx)
+                // structure input too: the phase-control alt-dest tables (pcDest/pcSel) are built from it
+                && java.util.Arrays.equals(cbPcSide, other.cbPcSide);
     }
 
     /**

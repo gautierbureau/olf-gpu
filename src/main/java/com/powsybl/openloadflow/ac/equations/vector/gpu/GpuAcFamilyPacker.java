@@ -296,6 +296,12 @@ final class GpuAcFamilyPacker {
                 throw new com.powsybl.commons.PowsyblException("GPU AC solver: load model on controller-shunt bus "
                         + bus.getId() + " (dynamic Q-relocation) not supported");
             }
+            if (qRow[bus.getNum()] < 0 || phiCol[bus.getNum()] < 0 || vCol[bus.getNum()] < 0) {
+                // a suppressed/relocated Q row (e.g. a REMOTE-VC controller bus: qRow == -1) has no
+                // static slot for the vdl term — a -1 row would be an OOB read in buildStructure
+                throw new com.powsybl.commons.PowsyblException("GPU AC solver: load model on bus "
+                        + bus.getId() + " with a suppressed/absent P/Q/V row not supported");
+            }
             for (var t : lm.getExpTermsP()) {
                 if (t.n() != 0) {
                     vdlIn.add(new double[] {t.c() * load.getTargetP(), t.n()});

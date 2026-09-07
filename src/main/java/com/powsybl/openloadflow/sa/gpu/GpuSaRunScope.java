@@ -137,11 +137,17 @@ final class GpuSaRunScope {
                     }
                     boolean allPinnable = enabled.stream().allMatch(GpuSaRunScope::pinnableRemoteMember);
                     boolean relocatable = vc.getMergedControllerElements().size() >= 2
-                            && vc.getControlledBus().getBranches().stream()
-                                    .filter(b -> !b.isDisabled())
-                                    .allMatch(b -> b.getBus1() != null && b.getBus2() != null
-                                            && !b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC));
-                    return allPinnable || pinnableRemoteMember(enabled.get(0)) && !relocatable;
+                            && cleanQScatterBus(vc.getControlledBus());
+                    // a PINNABLE member with half-open / zero-impedance q terms: its mode-4 (pinned)
+                    // row would silently MISS those terms — the alternate-dest select covers only
+                    // the cb/sh channels (measured 3.3e-4 kV on a pinned member with one open
+                    // line); such a member keeps the frozen extraction encoding and its group
+                    // routes whole-run to the CPU. An UNPINNABLE unclean member is fine (its own-q
+                    // row is never activated).
+                    boolean uncleanPinnableMember = vc.getMergedControllerElements().stream()
+                            .anyMatch(m -> pinnableRemoteMember(m) && !cleanQScatterBus(m));
+                    return allPinnable || uncleanPinnableMember
+                            || pinnableRemoteMember(enabled.get(0)) && !relocatable;
                 });
         boolean noSvc = lfNetwork.getBuses().stream()
                 .flatMap(b -> b.getGenerators().stream())
@@ -357,6 +363,15 @@ final class GpuSaRunScope {
      *  (mirrors the RL pack's remote-entry condition — a member without an RL entry never pins). */
     private static boolean pinnableRemoteMember(com.powsybl.openloadflow.network.LfBus member) {
         return (member.getMinQ() > -1e9 || member.getMaxQ() < 1e9) && member.getMinQ() < member.getMaxQ();
+    }
+
+    /** Every enabled branch at the bus is plain CLOSED non-zero-impedance — all its q terms ride
+     *  the dynamically routable cb/sh channels (mirrors ExtractionColumns.relocatablePilot). */
+    private static boolean cleanQScatterBus(com.powsybl.openloadflow.network.LfBus bus) {
+        return bus.getBranches().stream()
+                .filter(b -> !b.isDisabled())
+                .allMatch(b -> b.getBus1() != null && b.getBus2() != null
+                        && !b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC));
     }
 
     private static List<String> javaUnsupportedOuterLoops(LfNetwork lfNetwork, AcLoadFlowParameters acParameters,

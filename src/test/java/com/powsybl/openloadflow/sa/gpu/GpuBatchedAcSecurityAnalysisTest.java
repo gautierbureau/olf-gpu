@@ -982,6 +982,43 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
     }
 
+    /** B3-class residual, now GUARDED: a PINNABLE member with a HALF-OPEN branch at its bus.
+     *  The mode-4 (pinned) row's alternate-dest select covers only the cb/sh channels, so the open
+     *  line's charging q would be MISSING from the pinned row — measured 3.3e-4 kV silently wrong
+     *  before the guard. The scope gate must route the whole run to the CPU and match exactly. */
+    @org.junit.jupiter.api.Test
+    void deviceRemoteUncleanPinnableMemberFallsBackWholeRun() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = remotePinNetwork("g2", 186.0);
+        network.newLine().setId("lob")
+                .setVoltageLevel1("vl2").setBus1("b2").setConnectableBus1("b2")
+                .setVoltageLevel2("vl5").setBus2("b5").setConnectableBus2("b5")
+                .setR(1.5).setX(40.0).setG1(0).setB1(1e-4).setG2(0).setB2(1e-4).add();
+        network.getLine("lob").getTerminal2().disconnect();
+        List<Contingency> ctgs = List.of(
+                new Contingency("l45b", new BranchContingency("l45b")));
+        assertGpuFallsBackWholeRunAndMatchesCpu(network, ctgs, remotePinParameters());
+    }
+
+    /** The unclean-member gate is MEMBER-targeted: the same half-open branch at an UNPINNABLE
+     *  member's bus (g3, unlimited — its own-q row is never activated) must still batch, with the
+     *  pinnable clean member (g2) pinning on-device. 1e-12 with engagement. */
+    @org.junit.jupiter.api.Test
+    void deviceRemoteUncleanUnpinnableMemberStillBatches() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = remotePinNetwork("g2", 186.0);
+        network.newLine().setId("lob")
+                .setVoltageLevel1("vl3").setBus1("b3").setConnectableBus1("b3")
+                .setVoltageLevel2("vl5").setBus2("b5").setConnectableBus2("b5")
+                .setR(1.5).setX(40.0).setG1(0).setB1(1e-4).setG2(0).setB2(1e-4).add();
+        network.getLine("lob").getTerminal2().disconnect();
+        List<Contingency> ctgs = List.of(
+                new Contingency("l45b", new BranchContingency("l45b")));
+        assertGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
+    }
+
     /** Remote gen-VC group (g1/g2/g3 behind tr1/tr2/tr3 regulating b4) + a Q-heavy load bus b5 on
      *  two parallel lines; the named generator gets the given maxQ (the pin knob), the others stay
      *  unlimited — the plan-B4 all-members-pinnable gate always passes and the batch engages. */

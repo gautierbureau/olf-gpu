@@ -142,9 +142,16 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         // (plan-B4: the pilot's Q follows the mode-scan carrier, so the free member's row is free
         // to host its own Q balance when pinned); without a group it keeps the structure-frozen
         // pilot-carrier encoding and free pins stay whole-run CPU.
+        // A member with half-open or zero-impedance q terms (relocatablePilot false on ITS bus)
+        // also keeps the FROZEN encoding: the mode-4 alternate select covers only the cb/sh
+        // channels, so a canonical pin row would silently MISS those terms (measured 3.3e-4 kV on
+        // a pinned member with one open line) — the scope gate routes any group whose PINNABLE
+        // member is unclean to the CPU, and the frozen encoding keeps a base-pinned unclean
+        // member's own row complete (computeQRow routes ALL its terms there).
         for (LfBus bus : network.getBuses()) {
             int bn = bus.getNum();
             if (vCol[bn] >= 0 && GpuAcRowIndexing.isRemoteGenVcMember(bus)
+                    && relocatablePilot(bus)
                     && (!GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)
                         || qrPilotBuses.contains(bus.getGeneratorVoltageControl().orElseThrow()
                                 .getControlledBus().getNum()))) {
@@ -156,10 +163,12 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                 GpuAcArrays.toIntArray(qrPtr), GpuAcArrays.toIntArray(qrRows));
     }
 
-    /** True when every enabled branch at {@code pilot} is a plain CLOSED non-zero-impedance branch,
-     *  so ALL of the pilot's reactive contributions ride the cb/sh alternate-dest channels that the
-     *  group relocation select covers (half-open and zero-impedance dummy q terms scatter through
-     *  frozen dests). Mirrored by the plan-B4 scope gate in GpuSaRunScope. */
+    /** True when every enabled branch at the bus is a plain CLOSED non-zero-impedance branch, so
+     *  ALL of its reactive contributions ride the cb/sh channels that the dynamic q routing covers
+     *  (half-open and zero-impedance dummy q terms scatter through frozen dests only). Used for
+     *  relocation PILOTS (no qr group otherwise) and for remote MEMBERS (an unclean member keeps
+     *  the frozen encoding — its mode-4 row would miss those terms). Mirrored by the plan-B3/B4
+     *  scope gate in GpuSaRunScope. */
     static boolean relocatablePilot(LfBus pilot) {
         return pilot.getBranches().stream()
                 .filter(b -> !b.isDisabled())

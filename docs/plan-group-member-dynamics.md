@@ -290,6 +290,16 @@ DISTR_Q pilots:
 - Scope gate narrowed (`remoteGroupPinDynamicsUnrepresentable`): whole-run CPU only when ALL
   enabled members of a group are pinnable (all-pinned would deactivate the pilot's vEq —
   fallback not modeled) or a pinnable free member has no relocation table.
+- **Unclean-member guard (2026-09-07, closing the B3-class residual):** a PINNABLE member with
+  half-open or zero-impedance q terms at its bus was SILENTLY WRONG when pinned — the mode-4
+  alternate select covers only the cb/sh channels, so the pinned row missed those terms
+  (measured 3.3e-4 kV with one open line at the member, `deviceRemoteUncleanPinnableMemberFallsBackWholeRun`
+  probe). Now: such a member keeps the FROZEN extraction encoding (a base-pinned unclean
+  member's own row stays complete — computeQRow routes ALL its terms there) and
+  `uncleanPinnableMember` in the shared gate routes its group whole-run to the CPU; an
+  unpinnable unclean member still batches (its own-q row never activates,
+  `deviceRemoteUncleanUnpinnableMemberStillBatches`). A real lift would need alternate-dest
+  channels on the ob and zero-impedance families.
 - **JAVA lift (2026-09-07, same day):** the hybrid installs the carrier-row suppression tables
   (`setBatchDqQrSuppression`: dqJMember + dqMemberQrGroup, WITHOUT the dynamic-weight
   machinery — nDqDyn stays 0, weights = static pack + dqOv live pushes). Everything else was

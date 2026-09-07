@@ -162,8 +162,8 @@ the CPU via `-Dolf.gpu.sa.gpuBaseLoadFlow=false`.
 - [x] A3 group controller (per-member off-deltas via subset toggling; free-member clamp -> STATUS_REJECTED
       per-scenario CPU route; SimpleTvc converted) + all TVC tests green at 1e-12
 - [x] A4 deviceSharedTransformerControlMatchesCpu (AFTER_GENERATOR, engagement verified at targetV 33.0);
-      gates now flavor-specific: AFTER_GENERATOR + WITH_GENERATOR lifted, INCREMENTAL
-      stays gated (useInitialTapPosition + JAVA hybrid since lifted, 2026-09-07). WITH_GENERATOR twin landed 2026-09-06
+      gates now flavor-specific — since 2026-09-07 ALL lifted (useInitialTapPosition,
+      JAVA hybrid, and INCREMENTAL shared groups: see below). WITH_GENERATOR twin landed 2026-09-06
       (deviceSharedSimpleTransformerControlMatchesCpu at 1e-12, after fixing applyVcOn's
       double-override + stale rho target and adding the DS carry to roundAndResolve)
 - [x] A5 drOv channel + member-outage tests (non-free batched / free CPU-routed) — 2026-09-06.
@@ -392,8 +392,22 @@ Both gated features now run in the JAVA hybrid too, at 1e-12:
   deviceSharedUseInitialTvcMatchesCpu (3 ctgs batched incl. member outage),
   javaSharedUseInitialTvcMatchesCpu, deviceSharedSimpleUseInitialMatchesCpu (WITH_GENERATOR
   flag-neutral), deviceSharedUseInitialGroupClampMatchesCpu (2-tap capped members, base
-  clamps on GPU, both scenarios batch, count==2). INCREMENTAL shared groups remain the one
-  gated TVC flavor.
+  clamps on GPU, both scenarios batch, count==2).
+- **INCREMENTAL shared groups PORTED 2026-09-07 (the last gated TVC flavor)**: the loop keeps
+  branch VC disabled (no DISTR_RHO ever activates), so shared = OLF's one-tap-at-a-time
+  round-robin over merged controllers (adjustWithSeveralControllers), which the machine
+  already carried — the gate lift needed (1) MAIN-bus grouping in buildControllers (each
+  member, incl. a zero-impedance-merged DEPENDENT's, keys on the MAIN control's controlled
+  bus — order preserved: LfNetwork.getControllerElements flat-maps the same merged lists) and
+  (2) the machine-level DS TARGET CARRY (captureDsCarry seed/re-capture per re-solve, same
+  three coupled pieces as GpuBatchTransformerControl): without it the re-solve re-uploaded
+  baseTargets with only the strategy-leg seeds and re-derived the main solve's distribution
+  — 3.9e-3 kV on exactly the one scenario that distributes slack (the member outage,
+  −7.14 MW). A/B: round-robin degraded to independent full-diffV adjustments = 6.8e-2 kV.
+  Tests at 1e-12: deviceIncrementalSharedTvcMatchesCpu (targetV 34.5 forces multi-tap
+  round-robin spread [3,2,1]; weak line, strong line, member outage all batch, count==3),
+  javaIncrementalSharedTvcMatchesCpu. NOTE the sibling incremental orchestrators (shunt VC,
+  HVDC AC-emu, SecondaryVc) still pass only the pre-solve DS seeds — same latent class.
 - **Member outages batch too (2026-09-07, the live/base row map)**: the element disable removes
   the member's BRANCH_RHO1 variable from the live es, SHRINKING and SHIFTING the live rows off
   the device's frozen base superset. The engine now remaps every crossing through a

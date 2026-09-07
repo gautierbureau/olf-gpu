@@ -469,6 +469,55 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** INCREMENTAL mode over a SHARED 3-member group (gate lifted 2026-09-07): the loop keeps every
+     *  branch VC disabled (no DISTR_RHO ever activates), so the shared group is purely OLF's
+     *  one-tap-at-a-time round-robin over the merged controllers (adjustWithSeveralControllers) —
+     *  ported in GpuBatchIncrementalTvc, grouped by the MAIN control's controlled bus. Weak line,
+     *  strong (tap-moving) line and a MEMBER outage, all batched at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceIncrementalSharedTvcMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = sharedThreeMemberTvcNetwork();
+        for (String id : new String[] {"T2wT", "T2wT2", "T2wT3"}) {
+            network.getTwoWindingsTransformer(id).getRatioTapChanger().setTargetV(34.5);   // several taps must move
+        }
+        com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+        List<Contingency> ctgs = List.of(
+                new Contingency(l0.getId() + "_BIS", new BranchContingency(l0.getId() + "_BIS")),
+                new Contingency(l0.getId(), new BranchContingency(l0.getId())),
+                new Contingency("T2wT2", new BranchContingency("T2wT2")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setTransformerVoltageControlMode(
+                com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(3, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "all three scenarios (incl. the member outage) must batch on-device");
+    }
+
+    /** JAVA-hybrid twin of {@link #deviceIncrementalSharedTvcMatchesCpu}: OLF's own incremental loop
+     *  makes the round-robin tap decisions, the device re-solves via the pi-model refresh. */
+    @org.junit.jupiter.api.Test
+    void javaIncrementalSharedTvcMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = sharedThreeMemberTvcNetwork();
+        for (String id : new String[] {"T2wT", "T2wT2", "T2wT3"}) {
+            network.getTwoWindingsTransformer(id).getRatioTapChanger().setTargetV(34.5);   // several taps must move
+        }
+        com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+        List<Contingency> ctgs = List.of(
+                new Contingency(l0.getId() + "_BIS", new BranchContingency(l0.getId() + "_BIS")),
+                new Contingency(l0.getId(), new BranchContingency(l0.getId())),
+                new Contingency("T2wT2", new BranchContingency("T2wT2")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setTransformerVoltageControlMode(
+                com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL);
+        assertJavaGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
     /** DEVICE-mode IncrementalShuntVoltageControl: in-kernel dV/dB sensitivities + OLF's section
      *  decisions per scenario (GpuBatchIncrementalShuntVc); GPU SA == CPU SA at 1e-12. */
     @org.junit.jupiter.api.Test

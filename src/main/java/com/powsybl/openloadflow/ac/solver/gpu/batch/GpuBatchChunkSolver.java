@@ -653,7 +653,7 @@ final class GpuBatchChunkSolver {
                                 chunkResults, incrementalTvcControllers, rowModePerScenario, baseRowMode, disabledMask,
                                 targetOverrideIndex, targetOverrideValue,
                                 dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                dsAnchorShift, dsSlackShift,
+                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
                                 r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                                 r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
                                 shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),

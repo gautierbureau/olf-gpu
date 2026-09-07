@@ -66,8 +66,10 @@ final class GpuSaRunScope {
         // orchestrate them with group-level controllers, INCLUDING the useInitialTapPosition
         // shared-ratio manager since 2026-09-07 (group-averaged clamp bounds + the spread-
         // preserving remap live in the machine; WITH_GENERATOR's loop never used the manager).
-        // Only the INCREMENTAL flavor keeps its shared-group gate.
-        boolean sharedGroups = GpuBatchTransformerControl.sharedGroupPresent(lfNetwork);
+        // INCREMENTAL shared groups run since 2026-09-07 too: the loop keeps every branch VC
+        // DISABLED (no DISTR_RHO coupling ever activates), so a shared group is purely the
+        // one-tap-at-a-time round-robin over the merged controllers — ported in
+        // GpuBatchIncrementalTvc.orchestrate, grouped by the MAIN control's controlled bus.
         boolean transformerControlBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL
                 && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
@@ -76,8 +78,7 @@ final class GpuSaRunScope {
         // the same as the continuous port (no generator VC under the transformer-controlled level).
         boolean incrementalTvcBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL
-                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork)
-                && !sharedGroups;
+                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
         // INCREMENTAL shunt VC: same per-scenario orchestrator pattern (GpuBatchIncrementalShuntVc)
         // with in-kernel dV/dB sensitivities.
         boolean incrementalShuntBatchable =

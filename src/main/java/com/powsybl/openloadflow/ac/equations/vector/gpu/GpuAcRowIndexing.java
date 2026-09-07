@@ -113,6 +113,7 @@ final class GpuAcRowIndexing {
                 LfShunt freeShunt = svc.getMergedControllerElements().stream()
                         .filter(c -> !c.isDisabled())
                         .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_SHUNT_B) < 0)
+                        .filter(c -> row(es, c.getNum(), AcEquationType.SHUNT_TARGET_B) < 0)   // control ON
                         .findFirst()
                         .orElseThrow(() -> new PowsyblException("GPU AC solver: shunt voltage control of bus "
                                 + bus.getId() + " has no free controller (all DISTR_SHUNT_B active)"));
@@ -135,7 +136,12 @@ final class GpuAcRowIndexing {
             LfBranch freeController = tvc.getMergedControllerElements().stream()
                     .filter(c -> !c.isDisabled())            // an OUTAGED member also has DISTR_RHO
                     .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_RHO) < 0)   // inactive, but its rho
-                    .findFirst()                             // variable left the live es — never the free role
+                    // a CLAMPED/ROUNDED member has DISTR_RHO inactive too, but its rho row already
+                    // carries the BRANCH_TARGET_RHO1 identity — picking it as the free role would
+                    // COLLIDE both equations on one row and leave the pilot's Q equation unmapped
+                    // (the clamp-in-the-BASE sequential failure: device |f| 1.4e-5 vs CPU 7.4e-3)
+                    .filter(c -> row(es, c.getNum(), AcEquationType.BRANCH_TARGET_RHO1) < 0)
+                    .findFirst()                             // = OLF's free role: first ENABLED member
                     .orElseThrow(() -> new PowsyblException("GPU AC solver: transformer voltage control of bus "
                             + bus.getId() + " has no free controller (all DISTR_RHO active)"));
             int rhoRow = branchRhoCol[freeController.getNum()];
@@ -194,6 +200,9 @@ final class GpuAcRowIndexing {
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .orElse(null);
             if (tvc != null) {
+                // NO control-ON filter here (unlike computeQRow's live free pick): the ALTERNATE
+                // is computed at a control-OFF base too, where every identity is active — the
+                // stable "first with DISTR_RHO inactive" pick keeps the two-way relocation alive.
                 LfBranch ctl = tvc.getMergedControllerElements().stream()
                         .filter(c -> !c.isDisabled())
                         .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_RHO) < 0)

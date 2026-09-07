@@ -865,12 +865,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
                 .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
-        System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY, "false");
-        try {
-            assertGpuMatchesCpuNoEngage(network, ctgs, 1e-12, lfp);
-        } finally {
-            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY);
-        }
+        assertGpuMatchesCpuNoEngage(network, ctgs, 1e-12, lfp);   // GPU base self-heals (safety net)
         assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() <= 0,
                 "the carrier-clamp scenario must be routed to the CPU (A6-remaining)");
     }
@@ -1065,16 +1060,8 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .setR(0.0).setX(0.0).setG1(0).setB1(0).setG2(0).setB2(0).add();
         List<Contingency> ctgs = List.of(
                 new Contingency("l45b", new BranchContingency("l45b")));
-        // the extra l8 load pushes g2 over its limit in the BASE case, and the sequential
-        // GPU-inner-solver path has the known open gap under outer-loop switching — run the base
-        // on the CPU (same pattern as the carrier-clamp test); the BATCH path is the subject here.
-        System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY, "false");
-        try {
-            assertGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
-        } finally {
-            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY);
-        }
-    }
+        assertGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());   // GPU base self-heals via
+    }                                                        // the device-broken-solve safety net
 
     /** Half-open branch at the PILOT + a FREE-member pin: the pilot's ob charging q rides the
      *  relocation GROUP pool (the qr table now exists for unclean pilots) and follows the

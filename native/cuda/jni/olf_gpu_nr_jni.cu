@@ -985,9 +985,17 @@ __global__ void fillZeroImp(int nzi, const double* in, const int* ix, const int*
 // DISTR_RHO row = (1/count)·Σ r1 − r1_k, so each is coef·r1_j into the row's F + a constant coef in
 // J(row, r1_j). dest[2] = {F row, J slot} (built host-side through the CSR pattern).
 __global__ void fillDistrRho(int ndr, const int* drCol, const double* drCoef, const int* drDest,
-                             const double* x, double* vals, double* F) {
+                             const double* x, double* vals, double* F,
+                             const int* drQrGroup, const int* mode, const int* qrPtr, const int* qrRows) {
     int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= ndr) return;
+    // the CURRENT pilot-Q carrier's row (the free role re-picked to this member after a clamp)
+    // hosts the relocated pilot balance — its DISTR_RHO row is inactive (the clamp-in-the-BASE
+    // sequential failure: the leftover emissions solved a MIXED equation 7.4e-3 off the CPU's)
+    if (drQrGroup != nullptr && drQrGroup[c] >= 0) {
+        int g = drQrGroup[c];
+        if (-2 - drDest[c * 2] == qrRows[qrPtr[g] + relocChoose(g, qrPtr, qrRows, mode)]) return;
+    }
     double coef = drCoef[c];
     addAt(drDest[c * 2 + 0], coef * x[drCol[c]], vals, F);   // F[DISTR_RHO row] += coef * r1
     addAt(drDest[c * 2 + 1], coef, vals, F);                 // J(DISTR_RHO row, r1) += coef
@@ -1302,6 +1310,9 @@ struct SharedStructure {
     DeviceBuf dDqElem, dDqSide, dDqKind, dDqWeight, dDqDest; // ndq each (dDqDest is ndq*6)
     int nzi = 0;                                             // zero-impedance branches
     DeviceBuf dZiIn, dZiIdx, dZiDest;                        // nzi (dZiIn) / nzi*11 (dZiIdx) / nzi*14 (dZiDest)
+    DeviceBuf dDrQrGroup;                                    // per DISTR_RHO contribution: the qr relocation group
+    int drQr = 0;                                            // whose candidates contain its row (-1 none) — the seq
+                                                             // fill suppresses the CURRENT carrier's row in-kernel
     DeviceBuf dZiAltDest;                                    // zi dynamic Q-routing (ob/zi channels): per element,
     DeviceBuf dZiSelRow;                                     // 4 q slots {F1,F2,J1,J2} alt dests + select rows, and
     DeviceBuf dZiRelocGroup;                                 // the GROUP relocation tables (same encodings as the
@@ -1448,14 +1459,31 @@ static void buildDistrRhoDest(SharedStructure* st, const CsrPattern& pos, const 
     st->ndr = ndr;
     if (ndr > 0) {
         std::vector<int> drDest(static_cast<size_t>(ndr) * 2);
+        std::vector<int> drQrGroup(ndr, -1);
         for (int c = 0; c < ndr; c++) {
             int mappedRow = rowMap[drRow[c]];
             drDest[c * 2 + 0] = -2 - mappedRow;              // DISTR_RHO F row
             drDest[c * 2 + 1] = pos.at(mappedRow, drCol[c]); // J slot
+            // link the row to its pilot-Q relocation group (a member rho row is a candidate): when
+            // the free role RE-PICKS to this row per scenario, it hosts the relocated pilot Q and
+            // its DISTR_RHO emissions must stop — the SEQUENTIAL fill suppresses in-kernel by the
+            // same mode-scan the scatter uses (the batch machine instead pushes drOv zero entries).
+            for (int g = 0; g < st->nQr && drQrGroup[c] < 0; g++) {
+                for (int k = st->hQrPtr[g] + 1; k < st->hQrPtr[g + 1]; k++) {
+                    if (st->hQrRows[k] == mappedRow) {
+                        drQrGroup[c] = g;
+                        st->drQr = 1;
+                        break;
+                    }
+                }
+            }
         }
         st->dDrCol.upload(drCol, ndr * sizeof(int));
         st->dDrCoef.upload(drCoef, ndr * sizeof(double));
         st->dDrDest.upload(drDest.data(), drDest.size() * sizeof(int));
+        if (st->drQr) {
+            st->dDrQrGroup.upload(drQrGroup.data(), drQrGroup.size() * sizeof(int));
+        }
     }
 }
 
@@ -1904,7 +1932,7 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
         if (ctx->st->hv.ne) fillHvdc<<<grid(ctx->st->hv.ne), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->ndq) fillDistrQ<<<grid(ctx->ndq), BLOCK, 0, ctx->stream>>>(ctx->ndq, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dMode.as<int>());
         if (ctx->nzi) fillZeroImp<<<grid(ctx->nzi), BLOCK, 0, ctx->stream>>>(ctx->nzi, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, ziRelocOf(ctx->st.get()));
-        if (ctx->ndr) fillDistrRho<<<grid(ctx->ndr), BLOCK, 0, ctx->stream>>>(ctx->ndr, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        if (ctx->ndr) fillDistrRho<<<grid(ctx->ndr), BLOCK, 0, ctx->stream>>>(ctx->ndr, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
         if (ctx->ndb) fillDistrShuntB<<<grid(ctx->ndb), BLOCK, 0, ctx->stream>>>(ctx->ndb, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         applyRowMode<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));

@@ -210,9 +210,13 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 varType = GpuAcActivationExtractor.extractVarType(equationSystem, n);
                 invalidation.activationDirty = false;
             }
-            // Row modes >= 2 (SLOPE-SVC = 2, continuous phase control = 3) are BATCH kernel capabilities —
-            // the single-scenario fill path has no alternate-destination scatter for them: fall back to CPU
-            // (the extractor no longer rejects these shapes, so guard here).
+            // Row modes >= 2 are per-solve CPU-fallback territory: SLOPE-SVC (2) and continuous phase
+            // control (3) are BATCH kernel capabilities, and a PINNED remote gen-VC member (4 — a base
+            // reactive-limit switch during this engine run) is DELIBERATELY included even though the
+            // fills could route it: the sequential pack's DISTR_Q weights are STATIC extraction-time
+            // qPct, and OLF's pin renormalizes them (updateReactiveKeys) with NO equation-system event
+            // — solving on-device would use stale weights. Every post-pin solve of the run therefore
+            // runs on the CPU (correct, just un-accelerated).
             for (int mode : activation.rowMode()) {
                 if (mode >= 2) {
                     throw new UnsupportedOperationException(
@@ -248,7 +252,42 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             NewtonRaphsonStoppingCriteria.TestResult result =
                     parameters.getStoppingCriteria().test(equationVector.getArray(), equationSystem);
             status = result.isStop() ? AcSolverStatus.CONVERGED : AcSolverStatus.MAX_ITERATION_REACHED;
+            // DEVICE-BROKEN result safety net: a non-finite or absurd residual is a device-side
+            // numerical failure (e.g. the open zi-with-loaded-far-bus-behind-a-remote-member shape,
+            // where the sequential solve returns phi ~1e22 while the SAME system solves on the CPU
+            // and in the batch context — see GpuSeqBaseFallbackTest). Returning it would poison
+            // OLF's outer loops and fail the whole run (an SA base would come back FAILED where the
+            // stock CPU provider succeeds); throw into the CPU-fallback path instead, so the solve
+            // reruns on the CPU Newton-Raphson: never wrong, only un-accelerated. Ordinary
+            // non-convergence (a plausible norm) is NOT retried — the CPU would reproduce it.
+            if (status == AcSolverStatus.MAX_ITERATION_REACHED
+                    && (!Double.isFinite(result.getNorm()) || result.getNorm() > 1e2)) {
+                throw new PowsyblException("GPU Newton-Raphson returned a device-broken state (|f(x)|="
+                        + result.getNorm() + ")");
+            }
             LOGGER.debug("GPU Newton-Raphson: {} iterations, |f(x)|={}, {}", iterations, result.getNorm(), status);
+            if (System.getenv("OLF_GPU_SEQ_TRACE") != null) {   // test logback is broken — stderr trace
+                System.err.println("SEQ_TRACE solve iters=" + iterations + " norm=" + result.getNorm()
+                        + " devNorm=" + out[n + 1] + " status=" + status);
+                double[] fv = equationVector.getArray();
+                int[] tm = activation.targetMap();
+                var vars = equationSystem.getIndex().getSortedVariablesToFind();
+                for (int c = 0; c < fv.length; c++) {
+                    if (Math.abs(fv[c]) > 1e-4) {
+                        int row = -1;
+                        for (int r = 0; r < tm.length; r++) {
+                            if (tm[r] == c) {
+                                row = r;
+                            }
+                        }
+                        final int rr = row;
+                        var vv = vars.stream().filter(x -> x.getRow() == rr).findFirst().orElse(null);
+                        System.err.println("SEQ_TRACE   |f|=" + Math.abs(fv[c]) + " col=" + c + " row=" + row
+                                + " mode=" + (row >= 0 ? activation.rowMode()[row] : -9)
+                                + " var=" + (vv != null ? vv.getType() + "#" + vv.getElementNum() : "?"));
+                    }
+                }
+            }
         } catch (RuntimeException e) {
             CPU_FALLBACK_COUNT.incrementAndGet();
             // the native context may be mid-iteration inconsistent — rebuild next run

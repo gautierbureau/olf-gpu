@@ -290,16 +290,20 @@ DISTR_Q pilots:
 - Scope gate narrowed (`remoteGroupPinDynamicsUnrepresentable`): whole-run CPU only when ALL
   enabled members of a group are pinnable (all-pinned would deactivate the pilot's vEq —
   fallback not modeled) or a pinnable free member has no relocation table.
-- **Unclean-member guard (2026-09-07, closing the B3-class residual):** a PINNABLE member with
-  half-open or zero-impedance q terms at its bus was SILENTLY WRONG when pinned — the mode-4
-  alternate select covers only the cb/sh channels, so the pinned row missed those terms
-  (measured 3.3e-4 kV with one open line at the member, `deviceRemoteUncleanPinnableMemberFallsBackWholeRun`
-  probe). Now: such a member keeps the FROZEN extraction encoding (a base-pinned unclean
-  member's own row stays complete — computeQRow routes ALL its terms there) and
-  `uncleanPinnableMember` in the shared gate routes its group whole-run to the CPU; an
-  unpinnable unclean member still batches (its own-q row never activates,
-  `deviceRemoteUncleanUnpinnableMemberStillBatches`). A real lift would need alternate-dest
-  channels on the ob and zero-impedance families.
+- **Unclean-member guard (2026-09-07) — LIFTED the same day by the ob/zi alternate-dest
+  channels:** a PINNABLE member with half-open or zero-impedance q terms was silently wrong when
+  pinned (3.3e-4 kV measured with one open line), briefly whole-run guarded, then fixed for
+  real: per-side alternate Q rows `obQAlt` (nob×2) / `ziQAlt` (nzi×2) flow through
+  createStructure (same encodings as cb/sh: ≥0 two-way row, −2−groupId relocation group, −1
+  none; mapRows passes negatives through). The ob family reuses the generic Family machinery —
+  `obAltRow`/`collectObAltPattern`/`buildObDynDest`, `scatterAdd(F)Dyn` in all three ob kernels,
+  `patchFrozenGroupDests` for the qBuf-safe frozen group dests. The zi family gets 4 dynamic q
+  slots per element ({F,J}×side) picked by `ziDynDest` in both zi kernels, with grouped frozen-F
+  dests re-pointed at the fallback row. Guards removed from ExtractionColumns (members always
+  canonical, pilots always get qr tables) and GpuSaRunScope (only the <2-members table condition
+  remains). Tests: ob member pin (DEVICE + JAVA), zi member pin (base on CPU — the l8 load pins
+  g2 in the BASE, the known sequential-inner-solver-under-outer-loop gap), ob-pilot free pin
+  (the ob GROUP pool), and the unpinnable-member twin — all 1e-12.
 - **All-pinned corner (2026-09-07, later same day — JAVA first, DEVICE hours after):** the
   all-pinnable gate condition is GONE in both modes. JAVA: OLF deactivates the pilot's vEq
   itself and the pushed activation carries it (the pilot row flips to a power row with its own

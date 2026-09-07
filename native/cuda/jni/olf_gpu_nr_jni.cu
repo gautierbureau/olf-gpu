@@ -375,6 +375,15 @@ std::vector<int> buildDest(int ne, const int* idx, int stride, const S* table, i
 // shIdx[e*5+4], set to a real row (>= 0) only for a controllable bus, -1 otherwise. When no element has
 // one, the union pattern is empty and every fill uses the frozen dest — so plain PF keeps the fast
 // path and only voltage-control structures pay the (tiny) per-output selector cost.
+static bool hasAltEntries(const int* a, int len) {
+    for (int i = 0; i < len; i++) {
+        if (a[i] != -1) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool hasRelocatable(int ncb, const int* cbIdx, int nsh, const int* shIdx) {
     for (int e = 0; e < ncb; e++) {
         if (cbIdx[static_cast<size_t>(e) * 12 + 10] >= 0 || cbIdx[static_cast<size_t>(e) * 12 + 10] <= -2
@@ -607,6 +616,86 @@ void buildShDynDest(int nsh, const int* shIdx, const CsrPattern& pos,
     }
 }
 
+// Open-branch analogue of shAltRow / collectShAltPattern / buildShDynDest: the ALTERNATE Q row
+// of each side's bus travels in a SEPARATE obQAlt array (nob*2) rather than inside obIdx —
+// the connected side's half-open charging q follows a pinned remote member's mode-4 row or a
+// relocation group's carrier exactly like its closed-branch terms.
+inline int obAltRow(const ObScatter& s, const int* qAlt, int e) {
+    return s.rowEq == 1 ? qAlt[e * 2 + s.rowEnd] : -1;
+}
+
+void collectObAltPattern(int nob, const int* obIdx, const int* obQAlt, std::vector<std::pair<int, int>>& pat,
+                         int nQr, const int* qrPtr, const int* qrRows) {
+    for (int e = 0; e < nob; e++) {
+        const int* ix = obIdx + static_cast<size_t>(e) * 6;
+        for (int k = 0; k < OB_NOUT; k++) {
+            const ObScatter& s = OB_SCATTER[k];
+            if (s.role != 1) {
+                continue;
+            }
+            RC rc = resolveOb(s, ix);
+            int altRow = obAltRow(s, obQAlt, e);
+            if (rc.col < 0) {
+                continue;
+            }
+            if (altRow <= -2) {
+                int g = -2 - altRow;
+                for (int c = qrPtr[g]; c < qrPtr[g + 1]; c++) {
+                    pat.emplace_back(qrRows[c], rc.col);
+                }
+            } else if (altRow >= 0 && altRow != rc.row) {
+                pat.emplace_back(altRow, rc.col);
+            }
+        }
+    }
+}
+
+void buildObDynDest(int nob, const int* obIdx, const int* obQAlt, const CsrPattern& pos,
+                    std::vector<int>& altDest, std::vector<int>& selRow,
+                    int nQr, const int* qrPtr, const int* qrRows,
+                    std::vector<int>& relocGroup, std::vector<int>& relocOff, std::vector<int>& relocPool) {
+    altDest.assign(static_cast<size_t>(nob) * OB_NOUT, -1);
+    selRow.assign(static_cast<size_t>(nob) * OB_NOUT, -1);
+    relocGroup.assign(static_cast<size_t>(nob) * OB_NOUT, -1);
+    relocOff.assign(static_cast<size_t>(nob) * OB_NOUT, -1);
+    for (int e = 0; e < nob; e++) {
+        const int* ix = obIdx + static_cast<size_t>(e) * 6;
+        for (int k = 0; k < OB_NOUT; k++) {
+            const ObScatter& s = OB_SCATTER[k];
+            RC rc = resolveOb(s, ix);
+            int altRow = obAltRow(s, obQAlt, e);
+            size_t o = static_cast<size_t>(e) * OB_NOUT + k;
+            if (altRow <= -2) {
+                int g = -2 - altRow;
+                if (s.role == 1 && rc.col >= 0) {
+                    relocGroup[o] = g;
+                    relocOff[o] = static_cast<int>(relocPool.size());
+                    for (int c = qrPtr[g]; c < qrPtr[g + 1]; c++) {
+                        relocPool.push_back(pos.at(qrRows[c], rc.col));
+                    }
+                } else if (s.role == 0) {
+                    relocGroup[o] = g;
+                    relocOff[o] = static_cast<int>(relocPool.size());
+                    for (int c = qrPtr[g]; c < qrPtr[g + 1]; c++) {
+                        relocPool.push_back(-2 - qrRows[c]);
+                    }
+                }
+                continue;
+            }
+            if (altRow < 0 || altRow == rc.row) {
+                continue;
+            }
+            if (s.role == 1 && rc.col >= 0) {
+                altDest[o] = pos.at(altRow, rc.col);
+                selRow[o] = rc.row >= 0 ? rc.row : altRow;   // suppressed frozen dest: select on ALT row
+            } else if (s.role == 0) {
+                altDest[o] = -2 - altRow;
+                selRow[o] = rc.row >= 0 ? rc.row : altRow;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------
 // Device: the four family fill kernels + the loop helpers
 // ---------------------------------------------------------------------------------
@@ -651,6 +740,18 @@ __device__ inline int relocChoose(int g, const int* qrPtr, const int* qrRows, co
         }
     }
     return 0;
+}
+
+// zi q-slot dynamic pick (F/J slots {0..3} per element): group -> mode-scan candidate slot,
+// two-way -> alt when the select row is identity/pinned this scenario, else the frozen dest.
+__device__ inline int ziDynDest(int frozen, int slot, const int* alt, const int* sel,
+                                const int* mode, RelocTables rt) {
+    int rg = rt.group != nullptr ? rt.group[slot] : -1;
+    if (rg >= 0) {
+        return rt.pool[rt.off[slot] + relocChoose(rg, rt.qrPtr, rt.qrRows, mode)];
+    }
+    int sr = sel != nullptr ? sel[slot] : -1;
+    return (sr >= 0 && (mode[sr] == 0 || mode[sr] == 4)) ? alt[slot] : frozen;
 }
 
 __device__ void scatterAddDyn(int nout, const int* dest, const int* altDest, const int* selRow,
@@ -700,7 +801,9 @@ __global__ void fillClosedBranch(int ne, const double* in, const int* ix, const 
 }
 
 __global__ void fillOpenBranch(int ne, const double* in, const int* ix, const int* dest,
-                               const double* x, double* vals, double* F) {
+                               const double* x, double* vals, double* F,
+                               const int* altDest, const int* selRow, const int* mode, int dynReloc,
+                               RelocTables rt) {
     int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= ne) return;
     const double* p = in + e * 7;                            // y ksi g1 b1 g2 b2 r1
@@ -710,7 +813,12 @@ __global__ void fillOpenBranch(int ne, const double* in, const int* ix, const in
     double o[OB_NOUT];
     evalOpenBranch(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0,
                    o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7);
-    scatterAdd(OB_NOUT, dest + e * OB_NOUT, o, vals, F);
+    if (dynReloc) {
+        scatterAddDyn(OB_NOUT, dest + e * OB_NOUT, altDest + e * OB_NOUT, selRow + e * OB_NOUT, mode, o, vals, F,
+                      rt, e * OB_NOUT);
+    } else {
+        scatterAdd(OB_NOUT, dest + e * OB_NOUT, o, vals, F);
+    }
 }
 
 __global__ void fillVdlBatch(int ne, int nScenarios, int n, int nnz,
@@ -838,21 +946,30 @@ __device__ inline void addAt(int dest, double val, double* vals, double* F) {
 // (ph1−ph2) on the DUMMY_Q row [8..13] (−1/skip on a non-tree edge, whose dummy rows are mode-0 identities
 // the row-mode mask handles). The Jacobian entries are constants; only F depends on the state.
 __global__ void fillZeroImp(int nzi, const double* in, const int* ix, const int* dest,
-                            const double* x, double* vals, double* F) {
+                            const double* x, double* vals, double* F,
+                            const int* ziAlt, const int* ziSel, const int* mode, int ziDyn,
+                            RelocTables rt) {
     int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= nzi) return;
     double rho = in[e];
     const int* q = ix + e * 11;
     double dummyP = x[q[4]], dummyQ = x[q[5]];
     const int* d = dest + e * 14;
+    int d2 = d[2], d3 = d[3], d6 = d[6], d7 = d[7];
+    if (ziDyn) {                                             // dynamic Q-routing (ob/zi channels)
+        d2 = ziDynDest(d2, e * 4 + 0, ziAlt, ziSel, mode, rt);
+        d3 = ziDynDest(d3, e * 4 + 1, ziAlt, ziSel, mode, rt);
+        d6 = ziDynDest(d6, e * 4 + 2, ziAlt, ziSel, mode, rt);
+        d7 = ziDynDest(d7, e * 4 + 3, ziAlt, ziSel, mode, rt);
+    }
     addAt(d[0], dummyP, vals, F);                            // F[bus1 P] += dummyP
     addAt(d[1], -dummyP, vals, F);                           // F[bus2 P] -= dummyP
-    addAt(d[2], dummyQ, vals, F);                            // F[bus1 Q] += dummyQ
-    addAt(d[3], -dummyQ, vals, F);                           // F[bus2 Q] -= dummyQ
+    addAt(d2, dummyQ, vals, F);                              // F[bus1 Q] += dummyQ
+    addAt(d3, -dummyQ, vals, F);                             // F[bus2 Q] -= dummyQ
     addAt(d[4], 1.0, vals, F);                               // J(bus1 P, dummyP)
     addAt(d[5], -1.0, vals, F);                              // J(bus2 P, dummyP)
-    addAt(d[6], 1.0, vals, F);                               // J(bus1 Q, dummyQ)
-    addAt(d[7], -1.0, vals, F);                              // J(bus2 Q, dummyQ)
+    addAt(d6, 1.0, vals, F);                                 // J(bus1 Q, dummyQ)
+    addAt(d7, -1.0, vals, F);                                // J(bus2 Q, dummyQ)
     if (q[10]) {                                             // spanning-tree edge: voltage/angle coupling
         double v1 = x[q[6]], v2 = x[q[7]], ph1 = x[q[8]], ph2 = x[q[9]];
         addAt(d[8], v1 - rho * v2, vals, F);                 // F[ZERO_V row] += v1 - rho*v2
@@ -1185,6 +1302,12 @@ struct SharedStructure {
     DeviceBuf dDqElem, dDqSide, dDqKind, dDqWeight, dDqDest; // ndq each (dDqDest is ndq*6)
     int nzi = 0;                                             // zero-impedance branches
     DeviceBuf dZiIn, dZiIdx, dZiDest;                        // nzi (dZiIn) / nzi*11 (dZiIdx) / nzi*14 (dZiDest)
+    DeviceBuf dZiAltDest;                                    // zi dynamic Q-routing (ob/zi channels): per element,
+    DeviceBuf dZiSelRow;                                     // 4 q slots {F1,F2,J1,J2} alt dests + select rows, and
+    DeviceBuf dZiRelocGroup;                                 // the GROUP relocation tables (same encodings as the
+    DeviceBuf dZiRelocOff;                                   // cb/sh families)
+    DeviceBuf dZiRelocPool;
+    bool ziDyn = false;
     int ndr = 0;                                             // DISTR_RHO linear contributions
     DeviceBuf dDrCol, dDrCoef, dDrDest;                      // ndr each (dDrDest is ndr*2)
     int ndb = 0;                                             // DISTR_SHUNT_B linear contributions
@@ -1237,10 +1360,20 @@ static void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const st
 }
 
 static void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
-                             int nzi, const double* ziIn, const int* ziIdx) {
+                             int nzi, const double* ziIn, const int* ziIdx, const int* ziQAlt) {
     st->nzi = nzi;
     if (nzi > 0) {
         std::vector<int> ziDest(static_cast<size_t>(nzi) * 14, -1);
+        // zi dynamic Q-routing (ob/zi channels): 4 q slots per element {F side1, F side2, J side1,
+        // J side2} with the same alt/select/group encodings as the cb/sh families. A GROUP side's
+        // FROZEN F dest is re-pointed at the fallback row (the pilot's own row) so the qBuf
+        // diagnostic never lands the pilot's dummy-Q on a member row.
+        std::vector<int> ziAlt(static_cast<size_t>(nzi) * 4, -1);
+        std::vector<int> ziSel(static_cast<size_t>(nzi) * 4, -1);
+        std::vector<int> ziGrp(static_cast<size_t>(nzi) * 4, -1);
+        std::vector<int> ziOff(static_cast<size_t>(nzi) * 4, -1);
+        std::vector<int> ziPool;
+        bool anyDyn = false;
         for (int e = 0; e < nzi; e++) {
             const int* z = ziIdx + static_cast<size_t>(e) * 11;
             // -1 Q row = a DISTR_Q controller whose reactive balance is suppressed (its dummyQ joins the
@@ -1256,6 +1389,34 @@ static void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const s
             dd[5] = pos.at(b2P, z[4]);                       // J(bus2 P, dummyP)
             dd[6] = b1Q >= 0 ? pos.at(b1Q, z[5]) : -1;       // J(bus1 Q, dummyQ)
             dd[7] = b2Q >= 0 ? pos.at(b2Q, z[5]) : -1;       // J(bus2 Q, dummyQ)
+            int frozenQ[2] = {b1Q, b2Q};
+            for (int side = 0; side < 2; side++) {
+                int altRow = ziQAlt[e * 2 + side];
+                int fSlot = static_cast<int>(e) * 4 + side;
+                int jSlot = static_cast<int>(e) * 4 + 2 + side;
+                if (altRow <= -2) {                          // GROUP relocation: one slot per candidate
+                    int g = -2 - altRow;
+                    ziGrp[fSlot] = g;
+                    ziOff[fSlot] = static_cast<int>(ziPool.size());
+                    for (int c = st->hQrPtr[g]; c < st->hQrPtr[g + 1]; c++) {
+                        ziPool.push_back(-2 - st->hQrRows[c]);
+                    }
+                    ziGrp[jSlot] = g;
+                    ziOff[jSlot] = static_cast<int>(ziPool.size());
+                    for (int c = st->hQrPtr[g]; c < st->hQrPtr[g + 1]; c++) {
+                        ziPool.push_back(pos.at(st->hQrRows[c], z[5]));
+                    }
+                    dd[2 + side] = -2 - st->hQrRows[st->hQrPtr[g]];   // frozen F -> fallback (qBuf)
+                    anyDyn = true;
+                } else if (altRow >= 0 && altRow != frozenQ[side]) {
+                    ziAlt[fSlot] = -2 - altRow;
+                    ziAlt[jSlot] = pos.at(altRow, z[5]);
+                    int sel = frozenQ[side] >= 0 ? frozenQ[side] : altRow;
+                    ziSel[fSlot] = sel;                      // suppressed frozen dest: select on ALT row
+                    ziSel[jSlot] = sel;
+                    anyDyn = true;
+                }
+            }
             if (z[10]) {                                     // spanning-tree edge
                 int dpRow = rowMap[z[4]], dqRow2 = rowMap[z[5]];
                 dd[8] = -2 - dpRow;                          // F ZERO_V row
@@ -1269,6 +1430,16 @@ static void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const s
         st->dZiIn.upload(ziIn, nzi * sizeof(double));
         st->dZiIdx.upload(ziIdx, static_cast<size_t>(nzi) * 11 * sizeof(int));
         st->dZiDest.upload(ziDest.data(), ziDest.size() * sizeof(int));
+        if (anyDyn) {
+            st->dZiAltDest.upload(ziAlt.data(), ziAlt.size() * sizeof(int));
+            st->dZiSelRow.upload(ziSel.data(), ziSel.size() * sizeof(int));
+            if (!ziPool.empty()) {
+                st->dZiRelocGroup.upload(ziGrp.data(), ziGrp.size() * sizeof(int));
+                st->dZiRelocOff.upload(ziOff.data(), ziOff.size() * sizeof(int));
+                st->dZiRelocPool.upload(ziPool.data(), ziPool.size() * sizeof(int));
+            }
+            st->ziDyn = true;
+        }
     }
 }
 
@@ -1333,6 +1504,19 @@ static RelocTables relocOf(Family& f, SharedStructure* st) {
     return rt;
 }
 
+// The zi family's relocation tables, or all-null when it has none.
+static RelocTables ziRelocOf(SharedStructure* st) {
+    RelocTables rt;
+    if (st->dZiRelocPool.p != nullptr) {
+        rt.group = st->dZiRelocGroup.as<int>();
+        rt.off = st->dZiRelocOff.as<int>();
+        rt.pool = st->dZiRelocPool.as<int>();
+        rt.qrPtr = st->dQrPtr.as<int>();
+        rt.qrRows = st->dQrRows.as<int>();
+    }
+    return rt;
+}
+
 SharedStructure* buildStructure(int n,
                                 int ncb, const double* cbIn, const int* cbIdx,
                                 int nob, const double* obIn, const int* obIdx,
@@ -1345,7 +1529,8 @@ SharedStructure* buildStructure(int n,
                                 int ndb, const int* dbRow, const int* dbCol, const double* dbCoef,
                                 const int* cbPcSide,
                                 int nvdl, const double* vdlIn, const int* vdlIdx,
-                                int nQr, const int* qrPtr, const int* qrRowsIn) {
+                                int nQr, const int* qrPtr, const int* qrRowsIn,
+                                const int* obQAltIn, const int* ziQAltIn) {
     auto st = std::make_unique<SharedStructure>();
     st->n = n;
     st->nElements = ncb + nob + nsh + nhv;
@@ -1381,6 +1566,10 @@ SharedStructure* buildStructure(int n,
     }
     std::vector<int> cbIdxM = mapRows(cbIdx, ncb, 12, {0, 1, 2, 3, 10, 11});
     std::vector<int> obIdxM = mapRows(obIdx, nob, 6, {0, 1, 2, 3});
+    std::vector<int> obQAltM = mapRows(obQAltIn, nob, 2, {0, 1});   // negative encodings pass through
+    std::vector<int> ziQAltM = mapRows(ziQAltIn, nzi, 2, {0, 1});
+    const int* obQAlt = obQAltM.data();
+    const int* ziQAlt = ziQAltM.data();
     std::vector<int> shIdxM = mapRows(shIdx, nsh, 5, {0, 1, 4});
     std::vector<int> hvIdxM = mapRows(hvIdx, nhv, 4, {0, 1});
     std::vector<int> vdlIdxM = mapRows(vdlIdx, nvdl, 2, {0});
@@ -1393,7 +1582,8 @@ SharedStructure* buildStructure(int n,
     // ---- fixed CSR pattern (rows = permuted equations, cols = variables) ----
     std::vector<std::pair<int, int>> pat;
     collectPattern(ncb, cbIdx, 12, CB_SCATTER, CB_NOUT, resolveCb, pat);
-    bool dynReloc = hasRelocatable(ncb, cbIdx, nsh, shIdx);
+    bool dynReloc = hasRelocatable(ncb, cbIdx, nsh, shIdx)
+            || hasAltEntries(obQAlt, nob * 2) || hasAltEntries(ziQAlt, nzi * 2);
     if (dynReloc) {
         collectCbAltPattern(ncb, cbIdx, pat, st->nQr,        // union the alternate Q rows into the pattern
                 st->hQrPtr.data(), st->hQrRows.data());      // (+ every GROUP candidate's slots, plan-A6)
@@ -1406,6 +1596,9 @@ SharedStructure* buildStructure(int n,
         collectCbPhasePattern(ncb, cbIdx, cbPcSide, rowMap, pat);   // union the a1-row P-flow positions
     }
     collectPattern(nob, obIdx, 6, OB_SCATTER, OB_NOUT, resolveOb, pat);
+    if (dynReloc) {
+        collectObAltPattern(nob, obIdx, obQAlt, pat, st->nQr, st->hQrPtr.data(), st->hQrRows.data());
+    }
     collectPattern(nsh, shIdx, 5, SH_SCATTER, SH_NOUT, resolveSh, pat);
     if (dynReloc) {
         collectShAltPattern(nsh, shIdx, pat, st->nQr, st->hQrPtr.data(), st->hQrRows.data());
@@ -1413,6 +1606,22 @@ SharedStructure* buildStructure(int n,
     collectPattern(nhv, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pat);
     collectFamilyPattern(rowMap, cbIdx, obIdx, shIdx, ndq, dqElem, dqSide, dqKind, dqRow,
                          ndr, drRow, drCol, ndb, dbRow, dbCol, nzi, ziIdx, pat);
+    if (dynReloc) {
+        for (int e = 0; e < nzi; e++) {                      // zi alt J slots: (alt/candidate row, dummyQ col)
+            int dqCol = ziIdx[static_cast<size_t>(e) * 11 + 5];
+            for (int side = 0; side < 2; side++) {
+                int altRow = ziQAlt[e * 2 + side];
+                if (altRow <= -2) {
+                    int g = -2 - altRow;
+                    for (int c = st->hQrPtr[g]; c < st->hQrPtr[g + 1]; c++) {
+                        pat.emplace_back(st->hQrRows[c], dqCol);
+                    }
+                } else if (altRow >= 0) {
+                    pat.emplace_back(altRow, dqCol);
+                }
+            }
+        }
+    }
     for (int e = 0; e < nvdl; e++) {                         // voltage-dependent load: (row, own-V) slot
         pat.emplace_back(vdlIdx[e * 2], vdlIdx[e * 2 + 1]);
     }
@@ -1473,6 +1682,29 @@ SharedStructure* buildStructure(int n,
         initClosedBranchTrig<<<grid(ncb), BLOCK>>>(ncb, st->cb.in.as<double>(), st->cbTrig.as<double>());
     }
     setupFamily(st->ob, nob, obIn, 7, obIdx, 6, OB_SCATTER, OB_NOUT, resolveOb, pos);
+    if (dynReloc && nob) {                                   // ob dynamic Q-routing: alt-dest + selector
+        std::vector<int> obAltDest;
+        std::vector<int> obSelRow;
+        std::vector<int> obRelocGroup;
+        std::vector<int> obRelocOff;
+        std::vector<int> obRelocPool;
+        buildObDynDest(nob, obIdx, obQAlt, pos, obAltDest, obSelRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
+                obRelocGroup, obRelocOff, obRelocPool);
+        st->ob.altDest.upload(obAltDest.data(), obAltDest.size() * sizeof(int));
+        st->ob.selRow.upload(obSelRow.data(), obSelRow.size() * sizeof(int));
+        if (!obRelocPool.empty()) {
+            st->ob.relocGroup.upload(obRelocGroup.data(), obRelocGroup.size() * sizeof(int));
+            st->ob.relocOff.upload(obRelocOff.data(), obRelocOff.size() * sizeof(int));
+            st->ob.relocPool.upload(obRelocPool.data(), obRelocPool.size() * sizeof(int));
+            static int obRoles[OB_NOUT];
+            for (int k = 0; k < OB_NOUT; k++) {
+                obRoles[k] = OB_SCATTER[k].role;
+            }
+            patchFrozenGroupDests(st->ob.dest, obRelocGroup, OB_NOUT, obRoles,
+                    st->hQrPtr.data(), st->hQrRows.data());
+        }
+        st->ob.dynReloc = true;
+    }
     setupFamily(st->sh, nsh, shIn, 2, shIdx, 5, SH_SCATTER, SH_NOUT, resolveSh, pos);
     if (dynReloc && nsh) {                                   // Dynamic Q-relocation: shunt alt-dest + selector
         std::vector<int> shAltDest;
@@ -1504,7 +1736,7 @@ SharedStructure* buildStructure(int n,
     buildDistrQDest(st.get(), pos, rowMap, ndq, dqElem, dqSide, dqKind, dqWeight, dqRow, cbIdx, obIdx, shIdx);
 
     // ---- zero-impedance destinations: per branch the 8 dummy couplings + (tree) the 6 ZERO_V/ZERO_PHI ----
-    buildZeroImpDest(st.get(), pos, rowMap, nzi, ziIn, ziIdx);
+    buildZeroImpDest(st.get(), pos, rowMap, nzi, ziIn, ziIdx, ziQAlt);
 
     // ---- DISTR_RHO destinations: per contribution {F row, J slot (row, r1 col)} ----
     buildDistrRhoDest(st.get(), pos, rowMap, ndr, drRow, drCol, drCoef);
@@ -1666,12 +1898,12 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
         CUDA_CHECK(cudaMemsetAsync(ctx->dVals.p, 0, ctx->nnz * sizeof(double), ctx->stream));
         initF<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dTarget.as<double>(), ctx->dF.as<double>());
         if (ctx->st->cb.ne) fillClosedBranch<<<grid(ctx->st->cb.ne), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0, relocOf(ctx->st->cb, ctx->st.get()));
-        if (ctx->st->ob.ne) fillOpenBranch<<<grid(ctx->st->ob.ne), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        if (ctx->st->ob.ne) fillOpenBranch<<<grid(ctx->st->ob.ne), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->ob.altDest.as<int>(), ctx->st->ob.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ob.dynReloc ? 1 : 0, relocOf(ctx->st->ob, ctx->st.get()));
         if (ctx->st->sh.ne) fillShunt<<<grid(ctx->st->sh.ne), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0, relocOf(ctx->st->sh, ctx->st.get()));
         if (ctx->st->nvdl) fillVdlBatch<<<grid(ctx->st->nvdl), BLOCK, 0, ctx->stream>>>(ctx->st->nvdl, 1, ctx->st->n, ctx->st->nnz, ctx->st->dVdlIn.as<double>(), ctx->st->dVdlIdx.as<int>(), ctx->st->dVdlDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->st->hv.ne) fillHvdc<<<grid(ctx->st->hv.ne), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->ndq) fillDistrQ<<<grid(ctx->ndq), BLOCK, 0, ctx->stream>>>(ctx->ndq, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dMode.as<int>());
-        if (ctx->nzi) fillZeroImp<<<grid(ctx->nzi), BLOCK, 0, ctx->stream>>>(ctx->nzi, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        if (ctx->nzi) fillZeroImp<<<grid(ctx->nzi), BLOCK, 0, ctx->stream>>>(ctx->nzi, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, ziRelocOf(ctx->st.get()));
         if (ctx->ndr) fillDistrRho<<<grid(ctx->ndr), BLOCK, 0, ctx->stream>>>(ctx->ndr, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->ndb) fillDistrShuntB<<<grid(ctx->ndb), BLOCK, 0, ctx->stream>>>(ctx->ndb, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         applyRowMode<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
@@ -1955,7 +2187,9 @@ __global__ void fillClosedBranchBatch(int ne, int nScenarios, int n, int nnz, in
 __global__ void fillOpenBranchBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                     const double* in, const int* ix, const int* dest,
                                     const double* x, double* vals, double* F,
-                                    const char* disabled, const char* active) {
+                                    const char* disabled, const char* active,
+                                    const int* altDest, const int* selRow, const int* mode, int dynReloc,
+                                    RelocTables rt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ne * nScenarios) return;
     int e = tid % ne;
@@ -1969,7 +2203,12 @@ __global__ void fillOpenBranchBatch(int ne, int nScenarios, int n, int nnz, int 
     double o[OB_NOUT];
     evalOpenBranch(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0,
                    o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7);
-    scatterAdd(OB_NOUT, dest + e * OB_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+    if (dynReloc) {
+        scatterAddDyn(OB_NOUT, dest + e * OB_NOUT, altDest + e * OB_NOUT, selRow + e * OB_NOUT,
+                      mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n, rt, e * OB_NOUT);
+    } else {
+        scatterAdd(OB_NOUT, dest + e * OB_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+    }
 }
 
 // Per-scenario shunt admittance override (section shifts / reconnection): entries are
@@ -2145,7 +2384,9 @@ __global__ void fillClosedBranchBatchF(int ne, int nScenarios, int n, int nnz, i
 __global__ void fillOpenBranchBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                      const double* in, const int* ix, const int* dest,
                                      const double* x, double* F,
-                                     const char* disabled, const char* active) {
+                                     const char* disabled, const char* active,
+                                     const int* altDest, const int* selRow, const int* mode, int dynReloc,
+                                     RelocTables rt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ne * nScenarios) return;
     int e = tid % ne;
@@ -2159,7 +2400,12 @@ __global__ void fillOpenBranchBatchF(int ne, int nScenarios, int n, int nnz, int
     double o[4];
     evalOpenBranchF(p[0], p[1], p[2], p[3], p[4], p[5], v1, p[6], v2, 0, o + 0, o + 1, o + 2, o + 3);
     const int pos[4] = {0, 2, 4, 6};
-    scatterAddF(4, dest + e * OB_NOUT, pos, o, F + (size_t) s * n);
+    if (dynReloc) {
+        scatterAddFDyn(4, dest + e * OB_NOUT, altDest + e * OB_NOUT, selRow + e * OB_NOUT,
+                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, rt, e * OB_NOUT);
+    } else {
+        scatterAddF(4, dest + e * OB_NOUT, pos, o, F + (size_t) s * n);
+    }
 }
 
 // Voltage-dependent load model terms (OLF AbstractLoadModelEquationTerm): per entry e,
@@ -2402,7 +2648,9 @@ __global__ void fillZeroImpBatch(int nzi, int nScenarios, int n, int nnz,
                                  const double* in, const int* ix, const int* dest,
                                  const double* x, double* vals, double* F, const char* active,
                                  int nziBase, int nZiOn, const int* ziOnSlotElem,
-                                 int nZiOff, const int* ziOffSlotElem) {
+                                 int nZiOff, const int* ziOffSlotElem,
+                                 const int* ziAlt, const int* ziSel, const int* mode, int ziDyn,
+                                 RelocTables rt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nzi * nScenarios) return;
     int e = tid % nzi;
@@ -2432,14 +2680,22 @@ __global__ void fillZeroImpBatch(int nzi, int nScenarios, int n, int nnz,
     double* FS = F + (size_t) s * n;
     const int* d = dest + e * 14;
     double dummyP = xs[q[4]], dummyQ = xs[q[5]];
+    int d2 = d[2], d3 = d[3], d6 = d[6], d7 = d[7];
+    if (ziDyn) {                                             // dynamic Q-routing (ob/zi channels)
+        const int* ms = mode + (size_t) s * n;
+        d2 = ziDynDest(d2, e * 4 + 0, ziAlt, ziSel, ms, rt);
+        d3 = ziDynDest(d3, e * 4 + 1, ziAlt, ziSel, ms, rt);
+        d6 = ziDynDest(d6, e * 4 + 2, ziAlt, ziSel, ms, rt);
+        d7 = ziDynDest(d7, e * 4 + 3, ziAlt, ziSel, ms, rt);
+    }
     addAt(d[0], dummyP, valsS, FS);                          // F[bus1 P] += dummyP
     addAt(d[1], -dummyP, valsS, FS);                         // F[bus2 P] -= dummyP
-    addAt(d[2], dummyQ, valsS, FS);                          // F[bus1 Q] += dummyQ
-    addAt(d[3], -dummyQ, valsS, FS);                         // F[bus2 Q] -= dummyQ
+    addAt(d2, dummyQ, valsS, FS);                            // F[bus1 Q] += dummyQ
+    addAt(d3, -dummyQ, valsS, FS);                           // F[bus2 Q] -= dummyQ
     addAt(d[4], 1.0, valsS, FS);                             // J(bus1 P, dummyP)
     addAt(d[5], -1.0, valsS, FS);                            // J(bus2 P, dummyP)
-    addAt(d[6], 1.0, valsS, FS);                             // J(bus1 Q, dummyQ)
-    addAt(d[7], -1.0, valsS, FS);                            // J(bus2 Q, dummyQ)
+    addAt(d6, 1.0, valsS, FS);                               // J(bus1 Q, dummyQ)
+    addAt(d7, -1.0, valsS, FS);                              // J(bus2 Q, dummyQ)
     if (q[10]) {                                             // spanning-tree edge: voltage/angle coupling
         double v1 = xs[q[6]], v2 = xs[q[7]], ph1 = xs[q[8]], ph2 = xs[q[9]];
         addAt(d[8], v1 - rho * v2, valsS, FS);               // F[ZERO_V row]
@@ -4035,9 +4291,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
         if (ctx->st->ob.ne) {
             if (fOnly) {
-                fillOpenBranchBatchF<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+                fillOpenBranchBatchF<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->st->ob.altDest.as<int>(), ctx->st->ob.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ob.dynReloc ? 1 : 0, relocOf(ctx->st->ob, ctx->st.get()));
             } else {
-                fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+                fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->st->ob.altDest.as<int>(), ctx->st->ob.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ob.dynReloc ? 1 : 0, relocOf(ctx->st->ob, ctx->st.get()));
             }
         }
         if (ctx->st->sh.ne) {
@@ -4062,7 +4318,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr);
         if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr);
         if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
-        if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>());
+        if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, ziRelocOf(ctx->st.get()));
         applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>());
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: stream-ordered into the solve, no host sync
 
@@ -4368,14 +4624,14 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // Reactive-limit Q buffer: physical bus-Q for PV-limit detection — keep the FROZEN routing
     // (dynReloc=0), the relocation only concerns the Newton residual, not this diagnostic Q.
     if (ctx->st->cb.ne) fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), nullptr, nullptr, nullptr, 0, nullptr, nullptr, RelocTables{});
-    if (ctx->st->ob.ne) fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>());
+    if (ctx->st->ob.ne) fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), nullptr, nullptr, nullptr, 0, RelocTables{});
     if (ctx->st->sh.ne) fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), nullptr, nullptr, nullptr, 0, RelocTables{});
     if (ctx->st->nvdl) fillVdlBatch<<<grid(ctx->st->nvdl * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nvdl, nS, n, nnz, ctx->st->dVdlIn.as<double>(), ctx->st->dVdlIdx.as<int>(), ctx->st->dVdlDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>());
     // Zero-impedance dummy transfers MUST be in the Q/P buffer too: the distributed-slack retain
     // reads the slack row's balance from dQbuf — without the coupler's dummy-P the DS sees a
     // phantom mismatch equal to the through-flow and distributes it FOREVER (measured: +392 MW
     // runaway on the first switch-close scenario until the per-scenario budget rejected it).
-    if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>());
+    if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), nullptr, nullptr, nullptr, 0, RelocTables{});
     // Remote-member OWN q (plan-B3): fill each member's own reactive injection into its (suppressed,
     // hence free) qBuf row so the RL kernel evaluates remote entries like local ones.
     if (ctx->nRmq > 0) {
@@ -4635,7 +4891,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
         jdoubleArray jziIn, jintArray jziIdx,
         jintArray jdrRow, jintArray jdrCol, jdoubleArray jdrCoef,
         jintArray jdbRow, jintArray jdbCol, jdoubleArray jdbCoef, jintArray jcbPcSide,
-        jdoubleArray jvdlIn, jintArray jvdlIdx, jintArray jqrPtr, jintArray jqrRows) {
+        jdoubleArray jvdlIn, jintArray jvdlIdx, jintArray jqrPtr, jintArray jqrRows,
+        jintArray jobQAlt, jintArray jziQAlt) {
     jdouble* cbIn = env->GetDoubleArrayElements(jcbIn, nullptr);
     jint* cbIdx = env->GetIntArrayElements(jcbIdx, nullptr);
     jdouble* obIn = env->GetDoubleArrayElements(jobIn, nullptr);
@@ -4664,6 +4921,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
     int nQrRows = env->GetArrayLength(jqrRows);
     jdouble* vdlIn = env->GetDoubleArrayElements(jvdlIn, nullptr);
     jint* vdlIdx = env->GetIntArrayElements(jvdlIdx, nullptr);
+    jint* obQAlt = env->GetIntArrayElements(jobQAlt, nullptr);
+    jint* ziQAlt = env->GetIntArrayElements(jziQAlt, nullptr);
 
     int ncb = env->GetArrayLength(jcbIdx) / 12;             // cbIdx stride 12 (…a1col r1col qAlt1 qAlt2)
     int nob = env->GetArrayLength(jobIdx) / 6;
@@ -4699,6 +4958,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
         // qAlt slots ([10]/[11] cb, [4] sh) also carry the GROUP encoding -2-groupId (plan-A6)
         checkRange("cbIdx.qAlt", cbIdx, ncb, 12, {10, 11}, -1 - nQr, n);
         checkRange("obIdx", obIdx, nob, 6, {0, 1, 2, 3, 4, 5}, -1, n);
+        checkRange("obQAlt", obQAlt, nob, 2, {0, 1}, -1 - nQr, n);
         checkRange("shIdx", shIdx, nsh, 5, {0, 1, 2, 3}, -1, n);
         checkRange("shIdx.qAlt", shIdx, nsh, 5, {4}, -1 - nQr, n);
         checkRange("qrRows", qrRows, nQrRows, 1, {0}, 0, n);
@@ -4710,6 +4970,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
         checkRange("hvIdx", hvIdx, nhv, 4, {0, 1, 2, 3}, -1, n);
         checkRange("dqRow", dqRow, ndq, 1, {0}, 0, n);
         checkRange("ziIdx", ziIdx, nzi, 11, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, -1, n);
+        checkRange("ziQAlt", ziQAlt, nzi, 2, {0, 1}, -1 - nQr, n);
         checkRange("drRow", drRow, ndr, 1, {0}, 0, n);
         checkRange("drCol", drCol, ndr, 1, {0}, 0, n);
         checkRange("dbRow", dbRow, ndb, 1, {0}, 0, n);
@@ -4727,7 +4988,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
                                                    nzi, ziIn, ziIdx,
                                                    ndr, drRow, drCol, drCoef,
                                                    ndb, dbRow, dbCol, dbCoef, cbPcSide,
-                                                   nvdl, vdlIn, vdlIdx, nQr, qrPtr, qrRows));
+                                                   nvdl, vdlIn, vdlIdx, nQr, qrPtr, qrRows,
+                                                   obQAlt, ziQAlt));
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {
@@ -4760,6 +5022,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
     env->ReleaseDoubleArrayElements(jdbCoef, dbCoef, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jvdlIn, vdlIn, JNI_ABORT);
     env->ReleaseIntArrayElements(jvdlIdx, vdlIdx, JNI_ABORT);
+    env->ReleaseIntArrayElements(jobQAlt, obQAlt, JNI_ABORT);
+    env->ReleaseIntArrayElements(jziQAlt, ziQAlt, JNI_ABORT);
 
     if (!error.empty()) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
@@ -5214,7 +5478,7 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
         fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0, ctx->st->cb.phaseCtl ? ctx->st->cb.pcDest.as<int>() : nullptr, ctx->st->cb.phaseCtl ? ctx->st->cb.pcSel.as<int>() : nullptr, relocOf(ctx->st->cb, ctx->st.get()));
     }
     if (ctx->st->ob.ne) {
-        fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+        fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->st->ob.altDest.as<int>(), ctx->st->ob.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ob.dynReloc ? 1 : 0, relocOf(ctx->st->ob, ctx->st.get()));
     }
     if (ctx->st->sh.ne) {
         fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0, relocOf(ctx->st->sh, ctx->st.get()));
@@ -5228,7 +5492,7 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
     if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr);
     if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr);
     if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
-    if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>());
+    if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, ziRelocOf(ctx->st.get()));
     applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>());
 
     if (!ctx->analyzed) {

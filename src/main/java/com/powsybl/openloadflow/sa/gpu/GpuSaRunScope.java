@@ -115,13 +115,10 @@ final class GpuSaRunScope {
         // updatePilotVeqBatch (mode-scan fallback = candidate 0, the pilot's own row), in JAVA by
         // OLF's own vEq deactivation carried through the activation push. Still whole-run CPU in
         // BOTH modes:
-        //  - a pinnable free member whose group has NO relocation table: fewer than 2 merged
-        //    members, or a pilot with half-open / zero-impedance q terms (frozen scatter — mirrors
-        //    ExtractionColumns.relocatablePilot);
-        //  - a PINNABLE member with half-open / zero-impedance q terms: its mode-4 (pinned) row
-        //    would silently MISS those terms — the alternate-dest select covers only the cb/sh
-        //    channels (measured 3.3e-4 kV on a pinned member with one open line); an UNPINNABLE
-        //    unclean member is fine (its own-q row is never activated).
+        //  - a pinnable free member whose group has NO relocation table (fewer than 2 merged
+        //    members). Half-open / zero-impedance q terms at members and pilots ride the ob/zi
+        //    alternate-dest channels since 2026-09-07 — the unclean-member/pilot conditions are
+        //    gone (the pre-channel gap was 3.3e-4 kV on a pinned member with one open line).
         boolean remoteRlUnsupported = remoteRlUnrepresentable(lfNetwork);
         boolean noSvc = lfNetwork.getBuses().stream()
                 .flatMap(b -> b.getGenerators().stream())
@@ -354,22 +351,9 @@ final class GpuSaRunScope {
                     if (enabled.isEmpty()) {
                         return false;                        // control lost already — no pin dynamics
                     }
-                    boolean relocatable = vc.getMergedControllerElements().size() >= 2
-                            && cleanQScatterBus(vc.getControlledBus());
-                    boolean uncleanPinnableMember = vc.getMergedControllerElements().stream()
-                            .anyMatch(m -> pinnableRemoteMember(m) && !cleanQScatterBus(m));
-                    return uncleanPinnableMember
-                            || pinnableRemoteMember(enabled.get(0)) && !relocatable;
+                    boolean relocatable = vc.getMergedControllerElements().size() >= 2;
+                    return pinnableRemoteMember(enabled.get(0)) && !relocatable;
                 });
-    }
-
-    /** Every enabled branch at the bus is plain CLOSED non-zero-impedance — all its q terms ride
-     *  the dynamically routable cb/sh channels (mirrors ExtractionColumns.relocatablePilot). */
-    private static boolean cleanQScatterBus(com.powsybl.openloadflow.network.LfBus bus) {
-        return bus.getBranches().stream()
-                .filter(b -> !b.isDisabled())
-                .allMatch(b -> b.getBus1() != null && b.getBus2() != null
-                        && !b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC));
     }
 
     private static List<String> javaUnsupportedOuterLoops(LfNetwork lfNetwork, AcLoadFlowParameters acParameters,

@@ -46,7 +46,8 @@ final class GpuAcFamilyPacker {
                  List<double[]> ziIn, List<int[]> ziIdx, List<Integer> ziNums,
                  List<Integer> baseOpenCb, List<Integer> baseOpenZi, List<Integer> baseOpenZiNums,
                  int[] cbElemOf, int[] obElemOf, int[] shElemOf, List<Integer> cbPcSide,
-                 List<double[]> vdlIn, List<int[]> vdlIdx) {
+                 List<double[]> vdlIn, List<int[]> vdlIdx,
+                 List<int[]> obQAlt, List<int[]> ziQAlt) {
     }
 
     static Packs pack(LfNetwork network, ExtractionColumns columns,
@@ -77,6 +78,13 @@ final class GpuAcFamilyPacker {
         List<Integer> cbPcSide = new ArrayList<>();
         List<double[]> obIn = new ArrayList<>();
         List<int[]> obIdx = new ArrayList<>();
+        // Dynamic Q-relocation for the ob/zi families (the cb/sh channels' twin): per element, the
+        // ALTERNATE Q row of each side's bus — a two-way row (>= 0), a -2-groupId relocation-group
+        // encoding, or -1 (no second candidate). Lets a pinned remote member's / relocated pilot's
+        // half-open-charging and dummy-Q terms follow the per-scenario routing instead of the
+        // frozen dests (the guarded 3.3e-4 kV gap).
+        List<int[]> obQAlt = new ArrayList<>();
+        List<int[]> ziQAlt = new ArrayList<>();
         int[] obElemOf = new int[nBranches];                 // open-branch element index per branch (-1 = none)
         java.util.Arrays.fill(obElemOf, -1);
         for (LfBranch br : network.getBranches()) {
@@ -107,6 +115,7 @@ final class GpuAcFamilyPacker {
                 ziIdx.add(new int[] {phiCol[b1n], qRow[b1n], phiCol[b2n], qRow[b2n], dpRow, dqRow,
                     vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n],
                     br.isSpanningTreeEdge(LoadFlowModel.AC) ? 1 : 0});
+                ziQAlt.add(new int[] {qRowAlt[b1n], qRowAlt[b2n]});
                 continue;
             }
             if (b1 != null && b2 != null) {
@@ -148,6 +157,7 @@ final class GpuAcFamilyPacker {
                 obIdx.add(new int[] {-1, -1,
                     phiCol[b2.getNum()], qRow[b2.getNum()],
                     -1, vCol[b2.getNum()]});
+                obQAlt.add(new int[] {-1, qRowAlt[b2.getNum()]});
             } else if (b1 != null) {                       // side 2 open: p1/q1 at bus1, variable v1
                 obElemOf[br.getNum()] = obIn.size();
                 obIn.add(new double[] {pi.getY(), pi.getKsi(), pi.getG1(), pi.getB1(), pi.getG2(), pi.getB2(), pi.getR1()});
@@ -155,6 +165,7 @@ final class GpuAcFamilyPacker {
                     phiCol[b1.getNum()], qRow[b1.getNum()],
                     -1, -1,
                     vCol[b1.getNum()], -1});
+                obQAlt.add(new int[] {qRowAlt[b1.getNum()], -1});
             }
         }
 
@@ -224,6 +235,7 @@ final class GpuAcFamilyPacker {
                 ziIn.add(new double[] {PiModel.R2 / br.getPiModel().getR1()});
                 ziIdx.add(new int[] {phiCol[b1n], qRow[b1n], phiCol[b2n], qRow[b2n], dpRow, dqRow,
                     vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n], 1});
+                ziQAlt.add(new int[] {qRowAlt[b1n], qRowAlt[b2n]});
             }
         }
 
@@ -281,7 +293,7 @@ final class GpuAcFamilyPacker {
 
         return new Packs(cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx, ziIn, ziIdx, ziNums,
                 baseOpenCb, baseOpenZi, baseOpenZiNums, cbElemOf, obElemOf, shElemOf, cbPcSide,
-                vdlIn, vdlIdx);
+                vdlIn, vdlIdx, obQAlt, ziQAlt);
     }
 
     /** Voltage-dependent load model (ZIP/exponential): one vdl entry per NON-CONSTANT exp term,

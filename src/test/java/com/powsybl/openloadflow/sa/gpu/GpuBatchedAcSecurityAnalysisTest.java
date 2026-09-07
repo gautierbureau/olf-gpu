@@ -1012,12 +1012,12 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
     }
 
-    /** B3-class residual, now GUARDED: a PINNABLE member with a HALF-OPEN branch at its bus.
-     *  The mode-4 (pinned) row's alternate-dest select covers only the cb/sh channels, so the open
-     *  line's charging q would be MISSING from the pinned row — measured 3.3e-4 kV silently wrong
-     *  before the guard. The scope gate must route the whole run to the CPU and match exactly. */
+    /** The formerly-guarded B3-class gap, now LIFTED by the ob alternate-dest channel: a PINNABLE
+     *  member with a HALF-OPEN branch at its bus pins ON-DEVICE — the open line's charging q
+     *  follows the mode-4 row through the ob two-way select (it was 3.3e-4 kV silently MISSING
+     *  from the pinned row before the channel, then whole-run CPU-gated). 1e-12 with engagement. */
     @org.junit.jupiter.api.Test
-    void deviceRemoteUncleanPinnableMemberFallsBackWholeRun() {
+    void deviceRemoteOpenBranchMemberPinMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = remotePinNetwork("g2", 186.0);
@@ -1028,12 +1028,75 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         network.getLine("lob").getTerminal2().disconnect();
         List<Contingency> ctgs = List.of(
                 new Contingency("l45b", new BranchContingency("l45b")));
-        assertGpuFallsBackWholeRunAndMatchesCpu(network, ctgs, remotePinParameters());
+        assertGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
     }
 
-    /** The unclean-member gate is MEMBER-targeted: the same half-open branch at an UNPINNABLE
-     *  member's bus (g3, unlimited — its own-q row is never activated) must still batch, with the
-     *  pinnable clean member (g2) pinning on-device. 1e-12 with engagement. */
+    /** JAVA twin of {@link #deviceRemoteOpenBranchMemberPinMatchesCpu}: the pushed mode-4 row
+     *  routes the member's ob q through the same channel. 1e-12. */
+    @org.junit.jupiter.api.Test
+    void javaRemoteOpenBranchMemberPinMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = remotePinNetwork("g2", 186.0);
+        network.newLine().setId("lob")
+                .setVoltageLevel1("vl2").setBus1("b2").setConnectableBus1("b2")
+                .setVoltageLevel2("vl5").setBus2("b5").setConnectableBus2("b5")
+                .setR(1.5).setX(40.0).setG1(0).setB1(1e-4).setG2(0).setB2(1e-4).add();
+        network.getLine("lob").getTerminal2().disconnect();
+        List<Contingency> ctgs = List.of(
+                new Contingency("l45b", new BranchContingency("l45b")));
+        assertJavaGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
+    }
+
+    /** Zero-impedance twin: a PINNABLE member with a ZERO-IMPEDANCE spanning-tree branch at its
+     *  bus — the dummy-Q coupling follows the mode-4 row through the zi dynamic slots. 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceRemoteZeroImpMemberPinMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = remotePinNetwork("g2", 186.0);
+        var vl8 = network.getSubstation("s").newVoltageLevel().setId("vl8").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        vl8.getBusBreakerView().newBus().setId("b8").add();
+        vl8.newLoad().setId("l8").setBus("b8").setConnectableBus("b8").setP0(5).setQ0(10).add();
+        network.newLine().setId("lzi")                       // R = X = 0: OLF zero-impedance branch,
+                .setVoltageLevel1("vl2").setBus1("b2").setConnectableBus1("b2")   // spanning-tree edge
+                .setVoltageLevel2("vl8").setBus2("b8").setConnectableBus2("b8")   // (b8's only feed)
+                .setR(0.0).setX(0.0).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        List<Contingency> ctgs = List.of(
+                new Contingency("l45b", new BranchContingency("l45b")));
+        // the extra l8 load pushes g2 over its limit in the BASE case, and the sequential
+        // GPU-inner-solver path has the known open gap under outer-loop switching — run the base
+        // on the CPU (same pattern as the carrier-clamp test); the BATCH path is the subject here.
+        System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY, "false");
+        try {
+            assertGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
+        } finally {
+            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY);
+        }
+    }
+
+    /** Half-open branch at the PILOT + a FREE-member pin: the pilot's ob charging q rides the
+     *  relocation GROUP pool (the qr table now exists for unclean pilots) and follows the
+     *  re-picked carrier. 1e-12 with engagement. */
+    @org.junit.jupiter.api.Test
+    void deviceRemoteOpenBranchPilotFreePinMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = remotePinNetwork("g1", 186.0);
+        network.newLine().setId("lob4")
+                .setVoltageLevel1("vl4").setBus1("b4").setConnectableBus1("b4")
+                .setVoltageLevel2("vl5").setBus2("b5").setConnectableBus2("b5")
+                .setR(1.5).setX(40.0).setG1(0).setB1(1e-4).setG2(0).setB2(1e-4).add();
+        network.getLine("lob4").getTerminal2().disconnect();
+        List<Contingency> ctgs = List.of(
+                new Contingency("l45b", new BranchContingency("l45b")));
+        assertGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
+    }
+
+    /** The former gate's member-targeting twin, still valid post-lift: the half-open branch at an
+     *  UNPINNABLE member's bus (g3, unlimited) batches with the pinnable clean member (g2)
+     *  pinning on-device. 1e-12 with engagement. */
     @org.junit.jupiter.api.Test
     void deviceRemoteUncleanUnpinnableMemberStillBatches() {
         org.junit.jupiter.api.Assumptions.assumeTrue(

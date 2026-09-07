@@ -87,7 +87,8 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         int dsMode, double[] dsMarginUp, double[] dsMarginDown,
                         double dsSlackMarginUp, double dsSlackMarginDown,
                         int[] baseOpenCbElements, int[] baseOpenZiElements, int[] baseOpenZiBranchNums,
-                        int[] ziBranchNums, double[] vdlIn, int[] vdlIdx, int[] qrPtr, int[] qrRows) {
+                        int[] ziBranchNums, double[] vdlIn, int[] vdlIdx, int[] qrPtr, int[] qrRows,
+                        int[] obQAlt, int[] ziQAlt) {
 
     /**
      * Content equality over every array — true means a cached solver context built from
@@ -131,7 +132,8 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(dbCoef, other.dbCoef)
                 && java.util.Arrays.equals(vdlIn, other.vdlIn) && java.util.Arrays.equals(vdlIdx, other.vdlIdx)
                 // structure input too: the phase-control alt-dest tables (pcDest/pcSel) are built from it
-                && java.util.Arrays.equals(cbPcSide, other.cbPcSide);
+                && java.util.Arrays.equals(cbPcSide, other.cbPcSide)
+                && java.util.Arrays.equals(obQAlt, other.obQAlt) && java.util.Arrays.equals(ziQAlt, other.ziQAlt);
     }
 
     /**
@@ -162,6 +164,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(dsBaseTargetP, other.dsBaseTargetP)
                 && java.util.Arrays.equals(dsMaxDelta, other.dsMaxDelta) && java.util.Arrays.equals(dsMinDelta, other.dsMinDelta)
                 && java.util.Arrays.equals(qrPtr, other.qrPtr) && java.util.Arrays.equals(qrRows, other.qrRows)
+                && java.util.Arrays.equals(obQAlt, other.obQAlt) && java.util.Arrays.equals(ziQAlt, other.ziQAlt)
                 && java.util.Arrays.equals(rlMonitored, other.rlMonitored)
                 && java.util.Arrays.equals(rlRemote, other.rlRemote)
                 && java.util.Arrays.equals(rlCmpVrow, other.rlCmpVrow)

@@ -67,6 +67,12 @@ public final class GpuAcNewtonSolver {
      * @param hvIdx HVDC AC emulation, {@code nhv*4}: (Prow1 Prow2 ph1col ph2col)
      * @return an opaque native handle; release it with {@link #destroyStructure}
      */
+    private static int[] noQAlt(int ne) {
+        int[] a = new int[ne * 2];
+        java.util.Arrays.fill(a, -1);
+        return a;
+    }
+
     private static int[] noPcSide(int ncb) {
         int[] a = new int[ncb];
         java.util.Arrays.fill(a, -1);
@@ -80,7 +86,8 @@ public final class GpuAcNewtonSolver {
                                               double[] ziIn, int[] ziIdx,
                                               int[] drRow, int[] drCol, double[] drCoef,
                                               int[] dbRow, int[] dbCol, double[] dbCoef, int[] cbPcSide,
-                                              double[] vdlIn, int[] vdlIdx, int[] qrPtr, int[] qrRows);
+                                              double[] vdlIn, int[] vdlIdx, int[] qrPtr, int[] qrRows,
+                                              int[] obQAlt, int[] ziQAlt);
 
     /**
      * Release a structure handle from {@link #createStructure} (idempotent for handle 0). Contexts
@@ -176,11 +183,12 @@ public final class GpuAcNewtonSolver {
                                  int[] dbRow, int[] dbCol, double[] dbCoef) {
         return solve(x0, target, rowMode, maxIter, tol, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
                 dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
-                new int[] {0}, new int[0]);
+                new int[] {0}, new int[0], noQAlt(obIdx.length / 6), noQAlt(ziIdx.length / 11));
     }
 
-    /** {@link #solve} with the GROUP pilot-Q relocation tables (plan-A6) — required whenever the
-     *  index packs carry the {@code -2-groupId} qAlt encoding (shared transformer-VC groups). */
+    /** {@link #solve} with the GROUP pilot-Q relocation tables (plan-A6) and the ob/zi alternate
+     *  Q rows — required whenever the index packs carry qAlt encodings (shared groups / remote
+     *  members). Pass all-(-1) ob/zi alt arrays when only cb/sh relocate. */
     @SuppressWarnings("java:S107")
     public static double[] solve(double[] x0, double[] target, int[] rowMode, int maxIter, double tol,
                                  double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
@@ -188,10 +196,11 @@ public final class GpuAcNewtonSolver {
                                  int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                                  double[] ziIn, int[] ziIdx,
                                  int[] drRow, int[] drCol, double[] drCoef,
-                                 int[] dbRow, int[] dbCol, double[] dbCoef, int[] qrPtr, int[] qrRows) {
+                                 int[] dbRow, int[] dbCol, double[] dbCoef, int[] qrPtr, int[] qrRows,
+                                 int[] obQAlt, int[] ziQAlt) {
         long structure = createStructure(x0.length, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
                 dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
-                noPcSide(cbIdx.length / 12), new double[0], new int[0], qrPtr, qrRows);
+                noPcSide(cbIdx.length / 12), new double[0], new int[0], qrPtr, qrRows, obQAlt, ziQAlt);
         try {
             long handle = createContext(structure);
             try {
@@ -393,7 +402,8 @@ public final class GpuAcNewtonSolver {
         int nScenarios = disabledElementMask.length;
         long structure = createStructure(n, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
                 dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
-                noPcSide(cbIdx.length / 12), new double[0], new int[0], new int[] {0}, new int[0]);
+                noPcSide(cbIdx.length / 12), new double[0], new int[0], new int[] {0}, new int[0],
+                noQAlt(obIdx.length / 6), noQAlt(ziIdx.length / 11));
         try {
             long handle = createBatchContext(structure, nScenarios, mode,
                     rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, new byte[rlVrow.length], new double[x0Base.length],

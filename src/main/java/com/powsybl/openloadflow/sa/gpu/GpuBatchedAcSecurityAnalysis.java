@@ -98,41 +98,52 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     static final java.util.concurrent.atomic.AtomicInteger LAST_GPU_PRECOMPUTED_COUNT =
             new java.util.concurrent.atomic.AtomicInteger(-1);
 
-    private List<PropagatedContingency> currentContingencies = List.of();
-    private List<OperatorStrategy> currentOperatorStrategies = List.of();
-    private List<Action> currentActions = List.of();
     /** Separator inside the precomputed-state key of a (contingency, strategy) pair — the SOLVER's
      *  constant, which also drives its two-phase warm-continuation ordering. */
     private static final char STRATEGY_KEY_SEP = GpuBatchStatus.STRATEGY_KEY_SEP;
-    private LfNetwork currentLfNetwork;
-    private AcLoadFlowContext currentContext;
-    /** The batch precomputed on the device once the base load flow converged (see
-     *  GpuBatchPrecomputer); PrecomputedBatch.empty() until then / on CPU fallback. */
-    private PrecomputedBatch precomputed = PrecomputedBatch.empty();
-    // The run's actual outer loops, captured in runSimulations: the device must run the distributed-slack /
-    // reactive-limits passes ONLY when OLF would (i.e. when the outer loop is in the configured list), never
-    // unconditionally from network capability. Default to OLF's defaults until runSimulations sets them.
-    private boolean batchDistributedSlack = true;
-    private boolean batchReactiveLimits = true;
-    // The run's outer-loop convergence tolerances (per-unit), captured from the loadflow parameters so the
-    // device aligns to the CPU loadflow (GPU follows CPU, not the reverse): slackBusPMaxMismatch /
-    // maxReactivePowerMismatch divided by the 100 MVA base. Default to OLF's defaults until runSimulations sets.
-    private double batchSlackDistTol = GpuBatchedSecurityAnalysisSolver.DEFAULT_SLACK_DIST_TOL;
-    private double batchReactiveLimitTol = GpuBatchedSecurityAnalysisSolver.DEFAULT_REACTIVE_LIMIT_TOL;
-    // The device inner-Newton stopping criterion, matched to OLF's: for UNIFORM_CRITERIA (default) the device
-    // stops on OLF's exact ‖F‖₂ < sqrt(convEpsPerEq²·n) so the reactive-limit switch DECISIONS (whose tolerance
-    // is convEpsPerEq for UNIFORM) are made on a state converged to the SAME depth as the CPU — else the device
-    // switched on a 1e-8-converged state while the RL threshold was convEpsPerEq (1e-12), flipping borderline
-    // buses vs the CPU. 0 = the device infinity-norm floor (kept for PER_EQUATION_TYPE, whose per-eq criteria
-    // are not ported to the device).
-    private double batchConvEpsPerEq;
-    // The run's batched outer-loop parameterization, captured here (per provider instance = per run) and
-    // assembled into a BatchConfig at the solveBatchN1 call. This replaced
-    // the solver's former JVM-global static config, whose leak between a provider run and a direct-solver
-    // run caused the pegase full-suite failure — see BatchConfig's javadoc.
-    private BatchConfig batchConfig =
-            BatchConfig.DEVICE_DEFAULTS;
-    private com.powsybl.loadflow.LoadFlowParameters currentLoadFlowParameters;
+
+    /** The per-RUN mutable state, one holder PER PARTITION THREAD. Under threadCount > 1 OLF invokes
+     *  {@code runSimulations} CONCURRENTLY on this same analysis instance (one call per contingency
+     *  partition, each with its own LfNetwork), and every hook this class overrides runs on the
+     *  partition's own thread inside that call stack — so the state is ThreadLocal, never instance
+     *  fields. As INSTANCE fields these raced: partition A's precompute could read partition B's
+     *  lfNetwork/context and LOAD STATES INTO B's equation system while B was mid-solve — one
+     *  corrupted scenario (the 19/1 MAX_ITERATION flake) or an NPE inside B's JacobianMatrix on
+     *  pure CPU stacks (both observed, threadCountAboveOneRunsSafelyOnGpuProvider). */
+    private static final class RunState {
+        private List<PropagatedContingency> contingencies = List.of();
+        private List<OperatorStrategy> operatorStrategies = List.of();
+        private List<Action> actions = List.of();
+        private LfNetwork lfNetwork;
+        private AcLoadFlowContext context;
+        /** The batch precomputed on the device once the base load flow converged (see
+         *  GpuBatchPrecomputer); PrecomputedBatch.empty() until then / on CPU fallback. */
+        private PrecomputedBatch precomputed = PrecomputedBatch.empty();
+        // The run's actual outer loops, captured in runSimulations: the device must run the distributed-slack /
+        // reactive-limits passes ONLY when OLF would (i.e. when the outer loop is in the configured list), never
+        // unconditionally from network capability. Default to OLF's defaults until runSimulations sets them.
+        private boolean batchDistributedSlack = true;
+        private boolean batchReactiveLimits = true;
+        // The run's outer-loop convergence tolerances (per-unit), captured from the loadflow parameters so the
+        // device aligns to the CPU loadflow (GPU follows CPU, not the reverse): slackBusPMaxMismatch /
+        // maxReactivePowerMismatch divided by the 100 MVA base. Default to OLF's defaults until runSimulations sets.
+        private double batchSlackDistTol = GpuBatchedSecurityAnalysisSolver.DEFAULT_SLACK_DIST_TOL;
+        private double batchReactiveLimitTol = GpuBatchedSecurityAnalysisSolver.DEFAULT_REACTIVE_LIMIT_TOL;
+        // The device inner-Newton stopping criterion, matched to OLF's: for UNIFORM_CRITERIA (default) the device
+        // stops on OLF's exact ‖F‖₂ < sqrt(convEpsPerEq²·n) so the reactive-limit switch DECISIONS (whose tolerance
+        // is convEpsPerEq for UNIFORM) are made on a state converged to the SAME depth as the CPU — else the device
+        // switched on a 1e-8-converged state while the RL threshold was convEpsPerEq (1e-12), flipping borderline
+        // buses vs the CPU. 0 = the device infinity-norm floor (kept for PER_EQUATION_TYPE, whose per-eq criteria
+        // are not ported to the device).
+        private double batchConvEpsPerEq;
+        // The run's batched outer-loop parameterization, captured per run and assembled into a BatchConfig at
+        // the solveBatchN1 call. This replaced the solver's former JVM-global static config, whose leak between
+        // a provider run and a direct-solver run caused the pegase full-suite failure — see BatchConfig's javadoc.
+        private BatchConfig batchConfig = BatchConfig.DEVICE_DEFAULTS;
+        private com.powsybl.loadflow.LoadFlowParameters loadFlowParameters;
+    }
+
+    private final ThreadLocal<RunState> runState = ThreadLocal.withInitial(RunState::new);
 
     protected GpuBatchedAcSecurityAnalysis(Network network, MatrixFactory matrixFactory,
                                            GraphConnectivityFactory<LfBus, LfBranch> connectivityFactory,
@@ -154,7 +165,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // the single-device sequential solver would race in native code (SIGSEGV in cuLaunchKernel,
         // measured 2026-07-17).
         boolean multiThread = OpenSecurityAnalysisParameters.getOrDefault(securityAnalysisParameters).getThreadCount() > 1;
-        this.currentLoadFlowParameters = securityAnalysisParameters.getLoadFlowParameters();
+        RunState rs = new RunState();
+        runState.set(rs);
+        rs.loadFlowParameters = securityAnalysisParameters.getLoadFlowParameters();
         // STRUCTURAL: run the base (pre-contingency) load flow on the GPU solver when the device
         // is available and the user left the default CPU Newton-Raphson. This absorbs the one-time
         // CUDA init into the base phase (so the batched contingency pass that follows is warm) and
@@ -224,21 +237,21 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         }
         // Capture this component's network + contingencies; the batch is precomputed once the
         // pre-contingency load flow has converged (afterPreContingencySimulation hook).
-        this.currentLfNetwork = lfNetwork;
-        this.currentContingencies = propagatedContingencies;
-        this.currentOperatorStrategies = operatorStrategies != null ? operatorStrategies : List.of();
-        this.currentActions = actions != null ? actions : List.of();
-        this.precomputed = PrecomputedBatch.empty();
-        this.batchDistributedSlack = scope.distributedSlack();
-        this.batchReactiveLimits = scope.reactiveLimits();
+        rs.lfNetwork = lfNetwork;
+        rs.contingencies = propagatedContingencies;
+        rs.operatorStrategies = operatorStrategies != null ? operatorStrategies : List.of();
+        rs.actions = actions != null ? actions : List.of();
+        rs.precomputed = PrecomputedBatch.empty();
+        rs.batchDistributedSlack = scope.distributedSlack();
+        rs.batchReactiveLimits = scope.reactiveLimits();
         if (scope.batchDisabled()) {                         // outer-loop guard: also skip the solver swap below
-            this.currentLfNetwork = null;
-            this.currentContingencies = null;
+            rs.lfNetwork = null;
+            rs.contingencies = null;
         }
-        this.batchSlackDistTol = scope.slackDistTol();
-        this.batchReactiveLimitTol = scope.reactiveLimitTol();
-        this.batchConvEpsPerEq = scope.convEpsPerEq();
-        this.batchConfig = scope.batchConfig();
+        rs.batchSlackDistTol = scope.slackDistTol();
+        rs.batchReactiveLimitTol = scope.reactiveLimitTol();
+        rs.batchConvEpsPerEq = scope.convEpsPerEq();
+        rs.batchConfig = scope.batchConfig();
         // Run the engine's load flows — the pre-contingency BASE and any contingency that falls through to
         // the sequential path — on the FULL GPU Newton-Raphson when the device + network support it. The base
         // then solves on-device and PRE-WARMS CUDA for the batched contingency pass (the one-time device init
@@ -253,8 +266,12 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             acParameters.setSolverFactory(new GpuNewtonRaphsonFactory(), securityAnalysisParameters.getLoadFlowParameters());
             LOGGER.info("GPU batched SA: base + fall-through load flows run on the GPU Newton-Raphson (CUDA pre-warm)");
         }
-        return super.runSimulations(lfNetwork, propagatedContingencies, acParameters, securityAnalysisParameters,
-                operatorStrategies, actions, limitReductions, contingencyActivePowerLossDistribution);
+        try {
+            return super.runSimulations(lfNetwork, propagatedContingencies, acParameters, securityAnalysisParameters,
+                    operatorStrategies, actions, limitReductions, contingencyActivePowerLossDistribution);
+        } finally {
+            runState.remove();                               // pooled partition threads must not leak a run's state
+        }
     }
 
     /** System property toggle for the GPU base/fall-through load flow (default on). */
@@ -280,17 +297,20 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // contingency would then evaluate the batch system's stale-indexed equations (an index -1 crash, or a
         // mis-converged generator/N-2 outage). The context is created per component, just before the base
         // load flow and afterPreContingencySimulation, and lives through the whole contingency loop.
-        currentContext = super.createLoadFlowContext(lfNetwork, parameters);
-        return currentContext;
+        AcLoadFlowContext context = super.createLoadFlowContext(lfNetwork, parameters);
+        runState.get().context = context;
+        return context;
     }
 
     @Override
     protected void afterPreContingencySimulation(AcLoadFlowParameters parameters) {
         super.afterPreContingencySimulation(parameters);
-        this.precomputed = GpuBatchPrecomputer.precompute(network, currentLfNetwork, currentContext,
-                currentContingencies, currentOperatorStrategies, currentActions, batchDistributedSlack,
-                batchReactiveLimits, batchReactiveLimitTol, batchSlackDistTol, batchConvEpsPerEq, batchConfig, reportNode);
-        LAST_GPU_PRECOMPUTED_COUNT.set(precomputed.isReady() ? precomputed.states().size() : -1);
+        RunState rs = runState.get();
+        rs.precomputed = GpuBatchPrecomputer.precompute(network, rs.lfNetwork, rs.context,
+                rs.contingencies, rs.operatorStrategies, rs.actions, rs.batchDistributedSlack,
+                rs.batchReactiveLimits, rs.batchReactiveLimitTol, rs.batchSlackDistTol, rs.batchConvEpsPerEq,
+                rs.batchConfig, reportNode);
+        LAST_GPU_PRECOMPUTED_COUNT.set(rs.precomputed.isReady() ? rs.precomputed.states().size() : -1);
         // Sequential fall-through routing is an OPTION (2026-07-17): by DEFAULT the engine's
         // solver reverts to the stock CPU Newton-Raphson after the base LF — single-system GPU
         // solves are not where the device wins (its parallelism is the batch), and the CPU path
@@ -298,8 +318,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // the GPU solver for the sequential fall-through solves instead. The base LF has already
         // run at this point (on the GPU when enabled, absorbing CUDA init).
         if (!gpuSequentialLoadFlowEnabled()
-                && parameters.getSolverFactory() instanceof GpuNewtonRaphsonFactory && currentLoadFlowParameters != null) {
-            parameters.setSolverFactory(new NewtonRaphsonFactory(), currentLoadFlowParameters);
+                && parameters.getSolverFactory() instanceof GpuNewtonRaphsonFactory && rs.loadFlowParameters != null) {
+            parameters.setSolverFactory(new NewtonRaphsonFactory(), rs.loadFlowParameters);
         }
     }
 
@@ -321,6 +341,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                          com.powsybl.openloadflow.network.LfNetworkParameters networkParameters,
                                                          List<LimitReduction> limitReductions) {
         String scId = contingency.getId() + STRATEGY_KEY_SEP + operatorStrategy.getId();
+        PrecomputedBatch precomputed = runState.get().precomputed;
         double[] state = precomputed.states().get(scId);
         if (state == null || !precomputed.isReady()) {
             // pair not precomputed (condition not TrueCondition / out-of-scope action / diverged) — CPU path
@@ -365,6 +386,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                                  SecurityAnalysisParameters securityAnalysisParameters,
                                                                  PreContingencyNetworkResult preContingencyNetworkResult, boolean createResultExtension,
                                                                  List<LimitReduction> limitReductions, double preDistributedActivePower) {
+        PrecomputedBatch precomputed = runState.get().precomputed;
         double[] state = precomputed.states().get(contingency.getId());
         if (state == null || !precomputed.isReady()) {
             // not batched (multi-element / islanding / out of scope / diverged) — standard CPU path

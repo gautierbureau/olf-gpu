@@ -909,6 +909,101 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         return network;
     }
 
+    private void assertJavaGpuMatchesCpu(Network network, List<Contingency> ctgs, double tolKv,
+                                         com.powsybl.loadflow.LoadFlowParameters lfp) {
+        System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY, "JAVA");
+        try {
+            assertGpuMatchesCpu(network, ctgs, tolKv, lfp);
+        } finally {
+            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
+        }
+    }
+
+    /** JAVA-hybrid twin of {@link #deviceSharedTransformerControlMatchesCpu}: OLF's own
+     *  TransformerVoltageControl loop drives the 3-member shared group per scenario; the engine
+     *  pushes the LIVE DISTR_RHO coefficients (drOv) when the T2wT2 member outage reforms them, and
+     *  the T2wT (FREE member) outage is dropped to the CPU at qualification. 1e-12. */
+    @org.junit.jupiter.api.Test
+    void javaSharedTransformerControlMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = sharedThreeMemberTvcNetwork();
+        com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+        List<Contingency> ctgs = List.of(
+                new Contingency(l0.getId() + "_BIS", new BranchContingency(l0.getId() + "_BIS")),
+                new Contingency("T2wT2", new BranchContingency("T2wT2")),
+                new Contingency("T2wT", new BranchContingency("T2wT")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
+        assertJavaGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
+    /** WITH_GENERATOR (SimpleTransformerVoltageControl) flavor of the JAVA shared-group twin. */
+    @org.junit.jupiter.api.Test
+    void javaSharedSimpleTransformerControlMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = sharedThreeMemberTvcNetwork();
+        com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+        List<Contingency> ctgs = List.of(
+                new Contingency(l0.getId() + "_BIS", new BranchContingency(l0.getId() + "_BIS")),
+                new Contingency("T2wT2", new BranchContingency("T2wT2")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL);
+        assertJavaGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
+    /** JAVA-hybrid twin of {@link #deviceRemoteMemberPostContingencyPinMatchesCpu}: OLF's own RL
+     *  loop pins g2 post-contingency; the activation re-extract carries the mode-4 member row and
+     *  the engine pushes the LIVE renormalized qPct weights (dqOv). 1e-12. */
+    @org.junit.jupiter.api.Test
+    void javaRemoteMemberPostContingencyPinMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = remotePinNetwork(186.0);
+        List<Contingency> ctgs = List.of(
+                new Contingency("l45b", new BranchContingency("l45b")));
+        assertJavaGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
+    }
+
+    /** JAVA-hybrid base-pinned continuation (branch-outage flavor: the JAVA engine batches
+     *  branch-only contingencies): g2 pinned in the base, the l45b outage loads the group further
+     *  and the member STAYS pinned on both sides. 1e-12. */
+    @org.junit.jupiter.api.Test
+    void javaRemoteMemberBasePinnedMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = remotePinNetwork(180.0);
+        List<Contingency> ctgs = List.of(
+                new Contingency("l45b", new BranchContingency("l45b")));
+        assertJavaGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
+    }
+
+    /** JAVA-mode plan-B4 pre-gate: a pinnable FREE member still routes the whole run to the CPU. */
+    @org.junit.jupiter.api.Test
+    void javaRemoteFreeMemberPinnableFallsBackWholeRun() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
+        network.getGenerator("g1").newMinMaxReactiveLimits().setMinQ(-1000).setMaxQ(1000).add();
+        network.newLine().setId("L14")
+                .setVoltageLevel1("vl1").setBus1("b1").setVoltageLevel2("vl4").setBus2("b4")
+                .setR(1.5).setX(40).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        List<Contingency> ctgs = List.of(new Contingency("L14", new BranchContingency("L14")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY, "JAVA");
+        try {
+            assertGpuFallsBackWholeRunAndMatchesCpu(network, ctgs, lfp);
+        } finally {
+            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
+        }
+    }
+
     /** The whole-run-fallback contract: the batch must NOT engage (the scope routed the run to the
      *  stock CPU path) and the results must equal the plain CPU SA bit-for-bit. */
     private void assertGpuFallsBackWholeRunAndMatchesCpu(Network network, List<Contingency> ctgs,

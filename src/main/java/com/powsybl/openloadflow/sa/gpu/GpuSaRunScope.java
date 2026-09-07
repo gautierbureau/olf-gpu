@@ -149,7 +149,8 @@ final class GpuSaRunScope {
         if (outerLoopMode == OuterLoopMode.JAVA) {
             // JAVA runs OLF's OWN outer-loop code per scenario, so there is no device-port parameterization
             // limit — only not-yet-validated loops and config the compact snapshot cannot isolate fall back.
-            unsupportedOuterLoops = javaUnsupportedOuterLoops(lfNetwork, acParameters, noHvdc, noSvc, remoteRlPinnable);
+            unsupportedOuterLoops = javaUnsupportedOuterLoops(lfNetwork, acParameters, noHvdc, noSvc,
+                    freeRemoteRlPinnable, sharedUseInitial);
         } else {
             unsupportedOuterLoops = new ArrayList<>(acParameters.getOuterLoops().stream()
                     .map(AcOuterLoop::getName)
@@ -349,12 +350,18 @@ final class GpuSaRunScope {
      *  DEVICE gate: EVERY OLF balance type works (generation- AND load-based — the engine isolates both generator
      *  and load targets per scenario), and no useActiveLimits requirement (JAVA runs OLF's own ActivePowerDistribution). */
     private static List<String> javaUnsupportedOuterLoops(LfNetwork lfNetwork, AcLoadFlowParameters acParameters,
-                                                          boolean noHvdc, boolean noSvc, boolean remoteRlPinnableJava) {
+                                                          boolean noHvdc, boolean noSvc, boolean freeRemoteRlPinnableJava,
+                                                          boolean sharedUseInitialJava) {
         List<String> unsupported = new ArrayList<>();
         for (AcOuterLoop ol : acParameters.getOuterLoops()) {
             String name = ol.getName();
             boolean ok = JAVA_SUPPORTED_LOOPS.contains(name)
-                    && !(ReactiveLimitsOuterLoop.NAME.equals(name) && remoteRlPinnableJava)
+                    // Remote-group RL pins run in the JAVA hybrid too (2026-09-07): OLF's own RL loop
+                    // makes the pin decisions, the activation re-extract carries the mode-4 member rows,
+                    // and the engine pushes the LIVE renormalized qPct weights per scenario (dqOv) — only
+                    // a group whose FREE member is pinnable stays CPU (the pilot-Q relocation would move
+                    // to another member's column, a frozen structural choice: plan-B4 / A6).
+                    && !(ReactiveLimitsOuterLoop.NAME.equals(name) && freeRemoteRlPinnableJava)
                     // TransformerVoltageControl: the JAVA engine runs OLF's real transformer VC loop; the continuous
                     // ratio is solved INSIDE the device inner Newton (rho is a BRANCH_RHO1 variable in es), the loop
                     // makes only the discrete tap DECISIONS, and the compact snapshot now isolates the transformer
@@ -367,10 +374,17 @@ final class GpuSaRunScope {
                     // in-Newton, discrete tap moves reach the device via the per-scenario pi-model refresh
                     // (r1Ov carries all 8 statics), and the OLF-faithful re-solve initialization starts a
                     // just-pinned ratio exactly at its pinned value.
+                    // SHARED transformer control groups run in the JAVA hybrid too (2026-09-07): OLF's own
+                    // loop drives the group (free role, clamps, rounding), the activation re-extract carries
+                    // the DISTR_RHO row set, the pi-model refresh carries the taps, and the engine pushes the
+                    // LIVE 1/enabled-count DISTR_RHO coefficients per scenario (drOv) when a member outage
+                    // reforms them. A FREE-member outage re-picks the pilot-Q carrier column (frozen
+                    // structural choice) — those contingencies are dropped to the CPU at qualification.
+                    // useInitialTapPosition group semantics stay gated (unvalidated).
                     || ("TransformerVoltageControl".equals(name) || "SimpleTransformerVoltageControl".equals(name)
                             || "IncrementalTransformerVoltageControl".equals(name))
                             && GpuBatchTransformerControl.transformerControlSupported(lfNetwork)
-                            && !GpuBatchTransformerControl.sharedGroupPresent(lfNetwork)
+                            && !sharedUseInitialJava
                     // ShuntVoltageControl: the JAVA engine runs OLF's real shunt VC loop; the continuous
                     // susceptance is solved INSIDE the device inner Newton (SHUNT_B is a variable in es) and the
                     // compact snapshot isolates the controller-shunt b + VC-enabled per scenario (BusState).

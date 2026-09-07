@@ -66,6 +66,56 @@ public final class GpuHybridBatchOuterLoopEngine {
     private GpuHybridBatchOuterLoopEngine() {
     }
 
+    /** LIVE distribution coefficients for one scenario (weights for DISTR_Q, coefs for DISTR_RHO),
+     *  re-read off the mutated network exactly as OLF's live suppliers would evaluate them. Returns
+     *  null when every value equals the static pack — the common no-pin/no-outage case. */
+    private static double[] liveDqWeights(GpuAcData d, LfBus[] memberBus) {
+        int ndq = d.dqKMember().length;
+        double[] w = null;
+        for (int c = 0; c < ndq; c++) {
+            int kM = d.dqKMember()[c];
+            if (kM < 0) {
+                continue;
+            }
+            double live = memberBus[kM].getRemoteControlReactivePercent()
+                    - (d.dqJMember()[c] == kM ? 1.0 : 0.0);
+            if (live != d.dqWeight()[c]) {
+                if (w == null) {
+                    w = d.dqWeight().clone();
+                }
+                w[c] = live;
+            }
+        }
+        return w;
+    }
+
+    private static double[] liveDrCoefs(GpuAcData d, LfBranch[] kBranch, LfBranch[] jBranch) {
+        int ndr = d.drRow().length;
+        double[] cfs = null;
+        for (int c = 0; c < ndr; c++) {
+            LfBranch k = kBranch[c];
+            LfBranch j = jBranch[c];
+            if (k == null || j == null) {
+                continue;
+            }
+            double live;
+            if (j.isDisabled() || k.isDisabled()) {
+                live = 0.0;                                  // terms touching a disabled element deactivate
+            } else {
+                long count = k.getVoltageControl().map(vc -> vc.getMergedControllerElements().stream()
+                        .filter(b -> !b.isDisabled()).count()).orElse(0L);
+                live = count == 0 ? 0.0 : 1.0 / count - (j == k ? 1.0 : 0.0);
+            }
+            if (live != d.drCoef()[c]) {
+                if (cfs == null) {
+                    cfs = d.drCoef().clone();
+                }
+                cfs[c] = live;
+            }
+        }
+        return cfs;
+    }
+
     /** The branch's current static device row [y g1 g2 b1 b2 ksi r1 a1] — the cbIn packing. */
     private static double[] cbRowOf(LfBranch branch) {
         var pi = branch.getPiModel();
@@ -209,6 +259,54 @@ public final class GpuHybridBatchOuterLoopEngine {
         }
         double[][][] scenShGb = new double[nS][][];
 
+        // LIVE distribution-coefficient tracking (JAVA-hybrid group dynamics, 2026-09-07).
+        // The device DISTR_Q / DISTR_RHO fills read STATIC pack-time coefficients, but OLF's loops
+        // renormalize them per scenario: a reactive-limit pin zeroes the pinned member's reactive key
+        // (updateReactiveKeys) and re-normalizes qPct over the survivors. After each scenario's
+        // outer-loop step the engine re-reads the LIVE coefficients off the network and pushes any
+        // that differ from the pack through the existing per-scenario dqOv / drOv channels. (The
+        // DISTR_RHO side is a dormant safety net today: member OUTAGES — the one thing that reforms
+        // the live 1/enabled-count coupling — are dropped to the CPU at qualification because the
+        // element disable shrinks the es variable layout, and TVC clamps disable only the CONTROL,
+        // which the live coefficient does not depend on.)
+        int ndqContrib = in.gpuData().dqKMember().length;
+        LfBus[] dqMemberBus = new LfBus[in.gpuData().dqMemberKey().length];
+        if (ndqContrib > 0 && dqMemberBus.length > 0) {
+            // rebuild the member table in the PACK's enumeration order (pilots in bus order,
+            // merged controllers in order) — GpuAcOuterLoopPacks.distrQPack's exact loop
+            int mi = 0;
+            for (LfBus pilot : in.network().getBuses()) {
+                var gvc = pilot.getGeneratorVoltageControl()
+                        .filter(c -> c.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN)
+                        .filter(c -> pilot.isGeneratorVoltageControlled() && !c.isLocalControl())
+                        .orElse(null);
+                if (gvc == null) {
+                    continue;
+                }
+                for (LfBus m : gvc.getMergedControllerElements()) {
+                    dqMemberBus[mi++] = m;
+                }
+            }
+        }
+        int ndrContrib = in.gpuData().drRow().length;
+        LfBranch[] drKBranch = new LfBranch[ndrContrib];
+        LfBranch[] drJBranch = new LfBranch[ndrContrib];
+        if (ndrContrib > 0) {
+            java.util.Map<Integer, LfBranch> branchByRhoCol = new java.util.HashMap<>();
+            for (LfBranch br : in.network().getBranches()) {
+                var rhoVar = in.es().getVariableSet().getVariable(br.getNum(), AcVariableType.BRANCH_RHO1);
+                if (rhoVar != null && rhoVar.getRow() >= 0) {
+                    branchByRhoCol.put(rhoVar.getRow(), br);
+                }
+            }
+            for (int c = 0; c < ndrContrib; c++) {
+                drKBranch[c] = branchByRhoCol.get(in.gpuData().drRow()[c]);
+                drJBranch[c] = branchByRhoCol.get(in.gpuData().drCol()[c]);
+            }
+        }
+        double[][] scenDqW = new double[nS][];               // per-scenario LIVE weights, null = pack values
+        double[][] scenDrC = new double[nS][];
+
         // Packed AC-emulation HVDCs (the device hv family), in the packer's enumeration order. OLF's HVDC
         // outer loops (FreezingHvdcACEmulation / AcHvdcAcEmulationLimits) flip the emulation status per
         // scenario: any non-LINEAR status DEACTIVATES the hvdc P coupling terms on the CPU (the injections
@@ -319,6 +417,8 @@ public final class GpuHybridBatchOuterLoopEngine {
                 disabled[s][hvOffset + h] = hvPacked.get(h).getAcEmulationControl().getAcEmulationStatus()
                         != LfHvdc.AcEmulationControl.AcEmulationStatus.LINEAR_MODE;
             }
+            scenDqW[s] = liveDqWeights(in.gpuData(), dqMemberBus);
+            scenDrC[s] = liveDrCoefs(in.gpuData(), drKBranch, drJBranch);
             snaps[s] = new HybridScenarioState(in.ctrlBuses(), in.hvdcs(), in.transformerBranches());
             genSnap[s] = in.gens().stream().mapToDouble(LfGenerator::getTargetP).toArray();
             loadSnapP[s] = loads.stream().mapToDouble(LfLoad::getTargetP).toArray();
@@ -392,6 +492,39 @@ public final class GpuHybridBatchOuterLoopEngine {
                 }
                 System.arraycopy(states[s], 0, x0C, i * n, n);
             }
+            // LIVE distribution coefficients that moved off the pack this round (pins / member outages):
+            // push them through the per-scenario dqOv / drOv channels, or CLEAR a previous round's set.
+            List<Integer> dqOvIdx = new ArrayList<>();
+            List<Double> dqOvW = new ArrayList<>();
+            List<Integer> drOvIdx = new ArrayList<>();
+            List<Double> drOvC = new ArrayList<>();
+            for (int i = 0; i < nA; i++) {
+                int s = active.get(i);
+                if (scenDqW[s] != null) {
+                    for (int c = 0; c < scenDqW[s].length; c++) {
+                        if (scenDqW[s][c] != in.gpuData().dqWeight()[c]) {
+                            dqOvIdx.add(i);
+                            dqOvIdx.add(c);
+                            dqOvW.add(scenDqW[s][c]);
+                        }
+                    }
+                }
+                if (scenDrC[s] != null) {
+                    for (int c = 0; c < scenDrC[s].length; c++) {
+                        if (scenDrC[s][c] != in.gpuData().drCoef()[c]) {
+                            drOvIdx.add(i);
+                            drOvIdx.add(c);
+                            drOvC.add(scenDrC[s][c]);
+                        }
+                    }
+                }
+            }
+            GpuAcNewtonSolver.setBatchDqWeightOverrides(handle,
+                    dqOvIdx.isEmpty() ? null : dqOvIdx.stream().mapToInt(Integer::intValue).toArray(),
+                    dqOvW.isEmpty() ? null : dqOvW.stream().mapToDouble(Double::doubleValue).toArray());
+            GpuAcNewtonSolver.setBatchDrCoefOverrides(handle,
+                    drOvIdx.isEmpty() ? null : drOvIdx.stream().mapToInt(Integer::intValue).toArray(),
+                    drOvC.isEmpty() ? null : drOvC.stream().mapToDouble(Double::doubleValue).toArray());
             long ts0 = System.nanoTime();
             double[][] statesC = GpuAcNewtonSolver.solveBatchContext(handle, in.baseState(), in.baseTargets(),
                     rowModeC, in.baseRowMode(), disabledC,
@@ -486,6 +619,8 @@ public final class GpuHybridBatchOuterLoopEngine {
                     disabled[s][hvOffset + h] = hvPacked.get(h).getAcEmulationControl().getAcEmulationStatus()
                             != LfHvdc.AcEmulationControl.AcEmulationStatus.LINEAR_MODE;
                 }
+                scenDqW[s] = liveDqWeights(in.gpuData(), dqMemberBus);
+                scenDrC[s] = liveDrCoefs(in.gpuData(), drKBranch, drJBranch);
                 rowMode[s] = act.rowMode();
                 scenTargets[s] = act.applyTargets(new AcTargetVector(in.network(), in.es()).getArray());
                 // OLF-faithful re-solve initialization — the EXACT call OLF's runOuterLoop makes before every

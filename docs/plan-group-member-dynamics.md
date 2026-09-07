@@ -257,6 +257,30 @@ reject stays; group still batchable when only NON-free members are pinnable).
   it the mechanism; verify).
 - Both benches after (kernel-side changes! same-day A/B, cold first).
 
+### JAVA-hybrid variants (landed 2026-09-07)
+
+Both gated features now run in the JAVA hybrid too, at 1e-12:
+
+- **Remote-group RL pins**: OLF's own RL loop makes every pin/unpin decision; the activation
+  re-extract carries the mode-4 member rows (the B2 extractor), the AcTargetVector re-read
+  carries the frozen-member target compensation, and the engine pushes the LIVE renormalized
+  qPct weights per scenario through the dqOv channel (liveDqWeights: re-read
+  getRemoteControlReactivePercent after each outer-loop step, push diffs vs the pack). The
+  JAVA gate is now the same B4 pre-gate as DEVICE (free member pinnable → whole-run CPU).
+  Tests: javaRemoteMemberPostContingencyPinMatchesCpu, javaRemoteMemberBasePinnedMatchesCpu,
+  javaRemoteFreeMemberPinnableFallsBackWholeRun.
+- **Shared transformer-VC groups**: OLF's loop drives the group (free role, clamps, rounding);
+  DISTR_RHO rows via the re-extract, taps via the pi-model refresh, and a dormant drOv safety
+  net (liveDrCoefs) for any live-coefficient drift. The sharedGroupPresent gate is gone;
+  useInitialTapPosition group semantics stay gated (unvalidated). **JAVA-mode residual gap**:
+  a group MEMBER OUTAGE is dropped to the CPU per scenario (outagesSharedTvcMember) — the
+  element disable removes the member's BRANCH_RHO1 variable from the live es, SHRINKING the
+  row layout the hybrid's stable-row alignment depends on; batching those needs a per-scenario
+  base-row↔current-row variable map through x0/rowMode/targets/bridge-load (a design of its
+  own), while the DEVICE path already batches them via the frozen superset layout + drOv.
+  Tests: javaSharedTransformerControlMatchesCpu (member + free-member outages CPU-routed,
+  compared), javaSharedSimpleTransformerControlMatchesCpu.
+
 ### Part B landing checklist
 - [x] B0 read `getBusTargetV`/`getBusV` remote semantics; state table written — 2026-09-06:
       **Both RL switch conditions test the PILOT, not the member**:
@@ -352,7 +376,7 @@ reject stays; group still batchable when only NON-free members are pinnable).
       deviceRemoteGeneratorControlReactiveLimitsMatchesCpu (previously whole-run-gated network now
       batches at 1e-12) + the B4 gate test. Still owed: benches after the B-work settles
 - [x] gate lifted for the DEVICE mode (ReactiveLimits[remoteGroupFreeMemberPinnable] only);
-      JAVA hybrid stays fully gated; docs + memory updated 2026-09-06; bench row `13eb259`:
+      docs + memory updated 2026-09-06; bench row `13eb259`:
       prod COLD 22.22 / warm 19.26 ms/ctg vs CPU-4t 27.12 (×1.41), viol 0/0/0, fixed-iter
       7.58 / 4.47, 499/500 — the new channels are inert on pegase (no remote groups)
 

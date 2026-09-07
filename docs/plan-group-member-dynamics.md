@@ -263,10 +263,37 @@ on a 2-member group before generalizing.
   V row → mode 1) — enumerate the states with a table BEFORE coding; add
   `OLF_GPU_BATCH_TRACE` lines for every transition.
 
-**B4. Free-member pin (needs A6's generalized select).** Until then: per-scenario
-reject (route the scenario to CPU when the FREE member would pin — detectable only
-in-flight ⇒ conservative pre-gate: free member has finite limits ⇒ scenario-level
-reject stays; group still batchable when only NON-free members are pinnable).
+**B4. Free-member pin — LANDED 2026-09-07 (DEVICE).** Reuses A6's relocation machinery on
+DISTR_Q pilots:
+- Extraction: qr candidate groups also for MAIN remote gen-VC pilots — `[pilot vCol
+  (fallback = control lost), member vCols in merged order]`, qAlt = −2−g; the FREE member
+  joins the canonical suppressed-dest/mode-4 encoding when its pilot has a group. Pilot guard:
+  every pilot branch must be plain closed non-zero-impedance (`relocatablePilot` — half-open /
+  dummy q terms have no dynamic scatter channel), mirrored in the scope gate.
+- The RL kernel pins the free member like any other (mode 4, target = limit − loadQ; the free
+  member always had an rlRemote entry + rmq own-q rows) — the fill kernels re-pick the carrier
+  by the SAME mode-scan (`relocChoose` skips modes {0, 4}; the new carrier's row is mode 1
+  whether it hosted DISTR_Q or the relocated pilot balance).
+- `fillDistrQBatch` suppresses the CURRENT carrier's DISTR_Q row (dqMemberQrGroup links each
+  member to its qr group; F-dest row == relocChoose row ⇒ inactive — OLF deactivating the new
+  free member's DISTR_Q equation).
+- Targets: `capturePilotQBatch` snapshots each group's pilot-Q target per scenario from the
+  BASE carrier's row (relocChoose over baseMode — injection overrides at the pilot land there
+  too) BEFORE the RL mode seeding; `updateDistrQTargetsBatch` writes it to whichever member
+  row currently carries the relocated pilot balance and keeps the frozen-member compensation
+  on the true DISTR_Q rows.
+- qBuf fix (the bug the first run caught): the diagnostic fill keeps frozen routing, and the
+  frozen role-0 dest of a grouped output pointed at the BASE carrier's row — the pilot's whole
+  balance corrupted the free member's own-q RL check (it never pinned).
+  `patchFrozenGroupDests` re-points those dests at the FALLBACK row (the pilot's own row, read
+  by no outer loop), so member diagnostic rows carry ONLY their own injection.
+- Scope gate narrowed (`remoteGroupPinDynamicsUnrepresentable`): whole-run CPU only when ALL
+  enabled members of a group are pinnable (all-pinned would deactivate the pilot's vEq —
+  fallback not modeled) or a pinnable free member has no relocation table. JAVA keeps the full
+  free-member pre-gate (the hybrid installs no dq member tables — carrier suppression inert).
+- Tests (1e-12, engagement): free post-contingency pin (l45b pins g1, carrier → g2),
+  base-pinned free (base carrier = g2), chained g1+g2 pins (carrier → g3, two frozen members'
+  compensation), all-members-pinnable gate fallback.
 
 **B5. Validation.**
 - Extend `createWithGeneratorRemoteControl` with limits chosen so a CONTINGENCY (not

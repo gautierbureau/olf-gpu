@@ -1304,6 +1304,22 @@ static void buildDistrShuntBDest(SharedStructure* st, const CsrPattern& pos, con
     }
 }
 
+// plan-B4: the FROZEN role-0 dest of a GROUP-relocated output backs only the qBuf DIAGNOSTIC
+// fill (dynReloc = 0; every Newton fill selects a pool slot instead) — point it at the group's
+// FALLBACK row (the pilot's own row, read by no outer loop) so a remote member's diagnostic q
+// row carries ONLY its own injection (fillRemoteMemberQBatch). Without this the pilot's whole
+// balance lands on the base carrier's row and corrupts the free member's reactive-limit check.
+static void patchFrozenGroupDests(DeviceBuf& dest, const std::vector<int>& relocGroup, int nout,
+                                  const int* scatterRole, const int* qrPtr, const int* qrRows) {
+    for (size_t o = 0; o < relocGroup.size(); o++) {
+        int g = relocGroup[o];
+        if (g >= 0 && scatterRole[o % nout] == 0) {
+            int v = -2 - qrRows[qrPtr[g]];
+            CUDA_CHECK(cudaMemcpy(dest.as<int>() + o, &v, sizeof(int), cudaMemcpyHostToDevice));
+        }
+    }
+}
+
 // The GROUP relocation tables of one family, or all-null when the structure has none (plan-A6).
 static RelocTables relocOf(Family& f, SharedStructure* st) {
     RelocTables rt;
@@ -1435,6 +1451,12 @@ SharedStructure* buildStructure(int n,
             st->cb.relocGroup.upload(relocGroup.data(), relocGroup.size() * sizeof(int));
             st->cb.relocOff.upload(relocOff.data(), relocOff.size() * sizeof(int));
             st->cb.relocPool.upload(relocPool.data(), relocPool.size() * sizeof(int));
+            static int cbRoles[CB_NOUT];
+            for (int k = 0; k < CB_NOUT; k++) {
+                cbRoles[k] = CB_SCATTER[k].role;
+            }
+            patchFrozenGroupDests(st->cb.dest, relocGroup, CB_NOUT, cbRoles,
+                    st->hQrPtr.data(), st->hQrRows.data());
         }
         st->cb.dynReloc = true;
     }
@@ -1466,6 +1488,12 @@ SharedStructure* buildStructure(int n,
             st->sh.relocGroup.upload(shRelocGroup.data(), shRelocGroup.size() * sizeof(int));
             st->sh.relocOff.upload(shRelocOff.data(), shRelocOff.size() * sizeof(int));
             st->sh.relocPool.upload(shRelocPool.data(), shRelocPool.size() * sizeof(int));
+            static int shRoles[SH_NOUT];
+            for (int k = 0; k < SH_NOUT; k++) {
+                shRoles[k] = SH_SCATTER[k].role;
+            }
+            patchFrozenGroupDests(st->sh.dest, shRelocGroup, SH_NOUT, shRoles,
+                    st->hQrPtr.data(), st->hQrRows.data());
         }
         st->sh.dynReloc = true;
     }
@@ -2217,7 +2245,8 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
                                 const int* mode,
                                 const int* dqKMember, const int* dqJMember, const double* mKey,
                                 const int* mRlEntry, const int* mGroupStart, const int* mGroupCount,
-                                const char* limitType, int nrl) {
+                                const char* limitType, int nrl,
+                                const int* mQrGroup, const int* qrPtr, const int* qrRows) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ndq * nScenarios) return;
     int c = tid % ndq;
@@ -2228,6 +2257,16 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
     {
         int d0 = dqDest[c * 6];
         if (d0 <= -2 && mode[(size_t) s * n + (-2 - d0)] == 4) return;
+        // plan-B4: the CURRENT pilot-Q carrier's row (a re-picked free role after the base free
+        // member pinned) hosts the group's relocated pilot balance — its DISTR_Q row is inactive
+        // this scenario, exactly like OLF deactivating the new free member's DISTR_Q equation.
+        if (mQrGroup != nullptr && dqJMember[c] >= 0) {
+            int g = mQrGroup[dqJMember[c]];
+            if (g >= 0 && d0 <= -2
+                    && -2 - d0 == qrRows[qrPtr[g] + relocChoose(g, qrPtr, qrRows, mode + (size_t) s * n)]) {
+                return;
+            }
+        }
     }
     int e = dqElem[c];
     int kind = dqKind[c];
@@ -2581,14 +2620,31 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                                          const int* mRow, const char* mHasRow,
                                          const int* rlVrowArr, const double* rlMinQ, const double* rlMaxQ,
                                          const double* rlLoadQ, const char* limitType, int cvStride,
-                                         double* target, const char* rlActive) {
+                                         double* target, const char* rlActive,
+                                         const int* mQrGroup, const int* qrPtr, const int* qrRows,
+                                         const int* mode, const double* pilotQ, int nQr) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nMembers * nScenarios) return;
     int k = tid % nMembers;
     int s = tid / nMembers;
-    if (!rlActive[s] || !mHasRow[k]) return;                 // only members owning a packed DISTR_Q row
+    if (!rlActive[s]) return;
+    int qg = mQrGroup != nullptr ? mQrGroup[k] : -1;
+    if (!mHasRow[k] && qg < 0) return;                       // only members owning a packed DISTR_Q row
+                                                             // (or linked to a relocation group, plan-B4)
     int reK = mRlEntry[k];
     if (reK >= 0 && limitType[(size_t) s * nrl + reK] != 0) return;   // pinned: the RL kernel owns its row
+    if (qg >= 0) {
+        // plan-B4: the member whose row CURRENTLY hosts the relocated pilot Q carries the pilot's
+        // Q target (captured at solve init); its DISTR_Q compensation does not apply. A non-carrier
+        // member without a packed DISTR_Q row (the base free member, superseded mid-scenario) has
+        // no row to maintain here — the RL kernel owns it while pinned.
+        int carrier = qrRows[qrPtr[qg] + relocChoose(qg, qrPtr, qrRows, mode + (size_t) s * n)];
+        if (mRow[k] == carrier) {
+            target[(size_t) s * n + mRow[k]] = pilotQ[(size_t) s * nQr + qg];
+            return;
+        }
+        if (!mHasRow[k]) return;
+    }
     int gs = mGroupStart[k];
     int gc = mGroupCount[k];
     double sum = 0.0;
@@ -2605,6 +2661,21 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     }
     double qpk = sum == 0.0 ? 0.0 : mKey[k] / sum;
     target[(size_t) s * n + mRow[k]] = qpk * frozen;         // 0 when nothing is frozen (the base DISTR_Q target)
+}
+
+// plan-B4: capture, per (scenario, relocation group), the pilot's Q target from the BASE carrier's
+// row — the base target upload and the per-scenario injection overrides both address the pilot's
+// reactive balance at that row (structure-time qRow). updateDistrQTargetsBatch hands the value to
+// whichever member row currently carries the relocated pilot Q. Runs BEFORE the RL mode seeding so
+// a warm-continuation pin cannot overwrite the value first.
+__global__ void capturePilotQBatch(int nQr, int nScenarios, int n, const int* qrPtr, const int* qrRows,
+                                   const int* baseMode, const double* target, double* pilotQ) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nQr * nScenarios) return;
+    int g = tid % nQr;
+    int s = tid / nQr;
+    int row = qrRows[qrPtr[g] + relocChoose(g, qrPtr, qrRows, baseMode)];
+    pilotQ[(size_t) s * nQr + g] = target[(size_t) s * n + row];
 }
 
 // Remote-member OWN reactive injection (plan-B3): accumulate each remote member's own bus q into
@@ -2705,9 +2776,10 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
         // REMOTE group member (plan-B3). Unpinned = its DISTR_Q row (mode 1, limitType 0);
         // pinned = mode 4 ("row hosts its own Q balance"). BOTH switch conditions test the
         // PILOT's voltage (rlCmpVrow) against the GROUP target — B0-verified CPU semantics.
-        // qPct weights do NOT renormalize on a pin (only on element disable). The FREE member
-        // never reaches here (the B4 pre-gate rejects groups whose free member is pinnable),
-        // so the pilot's vEq never flips and at least one member stays enabled.
+        // The FREE member pins the same way (plan-B4): the fill kernels re-pick the pilot-Q
+        // carrier by mode-scan over the relocation candidates, and updateDistrQTargetsBatch
+        // hands the pilot's Q target to the new carrier's row — the scope gate guarantees at
+        // least one member of a batched group can never pin, so the pilot's vEq never flips.
         size_t ridx = (size_t) s * n + rlVrow[i];
         size_t rst = (size_t) s * nrl + i;
         size_t rli = cvStride ? rst : (size_t) i;
@@ -3277,6 +3349,11 @@ struct BatchSolverContext {
     DeviceBuf dDqMemberRow;                                // per member: its own row (vCol) + whether it OWNS a
     DeviceBuf dDqMemberHasRow;                             // packed DISTR_Q row (non-free with existing equation)
     int nDqMembers = 0;
+    int hasDqQrGroups = 0;                                 // plan-B4: any member linked to a pilot-Q relocation group
+    DeviceBuf dDqMemberQrGroup;                            // per member: the pilot's qr candidate group id, -1 = none
+    DeviceBuf dQrPilotQ;                                   // per (scenario, qr group): the pilot's Q target, captured
+                                                           // at solve init from the BASE carrier's row and handed to
+                                                           // the CURRENT carrier's row on every re-pick
     int nRmq = 0;                                          // remote-member OWN-q contributions (plan-B3): a twin
     DeviceBuf dRmqRow;                                     // of the DISTR_Q assembly accumulating each member's own
     DeviceBuf dRmqElem;                                    // bus q into dQbuf at its own row (that slot is free —
@@ -3789,6 +3866,13 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     int maxOuter = fullLoadflow ? 8 * RL_MAX_OUTER : 1;
     std::vector<char> rlActive(nS), rlSwitched(nS), wasActive(nS);
     if (fullLoadflow) {                                      // per-solve PV↔PQ state: 0 switches, limitType from base
+        if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {        // plan-B4: capture each group's pilot-Q target from
+            size_t need = static_cast<size_t>(ctx->st->nQr) * nS * sizeof(double);   // the BASE carrier's row,
+            if (!ctx->dQrPilotQ.p) ctx->dQrPilotQ.alloc(need);   // BEFORE any RL mode seeding rewrites it
+            capturePilotQBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nQr, nS, n,
+                    ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), dBaseMode.as<int>(),
+                    ctx->dTarget.as<double>(), ctx->dQrPilotQ.as<double>());
+        }
         if (rlStateIn != nullptr && ctx->nrl > 0) {
             // WARM CONTINUATION (operator strategies stage 2): seed each (controller, scenario)'s
             // pinned limit type AND switch count from a previous solve's exported state, so the
@@ -3918,7 +4002,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 fillHvdcBatch<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
             }
         }
-        if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl);
+        if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr);
         if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr);
         if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>());
@@ -4318,7 +4402,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->ncv > 0 ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
                         ctx->ncv > 0 ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
                         ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(), ctx->ncv > 0 ? 1 : 0,
-                        ctx->dTarget.as<double>(), ctx->dRlActive.as<char>());
+                        ctx->dTarget.as<double>(), ctx->dRlActive.as<char>(),
+                        ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr,
+                        ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr,
+                        ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr,
+                        ctx->dMode.as<int>(),
+                        ctx->hasDqQrGroups ? ctx->dQrPilotQ.as<double>() : nullptr, ctx->st->nQr);
             }
         }
     }
@@ -5040,7 +5129,7 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
     if (ctx->st->hv.ne) {
         fillHvdcBatch<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
     }
-    if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl);
+    if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr);
     if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr);
     if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
     if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>());
@@ -5188,7 +5277,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
         JNIEnv* env, jclass, jlong handle, jbyteArray jRemote, jintArray jCmpVrow,
         jintArray jRmqRow, jintArray jRmqElem, jintArray jRmqSide, jintArray jRmqKind, jdoubleArray jRmqWeight,
         jintArray jDqKMember, jintArray jDqJMember, jdoubleArray jMKey, jintArray jMRlEntry,
-        jintArray jMGroupStart, jintArray jMGroupCount, jintArray jMRow, jbyteArray jMHasRow) {
+        jintArray jMGroupStart, jintArray jMGroupCount, jintArray jMRow, jbyteArray jMHasRow,
+        jintArray jMQrGroup) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
@@ -5197,6 +5287,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
         ctx->nRlRemote = 0;
         ctx->nRmq = 0;
         ctx->nDqDyn = 0;
+        ctx->hasDqQrGroups = 0;
         return;
     }
     int nr = env->GetArrayLength(jRemote);
@@ -5239,6 +5330,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
         ctx->nRmq = nq;
     }
     ctx->nDqDyn = 0;
+    ctx->hasDqQrGroups = 0;
     if (jDqKMember != nullptr && env->GetArrayLength(jDqKMember) > 0 && env->GetArrayLength(jMKey) > 0) {
         int ndqc = env->GetArrayLength(jDqKMember);
         int nm = env->GetArrayLength(jMKey);
@@ -5268,6 +5360,17 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
         env->ReleaseIntArrayElements(jMGroupStart, mgs, JNI_ABORT);
         env->ReleaseIntArrayElements(jMGroupCount, mgc, JNI_ABORT);
         ctx->nDqDyn = ndqc;
+        ctx->hasDqQrGroups = 0;
+        if (jMQrGroup != nullptr && env->GetArrayLength(jMQrGroup) == nm) {
+            jint* mqg = env->GetIntArrayElements(jMQrGroup, nullptr);
+            for (int i = 0; i < nm; i++) {
+                if (mqg[i] >= 0) {
+                    ctx->hasDqQrGroups = 1;                  // plan-B4: relocation-linked group present
+                }
+            }
+            ctx->dDqMemberQrGroup.upload(mqg, static_cast<size_t>(nm) * sizeof(int));
+            env->ReleaseIntArrayElements(jMQrGroup, mqg, JNI_ABORT);
+        }
   }
 }
 

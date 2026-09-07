@@ -96,22 +96,74 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             qrRows.addAll(memberRows);
             qRowAlt[bus.getNum()] = -2 - g;
         }
+        // Remote gen-VC pilot-Q relocation (plan-B4): the pilot's reactive balance rides on the
+        // FREE member's BUS_V row — "first controller-enabled", which an RL pin of the free member
+        // RE-PICKS per scenario. Same candidate table + in-kernel mode-scan select as the TVC
+        // groups above: [pilot v row (fallback = group control lost — stays whole-run CPU via the
+        // all-members-pinnable scope gate), member v cols in merged order]. Guard: every branch at
+        // the pilot must be a plain closed non-zero-impedance branch (half-open and dummy-transfer
+        // q terms have no dynamic scatter channel) — an unclean pilot keeps the frozen encoding
+        // and the scope gate keeps such runs on the CPU when its free member is pinnable.
+        java.util.Set<Integer> qrPilotBuses = new java.util.HashSet<>();
+        for (LfBus bus : network.getBuses()) {
+            var gvc = bus.getGeneratorVoltageControl()
+                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                    .filter(c -> bus.isGeneratorVoltageControlled() && !c.isLocalControl())
+                    .orElse(null);
+            if (gvc == null || gvc.getMergedControllerElements().size() < 2 || vCol[bus.getNum()] < 0
+                    || !relocatablePilot(bus)) {
+                continue;
+            }
+            List<Integer> memberRows = new ArrayList<>();
+            boolean allResolvable = true;
+            for (LfBus m : gvc.getMergedControllerElements()) {
+                if (vCol[m.getNum()] < 0) {
+                    allResolvable = false;
+                    break;
+                }
+                memberRows.add(vCol[m.getNum()]);
+            }
+            if (!allResolvable) {
+                continue;
+            }
+            int g = qrPtr.size();
+            qrPtr.add(qrRows.size());
+            qrRows.add(vCol[bus.getNum()]);                  // candidate 0 = the FALLBACK (control lost)
+            qrRows.addAll(memberRows);
+            qRowAlt[bus.getNum()] = -2 - g;
+            qrPilotBuses.add(bus.getNum());
+        }
         qrPtr.add(qrRows.size());
 
         // Remote gen-VC group members (plan-B2), CANONICAL encoding independent of the base pin
         // state: the frozen q dest is SUPPRESSED and the member's OWN row is the ALTERNATE,
         // selected per scenario by row mode 4 ("member row hosts its own Q balance" — RL pinned).
-        // The FREE member is excluded: its row carries the pilot's relocated Q (B4 rejects free
-        // pins until A6's generalized select).
+        // The FREE member joins the canonical encoding when its pilot carries a relocation group
+        // (plan-B4: the pilot's Q follows the mode-scan carrier, so the free member's row is free
+        // to host its own Q balance when pinned); without a group it keeps the structure-frozen
+        // pilot-carrier encoding and free pins stay whole-run CPU.
         for (LfBus bus : network.getBuses()) {
             int bn = bus.getNum();
             if (vCol[bn] >= 0 && GpuAcRowIndexing.isRemoteGenVcMember(bus)
-                    && !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) {
+                    && (!GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)
+                        || qrPilotBuses.contains(bus.getGeneratorVoltageControl().orElseThrow()
+                                .getControlledBus().getNum()))) {
                 qRow[bn] = -1;
                 qRowAlt[bn] = vCol[bn];
             }
         }
         return new ExtractionColumns(phiCol, vCol, branchRhoCol, branchAlphaCol, dummyPCol, dummyQCol, shuntBCol, qRow, qRowAlt,
                 GpuAcArrays.toIntArray(qrPtr), GpuAcArrays.toIntArray(qrRows));
+    }
+
+    /** True when every enabled branch at {@code pilot} is a plain CLOSED non-zero-impedance branch,
+     *  so ALL of the pilot's reactive contributions ride the cb/sh alternate-dest channels that the
+     *  group relocation select covers (half-open and zero-impedance dummy q terms scatter through
+     *  frozen dests). Mirrored by the plan-B4 scope gate in GpuSaRunScope. */
+    static boolean relocatablePilot(LfBus pilot) {
+        return pilot.getBranches().stream()
+                .filter(b -> !b.isDisabled())
+                .allMatch(b -> b.getBus1() != null && b.getBus2() != null
+                        && !b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC));
     }
 }

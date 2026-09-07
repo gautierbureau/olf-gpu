@@ -44,7 +44,7 @@ public final class GpuAcOuterLoopPacks {
     record DqPack(int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                   int[] dqKMember, int[] dqJMember,
                   double[] dqMemberKey, int[] dqMemberRlEntry, int[] dqMemberGroupStart, int[] dqMemberGroupCount,
-                  int[] dqMemberRow, byte[] dqMemberHasRow) {
+                  int[] dqMemberRow, byte[] dqMemberHasRow, int[] dqMemberQrGroup) {
     }
 
     /** Per-group member table for the IN-KERNEL reactive-key renormalization on a remote RL pin
@@ -164,6 +164,7 @@ public final class GpuAcOuterLoopPacks {
         for (int i = 0; i < rl.rlBusNum().length; i++) {
             rlEntryByBusNum.put(rl.rlBusNum()[i], i);
         }
+        List<Integer> qrGroupList = new ArrayList<>();
         for (LfBus pilot : network.getBuses()) {
             GeneratorVoltageControl gvc = pilot.getGeneratorVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
@@ -177,6 +178,10 @@ public final class GpuAcOuterLoopPacks {
                     controllers, com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.VOLTAGE);
             int start = mt.key().size();
             LfBus freeMember = controllers.stream().filter(gvc::isControllerEnabled).findFirst().orElse(null);
+            // the pilot's relocation group (plan-B4, encoded -2-g in qRowAlt by the extraction):
+            // the kernels re-pick the pilot-Q carrier by mode-scan, so the CURRENT carrier's
+            // DISTR_Q row is suppressed and its target carries the pilot's Q instead
+            int qrGroup = columns.qRowAlt()[pilot.getNum()] <= -2 ? -2 - columns.qRowAlt()[pilot.getNum()] : -1;
             for (int i = 0; i < controllers.size(); i++) {
                 LfBus m = controllers.get(i);
                 mt.memberIdxByBusNum().put(m.getNum(), mt.key().size());
@@ -184,9 +189,10 @@ public final class GpuAcOuterLoopPacks {
                 mt.rlEntry().add(rlEntryByBusNum.getOrDefault(m.getNum(), -1));
                 mt.row().add(columns.vCol()[m.getNum()]);
                 // a member OWNS a DISTR_Q row when the equation EXISTS and it is not the FREE
-                // member (whose row carries the pilot's relocated Q; free-role changes are B4-gated)
+                // member (whose row carries the pilot's relocated Q)
                 mt.hasRow().add((byte) (m != freeMember
                         && es.getEquation(m.getNum(), AcEquationType.DISTR_Q).isPresent() ? 1 : 0));
+                qrGroupList.add(qrGroup);
             }
             for (int i = 0; i < controllers.size(); i++) {
                 mt.groupStart().add(start);
@@ -222,7 +228,7 @@ public final class GpuAcOuterLoopPacks {
         return new DqPack(dqElem, dqSide, dqWeight, dqRow, dqKind, dqKMember, dqJMember,
                 GpuAcArrays.toDoubleArray(mt.key()), GpuAcArrays.toIntArray(mt.rlEntry()),
                 GpuAcArrays.toIntArray(mt.groupStart()), GpuAcArrays.toIntArray(mt.groupCount()),
-                GpuAcArrays.toIntArray(mt.row()), hasRow);
+                GpuAcArrays.toIntArray(mt.row()), hasRow, GpuAcArrays.toIntArray(qrGroupList));
     }
 
     static DrPack distrRhoPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,

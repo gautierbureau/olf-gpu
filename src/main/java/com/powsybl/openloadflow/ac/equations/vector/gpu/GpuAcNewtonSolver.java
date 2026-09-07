@@ -307,13 +307,16 @@ public final class GpuAcNewtonSolver {
 
     /** Remote-member RL entries (plan-B1): per-entry remote kinds + compare rows (PILOT v column for
      *  remote group members — both RL switch conditions test the pilot's V against the GROUP target).
-     *  The RL kernel SKIPS remote entries until the B3 transition machinery lands; nulls clear. */
+     *  {@code dqMemberQrGroup} (plan-B4) links each group member to its pilot's relocation candidate
+     *  group (−1 = none) so the kernels suppress the CURRENT carrier's DISTR_Q row and hand its
+     *  target the pilot's Q when the free role re-picks. Nulls clear. */
     public static native void setBatchRlRemote(long handle, byte[] rlRemote, int[] rlCmpVrow,
                                                int[] rmqRow, int[] rmqElem, int[] rmqSide, int[] rmqKind,
                                                double[] rmqWeight,
                                                int[] dqKMember, int[] dqJMember, double[] dqMemberKey,
                                                int[] dqMemberRlEntry, int[] dqMemberGroupStart,
-                                               int[] dqMemberGroupCount, int[] dqMemberRow, byte[] dqMemberHasRow);
+                                               int[] dqMemberGroupCount, int[] dqMemberRow, byte[] dqMemberHasRow,
+                                               int[] dqMemberQrGroup);
 
     /** Install (or clear, with nulls) per-scenario DISTR_Q weight overrides on a batch context —
      *  {@code idx} = flat {scenario, contribution} pairs, {@code w} = the renormalized weight (a gen

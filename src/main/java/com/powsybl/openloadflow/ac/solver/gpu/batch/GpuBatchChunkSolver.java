@@ -103,7 +103,8 @@ final class GpuBatchChunkSolver {
                 anyRlRemote ? gpuData.dqMemberGroupStart() : null,
                 anyRlRemote ? gpuData.dqMemberGroupCount() : null,
                 anyRlRemote ? gpuData.dqMemberRow() : null,
-                anyRlRemote ? gpuData.dqMemberHasRow() : null);
+                anyRlRemote ? gpuData.dqMemberHasRow() : null,
+                anyRlRemote ? gpuData.dqMemberQrGroup() : null);
 
         // The base state / targets are IDENTICAL for every scenario (a single-branch N-1 starts from the
         // same converged base operating point): passed as single length-n rows and tiled on-device. The

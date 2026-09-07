@@ -300,15 +300,38 @@ DISTR_Q pilots:
   unpinnable unclean member still batches (its own-q row never activates,
   `deviceRemoteUncleanUnpinnableMemberStillBatches`). A real lift would need alternate-dest
   channels on the ob and zero-impedance families.
-- **JAVA all-pinned corner (2026-09-07, later same day):** JAVA no longer gates all-pinnable
-  groups — OLF deactivates the pilot's vEq itself and the pushed activation carries it (the
-  pilot row flips to a power row with its own Q target; the relocation mode-scan falls back to
-  candidate 0 since every member row reads mode 4). The gate split: `remoteRlUnrepresentable`
-  keeps the all-pinnable condition for DEVICE only. Test javaRemoteAllMembersPinnedMatchesCpu:
-  all three members pin in-flight, control genuinely lost (base at target, post-outage 0.23 kV
-  off, asserted in-test), 1e-12 — the network needs a DISTANT keeper PV (g5 behind 400 ohm)
-  because with no voltage reference at all the all-pinned system is near-singular (CPU itself
-  hits MAX_ITERATION), while a near keeper does the group's job.
+- **All-pinned corner (2026-09-07, later same day — JAVA first, DEVICE hours after):** the
+  all-pinnable gate condition is GONE in both modes. JAVA: OLF deactivates the pilot's vEq
+  itself and the pushed activation carries it (the pilot row flips to a power row with its own
+  Q target; the relocation mode-scan falls back to candidate 0 since every member row reads
+  mode 4). DEVICE: `updatePilotVeqBatch`, one thread per (qr gen-VC group, scenario) after each
+  RL pass — when `relocChoose` returns the fallback and the pilot row is still the V identity,
+  it saves the V target, flips the row to mode 1 with the captured `dQrPilotQ` target and marks
+  the scenario switched; the first unpin restores the identity. Flag-guarded (`dQrVeqOff`) so a
+  base-lost-control pilot row (already a power row in the base modes) is never touched; per-
+  group gen-VC flags (`dQrGenVc`, derived from dqMemberQrGroup at upload) keep TVC qr groups
+  out. Tests device/javaRemoteAllMembersPinnedMatchesCpu (shared network + CPU-side semantics
+  assertions: base holds the pilot AT target, post-outage converges 0.23 kV OFF it): all three
+  members pin in-flight at 1e-12. Scenario-design note: the all-pinned system is near-singular
+  without any remaining voltage reference (the CPU itself hits MAX_ITERATION), while a near
+  keeper PV simply does the group's job — the network uses a DISTANT keeper (g5 behind a
+  400-ohm line), which also holds OLF's global "strongest stays PV" rule off.
+- **Found under the old gate — the FORCED-PV rule (DEVICE detector, JAVA supported):** the
+  all-pinnable gate had silently covered OLF's network-global "all PV buses should switch PQ,
+  strongest one will stay PV" election, which the device RL kernel does not implement
+  (measured 1.9 kV on the old gate-test network: the device pinned the bus OLF keeps PV at
+  q=1742 > maxQ=1000). A whole-run reachability GATE was tried first and over-fired (any
+  network where every gen is limited — the curve/zip tests, and it would have killed pegase
+  entirely). Landed instead: a per-RL-pass host-side DETECTOR in solveBatchContext — the
+  moment a scenario's RL state has ZERO unpinned non-monitored entries, its trajectory has
+  already diverged from the CPU's (the rule would have kept one PV), so that scenario alone
+  gets STATUS_REJECTED to the per-contingency CPU fallback. Guarded by `allPvPinnable`
+  (precomputed at context creation): one unlimited PV bus anywhere makes the state
+  unreachable and skips the per-pass copy. Tests: deviceRemoteForcedPvRejectsToCpuAndMatches
+  (LAST_GPU_PRECOMPUTED_COUNT == 0 = engaged-then-rejected, vs -1 = scope fallback);
+  javaRemoteForcedPvMatchesCpu (OLF applies the rule, the hybrid follows, 1e-12). A real
+  device port would need a per-pass network-wide proposed-switch count + the
+  nominal-V/targetP/id "strongest" comparator in the RL kernel.
 - **JAVA lift (2026-09-07, same day):** the hybrid installs the carrier-row suppression tables
   (`setBatchDqQrSuppression`: dqJMember + dqMemberQrGroup, WITHOUT the dynamic-weight
   machinery — nDqDyn stays 0, weights = static pack + dqOv live pushes). Everything else was

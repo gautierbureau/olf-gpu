@@ -2678,6 +2678,43 @@ __global__ void capturePilotQBatch(int nQr, int nScenarios, int n, const int* qr
     pilotQ[(size_t) s * nQr + g] = target[(size_t) s * n + row];
 }
 
+// DEVICE all-pinned corner (plan-B4 follow-up): when the LAST live member of a remote gen-VC
+// relocation group pins (the mode-scan finds no candidate with mode not in {0, 4} and falls back
+// to candidate 0 = the pilot's own row), OLF deactivates the pilot's V equation — control lost.
+// Flip the pilot row to a POWER row carrying the group's captured pilot-Q target (the scatter
+// already lands the pilot's balance there via the same fallback); when a member unpins again,
+// restore the V identity and its saved target. Flag-guarded per (scenario, group): only rows
+// THIS kernel flipped are ever flipped back — a base-lost-control pilot row is already a power
+// row in the pushed base modes and stays untouched. A flip (either direction) marks the scenario
+// switched: the row swap needs a re-solve even when it rides a no-switch warm-continuation pass.
+__global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
+                                    const int* qrPtr, const int* qrRows, const char* qrGenVc,
+                                    const double* pilotQ, int* mode, double* target,
+                                    char* veqOff, double* savedVTarget,
+                                    const char* rlActive, char* switched) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nQr * nScenarios) return;
+    int g = tid % nQr;
+    int s = tid / nQr;
+    if (!rlActive[s] || !qrGenVc[g]) return;
+    int pilotRow = qrRows[qrPtr[g]];
+    size_t pi = (size_t) s * n + pilotRow;
+    size_t fi = (size_t) s * nQr + g;
+    bool lost = relocChoose(g, qrPtr, qrRows, mode + (size_t) s * n) == 0;
+    if (lost && !veqOff[fi] && mode[pi] == 0) {
+        savedVTarget[fi] = target[pi];
+        mode[pi] = 1;
+        target[pi] = pilotQ[fi];
+        veqOff[fi] = 1;
+        switched[s] = 1;
+    } else if (!lost && veqOff[fi]) {
+        mode[pi] = 0;
+        target[pi] = savedVTarget[fi];
+        veqOff[fi] = 0;
+        switched[s] = 1;
+    }
+}
+
 // Remote-member OWN reactive injection (plan-B3): accumulate each remote member's own bus q into
 // the diagnostic Q buffer at its OWN row (suppressed by the main qBuf fill), so the RL kernel's
 // q = qBuf[row] + loadQ works verbatim for remote entries. Same family evaluation as fillDistrQBatch
@@ -2778,8 +2815,9 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
         // PILOT's voltage (rlCmpVrow) against the GROUP target — B0-verified CPU semantics.
         // The FREE member pins the same way (plan-B4): the fill kernels re-pick the pilot-Q
         // carrier by mode-scan over the relocation candidates, and updateDistrQTargetsBatch
-        // hands the pilot's Q target to the new carrier's row — the scope gate guarantees at
-        // least one member of a batched group can never pin, so the pilot's vEq never flips.
+        // hands the pilot's Q target to the new carrier's row. When the LAST live member pins,
+        // updatePilotVeqBatch flips the pilot's V identity to a power row (control lost) and
+        // restores it on the first unpin — the all-pinned corner runs on-device too.
         size_t ridx = (size_t) s * n + rlVrow[i];
         size_t rst = (size_t) s * nrl + i;
         size_t rli = cvStride ? rst : (size_t) i;
@@ -3335,6 +3373,10 @@ struct BatchSolverContext {
     // threshold skew that lands stops up to the criterion apart. Empty = use n for every scenario.
     std::vector<int> hNActive;
     DeviceBuf dRlMonitored;                                // per controller: 1 = MONITORING_VOLTAGE SVC standing by
+    std::vector<char> hRlMonitored;                        // host copy, for the forced-PV detector
+    int allPvPinnable = 0;                                 // every non-monitored RL entry has finite limits — the
+                                                           // ONLY networks where OLF's global "strongest stays PV"
+                                                           // rule (remainingPvBusCount 0) is reachable
     DeviceBuf dRowSlope;                                   // per row: SLOPE-SVC slope (mode-2 V rows), 0 elsewhere
     int nRlRemote = 0;                                     // remote-member RL entries present (plan-B1/B3)
     DeviceBuf dRlRemote;                                   // per-entry remote kind (1 = remote group member)
@@ -3354,6 +3396,10 @@ struct BatchSolverContext {
     DeviceBuf dQrPilotQ;                                   // per (scenario, qr group): the pilot's Q target, captured
                                                            // at solve init from the BASE carrier's row and handed to
                                                            // the CURRENT carrier's row on every re-pick
+    DeviceBuf dQrGenVc;                                    // per qr group: 1 = remote gen-VC group (vs TVC — only
+                                                           // those get the all-pinned pilot-vEq flip)
+    DeviceBuf dQrVeqOff;                                   // per (scenario, qr group): 1 = the pilot's V equation was
+    DeviceBuf dQrSavedVT;                                  // flipped OFF by updatePilotVeqBatch (+ the saved V target)
     int nRmq = 0;                                          // remote-member OWN-q contributions (plan-B3): a twin
     DeviceBuf dRmqRow;                                     // of the DISTR_Q assembly accumulating each member's own
     DeviceBuf dRmqElem;                                    // bus q into dQbuf at its own row (that slot is free —
@@ -3600,6 +3646,13 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
         ctx->dRlLoadQ.upload(rlLoadQ, nrl * sizeof(double));
         ctx->dRlVtarget.upload(rlVtarget, nrl * sizeof(double));
         ctx->dRlMonitored.upload(rlMonitored, nrl * sizeof(char));
+        ctx->hRlMonitored.assign(rlMonitored, rlMonitored + nrl);
+        ctx->allPvPinnable = 1;
+        for (int i = 0; i < nrl; i++) {
+            if (!rlMonitored[i] && !((rlMinQ[i] > -1e7 || rlMaxQ[i] < 1e7) && rlMinQ[i] < rlMaxQ[i])) {
+                ctx->allPvPinnable = 0;                      // an unlimited PV bus: the rule never fires
+            }
+        }
         ctx->dRlSavedTarget.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(double));
         ctx->dRlLimitType.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(char));
         ctx->dRlSwitchCount.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(char));
@@ -3869,6 +3922,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {        // plan-B4: capture each group's pilot-Q target from
             size_t need = static_cast<size_t>(ctx->st->nQr) * nS * sizeof(double);   // the BASE carrier's row,
             if (!ctx->dQrPilotQ.p) ctx->dQrPilotQ.alloc(need);   // BEFORE any RL mode seeding rewrites it
+            if (!ctx->dQrSavedVT.p) ctx->dQrSavedVT.alloc(need);
+            if (!ctx->dQrVeqOff.p) ctx->dQrVeqOff.alloc(static_cast<size_t>(ctx->st->nQr) * nS * sizeof(char));
+            CUDA_CHECK(cudaMemsetAsync(ctx->dQrVeqOff.p, 0,      // per-solve state, like limitType
+                    static_cast<size_t>(ctx->st->nQr) * nS * sizeof(char), ctx->stream));
             capturePilotQBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nQr, nS, n,
                     ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), dBaseMode.as<int>(),
                     ctx->dTarget.as<double>(), ctx->dQrPilotQ.as<double>());
@@ -4409,20 +4466,59 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->dMode.as<int>(),
                         ctx->hasDqQrGroups ? ctx->dQrPilotQ.as<double>() : nullptr, ctx->st->nQr);
             }
+            if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {    // all-pinned corner: pilot vEq flip/restore
+                updatePilotVeqBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
+                        ctx->st->nQr, nS, n,
+                        ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), ctx->dQrGenVc.as<char>(),
+                        ctx->dQrPilotQ.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
+                        ctx->dQrVeqOff.as<char>(), ctx->dQrSavedVT.as<double>(),
+                        ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
+            }
         }
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     CUDA_CHECK(cudaMemcpy(rlSwitched.data(), ctx->dRlSwitched.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
+    // FORCED-PV detector: OLF's switchPvPq NEVER lets the network reach zero PV buses ("all PV
+    // buses should switch PQ, strongest one will stay PV" — a network-wide election the device
+    // does not run). The moment a scenario's RL state has EVERY non-monitored entry pinned, its
+    // trajectory has already diverged from the CPU's (measured 1.9 kV) — reject it to the
+    // per-contingency CPU fallback. Only reachable when every PV-capable entry has finite limits
+    // (allPvPinnable, precomputed): one unlimited PV bus anywhere skips the check entirely.
+    if (!inDsPhase && !skipRlPhase && ctx->nrl > 0 && ctx->allPvPinnable) {
+        std::vector<char> ltHost(static_cast<size_t>(ctx->nrl) * nS);
+        CUDA_CHECK(cudaMemcpy(ltHost.data(), ctx->dRlLimitType.p, ltHost.size(), cudaMemcpyDeviceToHost));
+        for (int s = 0; s < nS; s++) {
+            if (!rlActive[s]) {
+                continue;
+            }
+            bool anyPv = false;
+            for (int i = 0; i < ctx->nrl && !anyPv; i++) {
+                anyPv = !ctx->hRlMonitored[i] && ltHost[(size_t) s * ctx->nrl + i] == 0;
+            }
+            if (!anyPv) {
+                res.status[s] = -2;                          // STATUS_REJECTED -> CPU recomputes it
+                live[s] = 0;
+                active[s] = 0;
+            }
+        }
+    }
     if (!inDsPhase && ctx->nRlRemote > 0 && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {   // TEMP remote-RL trace
         std::vector<char> lt(static_cast<size_t>(ctx->nrl) * nS);
         std::vector<char> rem(ctx->nrl);
+        std::vector<int> vr(ctx->nrl);
+        std::vector<double> qb(static_cast<size_t>(n) * nS);
+        std::vector<double> lq(ctx->nrl);
         CUDA_CHECK(cudaMemcpy(lt.data(), ctx->dRlLimitType.p, lt.size(), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(rem.data(), ctx->dRlRemote.p, rem.size(), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(vr.data(), ctx->dRlVrow.p, vr.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(qb.data(), ctx->dQbuf.p, qb.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(lq.data(), ctx->dRlLoadQ.p, lq.size() * sizeof(double), cudaMemcpyDeviceToHost));
         for (int s2 = 0; s2 < nS; s2++) {
             for (int i2 = 0; i2 < ctx->nrl; i2++) {
                 if (rem[i2]) {
-                    std::fprintf(stderr, "RLREMOTE_TRACE s=%d entry=%d lt=%d switched=%d\n",
-                                 s2, i2, (int) lt[(size_t) s2 * ctx->nrl + i2], (int) rlSwitched[s2]);
+                    std::fprintf(stderr, "RLREMOTE_TRACE s=%d entry=%d lt=%d switched=%d q=%.6f\n",
+                                 s2, i2, (int) lt[(size_t) s2 * ctx->nrl + i2], (int) rlSwitched[s2],
+                                 qb[(size_t) s2 * n + vr[i2]] + lq[i2]);
                 }
             }
         }
@@ -5363,12 +5459,17 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
         ctx->hasDqQrGroups = 0;
         if (jMQrGroup != nullptr && env->GetArrayLength(jMQrGroup) == nm) {
             jint* mqg = env->GetIntArrayElements(jMQrGroup, nullptr);
+            std::vector<char> genVc(ctx->st->nQr > 0 ? ctx->st->nQr : 1, 0);
             for (int i = 0; i < nm; i++) {
                 if (mqg[i] >= 0) {
                     ctx->hasDqQrGroups = 1;                  // plan-B4: relocation-linked group present
+                    genVc[mqg[i]] = 1;                       // this qr group is a remote gen-VC group
                 }
             }
             ctx->dDqMemberQrGroup.upload(mqg, static_cast<size_t>(nm) * sizeof(int));
+            if (ctx->hasDqQrGroups) {
+                ctx->dQrGenVc.upload(genVc.data(), genVc.size() * sizeof(char));
+            }
             env->ReleaseIntArrayElements(jMQrGroup, mqg, JNI_ABORT);
         }
   }

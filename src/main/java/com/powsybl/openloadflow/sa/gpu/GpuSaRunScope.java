@@ -108,11 +108,13 @@ final class GpuSaRunScope {
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL
                 && GpuBatchTransformerControl.transformerControlSupported(lfNetwork)
                 && !sharedUseInitial;
-        // REMOTE/DISTRIBUTED generator VC groups + reactive limits. DEVICE mode runs the pin/unpin
-        // dynamics on-device: NON-free members via mode-4 transitions + own-q accumulation (plan-B3),
-        // and the FREE member via the pilot-Q relocation candidate groups (plan-B4: the fill kernels
-        // re-pick the carrier by mode-scan, the DISTR_Q kernels suppress the carrier row and hand it
-        // the pilot's Q target). Still whole-run CPU in BOTH modes:
+        // REMOTE/DISTRIBUTED generator VC groups + reactive limits. Both modes run the full
+        // pin/unpin dynamics: NON-free members via mode-4 transitions + own-q accumulation
+        // (plan-B3), the FREE member via the pilot-Q relocation candidate groups (plan-B4), and
+        // the ALL-PINNED corner (control lost) via the pilot-vEq flip — on-device by
+        // updatePilotVeqBatch (mode-scan fallback = candidate 0, the pilot's own row), in JAVA by
+        // OLF's own vEq deactivation carried through the activation push. Still whole-run CPU in
+        // BOTH modes:
         //  - a pinnable free member whose group has NO relocation table: fewer than 2 merged
         //    members, or a pilot with half-open / zero-impedance q terms (frozen scatter — mirrors
         //    ExtractionColumns.relocatablePilot);
@@ -120,14 +122,7 @@ final class GpuSaRunScope {
         //    would silently MISS those terms — the alternate-dest select covers only the cb/sh
         //    channels (measured 3.3e-4 kV on a pinned member with one open line); an UNPINNABLE
         //    unclean member is fine (its own-q row is never activated).
-        // DEVICE additionally gates a group whose ENABLED members are ALL pinnable: an all-pinned
-        // scenario drops the pilot's V equation (control lost), a vEq flip the device RL kernel
-        // does not orchestrate. JAVA batches that corner since 2026-09-07: OLF's own loop
-        // deactivates the vEq and the pushed activation carries it — the pilot row flips to a
-        // power row (mode 1) with its own Q target, and the relocation mode-scan falls back to
-        // candidate 0 (the pilot's own row) because every member row reads mode 4.
-        boolean remoteRlUnsupportedDevice = remoteRlUnrepresentable(lfNetwork, true);
-        boolean remoteRlUnsupportedJava = remoteRlUnrepresentable(lfNetwork, false);
+        boolean remoteRlUnsupported = remoteRlUnrepresentable(lfNetwork);
         boolean noSvc = lfNetwork.getBuses().stream()
                 .flatMap(b -> b.getGenerators().stream())
                 .noneMatch(g -> g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator);
@@ -139,7 +134,7 @@ final class GpuSaRunScope {
             // JAVA runs OLF's OWN outer-loop code per scenario, so there is no device-port parameterization
             // limit — only not-yet-validated loops and config the compact snapshot cannot isolate fall back.
             unsupportedOuterLoops = javaUnsupportedOuterLoops(lfNetwork, acParameters, noHvdc, noSvc,
-                    remoteRlUnsupportedJava, sharedUseInitial);
+                    remoteRlUnsupported, sharedUseInitial);
         } else {
             unsupportedOuterLoops = new ArrayList<>(acParameters.getOuterLoops().stream()
                     .map(AcOuterLoop::getName)
@@ -180,7 +175,7 @@ final class GpuSaRunScope {
             if (dsLoopActive && loadBased && olfGuardParams.isUseLoadModel()) {
                 unsupportedOuterLoops.add("DistributedSlack[useLoadModel+loadBased]");
             }
-            if (remoteRlUnsupportedDevice && acParameters.getOuterLoops().stream()
+            if (remoteRlUnsupported && acParameters.getOuterLoops().stream()
                     .anyMatch(ol -> ReactiveLimitsOuterLoop.NAME.equals(ol.getName()))) {
                 unsupportedOuterLoops.add("ReactiveLimits[remoteGroupPinDynamicsUnrepresentable]");
             }
@@ -344,10 +339,8 @@ final class GpuSaRunScope {
         return (member.getMinQ() > -1e9 || member.getMaxQ() < 1e9) && member.getMinQ() < member.getMaxQ();
     }
 
-    /** The remote-group pin-dynamics residual gate (see the caller comment): {@code allPinnable}
-     *  adds the DEVICE-only all-pinned condition (pilot vEq flip — JAVA follows OLF's own
-     *  activation instead). */
-    private static boolean remoteRlUnrepresentable(LfNetwork lfNetwork, boolean gateAllPinnable) {
+    /** The remote-group pin-dynamics residual gate (see the caller comment). */
+    private static boolean remoteRlUnrepresentable(LfNetwork lfNetwork) {
         return lfNetwork.getBuses().stream()
                 .map(b -> b.getGeneratorVoltageControl()
                         .filter(vc -> vc.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN
@@ -361,13 +354,11 @@ final class GpuSaRunScope {
                     if (enabled.isEmpty()) {
                         return false;                        // control lost already — no pin dynamics
                     }
-                    boolean allPinnable = gateAllPinnable
-                            && enabled.stream().allMatch(GpuSaRunScope::pinnableRemoteMember);
                     boolean relocatable = vc.getMergedControllerElements().size() >= 2
                             && cleanQScatterBus(vc.getControlledBus());
                     boolean uncleanPinnableMember = vc.getMergedControllerElements().stream()
                             .anyMatch(m -> pinnableRemoteMember(m) && !cleanQScatterBus(m));
-                    return allPinnable || uncleanPinnableMember
+                    return uncleanPinnableMember
                             || pinnableRemoteMember(enabled.get(0)) && !relocatable;
                 });
     }

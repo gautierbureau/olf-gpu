@@ -1076,13 +1076,56 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertJavaGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
     }
 
-    /** JAVA-mode plan-B4 pre-gate: a pinnable FREE member still routes the whole run to the CPU. */
+    /** JAVA-hybrid twin of {@link #deviceRemoteFreeMemberPostContingencyPinMatchesCpu} (plan-B4
+     *  lift): OLF's own RL loop pins g1 — the FREE member, the pilot-Q carrier — and the pushed
+     *  mode-4 row re-picks the carrier to g2 in the device fills; the engine's suppression tables
+     *  (setBatchDqQrSuppression) gate g2's DISTR_Q row off, and the re-extracted activation/target
+     *  push lands the pilot's Q target on g2's row. 1e-12. */
     @org.junit.jupiter.api.Test
-    void javaRemoteFreeMemberPinnableFallsBackWholeRun() {
+    void javaRemoteFreeMemberPostContingencyPinMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = remotePinNetwork("g1", 186.0);
+        List<Contingency> ctgs = List.of(
+                new Contingency("l45b", new BranchContingency("l45b")));
+        assertJavaGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
+    }
+
+    /** JAVA-hybrid base-pinned FREE member (plan-B4 lift): the base free role is already g2; the
+     *  outage loads the group further and g1 stays pinned on both sides. 1e-12. */
+    @org.junit.jupiter.api.Test
+    void javaRemoteFreeMemberBasePinnedMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = remotePinNetwork("g1", 180.0);
+        List<Contingency> ctgs = List.of(
+                new Contingency("l45b", new BranchContingency("l45b")));
+        assertJavaGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
+    }
+
+    /** JAVA-hybrid chained pins (plan-B4 lift): g1 (free) AND g2 pinned by the outage, the carrier
+     *  lands on g3 with two frozen members' compensation. 1e-12. */
+    @org.junit.jupiter.api.Test
+    void javaRemoteFreeAndSiblingPinMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = remotePinNetwork("g1", 186.0);
+        network.getGenerator("g2").newMinMaxReactiveLimits().setMinQ(-1000).setMaxQ(186.0).add();
+        List<Contingency> ctgs = List.of(
+                new Contingency("l45b", new BranchContingency("l45b")));
+        assertJavaGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
+    }
+
+    /** JAVA-mode plan-B4 residual gate (same as DEVICE since the free-pin lift): only a group
+     *  whose enabled members are ALL pinnable still routes the whole run to the CPU. */
+    @org.junit.jupiter.api.Test
+    void javaRemoteAllMembersPinnableFallsBackWholeRun() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
-        network.getGenerator("g1").newMinMaxReactiveLimits().setMinQ(-1000).setMaxQ(1000).add();
+        for (String g : new String[] {"g1", "g2", "g3"}) {
+            network.getGenerator(g).newMinMaxReactiveLimits().setMinQ(-1000).setMaxQ(1000).add();
+        }
         network.newLine().setId("L14")
                 .setVoltageLevel1("vl1").setBus1("b1").setVoltageLevel2("vl4").setBus2("b4")
                 .setR(1.5).setX(40).setG1(0).setB1(0).setG2(0).setB2(0).add();

@@ -195,6 +195,17 @@ public final class GpuHybridBatchOuterLoopEngine {
         // inner solves stop exactly where OLF's PerEquationTypeStoppingCriteria would.
         GpuAcNewtonSolver.setBatchRowCriteria(h,
                 rowCriteria != null ? rowCriteria[0] : null, rowCriteria != null ? rowCriteria[1] : null);
+        // plan-B4 (JAVA): when a remote group has a pilot-Q relocation table, OLF's RL loop may pin
+        // the FREE member — the pushed mode-4 row re-picks the carrier in the fills, and these
+        // tables gate the new carrier's DISTR_Q row off (its row hosts the relocated pilot balance,
+        // whose target arrives through the per-round activation/target push).
+        boolean anyQr = false;
+        for (int g : d.dqMemberQrGroup()) {
+            anyQr |= g >= 0;
+        }
+        GpuAcNewtonSolver.setBatchDqQrSuppression(h,
+                anyQr ? d.dqJMember() : null,
+                anyQr ? d.dqMemberQrGroup() : null);
         return h;
     }
 

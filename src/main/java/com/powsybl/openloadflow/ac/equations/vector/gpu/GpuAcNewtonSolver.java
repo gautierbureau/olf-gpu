@@ -318,6 +318,15 @@ public final class GpuAcNewtonSolver {
                                                int[] dqMemberGroupCount, int[] dqMemberRow, byte[] dqMemberHasRow,
                                                int[] dqMemberQrGroup);
 
+    /** Install (or clear, with nulls) the plan-B4 carrier-row suppression tables on a batch context
+     *  WITHOUT the full remote-RL machinery — the JAVA hybrid's channel: OLF's own RL loop decides
+     *  the pins and pushes mode-4 rows + live targets/weights, and the device fills only need
+     *  {@code dqJMember} (per DISTR_Q contribution: the row-owner member) + {@code dqMemberQrGroup}
+     *  (per member: the pilot's relocation candidate group, −1 = none) to gate the CURRENT
+     *  carrier's DISTR_Q row off. A chunk-solver context gets the same tables via
+     *  {@link #setBatchRlRemote} instead. */
+    public static native void setBatchDqQrSuppression(long handle, int[] dqJMember, int[] dqMemberQrGroup);
+
     /** Install (or clear, with nulls) per-scenario DISTR_Q weight overrides on a batch context —
      *  {@code idx} = flat {scenario, contribution} pairs, {@code w} = the renormalized weight (a gen
      *  outage at a remote-VC controller bus re-runs updateReactiveKeys on the CPU). Per-chunk state. */

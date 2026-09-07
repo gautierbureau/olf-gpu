@@ -289,8 +289,16 @@ DISTR_Q pilots:
   by no outer loop), so member diagnostic rows carry ONLY their own injection.
 - Scope gate narrowed (`remoteGroupPinDynamicsUnrepresentable`): whole-run CPU only when ALL
   enabled members of a group are pinnable (all-pinned would deactivate the pilot's vEq —
-  fallback not modeled) or a pinnable free member has no relocation table. JAVA keeps the full
-  free-member pre-gate (the hybrid installs no dq member tables — carrier suppression inert).
+  fallback not modeled) or a pinnable free member has no relocation table.
+- **JAVA lift (2026-09-07, same day):** the hybrid installs the carrier-row suppression tables
+  (`setBatchDqQrSuppression`: dqJMember + dqMemberQrGroup, WITHOUT the dynamic-weight
+  machinery — nDqDyn stays 0, weights = static pack + dqOv live pushes). Everything else was
+  already in place by construction: OLF's own RL loop pins the free member (activation only —
+  the variable layout is untouched, unlike a member OUTAGE), the per-round activation
+  re-extract pushes the mode-4 row (re-picking the carrier via the same in-kernel mode-scan)
+  and computeQRow(live es) lands the pilot's Q target on the NEW carrier's row through the
+  full per-scenario target push. JAVA now shares the DEVICE residual gate (all-enabled-pinnable
+  → whole-run CPU). Tests: the 3 JAVA free-pin twins + the renamed gate test.
 - Tests (1e-12, engagement): free post-contingency pin (l45b pins g1, carrier → g2),
   base-pinned free (base carrier = g2), chained g1+g2 pins (carrier → g3, two frozen members'
   compensation), all-members-pinnable gate fallback.
@@ -314,10 +322,12 @@ Both gated features now run in the JAVA hybrid too, at 1e-12:
   re-extract carries the mode-4 member rows (the B2 extractor), the AcTargetVector re-read
   carries the frozen-member target compensation, and the engine pushes the LIVE renormalized
   qPct weights per scenario through the dqOv channel (liveDqWeights: re-read
-  getRemoteControlReactivePercent after each outer-loop step, push diffs vs the pack). The
-  JAVA gate is now the same B4 pre-gate as DEVICE (free member pinnable → whole-run CPU).
-  Tests: javaRemoteMemberPostContingencyPinMatchesCpu, javaRemoteMemberBasePinnedMatchesCpu,
-  javaRemoteFreeMemberPinnableFallsBackWholeRun.
+  getRemoteControlReactivePercent after each outer-loop step, push diffs vs the pack). Since
+  the B4 lift the JAVA gate equals the DEVICE residual gate (all enabled members pinnable →
+  whole-run CPU; a pinnable free member batches). Tests:
+  javaRemoteMemberPostContingencyPinMatchesCpu, javaRemoteMemberBasePinnedMatchesCpu,
+  javaRemoteFreeMember{PostContingencyPin,BasePinned}MatchesCpu,
+  javaRemoteFreeAndSiblingPinMatchesCpu, javaRemoteAllMembersPinnableFallsBackWholeRun.
 - **Shared transformer-VC groups**: OLF's loop drives the group (free role, clamps, rounding);
   DISTR_RHO rows via the re-extract, taps via the pi-model refresh, and a dormant drOv safety
   net (liveDrCoefs) for any live-coefficient drift. The sharedGroupPresent gate is gone;

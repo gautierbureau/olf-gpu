@@ -118,19 +118,10 @@ final class GpuSaRunScope {
         //  - a pinnable free member whose group has NO relocation table: fewer than 2 merged
         //    members, or a pilot with half-open / zero-impedance q terms (frozen scatter — mirrors
         //    ExtractionColumns.relocatablePilot).
-        // JAVA mode keeps the full free-member pre-gate: the hybrid installs no dq member tables,
-        // so the carrier-row suppression never fires there.
-        boolean freeRemoteRlPinnable = lfNetwork.getBuses().stream()
-                .map(b -> b.getGeneratorVoltageControl()
-                        .filter(vc -> vc.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN
-                                && !vc.isLocalControl())
-                        .orElse(null))
-                .filter(java.util.Objects::nonNull)
-                .distinct()
-                .map(vc -> vc.getMergedControllerElements().stream()
-                        .filter(vc::isControllerEnabled).findFirst().orElse(null))
-                .filter(java.util.Objects::nonNull)
-                .anyMatch(GpuSaRunScope::pinnableRemoteMember);
+        // JAVA mode shares the same residual gate since 2026-09-07: OLF's own RL loop pins the free
+        // member and the hybrid pushes the mode-4 row + re-extracted targets; the engine installs
+        // the carrier-row suppression tables (setBatchDqQrSuppression) so the re-picked carrier's
+        // DISTR_Q row gates off in the fills.
         boolean remoteRlUnsupported = lfNetwork.getBuses().stream()
                 .map(b -> b.getGeneratorVoltageControl()
                         .filter(vc -> vc.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN
@@ -163,7 +154,7 @@ final class GpuSaRunScope {
             // JAVA runs OLF's OWN outer-loop code per scenario, so there is no device-port parameterization
             // limit — only not-yet-validated loops and config the compact snapshot cannot isolate fall back.
             unsupportedOuterLoops = javaUnsupportedOuterLoops(lfNetwork, acParameters, noHvdc, noSvc,
-                    freeRemoteRlPinnable, sharedUseInitial);
+                    remoteRlUnsupported, sharedUseInitial);
         } else {
             unsupportedOuterLoops = new ArrayList<>(acParameters.getOuterLoops().stream()
                     .map(AcOuterLoop::getName)
@@ -369,7 +360,7 @@ final class GpuSaRunScope {
     }
 
     private static List<String> javaUnsupportedOuterLoops(LfNetwork lfNetwork, AcLoadFlowParameters acParameters,
-                                                          boolean noHvdc, boolean noSvc, boolean freeRemoteRlPinnableJava,
+                                                          boolean noHvdc, boolean noSvc, boolean remoteRlUnsupportedJava,
                                                           boolean sharedUseInitialJava) {
         List<String> unsupported = new ArrayList<>();
         for (AcOuterLoop ol : acParameters.getOuterLoops()) {
@@ -380,7 +371,7 @@ final class GpuSaRunScope {
                     // and the engine pushes the LIVE renormalized qPct weights per scenario (dqOv) — only
                     // a group whose FREE member is pinnable stays CPU (the pilot-Q relocation would move
                     // to another member's column, a frozen structural choice: plan-B4 / A6).
-                    && !(ReactiveLimitsOuterLoop.NAME.equals(name) && freeRemoteRlPinnableJava)
+                    && !(ReactiveLimitsOuterLoop.NAME.equals(name) && remoteRlUnsupportedJava)
                     // TransformerVoltageControl: the JAVA engine runs OLF's real transformer VC loop; the continuous
                     // ratio is solved INSIDE the device inner Newton (rho is a BRANCH_RHO1 variable in es), the loop
                     // makes only the discrete tap DECISIONS, and the compact snapshot now isolates the transformer

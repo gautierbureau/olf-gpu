@@ -432,21 +432,6 @@ public final class GpuBatchedSecurityAnalysisSolver {
      * @param context the base AC loadflow context (its outer loops are replayed per scenario) — MUST be the
      *                context whose equation system + target vector are passed here (the engine drives that network)
      */
-    /** A shared transformer-VC group MEMBER outage is dropped to the CPU per scenario in the JAVA
-     *  hybrid: element-disabling a controller branch deactivates its BRANCH_RHO1-referencing
-     *  equations on the live es, so the rho VARIABLE leaves the index and the es row layout
-     *  SHRINKS — the hybrid's stable-row alignment (x0 / rowMode / targets all indexed by the
-     *  BASE variable rows) cannot follow. The DEVICE path batches non-free member outages via the
-     *  frozen superset layout + drOv (plan A5); the free-member re-pick is A6 there too. */
-    private static boolean outagesSharedTvcMember(BatchContingency c) {
-        for (LfBranch b : c.outagedBranches()) {
-            if (b.getVoltageControl().filter(tvc -> tvc.getMergedControllerElements().size() > 1).isPresent()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     public static List<BatchScenarioResult> solveBatchN1JavaOuterLoops(LfNetwork network, AcLoadFlowContext context,
                                                                        double[] baseState, List<BatchContingency> contingencies,
                                                                        EquationSystem<AcVariableType, AcEquationType> equationSystem,
@@ -487,8 +472,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
             List<GpuBatchContingencyValidator.Qualification> quals =
                     GpuBatchContingencyValidator.qualify(network, branchOnly, mapper, false);
             for (int j = 0; j < quals.size(); j++) {
-                if (quals.get(j).qualified()
-                        && !outagesSharedTvcMember(quals.get(j).contingency())) {
+                if (quals.get(j).qualified()) {
                     engineIndexOfInput[branchOnlyInputIndex.get(j)] = qualified.size();
                     qualified.add(quals.get(j).contingency());
                     qualifiedInputIndex.add(branchOnlyInputIndex.get(j));

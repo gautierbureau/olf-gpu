@@ -300,6 +300,15 @@ DISTR_Q pilots:
   unpinnable unclean member still batches (its own-q row never activates,
   `deviceRemoteUncleanUnpinnableMemberStillBatches`). A real lift would need alternate-dest
   channels on the ob and zero-impedance families.
+- **JAVA all-pinned corner (2026-09-07, later same day):** JAVA no longer gates all-pinnable
+  groups — OLF deactivates the pilot's vEq itself and the pushed activation carries it (the
+  pilot row flips to a power row with its own Q target; the relocation mode-scan falls back to
+  candidate 0 since every member row reads mode 4). The gate split: `remoteRlUnrepresentable`
+  keeps the all-pinnable condition for DEVICE only. Test javaRemoteAllMembersPinnedMatchesCpu:
+  all three members pin in-flight, control genuinely lost (base at target, post-outage 0.23 kV
+  off, asserted in-test), 1e-12 — the network needs a DISTANT keeper PV (g5 behind 400 ohm)
+  because with no voltage reference at all the all-pinned system is near-singular (CPU itself
+  hits MAX_ITERATION), while a near keeper does the group's job.
 - **JAVA lift (2026-09-07, same day):** the hybrid installs the carrier-row suppression tables
   (`setBatchDqQrSuppression`: dqJMember + dqMemberQrGroup, WITHOUT the dynamic-weight
   machinery — nDqDyn stays 0, weights = static pack + dqOv live pushes). Everything else was
@@ -339,16 +348,24 @@ Both gated features now run in the JAVA hybrid too, at 1e-12:
   javaRemoteFreeMember{PostContingencyPin,BasePinned}MatchesCpu,
   javaRemoteFreeAndSiblingPinMatchesCpu, javaRemoteAllMembersPinnableFallsBackWholeRun.
 - **Shared transformer-VC groups**: OLF's loop drives the group (free role, clamps, rounding);
-  DISTR_RHO rows via the re-extract, taps via the pi-model refresh, and a dormant drOv safety
-  net (liveDrCoefs) for any live-coefficient drift. The sharedGroupPresent gate is gone;
-  useInitialTapPosition group semantics stay gated (unvalidated). **JAVA-mode residual gap**:
-  a group MEMBER OUTAGE is dropped to the CPU per scenario (outagesSharedTvcMember) — the
-  element disable removes the member's BRANCH_RHO1 variable from the live es, SHRINKING the
-  row layout the hybrid's stable-row alignment depends on; batching those needs a per-scenario
-  base-row↔current-row variable map through x0/rowMode/targets/bridge-load (a design of its
-  own), while the DEVICE path already batches them via the frozen superset layout + drOv.
-  Tests: javaSharedTransformerControlMatchesCpu (member + free-member outages CPU-routed,
-  compared), javaSharedSimpleTransformerControlMatchesCpu.
+  DISTR_RHO rows via the re-extract, taps via the pi-model refresh, and the drOv channel
+  carrying OLF's live renormalized coefficients. The sharedGroupPresent gate is gone;
+  useInitialTapPosition group semantics stay gated (unvalidated).
+- **Member outages batch too (2026-09-07, the live/base row map)**: the element disable removes
+  the member's BRANCH_RHO1 variable from the live es, SHRINKING and SHIFTING the live rows off
+  the device's frozen base superset. The engine now remaps every crossing through a
+  per-scenario live-row→base-row variable map (`liveToBaseMap`, keyed (type, elementNum),
+  computed once per scenario — outer loops change activation only, never the element-disable
+  set): pushed row modes / targets / x0 EXPAND to base indexing (a base row with no live
+  variable = identity pin at the base state, the DEVICE path's A5 encoding), device states
+  COMPACT to live indexing before entering the bridge, and `setBatchActiveRowCounts` follows
+  the live row count (the CPU's sqrt(eps²·nLive) L2 threshold — the A5 lesson). The FREE
+  member's outage re-picks the pilot-Q carrier through the A6 relocation mode-scan off the
+  pushed mode-0 row; fix en route: the activation extractor's free-controller picks now SKIP
+  DISABLED members (an outaged member also has DISTR_RHO inactive, but its rho variable is
+  gone — it must never be picked as the free role). Tests:
+  javaSharedTransformerControlMatchesCpu (ALL THREE contingencies batch — line, member, free
+  member; count asserted), javaSharedSimpleTransformerControlMatchesCpu (member outage batches).
 
 ### Part B landing checklist
 - [x] B0 read `getBusTargetV`/`getBusV` remote semantics; state table written — 2026-09-06:

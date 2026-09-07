@@ -111,6 +111,7 @@ final class GpuAcRowIndexing {
                     .orElse(null);
             if (svc != null) {
                 LfShunt freeShunt = svc.getMergedControllerElements().stream()
+                        .filter(c -> !c.isDisabled())
                         .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_SHUNT_B) < 0)
                         .findFirst()
                         .orElseThrow(() -> new PowsyblException("GPU AC solver: shunt voltage control of bus "
@@ -132,8 +133,9 @@ final class GpuAcRowIndexing {
                     .orElseThrow(() -> new PowsyblException("GPU AC solver: bus " + bus.getId()
                             + " has active voltage and reactive targets but no supported voltage control"));
             LfBranch freeController = tvc.getMergedControllerElements().stream()
-                    .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_RHO) < 0)
-                    .findFirst()
+                    .filter(c -> !c.isDisabled())            // an OUTAGED member also has DISTR_RHO
+                    .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_RHO) < 0)   // inactive, but its rho
+                    .findFirst()                             // variable left the live es — never the free role
                     .orElseThrow(() -> new PowsyblException("GPU AC solver: transformer voltage control of bus "
                             + bus.getId() + " has no free controller (all DISTR_RHO active)"));
             int rhoRow = branchRhoCol[freeController.getNum()];
@@ -193,6 +195,7 @@ final class GpuAcRowIndexing {
                     .orElse(null);
             if (tvc != null) {
                 LfBranch ctl = tvc.getMergedControllerElements().stream()
+                        .filter(c -> !c.isDisabled())
                         .filter(c -> row(es, c.getNum(), AcEquationType.DISTR_RHO) < 0)
                         .findFirst().orElse(null);
                 if (ctl != null) {

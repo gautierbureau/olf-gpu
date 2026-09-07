@@ -116,6 +116,86 @@ public final class GpuHybridBatchOuterLoopEngine {
         return cfs;
     }
 
+    /** Key of one equation-system variable: (type, element) — stable across activation AND layout
+     *  changes, unlike the row. */
+    private static long varKey(int typeOrdinal, int elementNum) {
+        return ((long) typeOrdinal << 32) ^ (elementNum & 0xFFFFFFFFL);
+    }
+
+    /** The live-row -> base-row variable map for the CURRENT es layout, or {@code null} when the
+     *  live layout equals the base one (the common case: OLF's index assigns rows in sorted
+     *  variable order, so an unchanged variable SET means unchanged rows). A shared-TVC member
+     *  OUTAGE removes the member's BRANCH_RHO1 variable from the live index (every referencing
+     *  equation deactivates with the element), shrinking and SHIFTING the live rows off the
+     *  device's frozen base superset — this map is how the hybrid's pushes/reads cross that. */
+    private static int[] liveToBaseMap(EquationSystem<AcVariableType, AcEquationType> es,
+                                       java.util.Map<Long, Integer> baseRowByVar, int n) {
+        var vars = es.getIndex().getSortedVariablesToFind();
+        if (vars.size() == n) {
+            return null;
+        }
+        int[] map = new int[vars.size()];
+        for (var v : vars) {
+            Integer b = baseRowByVar.get(varKey(v.getType().ordinal(), v.getElementNum()));
+            if (b == null) {
+                throw new com.powsybl.commons.PowsyblException(
+                        "GPU hybrid: live variable absent from the base layout: " + v);
+            }
+            map[v.getRow()] = b;
+        }
+        return map;
+    }
+
+    /** Base-indexed device state -> live-row state for the bridge/es (identity when map is null). */
+    private static double[] compactState(double[] base, int[] liveToBase) {
+        if (liveToBase == null) {
+            return base;
+        }
+        double[] out = new double[liveToBase.length];
+        for (int i = 0; i < liveToBase.length; i++) {
+            out[i] = base[liveToBase[i]];
+        }
+        return out;
+    }
+
+    /** Live-row modes -> base-indexed device row modes; a base row with NO live variable becomes an
+     *  IDENTITY pin (mode 0) — the device analogue of the removed variable, held at the base state
+     *  by {@link #expandTargets}/{@link #expandStateInto} (exactly the DEVICE path's outaged-member
+     *  rho encoding, plan A5). */
+    private static int[] expandModes(int[] liveModes, int[] liveToBase, int n) {
+        if (liveToBase == null) {
+            return liveModes;
+        }
+        int[] out = new int[n];
+        for (int i = 0; i < liveToBase.length; i++) {
+            out[liveToBase[i]] = liveModes[i];
+        }
+        return out;
+    }
+
+    private static double[] expandTargets(double[] liveTargets, int[] liveToBase, double[] baseState, int n) {
+        if (liveToBase == null) {
+            return liveTargets;
+        }
+        double[] out = new double[n];
+        System.arraycopy(baseState, 0, out, 0, n);           // unmapped rows: identity target = base value
+        for (int i = 0; i < liveToBase.length; i++) {
+            out[liveToBase[i]] = liveTargets[i];
+        }
+        return out;
+    }
+
+    private static void expandStateInto(double[] liveState, int[] liveToBase, double[] baseState, double[] dst, int n) {
+        if (liveToBase == null) {
+            System.arraycopy(liveState, 0, dst, 0, n);
+            return;
+        }
+        System.arraycopy(baseState, 0, dst, 0, n);           // unmapped rows sit AT their pin from x0 on
+        for (int i = 0; i < liveToBase.length; i++) {
+            dst[liveToBase[i]] = liveState[i];
+        }
+    }
+
     /** The branch's current static device row [y g1 g2 b1 b2 ksi r1 a1] — the cbIn packing. */
     private static double[] cbRowOf(LfBranch branch) {
         var pi = branch.getPiModel();
@@ -351,6 +431,15 @@ public final class GpuHybridBatchOuterLoopEngine {
         double[][] loadSnapP = new double[nS][];
         double[][] loadSnapQ = new double[nS][];
         int[][] rowMode = new int[nS][];
+        // live-row -> base-row map per scenario (null = identity): a member outage that removes a
+        // VARIABLE from the live es shrinks the layout; the outage set is fixed per scenario, and
+        // outer loops only ever change ACTIVATION (never the element-disable set), so the map is
+        // computed once per scenario after its outage is applied.
+        java.util.Map<Long, Integer> baseRowByVar = new java.util.HashMap<>();
+        for (var v : in.es().getIndex().getSortedVariablesToFind()) {
+            baseRowByVar.put(varKey(v.getType().ordinal(), v.getElementNum()), v.getRow());
+        }
+        int[][] liveToBase = new int[nS][];
         boolean[][] disabled = new boolean[nS][in.nElements()];
         double[][] scenTargets = new double[nS][];
         boolean[] retired = new boolean[nS];
@@ -402,14 +491,16 @@ public final class GpuHybridBatchOuterLoopEngine {
                 b.setDisabled(true);
             }
             networkDisabled = in.ctgs().get(s).outagedBranches();
-            GpuAcActivation act = bridges[s].initializeScenario(in.baseState());
-            rowMode[s] = act.rowMode();
-            scenTargets[s] = act.applyTargets(new AcTargetVector(in.network(), in.es()).getArray());
+            liveToBase[s] = liveToBaseMap(in.es(), baseRowByVar, n);
+            GpuAcActivation act = bridges[s].initializeScenario(compactState(in.baseState(), liveToBase[s]));
+            rowMode[s] = expandModes(act.rowMode(), liveToBase[s], n);
+            scenTargets[s] = expandTargets(act.applyTargets(new AcTargetVector(in.network(), in.es()).getArray()),
+                    liveToBase[s], in.baseState(), n);
             com.powsybl.openloadflow.ac.solver.AcSolverUtil.initStateVector(in.network(), in.es(),
                     new com.powsybl.openloadflow.network.util.PreviousValueVoltageInitializer());
             double[] x0 = in.es().getStateVector().get();
             states[s] = new double[n + 3];
-            System.arraycopy(x0, 0, states[s], 0, n);
+            expandStateInto(x0, liveToBase[s], in.baseState(), states[s], n);
             if (!tapTracked.isEmpty()) {                     // initialize may not move taps, but stay uniform
                 double[][] rr = new double[tapTracked.size()][];
                 for (int b = 0; b < tapTracked.size(); b++) {
@@ -530,6 +621,20 @@ public final class GpuHybridBatchOuterLoopEngine {
                     }
                 }
             }
+            // per-scenario ACTIVE row count: the CPU's L2 stopping criterion is sqrt(eps^2 * nLive),
+            // and a shrunk live layout has fewer rows than the device's frozen superset (A5 lesson:
+            // a one-row threshold difference is a measurable trajectory shift at 1e-12).
+            int[] nActiveC = null;
+            for (int i = 0; i < nA; i++) {
+                if (liveToBase[active.get(i)] != null) {
+                    if (nActiveC == null) {
+                        nActiveC = new int[nA];
+                        java.util.Arrays.fill(nActiveC, n);
+                    }
+                    nActiveC[i] = liveToBase[active.get(i)].length;
+                }
+            }
+            GpuAcNewtonSolver.setBatchActiveRowCounts(handle, nActiveC);
             GpuAcNewtonSolver.setBatchDqWeightOverrides(handle,
                     dqOvIdx.isEmpty() ? null : dqOvIdx.stream().mapToInt(Integer::intValue).toArray(),
                     dqOvW.isEmpty() ? null : dqOvW.stream().mapToDouble(Double::doubleValue).toArray());
@@ -608,7 +713,8 @@ public final class GpuHybridBatchOuterLoopEngine {
                 double[] st = new double[n];
                 System.arraycopy(states[s], 0, st, 0, n);
                 long tj0 = System.nanoTime();
-                GpuAcActivation act = bridges[s].applyOuterLoopStep(st);  // load state -> OLF outer loops -> re-extract
+                // load state -> OLF outer loops -> re-extract (state compacted to the live layout)
+                GpuAcActivation act = bridges[s].applyOuterLoopStep(compactState(st, liveToBase[s]));
                 // capture this scenario's controller-branch pi-model rows: the outer loops may have moved a tap,
                 // which changes R/X/Y/ksi on the network (PiModelArray reads them from the CURRENT tap) — the
                 // device row must follow, or the next round solves with a stale admittance.
@@ -632,8 +738,9 @@ public final class GpuHybridBatchOuterLoopEngine {
                 }
                 scenDqW[s] = liveDqWeights(in.gpuData(), dqMemberBus);
                 scenDrC[s] = liveDrCoefs(in.gpuData(), drKBranch, drJBranch);
-                rowMode[s] = act.rowMode();
-                scenTargets[s] = act.applyTargets(new AcTargetVector(in.network(), in.es()).getArray());
+                rowMode[s] = expandModes(act.rowMode(), liveToBase[s], n);
+                scenTargets[s] = expandTargets(act.applyTargets(new AcTargetVector(in.network(), in.es()).getArray()),
+                        liveToBase[s], in.baseState(), n);
                 // OLF-faithful re-solve initialization — the EXACT call OLF's runOuterLoop makes before every
                 // re-solve: solver.run(new PreviousValueVoltageInitializer()) -> AcSolverUtil.initStateVector
                 // re-reads EVERY variable from the network (v/phi from the bus, rho/a1 from the pi-model — so a
@@ -648,7 +755,7 @@ public final class GpuHybridBatchOuterLoopEngine {
                 com.powsybl.openloadflow.ac.solver.AcSolverUtil.initStateVector(in.network(), in.es(),
                         new com.powsybl.openloadflow.network.util.PreviousValueVoltageInitializer());
                 double[] cpuX0 = in.es().getStateVector().get();
-                System.arraycopy(cpuX0, 0, states[s], 0, n);
+                expandStateInto(cpuX0, liveToBase[s], in.baseState(), states[s], n);
                 tJava += System.nanoTime() - tj0;
                 nJavaCalls++;
 

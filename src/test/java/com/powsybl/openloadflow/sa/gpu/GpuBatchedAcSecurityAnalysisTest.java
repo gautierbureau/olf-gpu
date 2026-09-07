@@ -1050,9 +1050,13 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     /** JAVA-hybrid twin of {@link #deviceSharedTransformerControlMatchesCpu}: OLF's own
-     *  TransformerVoltageControl loop drives the 3-member shared group per scenario; the engine
-     *  pushes the LIVE DISTR_RHO coefficients (drOv) when the T2wT2 member outage reforms them, and
-     *  the T2wT (FREE member) outage is dropped to the CPU at qualification. 1e-12. */
+     *  TransformerVoltageControl loop drives the 3-member shared group per scenario. Since the
+     *  live/base row-map lift (2026-09-07) MEMBER outages batch too: the outaged member's
+     *  BRANCH_RHO1 variable leaves the live es and the hybrid remaps every push/read through the
+     *  per-scenario live-row->base-row map (the missing rho row = identity pin at the base state,
+     *  the CPU's L2 threshold follows the live row count), the drOv channel carries OLF's live
+     *  renormalized coefficients and the A6 relocation mode-scan re-picks the pilot-Q carrier off
+     *  the pushed mode-0 row for the FREE member's outage. ALL THREE contingencies batch, 1e-12. */
     @org.junit.jupiter.api.Test
     void javaSharedTransformerControlMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -1068,9 +1072,12 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
                 .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
         assertJavaGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(3, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "member + free-member outages must batch in the JAVA hybrid (live/base row map)");
     }
 
-    /** WITH_GENERATOR (SimpleTransformerVoltageControl) flavor of the JAVA shared-group twin. */
+    /** WITH_GENERATOR (SimpleTransformerVoltageControl) flavor of the JAVA shared-group twin —
+     *  the T2wT2 MEMBER outage batches through the live/base row map. */
     @org.junit.jupiter.api.Test
     void javaSharedSimpleTransformerControlMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -1085,6 +1092,8 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
                 .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL);
         assertJavaGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the member outage must batch in the JAVA hybrid (live/base row map)");
     }
 
     /** JAVA-hybrid twin of {@link #deviceRemoteMemberPostContingencyPinMatchesCpu}: OLF's own RL
@@ -1153,28 +1162,58 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertJavaGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
     }
 
-    /** JAVA-mode plan-B4 residual gate (same as DEVICE since the free-pin lift): only a group
-     *  whose enabled members are ALL pinnable still routes the whole run to the CPU. */
+    /** JAVA all-pinned corner (lifted 2026-09-07): ALL THREE members pin under the outage, OLF
+     *  deactivates the pilot's V equation (control lost — verified in-test: the base holds the
+     *  pilot AT target, the post-outage pilot converges 0.23 kV OFF it) and the pushed activation
+     *  carries it — the pilot row flips to a power row with its own Q target and the relocation
+     *  mode-scan falls back to the pilot's own row (every member row reads mode 4). g5, a DISTANT
+     *  unlimited PV behind a 400-ohm line, keeps OLF's global "keep one PV bus" rule out of the
+     *  way AND keeps the all-pinned system regular (with no voltage reference at all the CPU
+     *  itself hits MAX_ITERATION — a nearer/stronger keeper instead holds the group's job, which
+     *  is why the caps sit in the narrow 185-vs-183 window). 1e-12 with engagement. */
     @org.junit.jupiter.api.Test
-    void javaRemoteAllMembersPinnableFallsBackWholeRun() {
+    void javaRemoteAllMembersPinnedMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
-        for (String g : new String[] {"g1", "g2", "g3"}) {
-            network.getGenerator(g).newMinMaxReactiveLimits().setMinQ(-1000).setMaxQ(1000).add();
-        }
-        network.newLine().setId("L14")
-                .setVoltageLevel1("vl1").setBus1("b1").setVoltageLevel2("vl4").setBus2("b4")
-                .setR(1.5).setX(40).setG1(0).setB1(0).setG2(0).setB2(0).add();
-        List<Contingency> ctgs = List.of(new Contingency("L14", new BranchContingency("L14")));
-        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
-                .setDistributedSlack(true).setUseReactiveLimits(true);
-        System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY, "JAVA");
-        try {
-            assertGpuFallsBackWholeRunAndMatchesCpu(network, ctgs, lfp);
-        } finally {
-            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
-        }
+        Network network = remotePinNetwork("g1", 185.0);
+        network.getGenerator("g2").newMinMaxReactiveLimits().setMinQ(-1000).setMaxQ(185.0).add();
+        network.getGenerator("g3").newMinMaxReactiveLimits().setMinQ(-1000).setMaxQ(185.0).add();
+        // keeper PV: a weakly-coupled unlimited generator far from the group, so OLF's global
+        // "all PV buses should switch — strongest stays PV" rule never forces a member to keep
+        // regulating (remainingPvBusCount stays > 0 when all three members hit their limits)
+        var vl7 = network.getSubstation("s").newVoltageLevel().setId("vl7").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        vl7.getBusBreakerView().newBus().setId("b7").add();
+        vl7.newGenerator().setId("g5").setBus("b7").setConnectableBus("b7")
+                .setMinP(0).setMaxP(10).setTargetP(1).setVoltageRegulatorOn(true).setTargetV(408).add();
+        network.newLine().setId("l47")                       // DISTANT but real voltage reference:
+                .setVoltageLevel1("vl4").setBus1("b4").setConnectableBus1("b4")   // keeps the PV
+                .setVoltageLevel2("vl7").setBus2("b7").setConnectableBus2("b7")   // count > 0 and the
+                .setR(10.0).setX(400.0).setG1(0).setB1(0).setG2(0).setB2(0).add();   // system regular
+        network.getLine("l45").setX(20.0);                   // keep decent post-outage coupling: the
+        // corner is CONTROL loss, not voltage collapse
+        List<Contingency> ctgs = List.of(
+                new Contingency("l45b", new BranchContingency("l45b")));
+        // CPU-side semantics check (ground rule: prove the scenario exercises what it claims):
+        // with all three members at their limits the group loses control and the pilot's voltage
+        // must sit measurably OFF the group target post-outage.
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(remotePinParameters());
+        List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), java.util.Set.of("vl4", "vl5"), java.util.Set.of()));
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, ctgs, mon, sap);
+        double targetV = network.getGenerator("g1").getTargetV();
+        double basePilotV = cpu.getPreContingencyResult().getNetworkResult().getBusResults().stream()
+                .filter(b -> "b4".equals(b.getBusId())).findFirst().orElseThrow().getV();
+        assertTrue(Math.abs(basePilotV - targetV) < 0.05,
+                "the BASE must keep group control (pilot " + basePilotV + " vs target " + targetV
+                        + ") — the corner under test is the IN-FLIGHT vEq deactivation");
+        double pilotV = cpu.getPostContingencyResults().get(0).getNetworkResult().getBusResults().stream()
+                .filter(b -> "b4".equals(b.getBusId())).findFirst().orElseThrow().getV();
+        assertTrue(Math.abs(pilotV - targetV) > 0.1,
+                "the scenario must LOSE group control (pilot " + pilotV + " vs target " + targetV
+                        + ") — otherwise it does not exercise the all-pinned corner");
+        assertJavaGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
     }
 
     /** The whole-run-fallback contract: the batch must NOT engage (the scope routed the run to the

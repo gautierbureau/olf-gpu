@@ -63,15 +63,14 @@ final class GpuSaRunScope {
         // transformer-controlled level — the solver checks). Anything else falls back.
         OpenLoadFlowParameters olfGuardParams = OpenLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters());
         // Shared groups (plan-group-member-dynamics A3/A4): AFTER_GENERATOR and WITH_GENERATOR
-        // orchestrate them with group-level controllers; the useInitialTapPosition shared-ratio
-        // manager and the INCREMENTAL flavor are still out of scope, as is the JAVA hybrid
-        // (unvalidated) — those combinations stay whole-run CPU.
+        // orchestrate them with group-level controllers, INCLUDING the useInitialTapPosition
+        // shared-ratio manager since 2026-09-07 (group-averaged clamp bounds + the spread-
+        // preserving remap live in the machine; WITH_GENERATOR's loop never used the manager).
+        // Only the INCREMENTAL flavor keeps its shared-group gate.
         boolean sharedGroups = GpuBatchTransformerControl.sharedGroupPresent(lfNetwork);
-        boolean sharedUseInitial = sharedGroups && olfGuardParams.isTransformerVoltageControlUseInitialTapPosition();
         boolean transformerControlBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL
-                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork)
-                && !sharedUseInitial;
+                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
         // INCREMENTAL (OLF's default TVC mode): the DEVICE runs the loop's decisions per scenario around
         // batched solves with in-kernel dV/drho sensitivities (GpuBatchIncrementalTvc); stage-1 scope is
         // the same as the continuous port (no generator VC under the transformer-controlled level).
@@ -106,8 +105,7 @@ final class GpuSaRunScope {
                         || pc.getControlledBranch() == pc.getControllerBranch());
         boolean simpleTvcBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL
-                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork)
-                && !sharedUseInitial;
+                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
         // REMOTE/DISTRIBUTED generator VC groups + reactive limits. Both modes run the full
         // pin/unpin dynamics: NON-free members via mode-4 transitions + own-q accumulation
         // (plan-B3), the FREE member via the pilot-Q relocation candidate groups (plan-B4), and
@@ -131,7 +129,7 @@ final class GpuSaRunScope {
             // JAVA runs OLF's OWN outer-loop code per scenario, so there is no device-port parameterization
             // limit — only not-yet-validated loops and config the compact snapshot cannot isolate fall back.
             unsupportedOuterLoops = javaUnsupportedOuterLoops(lfNetwork, acParameters, noHvdc, noSvc,
-                    remoteRlUnsupported, sharedUseInitial);
+                    remoteRlUnsupported);
         } else {
             unsupportedOuterLoops = new ArrayList<>(acParameters.getOuterLoops().stream()
                     .map(AcOuterLoop::getName)
@@ -286,7 +284,8 @@ final class GpuSaRunScope {
                         lfGuardParams.getBalanceType(), olfGuardParams.isUseActiveLimits()),
                 cfgIncrementalTvc, olfGuardParams.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift(),
                 cfgIncrementalShunt, olfGuardParams.getIncrementalShuntControlOuterLoopMaxSectionShift(),
-                cfgIncrementalRpc, cfgIncrementalPhase, cfgSimpleTvc, cfgHvdcFreezing, cfgHvdcLimits,
+                cfgIncrementalRpc, cfgIncrementalPhase, cfgSimpleTvc,
+                olfGuardParams.isTransformerVoltageControlUseInitialTapPosition(), cfgHvdcFreezing, cfgHvdcLimits,
                 cfgSecondaryVc, olfGuardParams.getMinPlausibleTargetVoltage(), olfGuardParams.getMaxPlausibleTargetVoltage(),
                 cfgVoltageMonitoring, cfgContinuousPhase, defaultLossDist && dsActive,
                 olfParams.getNewtonRaphsonStoppingCriteriaType()
@@ -357,8 +356,7 @@ final class GpuSaRunScope {
     }
 
     private static List<String> javaUnsupportedOuterLoops(LfNetwork lfNetwork, AcLoadFlowParameters acParameters,
-                                                          boolean noHvdc, boolean noSvc, boolean remoteRlUnsupportedJava,
-                                                          boolean sharedUseInitialJava) {
+                                                          boolean noHvdc, boolean noSvc, boolean remoteRlUnsupportedJava) {
         List<String> unsupported = new ArrayList<>();
         for (AcOuterLoop ol : acParameters.getOuterLoops()) {
             String name = ol.getName();
@@ -387,11 +385,12 @@ final class GpuSaRunScope {
                     // LIVE 1/enabled-count DISTR_RHO coefficients per scenario (drOv) when a member outage
                     // reforms them. A FREE-member outage re-picks the pilot-Q carrier column (frozen
                     // structural choice) — those contingencies are dropped to the CPU at qualification.
-                    // useInitialTapPosition group semantics stay gated (unvalidated).
+                    // useInitialTapPosition needs no JAVA gate (2026-09-07): OLF's own ratio manager
+                    // runs in the replayed loop, its remapped/rounded taps reach the device through
+                    // the pi-model refresh like any other tap decision.
                     || ("TransformerVoltageControl".equals(name) || "SimpleTransformerVoltageControl".equals(name)
                             || "IncrementalTransformerVoltageControl".equals(name))
                             && GpuBatchTransformerControl.transformerControlSupported(lfNetwork)
-                            && !sharedUseInitialJava
                     // ShuntVoltageControl: the JAVA engine runs OLF's real shunt VC loop; the continuous
                     // susceptance is solved INSIDE the device inner Newton (SHUNT_B is a variable in es) and the
                     // compact snapshot isolates the controller-shunt b + VC-enabled per scenario (BusState).

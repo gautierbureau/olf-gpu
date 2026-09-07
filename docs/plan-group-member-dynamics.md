@@ -162,8 +162,8 @@ the CPU via `-Dolf.gpu.sa.gpuBaseLoadFlow=false`.
 - [x] A3 group controller (per-member off-deltas via subset toggling; free-member clamp -> STATUS_REJECTED
       per-scenario CPU route; SimpleTvc converted) + all TVC tests green at 1e-12
 - [x] A4 deviceSharedTransformerControlMatchesCpu (AFTER_GENERATOR, engagement verified at targetV 33.0);
-      gates now flavor-specific: AFTER_GENERATOR + WITH_GENERATOR lifted, INCREMENTAL /
-      useInitialTapPosition / JAVA hybrid stay gated. WITH_GENERATOR twin landed 2026-09-06
+      gates now flavor-specific: AFTER_GENERATOR + WITH_GENERATOR lifted, INCREMENTAL
+      stays gated (useInitialTapPosition + JAVA hybrid since lifted, 2026-09-07). WITH_GENERATOR twin landed 2026-09-06
       (deviceSharedSimpleTransformerControlMatchesCpu at 1e-12, after fixing applyVcOn's
       double-override + stale rho target and adding the DS carry to roundAndResolve)
 - [x] A5 drOv channel + member-outage tests (non-free batched / free CPU-routed) — 2026-09-06.
@@ -377,7 +377,23 @@ Both gated features now run in the JAVA hybrid too, at 1e-12:
 - **Shared transformer-VC groups**: OLF's loop drives the group (free role, clamps, rounding);
   DISTR_RHO rows via the re-extract, taps via the pi-model refresh, and the drOv channel
   carrying OLF's live renormalized coefficients. The sharedGroupPresent gate is gone;
-  useInitialTapPosition group semantics stay gated (unvalidated).
+  useInitialTapPosition group semantics PORTED 2026-09-07: `SharedRatio` per scenario
+  over surviving members (group-averaged clamp bounds, normalized-headroom initial — OLF
+  builds its TransformerRatioManager at the INITIAL step, stats frozen), OLF's two-slope
+  `updateContinuousRatio` remap composed with the round, and the GROUP clamp (common ratio
+  trips the averaged bounds → every alive member rounds to the group extreme and the control
+  ends together, so it BATCHES — unlike the individual-mode carrier clamp). The clamp path
+  additionally needed the COMPLETE polish solve: OLF's controlStep returns UNSTABLE "in any
+  case" after a clamp ends the control, and OLF's NewtonRaphson ALWAYS takes ≥1 Newton step
+  before testing (no early exit on a converged start) — one extra ~1e-6-pu-perturbing solve
+  the machine skipped (9.2e-4 kV measured; per-slot `polish` flag now replays it). Round path
+  unchanged (rounding and COMPLETE share one controlStep → solve counts already matched).
+  A/B: machine flag forced off = 1.2e-3 kV drift. Tests (all 1e-12):
+  deviceSharedUseInitialTvcMatchesCpu (3 ctgs batched incl. member outage),
+  javaSharedUseInitialTvcMatchesCpu, deviceSharedSimpleUseInitialMatchesCpu (WITH_GENERATOR
+  flag-neutral), deviceSharedUseInitialGroupClampMatchesCpu (2-tap capped members, base
+  clamps on GPU, both scenarios batch, count==2). INCREMENTAL shared groups remain the one
+  gated TVC flavor.
 - **Member outages batch too (2026-09-07, the live/base row map)**: the element disable removes
   the member's BRANCH_RHO1 variable from the live es, SHRINKING and SHIFTING the live rows off
   the device's frozen base superset. The engine now remaps every crossing through a

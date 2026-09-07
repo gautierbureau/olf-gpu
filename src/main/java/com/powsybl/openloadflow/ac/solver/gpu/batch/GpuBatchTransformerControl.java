@@ -47,7 +47,8 @@ public final class GpuBatchTransformerControl {
      *  coefficients do NOT renormalize — the DISTR_RHO cross terms to a control-disabled member
      *  stay). {@code clampNeedsCpu}: clamping this member re-picks the group's FREE role (its
      *  off-delta touches other members' rows) — per-scenario CPU route, out of stage-1 scope. */
-    record Member(int rhoRow, double minR1, double maxR1, double[] taps, double[][] tapRows, int elemIndex,
+    record Member(int rhoRow, double minR1, double maxR1, double initialR1,
+                  double[] taps, double[][] tapRows, int elemIndex,
                   int[] offDeltaRows, int[] offDeltaModes, double[] offDeltaTargets, boolean clampNeedsCpu) {
         double closestTap(double r1) {
             if (taps.length == 0) {
@@ -86,7 +87,49 @@ public final class GpuBatchTransformerControl {
      *  WHOLE group, never one member alone), and the members. */
     record TransformerController(int vCol, double targetV, double halfDeadband,
                                  int[] deltaRows, int[] deltaModesOn, double[] deltaTargetsOn,
-                                 Member[] members) {
+                                 Member[] members, boolean useInitialTapPosition) {
+    }
+
+    /** OLF's {@code TransformerRatioManager} SHARED behavior ({@code useInitialTapPosition=true}),
+     *  per scenario over the group's SURVIVING members (the CPU builds it at the INITIAL step over
+     *  the just-enabled controllers; outaged members never enable): group-AVERAGED clamp bounds and
+     *  the normalized-headroom initial, plus the spread-preserving remap each member's continuous
+     *  ratio goes through before rounding. A single-member group degenerates to the exact identity
+     *  (initialR1 = own r1, bounds = own bounds), so applying it uniformly is behavior-neutral. */
+    record SharedRatio(double minR1, double maxR1, double initialR1) {
+        static SharedRatio of(Member[] members, boolean[] disabledByElem) {
+            double sumMin = 0;
+            double sumMax = 0;
+            double a = 0;
+            double b = 0;
+            int count = 0;
+            for (Member m : members) {
+                if (disabledByElem[m.elemIndex()]) {
+                    continue;
+                }
+                sumMin += m.minR1();
+                sumMax += m.maxR1();
+                if (m.maxR1() != m.minR1()) {
+                    a += (m.maxR1() - m.initialR1()) / (m.maxR1() - m.minR1());
+                    b += (m.initialR1() - m.minR1()) / (m.maxR1() - m.minR1());
+                } else {
+                    a += 1;
+                    b += 1;
+                }
+                count++;
+            }
+            double avgMin = sumMin / count;
+            double avgMax = sumMax / count;
+            return new SharedRatio(avgMin, avgMax, (avgMin * a + avgMax * b) / count);
+        }
+
+        /** OLF's {@code updateContinuousRatio}, verbatim: map the COMMON computed ratio to this
+         *  member's individual one, preserving the initial spread (two-slope piecewise linear). */
+        double remap(Member m, double computedR1) {
+            return computedR1 >= initialR1
+                    ? m.initialR1() + (computedR1 - initialR1) * (m.maxR1() - m.initialR1()) / (maxR1 - initialR1)
+                    : m.initialR1() - (initialR1 - computedR1) * (m.initialR1() - m.minR1()) / (initialR1 - minR1);
+        }
     }
 
     /** Stage-1 scope check: the CPU loop's GeneratorVoltageControlManager disables generator
@@ -127,7 +170,8 @@ public final class GpuBatchTransformerControl {
     static List<TransformerController> buildTransformerControllers(
             LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
             TargetVector<AcVariableType, AcEquationType> targetVector,
-            GpuAcActivation baseActivation, double[] baseTargets, GpuBatchElementMapper elementMapper) {
+            GpuAcActivation baseActivation, double[] baseTargets, GpuBatchElementMapper elementMapper,
+            boolean useInitialTapPosition) {
         List<TransformerController> out = new ArrayList<>();
         java.util.Map<Integer, Integer> busVCols = new java.util.HashMap<>();
         java.util.Map<Integer, Integer> branchR1Cols = new java.util.HashMap<>();
@@ -208,6 +252,7 @@ public final class GpuBatchTransformerControl {
                     offDeltaTargets[k] = mOffTargets[offDeltaRows[k]];
                 }
                 members[m] = new Member(rhoRow, branch.getPiModel().getMinR1(), branch.getPiModel().getMaxR1(),
+                        branch.getPiModel().getR1(),             // individual initial (base) ratio
                         tapR1Values(branch.getPiModel()), tapModels(branch.getPiModel()),
                         elementMapper.getElementIndex(branch),
                         offDeltaRows, offDeltaModes, offDeltaTargets, cpuOnly);
@@ -216,7 +261,7 @@ public final class GpuBatchTransformerControl {
                 memberBranches.get(m).setVoltageControlEnabled(wasEnabled[m]);
             }
             out.add(new TransformerController(vCol, vc.getTargetValue(), halfDeadband,
-                    deltaRows, deltaModesOn, deltaTargetsOn, members));
+                    deltaRows, deltaModesOn, deltaTargetsOn, members, useInitialTapPosition));
         }
         return out;
     }
@@ -311,9 +356,16 @@ public final class GpuBatchTransformerControl {
         }
         java.util.Set<Integer> affected = new java.util.TreeSet<>();
         boolean[][] on = new boolean[chunkSize][tcs.size()];
+        // useInitialTapPosition: the CPU builds its TransformerRatioManager at the INITIAL step
+        // over the just-enabled controllers — per scenario that is the ON control's non-outaged
+        // members, and the stats stay frozen for the run (later clamps do not rebuild them).
+        SharedRatio[][] shared = new SharedRatio[chunkSize][tcs.size()];
         for (int[] e : enabled) {
             affected.add(e[0]);
             on[e[0]][e[1]] = true;
+            if (tcs.get(e[1]).useInitialTapPosition()) {
+                shared[e[0]][e[1]] = SharedRatio.of(tcs.get(e[1]).members(), disabledMask[e[0]]);
+            }
         }
         LOGGER.info("Transformer control: {} out-of-deadband controls across {} scenario(s) of the chunk", enabled.size(), affected.size());
 
@@ -321,6 +373,7 @@ public final class GpuBatchTransformerControl {
         List<Integer> ovIdx = new ArrayList<>();
         List<Double> ovVal = new ArrayList<>();
         double[] rounded = new double[chunkSize * totalMembers];   // fixed r1 once clamped/rounded (NaN = still continuous)
+        boolean[] polish = new boolean[chunkSize];           // slot owes OLF's post-clamp COMPLETE solve
         java.util.Arrays.fill(rounded, Double.NaN);
 
         // DS target carry: OLF's targets are STATEFUL across outer-loop re-solves, but every device
@@ -471,9 +524,25 @@ public final class GpuBatchTransformerControl {
             if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                 traceStep(step, affected, chunkResults, tcs, n, rounded, memberBase, totalMembers, disabledMask);
             }
-            int action = clampOrRoundStep(affected, chunkResults, n, tcs, on, rounded, memberBase, totalMembers, disabledMask);
+            int action = clampOrRoundStep(affected, chunkResults, n, tcs, on, rounded, memberBase, totalMembers, disabledMask, shared, polish);
             if (action == 0) {
-                break;                                       // everything fixed and re-solved: done
+                // A slot whose LAST continuous member was fixed by a CLAMP (not a round) owes one
+                // more solve: OLF's controlStep returns UNSTABLE "in any case", so the COMPLETE
+                // transition triggers one more NR — and OLF's NewtonRaphson ALWAYS takes at least
+                // one Newton step before testing (no early exit on a converged start), so that
+                // "no-op" solve perturbs the state by ~1e-6 pu (measured 9.2e-4 kV without it).
+                // The round path needs none: rounding and COMPLETE share the same controlStep.
+                java.util.Set<Integer> needPolish = new java.util.TreeSet<>();
+                for (int slot : affected) {
+                    if (polish[slot]) {
+                        polish[slot] = false;
+                        needPolish.add(slot);
+                    }
+                }
+                if (needPolish.isEmpty()) {
+                    break;                                   // everything fixed and re-solved: done
+                }
+                affected = needPolish;                       // one extra pinned solve for those slots
             }
         }
         return chunkResults;
@@ -481,10 +550,11 @@ public final class GpuBatchTransformerControl {
 
     /** One CONTROL decision per machine step: clamp out-of-range continuous ratios (returns 1 —
      *  re-solve with them fixed); when none, round ALL remaining continuous ones (returns 2 — one
-     *  final solve); when nothing is continuous anymore, returns 0 (done). */
+     *  final solve); when nothing is continuous anymore, returns 0 (done). Sets {@code polish} for
+     *  a slot whose clamp fixed its last continuous member (it still owes OLF's COMPLETE solve). */
     private static int clampOrRoundStep(java.util.Set<Integer> affected, double[][] chunkResults, int n,
             List<TransformerController> tcs, boolean[][] on, double[] rounded, int[] memberBase, int totalMembers,
-            boolean[][] disabledMask) {
+            boolean[][] disabledMask, SharedRatio[][] shared, boolean[] polish) {
         boolean anyClamped = false;
         boolean anyContinuous = false;
         for (int slot : affected) {
@@ -492,6 +562,8 @@ public final class GpuBatchTransformerControl {
             if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
                 continue;
             }
+            boolean slotClamped = false;
+            boolean slotContinuous = false;
             for (int c = 0; c < tcs.size(); c++) {
                 TransformerController tc = tcs.get(c);
                 if (!on[slot][c]) {
@@ -505,7 +577,20 @@ public final class GpuBatchTransformerControl {
                         continue;                        // fixed already, or outaged (pinned at base)
                     }
                     double r1 = r[mem.rhoRow()];
-                    if (r1 < mem.minR1() || r1 > mem.maxR1()) {
+                    SharedRatio sr = tc.useInitialTapPosition() ? shared[slot][c] : null;
+                    if (sr != null && (r1 < sr.minR1() || r1 > sr.maxR1())) {
+                        // SHARED-ratio clamp (useInitialTapPosition): the COMMON continuous ratio
+                        // trips the GROUP-AVERAGED bounds, so every alive member clamps in the
+                        // SAME pass — OLF sets each to the group extreme, rounds to its OWN
+                        // closest tap and disables it; the whole control ends together, so no
+                        // mid-flight carrier re-pick can arise (the plan-A6 rejection below is
+                        // individual-mode only).
+                        rounded[slot * totalMembers + memberBase[c] + m] =
+                                mem.closestTap(r1 > sr.maxR1() ? sr.maxR1() : sr.minR1());
+                        slotClamped = true;
+                        continue;
+                    }
+                    if (sr == null && (r1 < mem.minR1() || r1 > mem.maxR1())) {
                         // plan-A6 remaining: clamping the CURRENT CARRIER while other members
                         // stay continuous re-picks the pilot-Q role MID-FLIGHT; the re-picked
                         // system sits on the CPU's 1-MW DS-threshold knife edge (measured
@@ -531,11 +616,19 @@ public final class GpuBatchTransformerControl {
                             continue;
                         }
                         rounded[slot * totalMembers + memberBase[c] + m] = Math.max(mem.minR1(), Math.min(mem.maxR1(), r1));
-                        anyClamped = true;
+                        slotClamped = true;
                     } else {
-                        anyContinuous = true;
+                        slotContinuous = true;
                     }
                 }
+            }
+            if ((int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
+                continue;                                    // rejected mid-slot: no further solves for it
+            }
+            anyClamped |= slotClamped;
+            anyContinuous |= slotContinuous;
+            if (slotClamped && !slotContinuous) {
+                polish[slot] = true;                         // clamp ended the whole control: COMPLETE solve owed
             }
         }
         if (anyClamped) {
@@ -553,10 +646,17 @@ public final class GpuBatchTransformerControl {
                         continue;
                     }
                     Member[] members = tc.members();
+                    SharedRatio srr = tc.useInitialTapPosition() ? shared[slot][c] : null;
                     for (int m = 0; m < members.length; m++) {
                         if (Double.isNaN(rounded[slot * totalMembers + memberBase[c] + m])
                                 && !disabledMask[slot][members[m].elemIndex()]) {
-                            rounded[slot * totalMembers + memberBase[c] + m] = members[m].closestTap(r[members[m].rhoRow()]);
+                            // useInitialTapPosition: OLF's updateContinuousRatio remaps the COMMON
+                            // solved ratio to each member's spread-preserving individual value
+                            // right before roundVoltageRatios rounds it (same check, one re-solve
+                            // after) — compose remap + round here.
+                            double cont = r[members[m].rhoRow()];
+                            rounded[slot * totalMembers + memberBase[c] + m] =
+                                    members[m].closestTap(srr != null ? srr.remap(members[m], cont) : cont);
                         }
                     }
                 }

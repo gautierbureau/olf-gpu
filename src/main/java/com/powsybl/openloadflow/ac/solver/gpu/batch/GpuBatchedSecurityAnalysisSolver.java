@@ -369,7 +369,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
                     config.transformerControl() || config.simpleTransformerControl()
                             ? GpuBatchTransformerControl.buildTransformerControllers(network, equationSystem, targetVector, baseActivation,
-                                    baseTargets, elementMapper)
+                                    baseTargets, elementMapper, config.tvcUseInitialTapPosition())
                             : null,
                     config.incrementalTransformerControl()
                             ? GpuBatchIncrementalTvc.buildControllers(network, equationSystem, elementMapper)

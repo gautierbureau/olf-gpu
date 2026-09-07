@@ -870,6 +870,113 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 "the carrier-clamp scenario must be routed to the CPU (A6-remaining)");
     }
 
+    /** useInitialTapPosition SHARED-ratio semantics (OLF TransformerRatioManager, ported to the
+     *  machine 2026-09-07): T2wT2 starts at a DIFFERENT tap so the spread-preserving remap is
+     *  non-trivial (group-averaged bounds + normalized-headroom initial; each member's continuous
+     *  ratio remapped around its own initial before rounding). Line + member + free-member outages
+     *  all batch, 1e-12 with count asserted. */
+    @org.junit.jupiter.api.Test
+    void deviceSharedUseInitialTvcMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = sharedThreeMemberTvcNetwork();
+        network.getTwoWindingsTransformer("T2wT2").getRatioTapChanger()
+                .setTapPosition(network.getTwoWindingsTransformer("T2wT2").getRatioTapChanger().getLowTapPosition() + 1);
+        com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+        List<Contingency> ctgs = List.of(
+                new Contingency(l0.getId() + "_BIS", new BranchContingency(l0.getId() + "_BIS")),
+                new Contingency("T2wT2", new BranchContingency("T2wT2")),
+                new Contingency("T2wT", new BranchContingency("T2wT")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL)
+                .setTransformerVoltageControlUseInitialTapPosition(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(3, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "all three contingencies must batch under useInitialTapPosition");
+    }
+
+    /** useInitialTapPosition GROUP clamp: all three members' tap ranges are capped at rho 1.0
+     *  (2 steps), so the strong outage's continuous ratio trips the GROUP-AVERAGED maxR1 — OLF
+     *  clamps every member to the group extreme in the SAME pass, rounds each to its OWN closest
+     *  tap and ends the control together (no mid-flight carrier re-pick, so the whole scenario
+     *  batches — unlike the individual-mode carrier clamp, which is CPU-routed). 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceSharedUseInitialGroupClampMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = sharedThreeMemberTvcNetwork();
+        for (String id : new String[] {"T2wT", "T2wT2", "T2wT3"}) {
+            var t = network.getTwoWindingsTransformer(id);
+            var old = t.getRatioTapChanger();
+            var adder = t.newRatioTapChanger();
+            for (int p = old.getLowTapPosition(); p <= old.getLowTapPosition() + 1; p++) {
+                var st = old.getStep(p);                     // keep only rho <= 1.0: maxR1 caps at 1.0
+                adder.beginStep().setRho(st.getRho()).setR(st.getR()).setX(st.getX())
+                        .setG(st.getG()).setB(st.getB()).endStep();
+            }
+            adder.setLowTapPosition(old.getLowTapPosition()).setTapPosition(old.getLowTapPosition() + 1)
+                    .setLoadTapChangingCapabilities(true)
+                    .setRegulationMode(com.powsybl.iidm.network.RatioTapChanger.RegulationMode.VOLTAGE)
+                    .setRegulationTerminal(t.getTerminal2()).setTargetV(33.0).setTargetDeadband(0)
+                    .setRegulating(true).add();
+        }
+        com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+        List<Contingency> ctgs = List.of(
+                new Contingency(l0.getId() + "_BIS", new BranchContingency(l0.getId() + "_BIS")),
+                new Contingency("T2wT2", new BranchContingency("T2wT2")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL)
+                .setTransformerVoltageControlUseInitialTapPosition(true);
+        assertGpuMatchesCpuNoEngage(network, ctgs, 1e-12, lfp);   // the base itself clamps: base on GPU
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the group clamp must batch on-device (shared bounds end the control together)");
+    }
+
+    /** JAVA-hybrid twin of {@link #deviceSharedUseInitialTvcMatchesCpu}: OLF's own ratio manager
+     *  runs in the replayed loop; its remapped/rounded taps reach the device through the pi-model
+     *  refresh. 1e-12. */
+    @org.junit.jupiter.api.Test
+    void javaSharedUseInitialTvcMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = sharedThreeMemberTvcNetwork();
+        network.getTwoWindingsTransformer("T2wT2").getRatioTapChanger()
+                .setTapPosition(network.getTwoWindingsTransformer("T2wT2").getRatioTapChanger().getLowTapPosition() + 1);
+        com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+        List<Contingency> ctgs = List.of(
+                new Contingency(l0.getId() + "_BIS", new BranchContingency(l0.getId() + "_BIS")),
+                new Contingency("T2wT2", new BranchContingency("T2wT2")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL)
+                .setTransformerVoltageControlUseInitialTapPosition(true);
+        assertJavaGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
+    /** WITH_GENERATOR + useInitialTapPosition: the Simple loop never uses the ratio manager, so
+     *  the flag is behavior-neutral there — this pins the gate lift (was whole-run CPU). */
+    @org.junit.jupiter.api.Test
+    void deviceSharedSimpleUseInitialMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = sharedThreeMemberTvcNetwork();
+        com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+        List<Contingency> ctgs = List.of(
+                new Contingency(l0.getId() + "_BIS", new BranchContingency(l0.getId() + "_BIS")),
+                new Contingency("T2wT2", new BranchContingency("T2wT2")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL)
+                .setTransformerVoltageControlUseInitialTapPosition(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
     /** 3-member shared transformer voltage-control group (T2wT + T2wT2 + a cloned T2wT3, all
      *  regulating BUS_3 to 33 kV) plus a parallel line for a non-islanding line outage. Free
      *  member = T2wT (first enabled). */

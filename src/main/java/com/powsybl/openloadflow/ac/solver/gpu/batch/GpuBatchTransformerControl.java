@@ -274,6 +274,7 @@ public final class GpuBatchTransformerControl {
             int[] targetOverrideIndex, double[] targetOverrideValue,
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
             int[] dsPhiRow, double[] dsFactor,
+            int[] chunkDrOvIdx, double[] chunkDrOvC, int[] drRowByContrib,
             double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
             double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, int[] varType,
             BatchConfig config) {
@@ -293,8 +294,12 @@ public final class GpuBatchTransformerControl {
             }
             for (int c = 0; c < tcs.size(); c++) {
                 TransformerController tc = tcs.get(c);
-                if (disabledMask[slot][tc.members()[0].elemIndex()]) {
-                    continue;                                // FREE member outaged: guard-rejected — safety net
+                boolean anySurvivor = false;                 // plan-A6: a FREE-member outage re-picks the
+                for (Member m : tc.members()) {              // carrier (mode-scan scatter + offDelta encode
+                    anySurvivor |= !disabledMask[slot][m.elemIndex()];   // it); only a fully-outaged group skips
+                }
+                if (!anySurvivor) {
+                    continue;
                 }
                 if (Math.abs(tc.targetV() - r[tc.vCol()]) > tc.halfDeadband()) {
                     enabled.add(new int[] {slot, c});
@@ -398,6 +403,52 @@ public final class GpuBatchTransformerControl {
                     }
                 }
             }
+            // plan-A6: the CURRENT carrier's packed DISTR_RHO contributions must gate OFF per
+            // scenario (its row hosts the pilot's relocated Q). Merge zero-entries for each slot's
+            // carrier row AFTER the chunk-level drOv (the kernel's scan is last-match-wins) and
+            // (re)install the channel — the carrier can move between steps as clamps accumulate.
+            if (drRowByContrib != null && drRowByContrib.length > 0) {
+                List<Integer> drIdx = new ArrayList<>();
+                List<Double> drC = new ArrayList<>();
+                if (chunkDrOvIdx != null) {
+                    for (int k = 0; k < chunkDrOvIdx.length; k++) {
+                        drIdx.add(chunkDrOvIdx[k]);
+                    }
+                    for (double v : chunkDrOvC) {
+                        drC.add(v);
+                    }
+                }
+                for (int slot : affected) {
+                    for (int c = 0; c < tcs.size(); c++) {
+                        if (!on[slot][c]) {
+                            continue;
+                        }
+                        Member[] mems = tcs.get(c).members();
+                        int carrier = -1;
+                        for (int m = 0; m < mems.length; m++) {
+                            if (!disabledMask[slot][mems[m].elemIndex()]
+                                    && Double.isNaN(rounded[slot * totalMembers + memberBase[c] + m])) {
+                                carrier = m;
+                                break;
+                            }
+                        }
+                        if (carrier <= 0) {
+                            continue;                        // base carrier's row has no packed contributions
+                        }
+                        int carrierRow = mems[carrier].rhoRow();
+                        for (int k = 0; k < drRowByContrib.length; k++) {
+                            if (drRowByContrib[k] == carrierRow) {
+                                drIdx.add(slot);
+                                drIdx.add(k);
+                                drC.add(0.0);
+                            }
+                        }
+                    }
+                }
+                GpuAcNewtonSolver.setBatchDrCoefOverrides(handle,
+                        drIdx.isEmpty() ? null : drIdx.stream().mapToInt(Integer::intValue).toArray(),
+                        drC.isEmpty() ? null : drC.stream().mapToDouble(Double::doubleValue).toArray());
+            }
             double[][] r2 = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                     rowMode, baseRowMode, disabledMask,
                     ovIdx.stream().mapToInt(Integer::intValue).toArray(),
@@ -420,9 +471,77 @@ public final class GpuBatchTransformerControl {
             if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                 traceStep(step, affected, chunkResults, tcs, n, rounded, memberBase, totalMembers, disabledMask);
             }
-            // CONTROL: clamp out-of-range continuous ratios; when none, ROUND the remaining ones.
-            boolean anyClamped = false;
-            boolean anyContinuous = false;
+            int action = clampOrRoundStep(affected, chunkResults, n, tcs, on, rounded, memberBase, totalMembers, disabledMask);
+            if (action == 0) {
+                break;                                       // everything fixed and re-solved: done
+            }
+        }
+        return chunkResults;
+    }
+
+    /** One CONTROL decision per machine step: clamp out-of-range continuous ratios (returns 1 —
+     *  re-solve with them fixed); when none, round ALL remaining continuous ones (returns 2 — one
+     *  final solve); when nothing is continuous anymore, returns 0 (done). */
+    private static int clampOrRoundStep(java.util.Set<Integer> affected, double[][] chunkResults, int n,
+            List<TransformerController> tcs, boolean[][] on, double[] rounded, int[] memberBase, int totalMembers,
+            boolean[][] disabledMask) {
+        boolean anyClamped = false;
+        boolean anyContinuous = false;
+        for (int slot : affected) {
+            double[] r = chunkResults[slot];
+            if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
+                continue;
+            }
+            for (int c = 0; c < tcs.size(); c++) {
+                TransformerController tc = tcs.get(c);
+                if (!on[slot][c]) {
+                    continue;
+                }
+                Member[] members = tc.members();
+                for (int m = 0; m < members.length; m++) {
+                    Member mem = members[m];
+                    if (!Double.isNaN(rounded[slot * totalMembers + memberBase[c] + m])
+                            || disabledMask[slot][mem.elemIndex()]) {
+                        continue;                        // fixed already, or outaged (pinned at base)
+                    }
+                    double r1 = r[mem.rhoRow()];
+                    if (r1 < mem.minR1() || r1 > mem.maxR1()) {
+                        // plan-A6 remaining: clamping the CURRENT CARRIER while other members
+                        // stay continuous re-picks the pilot-Q role MID-FLIGHT; the re-picked
+                        // system sits on the CPU's 1-MW DS-threshold knife edge (measured
+                        // 1.7e-9 trajectory offset flipping a 1.0045-MW distribution decision)
+                        // — per-scenario CPU route until the trajectory is exactly replicated.
+                        boolean isCarrier = true;
+                        for (int mm = 0; mm < m; mm++) {
+                            if (!disabledMask[slot][members[mm].elemIndex()]
+                                    && Double.isNaN(rounded[slot * totalMembers + memberBase[c] + mm])) {
+                                isCarrier = false;       // an earlier alive member carries the pilot Q
+                                break;
+                            }
+                        }
+                        boolean otherAlive = false;
+                        for (int mm = 0; mm < members.length; mm++) {
+                            if (mm != m && !disabledMask[slot][members[mm].elemIndex()]
+                                    && Double.isNaN(rounded[slot * totalMembers + memberBase[c] + mm])) {
+                                otherAlive = true;
+                            }
+                        }
+                        if (isCarrier && otherAlive) {
+                            chunkResults[slot][n + 2] = GpuBatchStatus.STATUS_REJECTED;
+                            continue;
+                        }
+                        rounded[slot * totalMembers + memberBase[c] + m] = Math.max(mem.minR1(), Math.min(mem.maxR1(), r1));
+                        anyClamped = true;
+                    } else {
+                        anyContinuous = true;
+                    }
+                }
+            }
+        }
+        if (anyClamped) {
+            return 1;                                        // re-solve with the clamped ones fixed
+        }
+        if (anyContinuous) {                                 // round ALL remaining continuous ratios, one final solve
             for (int slot : affected) {
                 double[] r = chunkResults[slot];
                 if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
@@ -435,55 +554,16 @@ public final class GpuBatchTransformerControl {
                     }
                     Member[] members = tc.members();
                     for (int m = 0; m < members.length; m++) {
-                        Member mem = members[m];
-                        if (!Double.isNaN(rounded[slot * totalMembers + memberBase[c] + m])
-                                || disabledMask[slot][mem.elemIndex()]) {
-                            continue;                        // fixed already, or outaged (pinned at base)
-                        }
-                        double r1 = r[mem.rhoRow()];
-                        if (r1 < mem.minR1() || r1 > mem.maxR1()) {
-                            if (mem.clampNeedsCpu()) {
-                                // clamping this member re-picks the group's FREE role — per-scenario
-                                // CPU route (never wrong, only un-accelerated)
-                                chunkResults[slot][n + 2] = GpuBatchStatus.STATUS_REJECTED;
-                                continue;
-                            }
-                            rounded[slot * totalMembers + memberBase[c] + m] = Math.max(mem.minR1(), Math.min(mem.maxR1(), r1));
-                            anyClamped = true;
-                        } else {
-                            anyContinuous = true;
+                        if (Double.isNaN(rounded[slot * totalMembers + memberBase[c] + m])
+                                && !disabledMask[slot][members[m].elemIndex()]) {
+                            rounded[slot * totalMembers + memberBase[c] + m] = members[m].closestTap(r[members[m].rhoRow()]);
                         }
                     }
                 }
             }
-            if (anyClamped) {
-                continue;                                    // re-solve with the clamped ones fixed
-            }
-            if (anyContinuous) {                             // round ALL remaining continuous ratios, one final solve
-                for (int slot : affected) {
-                    double[] r = chunkResults[slot];
-                    if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
-                        continue;
-                    }
-                    for (int c = 0; c < tcs.size(); c++) {
-                        TransformerController tc = tcs.get(c);
-                        if (!on[slot][c]) {
-                            continue;
-                        }
-                        Member[] members = tc.members();
-                        for (int m = 0; m < members.length; m++) {
-                            if (Double.isNaN(rounded[slot * totalMembers + memberBase[c] + m])
-                                    && !disabledMask[slot][members[m].elemIndex()]) {
-                                rounded[slot * totalMembers + memberBase[c] + m] = members[m].closestTap(r[members[m].rhoRow()]);
-                            }
-                        }
-                    }
-                }
-                continue;                                    // the final solve runs with every control fixed
-            }
-            break;                                           // everything fixed and re-solved: done
+            return 2;                                        // the final solve runs with every control fixed
         }
-        return chunkResults;
+        return 0;                                            // everything fixed and re-solved: done
     }
 
     /** Applies one control's per-step row/target deltas for one scenario: the group's ON deltas while
@@ -501,38 +581,53 @@ public final class GpuBatchTransformerControl {
             allFixed &= !Double.isNaN(rounded[slot * totalMembers + base + m])
                     || disabledMask[slot][members[m].elemIndex()];
         }
-        if (!allFixed) {                                     // control ACTIVE: the whole group's ON deltas
-            // rows owned by a FIXED (clamped) or OUTAGED member get their own override below —
-            // the same row must NEVER carry two target overrides (parallel scatter, no ordering)
-            java.util.Set<Integer> ownRows = new java.util.HashSet<>();
+        if (!allFixed) {                                     // control ACTIVE: build the group's rows for the
+            // EFFECTIVE role set (plan-A6). Pairwise offDeltas do NOT compose when a clamp and an
+            // outage combine (the free member's offDelta encodes a re-pick to a member that may
+            // itself be outaged this scenario), so member rho rows are constructed DIRECTLY:
+            //  - the CARRIER (first alive member — OLF's free-role rule) hosts the pilot's
+            //    relocated Q (the group mode-scan scatter routes the flows; the target is the one
+            //    captured for the BASE carrier's row);
+            //  - other alive members host DISTR_RHO (target 0);
+            //  - clamped / outaged members get identity pins (clamp value / base-state rho).
+            // Non-member delta rows (the pilot's v identity) apply as captured.
+            int carrier = -1;
             for (int m = 0; m < members.length; m++) {
-                if (!Double.isNaN(rounded[slot * totalMembers + base + m])
-                        || disabledMask[slot][members[m].elemIndex()]) {
-                    ownRows.add(members[m].rhoRow());
+                if (!disabledMask[slot][members[m].elemIndex()]
+                        && Double.isNaN(rounded[slot * totalMembers + base + m])) {
+                    carrier = m;
+                    break;
                 }
             }
+            double pilotQTarget = 0;
             for (int k = 0; k < tc.deltaRows().length; k++) {
-                if (ownRows.contains(tc.deltaRows()[k])) {
-                    continue;
+                if (tc.deltaRows()[k] == members[0].rhoRow()) {
+                    pilotQTarget = tc.deltaTargetsOn()[k];   // the BASE carrier's captured pilot-Q target
+                }
+            }
+            java.util.Set<Integer> memberRows = new java.util.HashSet<>();
+            for (Member mem : members) {
+                memberRows.add(mem.rhoRow());
+            }
+            for (int k = 0; k < tc.deltaRows().length; k++) {
+                if (memberRows.contains(tc.deltaRows()[k])) {
+                    continue;                                // member rho rows are built by ROLE below
                 }
                 row[tc.deltaRows()[k]] = tc.deltaModesOn()[k];
                 ovIdx.add(slot * n + tc.deltaRows()[k]);
                 ovVal.add(tc.deltaTargetsOn()[k]);
             }
-            for (int m = 0; m < members.length; m++) {       // clamped OR outaged members: OFF-delta
+            for (int m = 0; m < members.length; m++) {
                 Member mem = members[m];
                 boolean outaged = disabledMask[slot][mem.elemIndex()];
                 double fixedR1 = rounded[slot * totalMembers + base + m];
-                if (Double.isNaN(fixedR1) && !outaged) {
+                if (!outaged && Double.isNaN(fixedR1)) {     // ALIVE: carrier or DISTR_RHO
+                    row[mem.rhoRow()] = 1;
+                    ovIdx.add(slot * n + mem.rhoRow());
+                    ovVal.add(m == carrier ? pilotQTarget : 0.0);
                     continue;
                 }
-                for (int k = 0; k < mem.offDeltaRows().length; k++) {
-                    row[mem.offDeltaRows()[k]] = mem.offDeltaModes()[k];
-                    if (mem.offDeltaRows()[k] != mem.rhoRow()) {
-                        ovIdx.add(slot * n + mem.offDeltaRows()[k]);
-                        ovVal.add(mem.offDeltaTargets()[k]);
-                    }
-                }
+                row[mem.rhoRow()] = 0;                       // identity pin
                 ovIdx.add(slot * n + mem.rhoRow());
                 // outaged: pin at the BASE-STATE rho — matching the warm start, so the row's
                 // residual is exactly 0 (the CPU REMOVES the equation; a captured stale target

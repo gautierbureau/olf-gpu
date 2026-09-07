@@ -86,7 +86,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         int dsMode, double[] dsMarginUp, double[] dsMarginDown,
                         double dsSlackMarginUp, double dsSlackMarginDown,
                         int[] baseOpenCbElements, int[] baseOpenZiElements, int[] baseOpenZiBranchNums,
-                        int[] ziBranchNums, double[] vdlIn, int[] vdlIdx) {
+                        int[] ziBranchNums, double[] vdlIn, int[] vdlIdx, int[] qrPtr, int[] qrRows) {
 
     /**
      * Content equality over every array — true means a cached solver context built from
@@ -160,6 +160,8 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && dsSlackPhiRow == other.dsSlackPhiRow && dsSlackTargetP == other.dsSlackTargetP
                 && java.util.Arrays.equals(dsBaseTargetP, other.dsBaseTargetP)
                 && java.util.Arrays.equals(dsMaxDelta, other.dsMaxDelta) && java.util.Arrays.equals(dsMinDelta, other.dsMinDelta)
+                && java.util.Arrays.equals(qrPtr, other.qrPtr) && java.util.Arrays.equals(qrRows, other.qrRows)
+                && java.util.Arrays.equals(qrPtr, other.qrPtr) && java.util.Arrays.equals(qrRows, other.qrRows)
                 && java.util.Arrays.equals(rlMonitored, other.rlMonitored)
                 && java.util.Arrays.equals(rlRemote, other.rlRemote)
                 && java.util.Arrays.equals(rlCmpVrow, other.rlCmpVrow)

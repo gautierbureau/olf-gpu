@@ -173,6 +173,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         if (scope.batchDisabled()) {
             LOGGER.info("GPU batched SA: outer loops {} are not implemented in the batched device path — "
                     + "falling back to the sequential CPU path for all contingencies", scope.unsupportedOuterLoops());
+            if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+                System.err.println("SCOPE_FALLBACK " + scope.unsupportedOuterLoops());   // test logback is broken
+            }
         }
         // STRUCTURAL: run the base (pre-contingency) load flow on the GPU solver when the device is available
         // and the user left the default CPU Newton-Raphson — absorbs the one-time CUDA init into the base

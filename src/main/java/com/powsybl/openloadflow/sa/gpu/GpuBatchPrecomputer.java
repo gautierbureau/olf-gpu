@@ -76,7 +76,14 @@ final class GpuBatchPrecomputer {
                                                      double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                                                      BatchConfig config, ReportNode reportNode) {
         if (!GpuAcNewtonSolver.isAvailable() || net == null || context == null || contingencies.isEmpty()) {
+            if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+                System.err.println("PRECOMP_BAIL avail=" + GpuAcNewtonSolver.isAvailable() + " net=" + (net != null)
+                        + " ctx=" + (context != null) + " nCtg=" + contingencies.size());
+            }
             return PrecomputedBatch.empty();
+        }
+        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            System.err.println("PRECOMP_ENTER nCtg=" + contingencies.size());
         }
         try {
             // REUSE the engine's equation system + target vector (do NOT create a second system — that would
@@ -147,6 +154,9 @@ final class GpuBatchPrecomputer {
                 if (shunt != null) {
                     batch.add(BatchContingency.shunt(pc.getContingency().getId(), shunt));
                 }
+            }
+            if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+                System.err.println("PRECOMP_BATCH size=" + batch.size());
             }
             if (batch.isEmpty()) {
                 return PrecomputedBatch.empty();

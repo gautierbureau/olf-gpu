@@ -104,12 +104,15 @@ final class GpuBatchQualification {
     }
 
     /** The renormalized DISTR_RHO coefficients after outaging shared-TVC group members among
-     *  {@code outaged} (plan A5). Returns {contribIdx[], newCoef[]} as double[][] — EMPTY arrays
-     *  when no group member is outaged; null (CPU route) when the FREE member (first enabled) is
-     *  outaged, more than one member of a group is, or no survivor would remain. Coefficients are
-     *  ANALYTIC: the CPU's are live 1/count suppliers over !isDisabled(), so survivors get
-     *  1/c' − (self ? 1 : 0) and anything touching the outaged member's rho goes to 0 (its cross
-     *  terms deactivate with the element; its own row flips back to the rho identity). */
+     *  {@code outaged} (plan A5 / A6). Returns {contribIdx[], newCoef[]} as double[][] — EMPTY
+     *  arrays when no group member is outaged; null (CPU route) when more than one member of a
+     *  group is outaged or no survivor would remain. Coefficients are ANALYTIC: the CPU's are live
+     *  1/count suppliers over !isDisabled(), so survivors get 1/c' − (self ? 1 : 0) and anything
+     *  touching the outaged member's rho goes to 0 (its cross terms deactivate with the element;
+     *  its own row flips back to the rho identity). FREE-member outage (plan A6): the free role
+     *  RE-PICKS to the first survivor — that carrier's DISTR_RHO row deactivates (all its
+     *  contributions go to 0; the pilot's relocated Q lands there via the group mode-scan scatter)
+     *  and the remaining survivors renormalize over c'. */
     private static double[][] distrRhoOverrides(EquationSystem<AcVariableType, AcEquationType> es,
                                                 GpuAcData gpuData, Set<LfBranch> distrRhoControllers,
                                                 List<LfBranch> outaged) {
@@ -127,8 +130,14 @@ final class GpuBatchQualification {
         }
         List<LfBranch> group = tvc.getMergedControllerElements().stream()
                 .filter(b -> !b.isDisabled()).toList();
-        if (group.size() < 2 || group.get(0) == d) {
-            return null;                                     // FREE member (first) outaged / no survivor — CPU
+        if (group.size() < 2) {
+            return null;                                     // no survivor — CPU
+        }
+        // plan-A6: outaging the FREE member (first enabled) re-picks the free role to the FIRST
+        // SURVIVOR, whose DISTR_RHO row deactivates (it becomes the pilot-Q carrier)
+        LfBranch newCarrier = group.get(0) == d ? group.stream().filter(b -> b != d).findFirst().orElse(null) : null;
+        if (group.get(0) == d && group.size() == 2) {
+            return null;                                     // free outaged, single survivor: control degenerates — CPU
         }
         java.util.Map<Integer, LfBranch> byRhoCol = new java.util.HashMap<>();
         for (LfBranch b : group) {
@@ -153,6 +162,8 @@ final class GpuBatchQualification {
             double coef;
             if (rowOwner == d || colOwner == d || gpuData.drRow()[k] == dCol || gpuData.drCol()[k] == dCol) {
                 coef = 0;                                    // cross terms to the outaged member die with it
+            } else if (newCarrier != null && rowOwner == newCarrier) {
+                coef = 0;                                    // the re-picked carrier's DISTR_RHO row deactivates
             } else {
                 coef = 1.0 / cPrime - (gpuData.drRow()[k] == gpuData.drCol()[k] ? 1.0 : 0.0);
             }
@@ -382,7 +393,10 @@ final class GpuBatchQualification {
                     }
                     double[][] drOv = distrRhoOverrides(es, gpuData, distrRhoControllers, c.outagedBranches());
                     if (drOv == null) {
-                        continue;                            // free-member / multi-member group outage — CPU
+                        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+                            System.err.println("QUAL_REJECT drOv " + c.contingencyId());
+                        }
+                        continue;                            // multi-member / no-survivor group outage — CPU
                     }
                     if (drOv[0].length > 0) {
                         drOvContribByIndex[i] = java.util.Arrays.stream(drOv[0]).mapToInt(d -> (int) d).toArray();
@@ -440,7 +454,10 @@ final class GpuBatchQualification {
                 }
                 double[][] drOv = distrRhoOverrides(es, gpuData, distrRhoControllers, c.outagedBranches());
                 if (drOv == null) {
-                    continue;                                // free-member / multi-member group outage — CPU
+                    if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+                        System.err.println("QUAL_REJECT drOv2 " + c.contingencyId());
+                    }
+                    continue;                                // multi-member / no-survivor group outage — CPU
                 }
                 if (drOv[0].length > 0) {
                     drOvContribByIndex[i] = java.util.Arrays.stream(drOv[0]).mapToInt(d -> (int) d).toArray();

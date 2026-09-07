@@ -795,6 +795,50 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
                 .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        // plan-A6 engagement proof: ALL THREE contingencies batched — including the T2wT (FREE
+        // member) outage, whose free-role re-pick runs through the group mode-scan scatter
+        assertEquals(3, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the FREE-member outage must batch on-device (plan A6)");
+    }
+
+    /** A6-REMAINING contract: clamping the CURRENT CARRIER mid-flight (T2wT capped at rho 1.0
+     *  clamps under the T2wT2 outage) re-picks the pilot-Q role in a state that sits on the CPU's
+     *  1-MW DS-threshold knife edge — the machine routes the SCENARIO to the CPU
+     *  (STATUS_REJECTED) and the results must still equal the stock CPU SA exactly. (The GPU
+     *  sequential BASE loadflow also degrades on this base-clamping network — a separate
+     *  sequential-path gap — so the base runs on the CPU here.) */
+    @org.junit.jupiter.api.Test
+    void deviceSharedCarrierClampRoutesToCpuAndMatches() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = sharedThreeMemberTvcNetwork();
+        var t = network.getTwoWindingsTransformer("T2wT");
+        var old = t.getRatioTapChanger();
+        var adder = t.newRatioTapChanger();
+        for (int p = old.getLowTapPosition(); p <= old.getLowTapPosition() + 1; p++) {
+            var st = old.getStep(p);                         // keep only rho <= 1.0: maxR1 caps at 1.0
+            adder.beginStep().setRho(st.getRho()).setR(st.getR()).setX(st.getX())
+                    .setG(st.getG()).setB(st.getB()).endStep();
+        }
+        adder.setLowTapPosition(old.getLowTapPosition()).setTapPosition(old.getLowTapPosition() + 1)
+                .setLoadTapChangingCapabilities(true)
+                .setRegulationMode(com.powsybl.iidm.network.RatioTapChanger.RegulationMode.VOLTAGE)
+                .setRegulationTerminal(t.getTerminal2()).setTargetV(33.0).setTargetDeadband(0)
+                .setRegulating(true).add();
+        List<Contingency> ctgs = List.of(
+                new Contingency("T2wT2", new BranchContingency("T2wT2")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
+        System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY, "false");
+        try {
+            assertGpuMatchesCpuNoEngage(network, ctgs, 1e-12, lfp);
+        } finally {
+            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY);
+        }
+        assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() <= 0,
+                "the carrier-clamp scenario must be routed to the CPU (A6-remaining)");
     }
 
     /** 3-member shared transformer voltage-control group (T2wT + T2wT2 + a cloned T2wT3, all
@@ -1353,6 +1397,18 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
 
     private void assertGpuMatchesCpu(Network network, List<Contingency> contingencies, double vToleranceKv,
                                      com.powsybl.loadflow.LoadFlowParameters lfp) {
+        assertGpuMatchesCpu(network, contingencies, vToleranceKv, lfp, true);
+    }
+
+    /** Same state-level comparison but WITHOUT the engagement assert — for contracts where the
+     *  GPU provider is EXPECTED to route the scenarios back to the CPU (results must still match). */
+    private void assertGpuMatchesCpuNoEngage(Network network, List<Contingency> contingencies, double vToleranceKv,
+                                             com.powsybl.loadflow.LoadFlowParameters lfp) {
+        assertGpuMatchesCpu(network, contingencies, vToleranceKv, lfp, false);
+    }
+
+    private void assertGpuMatchesCpu(Network network, List<Contingency> contingencies, double vToleranceKv,
+                                     com.powsybl.loadflow.LoadFlowParameters lfp, boolean requireEngage) {
         String convEps = System.getProperty("olf.gpu.test.convEps", System.getenv("OLF_GPU_DBG_CONV_EPS"));
         if (convEps != null) {
             com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)   // create() ATTACHES (get() would detach!)
@@ -1386,8 +1442,10 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         try {
             SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, monitors, sap);
-            assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() > 0,
-                    "the batch must ENGAGE (fallen-back run proves nothing)");
+            if (requireEngage) {
+                assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() > 0,
+                        "the batch must ENGAGE (fallen-back run proves nothing)");
+            }
             assertEquals(cpu.getPostContingencyResults().size(), gpu.getPostContingencyResults().size());
             for (int i = 0; i < cpu.getPostContingencyResults().size(); i++) {
                 assertEquals(cpu.getPostContingencyResults().get(i).getStatus(),

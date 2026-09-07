@@ -49,8 +49,12 @@ final class GpuBatchSimpleTvc {
                           double[] baseState, List<Integer> ovIndexList, List<Double> ovValueList) {
         for (int slot = 0; slot < realCount; slot++) {
             for (GpuBatchTransformerControl.TransformerController tc : tcs) {
-                if (disabledMask[slot][tc.members()[0].elemIndex()]) {
-                    continue;                                // FREE member outaged: guard-rejected — safety net
+                boolean anySurvivor = false;                 // plan-A6: free-member outages re-pick on-device
+                for (GpuBatchTransformerControl.Member m : tc.members()) {
+                    anySurvivor |= !disabledMask[slot][m.elemIndex()];
+                }
+                if (!anySurvivor) {
+                    continue;
                 }
                 int[] row = rowModePerScenario[slot] == baseRowMode
                         ? baseRowMode.clone() : rowModePerScenario[slot];
@@ -162,8 +166,12 @@ final class GpuBatchSimpleTvc {
             }
             int[] row = null;
             for (GpuBatchTransformerControl.TransformerController tc : tcs) {
-                if (disabledMask[s][tc.members()[0].elemIndex()]) {
-                    continue;                                // FREE member outaged — safety net
+                boolean anySurvivor = false;                 // plan-A6: free-member outages re-pick on-device
+                for (GpuBatchTransformerControl.Member m : tc.members()) {
+                    anySurvivor |= !disabledMask[s][m.elemIndex()];
+                }
+                if (!anySurvivor) {
+                    continue;
                 }
                 if (row == null) {
                     row = rowModePerScenario[s].clone();

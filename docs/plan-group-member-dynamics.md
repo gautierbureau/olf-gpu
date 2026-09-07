@@ -123,13 +123,35 @@ WITH_GENERATOR (SimpleTvc) twin.
   (non-free), tap-moving scenario, 1e-12; outage the FIRST member → assert CPU routing
   (per-contingency, batch still engages on the others); outage down to one member.
 
-**A6 (stretch). Free-member outage.**
-Needs the pilot-Q row to move to another member's rho column per scenario — the
-alt-dest/selRow pattern (`computeQRowAlt` covers only the two-candidate bus case today;
-a group needs member-indexed candidates). Design sketch: extend qRowAlt to a per-group
-candidate LIST + a per-scenario select index channel; the cb/sh fill kernels already
-consult `(altDest, selRow, mode)` — generalize the select to an index. Do NOT start
-this before A1–A5 are landed and benched.
+**A6. Free-member outage — LANDED 2026-09-07 (outage dynamics); carrier-clamp re-pick stays CPU.**
+The pilot-Q row moves to another member's rho column per scenario via a generalized
+per-group candidate table + IN-KERNEL mode-scan select (no per-scenario select upload):
+- Extraction (`ExtractionColumns`): per-TVC-pilot candidate group `qrPtr/qrRows` =
+  `[fallback row (pilot vCol), member rho cols in merged order]`; the pilot's qAlt slot
+  (cbIdx 10/11, shIdx 4) encodes `−2−groupId`.
+- Native: `RelocTables` POD (group/off/pool/qrPtr/qrRows) passed by value to all 6 fill
+  kernels; `relocChoose` scans candidates 1..cnt−1 and returns the FIRST with row mode
+  ∉ {0 identity, 4 pinned} — exactly OLF's "first enabled member is free" rule — else the
+  fallback. Candidate rows are self-paired rowMap fixed points; scatter dest = one pool
+  slot per candidate (`buildCb/ShDynDest` group branch).
+- Machine (`GpuBatchTransformerControl.applyControlDeltas`): group rows are ROLE-BUILT
+  per step (pairwise offDeltas do NOT compose for clamp+outage combos): carrier = first
+  alive member → mode 1 + captured base-carrier pilot-Q target; other alive → mode 1 +
+  target 0; fixed/outaged → identity pins. Per-step drOv zeroes the current carrier's
+  packed contributions (appended after chunk entries — the kernel scan is last-match-wins).
+- Qualification computes analytic drOv for the re-picked carrier (coef 0 on rows owned by
+  the new carrier); free-member OUTAGE scenarios batch at 1e-12 (both TVC flavors,
+  engagement asserted: `deviceSharedTransformerControlMatchesCpu` now expects 3 batched).
+
+REMAINING (documented contract, not a bug): clamping the CURRENT CARRIER while other
+members stay continuous re-picks the pilot-Q role MID-FLIGHT. The re-picked system sits
+on the CPU's 1-MW DS-threshold knife edge — a measured 1.7e-9 trajectory offset flips a
+1.0045-MW distribution decision, so bitwise-close is not enough; the machine routes the
+SCENARIO to the CPU (STATUS_REJECTED, `deviceSharedCarrierClampRoutesToCpuAndMatches`).
+Non-carrier clamps and clamps with no other alive member stay on-device. Also observed
+on that network: the GPU sequential BASE loadflow degrades when the base itself clamps
+(pre-existing sequential-path gap, unrelated to batching) — the test runs the base on
+the CPU via `-Dolf.gpu.sa.gpuBaseLoadFlow=false`.
 
 ### Part A landing checklist
 - [x] A1 pack (existence-keyed, all-enabled config, free = first) — 2026-09-06; nnz growth measured

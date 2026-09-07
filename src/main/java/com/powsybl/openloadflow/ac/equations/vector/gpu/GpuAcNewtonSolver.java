@@ -80,7 +80,7 @@ public final class GpuAcNewtonSolver {
                                               double[] ziIn, int[] ziIdx,
                                               int[] drRow, int[] drCol, double[] drCoef,
                                               int[] dbRow, int[] dbCol, double[] dbCoef, int[] cbPcSide,
-                                              double[] vdlIn, int[] vdlIdx);
+                                              double[] vdlIn, int[] vdlIdx, int[] qrPtr, int[] qrRows);
 
     /**
      * Release a structure handle from {@link #createStructure} (idempotent for handle 0). Contexts
@@ -174,9 +174,24 @@ public final class GpuAcNewtonSolver {
                                  double[] ziIn, int[] ziIdx,
                                  int[] drRow, int[] drCol, double[] drCoef,
                                  int[] dbRow, int[] dbCol, double[] dbCoef) {
+        return solve(x0, target, rowMode, maxIter, tol, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
+                dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
+                new int[] {0}, new int[0]);
+    }
+
+    /** {@link #solve} with the GROUP pilot-Q relocation tables (plan-A6) — required whenever the
+     *  index packs carry the {@code -2-groupId} qAlt encoding (shared transformer-VC groups). */
+    @SuppressWarnings("java:S107")
+    public static double[] solve(double[] x0, double[] target, int[] rowMode, int maxIter, double tol,
+                                 double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
+                                 double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
+                                 int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
+                                 double[] ziIn, int[] ziIdx,
+                                 int[] drRow, int[] drCol, double[] drCoef,
+                                 int[] dbRow, int[] dbCol, double[] dbCoef, int[] qrPtr, int[] qrRows) {
         long structure = createStructure(x0.length, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
                 dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
-                noPcSide(cbIdx.length / 12), new double[0], new int[0]);
+                noPcSide(cbIdx.length / 12), new double[0], new int[0], qrPtr, qrRows);
         try {
             long handle = createContext(structure);
             try {
@@ -366,7 +381,7 @@ public final class GpuAcNewtonSolver {
         int nScenarios = disabledElementMask.length;
         long structure = createStructure(n, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
                 dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
-                noPcSide(cbIdx.length / 12), new double[0], new int[0]);
+                noPcSide(cbIdx.length / 12), new double[0], new int[0], new int[] {0}, new int[0]);
         try {
             long handle = createBatchContext(structure, nScenarios, mode,
                     rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, new byte[rlVrow.length], new double[x0Base.length],

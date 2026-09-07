@@ -335,6 +335,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 elementMapper, gpuData, equationSystem, dsSum, slackParticipates, dsParams, distrRhoControllers,
                 curvePRows);
         List<Integer> batchedIndices = plan.batchedIndices();
+        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            System.err.println("PLAN batched=" + batchedIndices.size() + " of " + contingencies.size());
+        }
         int islandingCount = plan.islandingCount();
         int rejected = contingencies.size() - batchedIndices.size();
         if (rejected > 0 || islandingCount > 0) {
@@ -534,7 +537,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     gpuData.dqElem(), gpuData.dqSide(), gpuData.dqWeight(), gpuData.dqRow(), gpuData.dqKind(),
                     gpuData.ziIn(), gpuData.ziIdx(), gpuData.drRow(), gpuData.drCol(), gpuData.drCoef(),
                     gpuData.dbRow(), gpuData.dbCol(), gpuData.dbCoef(), gpuData.cbPcSide(),
-                    gpuData.vdlIn(), gpuData.vdlIdx());
+                    gpuData.vdlIn(), gpuData.vdlIdx(), gpuData.qrPtr(), gpuData.qrRows());
             // The engine drives OLF's Java outer loops on the SHARED network, mutating control-enabled flags
             // (shunt/transformer VC), taps, PV/PQ, distributed targetP, and the state vector across scenarios.
             // It restores the compact snapshot only BETWEEN scenarios, leaving the network in the last

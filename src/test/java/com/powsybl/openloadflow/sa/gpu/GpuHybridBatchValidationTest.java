@@ -93,8 +93,7 @@ class GpuHybridBatchValidationTest {
     void hybridReactiveLimitsMatchesCpu() throws Exception {
         Network iidm = Network.read(CASES.resolve(CASE));
         LoadFlowParameters lfp = JsonLoadFlowParameters.read(Path.of("rte-loadflow-default-parameters.json"));
-        OpenLoadFlowParameters olfp = OpenLoadFlowParameters.get(lfp);
-        AcLoadFlowParameters acp = OpenLoadFlowParameters.createAcParameters(iidm, lfp, olfp,
+        AcLoadFlowParameters acp = OpenLoadFlowParameters.createAcParameters(iidm, lfp, OpenLoadFlowParameters.get(lfp),
                 new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>(), false, false);
         acp.getNetworkParameters().setMaxSlackBusCount(1);
 
@@ -170,7 +169,8 @@ class GpuHybridBatchValidationTest {
                 gpuData.shIn(), gpuData.shIdx(), gpuData.hvIn(), gpuData.hvIdx(),
                 gpuData.dqElem(), gpuData.dqSide(), gpuData.dqWeight(), gpuData.dqRow(), gpuData.dqKind(),
                 gpuData.ziIn(), gpuData.ziIdx(), gpuData.drRow(), gpuData.drCol(), gpuData.drCoef(),
-                gpuData.dbRow(), gpuData.dbCol(), gpuData.dbCoef(), gpuData.cbPcSide(), gpuData.vdlIn(), gpuData.vdlIdx());
+                gpuData.dbRow(), gpuData.dbCol(), gpuData.dbCoef(), gpuData.cbPcSide(), gpuData.vdlIn(), gpuData.vdlIdx(),
+                gpuData.qrPtr(), gpuData.qrRows());
         // (The batch-context handle + the per-scenario outer-loop bridges are now owned by
         // GpuHybridBatchOuterLoopEngine, which is invoked below.)
 

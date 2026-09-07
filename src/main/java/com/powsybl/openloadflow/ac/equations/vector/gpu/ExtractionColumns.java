@@ -12,6 +12,10 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.VoltageControl;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * The per-extraction column arrays every family and outer-loop packer reads: each bus's
@@ -25,7 +29,8 @@ import com.powsybl.openloadflow.network.LfNetwork;
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] branchAlphaCol,
-                         int[] dummyPCol, int[] dummyQCol, int[] shuntBCol, int[] qRow, int[] qRowAlt) {
+                         int[] dummyPCol, int[] dummyQCol, int[] shuntBCol, int[] qRow, int[] qRowAlt,
+                         int[] qrPtr, int[] qrRows) {
 
     static ExtractionColumns of(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es) {
         // Cache each bus's BUS_PHI/BUS_V column once: a bus appears in several branches (degree ~3),
@@ -57,6 +62,42 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         // Dynamic Q-relocation: the OTHER candidate Q row of each transformer/shunt voltage-controlled
         // bus, so the fill can follow a per-scenario control toggle on the shared structure (§11).
         int[] qRowAlt = GpuAcRowIndexing.computeQRowAlt(network, es, vCol, branchRhoCol, shuntBCol, qRow);
+        // GROUP pilot-Q relocation candidates (plan-A6): a shared transformer-VC pilot's reactive
+        // balance rides on the FREE member's rho column — "first enabled", which an outage or clamp
+        // of the free member RE-PICKS per scenario. Encode such pilots' alternate as -2-groupId and
+        // ship the candidate table [pilot v row (fallback), member rho cols in merged order]; the
+        // fill kernels select the FIRST member row whose per-scenario mode is not identity/pinned
+        // (exactly OLF's free-role rule), falling back to the pilot's own row when control is off.
+        List<Integer> qrPtr = new ArrayList<>();
+        List<Integer> qrRows = new ArrayList<>();
+        for (LfBus bus : network.getBuses()) {
+            var tvc = bus.getTransformerVoltageControl()
+                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                    .orElse(null);
+            if (tvc == null || tvc.getMergedControllerElements().size() < 2 || vCol[bus.getNum()] < 0) {
+                continue;
+            }
+            List<Integer> memberRows = new ArrayList<>();
+            boolean allResolvable = true;
+            for (var m : tvc.getMergedControllerElements()) {
+                int rc = branchRhoCol[m.getNum()];
+                if (rc < 0) {
+                    allResolvable = false;                   // a member without a rho column: keep the
+                    break;                                   // plain two-way alternate (validation guards)
+                }
+                memberRows.add(rc);
+            }
+            if (!allResolvable) {
+                continue;
+            }
+            int g = qrPtr.size();
+            qrPtr.add(qrRows.size());
+            qrRows.add(vCol[bus.getNum()]);                  // candidate 0 = the FALLBACK (control off)
+            qrRows.addAll(memberRows);
+            qRowAlt[bus.getNum()] = -2 - g;
+        }
+        qrPtr.add(qrRows.size());
+
         // Remote gen-VC group members (plan-B2), CANONICAL encoding independent of the base pin
         // state: the frozen q dest is SUPPRESSED and the member's OWN row is the ALTERNATE,
         // selected per scenario by row mode 4 ("member row hosts its own Q balance" — RL pinned).
@@ -70,6 +111,7 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                 qRowAlt[bn] = vCol[bn];
             }
         }
-        return new ExtractionColumns(phiCol, vCol, branchRhoCol, branchAlphaCol, dummyPCol, dummyQCol, shuntBCol, qRow, qRowAlt);
+        return new ExtractionColumns(phiCol, vCol, branchRhoCol, branchAlphaCol, dummyPCol, dummyQCol, shuntBCol, qRow, qRowAlt,
+                GpuAcArrays.toIntArray(qrPtr), GpuAcArrays.toIntArray(qrRows));
     }
 }

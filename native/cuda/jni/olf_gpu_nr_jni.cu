@@ -1050,6 +1050,17 @@ __global__ void stepFromPrev(int n, const double* xPrev, const double* dx, doubl
     if (i < n) x[i] = xPrev[i] + mu * dx[i];
 }
 
+// Per-scenario masked backtrack step: x = xPrev + mu[s]*dx for scenarios with mu[s] >= 0;
+// mu[s] < 0 leaves the scenario's state untouched (not backtracking this pass).
+__global__ void stepFromPrevBatchMasked(int n, int total, const double* xPrev, const double* dx,
+                                        const double* mu, double* x) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < total) {
+        double m = mu[i / n];
+        if (m >= 0.0) x[i] = xPrev[i] + m * dx[i];
+    }
+}
+
 inline int grid(int n) { return (n + BLOCK - 1) / BLOCK; }
 
 // ---------------------------------------------------------------------------------
@@ -3621,6 +3632,9 @@ struct BatchSolverContext {
     bool clampStep = false;                                  // MAX_VOLTAGE_CHANGE per-scenario step clamp (set per solve)
     double maxDv = 0.0, maxDphi = 0.0;
     DeviceBuf dVarType, dStepFactor;                         // n ints / nS factors (lazy, first clamped solve)
+    DeviceBuf dXprevLs;                                      // n*nS pre-step iterates (lazy, LINE_SEARCH solves)
+    int lsMaxIter = 10;                                      // LINE_SEARCH backtracks (setBatchLineSearch)
+    double lsStepFold = 4.0 / 3.0;
     DeviceBuf dNorms;                                        // nS*4 device-side convergence norms (see residualNormsBatch)
     DeviceBuf dThrIdent, dThrPower;                          // n each: per-row PER_EQUATION_TYPE thresholds (empty = 2-norm/infnorm criterion)
     bool perRowCriteria = false;
@@ -4033,6 +4047,10 @@ static void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double max
         ctx->dVarType.upload(varType, static_cast<size_t>(n) * sizeof(int));
         ctx->dStepFactor.alloc(static_cast<size_t>(nS) * sizeof(double));
     }
+    if (lsMode == 1) {                                       // LINE_SEARCH backtracking buffers
+        if (!ctx->dXprevLs.p) ctx->dXprevLs.alloc(static_cast<size_t>(n) * nS * sizeof(double));
+        if (!ctx->dStepFactor.p) ctx->dStepFactor.alloc(static_cast<size_t>(nS) * sizeof(double));
+    }
     ctx->clampStep = clampStep;
     ctx->maxDv = maxDv;
     ctx->maxDphi = maxDphi;
@@ -4306,14 +4324,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     if (solvePass) {
 
-    for (int it = 0; it <= maxIter && nActive > 0; it++) {
-        // ---- batched fill for all active scenarios: J + F, or F-ONLY when this iteration
-        //      never consumes the Jacobian — the final residual/convergence fill
-        //      (it == maxIter breaks before the solve) and mode 4's solve-only iterations
-        //      (factors frozen at iter 0; only the RHS must be fresh). The F-only variants
-        //      evaluate just the residual values (eval<X>F) and skip the vals memset —
-        //      the J buffer is never read before the next full fill re-zeroes it. ----
-        bool fOnly = it == maxIter || (ctx->mode == 4 && it > 0);
+    // ---- batched fill for all active scenarios (J + F, or F-ONLY: the final residual fill and
+    //      mode 4's solve-only iterations evaluate just the residual and skip the vals memset —
+    //      the J buffer is never read before the next full fill re-zeroes it). A lambda so the
+    //      LINE_SEARCH backtrack below can re-evaluate at a reduced step, like the sequential
+    //      solveContext's fillAndNorm. ----
+    auto fillActiveBatch = [&](bool fOnly) {
         if (!fOnly) {
             CUDA_CHECK(cudaMemsetAsync(ctx->dVals.p, 0, static_cast<size_t>(nnz) * nS * sizeof(double), ctx->stream));
         }
@@ -4357,6 +4373,23 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, ziRelocOf(ctx->st.get()));
         applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>());
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: stream-ordered into the solve, no host sync
+    };
+    auto readNormsBatch = [&](std::vector<double>& hn) {
+        residualNormsBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dNorms.as<double>(),
+                ctx->perRowCriteria ? ctx->dThrIdent.as<double>() : nullptr,
+                ctx->perRowCriteria ? ctx->dThrPower.as<double>() : nullptr, ctx->dMode.as<int>());
+        hn.resize(static_cast<size_t>(nS) * 4);
+        CUDA_CHECK(cudaMemcpy(hn.data(), ctx->dNorms.p, hn.size() * sizeof(double), cudaMemcpyDeviceToHost));
+    };
+    // LINE_SEARCH per-scenario backtracking state (mirrors the sequential solveContext: lastNorm2 /
+    // haveLast, per pass — a phase re-entry retargets the system, voiding the step relation)
+    std::vector<double> lsLastSsq(lsMode == 1 ? nS : 0, 0.0);
+    std::vector<char> lsHaveLast(lsMode == 1 ? nS : 0, 0);
+    std::vector<double> hMu(lsMode == 1 ? nS : 0, -1.0);
+
+    for (int it = 0; it <= maxIter && nActive > 0; it++) {
+        bool fOnly = it == maxIter || (ctx->mode == 4 && it > 0);
+        fillActiveBatch(fOnly);
 
         // ---- residual check + retirement ----
         // Normal mode (tol > 0): every iteration copies the batched mismatch to the host (the
@@ -4370,12 +4403,43 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (!deviceFixedIter || it == maxIter) {
             std::vector<double> hNorms;
             if (!deviceFixedIter) {
-                // Device-side reduction: read back nS*3 norms, not the 70-MB mismatch.
-                residualNormsBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dNorms.as<double>(),
-                        ctx->perRowCriteria ? ctx->dThrIdent.as<double>() : nullptr,
-                        ctx->perRowCriteria ? ctx->dThrPower.as<double>() : nullptr, ctx->dMode.as<int>());
-                hNorms.resize(static_cast<size_t>(nS) * 4);
-                CUDA_CHECK(cudaMemcpy(hNorms.data(), ctx->dNorms.p, hNorms.size() * sizeof(double), cudaMemcpyDeviceToHost));
+                // Device-side reduction: read back nS*4 norms, not the 70-MB mismatch.
+                readNormsBatch(hNorms);
+                // ---- LINE_SEARCH backtrack (per scenario): the full step applied at it-1 may have
+                //      RAISED that scenario's ||F||2 — walk it back to x = xPrev + mu*dx with
+                //      mu = stepFold^-k until the 2-norm improves, mirroring the sequential
+                //      solveContext / OLF's LineSearchStateVectorScaling. Judged on the 2-norm
+                //      (ssq, monotonic-equivalent); a non-finite mismatch backtracks too. Scenarios
+                //      not backtracking keep their state (mu sentinel -1 masks the step kernel). ----
+                if (lsMode == 1) {
+                    auto needsBt = [&](int s2) {
+                        return active[s2] && lsHaveLast[s2]
+                                && (hNorms[s2 * 4 + 2] == 0.0 || hNorms[s2 * 4 + 1] >= lsLastSsq[s2]);
+                    };
+                    bool anyBt = false;
+                    for (int s2 = 0; s2 < nS; s2++) {
+                        if (needsBt(s2)) anyBt = true;
+                    }
+                    for (int k = 1; anyBt && k <= ctx->lsMaxIter; k++) {
+                        double mu = 1.0 / std::pow(ctx->lsStepFold, k);
+                        for (int s2 = 0; s2 < nS; s2++) hMu[s2] = needsBt(s2) ? mu : -1.0;
+                        CUDA_CHECK(cudaMemcpyAsync(ctx->dStepFactor.p, hMu.data(), nS * sizeof(double), cudaMemcpyHostToDevice, ctx->stream));
+                        stepFromPrevBatchMasked<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS,
+                                ctx->dXprevLs.as<double>(), ctx->dDx.as<double>(), ctx->dStepFactor.as<double>(), ctx->dX.as<double>());
+                        fillActiveBatch(false);              // full fill: J must sit at the accepted x (like the seq path)
+                        readNormsBatch(hNorms);
+                        anyBt = false;
+                        for (int s2 = 0; s2 < nS; s2++) {
+                            if (needsBt(s2)) anyBt = true;
+                        }
+                    }
+                    for (int s2 = 0; s2 < nS; s2++) {
+                        if (active[s2]) {
+                            lsLastSsq[s2] = hNorms[s2 * 4 + 1];
+                            lsHaveLast[s2] = 1;
+                        }
+                    }
+                }
             } else {
                 CUDA_CHECK(cudaMemcpy(hF.data(), ctx->dF.p, nTot * sizeof(double), cudaMemcpyDeviceToHost));
             }
@@ -4474,6 +4538,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             break;
         }
 
+        if (lsMode == 1) {                                   // LINE_SEARCH: remember the pre-step iterates
+            CUDA_CHECK(cudaMemcpyAsync(ctx->dXprevLs.p, ctx->dX.p, static_cast<size_t>(n) * nS * sizeof(double),
+                                       cudaMemcpyDeviceToDevice, ctx->stream));
+        }
         if (ctx->mode == 1) {
         // ---- UNIFORM BATCHED solve: one ANALYSIS on the shared pattern, then ONE batched
         //      FACTORIZATION + SOLVE over every scenario's value set. Retired scenarios are
@@ -5605,6 +5673,20 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
     jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(ctx->nScenarios));
     env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(ctx->nScenarios), host.data());
     return out;
+}
+
+// LINE_SEARCH backtracking parameters for a batch context (OLF LineSearchStateVectorScaling's
+// maxIteration and stepFold): consumed by solves called with lsMode == 1. Context-scoped like
+// setBatchRowCriteria, so the solveBatchContext signature stays unchanged.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchLineSearch(
+        JNIEnv*, jclass, jlong handle, jint lsMaxIter, jdouble lsStepFold) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->lsMaxIter = lsMaxIter > 0 ? lsMaxIter : 10;
+    ctx->lsStepFold = lsStepFold > 1.0 ? lsStepFold : 4.0 / 3.0;
 }
 
 // PER_EQUATION_TYPE stopping criterion: install (or clear, with nulls) the per-row threshold

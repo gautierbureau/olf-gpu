@@ -124,11 +124,6 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
     private final GpuNativeContext context = new GpuNativeContext();
 
-    // LEGACY sequential context, created lazily and used ONLY for LINE_SEARCH scaling: the batch
-    // solve implements NONE (undamped) and MAX_VOLTAGE_CHANGE, but the backtracking line search
-    // lives in the sequential solveContext loop only. Everything else runs batch-of-1.
-    private final java.util.concurrent.atomic.AtomicLong lsContextHandle = new java.util.concurrent.atomic.AtomicLong();
-
     private final GpuSolverInvalidation invalidation = new GpuSolverInvalidation();
 
     private GpuAcData cachedData;
@@ -213,7 +208,6 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // pack re-upload reusing the analysis; an unchanged data is a no-op (context reused).
                 if (!data.sameStructureAs(cachedData)) {
                     GpuAcNewtonSolver.destroyBatchContext(context.handle.getAndSet(0));
-                    GpuAcNewtonSolver.destroyContext(lsContextHandle.getAndSet(0));
                     // BATCH-OF-1 (2026-09-08): the sequential solve runs on the BATCH context in
                     // pure-NR mode (skipRlPhase=1, slackDistTol=inf neutralize the in-kernel outer
                     // phases; OLF's own outer loops stay on the CPU around this solver). One kernel
@@ -281,39 +275,28 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             };
             long t1 = System.nanoTime();
             double convEpsPerEq = deviceConvEpsPerEq(parameters);
-            double[] out;
-            if (lsMode == 1) {
-                // LINE_SEARCH backtracking lives only in the sequential solveContext loop — use the
-                // lazily-created legacy context (same shared structure) for this scaling mode.
-                if (lsContextHandle.get() == 0) {
-                    lsContextHandle.set(GpuAcNewtonSolver.createContext(GpuAcStructures.handle(n, cachedData)));
-                }
-                out = GpuAcNewtonSolver.solveContext(lsContextHandle.get(),
-                        x0, target, activation.rowMode(), parameters.getMaxIterations(), GPU_TOLERANCE, convEpsPerEq,
-                        lsMode, parameters.getLineSearchStateVectorScalingMaxIteration(),
-                        parameters.getLineSearchStateVectorScalingStepFold(),
-                        parameters.getMaxVoltageChangeStateVectorScalingMaxDv(),
-                        parameters.getMaxVoltageChangeStateVectorScalingMaxDphi(),
-                        varType);
-            } else {
-                // Pure-NR batch-of-1: skipRlPhase=1 disables the in-kernel reactive-limit phase and
-                // the huge slackDistTol makes the distributed-slack phase a no-op (fabs(rem) <= tol
-                // -> return) — OLF's outer loops run on the CPU around this solver, exactly as before.
-                out = GpuAcNewtonSolver.solveBatchContext(context.handle.get(),
-                        x0, target, new int[][] {activation.rowMode()}, activation.rowMode(),
-                        new boolean[1][cachedData.getTotalElementCount()],
-                        new int[0], new double[0],
-                        new int[0], new double[0], new double[0], new double[0], new double[0], null, null,
-                        null, null,
-                        parameters.getMaxIterations(), GPU_TOLERANCE, 0.0, 1e300, convEpsPerEq,
-                        lsMode,
-                        parameters.getMaxVoltageChangeStateVectorScalingMaxDv(),
-                        parameters.getMaxVoltageChangeStateVectorScalingMaxDphi(),
-                        varType, null,
-                        null, null, null, null, null, null,
-                        0, 0, 0, 1,
-                        0, null, null)[0];
+            if (lsMode == 1) {                               // batch loop LINE_SEARCH (ported 2026-09-08)
+                GpuAcNewtonSolver.setBatchLineSearch(context.handle.get(),
+                        parameters.getLineSearchStateVectorScalingMaxIteration(),
+                        parameters.getLineSearchStateVectorScalingStepFold());
             }
+            // Pure-NR batch-of-1: skipRlPhase=1 disables the in-kernel reactive-limit phase and
+            // the huge slackDistTol makes the distributed-slack phase a no-op (fabs(rem) <= tol
+            // -> return) — OLF's outer loops run on the CPU around this solver, exactly as before.
+            double[] out = GpuAcNewtonSolver.solveBatchContext(context.handle.get(),
+                    x0, target, new int[][] {activation.rowMode()}, activation.rowMode(),
+                    new boolean[1][cachedData.getTotalElementCount()],
+                    new int[0], new double[0],
+                    new int[0], new double[0], new double[0], new double[0], new double[0], null, null,
+                    null, null,
+                    parameters.getMaxIterations(), GPU_TOLERANCE, 0.0, 1e300, convEpsPerEq,
+                    lsMode,
+                    parameters.getMaxVoltageChangeStateVectorScalingMaxDv(),
+                    parameters.getMaxVoltageChangeStateVectorScalingMaxDphi(),
+                    varType, null,
+                    null, null, null, null, null, null,
+                    0, 0, 0, 1,
+                    0, null, null)[0];
             long t2 = System.nanoTime();
             LOGGER.debug("GPU Newton-Raphson timing: prepare {} ms (context {}), solve {} ms",
                     (t1 - t0) / 1_000_000, rebuilt ? "rebuilt" : "reused", (t2 - t1) / 1_000_000);
@@ -364,7 +347,6 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             CPU_FALLBACK_COUNT.incrementAndGet();
             // the native context may be mid-iteration inconsistent — rebuild next run
             GpuAcNewtonSolver.destroyBatchContext(context.handle.getAndSet(0));
-            GpuAcNewtonSolver.destroyContext(lsContextHandle.getAndSet(0));
             cachedData = null;
             invalidation.structureDirty = true;
             if (Boolean.parseBoolean(System.getProperty(CPU_FALLBACK_PROPERTY, "true"))) {

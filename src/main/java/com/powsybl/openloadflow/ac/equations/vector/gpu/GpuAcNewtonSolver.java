@@ -317,6 +317,10 @@ public final class GpuAcNewtonSolver {
      *  a run without the criterion must clear (null, null). */
     public static native void setBatchRowCriteria(long handle, double[] thrIdent, double[] thrPower);
 
+    /** LINE_SEARCH backtracking parameters for a batch context (OLF LineSearchStateVectorScaling's
+     *  maxIteration and stepFold) — consumed by solves called with {@code lsMode == 1}. */
+    public static native void setBatchLineSearch(long handle, int lsMaxIter, double lsStepFold);
+
     /** Install (or clear, with nulls) the reactive-capability-CURVE channel on a batch context —
      *  per-scenario dynamic RL limits evaluated at the current targets (see GpuBatchRlCurves). */
     public static native void setBatchRlCurves(long handle, int[] cvIdx, double[] cvIn, double[] cvPts);

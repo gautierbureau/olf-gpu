@@ -666,6 +666,30 @@ the device's "converged" state was 0.45 pu and located it on DISTR_Q rows; a str
 showed exactly 2 groups with pilot-is-member and exactly 2 bad DISTR_Q rows. Regression test:
 `GpuLoadFlowTest.remoteVoltageControlWithPilotAsController`.
 
+### F.-1b Chunk sizing (reworked 2026-09-08)
+
+The batch is chunked to bound resident LU factors, and the chunk came from a native probe that
+modelled per-scenario cost as *LU-factor bytes + a few arrays*, times a 0.7 safety factor on free
+memory. That model missed the biggest term — cuDSS's own workspace — so on a 6 GB card it
+recommended 1675 scenarios for a 13040-row network, cuDSS returned status 2 (ALLOC_FAILED) mid
+factorization, and the thrown batch sent the WHOLE run to the CPU.
+
+Sizing now asks cuDSS instead of modelling it: after the (already existing, cached) single-matrix
+ANALYSIS the probe reads `CUDSS_DATA_MEMORY_ESTIMATES` and uses its device figure as the
+per-scenario factorization cost, plus the per-scenario arrays the context really allocates (7n
+doubles, not 5 — `dQbuf` and the line-search `dXprevLs` were missing).
+
+Calibration on rte6515 (n=13040, nnz=91002, 6 GB card): cuDSS estimates **4.97 MB/matrix** where
+the LU factors alone are ~1.3 MB; the batch's REAL device usage, sampled with `nvidia-smi` across
+chunk sizes 50 and 200, is **3.7 MiB/scenario** (357 MiB → 915 MiB) — so the estimate is slightly
+conservative, which is what a budget wants. Result at 2000 contingencies: no shrink-retry, peak
+2697 MiB of 6144, **1998/2000 batched (99.9%)**, the 2 remainders being by-design runtime rejects
+(`RUNTIME:status=-2`).
+
+The shrink-and-retry from the same commit stays as the safety net (it halves, RESUMES the
+unsolved indices, and remembers the ceiling for the JVM) — it should now be rare rather than the
+mechanism that finds the size.
+
 ### F.-1 Measuring it: the scope census
 
 `GpuBatchScopeCensus` (public, `sa.gpu`) counts WHY contingencies leave the batched path, at the

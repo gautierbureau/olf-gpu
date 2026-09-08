@@ -1835,6 +1835,26 @@ double luBytesPerScenario(SharedStructure& st) {
         CUDSS_CHECK(cudssMatrixCreateDn(&ds.matB, n, 1, n, dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
         CUDSS_CHECK(cudssMatrixCreateDn(&ds.matX, n, 1, n, dX.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
         CUDSS_CHECK(cudssExecute(ds.handle, CUDSS_PHASE_ANALYSIS, ds.config, ds.data, ds.matA, ds.matX, ds.matB));
+        // cuDSS's OWN device-memory estimate for one matrix with this pattern — [0] permanent,
+        // [1] peak (16 int64 entries). This is the number to size with: the LU numeric factors are
+        // only part of what a factorization allocates, and the workspace is the part our model used
+        // to miss. MEASURED on rte6515 (n=13040, nnz=91002, 2026-09-08): cuDSS reports 4.97 MB/
+        // matrix while the LU factors alone are ~1.3 MB, and the batch's REAL device usage sampled
+        // over chunk sizes 50 and 200 was 3.7 MiB/scenario — i.e. this estimate is slightly
+        // conservative, which is exactly what a chunk budget wants.
+        {
+            int64_t est[16] = {0};
+            size_t writtenEst = 0;
+            if (cudssDataGet(ds.handle, ds.data, CUDSS_DATA_MEMORY_ESTIMATES,
+                             est, sizeof(est), &writtenEst) == CUDSS_STATUS_SUCCESS
+                    && writtenEst >= 2 * sizeof(int64_t)) {
+                int64_t deviceBytes = std::max(est[0], est[1]);
+                if (deviceBytes > 0) {
+                    st.luBytes = static_cast<double>(deviceBytes);
+                    return st.luBytes;
+                }
+            }
+        }
         int64_t luNnz = 0;
         size_t written = 0;
         CUDSS_CHECK(cudssDataGet(ds.handle, ds.data, CUDSS_DATA_LU_NNZ, &luNnz, sizeof(luNnz), &written));
@@ -6091,8 +6111,11 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_recommen
         size_t freeBytes = 0;
         size_t totalBytes = 0;
         CUDA_CHECK(cudaMemGetInfo(&freeBytes, &totalBytes));  // after the probe freed its buffers
+        // 7n doubles per scenario, not 5: x/target/F/B/dx PLUS dQbuf (the per-scenario reactive
+        // accumulator) and dXprevLs (the line-search previous state, allocated under the RTE
+        // parameters' MAX_VOLTAGE_CHANGE scaling).
         double perScenarioBytes = luBytes
-                + (static_cast<double>(st.nnz) + 5.0 * st.n) * sizeof(double)
+                + (static_cast<double>(st.nnz) + 7.0 * st.n) * sizeof(double)
                 + static_cast<double>(st.n) * sizeof(int)    // dMode
                 + static_cast<double>(st.nElements);         // dDisabled (char)
         double budget = static_cast<double>(freeBytes) * SAFETY;

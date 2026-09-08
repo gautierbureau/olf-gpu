@@ -236,10 +236,10 @@ element falls back to the stock per-strategy CPU path individually.
    "time plus new kernels/channels" tier ✅ **landed 2026-09-04..06** (see the rows above and §B).
 2. **HVDC packing remainder** — (audited 2026-09-04: the former "HVDC + SVC packing" item is
    mostly landed — AC-emulation HVDC is packed with its batched loops, slope/monitoring SVCs
-   landed with modes 2/3.) Still open: **HVDC contingency** (likely cheap: the per-scenario hv
-   disabled bit exists — needs the precomputer mapping + non-AC-emu terminal-injection removal),
+   landed with modes 2/3; ~~HVDC contingency~~ ✅ 2026-09-04, §2 table.) Still open:
    **HvdcAction** (a per-scenario hv-parameter override channel: droop/P0/status), LCC shapes,
-   and an HVDC with a missing bus end.
+   an HVDC with a missing bus end, and the **saturated/frozen-at-base AC-emu HVDC** (the
+   `hvdcBatchable` all-LINEAR-at-base gate — see the scheduled backlog below).
 3. **Node-breaker contingency propagation** — ✅ **landed 2026-07-20.** A propagated contingency
    opens the target's retained breakers alongside it (switches are LfBranches in breaker mode), so
    the naive shape was ">2 branches" and NOTHING batched on a node-breaker network. Now split: the
@@ -253,7 +253,7 @@ element falls back to the stock per-strategy CPU path individually.
    expressible as a per-scenario mask (`ISLANDS_SLACK`). (b) is the next scope-widening step and is
    common on node-breaker networks — measure its share before building it. (Switch CLOSES landed
    2026-07-20; shunt reconnection 2026-07-19.)
-4. **Bus/busbar contingencies, ≥3-branch outages, single-side openings.**
+4. ~~Bus/busbar contingencies, ≥3-branch outages, single-side openings~~ ✅ **landed 2026-09-08** (§2 table).
 4b. **Operator strategies** — the machinery is complete for its scope; what is left is NOT strategy
    work. Only **multi-stage conditional actions** (#30) remain in the machinery itself: stage-on-stage
    needs the stage-1 state evaluated before stage 2 is composed, i.e. a second warm continuation off
@@ -263,7 +263,8 @@ element falls back to the stock per-strategy CPU path individually.
    under ACTIVE voltage control (worth re-examining now that transformer voltage control is batched
    and the control-row pairing is understood), PST tap action under active phase control, non-linear
    shunt model, GeneratorAction touching targetV/targetQ/regulator rather than P.
-5. **⚠️ corner-case deltas inside supported scope** (Part II): keep-strongest-PV guard,
+5. **⚠️ corner-case deltas inside supported scope** (Part II): ~~keep-strongest-PV guard~~
+   (✅ 2026-09-07 forced-PV per-scenario detector, §B),
    ~~curve-limits-at-runtime-P~~ (✅ 2026-09-05, §B), shared-control transformer groups — now a
    HARD GATE instead of a silent delta (2026-09-06: whole-run CPU; see the DISTR_RHO contingency
    row for the audit and the 5-step on-device plan) (~~`useInitialTapPosition`~~ ✅ 2026-09-07),
@@ -279,6 +280,60 @@ element falls back to the stock per-strategy CPU path individually.
    `deviceZipLoadModelMatchesCpu`). Still CPU: load LOSSES of modeled loads (not a target
    override), load-based DS with a load model (per-round coef rescale), a modeled load on a
    controller-shunt bus (dynamic Q-relocation moves its Q row).)
+
+### Scheduled backlog — the §F.0/§F.1 whole-run gates, ranked (audit 2026-09-08)
+
+Ranked by (does the gate fire on realistic runs) × (how much machinery already exists).
+Before building tier B, MEASURE: run the production/validation networks with
+`OLF_GPU_QUALIFY_TRACE` + the scope's unsupported-outer-loop log and rank by observed hits.
+
+**Tier A — high value, machinery mostly exists:**
+1. **Continuous shunt voltage control** (`ShuntVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL`)
+   — this is OLF's DEFAULT shunt VC mode, so ANY run with `shuntCompensatorVoltageControlOn`
+   and stock parameters is whole-run CPU today. The pieces exist: SHUNT_B batch rows
+   (controllable-shunt support), the DISTR_SHUNT_B pack (`dbRow/dbCol/dbCoef`), and
+   `GpuBatchSimpleTvc` is the orchestrator template (VC-on-first-solve + round-to-section
+   re-solve).
+2. **AC-emu HVDC saturated/frozen at base** (`hvdcBatchable` + the `frozenHvdcBase`
+   cpuBaseOnly) — pack the saturated-segment coupling as the base state; the
+   freeze/unfreeze + limit-switch machinery already runs per scenario
+   (`GpuBatchHvdcAcEmulation`). Closing it also retires the LAST base-on-CPU condition.
+3. **SecondaryVc with remote generator VC** — per §D: OLF's own loop is general; the port
+   collapsed controller/controlled index sets, so this is orchestrator restructuring plus
+   the (already-batched) DISTR_Q machinery — no kernel work expected.
+4. **Remote-group residual gates** — the table-less pinnable FREE member (<2 merged members:
+   reuse the all-pinned pilot-vEq flip for the 1-member case) and the residual
+   all-members-pinnable shapes; fold in the extraction-level "no free controller" corner
+   (an all-pinned BASE) — same machinery family.
+
+**Tier B — moderate, fire only under non-default parameters (measure first):**
+5. **loadPowerFactorConstant + load-based balance** — per-bus q-shift ∝ p-shift in the DS
+   kernel (a tan-phi channel next to the participation factors).
+6. **useLoadModel + load-based balance** — per-round vdl target rescale; needs a per-scenario
+   scale channel over `vdlIn`'s target slot (stride-3 verbatim pack).
+7. **extrapolateReactiveLimits + curve generators** — small: add the slope-extrapolation
+   branch to the device curve evaluator (`rlCurveLimitsBatch` implements CLAMP only).
+8. **Monitoring-SVC shapes failing `GpuBatchVoltageMonitoring.supported`** — extend the
+   orchestrator (remote monitoring SVC would ride the existing pilot-referenced
+   `rlCmpVrow` compare machinery).
+
+**Tier C — hard structural (schedule only with a driving network):**
+9. **Generator VC under the transformer-controlled level** (`transformerControlSupported`) —
+   the TVC-vs-generator-VC re-enable interplay; whole-run gate for all TVC flavors on such
+   networks.
+10. **ZI shapes without dummies** — one-side-open ZI, both-ends-controlled, 3-winding star
+    (extraction-level, kills the whole pack): new zi row shapes + per-scenario spanning-tree
+    semantics.
+11. **Voltage-controlling-shunt DISTR_Q contributor** — a SHUNT_B-aware remote-group Q sum
+    (extraction-level).
+
+**Not features (dead gates — OLF itself cannot produce the shape):** continuous
+PhaseControl LIMITER with a remote controlled branch (`LfNetworkLoaderImpl` logs
+"not supported yet" and creates NO phase control — our local-only restriction never rejects
+anything OLF supports); equation arrays beyond BUS_TARGET_P/Q (OLF's vectorized creator
+makes exactly those two, with the 4 evaluators we implement). Both stay as forward-compat
+guards. **Parked:** a custom `ContingencyActivePowerLossDistribution` SPI (black-box replay;
+schedule only when a concrete SPI implementation shows up).
 
 ---
 

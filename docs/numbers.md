@@ -74,3 +74,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-08 | 26d3dfa | 20.76 | 18.74 | 26.74 | x1.43 | 0/0/0 | 7.58 | 4.44 | 499/500 | 122/133 (92%) | continuous shunt VC batched (GpuBatchSimpleShuntVc, WITH_GENERATOR default mode) |
 | 2026-09-08 | c4430d2 | 21.52 | 18.76 | 26.50 | x1.41 | 0/0/0 | 7.63 | 4.44 | 499/500 | 122/133 (92%) | saturated-base HVDC batched + last cpu-base-only condition retired |
 | 2026-09-08 | 02534ac | 22.17 | 19.02 | 26.76 | x1.41 | 0/0/0 | 7.60 | 4.46 | 499/500 | 122/133 (92%) | SecondaryVc remote gen VC + remote pin-dynamics gate retired (tier A 3+4) |
+| 2026-09-08 | f76daae+dirty | 23.56 | 18.93 | 27.49 | x1.45 | 0/0/0 | 7.79 | 4.46 | 499/500 | 122/133 (92%) | curve-limit extrapolation batched (tier B item 7) |

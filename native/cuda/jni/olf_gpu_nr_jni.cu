@@ -2870,10 +2870,13 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
 //    never back-switch (OLF: canSwitchToPv = !hasGeneratorsWithSlope()), and SVC limits are re-evaluated
 //    at the live V (B*v^2 quadratic channel) at every check plus the pinned re-freeze.
 // Either switch marks the scenario for another inner Newton solve.
-// ReactiveCapabilityCurveImpl.getReactiveLimit, verbatim (extrapolation UNSUPPORTED — guarded in
-// Java): exact point hit -> the point's value; inside [minP,maxP] -> floor/ceiling interpolation;
-// outside -> clamp to the first/last point. sel 0 = minQ, 1 = maxQ. p in MW, result in MVAr.
-__device__ double rlCurveEval(double pMW, const double* pts, int npts, int sel) {
+// ReactiveCapabilityCurveImpl.getReactiveLimit, verbatim: exact point hit -> the point's value;
+// inside [minP,maxP] -> floor/ceiling interpolation; outside -> CLAMP to the first/last point, or
+// (extrapolate != 0, OLF's extrapolateReactiveLimits) the ReactiveCapabilityCurveUtil
+// .extrapolateReactiveLimitsSlope math — the BOUNDARY two-point slope continued past the range,
+// with the intersecting-limits corner (extrapolated minQ > maxQ) collapsing BOTH to their mean.
+// sel 0 = minQ, 1 = maxQ. p in MW, result in MVAr.
+__device__ double rlCurveEval(double pMW, const double* pts, int npts, int sel, int extrapolate) {
     for (int k = 0; k < npts; k++) {
         if (pts[k * 3] == pMW) {
             return pts[k * 3 + 1 + sel];                     // first case: exact curve point
@@ -2890,7 +2893,21 @@ __device__ double rlCurveEval(double pMW, const double* pts, int npts, int sel) 
         double q2 = pts[(lo + 1) * 3 + 1 + sel];
         return q1 + (q2 - q1) / (p2 - p1) * (pMW - p1);
     }
-    return pMW < pts[0] ? pts[1 + sel] : pts[(npts - 1) * 3 + 1 + sel];   // third case: clamp
+    if (!extrapolate) {
+        return pMW < pts[0] ? pts[1 + sel] : pts[(npts - 1) * 3 + 1 + sel];   // third case: clamp
+    }
+    int bi = pMW < pts[0] ? 0 : npts - 1;                    // pBound = the boundary point,
+    int si = pMW < pts[0] ? 1 : npts - 2;                    // pbis = its inward neighbor
+    double pB = pts[bi * 3];
+    double pS = pts[si * 3];
+    double slopeMin = (pts[si * 3 + 1] - pts[bi * 3 + 1]) / (pS - pB);
+    double slopeMax = (pts[si * 3 + 2] - pts[bi * 3 + 2]) / (pS - pB);
+    double minQ = pts[bi * 3 + 1] + slopeMin * (pMW - pB);
+    double maxQ = pts[bi * 3 + 2] + slopeMax * (pMW - pB);
+    if (minQ <= maxQ) {
+        return sel ? maxQ : minQ;
+    }
+    return (minQ + maxQ) / 2;                                // intersecting-limits corner: the mean, BOTH
 }
 
 // Evaluate the per-scenario DYNAMIC reactive limits (OLF: bus.getMinQ()/getMaxQ() re-read each RL
@@ -2898,7 +2915,7 @@ __device__ double rlCurveEval(double pMW, const double* pts, int npts, int sel) 
 // participating curve gen's delta eval(p_now) - eval(p_base). p_now = basePpu + share * (the bus's
 // DS-moved row target - its base) — exact while intra-bus proportionality holds (the pack's DS
 // model). At the base point the delta is bit-zero (same formula both sides).
-__global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n,
+__global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int cvExtrapolate,
                                    const int* cvIdx, const double* cvIn, const double* cvPts,
                                    const double* rlMinQ, const double* rlMaxQ, const double* target,
                                    double* minQDyn, double* maxQDyn) {
@@ -2914,8 +2931,8 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n,
         const double* pts = cvPts + cvIdx[g * 4 + 2] * 3;
         int npts = cvIdx[g * 4 + 3];
         double pNow = cvIn[g * 5] + cvIn[g * 5 + 1] * (target[(size_t) s * n + pRow] - cvIn[g * 5 + 2]);
-        mn += rlCurveEval(pNow * 100.0, pts, npts, 0) / 100.0 - cvIn[g * 5 + 3];
-        mx += rlCurveEval(pNow * 100.0, pts, npts, 1) / 100.0 - cvIn[g * 5 + 4];
+        mn += rlCurveEval(pNow * 100.0, pts, npts, 0, cvExtrapolate) / 100.0 - cvIn[g * 5 + 3];
+        mx += rlCurveEval(pNow * 100.0, pts, npts, 1, cvExtrapolate) / 100.0 - cvIn[g * 5 + 4];
     }
     minQDyn[(size_t) s * nrl + i] = mn;
     maxQDyn[(size_t) s * nrl + i] = mx;
@@ -3691,6 +3708,7 @@ struct BatchSolverContext {
     // cvIdx {rlIdx, pRow, ptsOff, npts}, cvIn {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu},
     // cvPts {p_MW, minQ_MW, maxQ_MW} sorted by p; dRlMinQDyn/dRlMaxQDyn = nS*nrl evaluated limits.
     int ncv = 0;
+    int cvExtrapolate = 0;                                 // OLF extrapolateReactiveLimits for curve gens
     DeviceBuf dCvIdx, dCvIn, dCvPts, dRlMinQDyn, dRlMaxQDyn;
     // DISTR_Q weight overrides (setBatchDqWeightOverrides): a gen outage at a remote-VC controller
     // bus renormalizes the group's qPct keys per scenario — {s, contrib} pairs + the new weight.
@@ -4286,7 +4304,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             CUDA_CHECK(cudaMemcpyAsync(ctx->dRlLimitType.p, lt.data(), lt.size(), cudaMemcpyHostToDevice, ctx->stream));
             CUDA_CHECK(cudaMemcpy(ctx->dRlSwitchCount.p, sc.data(), sc.size(), cudaMemcpyHostToDevice));
             if (ctx->ncv > 0) {                              // curve limits at the CURRENT (seeded) targets
-                rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n,
+                rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
                         ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
                         ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dTarget.as<double>(),
                         ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>());
@@ -4826,7 +4844,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     } else {                                               // reactive-limits outer loop: switch PV->PQ over Q limit
         if (ctx->nrl > 0 && !skipRlPhase) {                  // skipRlPhase: a monitoring interleave solve — the
             if (ctx->ncv > 0) {                              // curve limits at the CURRENT (post-DS) targets
-                rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n,
+                rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
                         ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
                         ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dTarget.as<double>(),
                         ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>());
@@ -5757,7 +5775,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // {p_MW, minQ_MW, maxQ_MW} sorted by p.
 extern "C" JNIEXPORT void JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlCurves(
-        JNIEnv* env, jclass, jlong handle, jintArray jCvIdx, jdoubleArray jCvIn, jdoubleArray jCvPts) {
+        JNIEnv* env, jclass, jlong handle, jintArray jCvIdx, jdoubleArray jCvIn, jdoubleArray jCvPts,
+        jint extrapolate) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
@@ -5783,6 +5802,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     env->ReleaseDoubleArrayElements(jCvIn, cvIn, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jCvPts, cvPts, JNI_ABORT);
     ctx->ncv = ncv;
+    ctx->cvExtrapolate = extrapolate;
 }
 
 // Remote-member RL entries (plan-B1): install (or clear) the per-entry remote kinds + compare rows

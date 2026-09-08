@@ -67,11 +67,11 @@ validation project sets it false to fail loudly instead).
 | Transformer ratio control (remote pilot / multi-transformer groups) | 🔶 | DISTR_RHO linear coupling derived incl. free-controller mechanism; remote controller zero-diagonal left to cuDSS pivoting; see Part II §E.4 |
 | Remote generator voltage control (DISTR_Q), incl. **multiple controllers on one pilot** | 🔶 | fully wired in sequential LF (weights, free controller, shunt / open-branch / zero-impedance contributors); voltage-controlling-shunt contributor ❌; batch path rejects all DISTR_Q. Part II §E.3 |
 | Transformer phase control (BRANCH_ALPHA1 as variable) | 🔶 | ✅ **2026-07-20** for the INCREMENTAL mode row: a1 is packed as a state variable and `BRANCH_TARGET_ALPHA1` (the a1−target identity that mode keeps active all run) is accepted, validated GPU-vs-CPU at ~1e-14 with the fallback counter asserted (`GpuPhaseControlTest`). Note `isDeriveA1` keys on `isPhaseController()` alone, so BOTH modes create the column. ⏩ CONTINUOUS mode with control ENABLED: that activates `BRANCH_TARGET_P` on the CONTROLLED branch — a branch-owned power row with no GPU family — so the solver falls back for those solves and resumes on GPU once the loop switches control off at iteration 0. GATE: all of it hangs off `phaseShifterRegulationOn` (core default **false**, not set by the RTE params file) |
-| Controllable shunt (SHUNT_B as variable) | ❌ | unsupported variable type |
+| Controllable shunt (SHUNT_B as variable) | ✅ **2026-09-08** | the BATCH-OF-1 route (the sequential solve runs on the batch context in pure-NR mode) carries SHUNT_B rows; GpuLoadFlowTest.controllableShunt: 0 kV dV, same iterations, no fallback |
 | Fixed shunts | ✅ | per-bus G,B pack |
 | Zero-impedance branches | 🔶 | only shapes with DUMMY_P/DUMMY_Q; one-side-open ZI ❌; both-ends-controlled / 3-winding star ❌. Part II §E.5 |
-| ZIP / exponential load models | ❌ | terms outside the 12 supported classes |
-| SVC (slope, standby automaton) | ❌ | SHUNT_B / non-supported terms |
+| ZIP / exponential load models | ✅ **2026-09-08** | vdl fills via the batch-of-1 route; GpuLoadFlowTest.zipLoadModel: 3.4e-13 kV, no fallback |
+| SVC (slope, standby automaton) | 🔶 **2026-09-08** | SLOPE rows (mode 2) solve via the batch-of-1 route (the SA slope tests now run base-on-GPU at 1e-12); a MONITORING (standby-automaton) SVC still keeps the SA base on CPU (mid-run activation flip unvalidated on the sequential path) |
 | HVDC AC emulation | 🔶 | packed (droop, P0, losses) when both buses present and AC-emulation mode; otherwise represented only through terminal P injections |
 | Batteries / LCC / VSC / dangling lines / tie lines / areas | 🔶 | no first-class handling: fine while they only contribute plain P/Q bus targets; anything introducing an unsupported term/variable throws. Part II §E.7 |
 | Vectorized equation-array systems | 🔶 | only BUS_TARGET_P/Q arrays with the 4 closed-branch array evaluators; other array types/evaluators ❌ |
@@ -91,7 +91,7 @@ CME-under-outer-loop-switching bug on this path was fixed 2026-07-17.
 | Fast decoupled / DC | ⏩ | explicit non-default solver choice is respected → CPU |
 | Stopping: `DefaultNewtonRaphsonStoppingCriteria` (‖F‖₂ < √(ε²·n)) | ✅ | `convEpsPerEq` wired through — byte-comparable criterion vs CPU |
 | Stopping: uniform ‖F‖∞ < tol | ✅ | GPU-native mode (bench/fast paths) |
-| Stopping: `PerEquationTypeStoppingCriteria` | ⏩ | not ported |
+| Stopping: `PerEquationTypeStoppingCriteria` | ✅ **2026-09-08** | per-row thresholds installed on the batch-of-1 context (setBatchRowCriteria); the device stops on the SAME decision as the CPU (A/B: install off = GPU 6 iters vs CPU 4; on = 4/4 at 1.1e-13 kV). LINE_SEARCH scaling still routes through the legacy sequential context (backtracking not in the batch loop) |
 | State scaling: NONE / LINE_SEARCH / MAX_VOLTAGE_CHANGE | ✅ | lsMode 0/1/2 on device |
 | maxIterations, per-run report | ✅ | |
 | Linear solver | ✅ | cuDSS LU; no per-solver ordering choice exposed |

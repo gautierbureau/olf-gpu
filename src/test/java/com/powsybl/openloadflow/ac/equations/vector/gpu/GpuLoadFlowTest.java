@@ -110,6 +110,97 @@ class GpuLoadFlowTest {
         compare(ShuntNetworkFactory::create, "shunt compensator");
     }
 
+    /** Sequential-solver ZIP/exponential loads (the batch-of-1 route runs the vdl fills): the
+     *  Eurostag network with a ZIP load solves ON the GPU (fallback counter guarded) and matches
+     *  the CPU exactly. */
+    @Test
+    void zipLoadModel() {
+        long before = com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
+        compareWithParams(() -> {
+            Network network = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
+            network.getVoltageLevel("VLLOAD").newLoad()
+                    .setId("ZIPLOAD").setBus("NLOAD").setP0(50).setQ0(30)
+                    .newZipModel()
+                        .setC0p(0.5).setC0q(0.55)
+                        .setC1p(0.3).setC1q(0.35)
+                        .setC2p(0.2).setC2q(0.1)
+                        .add()
+                    .add();
+            return network;
+        }, "zip load model", p -> OpenLoadFlowParameters.create(p).setUseLoadModel(true), 1e-9);
+        org.junit.jupiter.api.Assertions.assertEquals(before,
+                com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
+                "the ZIP solve must run ON the GPU, not silently fall back");
+    }
+
+    /** Sequential-solver PER_EQUATION_TYPE stopping criteria (the batch-of-1 route installs the
+     *  per-row thresholds via setBatchRowCriteria): the device stops on the SAME decision as OLF's
+     *  PerEquationTypeStoppingCriteria — identical iteration counts and a machine-precision state,
+     *  where the old uniform-floor path converged DEEPER and broke exact parity. */
+    @Test
+    void perEquationTypeCriteria() {
+        long before = com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
+        compareWithParams(() -> EurostagFactory.fix(EurostagTutorialExample1Factory.create()),
+                "per-equation-type criteria",
+                p -> OpenLoadFlowParameters.create(p).setNewtonRaphsonStoppingCriteriaType(
+                        com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA),
+                1e-9);
+        org.junit.jupiter.api.Assertions.assertEquals(before,
+                com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
+                "the per-eq-criteria solve must run ON the GPU, not silently fall back");
+    }
+
+    /** Sequential-solver CONTROLLABLE shunt (SHUNT_B as an in-Newton variable): shunt voltage
+     *  control ON in continuous mode — the batch-of-1 route carries the SHUNT_B rows. */
+    @Test
+    void controllableShunt() {
+        long before = com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
+        compareWithParams(ShuntNetworkFactory::create, "controllable shunt",
+                p -> p.setShuntCompensatorVoltageControlOn(true), 1e-9);
+        org.junit.jupiter.api.Assertions.assertEquals(before,
+                com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
+                "the controllable-shunt solve must run ON the GPU, not silently fall back");
+    }
+
+    /** compare() with a parameter customizer applied to BOTH arms and a configurable tolerance. */
+    private void compareWithParams(Supplier<Network> networkSupplier, String label,
+                                   java.util.function.Consumer<LoadFlowParameters> customize, double tolKv) {
+        LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
+
+        Network cpuNetwork = networkSupplier.get();
+        LoadFlowParameters cpuParameters = new LoadFlowParameters();
+        customize.accept(cpuParameters);
+        LoadFlowResult cpuResult = runner.run(cpuNetwork, cpuParameters);
+        assertTrue(cpuResult.isFullyConverged(), "CPU reference load flow must converge");
+
+        Network gpuNetwork = networkSupplier.get();
+        LoadFlowParameters gpuParameters = new LoadFlowParameters();
+        customize.accept(gpuParameters);
+        OpenLoadFlowParameters.get(gpuParameters).setAcSolverType(GpuNewtonRaphsonFactory.NAME);
+        LoadFlowResult gpuResult = runner.run(gpuNetwork, gpuParameters);
+        assertTrue(gpuResult.isFullyConverged(), "GPU load flow must converge");
+
+        org.junit.jupiter.api.Assertions.assertEquals(
+                cpuResult.getComponentResults().get(0).getIterationCount(),
+                gpuResult.getComponentResults().get(0).getIterationCount(),
+                "same stopping criteria must stop on the same iteration");
+        double worstV = 0;
+        int compared = 0;
+        for (Bus cpuBus : cpuNetwork.getBusView().getBuses()) {
+            Bus gpuBus = gpuNetwork.getBusView().getBus(cpuBus.getId());
+            if (gpuBus == null || Double.isNaN(cpuBus.getV()) || Double.isNaN(gpuBus.getV())) {
+                continue;
+            }
+            worstV = Math.max(worstV, Math.abs(cpuBus.getV() - gpuBus.getV()));
+            compared++;
+        }
+        System.out.printf("LoadFlow.run GPU vs CPU [%s]: %d buses, CPU %d iters / GPU %d iters, max dV = %.2e kV%n",
+                label, compared, cpuResult.getComponentResults().get(0).getIterationCount(),
+                gpuResult.getComponentResults().get(0).getIterationCount(), worstV);
+        assertTrue(compared > 0, "must compare at least one bus");
+        assertTrue(worstV < tolKv, "bus voltages must match (max dV = " + worstV + " kV)");
+    }
+
     @Test
     void hvdcAcEmulation() {
         compare(() -> {

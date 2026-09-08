@@ -290,6 +290,13 @@ public final class GpuAcNewtonSolver {
      *  PARENT contingency's final distributed targets (OLF's setGeneratorsInitialTargetPToTargetP). */
     public static native double[] readBatchTargets(long handle);
 
+    /** VALUES refresh addressed by the SHARED STRUCTURE handle: same semantics as
+     *  {@link #refreshContextValues} (tap r1/a1 or shunt-b moves with an unchanged pattern), but
+     *  usable when the caller holds a BATCH context — one extraction has ONE value set, every
+     *  context sharing the structure sees the update. */
+    public static native void refreshStructureValues(long structureHandle, double[] cbIn, double[] obIn,
+                                                     double[] shIn, double[] hvIn, double[] ziIn);
+
     /** Batched SENSITIVITY solve for the incremental outer-loop family: J at the given per-scenario
      *  states (same forward system as the Newton), unit RHS at each {@code unitRows} pinned-variable
      *  identity row, the {@code observeCols} variable entries of each solution gathered per scenario.

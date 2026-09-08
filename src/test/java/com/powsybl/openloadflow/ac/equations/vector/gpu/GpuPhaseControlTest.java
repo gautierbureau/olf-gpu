@@ -143,16 +143,16 @@ class GpuPhaseControlTest {
     }
 
     @Test
-    void continuousWithDiscretisationFallsBackButMatches() {
-        // CONTINUOUS: BRANCH_TARGET_P is activated on the controlled branch, the extractor throws,
-        // the solver falls back to CPU NR. The point of the assertion is that the RESULT is still
-        // CPU-identical — the control is never silently dropped.
+    void continuousWithDiscretisationSolvesOnGpuAndMatches() {
+        // CONTINUOUS: BRANCH_TARGET_P activates on the controlled branch (row mode 3). Since the
+        // batch-of-1 route (2026-09-08) the sequential solver carries mode-3 rows on-device — this
+        // shape used to fall back to the CPU NR; now it must SOLVE on the GPU and stay CPU-identical.
         compare(GpuPhaseControlTest::regulatingPst,
             (p, olf) -> {
                 p.setPhaseShifterRegulationOn(true);
                 olf.setPhaseShifterControlMode(
                         OpenLoadFlowParameters.PhaseShifterControlMode.CONTINUOUS_WITH_DISCRETISATION);
-            }, "continuous", 2, false);
+            }, "continuous", 2, true);
     }
 
     @Test

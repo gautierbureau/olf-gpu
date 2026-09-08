@@ -208,25 +208,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 .flatMap(b -> b.getGenerators().stream())
                 .anyMatch(g -> g.getGeneratorControlType()
                         == com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.MONITORING_VOLTAGE);
-        // SLOPE-SVC rows (row mode 2) are a BATCH capability — the sequential GPU solver path does not
-        // implement them yet: keep the base on the CPU there too.
-        boolean slopeSvcBase = lfNetwork.getBuses().stream()
-                .anyMatch(com.powsybl.openloadflow.network.LfBus::hasGeneratorsWithSlope);
-        // A CONTROLLER-mode phase control activates its BRANCH_TARGET_P equation mid-run in the BASE
-        // load flow (PhaseControlOuterLoop.initialize) — the SEQUENTIAL GPU solver has no family for
-        // that row (mode 3 is a batch capability): keep the base on the CPU, the batch still runs.
-        boolean phaseControlBase = lfNetwork.getBranches().stream()
-                .anyMatch(b -> b.getPhaseControl()
-                        .map(pc -> pc.getMode() == com.powsybl.openloadflow.network.TransformerPhaseControl.Mode.CONTROLLER)
-                        .orElse(false));
-        // PER_EQUATION_TYPE stopping criteria: the SEQUENTIAL GPU solver only implements the uniform
-        // criterion (it solves deeper, then the CPU retest passes — a DEEPER-converged base state
-        // than the CPU arm's, breaking exact SA parity). Keep the base on the CPU; the batch has its
-        // own per-row criterion (setBatchRowCriteria).
-        boolean perEqCriteriaBase = com.powsybl.openloadflow.OpenLoadFlowParameters
-                .get(securityAnalysisParameters.getLoadFlowParameters()).getNewtonRaphsonStoppingCriteriaType()
-                == com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA;
-        boolean cpuBaseOnly = frozenHvdcBase || monitoringSvcBase || slopeSvcBase || phaseControlBase || perEqCriteriaBase;
+        // SLOPE-SVC rows (row mode 2) solve on the sequential path since the batch-of-1 route
+        // (2026-09-08) — no CPU-base condition anymore.
+        // CONTROLLER-mode phase control (row mode 3) solves on the sequential path since the
+        // batch-of-1 route (2026-09-08) — no CPU-base condition anymore.
+        // PER_EQUATION_TYPE stopping criteria run on the sequential path since the batch-of-1
+        // route (2026-09-08): the batch-of-1 solve installs the per-row thresholds
+        // (setBatchRowCriteria) and stops on the SAME decision as the CPU — no CPU-base condition.
+        boolean cpuBaseOnly = frozenHvdcBase || monitoringSvcBase;
         if (!scope.batchDisabled() && !multiThread && gpuBaseLoadFlowEnabled() && !cpuBaseOnly
                 && GpuAcNewtonSolver.isAvailable()
                 && acParameters.getSolverFactory().getClass() == NewtonRaphsonFactory.class) {

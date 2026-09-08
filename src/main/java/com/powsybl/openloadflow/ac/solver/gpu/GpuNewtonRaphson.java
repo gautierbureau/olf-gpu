@@ -26,6 +26,8 @@ import com.powsybl.openloadflow.ac.solver.DefaultNewtonRaphsonStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphson;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteria;
+import com.powsybl.openloadflow.ac.solver.PerEquationTypeStoppingCriteria;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationSystemIndex;
 import com.powsybl.openloadflow.equations.EquationSystemIndexListener;
@@ -122,6 +124,11 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
     private final GpuNativeContext context = new GpuNativeContext();
 
+    // LEGACY sequential context, created lazily and used ONLY for LINE_SEARCH scaling: the batch
+    // solve implements NONE (undamped) and MAX_VOLTAGE_CHANGE, but the backtracking line search
+    // lives in the sequential solveContext loop only. Everything else runs batch-of-1.
+    private final java.util.concurrent.atomic.AtomicLong lsContextHandle = new java.util.concurrent.atomic.AtomicLong();
+
     private final GpuSolverInvalidation invalidation = new GpuSolverInvalidation();
 
     private GpuAcData cachedData;
@@ -131,6 +138,25 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     // per-row variable kind (0=BUS_PHI, 1=BUS_V, 2=other) for the MAX_VOLTAGE_CHANGE device step
     // clamp; structural, recomputed whenever the activation/structure is rebuilt
     private int[] varType;
+
+    // PER_EQUATION_TYPE row thresholds need (re)installing on the context: after a context rebuild
+    // and after any activation change (the thresholds follow the variables at each row)
+    private boolean criteriaDirty = true;
+
+    /** Install (or clear) the PER_EQUATION_TYPE per-row stopping thresholds on the batch context,
+     *  from the run's actual criteria object — the device then stops on the SAME decision as OLF's
+     *  PerEquationTypeStoppingCriteria (every row's |F| under its type threshold). */
+    private void installRowCriteria(int n) {
+        if (parameters.getStoppingCriteria() instanceof PerEquationTypeStoppingCriteria c) {
+            double[][] thr = GpuAcActivationExtractor.extractRowCriteria(equationSystem, n,
+                    c.getMaxActivePowerMismatch(), c.getMaxReactivePowerMismatch(), c.getMaxVoltageMismatch(),
+                    c.getMaxDefaultAngleMismatch(), c.getMaxDefaultRatioMismatch(),
+                    c.getMaxDefaultSusceptanceMismatch(), c.getConvEpsPerEq());
+            GpuAcNewtonSolver.setBatchRowCriteria(context.handle.get(), thr[0], thr[1]);
+        } else {
+            GpuAcNewtonSolver.setBatchRowCriteria(context.handle.get(), null, null);
+        }
+    }
 
     public GpuNewtonRaphson(LfNetwork network, NewtonRaphsonParameters parameters,
                             EquationSystem<AcVariableType, AcEquationType> equationSystem,
@@ -186,15 +212,30 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // only changed element PARAMETERS (tap r1/a1, shunt b) is VALUES -> a cheap in-place
                 // pack re-upload reusing the analysis; an unchanged data is a no-op (context reused).
                 if (!data.sameStructureAs(cachedData)) {
-                    GpuAcNewtonSolver.destroyContext(context.handle.getAndSet(0));
-                    // the shared structure comes from the per-extraction cache — the batched SA
-                    // building its context from the SAME extraction reuses it device-side
-                    context.handle.set(GpuAcNewtonSolver.createContext(GpuAcStructures.handle(n, data)));
+                    GpuAcNewtonSolver.destroyBatchContext(context.handle.getAndSet(0));
+                    GpuAcNewtonSolver.destroyContext(lsContextHandle.getAndSet(0));
+                    // BATCH-OF-1 (2026-09-08): the sequential solve runs on the BATCH context in
+                    // pure-NR mode (skipRlPhase=1, slackDistTol=inf neutralize the in-kernel outer
+                    // phases; OLF's own outer loops stay on the CPU around this solver). One kernel
+                    // set instead of two: per-row PER_EQUATION_TYPE criteria, slope-SVC (mode 2),
+                    // continuous phase (mode 3) and the vdl/ZIP fills come from the batch pipeline
+                    // instead of being ported twice. The shared structure comes from the
+                    // per-extraction cache — the batched SA building its context from the SAME
+                    // extraction reuses it device-side.
+                    context.handle.set(GpuAcNewtonSolver.createBatchContext(GpuAcStructures.handle(n, data), 1,
+                            GpuBatchContextCache.resolveBatchMode(),
+                            data.rlVrow(), data.rlMinQ(), data.rlMaxQ(), data.rlLoadQ(), data.rlVtarget(),
+                            data.rlMonitored(), data.rowSlope(),
+                            data.dsPhiRow(), data.dsFactor(), data.dsSlackPhiRow(), data.dsSlackTargetP(),
+                            data.dsBaseTargetP(), data.dsMaxDelta(), data.dsMinDelta(),
+                            data.dsMode(), data.dsMarginUp(), data.dsMarginDown(),
+                            data.dsSlackMarginUp(), data.dsSlackMarginDown()));
                     cachedData = data;
                     rebuilt = true;
+                    criteriaDirty = true;
                     CONTEXT_REBUILDS.incrementAndGet();
                 } else if (!data.sameAs(cachedData)) {
-                    GpuAcNewtonSolver.refreshContextValues(context.handle.get(),
+                    GpuAcNewtonSolver.refreshStructureValues(GpuAcStructures.handle(n, cachedData),
                             data.cbIn(), data.obIn(), data.shIn(), data.hvIn(), data.ziIn());
                     // the SHARED structure now holds the new values — re-key it to the new
                     // extraction so content matching never aliases it under the old one
@@ -209,18 +250,23 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 activation = GpuAcActivationExtractor.extractActivation(network, equationSystem, n);
                 varType = GpuAcActivationExtractor.extractVarType(equationSystem, n);
                 invalidation.activationDirty = false;
+                criteriaDirty = true;                        // per-row thresholds follow the variables
             }
-            // Row modes >= 2 are per-solve CPU-fallback territory: SLOPE-SVC (2) and continuous phase
-            // control (3) are BATCH kernel capabilities, and a PINNED remote gen-VC member (4 — a base
-            // reactive-limit switch during this engine run) is DELIBERATELY included even though the
-            // fills could route it: the sequential pack's DISTR_Q weights are STATIC extraction-time
-            // qPct, and OLF's pin renormalizes them (updateReactiveKeys) with NO equation-system event
-            // — solving on-device would use stale weights. Every post-pin solve of the run therefore
-            // runs on the CPU (correct, just un-accelerated).
+            if (criteriaDirty) {
+                installRowCriteria(n);
+                criteriaDirty = false;
+            }
+            // Since the batch-of-1 route (2026-09-08) modes 2 (slope-SVC) and 3 (continuous phase)
+            // solve on-device — the batch kernels carry them. Mode 4 (a PINNED remote gen-VC member,
+            // a base reactive-limit switch during this engine run) stays DELIBERATELY CPU-routed:
+            // the pack's DISTR_Q weights are STATIC extraction-time qPct, and OLF's pin renormalizes
+            // them (updateReactiveKeys) with NO equation-system event — solving on-device would use
+            // stale weights. Every post-pin solve of the run runs on the CPU (correct, just
+            // un-accelerated).
             for (int mode : activation.rowMode()) {
-                if (mode >= 2) {
+                if (mode >= 4) {
                     throw new UnsupportedOperationException(
-                            "row mode " + mode + " (slope-SVC / continuous phase control) is batch-only");
+                            "row mode " + mode + " (pinned remote gen-VC member) uses stale static qPct on-device");
                 }
             }
             double[] target = activation.applyTargets(targetVector.getArray());
@@ -235,13 +281,39 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             };
             long t1 = System.nanoTime();
             double convEpsPerEq = deviceConvEpsPerEq(parameters);
-            double[] out = GpuAcNewtonSolver.solveContext(context.handle.get(),
-                    x0, target, activation.rowMode(), parameters.getMaxIterations(), GPU_TOLERANCE, convEpsPerEq,
-                    lsMode, parameters.getLineSearchStateVectorScalingMaxIteration(),
-                    parameters.getLineSearchStateVectorScalingStepFold(),
-                    parameters.getMaxVoltageChangeStateVectorScalingMaxDv(),
-                    parameters.getMaxVoltageChangeStateVectorScalingMaxDphi(),
-                    varType);
+            double[] out;
+            if (lsMode == 1) {
+                // LINE_SEARCH backtracking lives only in the sequential solveContext loop — use the
+                // lazily-created legacy context (same shared structure) for this scaling mode.
+                if (lsContextHandle.get() == 0) {
+                    lsContextHandle.set(GpuAcNewtonSolver.createContext(GpuAcStructures.handle(n, cachedData)));
+                }
+                out = GpuAcNewtonSolver.solveContext(lsContextHandle.get(),
+                        x0, target, activation.rowMode(), parameters.getMaxIterations(), GPU_TOLERANCE, convEpsPerEq,
+                        lsMode, parameters.getLineSearchStateVectorScalingMaxIteration(),
+                        parameters.getLineSearchStateVectorScalingStepFold(),
+                        parameters.getMaxVoltageChangeStateVectorScalingMaxDv(),
+                        parameters.getMaxVoltageChangeStateVectorScalingMaxDphi(),
+                        varType);
+            } else {
+                // Pure-NR batch-of-1: skipRlPhase=1 disables the in-kernel reactive-limit phase and
+                // the huge slackDistTol makes the distributed-slack phase a no-op (fabs(rem) <= tol
+                // -> return) — OLF's outer loops run on the CPU around this solver, exactly as before.
+                out = GpuAcNewtonSolver.solveBatchContext(context.handle.get(),
+                        x0, target, new int[][] {activation.rowMode()}, activation.rowMode(),
+                        new boolean[1][cachedData.getTotalElementCount()],
+                        new int[0], new double[0],
+                        new int[0], new double[0], new double[0], new double[0], new double[0], null, null,
+                        null, null,
+                        parameters.getMaxIterations(), GPU_TOLERANCE, 0.0, 1e300, convEpsPerEq,
+                        lsMode,
+                        parameters.getMaxVoltageChangeStateVectorScalingMaxDv(),
+                        parameters.getMaxVoltageChangeStateVectorScalingMaxDphi(),
+                        varType, null,
+                        null, null, null, null, null, null,
+                        0, 0, 0, 1,
+                        0, null, null)[0];
+            }
             long t2 = System.nanoTime();
             LOGGER.debug("GPU Newton-Raphson timing: prepare {} ms (context {}), solve {} ms",
                     (t1 - t0) / 1_000_000, rebuilt ? "rebuilt" : "reused", (t2 - t1) / 1_000_000);
@@ -291,7 +363,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         } catch (RuntimeException e) {
             CPU_FALLBACK_COUNT.incrementAndGet();
             // the native context may be mid-iteration inconsistent — rebuild next run
-            GpuAcNewtonSolver.destroyContext(context.handle.getAndSet(0));
+            GpuAcNewtonSolver.destroyBatchContext(context.handle.getAndSet(0));
+            GpuAcNewtonSolver.destroyContext(lsContextHandle.getAndSet(0));
             cachedData = null;
             invalidation.structureDirty = true;
             if (Boolean.parseBoolean(System.getProperty(CPU_FALLBACK_PROPERTY, "true"))) {

@@ -541,7 +541,7 @@ public final class GpuAcOuterLoopPacks {
                 if (gk == freeCtl || es.getEquation(gk.getNum(), AcEquationType.DISTR_Q).isEmpty()) {
                     continue;                                // the free controller carries the pilot's Q
                 }
-                int dqRow = vCol[gk.getNum()];
+                int dqRow = GpuAcRowIndexing.distrQRow(es, gk);   // free-controller row when gk IS the pilot
                 double qpk = gk.getRemoteControlReactivePercent();
                 int kIdx = memberIdxByBusNum.getOrDefault(gk.getNum(), -1);
                 for (LfBus gj : controllers) {

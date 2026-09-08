@@ -640,6 +640,51 @@ whole-run, whole-network (extraction), per-contingency, or per-strategy — and 
 silently dropped (rejects fall back or throw; `OLF_GPU_QUALIFY_TRACE` prints every
 rejection with its reason, `LAST_GPU_PRECOMPUTED_COUNT` proves engagement).
 
+### F.-2 Pilot-is-also-a-controller (fixed 2026-09-08)
+
+The device maps every equation onto the row of its variable, so a REMOTE generator voltage-control
+group whose CONTROLLED (pilot) bus is ALSO one of its controllers put two equations on one row:
+the pilot's `BUS_TARGET_V` identity and that member's `DISTR_Q`. One silently overwrote the other
+(the extractor writes both to `col(BUS_V, pilot)`), the group's reactive sharing was never
+enforced, and the FREE controller's row — which hosts the pilot bus's reactive equation in every
+OTHER form (its Q balance when the pilot is a plain bus, or when this member is RL-pinned) — sat
+unused. The device then converged on ITS residual while OLF's re-test of the returned state
+failed, so the load flow reported MAX_ITERATION_REACHED **with no CPU fallback**: results stayed
+correct (the run failed) but nothing on that network could run on the GPU.
+
+Fix, one consistent rule — *the free controller's V row carries the pilot bus's reactive equation,
+whatever form it takes*: `GpuAcRowIndexing.distrQRow` relocates a pilot-member's DISTR_Q there
+(extractor + `buildDistrQContributions` both use it), `computeQRow` suppresses that bus's plain
+q-scatter via the new `isRemoteGenVcControllerElement` (the old predicate keyed on
+`!isGeneratorVoltageControlled()`, which is false exactly when the controller is also the pilot),
+and `ExtractionColumns` excludes such a pilot from the pilot-Q relocation table (it has no Q
+balance of its own to relocate — leaving it in double-counted its q on top of the DISTR_Q terms).
+
+Found by measurement, not review: on a richer-modelling RTE-like network (rte6515) the GPU base LF
+failed where the CPU converged in 7 iterations; `OLF_GPU_RESIDUAL_TRACE` showed OLF's residual at
+the device's "converged" state was 0.45 pu and located it on DISTR_Q rows; a structural probe then
+showed exactly 2 groups with pilot-is-member and exactly 2 bad DISTR_Q rows. Regression test:
+`GpuLoadFlowTest.remoteVoltageControlWithPilotAsController`.
+
+### F.-1 Measuring it: the scope census
+
+`GpuBatchScopeCensus` (public, `sa.gpu`) counts WHY contingencies leave the batched path, at the
+three funnels below — `MAPPER:*` (elements could not be composed), `VALIDATOR:*` (composed but
+disqualified by shape) and `RUNTIME:*` (solved on the device, result rejected). `reset()` before a
+run, `snapshot()` after. Two consumers:
+
+- `GpuRteScopeCensusTest` (opt-in, `OLF_GPU_SCOPE_CENSUS=1`): all-branch N-1 on case9241pegase
+  under `rte-loadflow-default-parameters.json`, printing the batched share + reason histogram.
+  **Result 2026-09-08: 300/300 batched on the first 300 branches, 100%** (full-network figure in
+  the commit that follows).
+- The gpu-validation project's SA mode, which puts the histogram in its metrics JSON, the
+  `--sa` summary and the report page — that is the census that matters, because it runs on the
+  REAL networks whose shapes pegase does not have (couplers/busbars, HVDC flavors, 3-winding
+  transformers).
+
+Caveat: batched operator-strategy PAIRS pass through the same funnels, so on a run WITH strategies
+the histogram counts rejected pairs alongside rejected contingencies.
+
 ### F.0 Whole-run gates (`GpuSaRunScope` — batch disabled, plain CPU SA)
 
 1. Any outer loop outside the supported set: AreaInterchangeControl, AutomationSystem

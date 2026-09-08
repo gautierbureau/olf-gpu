@@ -69,7 +69,88 @@ final class GpuBatchChunkSolver {
                                                List<GpuBatchContinuousPhase.Ctl> continuousPhaseControllers,
                                                BatchConfig config) {
         int nb = batchedIndices.size();
+        // Chunk sizing is a device-memory ESTIMATE (a cuDSS probe on the shared structure). When it
+        // is too optimistic the factorization fails to allocate mid-solve, and a thrown batch means
+        // the WHOLE run un-accelerates — so an allocation failure HALVES the chunk and retries
+        // instead (measured on a 6.5k-bus RTE-like network: the probe recommended a chunk whose LU
+        // factors did not fit, and 9042 contingencies all fell back to the CPU).
         int chunkSize = GpuBatchContextCache.resolveChunkSize(nb, n, gpuData);
+        List<Integer> remaining = batchedIndices;
+        while (true) {
+            try {
+                solveQualifiedInChunksAt(chunkSize, remaining, contingencies, elementMapper, gpuData, baseState,
+                        baseTargets, baseRowMode, frozenRowsByIndex, frozenTargetsByIndex, genOutagesByIndex,
+                        activePowerLossByIndex, hvdcElemIndex, rowCriteria, rlCurves,
+                        dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex,
+                        n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
+                        varType, transformerControllers, incrementalTvcControllers, incrementalShuntControllers,
+                        simpleShuntGroups, incrementalFlowControllers, esContext, hvdcControllers, svcControllers,
+                        monitoringControllers, continuousPhaseControllers, config);
+                return;
+            } catch (RuntimeException e) {
+                if (chunkSize <= 1 || !isDeviceAllocFailure(e)) {
+                    throw e;
+                }
+                // RESUME rather than redo: chunks that already produced results keep them (the retry
+                // only re-solves what is still missing), so a shrink costs one chunk, not the batch.
+                List<Integer> stillMissing = new ArrayList<>();
+                for (Integer idx : remaining) {
+                    if (resultsByIndex[idx] == null) {
+                        stillMissing.add(idx);
+                    }
+                }
+                remaining = stillMissing;
+                if (remaining.isEmpty()) {
+                    return;
+                }
+                GpuBatchContextCache.noteChunkAllocFailure(chunkSize);   // remember it for later runs
+                int retryChunk = Math.max(1, Math.min(chunkSize / 2, remaining.size()));
+                LOGGER.warn("GPU batched SA: device allocation failed at chunk {} ({}); retrying at chunk {}",
+                        chunkSize, e.getMessage(), retryChunk);
+                // the test harness's logback appenders are broken (core/classic version mismatch) —
+                // a silent shrink would look like an unexplained slowdown, so say it on stderr too
+                System.err.println("GPU_CHUNK_SHRINK device allocation failed at chunk " + chunkSize
+                        + "; retrying at " + retryChunk);
+                chunkSize = retryChunk;
+            }
+        }
+    }
+
+    /** cuDSS reports an out-of-device-memory as status 2 (CUDSS_STATUS_ALLOC_FAILED); a CUDA OOM
+     *  surfaces as its own message. Both mean "this chunk does not fit", not "this network cannot
+     *  be batched". */
+    private static boolean isDeviceAllocFailure(RuntimeException e) {
+        String m = e.getMessage();
+        return m != null && (m.contains("cuDSS error, status 2") || m.contains("out of memory")
+                || m.contains("cudaErrorMemoryAllocation"));
+    }
+
+    @SuppressWarnings({"java:S107", "java:S3776"})
+    private static void solveQualifiedInChunksAt(int chunkSize,
+                                               List<Integer> batchedIndices, List<BatchContingency> contingencies,
+                                               GpuBatchElementMapper elementMapper, GpuAcData gpuData,
+                                               double[] baseState, double[] baseTargets, int[] baseRowMode,
+                                               int[][] frozenRowsByIndex, double[][] frozenTargetsByIndex,
+                                               GenOutage[][] genOutagesByIndex, double[] activePowerLossByIndex,
+                                               java.util.Map<com.powsybl.openloadflow.network.LfHvdc, Integer> hvdcElemIndex,
+                                               double[][] rowCriteria, GpuBatchRlCurves.Channel rlCurves,
+                                               int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
+                                               int[][] drOvContribByIndex, double[][] drOvCByIndex,
+                                               int n, int nElements, NewtonRaphsonParameters parameters,
+                                               double tol, double reactiveLimitTol, double slackDistTol,
+                                               double convEpsPerEq, double[][] resultsByIndex, int[] varType,
+                                               List<GpuBatchTransformerControl.TransformerController> transformerControllers,
+                                               List<GpuBatchIncrementalTvc.Controller> incrementalTvcControllers,
+                                               List<GpuBatchIncrementalShuntVc.Controller> incrementalShuntControllers,
+                                               List<GpuBatchSimpleShuntVc.Group> simpleShuntGroups,
+                                               List<GpuBatchIncrementalFlowControl.Controller> incrementalFlowControllers,
+                                               GpuBatchIncrementalFlowControl.EsContext esContext,
+                                               List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers,
+                                               GpuBatchSecondaryVc.Controllers svcControllers,
+                                               List<GpuBatchVoltageMonitoring.Ctl> monitoringControllers,
+                                               List<GpuBatchContinuousPhase.Ctl> continuousPhaseControllers,
+                                               BatchConfig config) {
+        int nb = batchedIndices.size();
         int nChunks = (nb + chunkSize - 1) / chunkSize;
 
         // Reuse a cached analyzed context when the pattern/admittances/chunk/mode match (across

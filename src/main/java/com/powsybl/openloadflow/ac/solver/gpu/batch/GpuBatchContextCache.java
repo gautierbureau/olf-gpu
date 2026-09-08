@@ -135,6 +135,17 @@ public final class GpuBatchContextCache {
      * </ul>
      * The result is always clamped to {@code [1, nb]}.
      */
+    /** Chunk sizes this JVM has SEEN fail to allocate on the device: the auto-size probe is an
+     *  estimate, and on a small card it can recommend a chunk whose LU factors do not fit. Each
+     *  failed attempt costs a cuDSS analysis, so once the chunk solver has discovered a ceiling we
+     *  keep every later run under it instead of rediscovering it. Monotonic, never raised. */
+    private static volatile int maxSafeChunk = Integer.MAX_VALUE;
+
+    /** Record that {@code chunk} could not be allocated — later sizing stays strictly below it. */
+    public static void noteChunkAllocFailure(int chunk) {
+        maxSafeChunk = Math.min(maxSafeChunk, Math.max(1, chunk / 2));
+    }
+
     public static int resolveChunkSize(int nb, int n, GpuAcData gpuData) {
         Integer explicit = Integer.getInteger(MAX_BATCH_PROPERTY);
         if (explicit != null && explicit > 0) {
@@ -145,10 +156,10 @@ public final class GpuBatchContextCache {
             // only the first query per extraction pays the probe analysis)
             int rec = GpuAcNewtonSolver.recommendBatchSize(GpuAcStructures.handle(n, gpuData),
                     Math.min(nb, AUTO_MAX_CHUNK));
-            return Math.min(nb, Math.max(1, rec));
+            return Math.min(Math.min(nb, maxSafeChunk), Math.max(1, rec));
         } catch (Throwable t) {
             LOGGER.debug("GPU batch auto-size unavailable ({}); using default chunk {}", t.toString(), DEFAULT_MAX_BATCH);
-            return Math.min(nb, DEFAULT_MAX_BATCH);
+            return Math.min(Math.min(nb, maxSafeChunk), DEFAULT_MAX_BATCH);
         }
     }
 }

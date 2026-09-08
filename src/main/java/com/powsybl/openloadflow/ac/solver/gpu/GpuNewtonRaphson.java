@@ -323,6 +323,40 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             equationVector.minus(targetVector);
             NewtonRaphsonStoppingCriteria.TestResult result =
                     parameters.getStoppingCriteria().test(equationVector.getArray(), equationSystem);
+            // OLF_GPU_RESIDUAL_TRACE: the device solved to ITS residual, this is OLF's own residual at
+            // the state it returned — a large value here means the device's equations disagree with
+            // OLF's (a packing/row-mapping bug), not that the solver failed to converge. The
+            // by-equation-type breakdown names the family to look at. (Test logback is broken —
+            // stderr lever.)
+            if (System.getenv("OLF_GPU_RESIDUAL_TRACE") != null) {
+                double[] fx = equationVector.getArray();
+                double n2 = 0;
+                int worstRow = -1;
+                double worst = 0;
+                for (int i2 = 0; i2 < fx.length; i2++) {
+                    n2 += fx[i2] * fx[i2];
+                    if (Math.abs(fx[i2]) > worst) {
+                        worst = Math.abs(fx[i2]);
+                        worstRow = i2;
+                    }
+                }
+                System.err.println("RESID_TRACE rows=" + fx.length + " cpuNorm2=" + Math.sqrt(n2)
+                        + " cpuInfNorm=" + worst + " worstRow=" + worstRow
+                        + " deviceIters=" + iterations + " stop=" + result.isStop());
+                var worstEq = equationSystem.getIndex().getEquationAtColumn(worstRow);
+                System.err.println("RESID_TRACE worst equation type=" + worstEq.getType()
+                        + " elementNum=" + worstEq.getElementNum());
+                java.util.Map<String, Integer> byType = new java.util.TreeMap<>();
+                java.util.Map<String, Double> maxByType = new java.util.TreeMap<>();
+                for (int i2 = 0; i2 < fx.length; i2++) {
+                    if (Math.abs(fx[i2]) > 1e-4) {
+                        String t = equationSystem.getIndex().getEquationAtColumn(i2).getType().toString();
+                        byType.merge(t, 1, Integer::sum);
+                        maxByType.merge(t, Math.abs(fx[i2]), Math::max);
+                    }
+                }
+                System.err.println("RESID_TRACE rows over 1e-4 by type=" + byType + " max=" + maxByType);
+            }
             status = result.isStop() ? AcSolverStatus.CONVERGED : AcSolverStatus.MAX_ITERATION_REACHED;
             // DEVICE-BROKEN result safety net: a non-finite or absurd residual is a device-side
             // numerical failure (e.g. the open zi-with-loaded-far-bus-behind-a-remote-member shape,

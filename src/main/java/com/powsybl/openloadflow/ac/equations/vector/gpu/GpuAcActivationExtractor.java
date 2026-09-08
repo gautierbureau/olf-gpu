@@ -70,8 +70,13 @@ public final class GpuAcActivationExtractor {
         for (SingleEquation<AcVariableType, AcEquationType> e : es.getIndex().getSortedSingleEquationsToSolve()) {
             // POWER-equation rows (mode stays 1) whose stable row is a non-bus-P/Q variable — assembled by
             // the GPU DISTR_Q / zero-impedance passes; just map the target onto that variable's row.
+            if (e.getType() == AcEquationType.DISTR_Q) {
+                // the controller's BUS_V row — or, when the controller IS the group's controlled bus
+                // (its own row already carries the pilot's V identity), the FREE controller's row
+                targetMap[GpuAcRowIndexing.distrQRow(es, network.getBus(e.getElementNum()))] = e.getColumn();
+                continue;
+            }
             AcVariableType powerRowVar = switch (e.getType()) {
-                case DISTR_Q -> AcVariableType.BUS_V;        // controller's BUS_V row
                 case DISTR_RHO -> AcVariableType.BRANCH_RHO1; // controller's BRANCH_RHO1 row
                 case DISTR_SHUNT_B -> AcVariableType.SHUNT_B; // controller's SHUNT_B row
                 case ZERO_V -> AcVariableType.DUMMY_P;       // zero-imp v1−rho·v2 sits on the DUMMY_P row

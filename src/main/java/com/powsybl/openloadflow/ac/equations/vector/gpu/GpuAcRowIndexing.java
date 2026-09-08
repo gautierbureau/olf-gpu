@@ -80,8 +80,8 @@ final class GpuAcRowIndexing {
             // injection feeds the DISTR_Q rows, never its own BUS_V row — so suppress its per-bus Q scatter.
             // If the controller is switched to PQ by reactive limits, BUS_TARGET_Q becomes active again and the
             // bus must recover its own BUS_V-backed Q row.
-            if (bus.getGeneratorVoltageControl().isPresent() && !bus.isGeneratorVoltageControlled() && !qActive) {
-                qRow[bn] = -1;
+            if (!qActive && isRemoteGenVcControllerElement(bus)) {
+                qRow[bn] = -1;                               // includes a controller that is ALSO the pilot
                 continue;
             }
             if (!(vActive && qActive)) {
@@ -176,6 +176,40 @@ final class GpuAcRowIndexing {
                 .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                 .map(c -> c.getControlledBus() != bus)
                 .orElse(false);
+    }
+
+    /** True when the bus is a CONTROLLER ELEMENT of a remote (non-local) MAIN generator voltage
+     *  control — INCLUDING the case where it is also that control's CONTROLLED bus (a generator
+     *  regulating its own bus, merged with remote controllers). Such a bus's reactive injection
+     *  feeds the group's DISTR_Q rows, never a plain per-bus Q scatter. */
+    static boolean isRemoteGenVcControllerElement(LfBus bus) {
+        return bus.getGeneratorVoltageControl()
+                .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                .filter(c -> !c.isLocalControl())
+                .map(c -> c.getMergedControllerElements().contains(bus))
+                .orElse(false);
+    }
+
+    /** The device row that carries a controller's DISTR_Q equation. Normally the controller's own
+     *  BUS_V row — but when the controller IS the group's CONTROLLED bus, that row already carries
+     *  the pilot's BUS_TARGET_V identity, so the DISTR_Q moves to the FREE controller's row: the
+     *  row that hosts the pilot bus's reactive equation in every other form too (its Q balance when
+     *  the pilot is a plain bus, or when this member is RL-pinned). Without this the two equations
+     *  collide on one row — one silently overwrites the other and the group's reactive sharing is
+     *  left unsatisfied (measured on a richer-modelling RTE-like network: the device "converged"
+     *  with a 0.45 pu DISTR_Q residual and OLF's own re-test then failed the load flow). */
+    static int distrQRow(EquationSystem<AcVariableType, AcEquationType> es, LfBus controller) {
+        var vc = controller.getGeneratorVoltageControl()
+                .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                .orElse(null);
+        if (vc != null && vc.getControlledBus() == controller) {
+            LfBus free = vc.getMergedControllerElements().stream()
+                    .filter(vc::isControllerEnabled).findFirst()
+                    .orElseThrow(() -> new PowsyblException("GPU AC solver: remote generator voltage control of bus "
+                            + controller.getId() + " has no enabled controller"));
+            return col(es, free.getNum(), AcVariableType.BUS_V);
+        }
+        return col(es, controller.getNum(), AcVariableType.BUS_V);
     }
 
     static boolean isFreeRemoteGenVcMember(LfBus bus) {

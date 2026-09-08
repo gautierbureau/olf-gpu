@@ -260,6 +260,40 @@ class GpuLoadFlowTest {
                 "the frozen-start solves must stay on the GPU (no CPU fallback)");
     }
 
+    /** A REMOTE generator voltage-control group whose CONTROLLED (pilot) bus is ALSO one of its
+     *  controllers — a generator regulating its own bus merged with remote controllers. The device
+     *  maps each equation onto its variable's row, so the pilot's BUS_TARGET_V and the
+     *  pilot-member's DISTR_Q both claimed that bus's V row: one silently overwrote the other and
+     *  the group's reactive sharing was never enforced, while the FREE controller's row (which
+     *  hosts the pilot's reactive equation in every other form) sat unused. The device then
+     *  "converged" on its own norm while OLF's re-test of the same state failed, so the load flow
+     *  reported MAX_ITERATION_REACHED with no fallback. Found on a richer-modelling RTE-like
+     *  network, where it made the base LF — and therefore every contingency — fail. */
+    @Test
+    void remoteVoltageControlWithPilotAsController() {
+        long before = com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
+        compareWithParams(GpuLoadFlowTest::pilotIsControllerNetwork, "remote VC, pilot is also a controller",
+                p -> {
+                    p.setDistributedSlack(true).setUseReactiveLimits(true);
+                    OpenLoadFlowParameters.create(p).setVoltageRemoteControl(true);
+                }, 1e-10);
+        org.junit.jupiter.api.Assertions.assertEquals(before,
+                com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
+                "the pilot-is-controller group must solve ON the GPU (no CPU fallback)");
+    }
+
+    /** g1/g2/g3 (b1/b2/b3) remotely control b4, plus g4 AT b4 controlling b4 — so the group's
+     *  controlled bus is also one of its controllers. */
+    private static Network pilotIsControllerNetwork() {
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
+        var vl4 = network.getBusBreakerView().getBus("b4").getVoltageLevel();
+        vl4.newGenerator().setId("g4").setBus("b4").setConnectableBus("b4")
+                .setMinP(0).setMaxP(200).setTargetP(50).setTargetV(413.4)
+                .setVoltageRegulatorOn(true).add();
+        network.getGenerator("g4").newMinMaxReactiveLimits().setMinQ(-1000).setMaxQ(1000).add();
+        return network;
+    }
+
     @Test
     void hvdcAcEmulation() {
         compare(() -> {

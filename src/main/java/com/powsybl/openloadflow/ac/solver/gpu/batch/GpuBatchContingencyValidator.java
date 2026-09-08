@@ -76,6 +76,7 @@ public final class GpuBatchContingencyValidator {
         }
 
         static Qualification rejected(BatchContingency c, Disqualification reason, String detail) {
+            com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("VALIDATOR:" + reason);
             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {   // test logback is broken — stderr lever
                 System.err.println("QUALIFY_TRACE rejected " + c.contingencyId() + " reason=" + reason
                         + (detail.isEmpty() ? "" : " (" + detail + ")"));

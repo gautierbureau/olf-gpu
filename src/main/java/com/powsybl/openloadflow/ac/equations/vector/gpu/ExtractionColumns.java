@@ -112,7 +112,11 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .filter(c -> bus.isGeneratorVoltageControlled() && !c.isLocalControl())
                     .orElse(null);
-            if (gvc == null || gvc.getMergedControllerElements().isEmpty() || vCol[bus.getNum()] < 0) {
+            // A pilot that is ALSO one of its controllers has NO Q balance of its own to relocate —
+            // its q feeds the group's DISTR_Q rows instead (GpuAcRowIndexing.distrQRow), and leaving
+            // it in this table double-counted that q on top of the DISTR_Q terms.
+            if (gvc == null || gvc.getMergedControllerElements().isEmpty() || vCol[bus.getNum()] < 0
+                    || gvc.getMergedControllerElements().contains(bus)) {
                 continue;
             }
             List<Integer> memberRows = new ArrayList<>();

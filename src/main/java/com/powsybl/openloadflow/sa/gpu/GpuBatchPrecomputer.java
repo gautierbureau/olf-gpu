@@ -167,6 +167,9 @@ final class GpuBatchPrecomputer {
                 LfShunt shunt = GpuContingencyMapper.singleShuntOutage(net, pc);
                 if (shunt != null) {
                     batch.add(BatchContingency.shunt(pc.getContingency().getId(), shunt));
+                } else {
+                    GpuBatchScopeCensus.record(composeRejectReason(branches, gens, loads, shifts, hvdcs, sideOpens,
+                            loadsBatchable));
                 }
             }
             if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
@@ -196,6 +199,8 @@ final class GpuBatchPrecomputer {
                     if (r.islandedBusNums().length > 0) {
                         islandedBuses.put(r.contingencyId(), r.islandedBusNums());
                     }
+                } else {
+                    GpuBatchScopeCensus.record("RUNTIME:status=" + r.convergenceStatus());
                 }
             }
             Map<Variable<AcVariableType>, Integer> baseVariableRows = new HashMap<>();
@@ -215,5 +220,34 @@ final class GpuBatchPrecomputer {
             }                                                // (core/classic version mismatch) — surface it here
             return PrecomputedBatch.empty();
         }
+    }
+
+    /** Which unmodeled element kind kept a contingency out of the batch (the compose funnel's
+     *  null-guard, named): the FIRST null wins, and an all-empty-but-non-null compose means the
+     *  contingency touches nothing the device models. */
+    @SuppressWarnings("java:S107")
+    private static String composeRejectReason(List<LfBranch> branches, List<LfGenerator> gens, List<LoadLoss> loads,
+                                              List<ShuntShift> shifts,
+                                              List<com.powsybl.openloadflow.network.LfHvdc> hvdcs,
+                                              List<BatchContingency.SideOpen> sideOpens, boolean loadsBatchable) {
+        if (branches == null) {
+            return "MAPPER:branch-outage-unresolvable";
+        }
+        if (gens == null) {
+            return "MAPPER:generator-outage-unresolvable";
+        }
+        if (loads == null) {
+            return loadsBatchable ? "MAPPER:load-outage-unresolvable" : "MAPPER:load-outage-with-load-model";
+        }
+        if (shifts == null) {
+            return "MAPPER:shunt-shift-unresolvable";
+        }
+        if (hvdcs == null) {
+            return "MAPPER:hvdc-outage-unsupported";
+        }
+        if (sideOpens == null) {
+            return "MAPPER:side-open-unsupported";
+        }
+        return "MAPPER:no-batchable-element";
     }
 }

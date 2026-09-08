@@ -65,6 +65,19 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
         this(new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
     }
 
+    /** The last run's GPU engagement counter (see {@code GpuBatchedAcSecurityAnalysis}):
+     *  -1 = the WHOLE run fell back to the sequential CPU path, 0 = the batch engaged but every
+     *  contingency was individually rejected to CPU, N = contingencies actually solved on the
+     *  device. External validation harnesses read this to prove a comparison was real. */
+    public static int lastGpuPrecomputedCount() {
+        return GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get();
+    }
+
+    /** Reset the engagement counter to the whole-run-fallback sentinel before a run. */
+    public static void resetLastGpuPrecomputedCount() {
+        GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.set(-1);
+    }
+
     @Override
     public String getName() {
         return NAME;

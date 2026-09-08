@@ -79,3 +79,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-08 | ae58f89 | 24.45 | 19.69 | 26.14 | x1.33 | 0/0/0 | 7.56 | 4.44 | 499/500 | 122/133 (92%) | chunk sizing from cuDSS memory estimates (no shrink-retry on rte6515 @2000) |
 | 2026-09-08 | b927cc2 | 24.75 | 20.10 | 28.39 | x1.41 | 0/0/0 | 7.57 | 4.47 | 499/500 | 122/133 (92%) | quadratic DS-seed merge fixed (rte6515 SA 563s -> 49.6s) |
 | 2026-09-08 | 6ddfebf+dirty | 25.47 | 19.83 | 27.01 | x1.36 | 0/0/0 | 7.64 | 4.45 | 499/500 | 122/133 (92%) | perf: HVDC flows from OLF statics (no whole-network StateVector reload) + RL pinning carried across orchestrator solves |
+| 2026-09-08 | bd8c69d+dirty | 24.52 | 19.82 | 26.12 | x1.32 | 0/0/0 | 7.71 | 4.45 | 499/500 | 122/133 (92%) | monitoring phase B follows the untouched-scenarios rule (parity fix + skips the confirm solve); DS carry masked by the copy-back |

@@ -277,6 +277,7 @@ public final class GpuBatchHvdcAcEmulation {
      *  limit rounds (linear ↔ saturation) until stable. Restores every hv disabled bit at exit. */
     @SuppressWarnings({"java:S107", "java:S3776"})
     static double[][] orchestrate(long handle, int chunkSize, int realCount, int n, int nrl, int[] rlState,
+            boolean[] rlSolved,
             double[][] chunkResults, List<Ctl> ctls, int[][] status, boolean limitsActive,
             int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
             List<Integer> baseOvIndexList, List<Double> baseOvValueList,
@@ -426,12 +427,15 @@ public final class GpuBatchHvdcAcEmulation {
                 for (int s = 0; s < realCount; s++) {
                     if (affected[s]) {                       // untouched scenarios KEEP their converged state
                         chunkResults[s] = r2[s];
+                        if (rlSolved != null) {
+                            rlSolved[s] = true;              // this solve ran the RL phase for the scenario
+                        }
                     }
                 }
                 if (nds > 0) {                               // this solve may have distributed further
                     long tCap = System.nanoTime();
                     GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
-                            dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
+                            dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed, affected);
                     GpuBatchPhaseStats.addNs("HvdcAcEmulation.captureNs", System.nanoTime() - tCap);
                 }
             }

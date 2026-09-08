@@ -465,7 +465,7 @@ final class GpuBatchIncrementalFlowControl {
             }                                                // would polish them off the CPU's point (~1e-5)
             if (nds > 0) {                                   // this solve may have distributed further
                 GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
-                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
+                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed, affected);
             }
         }
         return chunkResults;

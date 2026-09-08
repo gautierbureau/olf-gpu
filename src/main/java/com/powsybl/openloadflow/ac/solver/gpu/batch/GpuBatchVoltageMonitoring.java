@@ -45,6 +45,19 @@ public final class GpuBatchVoltageMonitoring {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchVoltageMonitoring.class);
 
+    /** Phase-B confirmation solves this JVM has skipped, and monitored buses it has switched PQ -&gt; PV.
+     *  Test-visible: the skip is only reachable when a monitoring SVC and an orchestrator that
+     *  RL-solves (the HVDC AC-emulation loops) are in the SAME network, so a test that does not
+     *  check these counters cannot tell whether it exercised the skip or merely passed around it. */
+    public static final java.util.concurrent.atomic.LongAdder SKIPPED_CONFIRM_SOLVES = new java.util.concurrent.atomic.LongAdder();
+    public static final java.util.concurrent.atomic.LongAdder ACTIVATIONS = new java.util.concurrent.atomic.LongAdder();
+
+    /** {@code OLF_GPU_MON_TRACE}: print each monitored bus's per-unit voltage against its automaton
+     *  band. Thresholds are per-unit inside OLF, so a kV band picked by eye is easy to get wrong —
+     *  and an SVC whose BASE voltage is out of band is switched to plain voltage control for good by
+     *  OLF's monitoring loop, leaving nothing for the batch to monitor. */
+    private static final boolean MON_TRACE = System.getenv("OLF_GPU_MON_TRACE") != null;
+
     private GpuBatchVoltageMonitoring() {
     }
 
@@ -133,7 +146,7 @@ public final class GpuBatchVoltageMonitoring {
 
     @SuppressWarnings({"java:S107", "java:S3776"})
     static double[][] orchestrate(long handle, int chunkSize, int realCount, int n, int nrl,
-            double[][] chunkResults, List<Ctl> ctls, int[] rlState,
+            double[][] chunkResults, List<Ctl> ctls, int[] rlState, boolean[] rlSolved,
             int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
             int[] targetOverrideIndex, double[] targetOverrideValue,
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
@@ -182,6 +195,10 @@ public final class GpuBatchVoltageMonitoring {
                         continue;                            // already switched — a normal PV bus now
                     }
                     double v = r[ctl.vRow()];
+                    if (MON_TRACE) {                     // OLF_GPU_MON_TRACE: the per-unit band check
+                        System.err.printf("MON s=%d c=%d v=%.6f band=[%.6f,%.6f]%n",
+                                s, c, v, ctl.lowThreshold(), ctl.highThreshold());
+                    }
                     if (v > ctl.highThreshold()) {
                         activatedTargetV[s][c] = ctl.highTargetV();
                     } else if (v < ctl.lowThreshold()) {
@@ -189,6 +206,7 @@ public final class GpuBatchVoltageMonitoring {
                     } else {
                         continue;
                     }
+                    ACTIVATIONS.increment();
                     affected[s] = true;
                     any = true;
                 }
@@ -224,13 +242,36 @@ public final class GpuBatchVoltageMonitoring {
             }
             if (nds > 0) {                                   // this solve may have distributed further
                 GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
-                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
+                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed, affected);
             }
         }
-        // ---- PHASE B: monitoring stable at DS-only states — run the FULL solve (RL enabled) for every
-        // scenario (the CPU's ReactiveLimits loop runs only after monitoring stabilizes), then keep
-        // re-checking monitoring at the post-RL states (the engine re-checks it after every RL re-solve). ----
+        // ---- PHASE B: monitoring stable at DS-only states — run the FULL solve (RL enabled) for the
+        // scenarios that still OWE one, then keep re-checking monitoring at the post-RL states (the
+        // engine re-checks it after every RL re-solve).
+        //
+        // A scenario owes the solve when its state has not been through the reactive-limits phase (the
+        // main solve skips it while monitoring is interleaved) or when its automaton just switched
+        // PQ -> PV. A scenario that owes NEITHER is one both loops would report STABLE on, and the CPU
+        // runs no Newton for a stable scenario: re-solving it and keeping the result drifts it off the
+        // CPU by the solver's own convergence slack (measured 1e-3 kV when another scenario in the same
+        // chunk activated), and when NO scenario owes anything the whole batched solve is pure waste
+        // (measured 4.5 s of a 20 s batch on rte6515 at 2000 contingencies). So phase B follows the same
+        // "untouched scenarios KEEP their converged state" rule as every other orchestrator. ----
+        boolean[] owed = new boolean[chunkSize];
+        for (int s = 0; s < realCount; s++) {
+            owed[s] = rlSolved == null || !rlSolved[s];
+            for (int c = 0; c < nc && !owed[s]; c++) {
+                owed[s] = !Double.isNaN(activatedTargetV[s][c]);
+            }
+        }
         for (int round = 0; round < maxRounds; round++) {
+            if (noneOwed(realCount, owed)) {
+                if (round == 0) {
+                    GpuBatchPhaseStats.bump("VoltageMonitoring.skippedConfirmSolves");
+                    SKIPPED_CONFIRM_SOLVES.increment();
+                }
+                break;
+            }
             List<Integer> ovIdx = new ArrayList<>();
             List<Double> ovVal = new ArrayList<>();
             for (int i = 0; i < targetOverrideIndex.length; i++) {
@@ -259,13 +300,16 @@ public final class GpuBatchVoltageMonitoring {
                 GpuBatchPhaseStats.add("VoltageMonitoring.iterMax", itMax);
             }
             for (int s = 0; s < realCount; s++) {
-                chunkResults[s] = r2[s];                     // the RL-stabilized result for EVERY scenario
+                if (owed[s]) {                               // untouched scenarios KEEP their converged state
+                    chunkResults[s] = r2[s];
+                }
             }
             if (nds > 0) {                                   // this solve may have distributed further
                 GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
-                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
+                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed, owed);
             }
-            // post-RL monitoring re-check
+            // post-RL monitoring re-check: only a scenario that switches now owes the NEXT solve
+            owed = new boolean[chunkSize];
             boolean any = false;
             for (int s = 0; s < realCount; s++) {
                 double[] r = chunkResults[s];
@@ -280,9 +324,13 @@ public final class GpuBatchVoltageMonitoring {
                     double v = r[ctl.vRow()];
                     if (v > ctl.highThreshold()) {
                         activatedTargetV[s][c] = ctl.highTargetV();
+                        ACTIVATIONS.increment();
+                        owed[s] = true;
                         any = true;
                     } else if (v < ctl.lowThreshold()) {
                         activatedTargetV[s][c] = ctl.lowTargetV();
+                        ACTIVATIONS.increment();
+                        owed[s] = true;
                         any = true;
                     }
                 }
@@ -292,6 +340,16 @@ public final class GpuBatchVoltageMonitoring {
             }
         }
         return chunkResults;
+    }
+
+    /** True when no scenario still owes a reactive-limits solve — every outer loop would report STABLE. */
+    private static boolean noneOwed(int realCount, boolean[] owed) {
+        for (int s = 0; s < realCount; s++) {
+            if (owed[s]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Fold every activated (scenario, bus) into the row modes and override lists. */

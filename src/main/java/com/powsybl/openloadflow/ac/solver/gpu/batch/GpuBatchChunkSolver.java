@@ -713,6 +713,12 @@ final class GpuBatchChunkSolver {
                         GpuBatchPhaseStats.bump("main.solves");
                     }
                     long tOrch0 = System.nanoTime();
+                    // Which scenarios already hold a REACTIVE-LIMITS-stabilized state: none yet when the
+                    // main solve skipped the RL phase for the monitoring interleave, all of them otherwise.
+                    // An orchestrator that RL-solves a scenario sets its flag, and VoltageMonitoring uses
+                    // it to skip a confirmation solve that could only re-derive what it was handed.
+                    boolean[] rlSolvedPerScenario = new boolean[chunkSize];
+                    java.util.Arrays.fill(rlSolvedPerScenario, !monActive);
                     if (dbgPairRl) {
                         for (int s2 = 0; s2 < realCount; s2++) {
                             StringBuilder sb = new StringBuilder("GPU-PAIR-RL " + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(GpuBatchStatus.STRATEGY_KEY_SEP, '|'));
@@ -781,7 +787,7 @@ final class GpuBatchChunkSolver {
                     }
                     if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
                         long tOr1 = System.nanoTime();   // TIMED_GpuBatchHvdcAcEmulation
-                        chunkResults = GpuBatchHvdcAcEmulation.orchestrate(handle, chunkSize, realCount, n, nrl, rlStateOut,
+                        chunkResults = GpuBatchHvdcAcEmulation.orchestrate(handle, chunkSize, realCount, n, nrl, rlStateOut, rlSolvedPerScenario,
                                 chunkResults, hvdcControllers, hvdcStatus, config.hvdcLimits(),
                                 rowModePerScenario, baseRowMode, disabledMask,
                                 preHvdcOvIdx, preHvdcOvVal,
@@ -799,7 +805,7 @@ final class GpuBatchChunkSolver {
                     }
                     if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
                         long tOr2 = System.nanoTime();   // TIMED_GpuBatchHvdcAcEmulation
-                        chunkResults = GpuBatchHvdcAcEmulation.orchestrate(handle, chunkSize, realCount, n, nrl, rlStateOut,
+                        chunkResults = GpuBatchHvdcAcEmulation.orchestrate(handle, chunkSize, realCount, n, nrl, rlStateOut, rlSolvedPerScenario,
                                 chunkResults, hvdcControllers, hvdcStatus, config.hvdcLimits(),
                                 rowModePerScenario, baseRowMode, disabledMask,
                                 preHvdcOvIdx, preHvdcOvVal,
@@ -818,7 +824,7 @@ final class GpuBatchChunkSolver {
                     if (monActive && rlStateOut != null) {
                         long tOr3 = System.nanoTime();   // TIMED_GpuBatchVoltageMonitoring
                         chunkResults = GpuBatchVoltageMonitoring.orchestrate(handle, chunkSize, realCount, n, nrl,
-                                chunkResults, monitoringControllers, rlStateOut,
+                                chunkResults, monitoringControllers, rlStateOut, rlSolvedPerScenario,
                                 rowModePerScenario, baseRowMode, disabledMask,
                                 targetOverrideIndex, targetOverrideValue,
                                 dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,

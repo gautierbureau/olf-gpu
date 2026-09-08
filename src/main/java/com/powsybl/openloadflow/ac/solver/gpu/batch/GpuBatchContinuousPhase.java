@@ -239,7 +239,7 @@ final class GpuBatchContinuousPhase {
                     baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, varType, config);
             if (nds > 0) {                                   // this solve may have distributed further
                 GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
-                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, results, dsAnchorCarry, dsSlackCarry, dsSeed);
+                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, results, dsAnchorCarry, dsSlackCarry, dsSeed, affected);
             }
         }
         // ---- LIMITER rounds (OLF nextIteration): one tap per round while I exceeds the limit ----
@@ -285,7 +285,7 @@ final class GpuBatchContinuousPhase {
                     baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, varType, config);
             if (nds > 0) {                                   // this solve may have distributed further
                 GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
-                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, results, dsAnchorCarry, dsSlackCarry, dsSeed);
+                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, results, dsAnchorCarry, dsSlackCarry, dsSeed, moved);
             }
         }
         return results;

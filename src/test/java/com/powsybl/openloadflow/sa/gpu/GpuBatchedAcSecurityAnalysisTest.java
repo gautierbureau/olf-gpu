@@ -2016,6 +2016,96 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 "the saturated-base hvdc run must ENGAGE the batch (was a whole-run CPU gate)");
     }
 
+    /** A monitoring SVC and an AC-emulation HVDC in the SAME network — the only shape in which
+     *  {@code GpuBatchVoltageMonitoring} can skip its phase-B confirmation solve, and therefore the
+     *  only shape that covers the skip at all.
+     *
+     *  <p>The two arms differ ONLY in the automaton's threshold band:
+     *  <ul>
+     *    <li>WIDE band: no monitored bus leaves it, phase A never re-solves, and the HVDC unfreeze
+     *        solve has already stabilised the reactive limits for every scenario — phase B would
+     *        re-derive the state it was handed, so it is skipped. The assertion pins that the skip
+     *        actually fired (a passing test that quietly took the old path would prove nothing).</li>
+     *    <li>Band that the base voltage is already outside: the automaton switches PQ -&gt; PV, phase A
+     *        re-solves, and the skip must NOT fire.</li>
+     *  </ul>
+     *  Both arms are GPU SA == CPU SA at 1e-12, so the skipped solve provably changed no result. */
+    @org.junit.jupiter.api.Test
+    void deviceHvdcWithStandbySvcSkipsTheConfirmSolveAndMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = hvdcWithStandbySvcNetwork(390, 399);   // a band neither scenario's b4 leaves
+        long skippedBefore = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.SKIPPED_CONFIRM_SOLVES.sum();
+        long activatedBefore = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.ACTIVATIONS.sum();
+        assertGpuMatchesCpu(network, hvdcWithStandbySvcContingencies(), 1e-12, hvdcWithStandbySvcParameters());
+        assertEquals(activatedBefore,
+                com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.ACTIVATIONS.sum(),
+                "the wide band must leave the automaton standing by");
+        assertTrue(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.SKIPPED_CONFIRM_SOLVES.sum() > skippedBefore,
+                "phase B's confirmation solve must have been SKIPPED — otherwise this case does not cover the skip");
+    }
+
+    /** The other arm of {@link #deviceHvdcWithStandbySvcSkipsTheConfirmSolveAndMatchesCpu}: the
+     *  automaton activates, so the confirmation solve is NOT skippable and must still run. */
+    @org.junit.jupiter.api.Test
+    void deviceHvdcWithActivatingStandbySvcKeepsTheConfirmSolveAndMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        // Standing by, b4 sits at 398.00 kV at base, 397.62 kV after the l14_BIS outage and 398.34 kV
+        // after the l4 load outage. A 397.8 kV LOW threshold therefore leaves the BASE in band — which
+        // matters: OLF's MonitoringVoltageOuterLoop permanently switches an activated SVC to plain
+        // voltage control, so a base activation would leave no monitoring SVC for the batch to pack —
+        // and takes exactly one scenario out of it.
+        Network network = hvdcWithStandbySvcNetwork(397.8, 500);
+        long skippedBefore = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.SKIPPED_CONFIRM_SOLVES.sum();
+        long activatedBefore = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.ACTIVATIONS.sum();
+        assertGpuMatchesCpu(network, hvdcWithStandbySvcContingencies(), 1e-12, hvdcWithStandbySvcParameters());
+        assertTrue(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.ACTIVATIONS.sum() > activatedBefore,
+                "the automaton must switch PQ -> PV in this arm");
+        assertEquals(skippedBefore,
+                com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.SKIPPED_CONFIRM_SOLVES.sum(),
+                "an activated automaton moved the state — phase B's solve must NOT be skipped");
+    }
+
+    /** {@code deviceHvdcSaturatedBaseMatchesCpu}'s network plus a stand-by SVC on b4 (400 kV). */
+    private static Network hvdcWithStandbySvcNetwork(double lowThreshold, double highThreshold) {
+        Network network = com.powsybl.openloadflow.network.HvdcNetworkFactory.createHvdcLinkedByTwoLinesAndSwitch(
+                com.powsybl.iidm.network.HvdcConverterStation.HvdcType.VSC);
+        network.getHvdcLine("hvdc23").setMaxP(100);
+        network.getLineStream().forEach(l -> l.setR(1).setX(10));
+        com.powsybl.iidm.network.Line l14 = network.getLine("l14");
+        network.newLine().setId("l14_BIS")
+                .setVoltageLevel1(l14.getTerminal1().getVoltageLevel().getId()).setBus1(l14.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l14.getTerminal2().getVoltageLevel().getId()).setBus2(l14.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(3).setX(25)
+                .setG1(l14.getG1()).setB1(l14.getB1()).setG2(l14.getG2()).setB2(l14.getB2()).add();
+        network.getVoltageLevel("b4_vl").newStaticVarCompensator()
+                .setId("svc4").setConnectableBus("b4").setBus("b4")
+                .setBmin(-0.008).setBmax(0.008)
+                .setVoltageSetpoint(400)
+                .setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE)
+                .setRegulating(true)
+                .add();
+        network.getStaticVarCompensator("svc4")
+                .newExtension(com.powsybl.iidm.network.extensions.StandbyAutomatonAdder.class)
+                .withLowVoltageThreshold(lowThreshold).withHighVoltageThreshold(highThreshold)
+                .withLowVoltageSetpoint(398.5).withHighVoltageSetpoint(399)
+                .withB0(-0.001f).withStandbyStatus(true).add();
+        return network;
+    }
+
+    private static List<Contingency> hvdcWithStandbySvcContingencies() {
+        return List.of(new Contingency("l14_BIS", new BranchContingency("l14_BIS")),
+                new Contingency("l4", new com.powsybl.contingency.LoadContingency("l4")));
+    }
+
+    private static com.powsybl.loadflow.LoadFlowParameters hvdcWithStandbySvcParameters() {
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setHvdcAcEmulation(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setSvcVoltageMonitoring(true);
+        return lfp;
+    }
+
     /** DS-carry regression for the HVDC AC-emulation orchestrator: same freeze/saturation scenarios,
      *  with slackBusPMaxMismatch tightened to 0.01 MW (both arms) so the MW-scale network's loss
      *  deltas actually DISTRIBUTE in the main solve — the freeze/limit re-solves must carry that

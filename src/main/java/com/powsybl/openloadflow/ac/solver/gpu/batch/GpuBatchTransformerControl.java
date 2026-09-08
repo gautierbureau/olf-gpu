@@ -499,12 +499,14 @@ public final class GpuBatchTransformerControl {
                     r1OvSlotElem.isEmpty() ? null : r1OvSlotElem.stream().mapToInt(Integer::intValue).toArray(),
                     r1OvVal.isEmpty() ? null : r1OvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                     config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0, 0, null, null);
+            boolean[] taken = new boolean[chunkSize];
             for (int slot : affected) {
                 chunkResults[slot] = r2[slot];
+                taken[slot] = true;
             }
             if (nds > 0) {                                   // this solve may have distributed further
                 captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
-                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
+                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed, taken);
             }
             if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                 traceStep(step, affected, chunkResults, tcs, n, rounded, memberBase, totalMembers, disabledMask);
@@ -817,6 +819,26 @@ public final class GpuBatchTransformerControl {
             int[] dsPhiRow, double[] dsFactor, double[] baseTargets,
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta,
             double[][] chunkResults, double[] anchor, double[] slack, double[] seed) {
+        captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
+                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, anchor, slack, seed, null);
+    }
+
+    /**
+     * As above, but capturing ONLY the scenarios in {@code taken} (null = all of them).
+     *
+     * <p>The distribution is read from the DEVICE's target buffer, which a batched solve rewrites for
+     * every scenario in the chunk — including the ones an orchestrator solved but whose result it then
+     * threw away, because they were already stable and the CPU would never have re-run Newton on them
+     * ("untouched scenarios KEEP their converged state"). Capturing those slots too hands the next
+     * solve a slack distribution belonging to a trajectory the scenario never took, while its state
+     * says otherwise. So the mask that decides which results are kept must also decide which carries
+     * are captured; an untouched slot keeps the carry that matches the state it kept.
+     */
+    @SuppressWarnings("java:S107")
+    static void captureDsCarry(long handle, int chunkSize, int realCount, int n,
+            int[] dsPhiRow, double[] dsFactor, double[] baseTargets,
+            int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta,
+            double[][] chunkResults, double[] anchor, double[] slack, double[] seed, boolean[] taken) {
         int nds = dsPhiRow.length;
         double fsBase = 0;
         for (double fv : dsFactor) {
@@ -824,6 +846,9 @@ public final class GpuBatchTransformerControl {
         }
         double[] finalTargets = GpuAcNewtonSolver.readBatchTargets(handle);
         for (int s = 0; s < chunkSize; s++) {
+            if (taken != null && s < realCount && !taken[s]) {
+                continue;                                    // result discarded — its carry stays as it was
+            }
             boolean liveSlot = s < realCount && chunkResults[s] != null
                     && (int) chunkResults[s][n + 2] == GpuBatchStatus.STATUS_CONVERGED;
             double absorbedSum = 0;

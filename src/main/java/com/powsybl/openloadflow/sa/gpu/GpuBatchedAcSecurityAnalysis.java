@@ -102,6 +102,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      *  network precomputes one per component), so the last precompute's count is a fraction of the
      *  run's. The provider resets it to the sentinel before each run, which is what makes summing
      *  well-defined. */
+    /** Wall-clock spent in the phases of the GPU SA path OUTSIDE the batched solve, accumulated over
+     *  the run's contingencies and printed under {@code OLF_GPU_PHASE_TIME} beside the batch's own
+     *  split. Most of a batched run's wall time is not the batch: the engine still applies each
+     *  contingency, injects the precomputed state, updates the network and detects violations one
+     *  contingency at a time, and that tail is invisible in the batch timings. */
+    static final java.util.Map<String, java.util.concurrent.atomic.LongAdder> PHASE_NS =
+            new java.util.concurrent.ConcurrentSkipListMap<>();
+
     static final java.util.concurrent.atomic.AtomicInteger LAST_GPU_PRECOMPUTED_COUNT =
             new java.util.concurrent.atomic.AtomicInteger(-1);
 
@@ -262,6 +270,11 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     operatorStrategies, actions, limitReductions, contingencyActivePowerLossDistribution);
         } finally {
             runState.remove();                               // pooled partition threads must not leak a run's state
+            if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
+                PHASE_NS.forEach((k, v) ->
+                        System.err.printf("SA_PHASE_TIME  %-40s %6d ms%n", k, v.sum() / 1_000_000));
+                PHASE_NS.clear();
+            }
         }
     }
 
@@ -297,10 +310,13 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     protected void afterPreContingencySimulation(AcLoadFlowParameters parameters) {
         super.afterPreContingencySimulation(parameters);
         RunState rs = runState.get();
+        long tPre = System.nanoTime();
         rs.precomputed = GpuBatchPrecomputer.precompute(network, rs.lfNetwork, rs.context,
                 rs.contingencies, rs.operatorStrategies, rs.actions, rs.batchDistributedSlack,
                 rs.batchReactiveLimits, rs.batchReactiveLimitTol, rs.batchSlackDistTol, rs.batchConvEpsPerEq,
                 rs.batchConfig, reportNode);
+        PHASE_NS.computeIfAbsent("precompute (extraction + batched solves)", k -> new java.util.concurrent.atomic.LongAdder())
+                .add(System.nanoTime() - tPre);
         if (rs.precomputed.isReady()) {
             int solved = rs.precomputed.states().size();
             LAST_GPU_PRECOMPUTED_COUNT.updateAndGet(prev -> Math.max(prev, 0) + solved);
@@ -393,8 +409,11 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         logPostContingencyStart(network, lfContingency);
         Stopwatch stopwatch = Stopwatch.createStarted();
 
+        long tInj = System.nanoTime();
         GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state);
         AcSolverUtil.updateNetwork(network, precomputed.equationSystem());
+        PHASE_NS.computeIfAbsent("  state injection + network update", k -> new java.util.concurrent.atomic.LongAdder())
+                .add(System.nanoTime() - tInj);
 
         PostContingencyComputationStatus status = PostContingencyComputationStatus.CONVERGED;
         var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions,
@@ -404,8 +423,11 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex), createResultExtension,
                 preContingencyNetworkResult, contingency, loadFlowModel, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor(),
                 securityAnalysisParameters.getModifiedMonitoredElementsParameters());
+        long tRes = System.nanoTime();
         postContingencyNetworkResult.update();
         postContingencyLimitViolationManager.detectViolations(network);
+        PHASE_NS.computeIfAbsent("  result build + violation detection", k -> new java.util.concurrent.atomic.LongAdder())
+                .add(System.nanoTime() - tRes);
 
         stopwatch.stop();
         logPostContingencyEnd(network, lfContingency, stopwatch);

@@ -10,13 +10,14 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.AbstractHvdcAcEmulationFlowEquationTerm;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.HvdcAcEmulationSide1ActiveFlowEquationTerm;
+import com.powsybl.openloadflow.ac.equations.HvdcAcEmulationSide2ActiveFlowEquationTerm;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfHvdc;
 import com.powsybl.openloadflow.network.LfNetwork;
-import com.powsybl.openloadflow.util.Evaluable;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -39,8 +40,9 @@ import java.util.Map;
  * DISABLED bit (fillHvdcBatch drops the coupling terms — same channel the JAVA hybrid uses) and the
  * VSC injections land as CONVERTER-BUS target overrides (the stations' targetP is 0 in the base
  * linear extraction, so the bus-target delta IS the station targetP, generator convention). Flow
- * evaluations reuse OLF's OWN p1/p2 equation terms via es-state loading — same pattern as
- * {@link GpuBatchIncrementalFlowControl}.
+ * evaluations call OLF's OWN p1/p2 formulas directly on the scenario's state array (see
+ * {@link Ctl#p1At}) — the equation terms read a shared {@code StateVector} whose every load
+ * recomputes the whole network's flows and derivatives, which is unaffordable per scenario.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -59,9 +61,24 @@ public final class GpuBatchHvdcAcEmulation {
      *  BASE frame — the base status plus the base VSC station targetP contributions ALREADY inside
      *  baseTargets (0 for a linear base; a saturated/frozen base carries its injections there, so
      *  every status override composes as {@code baseTargets - baseD + d(status)}). */
-    record Ctl(int hvElemIndex, int bus1PRow, int bus2PRow, Evaluable p1, Evaluable p2,
+    record Ctl(int hvElemIndex, int bus1PRow, int bus2PRow, double p0, double k,
                double pMax12, double pMax21, double loss1, double loss2, double r,
                int baseStatus, double baseD1, double baseD2) {
+
+        /** OLF's own {@code HvdcAcEmulationSide1ActiveFlowEquationTerm.p1} at a scenario's state.
+         *  Called directly on the state array rather than through the equation term: loading a
+         *  state into the shared {@code StateVector} notifies {@code AcNetworkVector}, which
+         *  recomputes flows AND derivatives for every branch in the network — a whole-network pass
+         *  per scenario per check round, which measured 6 s of a 10 s orchestrator on a 9k-branch
+         *  case. The row IS the bus's BUS_PHI row (one device row per variable). */
+        double p1At(double[] x) {
+            return HvdcAcEmulationSide1ActiveFlowEquationTerm.p1(p0, k, loss1, loss2, r, x[bus1PRow], x[bus2PRow]);
+        }
+
+        /** OLF's own {@code HvdcAcEmulationSide2ActiveFlowEquationTerm.p2}; see {@link #p1At}. */
+        double p2At(double[] x) {
+            return HvdcAcEmulationSide2ActiveFlowEquationTerm.p2(p0, k, loss1, loss2, r, x[bus1PRow], x[bus2PRow]);
+        }
     }
 
     static List<Ctl> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
@@ -88,7 +105,7 @@ public final class GpuBatchHvdcAcEmulation {
             };
             out.add(new Ctl(hvOffset + h,
                     phiRows.get(hvdc.getBus1().getNum()), phiRows.get(hvdc.getBus2().getNum()),
-                    hvdc.getP1(), hvdc.getP2(),
+                    ac.getP0(), ac.getDroop() * 180 / Math.PI,
                     ac.getPMaxFromCS1toCS2(), ac.getPMaxFromCS2toCS1(),
                     hvdc.getConverterStation1().getLossFactor() / 100,
                     hvdc.getConverterStation2().getLossFactor() / 100, hvdc.getR(),
@@ -176,7 +193,6 @@ public final class GpuBatchHvdcAcEmulation {
      *  scenario's WARM-START flows — hv disabled bits set, converter-bus targets pinned. Returns the
      *  per-(scenario, hvdc) status matrix seeded FROZEN (or LINEAR where the freeze cannot apply). */
     static int[][] applyFreeze(int chunkSize, int realCount, int n, List<Ctl> ctls,
-                               GpuBatchIncrementalFlowControl.EsContext esCtx,
                                double[] baseState, double[] x0PerScenario, boolean[][] disabledMask,
                                double[] baseTargets, List<Integer> ovIndexList, List<Double> ovValueList) {
         int[][] status = new int[chunkSize][ctls.size()];
@@ -188,13 +204,12 @@ public final class GpuBatchHvdcAcEmulation {
             } else {
                 System.arraycopy(baseState, 0, warm, 0, n);
             }
-            esCtx.stateVector().set(warm.clone());
             for (int h = 0; h < ctls.size(); h++) {
                 Ctl c = ctls.get(h);
                 if (disabledMask[s][c.hvElemIndex()]) {
                     continue;                                // outaged hvdc — stays as the contingency left it
                 }
-                double[] d = frozenDeltas(c, c.p1().eval(), c.p2().eval());
+                double[] d = frozenDeltas(c, c.p1At(warm), c.p2At(warm));
                 status[s][h] = FROZEN;
                 disabledMask[s][c.hvElemIndex()] = true;
                 // base frame: baseTargets (or the row's existing override — e.g. a lost load on the
@@ -261,9 +276,8 @@ public final class GpuBatchHvdcAcEmulation {
     /** Post-solve driver: the unfreeze pass (all FROZEN → LINEAR, one re-solve) then the AC-emulation
      *  limit rounds (linear ↔ saturation) until stable. Restores every hv disabled bit at exit. */
     @SuppressWarnings({"java:S107", "java:S3776"})
-    static double[][] orchestrate(long handle, int chunkSize, int realCount, int n,
+    static double[][] orchestrate(long handle, int chunkSize, int realCount, int n, int nrl, int[] rlState,
             double[][] chunkResults, List<Ctl> ctls, int[][] status, boolean limitsActive,
-            GpuBatchIncrementalFlowControl.EsContext esCtx,
             int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
             List<Integer> baseOvIndexList, List<Double> baseOvValueList,
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
@@ -303,6 +317,7 @@ public final class GpuBatchHvdcAcEmulation {
         }
         try {
             for (int round = 0; round < maxRounds; round++) {
+                GpuBatchPhaseStats.bump("HvdcAcEmulation.rounds");
                 boolean[] affected = new boolean[chunkSize];
                 boolean any = false;
                 if (unfreezePending) {                       // OLF's UNFREEZE step: all frozen back to linear
@@ -322,13 +337,12 @@ public final class GpuBatchHvdcAcEmulation {
                         if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
                             continue;
                         }
-                        esCtx.stateVector().set(java.util.Arrays.copyOf(r, n));
                         for (int h = 0; h < nh; h++) {
                             Ctl c = ctls.get(h);
                             if (status[s][h] == LINEAR && disabledMask[s][c.hvElemIndex()]) {
                                 continue;                    // outaged by the contingency itself
                             }
-                            int next = nextStatus(c, status[s][h], c.p1().eval(), c.p2().eval());
+                            int next = nextStatus(c, status[s][h], c.p1At(r), c.p2At(r));
                             if (next != status[s][h]) {
                                 status[s][h] = next;
                                 affected[s] = true;
@@ -343,6 +357,7 @@ public final class GpuBatchHvdcAcEmulation {
                     break;
                 }
                 // ---- rebuild the per-scenario hv bits + converter-bus targets from the statuses ----
+                long tPrep = System.nanoTime();
                 List<Integer> ovIdx = new ArrayList<>(baseOvIndexList);
                 List<Double> ovVal = new ArrayList<>(baseOvValueList);
                 GpuBatchTransformerControl.seedDsTargets(nds, dsPhiRow, dsSeed, chunkResults, realCount, n, ovIdx, ovVal);
@@ -377,6 +392,14 @@ public final class GpuBatchHvdcAcEmulation {
                         }
                     }
                 }
+                GpuBatchPhaseStats.addNs("HvdcAcEmulation.prepNs", System.nanoTime() - tPrep);
+                GpuBatchPhaseStats.bump("HvdcAcEmulation.solves");
+                long tDev = System.nanoTime();
+                // Carry the reactive-limits PINNING across the freeze/saturation re-solves and out to the
+                // loops that run after this one. The RL loop is stateful on the CPU too — OLF re-enters it
+                // with the pinning it already established — and a solve handed the pinning cold has to
+                // re-derive it, which measured 4 Newton iterations instead of 1 in the next orchestrator.
+                int[] rlStateOut = rlState != null ? new int[chunkSize * nrl] : null;
                 double[][] r2 = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                         rowModePerScenario, baseRowMode, disabledMask,
                         ovIdx.stream().mapToInt(Integer::intValue).toArray(),
@@ -385,18 +408,31 @@ public final class GpuBatchHvdcAcEmulation {
                         parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                         config.lsMode(), config.maxDv(), config.maxDphi(),
                         config.lsMode() == 2 ? varType : null, x0Full,
-                        shOvSlotElem, shOvGb, null, null,
+                        shOvSlotElem, shOvGb, rlState, rlStateOut,
                         r1OvSlotElem, r1OvVal,
                         config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0,
                         nziBase, ziOnSlotElem, ziOffSlotElem);
+                GpuBatchPhaseStats.addNs("HvdcAcEmulation.deviceNs", System.nanoTime() - tDev);
+                if (rlStateOut != null) {
+                    System.arraycopy(rlStateOut, 0, rlState, 0, rlStateOut.length);
+                }
+                if (GpuBatchPhaseStats.ENABLED) {
+                    int itMax = 0;
+                    for (int s = 0; s < realCount; s++) {
+                        itMax = Math.max(itMax, (int) r2[s][n]);
+                    }
+                    GpuBatchPhaseStats.add("HvdcAcEmulation.iterMax", itMax);
+                }
                 for (int s = 0; s < realCount; s++) {
                     if (affected[s]) {                       // untouched scenarios KEEP their converged state
                         chunkResults[s] = r2[s];
                     }
                 }
                 if (nds > 0) {                               // this solve may have distributed further
+                    long tCap = System.nanoTime();
                     GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
                             dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
+                    GpuBatchPhaseStats.addNs("HvdcAcEmulation.captureNs", System.nanoTime() - tCap);
                 }
             }
         } finally {

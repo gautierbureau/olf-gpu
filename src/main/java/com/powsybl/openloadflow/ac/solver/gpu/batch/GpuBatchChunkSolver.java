@@ -657,7 +657,7 @@ final class GpuBatchChunkSolver {
                         preHvdcOvVal = new ArrayList<>(overrides.valueList());
                         if (config.hvdcFreezing()) {
                             hvdcStatus = GpuBatchHvdcAcEmulation.applyFreeze(chunkSize, realCount, n, hvdcControllers,
-                                    esContext, baseState, x0Full, disabledMask, baseTargets, overrides.mutableIndexList(), overrides.mutableValueList());
+                                    baseState, x0Full, disabledMask, baseTargets, overrides.mutableIndexList(), overrides.mutableValueList());
                             targetOverrideIndex = overrides.indexArray();
                             targetOverrideValue = overrides.valueArray();
                         } else {
@@ -704,6 +704,14 @@ final class GpuBatchChunkSolver {
                             nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
                     tMainSolveNs += System.nanoTime() - tSolve0;
+                    if (GpuBatchPhaseStats.ENABLED) {
+                        int itMax = 0;
+                        for (int s = 0; s < realCount; s++) {
+                            itMax = Math.max(itMax, (int) chunkResults[s][n]);
+                        }
+                        GpuBatchPhaseStats.add("main.iterMax", itMax);
+                        GpuBatchPhaseStats.bump("main.solves");
+                    }
                     long tOrch0 = System.nanoTime();
                     if (dbgPairRl) {
                         for (int s2 = 0; s2 < realCount; s2++) {
@@ -773,8 +781,8 @@ final class GpuBatchChunkSolver {
                     }
                     if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
                         long tOr1 = System.nanoTime();   // TIMED_GpuBatchHvdcAcEmulation
-                        chunkResults = GpuBatchHvdcAcEmulation.orchestrate(handle, chunkSize, realCount, n,
-                                chunkResults, hvdcControllers, hvdcStatus, config.hvdcLimits(), esContext,
+                        chunkResults = GpuBatchHvdcAcEmulation.orchestrate(handle, chunkSize, realCount, n, nrl, rlStateOut,
+                                chunkResults, hvdcControllers, hvdcStatus, config.hvdcLimits(),
                                 rowModePerScenario, baseRowMode, disabledMask,
                                 preHvdcOvIdx, preHvdcOvVal,
                                 dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
@@ -787,12 +795,12 @@ final class GpuBatchChunkSolver {
                                 ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                                 baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                                 config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("HvdcAcEmulation.orchestrate", System.nanoTime() - tOr1, Long::sum);
+                        orchNs.merge("HvdcAcEmulation.orchestrate#1", System.nanoTime() - tOr1, Long::sum);
                     }
                     if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
                         long tOr2 = System.nanoTime();   // TIMED_GpuBatchHvdcAcEmulation
-                        chunkResults = GpuBatchHvdcAcEmulation.orchestrate(handle, chunkSize, realCount, n,
-                                chunkResults, hvdcControllers, hvdcStatus, config.hvdcLimits(), esContext,
+                        chunkResults = GpuBatchHvdcAcEmulation.orchestrate(handle, chunkSize, realCount, n, nrl, rlStateOut,
+                                chunkResults, hvdcControllers, hvdcStatus, config.hvdcLimits(),
                                 rowModePerScenario, baseRowMode, disabledMask,
                                 preHvdcOvIdx, preHvdcOvVal,
                                 dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
@@ -805,7 +813,7 @@ final class GpuBatchChunkSolver {
                                 ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                                 baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                                 config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("HvdcAcEmulation.orchestrate", System.nanoTime() - tOr2, Long::sum);
+                        orchNs.merge("HvdcAcEmulation.orchestrate#2", System.nanoTime() - tOr2, Long::sum);
                     }
                     if (monActive && rlStateOut != null) {
                         long tOr3 = System.nanoTime();   // TIMED_GpuBatchVoltageMonitoring
@@ -959,6 +967,10 @@ final class GpuBatchChunkSolver {
                         + "outer-loop orchestrators=%d ms | %d scenarios in %d chunk(s) of <= %d%n",
                         elapsed, tMainSolveNs / 1_000_000, tOrchestratorNs / 1_000_000, nb, nChunks, chunkSize);
                 orchNs.forEach((k, v) -> System.err.printf("BATCH_PHASE_TIME    %-38s %6d ms%n", k, v / 1_000_000));
+                GpuBatchPhaseStats.snapshot().forEach((k, v) ->
+                        System.err.printf("BATCH_PHASE_TIME    %-38s %6d x%n", k, v));
+                GpuBatchPhaseStats.snapshotMs().forEach((k, v) ->
+                        System.err.printf("BATCH_PHASE_TIME    %-38s %6d ms%n", k, v));
             }
         } catch (RuntimeException e) {
             GpuBatchContextCache.clearContextCache();   // a failed solve may leave the context inconsistent — rebuild next time

@@ -92,9 +92,16 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      *  module's other GPU toggles (there is no GPU parameters extension). Read in {@link GpuSaRunScope}. */
     public static final String GPU_OUTER_LOOP_MODE_PROPERTY = "olf.gpu.sa.outerLoopMode";
 
-    /** How many contingencies the LAST GpuBatchPrecomputer.precompute solved on the GPU device: {@code -1} when
-     *  the batch was not attempted (no device, nothing to batch), {@code 0+} otherwise. Test-visibility hook
-     *  to assert the GPU actually engaged on a device-equipped machine (vs a silent CPU fallback). */
+    /** How many contingencies the run solved on the GPU device: {@code -1} when no batch was attempted
+     *  at all (no device, nothing to batch), {@code 0+} otherwise. Test-visibility hook to assert the
+     *  GPU actually engaged on a device-equipped machine (vs a silent CPU fallback), and the source of
+     *  the GPU/CPU split the validation harness reports.
+     *
+     *  <p>ACCUMULATED across the run's precomputes, not overwritten by each: a threadCount &gt; 1 run
+     *  partitions its contingencies and precomputes one batch per partition (and a multi-component
+     *  network precomputes one per component), so the last precompute's count is a fraction of the
+     *  run's. The provider resets it to the sentinel before each run, which is what makes summing
+     *  well-defined. */
     static final java.util.concurrent.atomic.AtomicInteger LAST_GPU_PRECOMPUTED_COUNT =
             new java.util.concurrent.atomic.AtomicInteger(-1);
 
@@ -294,7 +301,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 rs.contingencies, rs.operatorStrategies, rs.actions, rs.batchDistributedSlack,
                 rs.batchReactiveLimits, rs.batchReactiveLimitTol, rs.batchSlackDistTol, rs.batchConvEpsPerEq,
                 rs.batchConfig, reportNode);
-        LAST_GPU_PRECOMPUTED_COUNT.set(rs.precomputed.isReady() ? rs.precomputed.states().size() : -1);
+        if (rs.precomputed.isReady()) {
+            int solved = rs.precomputed.states().size();
+            LAST_GPU_PRECOMPUTED_COUNT.updateAndGet(prev -> Math.max(prev, 0) + solved);
+        }
         // Sequential fall-through routing is an OPTION (2026-07-17): by DEFAULT the engine's
         // solver reverts to the stock CPU Newton-Raphson after the base LF — single-system GPU
         // solves are not where the device wins (its parallelism is the batch), and the CPU path

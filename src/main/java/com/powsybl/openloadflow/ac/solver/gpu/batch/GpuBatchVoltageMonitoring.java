@@ -210,6 +210,7 @@ public final class GpuBatchVoltageMonitoring {
                 System.arraycopy(src, 0, x0Full, s * n, n);
             }
             applyActivations(realCount, n, ctls, activatedTargetV, rowModePerScenario, ovIdx, ovVal);
+            GpuBatchPhaseStats.bump("VoltageMonitoring.solvesPreRl");
             double[][] r2 = resolve(handle, chunkSize, n, nrl, ctls, activatedTargetV, rlState, 1,
                     rowModePerScenario, baseRowMode, disabledMask, ovIdx, ovVal, x0Full,
                     dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorCarry, dsSlackCarry,
@@ -243,12 +244,20 @@ public final class GpuBatchVoltageMonitoring {
                 System.arraycopy(src, 0, x0Full, s * n, n);
             }
             applyActivations(realCount, n, ctls, activatedTargetV, rowModePerScenario, ovIdx, ovVal);
+            GpuBatchPhaseStats.bump("VoltageMonitoring.solvesRl");
             double[][] r2 = resolve(handle, chunkSize, n, nrl, ctls, activatedTargetV, rlState, 0,
                     rowModePerScenario, baseRowMode, disabledMask, ovIdx, ovVal, x0Full,
                     dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorCarry, dsSlackCarry,
                     r1OvSlotElem, r1OvVal, shOvSlotElem, shOvGb, nziBase, ziOnSlotElem, ziOffSlotElem,
                     baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, varType,
                     config, realCount);
+            if (GpuBatchPhaseStats.ENABLED) {
+                int itMax = 0;
+                for (int s = 0; s < realCount; s++) {
+                    itMax = Math.max(itMax, (int) r2[s][n]);
+                }
+                GpuBatchPhaseStats.add("VoltageMonitoring.iterMax", itMax);
+            }
             for (int s = 0; s < realCount; s++) {
                 chunkResults[s] = r2[s];                     // the RL-stabilized result for EVERY scenario
             }

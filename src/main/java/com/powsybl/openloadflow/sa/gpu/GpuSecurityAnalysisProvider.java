@@ -99,6 +99,7 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
             return super.run(network, workingVariantId, contingenciesProvider, runParameters);
         }
 
+        resetLastGpuPrecomputedCount();                  // the counter ACCUMULATES over the run's partitions
         LOGGER.info("Version: {} (GPU-batched AC security analysis)", new PowsyblOpenLoadFlowVersion());
         OpenLoadFlowParameters loadFlowParametersExt = OpenLoadFlowParameters.get(loadFlowParameters);
         OpenLoadFlowParameters.log(loadFlowParameters, loadFlowParametersExt);

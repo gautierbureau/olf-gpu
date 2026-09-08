@@ -630,17 +630,23 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = IeeeCdfNetworkFactory.create14();
-        // GENERATOR outages on purpose: their scheduled active-power loss goes through the loss
-        // pre-distribution, which COMPOSES per-scenario DS-row overrides — the per-chunk scratch
-        // whose staleness across chunks is what this test is here to catch.
+        // ORDER MATTERS. Generator outages carry a scheduled active-power loss, so they go through
+        // the loss pre-distribution, which COMPOSES per-scenario DS-row overrides onto the chunk's
+        // override list — the per-chunk scratch this test exists to pin. With the chunk capped at 2:
+        //   chunk 1 = (gen, gen)   -> a LONG override list, DS rows sitting at high positions
+        //   chunk 2 = (branch, gen) -> slot 0 contributes nothing, so the list is SHORT when slot 1
+        //                              composes its DS rows under the SAME slot-keyed keys
+        // A per-chunk index that outlives its list therefore resolves chunk-1 positions against a
+        // shorter chunk-2 list: out of range (throws, batch lost) or, worse, in range and pointing
+        // at another row (silent wrong override). Identical chunk shapes hide it, which is why the
+        // kinds are interleaved rather than grouped.
         List<Contingency> ctgs = List.of(
                 new Contingency("B2-G", new com.powsybl.contingency.GeneratorContingency("B2-G")),
                 new Contingency("B3-G", new com.powsybl.contingency.GeneratorContingency("B3-G")),
-                new Contingency("B6-G", new com.powsybl.contingency.GeneratorContingency("B6-G")),
-                new Contingency("B8-G", new com.powsybl.contingency.GeneratorContingency("B8-G")),
                 new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("B6-G", new com.powsybl.contingency.GeneratorContingency("B6-G")),
                 new Contingency("L2-3-1", new BranchContingency("L2-3-1")),
-                new Contingency("L6-11-1", new BranchContingency("L6-11-1")));
+                new Contingency("B8-G", new com.powsybl.contingency.GeneratorContingency("B8-G")));
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true);
         String prev = System.getProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY);

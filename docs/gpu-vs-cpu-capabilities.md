@@ -715,10 +715,15 @@ CPU path at threadCount=4 and ~136 s single-threaded. So the GPU SA is now ~2.7�
 CPU core and ~1.5× slower than four on this network; the remaining GPU time is 8 s of device
 solves and 17.5 s of orchestrators.
 
-CAUTION when indexing these lists: the index must be cleared with the list it indexes (per chunk).
-A stale index survived into the next chunk and threw `IndexOutOfBounds` at 4 chunks of 643 —
-invisible to the whole suite, which never spans a chunk boundary except in
-`deviceMultiChunkMatchesCpu`, and that case is too small to reproduce it.
+The per-chunk override list is now a TYPE that owns its row index — `GpuBatchOverrides` — rather
+than a list plus a hand-maintained map. That makes the desync that bit us structurally
+unreachable: `clear()` drops the index with the entries, appends made through the raw lists (the
+orchestrator hooks take plain `List`s) mark the index dirty so it is rebuilt rather than trusted,
+and the read views are unmodifiable. `GpuBatchOverridesTest` pins those invariants in the suite in
+0.1 s with no GPU — reintroducing the original defect (an index surviving `clear()`) turns
+`clearDropsTheRowIndexWithTheEntries` red with the same IndexOutOfBounds seen on rte6515, which is
+the coverage a network-level test could not give: no case small enough for the suite spans a chunk
+boundary with chunk shapes different enough to expose it.
 
 ### F.-1 Measuring it: the scope census
 

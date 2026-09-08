@@ -204,12 +204,10 @@ final class GpuBatchChunkSolver {
         int[][] rowModePerScenario = new int[chunkSize][];   // per-scenario row mode (re-assigned every chunk)
         // Per-scenario target overrides (generator contingencies): flat (dTargetIndex = slot*n + row, value)
         // lists rebuilt per chunk. Empty when no generator outage is in the chunk.
-        List<Integer> ovIndexList = new ArrayList<>();
-        // flat-row -> position index over ovIndexList: these composition loops run per
-        // (scenario, DS participant), so a lastIndexOf scan over the growing list was
-        // quadratic (the same trap seedDsTargets had).
-        java.util.Map<Integer, Integer> ovPosOf = new java.util.HashMap<>();
-        List<Double> ovValueList = new ArrayList<>();
+        // The per-chunk override list AND its row index in one object: a row may carry only one
+        // override (the device scatter has no ordering), the lookup that enforces that must not be
+        // a linear scan, and the index must never outlive the entries — see GpuBatchOverrides.
+        GpuBatchOverrides overrides = new GpuBatchOverrides();
         java.util.Map<Integer, Integer> ziElemByBranchNumChunk = new java.util.HashMap<>();
         for (int z = 0; z < gpuData.baseOpenZiElements().length; z++) {
             ziElemByBranchNumChunk.put(gpuData.baseOpenZiBranchNums()[z], gpuData.baseOpenZiElements()[z]);
@@ -289,9 +287,7 @@ final class GpuBatchChunkSolver {
                 int nbg = group.size();
                 for (int chunkStart = 0; chunkStart < nbg; chunkStart += chunkSize) {
                     int realCount = Math.min(chunkSize, nbg - chunkStart);
-                    ovIndexList.clear();
-                    ovValueList.clear();
-                    ovPosOf.clear();                         // the index must die with the list it indexes
+                    overrides.clear();
                     List<Integer> dqOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_Q reweight)
                     List<Double> dqOvWList = new ArrayList<>();
                     List<Integer> drOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_RHO renorm, plan A5)
@@ -394,9 +390,7 @@ final class GpuBatchChunkSolver {
                                     row[frozen[k]] = 0;      // identity row — bus decoupled from the main component
                                     // ...held at a CLEAN flat state (V=1, phi=0) via the target override, NOT the base
                                     // equation target (a P/Q value that gives a nonsensical islanded voltage/angle).
-                                    ovPosOf.put(s * n + frozen[k], ovIndexList.size());
-                                    ovIndexList.add(s * n + frozen[k]);
-                                    ovValueList.add(frozenTargets[k]);
+                                    overrides.add(s * n + frozen[k], frozenTargets[k]);
                                 }
                                 rowModePerScenario[s] = row;
                             }
@@ -411,12 +405,8 @@ final class GpuBatchChunkSolver {
                                 int[] rowZi = rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rowModePerScenario[s];
                                 rowZi[dpRow] = 0;
                                 rowZi[dqRow] = 0;
-                                ovPosOf.put(s * n + dpRow, ovIndexList.size());
-                                ovIndexList.add(s * n + dpRow);
-                                ovValueList.add(0.0);
-                                ovPosOf.put(s * n + dqRow, ovIndexList.size());
-                                ovIndexList.add(s * n + dqRow);
-                                ovValueList.add(0.0);
+                                overrides.add(s * n + dpRow, 0.0);
+                                overrides.add(s * n + dqRow, 0.0);
                                 rowModePerScenario[s] = rowZi;
                             }
                             for (LfBranch reclosed : contingencies.get(ci).reclosedBranches()) {
@@ -452,13 +442,10 @@ final class GpuBatchChunkSolver {
                             GenOutage[] gos = genOutagesByIndex[ci];
                             if (gos != null) {               // generator loss(es): per-BUS target overrides (merged by bus;
                                 for (GenOutage go : gos) {   // at most one DS-participant bus per contingency by construction)
-                                    ovPosOf.put(s * n + go.pRow(), ovIndexList.size());
-                                    ovIndexList.add(s * n + go.pRow());
-                                    ovValueList.add(go.pTarget());
+                                    overrides.add(s * n + go.pRow(), go.pTarget());
                                     if (go.qOverride()) {    // Q target sheds the lost gens' Q: on the PV->PQ flip AND
-                                        ovPosOf.put(s * n + go.vRow(), ovIndexList.size());
-                                        ovIndexList.add(s * n + go.vRow());   // on an ALREADY-PQ bus losing fixed-Q gens (#21)
-                                        ovValueList.add(go.qTarget());
+                                        // on an ALREADY-PQ bus losing fixed-Q gens (#21)
+                                        overrides.add(s * n + go.vRow(), go.qTarget());
                                     }
                                     if (go.toPq()) {
                                         int[] row = rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rowModePerScenario[s];
@@ -523,14 +510,8 @@ final class GpuBatchChunkSolver {
                                 }
                                 dsAnchorShift[s * nds + i] = shares[i];
                                 int flat = s * n + gpuData.dsPhiRow()[i];
-                                Integer ovAt = ovPosOf.get(flat);          // compose with a gen-outage override
-                                if (ovAt != null) {
-                                    ovValueList.set(ovAt, ovValueList.get(ovAt) + shares[i]);
-                                } else {
-                                    ovPosOf.put(flat, ovIndexList.size());
-                                    ovIndexList.add(flat);
-                                    ovValueList.add(baseTargets[gpuData.dsPhiRow()[i]] + shares[i]);
-                                }
+                                // compose with a gen-outage override on the same row
+                                overrides.compose(flat, baseTargets[gpuData.dsPhiRow()[i]], shares[i]);
                             }
                             dsSlackShift[s] = shares[nds];
                         }
@@ -543,29 +524,29 @@ final class GpuBatchChunkSolver {
                     List<Integer> prePcOvIdx = null;
                     List<Double> prePcOvVal = null;
                     if (continuousPhaseControllers != null && !continuousPhaseControllers.isEmpty()) {
-                        prePcOvIdx = new ArrayList<>(ovIndexList);
-                        prePcOvVal = new ArrayList<>(ovValueList);
+                        prePcOvIdx = new ArrayList<>(overrides.indexList());
+                        prePcOvVal = new ArrayList<>(overrides.valueList());
                         GpuBatchContinuousPhase.applyPhaseOn(realCount, n, continuousPhaseControllers,
-                                rowModePerScenario, baseRowMode, disabledMask, ovIndexList, ovValueList);
+                                rowModePerScenario, baseRowMode, disabledMask, overrides.mutableIndexList(), overrides.mutableValueList());
                     }
                     List<Integer> preShuntOvIdx = null;
                     List<Double> preShuntOvVal = null;
                     if (config.simpleShuntControl() && simpleShuntGroups != null && !simpleShuntGroups.isEmpty()) {
-                        preShuntOvIdx = new ArrayList<>(ovIndexList);
-                        preShuntOvVal = new ArrayList<>(ovValueList);
+                        preShuntOvIdx = new ArrayList<>(overrides.indexList());
+                        preShuntOvVal = new ArrayList<>(overrides.valueList());
                         GpuBatchSimpleShuntVc.applyVcOn(realCount, n, simpleShuntGroups,
-                                rowModePerScenario, baseRowMode, disabledMask, ovIndexList, ovValueList);
+                                rowModePerScenario, baseRowMode, disabledMask, overrides.mutableIndexList(), overrides.mutableValueList());
                     }
                     List<Integer> preTvcOvIdx = null;
                     List<Double> preTvcOvVal = null;
                     if (config.simpleTransformerControl() && transformerControllers != null && !transformerControllers.isEmpty()) {
-                        preTvcOvIdx = new ArrayList<>(ovIndexList);
-                        preTvcOvVal = new ArrayList<>(ovValueList);
+                        preTvcOvIdx = new ArrayList<>(overrides.indexList());
+                        preTvcOvVal = new ArrayList<>(overrides.valueList());
                         GpuBatchSimpleTvc.applyVcOn(realCount, n, transformerControllers,
-                                rowModePerScenario, baseRowMode, disabledMask, baseState, ovIndexList, ovValueList);
+                                rowModePerScenario, baseRowMode, disabledMask, baseState, overrides.mutableIndexList(), overrides.mutableValueList());
                     }
-                    int[] targetOverrideIndex = ovIndexList.stream().mapToInt(Integer::intValue).toArray();
-                    double[] targetOverrideValue = ovValueList.stream().mapToDouble(Double::doubleValue).toArray();
+                    int[] targetOverrideIndex = overrides.indexArray();
+                    double[] targetOverrideValue = overrides.valueArray();
                     if (pairPhase && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_OV"))) {
                         for (int s2 = 0; s2 < realCount; s2++) {
                             StringBuilder sb = new StringBuilder("GPU-PAIR-OV "
@@ -653,14 +634,7 @@ final class GpuBatchChunkSolver {
                                     // nonlinear along the path). A pair override on the row (gen action /
                                     // gen-outage pTarget) is base-referenced: add the parent absorption to it.
                                     int flat = s * n + row;
-                                    Integer ovAt = ovPosOf.get(flat);
-                                    if (ovAt != null) {
-                                        ovValueList.set(ovAt, ovValueList.get(ovAt) + shift);
-                                    } else {
-                                        ovPosOf.put(flat, ovIndexList.size());
-                                        ovIndexList.add(flat);
-                                        ovValueList.add(baseTargets[row] + shift);
-                                    }
+                                    overrides.compose(flat, baseTargets[row], shift);
                                 }
                                 // the slack's own absorption in the parent's distribution, proportional to the
                                 // participants' share at the PARENT's factor sum (reweighted if the parent lost
@@ -669,8 +643,8 @@ final class GpuBatchChunkSolver {
                                 dsSlackShift[s] = parentFs > 0 ? (1.0 - parentFs) / parentFs * absorbedSum : 0.0;
                             }
                         }
-                        targetOverrideIndex = ovIndexList.stream().mapToInt(Integer::intValue).toArray();
-                        targetOverrideValue = ovValueList.stream().mapToDouble(Double::doubleValue).toArray();
+                        targetOverrideIndex = overrides.indexArray();
+                        targetOverrideValue = overrides.valueArray();
                     }
                     // HVDC AC-emulation: snapshot the pre-freeze override lists (the round rebuild base),
                     // then OLF's FreezingHvdcACEmulation freezes every live hvdc at its scenario's
@@ -679,13 +653,13 @@ final class GpuBatchChunkSolver {
                     List<Double> preHvdcOvVal = null;
                     int[][] hvdcStatus = null;
                     if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
-                        preHvdcOvIdx = new ArrayList<>(ovIndexList);
-                        preHvdcOvVal = new ArrayList<>(ovValueList);
+                        preHvdcOvIdx = new ArrayList<>(overrides.indexList());
+                        preHvdcOvVal = new ArrayList<>(overrides.valueList());
                         if (config.hvdcFreezing()) {
                             hvdcStatus = GpuBatchHvdcAcEmulation.applyFreeze(chunkSize, realCount, n, hvdcControllers,
-                                    esContext, baseState, x0Full, disabledMask, baseTargets, ovIndexList, ovValueList);
-                            targetOverrideIndex = ovIndexList.stream().mapToInt(Integer::intValue).toArray();
-                            targetOverrideValue = ovValueList.stream().mapToDouble(Double::doubleValue).toArray();
+                                    esContext, baseState, x0Full, disabledMask, baseTargets, overrides.mutableIndexList(), overrides.mutableValueList());
+                            targetOverrideIndex = overrides.indexArray();
+                            targetOverrideValue = overrides.valueArray();
                         } else {
                             hvdcStatus = new int[chunkSize][hvdcControllers.size()];
                         }

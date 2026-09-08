@@ -201,7 +201,7 @@ public final class GpuBatchHvdcAcEmulation {
             int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
             List<Integer> baseOvIndexList, List<Double> baseOvValueList,
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
-            double[] dsAnchorShift, double[] dsSlackShift,
+            int[] dsPhiRow, double[] dsFactor,
             int[] r1OvSlotElem, double[] r1OvVal, int[] shOvSlotElem, double[] shOvGb,
             int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem,
             double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
@@ -222,6 +222,18 @@ public final class GpuBatchHvdcAcEmulation {
             for (int h = 0; h < nh; h++) {
                 ctgOut[s][h] = status[s][h] == LINEAR && disabledMask[s][ctls.get(h).hvElemIndex()];
             }
+        }
+        // DS target carry (same three coupled pieces as GpuBatchTransformerControl): the MAIN
+        // solve's slack distribution must ride into every freeze/saturation re-solve, or the
+        // kernel re-derives it from the re-uploaded baseTargets along a trajectory the CPU
+        // never takes (drift confined to slack-distributing scenarios).
+        int nds = dsPhiRow != null ? dsPhiRow.length : 0;
+        double[] dsAnchorCarry = nds > 0 ? new double[chunkSize * nds] : null;
+        double[] dsSlackCarry = nds > 0 ? new double[chunkSize] : null;
+        double[] dsSeed = nds > 0 ? new double[chunkSize * nds] : null;
+        if (nds > 0) {
+            GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
+                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
         }
         try {
             for (int round = 0; round < maxRounds; round++) {
@@ -267,6 +279,7 @@ public final class GpuBatchHvdcAcEmulation {
                 // ---- rebuild the per-scenario hv bits + converter-bus targets from the statuses ----
                 List<Integer> ovIdx = new ArrayList<>(baseOvIndexList);
                 List<Double> ovVal = new ArrayList<>(baseOvValueList);
+                GpuBatchTransformerControl.seedDsTargets(nds, dsPhiRow, dsSeed, chunkResults, realCount, n, ovIdx, ovVal);
                 double[] x0Full = new double[chunkSize * n];
                 for (int s = 0; s < chunkSize; s++) {
                     double[] src = s < realCount && chunkResults[s] != null ? chunkResults[s] : baseState;
@@ -295,7 +308,7 @@ public final class GpuBatchHvdcAcEmulation {
                         rowModePerScenario, baseRowMode, disabledMask,
                         ovIdx.stream().mapToInt(Integer::intValue).toArray(),
                         ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift, null, null,
+                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorCarry, dsSlackCarry, null, null,
                         parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                         config.lsMode(), config.maxDv(), config.maxDphi(),
                         config.lsMode() == 2 ? varType : null, x0Full,
@@ -307,6 +320,10 @@ public final class GpuBatchHvdcAcEmulation {
                     if (affected[s]) {                       // untouched scenarios KEEP their converged state
                         chunkResults[s] = r2[s];
                     }
+                }
+                if (nds > 0) {                               // this solve may have distributed further
+                    GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
+                            dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
                 }
             }
         } finally {

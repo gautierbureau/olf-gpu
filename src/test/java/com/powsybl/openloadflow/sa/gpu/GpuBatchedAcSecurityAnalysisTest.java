@@ -540,6 +540,32 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** DS-carry regression for the INCREMENTAL SHUNT orchestrator (the IncrementalTvc bug's sibling):
+     *  the l1 outage reroutes ~100 MW over the doubled-impedance clone, so the MAIN solve's in-kernel
+     *  DS distributes the loss jump; the tightened deadband makes the same scenario MOVE shunt
+     *  sections, whose re-solve must CARRY that distribution (capture/seed/re-capture) — without it
+     *  the kernel re-derives the slack split from the re-uploaded base targets. 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceIncrementalShuntDsCarryMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.ShuntNetworkFactory.create();
+        network.getShuntCompensator("SHUNT").setTargetDeadband(1.0);   // post-outage V sag must trip it
+        com.powsybl.iidm.network.Line l1 = network.getLine("l1");
+        network.newLine().setId("l1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR() * 2).setX(l1.getX() * 2)
+                .setG1(l1.getG1()).setB1(l1.getB1()).setG2(l1.getG2()).setB2(l1.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("l1", new BranchContingency("l1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setShuntCompensatorVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setShuntVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.ShuntVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get());
+    }
+
     /** DEVICE-mode IncrementalPhaseControl (ACTIVE_POWER_CONTROL): a1 taps drive the controlled branch's
      *  P via in-kernel dP/da1 sensitivities + OLF's own flow terms (GpuBatchIncrementalFlowControl);
      *  the tap-moving strong-line outage included, GPU SA == CPU SA at 1e-12. */
@@ -565,6 +591,40 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
                 .setPhaseShifterControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.PhaseShifterControlMode.INCREMENTAL);
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
+    /** Tightened-DS regression for the INCREMENTAL FLOW-CONTROL orchestrator: at 0.01 MW the
+     *  scenarios batch at 1e-12 with the DS carry plumbed. The second block pins the PATHOLOGICAL
+     *  micro-threshold corner: a sweep measured thresholds 1e-3/5e-4/2e-4 MW all &lt; 1e-14 kV and
+     *  ONLY 1e-4 MW at 1.1e-10 kV — a distribute/skip decision landing on opposite sides of the
+     *  threshold boundary (the 1-MW DS knife edge's 100-W sibling), NOT a scaling systematic.
+     *  Accepted parity per the 2026-09-08 decision (1e-10-class agreement is good; no guard). */
+    @org.junit.jupiter.api.Test
+    void deviceIncrementalPhaseDsCarryMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.TwoWindingsTransformer ps1 = network.getTwoWindingsTransformer("PS1");
+        ps1.getPhaseTapChanger().setRegulationMode(com.powsybl.iidm.network.PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL)
+                .setTargetDeadband(1).setRegulating(true).setTapPosition(1)
+                .setRegulationTerminal(ps1.getTerminal1()).setRegulationValue(83);
+        com.powsybl.iidm.network.Line l1 = network.getLine("L1");
+        network.newLine().setId("L1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR() * 2).setX(l1.getX() * 2)
+                .setG1(l1.getG1()).setB1(l1.getB1()).setG2(l1.getG2()).setB2(l1.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("L1_BIS", new BranchContingency("L1_BIS")),
+                new Contingency("L1", new BranchContingency("L1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setPhaseShifterRegulationOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setPhaseShifterControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.PhaseShifterControlMode.INCREMENTAL)
+                .setSlackBusPMaxMismatch(0.01);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        // micro-threshold corner (100 W): batches, agrees to the measured 1.1e-10 kV ordering gap
+        com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp).setSlackBusPMaxMismatch(1e-4);
+        assertGpuMatchesCpu(network, ctgs, 1e-9, lfp);
     }
 
     /** DEVICE-mode IncrementalTransformerReactivePowerControl: rho taps drive the controlled branch's Q
@@ -1691,7 +1751,34 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 new Contingency("l12", new BranchContingency("l12")));
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setHvdcAcEmulation(true).setDistributedSlack(true).setUseReactiveLimits(true);
-        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setStartWithFrozenACEmulation(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setStartWithFrozenACEmulation(true)
+                .setSlackBusPMaxMismatch(1e-4);   // MW-scale network: micro-threshold so DS genuinely distributes (both arms)
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
+    /** DS-carry regression for the HVDC AC-emulation orchestrator: same freeze/saturation scenarios,
+     *  with slackBusPMaxMismatch tightened to 0.01 MW (both arms) so the MW-scale network's loss
+     *  deltas actually DISTRIBUTE in the main solve — the freeze/limit re-solves must carry that
+     *  distribution (capture/seed/re-capture) instead of re-deriving it from base targets. 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceHvdcDsCarryMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.HvdcNetworkFactory.createHvdcInAcEmulationInSymetricNetwork();
+        network.getHvdcLine("hvdc12").newExtension(com.powsybl.iidm.network.extensions.HvdcOperatorActivePowerRangeAdder.class)
+                .withOprFromCS1toCS2(1.4f).withOprFromCS2toCS1(1.4f).add();
+        com.powsybl.iidm.network.Line l12 = network.getLine("l12");
+        network.newLine().setId("l12_BIS")
+                .setVoltageLevel1(l12.getTerminal1().getVoltageLevel().getId()).setBus1(l12.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l12.getTerminal2().getVoltageLevel().getId()).setBus2(l12.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l12.getR() * 2).setX(l12.getX() * 2)
+                .setG1(l12.getG1()).setB1(l12.getB1()).setG2(l12.getG2()).setB2(l12.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("l12_BIS", new BranchContingency("l12_BIS")),
+                new Contingency("l12", new BranchContingency("l12")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setHvdcAcEmulation(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setStartWithFrozenACEmulation(true)
+                .setSlackBusPMaxMismatch(1e-4);   // MW-scale network: micro-threshold so DS genuinely distributes (both arms)
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 

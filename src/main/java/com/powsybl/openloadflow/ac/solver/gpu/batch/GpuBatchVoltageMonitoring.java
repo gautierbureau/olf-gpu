@@ -137,7 +137,7 @@ public final class GpuBatchVoltageMonitoring {
             int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
             int[] targetOverrideIndex, double[] targetOverrideValue,
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
-            double[] dsAnchorShift, double[] dsSlackShift,
+            int[] dsPhiRow, double[] dsFactor,
             int[] r1OvSlotElem, double[] r1OvVal, int[] shOvSlotElem, double[] shOvGb,
             int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem,
             double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
@@ -146,6 +146,17 @@ public final class GpuBatchVoltageMonitoring {
         int nc = ctls.size();
         if (nc == 0 || rlState == null) {
             return chunkResults;
+        }
+        // DS target carry (same three coupled pieces as GpuBatchTransformerControl): the MAIN
+        // solve's slack distribution must ride into the activation/RL re-solves, or the kernel
+        // re-derives it from the re-uploaded baseTargets along a trajectory the CPU never takes.
+        int nds = dsPhiRow != null ? dsPhiRow.length : 0;
+        double[] dsAnchorCarry = nds > 0 ? new double[chunkSize * nds] : null;
+        double[] dsSlackCarry = nds > 0 ? new double[chunkSize] : null;
+        double[] dsSeed = nds > 0 ? new double[chunkSize * nds] : null;
+        if (nds > 0) {
+            GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
+                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
         }
         double[][] activatedTargetV = new double[chunkSize][nc];   // NaN = still standing by
         for (double[] row : activatedTargetV) {
@@ -192,6 +203,7 @@ public final class GpuBatchVoltageMonitoring {
                 ovIdx.add(targetOverrideIndex[i]);
                 ovVal.add(targetOverrideValue[i]);
             }
+            GpuBatchTransformerControl.seedDsTargets(nds, dsPhiRow, dsSeed, chunkResults, realCount, n, ovIdx, ovVal);
             double[] x0Full = new double[chunkSize * n];
             for (int s = 0; s < chunkSize; s++) {
                 double[] src = s < realCount && chunkResults[s] != null ? chunkResults[s] : baseState;
@@ -200,7 +212,7 @@ public final class GpuBatchVoltageMonitoring {
             applyActivations(realCount, n, ctls, activatedTargetV, rowModePerScenario, ovIdx, ovVal);
             double[][] r2 = resolve(handle, chunkSize, n, nrl, ctls, activatedTargetV, rlState, 1,
                     rowModePerScenario, baseRowMode, disabledMask, ovIdx, ovVal, x0Full,
-                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
+                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorCarry, dsSlackCarry,
                     r1OvSlotElem, r1OvVal, shOvSlotElem, shOvGb, nziBase, ziOnSlotElem, ziOffSlotElem,
                     baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, varType,
                     config, realCount);
@@ -208,6 +220,10 @@ public final class GpuBatchVoltageMonitoring {
                 if (affected[s]) {                           // untouched scenarios KEEP their DS-only state
                     chunkResults[s] = r2[s];
                 }
+            }
+            if (nds > 0) {                                   // this solve may have distributed further
+                GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
+                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
             }
         }
         // ---- PHASE B: monitoring stable at DS-only states — run the FULL solve (RL enabled) for every
@@ -220,6 +236,7 @@ public final class GpuBatchVoltageMonitoring {
                 ovIdx.add(targetOverrideIndex[i]);
                 ovVal.add(targetOverrideValue[i]);
             }
+            GpuBatchTransformerControl.seedDsTargets(nds, dsPhiRow, dsSeed, chunkResults, realCount, n, ovIdx, ovVal);
             double[] x0Full = new double[chunkSize * n];
             for (int s = 0; s < chunkSize; s++) {
                 double[] src = s < realCount && chunkResults[s] != null ? chunkResults[s] : baseState;
@@ -228,12 +245,16 @@ public final class GpuBatchVoltageMonitoring {
             applyActivations(realCount, n, ctls, activatedTargetV, rowModePerScenario, ovIdx, ovVal);
             double[][] r2 = resolve(handle, chunkSize, n, nrl, ctls, activatedTargetV, rlState, 0,
                     rowModePerScenario, baseRowMode, disabledMask, ovIdx, ovVal, x0Full,
-                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
+                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorCarry, dsSlackCarry,
                     r1OvSlotElem, r1OvVal, shOvSlotElem, shOvGb, nziBase, ziOnSlotElem, ziOffSlotElem,
                     baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, varType,
                     config, realCount);
             for (int s = 0; s < realCount; s++) {
                 chunkResults[s] = r2[s];                     // the RL-stabilized result for EVERY scenario
+            }
+            if (nds > 0) {                                   // this solve may have distributed further
+                GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
+                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
             }
             // post-RL monitoring re-check
             boolean any = false;
@@ -296,7 +317,7 @@ public final class GpuBatchVoltageMonitoring {
             int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
             List<Integer> ovIdx, List<Double> ovVal, double[] x0Full,
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
-            double[] dsAnchorShift, double[] dsSlackShift,
+            double[] dsAnchorCarry, double[] dsSlackCarry,
             int[] r1OvSlotElem, double[] r1OvVal, int[] shOvSlotElem, double[] shOvGb,
             int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem,
             double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
@@ -318,7 +339,7 @@ public final class GpuBatchVoltageMonitoring {
                 rowModePerScenario, baseRowMode, disabledMask,
                 ovIdx.stream().mapToInt(Integer::intValue).toArray(),
                 ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
+                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorCarry, dsSlackCarry,
                 vtSlotIdx.stream().mapToInt(Integer::intValue).toArray(),
                 vtVal.stream().mapToDouble(Double::doubleValue).toArray(),
                 parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,

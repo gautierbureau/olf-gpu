@@ -344,24 +344,7 @@ final class GpuBatchIncrementalTvc {
                 ovIdx.add(targetOverrideIndex[i]);
                 ovVal.add(targetOverrideValue[i]);
             }
-            if (nds > 0) {                                   // DS-row target seeds at the carried values
-                for (int s2 = 0; s2 < realCount; s2++) {
-                    double[] r = chunkResults[s2];
-                    if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
-                        continue;
-                    }
-                    for (int i = 0; i < nds; i++) {
-                        int flat = s2 * n + dsPhiRow[i];
-                        int at = ovIdx.lastIndexOf(Integer.valueOf(flat));
-                        if (at >= 0) {
-                            ovVal.set(at, dsSeed[s2 * nds + i]);
-                        } else {
-                            ovIdx.add(flat);
-                            ovVal.add(dsSeed[s2 * nds + i]);
-                        }
-                    }
-                }
-            }
+            GpuBatchTransformerControl.seedDsTargets(nds, dsPhiRow, dsSeed, chunkResults, realCount, n, ovIdx, ovVal);
             List<Integer> r1Slot = new ArrayList<>();
             List<Double> r1Val = new ArrayList<>();
             for (int i = 0; i < baseR1OvSlotElem.length; i += 2) {

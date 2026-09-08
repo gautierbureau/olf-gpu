@@ -157,7 +157,7 @@ public final class GpuBatchSecondaryVc {
             int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
             int[] targetOverrideIndex, double[] targetOverrideValue,
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
-            double[] dsAnchorShift, double[] dsSlackShift,
+            int[] dsPhiRow, double[] dsFactor,
             int[] r1OvSlotElem, double[] r1OvVal, int[] shOvSlotElem, double[] shOvGb,
             int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem,
             double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
@@ -203,6 +203,17 @@ public final class GpuBatchSecondaryVc {
         int[] obs = obsList.stream().mapToInt(Integer::intValue).toArray();
         int m = obs.length;
         int maxRounds = config.maxOuterIterations() > 0 ? config.maxOuterIterations() : 20;
+        // DS target carry (same three coupled pieces as GpuBatchTransformerControl): the MAIN
+        // solve's slack distribution must ride into every zone re-solve, or the kernel re-derives
+        // it from the re-uploaded baseTargets along a trajectory the CPU never takes.
+        int nds = dsPhiRow != null ? dsPhiRow.length : 0;
+        double[] dsAnchorCarry = nds > 0 ? new double[chunkSize * nds] : null;
+        double[] dsSlackCarry = nds > 0 ? new double[chunkSize] : null;
+        double[] dsSeed = nds > 0 ? new double[chunkSize * nds] : null;
+        if (nds > 0) {
+            GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
+                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
+        }
 
         for (int round = 0; round < maxRounds; round++) {
             // ---- per-scenario OLF check(): re-enable pass, zone triggers ----
@@ -392,6 +403,7 @@ public final class GpuBatchSecondaryVc {
                 ovIdx.add(targetOverrideIndex[i]);
                 ovVal.add(targetOverrideValue[i]);
             }
+            GpuBatchTransformerControl.seedDsTargets(nds, dsPhiRow, dsSeed, chunkResults, realCount, n, ovIdx, ovVal);
             List<Integer> vtSlotIdx = new ArrayList<>();
             List<Double> vtVal = new ArrayList<>();
             for (int s = 0; s < realCount; s++) {
@@ -413,7 +425,7 @@ public final class GpuBatchSecondaryVc {
                     rowModePerScenario, baseRowMode, disabledMask,
                     ovIdx.stream().mapToInt(Integer::intValue).toArray(),
                     ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
+                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorCarry, dsSlackCarry,
                     vtSlotIdx.stream().mapToInt(Integer::intValue).toArray(),
                     vtVal.stream().mapToDouble(Double::doubleValue).toArray(),
                     parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
@@ -428,6 +440,10 @@ public final class GpuBatchSecondaryVc {
                 if (affected[s]) {                           // untouched scenarios KEEP their converged state
                     chunkResults[s] = r2[s];
                 }
+            }
+            if (nds > 0) {                                   // this solve may have distributed further
+                GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
+                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
             }
         }
         return chunkResults;

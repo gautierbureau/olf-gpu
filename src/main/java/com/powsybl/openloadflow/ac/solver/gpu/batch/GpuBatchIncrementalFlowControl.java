@@ -269,7 +269,7 @@ final class GpuBatchIncrementalFlowControl {
             int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
             int[] targetOverrideIndex, double[] targetOverrideValue,
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
-            double[] dsAnchorShift, double[] dsSlackShift,
+            int[] dsPhiRow, double[] dsFactor,
             int[] baseR1OvSlotElem, double[] baseR1OvVal, int[] shOvSlotElem, double[] shOvGb,
             int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem,
             double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
@@ -299,6 +299,17 @@ final class GpuBatchIncrementalFlowControl {
         int[] obs = obsList.stream().mapToInt(Integer::intValue).toArray();
         int m = obs.length;
         int maxRounds = config.maxOuterIterations() > 0 ? config.maxOuterIterations() : 20;
+        // DS target carry (same three coupled pieces as GpuBatchTransformerControl): the MAIN
+        // solve's slack distribution must ride into every tap-move re-solve, or the kernel
+        // re-derives it from the re-uploaded baseTargets along a trajectory the CPU never takes.
+        int nds = dsPhiRow != null ? dsPhiRow.length : 0;
+        double[] dsAnchorCarry = nds > 0 ? new double[chunkSize * nds] : null;
+        double[] dsSlackCarry = nds > 0 ? new double[chunkSize] : null;
+        double[] dsSeed = nds > 0 ? new double[chunkSize * nds] : null;
+        if (nds > 0) {
+            GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
+                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
+        }
 
         for (int round = 0; round < maxRounds; round++) {
             // ---- which (scenario, controller) pairs need attention on the current converged states ----
@@ -408,6 +419,7 @@ final class GpuBatchIncrementalFlowControl {
                 ovIdx.add(targetOverrideIndex[i]);
                 ovVal.add(targetOverrideValue[i]);
             }
+            GpuBatchTransformerControl.seedDsTargets(nds, dsPhiRow, dsSeed, chunkResults, realCount, n, ovIdx, ovVal);
             List<Integer> r1Slot = new ArrayList<>();
             List<Double> r1Val = new ArrayList<>();
             for (int v : baseR1OvSlotElem) {
@@ -437,7 +449,7 @@ final class GpuBatchIncrementalFlowControl {
                     rowModePerScenario, baseRowMode, disabledMask,
                     ovIdx.stream().mapToInt(Integer::intValue).toArray(),
                     ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift, null, null,
+                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorCarry, dsSlackCarry, null, null,
                     parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                     config.lsMode(), config.maxDv(), config.maxDphi(),
                     config.lsMode() == 2 ? varType : null, x0Full,
@@ -451,6 +463,10 @@ final class GpuBatchIncrementalFlowControl {
                     chunkResults[s] = r2[s];                 // the CPU never re-runs Newton on a STABLE scenario,
                 }                                            // and the batch re-solve's forced first iteration
             }                                                // would polish them off the CPU's point (~1e-5)
+            if (nds > 0) {                                   // this solve may have distributed further
+                GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
+                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
+            }
         }
         return chunkResults;
     }

@@ -172,13 +172,24 @@ final class GpuBatchContinuousPhase {
             int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
             List<Integer> baseOvIndexList, List<Double> baseOvValueList,
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
-            double[] dsAnchorShift, double[] dsSlackShift,
+            int[] dsPhiRow, double[] dsFactor,
             int[] baseR1OvSlotElem, double[] baseR1OvVal, int[] shOvSlotElem, double[] shOvGb,
             int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem,
             double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
             double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, int[] varType,
             BatchConfig config) {
         double[][] results = chunkResults;
+        // DS target carry (same three coupled pieces as GpuBatchTransformerControl): the MAIN
+        // solve's slack distribution must ride into the pinned re-solves, or the kernel re-derives
+        // it from the re-uploaded baseTargets along a trajectory the CPU never takes.
+        int nds = dsPhiRow != null ? dsPhiRow.length : 0;
+        double[] dsAnchorCarry = nds > 0 ? new double[chunkSize * nds] : null;
+        double[] dsSlackCarry = nds > 0 ? new double[chunkSize] : null;
+        double[] dsSeed = nds > 0 ? new double[chunkSize * nds] : null;
+        if (nds > 0) {
+            GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
+                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
+        }
         int nc = ctls.size();
         int[][] tap = new int[chunkSize][nc];
         for (int s = 0; s < chunkSize; s++) {
@@ -222,9 +233,14 @@ final class GpuBatchContinuousPhase {
         if (anyController) {                                  // pinned re-solve at the rounded taps
             results = resolvePinned(handle, chunkSize, realCount, n, results, ctls, tap, affected,
                     rowModePerScenario, baseRowMode, disabledMask, baseOvIndexList, baseOvValueList,
-                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
+                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                    nds, dsPhiRow, dsAnchorCarry, dsSlackCarry, dsSeed,
                     baseR1OvSlotElem, baseR1OvVal, shOvSlotElem, shOvGb, nziBase, ziOnSlotElem, ziOffSlotElem,
                     baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, varType, config);
+            if (nds > 0) {                                   // this solve may have distributed further
+                GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
+                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, results, dsAnchorCarry, dsSlackCarry, dsSeed);
+            }
         }
         // ---- LIMITER rounds (OLF nextIteration): one tap per round while I exceeds the limit ----
         for (int round = 0; round < maxRounds; round++) {
@@ -263,9 +279,14 @@ final class GpuBatchContinuousPhase {
             }
             results = resolvePinned(handle, chunkSize, realCount, n, results, ctls, tap, moved,
                     rowModePerScenario, baseRowMode, disabledMask, baseOvIndexList, baseOvValueList,
-                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
+                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                    nds, dsPhiRow, dsAnchorCarry, dsSlackCarry, dsSeed,
                     baseR1OvSlotElem, baseR1OvVal, shOvSlotElem, shOvGb, nziBase, ziOnSlotElem, ziOffSlotElem,
                     baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, varType, config);
+            if (nds > 0) {                                   // this solve may have distributed further
+                GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
+                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, results, dsAnchorCarry, dsSlackCarry, dsSeed);
+            }
         }
         return results;
     }
@@ -278,7 +299,7 @@ final class GpuBatchContinuousPhase {
             int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
             List<Integer> baseOvIndexList, List<Double> baseOvValueList,
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
-            double[] dsAnchorShift, double[] dsSlackShift,
+            int nds, int[] dsPhiRow, double[] dsAnchorCarry, double[] dsSlackCarry, double[] dsSeed,
             int[] baseR1OvSlotElem, double[] baseR1OvVal, int[] shOvSlotElem, double[] shOvGb,
             int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem,
             double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
@@ -286,6 +307,7 @@ final class GpuBatchContinuousPhase {
             BatchConfig config) {
         List<Integer> ovIdx = new ArrayList<>(baseOvIndexList);
         List<Double> ovVal = new ArrayList<>(baseOvValueList);
+        GpuBatchTransformerControl.seedDsTargets(nds, dsPhiRow, dsSeed, chunkResults, realCount, n, ovIdx, ovVal);
         List<Integer> r1Slot = new ArrayList<>();
         List<Double> r1Val = new ArrayList<>();
         for (int v : baseR1OvSlotElem) {
@@ -335,7 +357,7 @@ final class GpuBatchContinuousPhase {
                 rowModeOff, baseRowMode, disabledMask,
                 ovIdx.stream().mapToInt(Integer::intValue).toArray(),
                 ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift, null, null,
+                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorCarry, dsSlackCarry, null, null,
                 parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                 config.lsMode(), config.maxDv(), config.maxDphi(),
                 config.lsMode() == 2 ? varType : null, x0Full,

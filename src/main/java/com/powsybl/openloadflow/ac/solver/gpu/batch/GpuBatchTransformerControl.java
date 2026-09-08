@@ -790,6 +790,32 @@ public final class GpuBatchTransformerControl {
      *  effective base), the slack's own absorbed share at the scenario's effective factor sum, and
      *  the absolute DS-row targets for seeding the next call. Dead or non-converged slots carry 0. */
     @SuppressWarnings("java:S107")
+    /** Merge the carried absolute DS-row target seeds into an override list (replace via
+     *  lastIndexOf, never duplicate — the device scatter has no ordering). Shared by every
+     *  orchestrator that re-solves after the main chunk solve. */
+    static void seedDsTargets(int nds, int[] dsPhiRow, double[] dsSeed, double[][] chunkResults,
+            int realCount, int n, List<Integer> ovIdx, List<Double> ovVal) {
+        if (nds <= 0) {
+            return;
+        }
+        for (int s2 = 0; s2 < realCount; s2++) {
+            double[] r = chunkResults[s2];
+            if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
+                continue;
+            }
+            for (int i = 0; i < nds; i++) {
+                int flat = s2 * n + dsPhiRow[i];
+                int at = ovIdx.lastIndexOf(Integer.valueOf(flat));
+                if (at >= 0) {
+                    ovVal.set(at, dsSeed[s2 * nds + i]);
+                } else {
+                    ovIdx.add(flat);
+                    ovVal.add(dsSeed[s2 * nds + i]);
+                }
+            }
+        }
+    }
+
     static void captureDsCarry(long handle, int chunkSize, int realCount, int n,
             int[] dsPhiRow, double[] dsFactor, double[] baseTargets,
             int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta,

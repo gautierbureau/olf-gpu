@@ -73,6 +73,7 @@ public final class GpuAcOuterLoopPacks {
      *  the device RL must seed it UNPINNED (no spontaneous switch-back; only the VoltageMonitoring
      *  orchestrator may activate it). */
     record RlPack(int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget,
+                  double[] rlSvcBmin, double[] rlSvcBmax, double[] rlV2Base,
                   byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow, int[] rlBusNum) {
     }
 
@@ -263,6 +264,30 @@ public final class GpuAcOuterLoopPacks {
         return new DsbPack(dbRow, dbCol, dbCoef);
     }
 
+    /** SVC reactive limits are VOLTAGE-DEPENDENT: {@code LfStaticVarCompensatorImpl} evaluates
+     *  Bmin/Bmax*(v*nomV)^2 at the LIVE bus V on every CPU RL check, and a pinned bus re-freezes at
+     *  the moved limit ({@code busesWithUpdatedQLimits}). Per RL entry, capture the quadratic
+     *  coefficients (pu: SVC limit contribution = b*v^2) and the base v^2, so the kernel evaluates
+     *  limit(v) = packedLimit + b*(v^2 - v2Base) — exact for the SVC part, identically zero on
+     *  SVC-less buses. Must run under the SAME control-type view as the min/max capture (the
+     *  monitoring flip). */
+    private static void addSvcQuadratic(LfBus bus, List<Double> rlSvcBmin, List<Double> rlSvcBmax,
+                                        List<Double> rlV2Base) {
+        double v2 = bus.getV() * bus.getV();
+        double bmin = 0;
+        double bmax = 0;
+        for (LfGenerator g : bus.getGenerators()) {
+            if (g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator
+                    && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE) {
+                bmin += g.getMinQ() / v2;
+                bmax += g.getMaxQ() / v2;
+            }
+        }
+        rlSvcBmin.add(bmin);
+        rlSvcBmax.add(bmax);
+        rlV2Base.add(v2);
+    }
+
     static RlPack reactiveLimitsPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                      ExtractionColumns columns, boolean reactiveLimits) {
         int[] vCol = columns.vCol();
@@ -287,6 +312,9 @@ public final class GpuAcOuterLoopPacks {
         List<Double> rlMaxQ = new ArrayList<>();
         List<Double> rlLoadQ = new ArrayList<>();
         List<Double> rlVtarget = new ArrayList<>();
+        List<Double> rlSvcBmin = new ArrayList<>();
+        List<Double> rlSvcBmax = new ArrayList<>();
+        List<Double> rlV2Base = new ArrayList<>();
         List<Byte> rlMonitored = new ArrayList<>();
         List<Byte> rlRemote = new ArrayList<>();
         List<Integer> rlCmpVrow = new ArrayList<>();
@@ -308,6 +336,7 @@ public final class GpuAcOuterLoopPacks {
                         rlMaxQ.add(bus.getMaxQ());
                         rlLoadQ.add(bus.getLoadTargetQ());
                         rlVtarget.add(vc.getTargetValue());    // the GROUP target (pilot-referenced)
+                        addSvcQuadratic(bus, rlSvcBmin, rlSvcBmax, rlV2Base);
                         rlMonitored.add((byte) 0);
                         rlRemote.add((byte) 1);
                         rlCmpVrow.add(pilotV);                 // switch conditions compare the PILOT's V
@@ -332,10 +361,12 @@ public final class GpuAcOuterLoopPacks {
                         monitoringSvc.setGeneratorControlType(LfGenerator.GeneratorControlType.VOLTAGE);
                         minQ = bus.getMinQ();
                         maxQ = bus.getMaxQ();
+                        addSvcQuadratic(bus, rlSvcBmin, rlSvcBmax, rlV2Base);
                         monitoringSvc.setGeneratorControlType(LfGenerator.GeneratorControlType.MONITORING_VOLTAGE);
                     } else {
                         minQ = bus.getMinQ();
                         maxQ = bus.getMaxQ();
+                        addSvcQuadratic(bus, rlSvcBmin, rlSvcBmax, rlV2Base);
                     }
                     rlVrow.add(vCol[bn]);
                     rlMinQ.add(minQ);
@@ -357,7 +388,9 @@ public final class GpuAcOuterLoopPacks {
         }
         return new RlPack(GpuAcArrays.toIntArray(rlVrow), GpuAcArrays.toDoubleArray(rlMinQ),
                 GpuAcArrays.toDoubleArray(rlMaxQ), GpuAcArrays.toDoubleArray(rlLoadQ),
-                GpuAcArrays.toDoubleArray(rlVtarget), mon, rem, GpuAcArrays.toIntArray(rlCmpVrow),
+                GpuAcArrays.toDoubleArray(rlVtarget), GpuAcArrays.toDoubleArray(rlSvcBmin),
+                GpuAcArrays.toDoubleArray(rlSvcBmax), GpuAcArrays.toDoubleArray(rlV2Base),
+                mon, rem, GpuAcArrays.toIntArray(rlCmpVrow),
                 GpuAcArrays.toIntArray(rlBusNum));
     }
 

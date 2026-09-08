@@ -152,9 +152,10 @@ final class GpuSaRunScope {
             // active limits — any other balance type or unlimited distribution must fall back whole-run.
             boolean dsLoopActive = acParameters.getOuterLoops().stream()
                     .anyMatch(ol -> DistributedSlackOuterLoop.NAME.equals(ol.getName()));
-            // The device DS pass models every STATIC-factor generation balance type (P_MAX, P,
-            // PARTICIPATION_FACTOR — see GpuDsParams) and both useActiveLimits settings. REMAINING_MARGIN
-            // (mismatch-sign-dependent factors) and the load-based types still fall back whole-run.
+            // The device DS pass models EVERY balance type (GpuDsParams.supports returns true for all
+            // six — incl. the load-based types and REMAINING_MARGIN via the dsMode=1 margin factors)
+            // and both useActiveLimits settings, so this guard is future-proofing for balance types
+            // OLF adds later, not a live fallback.
             if (dsLoopActive && !com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams.supports(lfGuardParams.getBalanceType())) {
                 unsupportedOuterLoops.add("DistributedSlack[balanceType=" + lfGuardParams.getBalanceType() + "]");
             }

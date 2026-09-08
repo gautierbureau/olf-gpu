@@ -65,7 +65,7 @@ validation project sets it false to fail loudly instead).
 | Open / partially-connected branches | ✅ | open-branch pack; disconnection between solves is a contingency, not a reject |
 | Transformer ratio control (local, own terminal) | ✅ | r1 as state variable, qRow moved onto the rho column ("item 4" derivation) |
 | Transformer ratio control (remote pilot / multi-transformer groups) | 🔶 | DISTR_RHO linear coupling derived incl. free-controller mechanism; remote controller zero-diagonal left to cuDSS pivoting; see Part II §E.4 |
-| Remote generator voltage control (DISTR_Q), incl. **multiple controllers on one pilot** | 🔶 | fully wired in sequential LF (weights, free controller, shunt / open-branch / zero-impedance contributors); voltage-controlling-shunt contributor ❌; batch path rejects all DISTR_Q. Part II §E.3 |
+| Remote generator voltage control (DISTR_Q), incl. **multiple controllers on one pilot** | 🔶 | fully wired in sequential LF (weights, free controller, shunt / open-branch / zero-impedance contributors); voltage-controlling-shunt contributor ❌; the BATCH runs full remote pin dynamics since Part B/B4 (see §2 islanding row) — only pin-dynamics-UNREPRESENTABLE groups (all members pinnable / table-less pinnable free member) stay whole-run CPU. Part II §E.3 |
 | Transformer phase control (BRANCH_ALPHA1 as variable) | 🔶 | ✅ **2026-07-20** for the INCREMENTAL mode row: a1 is packed as a state variable and `BRANCH_TARGET_ALPHA1` (the a1−target identity that mode keeps active all run) is accepted, validated GPU-vs-CPU at ~1e-14 with the fallback counter asserted (`GpuPhaseControlTest`). Note `isDeriveA1` keys on `isPhaseController()` alone, so BOTH modes create the column. ⏩ CONTINUOUS mode with control ENABLED: that activates `BRANCH_TARGET_P` on the CONTROLLED branch — a branch-owned power row with no GPU family — so the solver falls back for those solves and resumes on GPU once the loop switches control off at iteration 0. GATE: all of it hangs off `phaseShifterRegulationOn` (core default **false**, not set by the RTE params file) |
 | Controllable shunt (SHUNT_B as variable) | ✅ **2026-09-08** | the BATCH-OF-1 route (the sequential solve runs on the batch context in pure-NR mode) carries SHUNT_B rows; GpuLoadFlowTest.controllableShunt: 0 kV dV, same iterations, no fallback |
 | Fixed shunts | ✅ | per-bus G,B pack |
@@ -128,13 +128,13 @@ Full predicate list in Part II §F.
 
 | Contingency element | Batched | Notes |
 |---|---|---|
-| Branch outage (N-1, N-2) | ✅ | ≤2 branches, both-sides opening; per-scenario element mask |
+| Branch outage (N-1 .. N-k) | ✅ | any branch count since 2026-09-08 (caps lifted — see the N-k row), both-sides opening; per-scenario element mask |
 | Fragmenting branch outage (islanding) | ✅ | islanded buses frozen to clean flat state; islanding the slack → ⏩; islanding a REMOTE/DISTR_Q VC group member (pilot or any controller) → ⏩ **2026-09-04** (stale qPct weights solved 0.47 kV wrong before the gate — `islandsRemoteVcMember`). **2026-09-06 DISTR_Q audit**: remote groups whose members can CHANGE PIN STATE (finite Q limits) + the RL loop → was whole-run ⏩ in BOTH modes (`remoteGroupPinDynamics`). **Part B LANDED 2026-09-06 (DEVICE mode)**: NON-free member pin/unpin dynamics run in-kernel at 1e-12 — canonical suppressed-dest/mode-4 member encoding (B2), rlRemote RL entries with PILOT-referenced switch conditions (B1/B3), per-scenario DISTR_Q weights recomputed from RAW reactive keys + limitType (an RL pin renormalizes qPct — updateReactiveKeys zeroes controller-disabled members) with the frozen-member TARGET compensation kept in step by updateDistrQTargetsBatch, and each member's own q accumulated into its qBuf row (fillRemoteMemberQBatch). Only a group whose FREE member is pinnable stays whole-run CPU in DEVICE mode (`remoteGroupFreeMemberPinnable`, plan-B4 — the free role would re-pick, A6 territory); the JAVA hybrid keeps the full gate — **until 2026-09-07: the JAVA hybrid now supports remote pins too** (OLF's own RL loop decides; live qPct weights per scenario via dqOv; same B4 free-member pre-gate) and shared TVC groups (member outages CPU-routed per scenario: the element disable SHRINKS the live es variable layout the hybrid's stable-row alignment needs). Tests: post-contingency pin, base-pinned relief (CPU stays pinned — the remote V-based switch-back is knife-edge while the group keeps control), the formerly-gated network now batching, the B4 gate, + the 5 JAVA twins. **B4 LANDED 2026-09-07 (DEVICE)**: the FREE member pins/unpins on-device too — the A6 `qrPtr/qrRows` candidate groups extended to DISTR_Q pilots (candidates = pilot vCol fallback + member vCols; in-kernel mode-scan re-picks the pilot-Q carrier when the free member goes mode 4), `fillDistrQBatch` suppresses the CURRENT carrier's DISTR_Q row, `capturePilotQBatch`+`updateDistrQTargetsBatch` move the pilot's Q target with the carrier, and the qBuf diagnostic's frozen group dests are re-pointed at the pilot's own row (`patchFrozenGroupDests` — the pilot balance was corrupting the free member's own-q RL check). Gate narrowed to `remoteGroupPinDynamicsUnrepresentable`: whole-run CPU only when ALL enabled members of a group are pinnable (all-pinned = pilot vEq deactivation, not modeled) or a pinnable free member has no relocation table (<2 members, or a pilot with half-open/zero-impedance q terms). **JAVA lifted same day** (`setBatchDqQrSuppression` installs just the carrier-suppression tables; OLF's RL loop pins, the pushed mode-4 row re-picks the carrier, the re-extracted activation/target push lands the pilot Q on the new carrier's row — a pin changes activation only, never the variable layout, so the hybrid's stable-row alignment holds); the ALL-PINNED corner (group control lost) batches in BOTH modes since later 2026-09-07: on-device `updatePilotVeqBatch` flips the pilot's V identity to a power row carrying the captured pilot-Q target when the mode-scan finds no live member (and restores it on the first unpin, flag-guarded per scenario/group); in JAVA OLF deactivates the vEq itself and the pushed activation carries it. `device/javaRemoteAllMembersPinnedMatchesCpu` verify genuine in-flight control loss at 1e-12 (base at target, post-outage 0.23 kV off) — the scenario needs a DISTANT keeper PV because the all-pinned system is near-singular without any voltage reference. The remote pin-dynamics gate is now identical in both modes (unclean-pinnable member / table-less pinnable free member only). **FORCED-PV detector, found under the old all-pinnable gate**: OLF's GLOBAL \"all PV buses should switch — strongest stays PV\" rule (switchPvPq at remainingPvBusCount 0) is NOT implemented by the device RL kernel (a network-wide election; measured 1.9 kV batching a network whose only PV buses are the three limited members — the device pinned the bus OLF forces to stay PV at q=1742 > maxQ). Instead of a whole-run gate (which would kill pegase — every gen limited): a per-pass host-side detector rejects a SCENARIO the moment its RL state has zero unpinned non-monitored entries (its trajectory has already diverged from the CPU's), precomputed-guarded by `allPvPinnable` — one unlimited PV bus anywhere skips the check entirely. `deviceRemoteForcedPvRejectsToCpuAndMatches` (count-0 contract). JAVA needs nothing — OLF's own loop applies the rule and the hybrid follows (javaRemoteForcedPvMatchesCpu, 1e-12). **2026-09-07 audit closure, then LIFTED the same day**: a PINNABLE member with HALF-OPEN or ZERO-IMPEDANCE q terms was silently wrong when pinned (measured 3.3e-4 kV with one open line at the member), first whole-run guarded, then FIXED by porting the alternate-dest channels to the ob and zero-impedance families (`obQAlt`/`ziQAlt` per-side alt rows through createStructure; the ob family reuses the generic Family alt/reloc machinery incl. the frozen-group-dest patch, the zi family gets 4 dynamic q slots {F,J}×side with `ziDynDest`; pattern union + checkRange for both). The unclean-member/pilot guards are GONE — members and pilots with half-open or zero-impedance q terms pin and relocate on-device. Tests: free post-ctg pin (carrier g1→g2), base-pinned free, chained g1+g2 pins (carrier → g3), gate fallbacks (all-pinnable + unclean-pinnable), unclean-unpinnable-still-batches — all 1e-12, DEVICE + JAVA twins |
 | Generator outage (single / multiple) | ✅ | per-BUS merged injection override; PV→PQ flip, Q-target shed, DS reweight. **2026-09-06**: a gen outage AT a DISTR_Q controller bus that KEEPS another controller is batched — the CPU's updateReactiveKeys renormalization is replayed host-side (toggle-OFF + re-extract + diff) and installed as per-scenario weight overrides (`setBatchDqWeightOverrides`); losing the bus's LAST controller (group restructure) / slack-bus loss / >1 DS bus / remote single-controller shapes → ⏩ |
 | Load outage | ✅ | PowerShift deltas (Q-carrying load delta at a PV bus → ⏩) |
 | Shunt shift / reconnection | ✅ | admittance override; DISTR_Q-contributing or unpacked shunt → ⏩ |
 | Fixed-shunt disconnection | ✅ | element mask |
-| Branch+generator+load+shunt combos | ✅ | branch part ≤2; gen on islanded bus → ⏩ |
+| Branch+generator+load+shunt combos | ✅ | branch part any count (2026-09-08); gen on islanded bus → ⏩ |
 | HVDC contingency (AC-emulation) | ✅ **2026-09-04** | the hv element's per-scenario disabled bit removes the coupling; the VSC stations' losses ride the generator-outage channel (PropagatedContingency puts them there); solo + branch combos at 1e-12. Needs the olf-local-patches getHvdcIdsToOpen accessor (cbdb9bd90). Still ⏩: setpoint-mode/LCC hvdc outage (not an hv element), a station on the slack bus (slack-loss guard), islanded hv endpoint (hvdcsWithoutPower unmodeled) |
 | ≥3 branch outage (N-k) | ✅ **2026-09-08** | the <=2 cap was validated-scope only: the per-element mask carries any count, the connectivity check removes the whole set; caps lifted in BatchContingency/GpuContingencyMapper/GpuStrategyComposer. deviceMultiBranchOutageMatchesCpu: N-1 + N-3 + N-4 on ieee14 (widened Q limits — the stock limits COLLAPSE under N-3, on the CPU too) at 1e-12, count==3. A physically infeasible N-k diverges on-device (MAX_ITERATION) and falls back to the CPU, which reproduces the failure — statuses stay consistent |
 | Single-side opening, bus/busbar loss | ✅ **2026-09-08** | KEY MEASUREMENT: OLF's AC path treats a side-opened branch as FULLY OUT — a bus loss is bit-identical to the full outage of its incident branches + load loss (the dangling half carries no model; OLF's own tests carry "FIXME line open at one side"). The device mirrors that exactly: SIDE_x → the closed element masked (SideOpen plumbing in BatchContingency/mapper/validator/qualification); bus loss → every incident branch side-opened (OLF's findBranchToOpenDirectlyImpactedByContingency rule replicated), the lost bus islands (frozen rows), its injections ride the islanded scheduled-loss accounting (lost-bus gens/loads FILTERED from the explicit override channels — no double count). deviceBusLossMatchesCpu: BusContingency at 1e-12, count asserted. A pre-packed dangling-half OB-view recipe was built and REMOVED (git history) — re-add it the day OLF models the dangling half. Scope: var-carrying (rho/alpha) or DISTR_RHO side-opens, zi incidents and branch-between-two-lost-buses → CPU. Bonus fix: a PURE switch (zi) contingency shape used to THROW in BatchContingency and silently kill the whole precompute |
@@ -326,13 +326,14 @@ CPU reference: `ReactiveLimitsOuterLoop`. Device: pack `EXT:281-297`, kernels
 | PV→PQ switch criterion | q < minQ − maxReactivePowerMismatch → pin MIN; q > maxQ + tol → pin MAX; q includes loadTargetQ | identical: `q = qBuf + loadQ`, `target = limit − loadQ` (`CU:1784-1797`); `reactiveLimitTol` = per-unitized maxReactivePowerMismatch | ✅ (freeze-at-LIMIT matches CPU `switchPvPq` which freezes at qLimit) |
 | PQ→PV back-switch criterion | MIN-pinned & V < targetV → back to PV; MAX-pinned & V > targetV | identical voltage criterion (`CU:1799-1808`) | ✅ |
 | Switch-count cap (oscillation guard) | maxPqPvSwitch, default 3; blocks the PQ→PV direction | run's `reactiveLimitsMaxPqPvSwitch` **wired** to the device (2026-07-18; 0 ⇒ default 3) | ✅ |
-| Keep-strongest-bus-PV when ALL PV buses would switch | if remainingPvBusCount==0, the strongest bus (nominalV, then targetP, then id) stays PV | **no equivalent** — all buses can switch PQ in a scenario | ⚠️ pathological-network corner (all-PV-breach); never observed in the 9241 equivalence run |
+| Keep-strongest-bus-PV when ALL PV buses would switch | if remainingPvBusCount==0, the strongest bus (nominalV, then targetP, then id) stays PV | the network-wide election is NOT in the kernel, but the per-pass host-side FORCED-PV detector (2026-09-07, `allPvPinnable`-guarded — see the §2 islanding row) rejects any SCENARIO whose RL state reaches zero unpinned non-monitored entries → CPU replays it with the rule | ✅ closed by per-scenario rejection (`deviceRemoteForcedPvRejectsToCpuAndMatches`); one unlimited PV bus anywhere skips the check |
 | Q-limit UPDATE while pinned (`busesWithUpdatedQLimits`) | if pinned and \|limit − q\| > tol because the LIMIT moved (curve at new P), re-freeze at new limit | ✅ **2026-09-05** — with the curve channel active, the pinned branch re-freezes at the moved limit (gated on cvStride; unreachable with static limits) | closed with the curve row below |
 | Reactive capability CURVES | per-gen min/maxQ evaluated at CURRENT targetP each check — a DS redistribution that moves targetP moves the curve limits | ✅ **2026-09-05** — curve channel (`setBatchRlCurves` / `rlCurveLimitsBatch`): per participating curve gen, points + p_now = baseP + share·(rowTarget − base); dynamic limits re-evaluated before every RL decision + the update-while-pinned re-freeze. Validated on a sloped ieee14 curve (1.8 kV wrong with the channel off) at 1e-11 (association ulps of the share reconstruction — machine precision). Scope: OLF patch b8e813a15 (public getReactiveLimits); extrapolateReactiveLimits+curves → whole-run CPU; injection outage at a curve bus's P row / strategy pairs → per-contingency CPU (the linkage models the DS delta only); non-participating curve gens stay static (exact) | closed (was the ⚠️ curve-vs-DS coupling) |
-| Multi-generator buses | bus-aggregated Σ minQ/maxQ over voltage-capable gens; whole bus flips at once | same aggregation, snapshotted (`LfBus.getMinQ/getMaxQ` summed at pack) | ✅ |
+| Multi-generator buses | bus-aggregated Σ minQ/maxQ over voltage-capable gens; whole bus flips at once | same aggregation, snapshotted (`LfBus.getMinQ/getMaxQ` summed at pack) — the SVC part of the aggregate is live (next row) | ✅ |
+| SVC reactive limits are VOLTAGE-DEPENDENT | `LfStaticVarCompensatorImpl` evaluates Bmin/Bmax·(v·nomV)² at the LIVE bus V on every check; a pinned bus re-freezes at the moved limit (`busesWithUpdatedQLimits`) | ✅ **2026-09-08** — per-entry SVC quadratic channel (`setBatchRlSvcLimits`): limit(v) = packed base aggregate + svcB·(v² − v²base), applied at both check sites + the pinned re-freeze (extends the curve-channel update gate); identically zero on SVC-less buses. Was static-at-base before (measured 0.064 kV on a pinned slope SVC whose V moved) | ✅ (same test as the row above) |
 | Base-PQ-but-capable buses (back-switchable under a relieving contingency) | checkPqBus path | packed explicitly (`EXT:284-296` second kind) | ✅ |
-| Robust mode (`voltageRemoteControlRobustMode`): unrealistic-V forcing, MIN/MAX_REALISTIC_V pin at initial targetQ, setV(1) | remote-controller-only extra criteria | not implemented — but remote control (DISTR_Q) is rejected from the batch entirely | — unreachable in batch scope |
-| Buses with generator slope (SVC) skip back-switch | `hasGeneratorsWithSlope()` guard | SVC never packs | — unreachable |
+| Robust mode (`voltageRemoteControlRobustMode`, default TRUE): unrealistic-V forcing, MIN/MAX_REALISTIC_V pin at initial targetQ, setV(1) | remote-controller-only extra criteria, firing ONLY at unrealistic voltages (min/maxRealisticVoltage) | not implemented — REACHABLE since Part B batched remote DISTR_Q groups (audit 2026-09-08): a remote controller at unrealistic V pins differently on CPU | ⚠️ pathological corner, same family as the missing unrealistic-state check (§4) — a near-divergent scenario either diverges (status −1 → CPU reproduces) or converges through the un-guarded region; no in-band scenario observed |
+| Buses with generator slope (SVC) skip back-switch | `checkPqBus(canSwitchToPv = !hasGeneratorsWithSlope())` — a pinned slope bus NEVER resumes voltage control | ✅ **2026-09-08** — the kernel back-switch is `!slopeRow`-gated (the f7fd028 mode-2 restore implemented a transition the CPU never makes: measured 0.27 kV on a base-pinned slope SVC relieved by a parallel-line outage). JAVA unaffected (OLF's own loop decides) | ✅ (`deviceSlopeSvcPinnedStaysPqMatchesCpu`) |
 | Remote reactive-power controller buses | switchReactiveControllerBusPq | not packed | — unreachable (⏩ via guard/extractor) |
 | Freeze semantics divergence (observed) | manager/robust paths freeze Q at the EVALUATED switch-time value (`freezeGenerationTargetQAndDisableGeneratorVoltageControl(getQ().eval())`); RL switchPvPq freezes at the limit | device always pins at the limit | ⚠️ the GeneratorAction ~0.17 kV delta traces here; blocking GeneratorAction batching, not contingencies |
 | `isFixVoltageTargets` (VoltageTargetChecker.fix at initialize) | pre-pass mutating implausible targets | runs on CPU before extraction (base solve) → inherited | ✅ by construction |
@@ -537,29 +538,80 @@ three-winding-transformer legs (star bus → §E.5 throw), areas, asymmetrical m
 They pass through only insofar as they reduce to plain bus P/Q targets; any term/variable
 they introduce outside §E.2 throws.
 
-## §F. Batch disqualification predicates (complete list)
+## §F. CPU-routing inventory (complete, audited 2026-09-08)
 
-Validator level (`VAL:110-161`):
-1. `NOT_IN_GPU_MODEL` — any outaged branch absent from the GPU element map.
-2. `FRAGMENTS_NETWORK` — islanding while `handleIslanding=false` (fixed-iter bench mode).
-3. `ISLANDS_SLACK` — islanding that removes a slack bus (production mode keeps other
-   islanding via frozen rows).
+Everything the batch does not carry routes to OLF's own CPU code at one of four levels —
+whole-run, whole-network (extraction), per-contingency, or per-strategy — and nothing is
+silently dropped (rejects fall back or throw; `OLF_GPU_QUALIFY_TRACE` prints every
+rejection with its reason, `LAST_GPU_PRECOMPUTED_COUNT` proves engagement).
 
-Solver qualification level (`SOLVER:642-701`):
-4. Tap override on an unpacked branch, or on a branch whose ratio or phase is a state
-   variable (r1col/a1col ≥ 0).
-5. Shunt shift/outage on an unpacked shunt or a DISTR_Q-contributing shunt.
-6. Injection outage unresolvable: slack-bus generator loss, >1 DS-participant bus in one
-   contingency, remote-controlling generator, or (when the slack itself participates) any
-   DS-participant-bus generator loss.
-7. Combo with a branch part outaging a DISTR_RHO controller (§E.4).
-8. Combo where a lost generator sits on an islanded bus.
-9. Reclose of a branch not in the base-open pack (unknown id, zero-impedance, or a disabled
-   endpoint bus — dead-island re-energization).
+### F.0 Whole-run gates (`GpuSaRunScope` — batch disabled, plain CPU SA)
 
-Provider mapping level (before qualification): >2 branches, single-side openings,
-bus/busbar losses, HVDC contingencies, Q-carrying load delta at a PV bus, non-linear
-shunt models — all route the contingency to CPU (Part I §2 table).
+1. Any outer loop outside the supported set: AreaInterchangeControl, AutomationSystem
+   (the low-tier gaps), and any loop OLF adds that the filter list does not know.
+2. Conditional batchability of the supported loops: TVC flavors on networks failing
+   `transformerControlSupported`; non-INCREMENTAL shunt voltage-control mode;
+   SecondaryVc with non-LOCAL generator VC; continuous PhaseControl LIMITER with a
+   remote controlled branch; monitoring SVCs failing `GpuBatchVoltageMonitoring.supported`;
+   AC-emu HVDC not all-LINEAR at base.
+3. Remote VC groups that are pin-dynamics-unrepresentable: ALL enabled members pinnable
+   (pilot-vEq corner is modeled, but the gate covers the residual shapes) or a pinnable
+   FREE member with no relocation table (<2 merged members).
+4. Parameterization: `loadPowerFactorConstant` or `useLoadModel` with load-based balance;
+   `extrapolateReactiveLimits` with curve generators; a custom
+   `ContingencyActivePowerLossDistribution` SPI. (The balance-type guard itself is
+   future-proofing — all six current types are modeled.)
+5. Base-only CPU (contingencies still batch): frozen-HVDC base; threadCount>1 disables
+   base-on-GPU only.
+
+### F.1 Whole-network extraction rejects (`GpuAcDataExtractor` throws → per-run fallback; §E)
+
+ZI shapes without dummies (one-side-open ZI, both-ends-controlled, 3-winding star);
+equation arrays beyond BUS_TARGET_P/Q with the 4 closed-branch evaluators; any
+equation/variable type or active term outside the packed families; DISTR_Q groups with no
+free controller or a voltage-controlling-shunt contributor.
+
+### F.2 Per-contingency (validator `VAL` + solver qualification `SOLVER` + mapper)
+
+Validator: `NOT_IN_GPU_MODEL` (outaged or side-opened branch absent from the element map,
+zi side-open with both sides energized), `FRAGMENTS_NETWORK` (islanding while
+`handleIslanding=false` — fixed-iter bench mode), `ISLANDS_SLACK` (production mode keeps
+other islanding via frozen rows).
+
+Solver qualification: tap override on an unpacked branch or one whose ratio/phase is a
+state variable; shunt shift/outage on an unpacked or DISTR_Q-contributing shunt; injection
+outage unresolvable (slack-bus generator loss, >1 DS-participant bus, remote-controlling
+generator, slope-SVC-bus injection outage, curve-gen-bus P-row outage, load-based DS with
+lost loads); combo outaging a DISTR_RHO controller in the gated shapes (§E.4 — most batch
+since A5/A6, the carrier-clamp re-pick scenario still rejects); lost generator on an
+islanded bus; reclose of a branch not in the base-open pack; var-carrying (rho/alpha) or
+DISTR_RHO side-opens; zi-incident shapes needing a spanning-tree re-pick; a dead branch
+between two lost buses.
+
+Mapper (`GpuContingencyMapper` returns null): unresolvable elements; setpoint-mode/LCC
+HVDC outage (not a packed hv element) or an islanded hv endpoint; Q-carrying load delta at
+a PV bus; load losses at ZIP/voltage-dependent-modeled buses; partial multi-compensator
+aggregates and controller/SVC-shunt outages.
+
+Runtime per-scenario rejects (status −2 → CPU): forced-PV detector (all-PV-pinnable
+networks whose scenario RL state runs out of unpinned entries); saturated DS when the
+failure behavior ≠ LEAVE_ON_SLACK_BUS; shared-TVC carrier-clamp re-pick; outer-budget
+exhaustion; straggler early-exit; divergence (status −1).
+
+### F.3 Per-strategy (`GpuStrategyComposer` returns null → stock per-strategy CPU path)
+
+Multi-stage conditional actions (stages ≠ 1); `HvdcAction` and
+`AreaInterchangeTargetAction` (element/loop missing upstream of the composer);
+`GeneratorAction` touching targetV/targetQ/regulation; tap actions on controlled
+transformers or without a tap table; ≥2 switch closes per scenario; dead-island
+re-energization; non-linear shunt positions. Strategy PAIRS also reject under
+TARGET/load-based/REMAINING_MARGIN balance (anchor-dependent factors) and at curve-gen
+buses (Part II §A/§B scope notes).
+
+### F.4 Semantic ⚠️ inside supported scope (documented deltas, not fallbacks)
+
+No device unrealistic-state check (§4) and its robust-mode cousin (§B); the tap-table
+reflection fallback (§C); the 1e-10-class micro-DS knife edges (user-accepted).
 
 ---
 

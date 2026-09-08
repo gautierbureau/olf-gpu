@@ -83,6 +83,10 @@ final class GpuBatchChunkSolver {
                 rlCurves != null ? rlCurves.cvIdx() : null,
                 rlCurves != null ? rlCurves.cvIn() : null,
                 rlCurves != null ? rlCurves.cvPts() : null);
+        // Voltage-dependent SVC reactive limits: install the quadratic coefficients (zero on
+        // SVC-less entries — the kernel's limit(v) then degenerates to the packed static limit).
+        GpuAcNewtonSolver.setBatchRlSvcLimits(handle,
+                gpuData.rlSvcBmin(), gpuData.rlSvcBmax(), gpuData.rlV2Base());
         // Remote-member RL entries (plan-B1): install (or clear, on a cached context) the kinds.
         boolean anyRlRemote = false;
         for (byte b : gpuData.rlRemote()) {

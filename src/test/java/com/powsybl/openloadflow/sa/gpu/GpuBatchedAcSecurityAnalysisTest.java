@@ -1885,9 +1885,41 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** DEVICE-mode SLOPE SVC pinned at a limit stays PQ like the CPU: OLF's ReactiveLimitsOuterLoop
+     *  runs checkPqBus with canSwitchToPv = !hasGeneratorsWithSlope() ("we don't support switching
+     *  PQ to PV for bus with one controller with slope"), so a pinned slope bus NEVER back-switches.
+     *  The base pins svc1 absorbing at its min limit (setpoint 385 below what full absorption can
+     *  reach: V stays 387.35); the parallel-line outage drops the pinned V below the setpoint — the
+     *  once-divergent condition where the device used to resume the mode-2 slope row. CPU-probed:
+     *  a FRESH post-outage LF regulates at 385.06, so an un-pinned arm visibly diverges. 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceSlopeSvcPinnedStaysPqMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithStaticVarCompensator();
+        network.getLoad("ld1").setQ0(50);
+        com.powsybl.iidm.network.StaticVarCompensator svc1 = network.getStaticVarCompensator("svc1");
+        svc1.setBmin(-0.004).setBmax(0.004)
+                .setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE)
+                .setRegulating(true);
+        svc1.newExtension(com.powsybl.iidm.network.extensions.VoltagePerReactivePowerControlAdder.class)
+                .withSlope(0.0001).add();
+        com.powsybl.iidm.network.Line l1 = network.getLine("l1");
+        network.newLine().setId("l1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR()).setX(l1.getX()).add();
+        List<Contingency> ctgs = List.of(new Contingency("l1_BIS", new BranchContingency("l1_BIS")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setVoltagePerReactivePowerControl(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
     /** DEVICE-mode SLOPE SVC (VoltagePerReactivePowerControl): the bus V row becomes
-     *  V + slope*sumQ = target — the device scales the natural reactive fill (row mode 2) and the RL
-     *  switch-back restores the slope form and its saved target; GPU SA == CPU SA at 1e-12. */
+     *  V + slope*sumQ = target — the device scales the natural reactive fill (row mode 2);
+     *  GPU SA == CPU SA at 1e-12. A pinned slope row never back-switches (see
+     *  deviceSlopeSvcPinnedStaysPqMatchesCpu). */
     @org.junit.jupiter.api.Test
     void deviceSlopeSvcMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(

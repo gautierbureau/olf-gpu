@@ -330,6 +330,12 @@ public final class GpuAcNewtonSolver {
      *  {@code dqMemberQrGroup} (plan-B4) links each group member to its pilot's relocation candidate
      *  group (−1 = none) so the kernels suppress the CURRENT carrier's DISTR_Q row and hand its
      *  target the pilot's Q when the free role re-picks. Nulls clear. */
+    /** Install the voltage-dependent SVC reactive-limit coefficients on a batch context:
+     *  per RL entry, limit(v) = packed base limit + svcB*(v^2 - v2Base) — exactly OLF's live
+     *  Bmin/Bmax*(v*nomV)^2 evaluation (and the pinned re-freeze via busesWithUpdatedQLimits). */
+    public static native void setBatchRlSvcLimits(long handle, double[] svcBmin, double[] svcBmax,
+                                                  double[] v2Base);
+
     public static native void setBatchRlRemote(long handle, byte[] rlRemote, int[] rlCmpVrow,
                                                int[] rmqRow, int[] rmqElem, int[] rmqSide, int[] rmqKind,
                                                double[] rmqWeight,

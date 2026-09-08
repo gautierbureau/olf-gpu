@@ -2866,7 +2866,9 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
 //  - PQ (mode 1, pinned): if it has not yet switched MAX_SWITCH times, resume voltage control (PQ→PV) when
 //    the voltage indicates the limit is no longer binding: a maxQ-pinned bus whose v rose ABOVE target, or
 //    a minQ-pinned bus whose v fell BELOW target (mirrors ReactiveLimitsOuterLoop). Restore mode 1→0,
-//    target → Vtarget. The count cap (matching OLF's maxPqPvSwitch) bounds oscillation.
+//    target → Vtarget. The count cap (matching OLF's maxPqPvSwitch) bounds oscillation. SLOPE-SVC buses
+//    never back-switch (OLF: canSwitchToPv = !hasGeneratorsWithSlope()), and SVC limits are re-evaluated
+//    at the live V (B*v^2 quadratic channel) at every check plus the pinned re-freeze.
 // Either switch marks the scenario for another inner Newton solve.
 // ReactiveCapabilityCurveImpl.getReactiveLimit, verbatim (extrapolation UNSUPPORTED — guarded in
 // Java): exact point hit -> the point's value; inside [minP,maxP] -> floor/ceiling interpolation;
@@ -3113,12 +3115,19 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
                                     char* limitType, char* switchCount, char* switched,
                                     int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
                                     const double* rowSlope, double* savedTarget, int cvStride,
-                                    const char* rlRemote, const int* rlCmpVrow) {
+                                    const char* rlRemote, const int* rlCmpVrow,
+                                    const double* rlSvcBmin, const double* rlSvcBmax, const double* rlV2Base) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
     int s = tid / nrl;
     if (!rlActive[s]) return;
+    // SVC reactive limits are VOLTAGE-DEPENDENT: LfStaticVarCompensatorImpl evaluates
+    // Bmin/Bmax*(v*nomV)^2 at the LIVE bus V on every CPU check (and a pinned bus re-freezes at
+    // the moved limit via busesWithUpdatedQLimits). rlMinQ/rlMaxQ hold the base-V aggregates;
+    // the per-entry svcB coefficients add the quadratic delta vs the packed base v^2 — exact for
+    // the SVC part, identically zero on SVC-less buses.
+    bool svcLim = rlSvcBmin[i] != 0.0 || rlSvcBmax[i] != 0.0;
     if (rlRemote != nullptr && rlRemote[i]) {
         // REMOTE group member (plan-B3). Unpinned = its DISTR_Q row (mode 1, limitType 0);
         // pinned = mode 4 ("row hosts its own Q balance"). BOTH switch conditions test the
@@ -3131,20 +3140,23 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
         size_t ridx = (size_t) s * n + rlVrow[i];
         size_t rst = (size_t) s * nrl + i;
         size_t rli = cvStride ? rst : (size_t) i;
+        double rdv2 = x[ridx] * x[ridx] - rlV2Base[i];
+        double rliMin = rlMinQ[rli] + rlSvcBmin[i] * rdv2;
+        double rliMax = rlMaxQ[rli] + rlSvcBmax[i] * rdv2;
         if (limitType[rst] == 0) {
             if (mode[ridx] != 1) return;                     // islanded / frozen this scenario
             double q = qBuf[ridx] + rlLoadQ[i];              // own q via fillRemoteMemberQBatch
-            if (q < rlMinQ[rli] - tol) {
+            if (q < rliMin - tol) {
                 savedTarget[rst] = target[ridx];             // the DISTR_Q row target (0)
                 mode[ridx] = 4;
-                target[ridx] = rlMinQ[rli] - rlLoadQ[i];
+                target[ridx] = rliMin - rlLoadQ[i];
                 limitType[rst] = 1;
                 switchCount[rst]++;
                 switched[s] = 1;
-            } else if (q > rlMaxQ[rli] + tol) {
+            } else if (q > rliMax + tol) {
                 savedTarget[rst] = target[ridx];
                 mode[ridx] = 4;
-                target[ridx] = rlMaxQ[rli] - rlLoadQ[i];
+                target[ridx] = rliMax - rlLoadQ[i];
                 limitType[rst] = 2;
                 switchCount[rst]++;
                 switched[s] = 1;
@@ -3159,8 +3171,8 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
                 target[ridx] = savedTarget[rst];
                 limitType[rst] = 0;
                 switched[s] = 1;
-            } else if (cvStride) {                           // curve-limit drift while pinned
-                double lim = limitType[rst] == 1 ? rlMinQ[rli] : rlMaxQ[rli];
+            } else if (cvStride || svcLim) {                 // curve/SVC limit drift while pinned
+                double lim = limitType[rst] == 1 ? rliMin : rliMax;
                 if (fabs(lim - (target[ridx] + rlLoadQ[i])) > tol) {
                     target[ridx] = lim - rlLoadQ[i];
                     switched[s] = 1;
@@ -3174,19 +3186,22 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
     size_t st = (size_t) s * nrl + i;
     size_t li = cvStride ? st : (size_t) i;                 // curve limits are per (scenario, entry)
     bool slopeRow = rowSlope[vrow] != 0;                    // SLOPE-SVC bus: its PV form is row mode 2
+    double dv2 = x[idx] * x[idx] - rlV2Base[i];
+    double liMin = rlMinQ[li] + rlSvcBmin[i] * dv2;
+    double liMax = rlMaxQ[li] + rlSvcBmax[i] * dv2;
     if ((mode[idx] == 0 || mode[idx] == 2) && limitType[st] == 0) {   // currently PV — check the reactive limits
         double q = qBuf[idx] + rlLoadQ[i];
-        if (q < rlMinQ[li] - tol) {
+        if (q < liMin - tol) {
             savedTarget[st] = target[idx];                   // remember the row target for the switch-back
             mode[idx] = 1;
-            target[idx] = rlMinQ[li] - rlLoadQ[i];
+            target[idx] = liMin - rlLoadQ[i];
             limitType[st] = 1;
             switchCount[st]++;
             switched[s] = 1;
-        } else if (q > rlMaxQ[li] + tol) {
+        } else if (q > liMax + tol) {
             savedTarget[st] = target[idx];
             mode[idx] = 1;
-            target[idx] = rlMaxQ[li] - rlLoadQ[i];
+            target[idx] = liMax - rlLoadQ[i];
             limitType[st] = 2;
             switchCount[st]++;
             switched[s] = 1;
@@ -3194,18 +3209,23 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
     } else if (limitType[st] != 0 && switchCount[st] < maxSwitch) {   // pinned at a limit — check switchback
         double v = x[idx];
         double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, s, i, rlVtarget[i]);
-        bool back = (limitType[st] == 2 && v > vt)                   // maxQ-pinned but v above target
-                 || (limitType[st] == 1 && v < vt);                  // minQ-pinned but v below target
+        // OLF never back-switches a slope-SVC bus: checkPqBus runs with
+        // canSwitchToPv = !bus.hasGeneratorsWithSlope() ("we don't support switching PQ to PV
+        // for bus with one controller with slope") — once pinned, a slope row stays PQ.
+        bool back = !slopeRow
+                && ((limitType[st] == 2 && v > vt)                   // maxQ-pinned but v above target
+                 || (limitType[st] == 1 && v < vt));                 // minQ-pinned but v below target
         if (back) {
-            mode[idx] = slopeRow ? 2 : 0;                   // PQ → PV: resume voltage control (slope form kept)
-            target[idx] = slopeRow ? savedTarget[st] : vt;  // the slope row's target is NOT the plain vtarget
+            mode[idx] = 0;                                  // PQ → PV: resume voltage control
+            target[idx] = vt;
             limitType[st] = 0;
             switched[s] = 1;
-        } else if (cvStride) {
+        } else if (cvStride || svcLim) {
             // Q-limit UPDATE while pinned (OLF checkPqBusWithQLimitType): a CURVE limit that moved
-            // (DS moved the gen's P) re-freezes the pinned Q at the NEW limit when it drifted by
-            // more than the mismatch tol. Unreachable with static limits — gated on the channel.
-            double lim = limitType[st] == 1 ? rlMinQ[li] : rlMaxQ[li];
+            // (DS moved the gen's P) or an SVC limit that moved (B*v^2 at the live V) re-freezes
+            // the pinned Q at the NEW limit when it drifted by more than the mismatch tol.
+            // Unreachable with static limits — gated on the channels.
+            double lim = limitType[st] == 1 ? liMin : liMax;
             if (fabs(lim - (target[idx] + rlLoadQ[i])) > tol) {
                 target[idx] = lim - rlLoadQ[i];
                 switched[s] = 1;
@@ -3694,6 +3714,8 @@ struct BatchSolverContext {
     int nRlRemote = 0;                                     // remote-member RL entries present (plan-B1/B3)
     DeviceBuf dRlRemote;                                   // per-entry remote kind (1 = remote group member)
     DeviceBuf dRlCmpVrow;                                  // per-entry compare row (PILOT v col for remote members)
+    DeviceBuf dRlSvcBmin, dRlSvcBmax, dRlV2Base;           // per-entry SVC quadratic limit coefs + packed base v^2
+                                                           // (limit(v) = static + b*(v^2 - v2Base)); zeroed default
     int nDqDyn = 0;                                        // dynamic reactive keys (plan-B3): an RL pin zeroes the
     DeviceBuf dDqKMember;                                  // pinned member's key and renormalizes the DISTR_Q
     DeviceBuf dDqJMember;                                  // weights over the survivors (updateReactiveKeys) — the
@@ -3969,6 +3991,10 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
         ctx->dRlSavedTarget.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(double));
         ctx->dRlLimitType.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(char));
         ctx->dRlSwitchCount.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(char));
+        std::vector<double> svcZero(nrl, 0.0);              // neutral until setBatchRlSvcLimits installs
+        ctx->dRlSvcBmin.upload(svcZero.data(), nrl * sizeof(double));
+        ctx->dRlSvcBmax.upload(svcZero.data(), nrl * sizeof(double));
+        ctx->dRlV2Base.upload(svcZero.data(), nrl * sizeof(double));
     }
     ctx->dRowSlope.upload(rowSlope, n * sizeof(double));
     ctx->nds = nds;
@@ -4817,7 +4843,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
                     ctx->dRowSlope.as<double>(), ctx->dRlSavedTarget.as<double>(), ctx->ncv > 0 ? 1 : 0,
                     ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
-                    ctx->nRlRemote > 0 ? ctx->dRlCmpVrow.as<int>() : nullptr);
+                    ctx->nRlRemote > 0 ? ctx->dRlCmpVrow.as<int>() : nullptr,
+                    ctx->dRlSvcBmin.as<double>(), ctx->dRlSvcBmax.as<double>(), ctx->dRlV2Base.as<double>());
             if (ctx->nRlRemote > 0 && ctx->nDqMembers > 0) {
                 // keep the survivors' DISTR_Q row targets in step with the pin states (plan-B3)
                 updateDistrQTargetsBatch<<<grid(ctx->nDqMembers * nS), BLOCK, 0, ctx->stream>>>(
@@ -5760,6 +5787,30 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 
 // Remote-member RL entries (plan-B1): install (or clear) the per-entry remote kinds + compare rows
 // on a batch context. The RL kernel SKIPS remote entries until the B3 transition machinery lands.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlSvcLimits(
+        JNIEnv* env, jclass, jlong handle, jdoubleArray jBmin, jdoubleArray jBmax, jdoubleArray jV2Base) {
+    BatchSolverContext* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || ctx->nrl == 0) {
+        return;
+    }
+    if (env->GetArrayLength(jBmin) != ctx->nrl || env->GetArrayLength(jBmax) != ctx->nrl
+            || env->GetArrayLength(jV2Base) != ctx->nrl) {
+        env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
+                      "setBatchRlSvcLimits: array length != nrl");
+        return;
+    }
+    jdouble* bmin = env->GetDoubleArrayElements(jBmin, nullptr);
+    jdouble* bmax = env->GetDoubleArrayElements(jBmax, nullptr);
+    jdouble* v2b = env->GetDoubleArrayElements(jV2Base, nullptr);
+    ctx->dRlSvcBmin.upload(bmin, static_cast<size_t>(ctx->nrl) * sizeof(double));
+    ctx->dRlSvcBmax.upload(bmax, static_cast<size_t>(ctx->nrl) * sizeof(double));
+    ctx->dRlV2Base.upload(v2b, static_cast<size_t>(ctx->nrl) * sizeof(double));
+    env->ReleaseDoubleArrayElements(jBmin, bmin, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jBmax, bmax, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jV2Base, v2b, JNI_ABORT);
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlRemote(
         JNIEnv* env, jclass, jlong handle, jbyteArray jRemote, jintArray jCmpVrow,

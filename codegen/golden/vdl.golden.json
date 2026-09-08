@@ -1,0 +1,25 @@
+{
+  "java_class": "AbstractLoadModelEquationTerm",
+  "methods": [
+    {
+      "name": "f",
+      "params": [
+        "v",
+        "target",
+        "c",
+        "n"
+      ],
+      "body": "(c * pow(v, n)) * target"
+    },
+    {
+      "name": "dfdv",
+      "params": [
+        "v",
+        "target",
+        "c",
+        "n"
+      ],
+      "body": "(c * n * pow(v, n - 1)) * target"
+    }
+  ]
+}

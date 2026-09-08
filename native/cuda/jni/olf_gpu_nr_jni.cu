@@ -59,6 +59,7 @@
 #include "shunt_scatter.h"
 #include "hvdc.cuh"
 #include "hvdc_scatter.h"
+#include "vdl.cuh"
 
 using namespace powsybl::openloadflow;
 
@@ -1335,7 +1336,7 @@ struct SharedStructure {
     int ndb = 0;                                             // DISTR_SHUNT_B linear contributions
     DeviceBuf dDbCol, dDbCoef, dDbDest;                      // ndb each (dDbDest is ndb*2)
     int nvdl = 0;                                            // voltage-dependent load model terms (ZIP/exp)
-    DeviceBuf dVdlIn, dVdlIdx, dVdlDest;                     // nvdl*2 (coef, exponent) / nvdl*2 (row, vCol) / nvdl
+    DeviceBuf dVdlIn, dVdlIdx, dVdlDest;                     // nvdl*3 (c, n, target — verbatim OLF) / nvdl*2 (row, vCol) / nvdl
     int nQr = 0;                                             // pilot-Q relocation GROUPS (plan-A6): candidate
     std::vector<int> hQrPtr, hQrRows;                        // tables [fallback row, member rows...] per group
     DeviceBuf dQrPtr, dQrRows;                               // (rows in DEVICE row space, rowMap applied)
@@ -1790,7 +1791,7 @@ SharedStructure* buildStructure(int n,
         for (int e = 0; e < nvdl; e++) {
             vdlDest[e] = pos.at(vdlIdx[e * 2], vdlIdx[e * 2 + 1]);
         }
-        st->dVdlIn.upload(vdlIn, static_cast<size_t>(nvdl) * 2 * sizeof(double));
+        st->dVdlIn.upload(vdlIn, static_cast<size_t>(nvdl) * 3 * sizeof(double));
         st->dVdlIdx.upload(vdlIdx, static_cast<size_t>(nvdl) * 2 * sizeof(int));
         st->dVdlDest.upload(vdlDest.data(), static_cast<size_t>(nvdl) * sizeof(int));
     }
@@ -2459,12 +2460,18 @@ __global__ void fillVdlBatch(int ne, int nScenarios, int n, int nnz,
     if (t >= ne * nScenarios) return;
     int e = t % ne;
     int s = t / ne;
-    double coef = in[e * 2];
-    double expn = in[e * 2 + 1];
+    // GENERATED evalVdl (codegen family "vdl", parsed from OLF's
+    // AbstractLoadModelEquationTerm.f/dfdv): one packed element per exp term, the sum over a
+    // load model's terms IS the per-entry atomicAdd — exactly the Java accumulation loop.
+    double c = in[e * 3];
+    double expn = in[e * 3 + 1];
+    double target = in[e * 3 + 2];
     double v = x[(size_t) s * n + ix[e * 2 + 1]];
-    atomicAdd(&F[(size_t) s * n + ix[e * 2]], coef * pow(v, expn));
+    double o[2];
+    evalVdl(v, target, c, expn, 0, o + 0, o + 1);
+    atomicAdd(&F[(size_t) s * n + ix[e * 2]], o[0]);
     if (vals != nullptr) {
-        atomicAdd(&vals[(size_t) s * nnz + dest[e]], coef * expn * pow(v, expn - 1.0));
+        atomicAdd(&vals[(size_t) s * nnz + dest[e]], o[1]);
     }
 }
 

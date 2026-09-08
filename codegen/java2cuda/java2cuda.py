@@ -50,10 +50,12 @@ import spec_shunt  # noqa: E402
 import spec_hvdc  # noqa: E402
 import spec_closed_branch_i  # noqa: E402
 import spec_open_branch_i  # noqa: E402
+import spec_vdl  # noqa: E402
 
 MODULES = [spec_closed_branch.MODULE, spec_open_branch.MODULE,
            spec_shunt.MODULE, spec_hvdc.MODULE,
-           spec_closed_branch_i.MODULE, spec_open_branch_i.MODULE]
+           spec_closed_branch_i.MODULE, spec_open_branch_i.MODULE,
+           spec_vdl.MODULE]
 
 # Math calls a flattened body may legitimately keep (extract_golden strips the
 # Math./FastMath. prefix); anything else left as a call is an unresolved helper.

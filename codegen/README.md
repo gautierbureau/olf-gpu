@@ -32,7 +32,11 @@ factoring OLF's own Java does with its locals and helpers.
   `getHvdcLineLosses` closed form, which lives in another repo).
   Families: closed_branch, open_branch, shunt, hvdc (the GPU fill kernels, with
   scatter stamps) + closed_branch_i, open_branch_i (current magnitude — NEW GPU
-  targets for future on-device current monitoring; no consumer, no scatter).
+  targets for future on-device current monitoring; no consumer, no scatter)
+  + vdl (ZIP/exponential load models: OLF's accumulation loop in
+  AbstractLoadModelEquationTerm is parsed to a per-exp-term body, the sum over a
+  load model's terms is the batch kernel's per-entry atomicAdd; no scatter —
+  landing rows are dynamic vdlIdx, wired by the packer + parity tests).
 - `java2cuda/java2cuda.py` — the transpiler + renderer (stdlib + one Jinja
   template, `templates/fused.cuh.j2`) + scatter emission.
 - `java2cuda/prove.py` — the proof (stdlib): parse == the frozen golden manifest

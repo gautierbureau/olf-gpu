@@ -3,8 +3,9 @@
 THE equation codegen (see ../README.md for the overview): the untouched,
 hand-written OLF Java is the single source of truth; the fused CUDA kernels +
 scatter tables in `native/cuda/` are parsed and transpiled from it. Covers all
-six families: closed-branch, open-branch P/Q, shunt, HVDC AC emulation (the GPU
-fill kernels) plus the two current-magnitude families (closed/open) as NEW GPU
+seven families: closed-branch, open-branch P/Q, shunt, HVDC AC emulation and the
+ZIP/exponential load models (`vdl` — the GPU fill kernels) plus the two
+current-magnitude families (closed/open) as NEW GPU
 targets — groundwork for future on-device current-limit monitoring (no consumer
 yet; note their derivatives divide by hypot(re, im) UNGUARDED at I=0, exactly
 like the CPU der() they replicate — upstream guards only calculateSensi).
@@ -81,6 +82,15 @@ exactly the factoring `AcNetworkVector` does on the CPU.
     and a post-pass rewrites hoisted expressions against earlier-listed helpers'
     locals. Only `di/dv` exists — the FD audit CONFIRMS the dropped angle
     derivatives are ~0 (the rotation-invariance claim).
+  - **vdl** (ZIP/exponential load models) — the parser's REDUCTION shape:
+    `AbstractLoadModelEquationTerm.f/dfdv` are ACCUMULATION LOOPS
+    (`Σ c·vⁿ · target` over a model's exp terms, `n == 0` skipped), extracted as
+    the per-term loop BODY with the term accessors (`expTerm.c()/n()`) promoted
+    to params — the sum IS the batch kernel's per-entry atomicAdd (one packed
+    element per exp term), and the `n == 0` guard is mirrored at pack time (the
+    constant part lives in the target vector). No scatter stamp: landing rows
+    are dynamic (`vdlIdx`), so the wiring guarantee stays with the packer +
+    parity tests; codegen adds the FORMULA guarantee.
 - `java2cuda.py` — parser front end (reuses `codegen/extract_golden.py`) + the
   transpiler + the renderer (reuses `codegen/templates/fused.cuh.j2`).
 - `prove.py` — the proof, stdlib-only, per family:
@@ -95,7 +105,7 @@ exactly the factoring `AcNetworkVector` does on the CPU.
     guard (rendered vs committed render); at adoption time it proved the swap
     against the SymPy pipeline's kernels (≤7e-15).
   - **D. rendered** — the rendered kernel == the golden manifest, 1e-12.
-- Kernels are emitted into `native/cuda/` (all six host-compile clean in ONE
+- Kernels are emitted into `native/cuda/` (all seven host-compile clean in ONE
   translation unit with `g++ -Wall -Wextra` — the shared `R2` constexpr guard is
   exercised); the four fill-kernel families also emit their scatter
   `.scatter.json` + `_scatter.h` from the spec's stamp, validated by

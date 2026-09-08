@@ -38,6 +38,21 @@ EXT_CALL = re.compile(r"\bHvdcUtils\.(getHvdcLineLosses)\b")
 METHOD = re.compile(
     r"(public|protected|private)\s+static\s+(?:double|boolean)\s+(\w+)\s*\(([^)]*)\)\s*\{(.*?)\}",
     re.DOTALL)
+# REDUCTION methods (voltage-dependent load model): an accumulation loop over the load model's
+# ExpTerm records, `value += <per-term expr>; ... return value * <mult>`. The GPU packs ONE
+# element per exp term and sums through the per-entry scatter (atomicAdd) — exactly the Java
+# loop's Σ — so the extracted method is the PER-TERM body: the record accessors (expTerm.c(),
+# expTerm.n()) become scalar parameters (c, n) and the trailing multiplier stays. The
+# `n != 0` guard is mirrored at PACK time (constant terms live in the target vector; the
+# packer skips them), so it does not appear in the per-term expression.
+REDUCTION = re.compile(
+    r"(public|protected|private)\s+static\s+double\s+(\w+)\s*\(([^)]*)\)\s*\{\s*"
+    r"double\s+(\w+)\s*=\s*0;\s*"
+    r"for\s*\(\s*[\w.]+\s+(\w+)\s*:\s*(\w+)\s*\)\s*\{\s*"
+    r"if\s*\(\s*\5\.n\(\)\s*!=\s*0\s*\)\s*\{\s*"
+    r"\4\s*\+=\s*(.*?);\s*\}\s*\}\s*"
+    r"return\s+\4\s*\*\s*(\w+)\s*;\s*\}",
+    re.DOTALL)
 _DECL = re.compile(r"double\s+(\w+)\s*=\s*(.*?);", re.DOTALL)
 _RETURN = re.compile(r"return\s+(.*?);", re.DOTALL)
 
@@ -124,7 +139,18 @@ def body_of(java_body):
 def extract(text):
     methods = []
     for mod, name, plist, body in METHOD.findall(text):
-        methods.append({"mod": mod, "name": name, "params": params_of(plist), "body": body_of(body)})
+        if re.search(r"\bfor\s*\(", body):
+            continue                                   # loop method: truncated by the non-nested-brace
+        methods.append({"mod": mod, "name": name, "params": params_of(plist), "body": body_of(body)})   # regex — the REDUCTION pass below owns it
+    for mod, name, plist, _acc, term, _coll, expr, mult in REDUCTION.findall(text):
+        # scalar params only (the Collection<ExpTerm> parameter is replaced by the per-term
+        # accessor scalars c and n, appended in accessor order)
+        scalars = [p.split()[-1] for p in plist.split(",") if p.strip().startswith("double")]
+        body = re.sub(rf"\b{term}\.c\(\)", "c", expr)
+        body = re.sub(rf"\b{term}\.n\(\)", "n", body)
+        body = MATH_CALL.sub(r"\1", body)
+        methods.append({"mod": mod, "name": name, "params": scalars + ["c", "n"],
+                        "body": " ".join(f"({body}) * {mult}".split())})
     return methods
 
 

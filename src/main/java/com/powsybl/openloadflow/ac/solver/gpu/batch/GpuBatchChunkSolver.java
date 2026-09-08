@@ -60,6 +60,7 @@ final class GpuBatchChunkSolver {
                                                List<GpuBatchTransformerControl.TransformerController> transformerControllers,
                                                List<GpuBatchIncrementalTvc.Controller> incrementalTvcControllers,
                                                List<GpuBatchIncrementalShuntVc.Controller> incrementalShuntControllers,
+                                               List<GpuBatchSimpleShuntVc.Group> simpleShuntGroups,
                                                List<GpuBatchIncrementalFlowControl.Controller> incrementalFlowControllers,
                                                GpuBatchIncrementalFlowControl.EsContext esContext,
                                                List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers,
@@ -448,6 +449,14 @@ final class GpuBatchChunkSolver {
                         GpuBatchContinuousPhase.applyPhaseOn(realCount, n, continuousPhaseControllers,
                                 rowModePerScenario, baseRowMode, disabledMask, ovIndexList, ovValueList);
                     }
+                    List<Integer> preShuntOvIdx = null;
+                    List<Double> preShuntOvVal = null;
+                    if (config.simpleShuntControl() && simpleShuntGroups != null && !simpleShuntGroups.isEmpty()) {
+                        preShuntOvIdx = new ArrayList<>(ovIndexList);
+                        preShuntOvVal = new ArrayList<>(ovValueList);
+                        GpuBatchSimpleShuntVc.applyVcOn(realCount, n, simpleShuntGroups,
+                                rowModePerScenario, baseRowMode, disabledMask, ovIndexList, ovValueList);
+                    }
                     List<Integer> preTvcOvIdx = null;
                     List<Double> preTvcOvVal = null;
                     if (config.simpleTransformerControl() && transformerControllers != null && !transformerControllers.isEmpty()) {
@@ -747,6 +756,22 @@ final class GpuBatchChunkSolver {
                                 rowModePerScenario, baseRowMode, disabledMask,
                                 prePcOvIdx, prePcOvVal,
                                 dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
+                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                config.lsMode() == 2 ? varType : null, config);
+                    }
+                    if (config.simpleShuntControl() && simpleShuntGroups != null && !simpleShuntGroups.isEmpty()) {
+                        chunkResults = GpuBatchSimpleShuntVc.roundAndResolve(handle, chunkSize, realCount, n,
+                                chunkResults, simpleShuntGroups, rowModePerScenario, baseRowMode, disabledMask,
+                                preShuntOvIdx, preShuntOvVal,
+                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                                dsAnchorShift, dsSlackShift,
                                 nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
                                 r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                                 r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),

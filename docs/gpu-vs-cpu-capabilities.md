@@ -114,7 +114,7 @@ the stock CPU path (base + contingencies + strategies), logged.
 | PhaseControl / IncrementalPhaseControl | ✅ **2026-09-03** | BOTH batched on DEVICE. IncrementalPhaseControl (ACTIVE_POWER_CONTROL + CURRENT_LIMITER): decision loop over the pinned α1 identity with es-loaded flow terms (`GpuBatchIncrementalFlowControl`). Continuous PhaseControl (CONTINUOUS_WITH_DISCRETISATION): row mode 3 re-emits the controlled side's P block at the α1-paired row (cbPcSide/pcDest in the structure) so α1 solves free in the first pass; `GpuBatchContinuousPhase` then rounds to the closest tap (CONTROLLER) / one-tap I-capping steps (LIMITER) with r1Ov pi-row pins. LOCAL control only (remote → CPU via the extraction guard); the SA base LF stays on CPU for CONTROLLER mode (BRANCH_TARGET_P activates mid-run, sequential solver guards row modes ≥ 2). Both `MatchesCpu` at 1e-12. Semantic axes in §D |
 | IncrementalTransformerVoltageControl / Simple | ✅ **2026-08** | folded into the TransformerVoltageControl row above |
 | TransformerReactivePowerControl (incremental) | ✅ **2026-08** | GpuBatchIncrementalFlowControl KIND_RPC (rho → branch Q, es-loaded flow terms), 1e-12 |
-| ShuntVoltageControl (incl. incremental) | ✅ **2026-08** | continuous (SHUNT_B in-Newton) + INCREMENTAL (GpuBatchIncrementalShuntVc, in-kernel dV/dB), 1e-12. **2026-09-08 audit**: the incremental orchestrator had NEVER actually run — the element mapper indexes only per-bus FIXED shunt aggregates, a controller shunt is a separate LfShunt → elemIndex −1 → every controller silently skipped (4.8 kV on a section-moving scenario; the dedicated test was hollow, its 5 kV deadband never moved). Fixed: −1 accepted when sections carry no G variation (b rides the SHUNT_B variable; static-G/outage-mask uses guarded), plus the DS carry. deviceIncrementalShuntDsCarryMatchesCpu pins both at 1e-12 |
+| ShuntVoltageControl (incl. incremental) | ✅ **2026-08** | continuous (SHUNT_B in-Newton) + INCREMENTAL (GpuBatchIncrementalShuntVc, in-kernel dV/dB), 1e-12. **2026-09-08 audit**: the incremental orchestrator had NEVER actually run — the element mapper indexes only per-bus FIXED shunt aggregates, a controller shunt is a separate LfShunt → elemIndex −1 → every controller silently skipped (4.8 kV on a section-moving scenario; the dedicated test was hollow, its 5 kV deadband never moved). Fixed: −1 accepted when sections carry no G variation (b rides the SHUNT_B variable; static-G/outage-mask uses guarded), plus the DS carry. deviceIncrementalShuntDsCarryMatchesCpu pins both at 1e-12. **DEVICE CONTINUOUS (WITH_GENERATOR — OLF's DEFAULT shunt mode) ✅ 2026-09-08**: was a WHOLE-RUN CPU gate; now GpuBatchSimpleShuntVc runs the SimpleTvc two-phase flow — VC-ON toggle-diff activation per scenario (controlled-bus V identity + bus Q relocated onto the SHUNT_B row by the structure's dynamic Q-relocation; DISTR_SHUNT_B couples shared groups), then LfShuntImpl.dispatchB replicated verbatim (per sub-controller, residue/remaining to the closest section from the current position over [minPos, size)) and one VC-OFF re-solve with the identities pinned at the dispatched totals + section (dG,dB) + the DS carry triple. A/B: rounding off = 1.04 kV, VC-on off = 1.04 kV. Stage-1 scope: standalone of the other DECISION orchestrators (co-presence with a transformer/phase/RPC/SecondaryVc loop, or VoltageMonitoring with actual SVCs, keeps the whole-run gate — the CPU interleaves simultaneously-unstable loops per outer iteration); DS/RL/HVDC in-kernel phases compose. device+javaSimpleShuntVoltageControlMatchesCpu at 1e-12 (the JAVA twin also NEW — that mode's gate accepted the loop but no test existed) |
 | SecondaryVoltageControl | ✅ **2026-08** | **plain LF: ✅ validated 2026-07-20** — this loop owns NO solver variable and NO equation type. It builds its own dense side matrices, solves a small LU OUTSIDE the Newton system, and writes back only `GeneratorVoltageControl.setTargetValue()` — i.e. it mutates the RHS of existing BUS_TARGET_V rows and their active flags. On the sequential path (CPU outer loops around a GPU inner solve) it therefore needs NO packing support: `GpuSecondaryVoltageControlTest` drives the ieee14 z1 pilot point to 13.0000 kV with max dV 2.8e-14 vs CPU and ZERO CPU fallbacks. BATCHED path ✅ **2026-08** (GpuBatchSecondaryVc: batched device sensitivities + host zone-system replay, 1e-11 — user-accepted machine precision on the pilot-point knife-edge); stage-1 scope LOCAL generator VC only. §D |
 | AreaInterchangeControl | ⏩ | §D |
 | AutomationSystem | ⏩ | §D |
@@ -288,12 +288,9 @@ Before building tier B, MEASURE: run the production/validation networks with
 `OLF_GPU_QUALIFY_TRACE` + the scope's unsupported-outer-loop log and rank by observed hits.
 
 **Tier A — high value, machinery mostly exists:**
-1. **Continuous shunt voltage control** (`ShuntVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL`)
-   — this is OLF's DEFAULT shunt VC mode, so ANY run with `shuntCompensatorVoltageControlOn`
-   and stock parameters is whole-run CPU today. The pieces exist: SHUNT_B batch rows
-   (controllable-shunt support), the DISTR_SHUNT_B pack (`dbRow/dbCol/dbCoef`), and
-   `GpuBatchSimpleTvc` is the orchestrator template (VC-on-first-solve + round-to-section
-   re-solve).
+1. ~~Continuous shunt voltage control~~ ✅ **landed 2026-09-08** (`GpuBatchSimpleShuntVc`,
+   see the §2 ShuntVoltageControl row; stage-1 scope standalone of the other decision
+   orchestrators).
 2. **AC-emu HVDC saturated/frozen at base** (`hvdcBatchable` + the `frozenHvdcBase`
    cpuBaseOnly) — pack the saturated-segment coupling as the base state; the
    freeze/unfreeze + limit-switch machinery already runs per scenario
@@ -605,7 +602,9 @@ rejection with its reason, `LAST_GPU_PRECOMPUTED_COUNT` proves engagement).
 1. Any outer loop outside the supported set: AreaInterchangeControl, AutomationSystem
    (the low-tier gaps), and any loop OLF adds that the filter list does not know.
 2. Conditional batchability of the supported loops: TVC flavors on networks failing
-   `transformerControlSupported`; non-INCREMENTAL shunt voltage-control mode;
+   `transformerControlSupported`; non-INCREMENTAL shunt voltage-control mode ONLY when
+   co-present with another decision orchestrator (standalone WITH_GENERATOR batches since
+   2026-09-08 — §2);
    SecondaryVc with non-LOCAL generator VC; continuous PhaseControl LIMITER with a
    remote controlled branch; monitoring SVCs failing `GpuBatchVoltageMonitoring.supported`;
    AC-emu HVDC not all-LINEAR at base.

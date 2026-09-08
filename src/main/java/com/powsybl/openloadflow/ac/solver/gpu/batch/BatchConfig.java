@@ -44,6 +44,7 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
                           com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams,
                           boolean incrementalTransformerControl, int incTvcMaxTapShift,
                           boolean incrementalShuntControl, int incShuntMaxSectionShift,
+                          boolean simpleShuntControl,
                           boolean incrementalRpcControl, boolean incrementalPhaseControl,
                           boolean simpleTransformerControl, boolean tvcUseInitialTapPosition,
                           boolean hvdcFreezing, boolean hvdcLimits,
@@ -60,7 +61,7 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
      *  constants, LEAVE_ON_SLACK_BUS behavior (never reject a saturated scenario), and the DEVICE
      *  outer-loop mode. This is what every non-provider entry point (tests, direct callers) uses. */
     public static final BatchConfig DEVICE_DEFAULTS = new BatchConfig(0, 0, 0, false, 0, 0, false, OuterLoopMode.DEVICE,
-            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams.DEFAULT, false, 3, false, 3, false, false, false, false, false, false,
+            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams.DEFAULT, false, 3, false, 3, false, false, false, false, false, false, false,
             false, 0.8, 1.2, false, false, false, null);
 
     int dsRejectResidualFlag() {

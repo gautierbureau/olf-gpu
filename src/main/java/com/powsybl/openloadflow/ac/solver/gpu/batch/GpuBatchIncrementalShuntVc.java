@@ -146,7 +146,7 @@ final class GpuBatchIncrementalShuntVc {
     }
 
     @SuppressWarnings("unchecked")
-    private static double shuntSectionG(LfShunt.Controller c, int pos) {
+    static double shuntSectionG(LfShunt.Controller c, int pos) {
         // no public accessor for the per-section G table (only getG() at the current position) —
         // read-only reflection, same pattern as GpuBatchTransformerControl.tapModels
         try {

@@ -615,6 +615,35 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get());
     }
 
+    /** DEVICE-mode CONTINUOUS shunt VC (WITH_GENERATOR — OLF's DEFAULT shuntVoltageControlMode):
+     *  the SimpleTvc two-phase flow for shunts (GpuBatchSimpleShuntVc) — per scenario, the VC-ON
+     *  toggle-diff activation solves the continuous b (the controlled bus V pinned, the bus Q
+     *  relocated onto the SHUNT_B row), then OLF's dispatchB rounds b to the closest sections and
+     *  the VC-OFF re-solve runs with the identity pinned there + the section (dG,dB) applied.
+     *  The l1 outage reroutes the flow over the doubled-impedance clone (V sag → a different
+     *  continuous b → a different dispatched section than the base). GPU SA == CPU SA at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceSimpleShuntVoltageControlMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.ShuntNetworkFactory.create();
+        com.powsybl.iidm.network.Line l1 = network.getLine("l1");
+        network.newLine().setId("l1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR() * 2).setX(l1.getX() * 2)
+                .setG1(l1.getG1()).setB1(l1.getB1()).setG2(l1.getG2()).setB2(l1.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("l1_BIS", new BranchContingency("l1_BIS")),
+                new Contingency("l1", new BranchContingency("l1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setShuntCompensatorVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setShuntVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.ShuntVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "continuous shunt VC must ENGAGE the batch (was a whole-run CPU gate)");
+    }
+
     /** DEVICE-mode IncrementalPhaseControl (ACTIVE_POWER_CONTROL): a1 taps drive the controlled branch's
      *  P via in-kernel dP/da1 sensitivities + OLF's own flow terms (GpuBatchIncrementalFlowControl);
      *  the tap-moving strong-line outage included, GPU SA == CPU SA at 1e-12. */
@@ -3714,6 +3743,30 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         // (sensitivity-guided), so the device sees only pi-model changes (via the r1Ov refresh) and
         // pinned-ratio target updates — the highest-value flavor to support.
         runJavaTvcModeMatchesCpu(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL);
+    }
+
+    @org.junit.jupiter.api.Test
+    void javaSimpleShuntVoltageControlMatchesCpu() {
+        // CONTINUOUS (WITH_GENERATOR — OLF's DEFAULT) shunt VC in JAVA mode: OLF's own loop enables
+        // VC, the continuous b solves in the device inner Newton (SHUNT_B variable + dynamic
+        // Q-relocation), dispatchB rounds on the CPU and the pinned b + (g,b) refresh reach the
+        // device per scenario. Was accepted by the JAVA gate but never validated by a test.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.ShuntNetworkFactory.create();
+        com.powsybl.iidm.network.Line l1 = network.getLine("l1");
+        network.newLine().setId("l1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR() * 2).setX(l1.getX() * 2)
+                .setG1(l1.getG1()).setB1(l1.getB1()).setG2(l1.getG2()).setB2(l1.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("l1_BIS", new BranchContingency("l1_BIS")),
+                new Contingency("l1", new BranchContingency("l1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setShuntCompensatorVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setShuntVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.ShuntVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL);
+        assertJavaSaMatchesCpu(network, ctgs, lfp, "SIMPLE-SHUNT-VC");
     }
 
     @org.junit.jupiter.api.Test

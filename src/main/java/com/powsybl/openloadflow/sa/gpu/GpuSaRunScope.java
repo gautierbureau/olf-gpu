@@ -83,6 +83,14 @@ final class GpuSaRunScope {
         // with in-kernel dV/dB sensitivities.
         boolean incrementalShuntBatchable =
                 olfGuardParams.getShuntVoltageControlMode() == OpenLoadFlowParameters.ShuntVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL;
+        // CONTINUOUS shunt VC (WITH_GENERATOR — OLF's DEFAULT shunt mode): the SimpleTvc two-phase
+        // flow for shunts (GpuBatchSimpleShuntVc: VC-on first solve + dispatchB round + re-solve).
+        // Stage-1 scope: standalone of the other DECISION orchestrators — the CPU interleaves
+        // simultaneously-unstable loops per outer iteration, which the sequential orchestrator
+        // chain does not model; co-presence with any transformer/phase/RPC/SecondaryVc/monitoring
+        // loop keeps the whole run on the CPU exactly as before (DS/RL/HVDC phases are in-kernel
+        // and compose fine).
+
         // SIMPLE (WITH_GENERATOR) TVC: continuous first solve (VC-on activation deltas) then a single
         // round-to-closest-tap re-solve (GpuBatchSimpleTvc); same stage-1 structural scope.
         // HVDC AC-emulation loops WITH HVDCs present (GpuBatchHvdcAcEmulation): the device pack extracts
@@ -122,6 +130,22 @@ final class GpuSaRunScope {
         boolean noSvc = lfNetwork.getBuses().stream()
                 .flatMap(b -> b.getGenerators().stream())
                 .noneMatch(g -> g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator);
+        // CONTINUOUS shunt VC (WITH_GENERATOR — OLF's DEFAULT shunt mode): the SimpleTvc two-phase
+        // flow for shunts (GpuBatchSimpleShuntVc: VC-on first solve + dispatchB round + re-solve).
+        // Stage-1 scope: standalone of the other DECISION orchestrators — the CPU interleaves
+        // simultaneously-unstable loops per outer iteration, which the sequential orchestrator
+        // chain does not model; co-presence with a transformer/phase/RPC/SecondaryVc loop (or
+        // VoltageMonitoring with actual SVCs — the loop is inert otherwise) keeps the whole run on
+        // the CPU exactly as before (DS/RL/HVDC phases are in-kernel and compose fine).
+        java.util.Set<String> shuntVcConflicts = java.util.Set.of(
+                "TransformerVoltageControl", "SimpleTransformerVoltageControl", "IncrementalTransformerVoltageControl",
+                "PhaseControl", "IncrementalPhaseControl", "IncrementalTransformerReactivePowerControl",
+                "SecondaryVoltageControl");
+        boolean simpleShuntVcBatchable =
+                olfGuardParams.getShuntVoltageControlMode() == OpenLoadFlowParameters.ShuntVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL
+                && acParameters.getOuterLoops().stream().map(AcOuterLoop::getName)
+                        .noneMatch(name -> shuntVcConflicts.contains(name)
+                                || "VoltageMonitoring".equals(name) && !noSvc);
         // DEVICE (CUDA outer loops) vs JAVA (OLF's Java outer loops per scenario) — §5.1 of the design.
         OuterLoopMode outerLoopMode = readOuterLoopMode();
         LoadFlowParameters lfGuardParams = securityAnalysisParameters.getLoadFlowParameters();
@@ -139,6 +163,7 @@ final class GpuSaRunScope {
                             && !(transformerControlBatchable && "TransformerVoltageControl".equals(name))
                             && !(incrementalTvcBatchable && "IncrementalTransformerVoltageControl".equals(name))
                             && !(incrementalShuntBatchable && "IncrementalShuntVoltageControl".equals(name))
+                            && !(simpleShuntVcBatchable && "ShuntVoltageControl".equals(name))
                             && !(simpleTvcBatchable && "SimpleTransformerVoltageControl".equals(name))
                             && !(svcBatchable && "SecondaryVoltageControl".equals(name))
                             && !"IncrementalPhaseControl".equals(name)
@@ -219,6 +244,8 @@ final class GpuSaRunScope {
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalTransformerVoltageControl".equals(ol.getName()));
         boolean cfgIncrementalShunt = outerLoopMode == OuterLoopMode.DEVICE && incrementalShuntBatchable
                 && acParameters.getOuterLoops().stream().anyMatch(ol -> "IncrementalShuntVoltageControl".equals(ol.getName()));
+        boolean cfgSimpleShunt = outerLoopMode == OuterLoopMode.DEVICE && simpleShuntVcBatchable
+                && acParameters.getOuterLoops().stream().anyMatch(ol -> "ShuntVoltageControl".equals(ol.getName()));
         // The flow-observed incremental family (GpuBatchIncrementalFlowControl): rho -> branch Q, and
         // a1 -> branch P / I. Both are decision-only loops over pinned identity rows — always batchable
         // when their loop is configured (continuous "PhaseControl" stays CPU via the extraction guard).
@@ -286,6 +313,7 @@ final class GpuSaRunScope {
                         lfGuardParams.getBalanceType(), olfGuardParams.isUseActiveLimits()),
                 cfgIncrementalTvc, olfGuardParams.getIncrementalTransformerRatioTapControlOuterLoopMaxTapShift(),
                 cfgIncrementalShunt, olfGuardParams.getIncrementalShuntControlOuterLoopMaxSectionShift(),
+                cfgSimpleShunt,
                 cfgIncrementalRpc, cfgIncrementalPhase, cfgSimpleTvc,
                 olfGuardParams.isTransformerVoltageControlUseInitialTapPosition(), cfgHvdcFreezing, cfgHvdcLimits,
                 cfgSecondaryVc, olfGuardParams.getMinPlausibleTargetVoltage(), olfGuardParams.getMaxPlausibleTargetVoltage(),

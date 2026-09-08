@@ -115,7 +115,7 @@ the stock CPU path (base + contingencies + strategies), logged.
 | IncrementalTransformerVoltageControl / Simple | ✅ **2026-08** | folded into the TransformerVoltageControl row above |
 | TransformerReactivePowerControl (incremental) | ✅ **2026-08** | GpuBatchIncrementalFlowControl KIND_RPC (rho → branch Q, es-loaded flow terms), 1e-12 |
 | ShuntVoltageControl (incl. incremental) | ✅ **2026-08** | continuous (SHUNT_B in-Newton) + INCREMENTAL (GpuBatchIncrementalShuntVc, in-kernel dV/dB), 1e-12. **2026-09-08 audit**: the incremental orchestrator had NEVER actually run — the element mapper indexes only per-bus FIXED shunt aggregates, a controller shunt is a separate LfShunt → elemIndex −1 → every controller silently skipped (4.8 kV on a section-moving scenario; the dedicated test was hollow, its 5 kV deadband never moved). Fixed: −1 accepted when sections carry no G variation (b rides the SHUNT_B variable; static-G/outage-mask uses guarded), plus the DS carry. deviceIncrementalShuntDsCarryMatchesCpu pins both at 1e-12. **DEVICE CONTINUOUS (WITH_GENERATOR — OLF's DEFAULT shunt mode) ✅ 2026-09-08**: was a WHOLE-RUN CPU gate; now GpuBatchSimpleShuntVc runs the SimpleTvc two-phase flow — VC-ON toggle-diff activation per scenario (controlled-bus V identity + bus Q relocated onto the SHUNT_B row by the structure's dynamic Q-relocation; DISTR_SHUNT_B couples shared groups), then LfShuntImpl.dispatchB replicated verbatim (per sub-controller, residue/remaining to the closest section from the current position over [minPos, size)) and one VC-OFF re-solve with the identities pinned at the dispatched totals + section (dG,dB) + the DS carry triple. A/B: rounding off = 1.04 kV, VC-on off = 1.04 kV. Stage-1 scope: standalone of the other DECISION orchestrators (co-presence with a transformer/phase/RPC/SecondaryVc loop, or VoltageMonitoring with actual SVCs, keeps the whole-run gate — the CPU interleaves simultaneously-unstable loops per outer iteration); DS/RL/HVDC in-kernel phases compose. device+javaSimpleShuntVoltageControlMatchesCpu at 1e-12 (the JAVA twin also NEW — that mode's gate accepted the loop but no test existed) |
-| SecondaryVoltageControl | ✅ **2026-08** | **plain LF: ✅ validated 2026-07-20** — this loop owns NO solver variable and NO equation type. It builds its own dense side matrices, solves a small LU OUTSIDE the Newton system, and writes back only `GeneratorVoltageControl.setTargetValue()` — i.e. it mutates the RHS of existing BUS_TARGET_V rows and their active flags. On the sequential path (CPU outer loops around a GPU inner solve) it therefore needs NO packing support: `GpuSecondaryVoltageControlTest` drives the ieee14 z1 pilot point to 13.0000 kV with max dV 2.8e-14 vs CPU and ZERO CPU fallbacks. BATCHED path ✅ **2026-08** (GpuBatchSecondaryVc: batched device sensitivities + host zone-system replay, 1e-11 — user-accepted machine precision on the pilot-point knife-edge); stage-1 scope LOCAL generator VC only. §D |
+| SecondaryVoltageControl | ✅ **2026-08** | **plain LF: ✅ validated 2026-07-20** — this loop owns NO solver variable and NO equation type. It builds its own dense side matrices, solves a small LU OUTSIDE the Newton system, and writes back only `GeneratorVoltageControl.setTargetValue()` — i.e. it mutates the RHS of existing BUS_TARGET_V rows and their active flags. On the sequential path (CPU outer loops around a GPU inner solve) it therefore needs NO packing support: `GpuSecondaryVoltageControlTest` drives the ieee14 z1 pilot point to 13.0000 kV with max dV 2.8e-14 vs CPU and ZERO CPU fallbacks. BATCHED path ✅ **2026-08** (GpuBatchSecondaryVc: batched device sensitivities + host zone-system replay, 1e-11 — user-accepted machine precision on the pilot-point knife-edge); **REMOTE generator VC ✅ 2026-09-08** (controller↔controlled bijection scope — the CtlBus pair keeps both rows; shared controlled buses stay CPU, OLF's own zone LU needs the square system). §D |
 | AreaInterchangeControl | ⏩ | §D |
 | AutomationSystem | ⏩ | §D |
 
@@ -305,13 +305,23 @@ Before building tier B, MEASURE: run the production/validation networks with
    no fallback); A/B: strip off = 2e-3 kV, baseD zeroed = 2e-3 kV. Residual gate: a
    non-linear base with NEITHER the freeze nor the limits loop running (nothing seeds the
    bits) stays whole-run CPU — unreachable with the SA-level freeze default TRUE.
-3. **SecondaryVc with remote generator VC** — per §D: OLF's own loop is general; the port
-   collapsed controller/controlled index sets, so this is orchestrator restructuring plus
-   the (already-batched) DISTR_Q machinery — no kernel work expected.
-4. **Remote-group residual gates** — the table-less pinnable FREE member (<2 merged members:
-   reuse the all-pinned pilot-vEq flip for the 1-member case) and the residual
-   all-members-pinnable shapes; fold in the extraction-level "no free controller" corner
-   (an all-pinned BASE) — same machinery family.
+3. ~~SecondaryVc with remote generator VC~~ ✅ **landed 2026-09-08** — the CtlBus pair keeps
+   BOTH rows (controller: RL entry incl. the rlRemote member entry; CONTROLLED: sensitivity
+   unit row + the moved zone target's landing row, steered through rlVtOv for the
+   pilot-referenced switch-back). Scope = a controller↔controlled BIJECTION (distinct
+   controlled buses — OLF's own zone system needs the square b = A·Jkᵀ) + a real Q range
+   per remote controller (the RL-pack entry condition).
+   `device/javaSecondaryVoltageControlRemoteMatchesCpu` at 1e-11. NOTE from the test hunt:
+   an UNPINNABLE remote controller (±1e9-pu limits) makes the zone system ~1e9-conditioned
+   and amplifies solver ULP noise to 1e-6-kV in BOTH arms — don't build SVC tests on absurd
+   limits.
+4. ~~Remote-group residual gates~~ ✅ **landed 2026-09-08** (folded into item 3's test hunt) —
+   SINGLETON remote groups now carry a relocation table too ([pilot fallback, member] — the
+   `< 2` skip in the qr builder was the whole gate): the only member's pin IS the all-pinned
+   corner, handled by the existing pilot-vEq flip. `remoteRlUnrepresentable` retired (kept
+   as a landing spot for future shapes); the remote pin-dynamics whole-run gate is GONE in
+   both modes. `device/javaRemoteSingletonMemberPinMatchesCpu` (maxQ 800 knob, swept: 750
+   loses the base, 850 never pins) at 1e-12.
 
 **Tier B — moderate, fire only under non-default parameters (measure first):**
 5. **loadPowerFactorConstant + load-based balance** — per-bus q-shift ∝ p-shift in the DS
@@ -621,9 +631,8 @@ rejection with its reason, `LAST_GPU_PRECOMPUTED_COUNT` proves engagement).
    runs (nothing would seed the base statuses; unreachable with the SA-level freeze
    default TRUE — the saturated/frozen base itself batches since 2026-09-08, §5 backlog
    item 2).
-3. Remote VC groups that are pin-dynamics-unrepresentable: ALL enabled members pinnable
-   (pilot-vEq corner is modeled, but the gate covers the residual shapes) or a pinnable
-   FREE member with no relocation table (<2 merged members).
+3. ~~Remote VC pin-dynamics gates~~ — RETIRED 2026-09-08: singleton groups carry a
+   relocation table too, so every clean group shape is representable (§5 backlog item 4).
 4. Parameterization: `loadPowerFactorConstant` or `useLoadModel` with load-based balance;
    `extrapolateReactiveLimits` with curve generators; a custom
    `ContingencyActivePowerLossDistribution` SPI. (The balance-type guard itself is

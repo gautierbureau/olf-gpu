@@ -101,14 +101,18 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         // RE-PICKS per scenario. Same candidate table + in-kernel mode-scan select as the TVC
         // groups above: [pilot v row (fallback = group control lost), member v cols in merged
         // order]. Since the ob/zi alternate-dest channels landed, half-open and zero-impedance q
-        // terms at the pilot ride the relocation too — no branch-shape guard remains.
+        // terms at the pilot ride the relocation too — no branch-shape guard remains. SINGLETON
+        // groups (one remote controller) get a table too since 2026-09-08: their candidate list
+        // [pilot fallback, the member] is structurally a 2-member table, and the only member's pin
+        // IS the all-pinned corner (updatePilotVeqBatch flips the pilot's V identity) — this
+        // retired the last remote-pin-dynamics whole-run gate (table-less pinnable free member).
         java.util.Set<Integer> qrPilotBuses = new java.util.HashSet<>();
         for (LfBus bus : network.getBuses()) {
             var gvc = bus.getGeneratorVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                     .filter(c -> bus.isGeneratorVoltageControlled() && !c.isLocalControl())
                     .orElse(null);
-            if (gvc == null || gvc.getMergedControllerElements().size() < 2 || vCol[bus.getNum()] < 0) {
+            if (gvc == null || gvc.getMergedControllerElements().isEmpty() || vCol[bus.getNum()] < 0) {
                 continue;
             }
             List<Integer> memberRows = new ArrayList<>();

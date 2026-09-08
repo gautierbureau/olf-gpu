@@ -1592,6 +1592,47 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     /** CPU-side semantics check (ground rule: prove the scenario exercises what it claims): the
      *  BASE holds the pilot AT the group target, the post-outage state converges measurably OFF
      *  it — control genuinely lost in flight. */
+    /** SINGLETON remote group (one controller, g1 -> b4; g2/g3 turned LOCAL) whose only member
+     *  PINS under the l45b outage — the shape the retired table-less-free-member whole-run gate
+     *  used to CPU-route (2026-09-08): the singleton now carries a relocation table
+     *  [pilot fallback, member], and its member's pin IS the all-pinned corner — the in-kernel
+     *  mode-scan finds no live candidate and updatePilotVeqBatch flips the pilot's V identity to
+     *  a power row with the captured pilot Q. Base keeps control, the outage loses it (asserted
+     *  on the CPU oracle); GPU SA == CPU SA at 1e-12 with the batch ENGAGED. */
+    @org.junit.jupiter.api.Test
+    void deviceRemoteSingletonMemberPinMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = singletonRemotePinNetwork();
+        List<Contingency> ctgs = List.of(new Contingency("l45b", new BranchContingency("l45b")));
+        assertAllPinnedCornerSemantics(network, ctgs);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
+    }
+
+    /** JAVA-hybrid twin of {@link #deviceRemoteSingletonMemberPinMatchesCpu}: OLF's own RL loop
+     *  pins the singleton and deactivates the pilot vEq; the pushed activation carries it. */
+    @org.junit.jupiter.api.Test
+    void javaRemoteSingletonMemberPinMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = singletonRemotePinNetwork();
+        List<Contingency> ctgs = List.of(new Contingency("l45b", new BranchContingency("l45b")));
+        assertJavaGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
+    }
+
+    /** g2/g3 turned LOCAL (own-bus 1.05 pu) so g1 alone carries the b4 group; maxQ 800 is the
+     *  swept knob (750: the BASE already loses control at 411.3 kV; 850: the outage no longer
+     *  pins) — the singleton holds in the base and PINS under l45b. */
+    private static Network singletonRemotePinNetwork() {
+        Network network = remotePinNetwork("g1", 800);
+        for (String id : new String[] {"g2", "g3"}) {
+            var g = network.getGenerator(id);
+            g.setRegulatingTerminal(g.getTerminal())
+                    .setTargetV(1.05 * g.getTerminal().getVoltageLevel().getNominalV());
+        }
+        return network;
+    }
+
     private void assertAllPinnedCornerSemantics(Network network, List<Contingency> ctgs) {
         com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
         sap.setLoadFlowParameters(remotePinParameters());
@@ -1944,6 +1985,62 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
                 .setSecondaryVoltageControl(true).setMaxPlausibleTargetVoltage(1.6);
         assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
+    }
+
+    /** DEVICE-mode SecondaryVoltageControl with a REMOTE controller (was rejected by the LOCAL-only
+     *  stage-1 scope): B6-G regulates B5 through a line terminal — the zone system's sensitivity
+     *  unit row and the moved zone target now live on the CONTROLLED bus B5's pinned V row while
+     *  the controller's RL entry is the rlRemote member entry (pilot-referenced switch-back via
+     *  rlVtOv). B6-G keeps its stock (pinnable) limits: the singleton remote group batches since
+     *  the table-less-free-member gate retired (backlog item 4, folded in here — the singleton's
+     *  relocation table is [pilot fallback, member], its only member's pin IS the all-pinned
+     *  pilot-vEq corner). B8-G stays local in the same zone (controllers <-> controlled buses
+     *  stay a bijection: {B5, B8}). 1e-11 (the established SecondaryVc knife-edge tolerance). */
+    @org.junit.jupiter.api.Test
+    void deviceSecondaryVoltageControlRemoteMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = secondaryVcRemoteNetwork();
+        List<Contingency> ctgs = List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("L2-3-1", new BranchContingency("L2-3-1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSecondaryVoltageControl(true).setMaxPlausibleTargetVoltage(1.6);
+        assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the remote-SVC run must ENGAGE the batch (was a whole-run CPU gate)");
+    }
+
+    /** JAVA-mode twin of the remote SecondaryVc scenario: OLF's own loop adjusts the zone; the
+     *  hybrid replays it per scenario (targets re-read each round). 1e-11. */
+    @org.junit.jupiter.api.Test
+    void javaSecondaryVoltageControlRemoteMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = secondaryVcRemoteNetwork();
+        List<Contingency> ctgs = List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("L2-3-1", new BranchContingency("L2-3-1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSecondaryVoltageControl(true).setMaxPlausibleTargetVoltage(1.6);
+        assertJavaSaMatchesCpu(network, ctgs, lfp, "SECONDARY-VC-REMOTE", 1e-11);
+    }
+
+    private static Network secondaryVcRemoteNetwork() {
+        Network network = com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory.create14();
+        com.powsybl.iidm.network.Generator b6g = network.getGenerator("B6-G");
+        b6g.setRegulatingTerminal(network.getLine("L2-5-1").getTerminal2())   // B5 end
+                .setTargetV(1.02 * network.getBusBreakerView().getBus("B5").getVoltageLevel().getNominalV())
+                .setVoltageRegulatorOn(true);
+        network.newExtension(com.powsybl.iidm.network.extensions.SecondaryVoltageControlAdder.class)
+                .newControlZone().withName("z1")
+                .newPilotPoint().withTargetV(13).withBusbarSectionsOrBusesIds(List.of("B10")).add()
+                .newControlUnit().withId("B6-G").add()
+                .newControlUnit().withId("B8-G").add()
+                .add().add();
+        return network;
     }
 
     /** DEVICE-mode VoltageMonitoring with a MONITORING SVC (stand-by automaton): the standing-by bus

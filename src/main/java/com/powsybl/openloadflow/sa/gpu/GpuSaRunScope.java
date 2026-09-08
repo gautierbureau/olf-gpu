@@ -368,30 +368,12 @@ final class GpuSaRunScope {
      *  the WHOLE run to the CPU fallback. TEMPORARY — shrinks to empty as coverage lands (§5.7). Differs from the
      *  DEVICE gate: EVERY OLF balance type works (generation- AND load-based — the engine isolates both generator
      *  and load targets per scenario), and no useActiveLimits requirement (JAVA runs OLF's own ActivePowerDistribution). */
-    /** A remote group member that can CHANGE pin state: finite bus Q limits with a real range
-     *  (mirrors the RL pack's remote-entry condition — a member without an RL entry never pins). */
-    private static boolean pinnableRemoteMember(com.powsybl.openloadflow.network.LfBus member) {
-        return (member.getMinQ() > -1e9 || member.getMaxQ() < 1e9) && member.getMinQ() < member.getMaxQ();
-    }
-
-    /** The remote-group pin-dynamics residual gate (see the caller comment). */
+    /** The remote-group pin-dynamics residual gate — RETIRED 2026-09-08: singleton remote groups
+     *  get a relocation table too (their only member's pin IS the all-pinned corner, handled by
+     *  the pilot-vEq flip), so every clean group shape is representable. Kept as a method so a
+     *  future unrepresentable shape has a place to land. */
     private static boolean remoteRlUnrepresentable(LfNetwork lfNetwork) {
-        return lfNetwork.getBuses().stream()
-                .map(b -> b.getGeneratorVoltageControl()
-                        .filter(vc -> vc.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN
-                                && !vc.isLocalControl())
-                        .orElse(null))
-                .filter(java.util.Objects::nonNull)
-                .distinct()
-                .anyMatch(vc -> {
-                    var enabled = vc.getMergedControllerElements().stream()
-                            .filter(vc::isControllerEnabled).toList();
-                    if (enabled.isEmpty()) {
-                        return false;                        // control lost already — no pin dynamics
-                    }
-                    boolean relocatable = vc.getMergedControllerElements().size() >= 2;
-                    return pinnableRemoteMember(enabled.get(0)) && !relocatable;
-                });
+        return false;
     }
 
     private static List<String> javaUnsupportedOuterLoops(LfNetwork lfNetwork, AcLoadFlowParameters acParameters,

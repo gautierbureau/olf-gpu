@@ -47,8 +47,11 @@ import java.util.Map;
  * <p>Per-scenario mechanics: new generator-VC targets land as V-row target overrides (PV rows) and
  * per-scenario RL V-target overrides (the {@code rlVtOv} channel — the RL switch-back must compare
  * against the MOVED target); OLF's {@code tryToReEnableHelpfulControllerBuses} maps to clearing the
- * some-but-not-all pinned controllers' RL state before the re-solve. Stage-1 scope: LOCAL generator
- * voltage control only (controller bus == controlled bus), every controller in the RL pack.
+ * some-but-not-all pinned controllers' RL state before the re-solve. Scope: LOCAL and REMOTE
+ * generator voltage control with DISTINCT controlled buses (a controller<->controlled bijection —
+ * see {@link #supported}); a remote controller's RL entry is the rlRemote member entry, its moved
+ * zone target lands on the CONTROLLED bus's V row and steers the pilot-referenced switch-back via
+ * the rlVtOv channel.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -62,9 +65,13 @@ public final class GpuBatchSecondaryVc {
     private GpuBatchSecondaryVc() {
     }
 
-    /** One (local) controller/controlled bus: the pinned V row (sensitivity unit row, target index,
-     *  RL vtarget anchor), its RL pack index, limits, and OLF's own Q terms for K and dQ/dVtarget. */
-    record CtlBus(int vRow, int rlIdx, double baseTargetV, double minQ, double maxQ, double loadTargetQ,
+    /** One (controller, controlled) PAIR — a bijection under {@link #supported}: {@code vRow} is
+     *  the CONTROLLER bus's V row (keys its RL entry — for a REMOTE controller that is the
+     *  rlRemote member entry), {@code ctldVRow} the CONTROLLED bus's pinned BUS_TARGET_V row (the
+     *  sensitivity unit row and the row the moved zone target lands on — OLF adjusts the
+     *  CONTROLLED bus's VC target). Local control collapses the two. */
+    record CtlBus(int vRow, int ctldVRow, int rlIdx, double baseTargetV, double minQ, double maxQ,
+                  double loadTargetQ,
                   com.powsybl.openloadflow.util.Evaluable busQ,
                   List<EquationTerm<AcVariableType, AcEquationType>> qTerms) {
     }
@@ -77,14 +84,25 @@ public final class GpuBatchSecondaryVc {
                        double minPlausibleTargetV, double maxPlausibleTargetV) {
     }
 
-    /** True if every enabled secondary-voltage-control zone is representable (LOCAL generator VC,
-     *  every controller in the device RL pack) — else the run must stay on the CPU. */
+    /** True if every enabled secondary-voltage-control zone is representable: LOCAL or REMOTE
+     *  generator VC with DISTINCT controlled buses (controllers <-> controlled is a BIJECTION —
+     *  OLF's own zone system requires it: b = A*Jk^T is nControllers x nControlled and its LU
+     *  needs a square matrix, so a shared controlled bus is outside OLF's effective scope too),
+     *  and every REMOTE controller carries a real Q range (the RL pack's remote-entry condition —
+     *  without an entry the pin state is invisible to the orchestrator). */
     public static boolean supported(LfNetwork network) {
+        java.util.Set<LfBus> controlled = new java.util.HashSet<>();
         for (LfSecondaryVoltageControl svc : network.getEnabledSecondaryVoltageControls()) {
             for (LfBus controller : svc.getControllerBuses()) {
                 var vc = controller.getGeneratorVoltageControl().orElse(null);
-                if (vc == null || vc.getControlledBus() != controller) {
-                    return false;                            // remote control — stage-1 scope is local only
+                if (vc == null) {
+                    return false;
+                }
+                if (!controlled.add(vc.getControlledBus())) {
+                    return false;                            // shared controlled bus — not bijective
+                }
+                if (vc.getControlledBus() != controller && !(controller.getMinQ() < controller.getMaxQ())) {
+                    return false;                            // remote controller without an RL entry
                 }
             }
         }
@@ -112,8 +130,9 @@ public final class GpuBatchSecondaryVc {
             for (LfBus controller : svc.getControllerBuses()) {
                 var vc = controller.getGeneratorVoltageControl().orElseThrow();
                 Integer vRow = busVRows.get(controller.getNum());
+                Integer ctldVRow = busVRows.get(vc.getControlledBus().getNum());
                 Integer rlIdx = vRow != null ? rlIdxOfVRow.get(vRow) : null;
-                if (vRow == null || rlIdx == null) {
+                if (vRow == null || ctldVRow == null || rlIdx == null) {
                     LOGGER.info("Secondary VC controller {} not representable on the GPU batch — skipped zone {}",
                             controller.getId(), svc.getZoneName());
                     return new Controllers(List.of(), List.of(), esCtx, minPlausibleTargetV, maxPlausibleTargetV);
@@ -134,7 +153,7 @@ public final class GpuBatchSecondaryVc {
                 controller.getControllerShunt().ifPresent(sh -> qTerms.add((EquationTerm<AcVariableType, AcEquationType>) sh.getQ()));
                 controller.getSvcShunt().ifPresent(sh -> qTerms.add((EquationTerm<AcVariableType, AcEquationType>) sh.getQ()));
                 zoneCtls.add(ctls.size());
-                ctls.add(new CtlBus(vRow, rlIdx, vc.getTargetValue(), controller.getMinQ(), controller.getMaxQ(),
+                ctls.add(new CtlBus(vRow, ctldVRow, rlIdx, vc.getTargetValue(), controller.getMinQ(), controller.getMaxQ(),
                         controller.getLoadTargetQ(), controller.getQ(), qTerms));
             }
             Integer pilotVRow = busVRows.get(svc.getPilotBus().getNum());
@@ -180,7 +199,7 @@ public final class GpuBatchSecondaryVc {
         // of the q-terms' variable rows + the pilot V rows (OLF extracts through these same terms)
         int[] unit = new int[nc];
         for (int c = 0; c < nc; c++) {
-            unit[c] = ctls.get(c).vRow();
+            unit[c] = ctls.get(c).ctldVRow();                // the CONTROLLED bus's pinned V row
         }
         List<Integer> obsList = new ArrayList<>();
         Map<Integer, Integer> obsPos = new LinkedHashMap<>();
@@ -258,6 +277,10 @@ public final class GpuBatchSecondaryVc {
                         allBelow &= k < -1;
                     }
                     boolean allAtLimits = allAbove || allBelow;
+                    if (System.getenv("OLF_GPU_SVC_TRACE") != null) {
+                        System.err.println("SVC_TRACE round=" + round + " s=" + s + " pilotDv=" + pilotDv
+                                + " kMin=" + kMin + " kMax=" + kMax);
+                    }
                     if (Math.abs(pilotDv) > DV_EPS || !allAtLimits && Math.abs(kMax - kMin) > DK_DIFF_MAX_EPS) {
                         scenAdjusts[s] = true;
                         anyAdjusts = true;
@@ -411,7 +434,7 @@ public final class GpuBatchSecondaryVc {
                     if (targetV[s][c] != ctls.get(c).baseTargetV()) {
                         CtlBus ctl = ctls.get(c);
                         if ((rlState[s * nrl + ctl.rlIdx()] & 3) == 0) {
-                            ovIdx.add(s * n + ctl.vRow());   // PV row: the V target moves now
+                            ovIdx.add(s * n + ctl.ctldVRow());   // the CONTROLLED bus's V target moves now
                             ovVal.add(targetV[s][c]);
                         }                                    // pinned row: the Q pin stays; the override below
                         vtSlotIdx.add(s);                    // steers the RL switch-back and its restored target

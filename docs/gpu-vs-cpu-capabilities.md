@@ -690,6 +690,36 @@ The shrink-and-retry from the same commit stays as the safety net (it halves, RE
 unsolved indices, and remembers the ceiling for the JVM) — it should now be rare rather than the
 mechanism that finds the size.
 
+### F.-1c Where the SA wall time actually goes (measured 2026-09-08)
+
+`OLF_GPU_PHASE_TIME=1` splits a batched run into the device solves and the host-side outer-loop
+orchestrators, per orchestrator. On rte6515 (RTE parameters, 500 contingencies) that split found
+the SA's real cost was NOT the GPU:
+
+| phase | before | after |
+|---|---|---|
+| batched main solves (device) | 1.5 s | 1.5 s |
+| `HvdcAcEmulation.orchestrate` | 50.5 s | 2.3 s |
+| `VoltageMonitoring.orchestrate` | 47.0 s | 1.2 s |
+| **wall** | **109 s** | **16 s** |
+
+Cause: `seedDsTargets` merged the carried DS-row seeds with `ovIdx.lastIndexOf(...)` — a linear
+scan run `realCount * nds` times (500 × 554) over a list that grows to the same size, i.e.
+quadratic. It is now backed by a flat-row → position index, and the two inline copies of the same
+loop (SimpleTvc, TransformerControl) call the shared helper instead. The same trap in the
+per-chunk setup composition (`GpuBatchChunkSolver`, loss pre-distribution and pair re-anchoring)
+is indexed too, taking per-chunk setup from ~8 s to ~1 s at 2000 scenarios.
+
+At 2000 contingencies: **563 s → 49.6 s** (1998/2000 batched), against 32.5 s for the same test's
+CPU path at threadCount=4 and ~136 s single-threaded. So the GPU SA is now ~2.7× faster than one
+CPU core and ~1.5× slower than four on this network; the remaining GPU time is 8 s of device
+solves and 17.5 s of orchestrators.
+
+CAUTION when indexing these lists: the index must be cleared with the list it indexes (per chunk).
+A stale index survived into the next chunk and threw `IndexOutOfBounds` at 4 chunks of 643 —
+invisible to the whole suite, which never spans a chunk boundary except in
+`deviceMultiChunkMatchesCpu`, and that case is too small to reproduce it.
+
 ### F.-1 Measuring it: the scope census
 
 `GpuBatchScopeCensus` (public, `sa.gpu`) counts WHY contingencies leave the batched path, at the

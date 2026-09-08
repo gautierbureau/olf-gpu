@@ -399,24 +399,9 @@ public final class GpuBatchTransformerControl {
                 ovIdx.add(targetOverrideIndex[k]);
                 ovVal.add(targetOverrideValue[k]);
             }
-            if (nds > 0) {                                   // DS-row target seeds at the carried values
-                for (int slot = 0; slot < realCount; slot++) {
-                    double[] r = chunkResults[slot];
-                    if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
-                        continue;
-                    }
-                    for (int i = 0; i < nds; i++) {
-                        int flat = slot * n + dsPhiRow[i];
-                        int at = ovIdx.lastIndexOf(Integer.valueOf(flat));
-                        if (at >= 0) {
-                            ovVal.set(at, dsSeed[slot * nds + i]);
-                        } else {
-                            ovIdx.add(flat);
-                            ovVal.add(dsSeed[slot * nds + i]);
-                        }
-                    }
-                }
-            }
+            // DS-row target seeds at the carried values (shared index-backed merge — the inline
+            // lastIndexOf scan this replaced was quadratic in realCount * nds)
+            seedDsTargets(nds, dsPhiRow, dsSeed, chunkResults, realCount, n, ovIdx, ovVal);
             double[] x0Full = new double[chunkSize * n];
             List<Integer> r1OvSlotElem = new ArrayList<>();  // fixed members' FULL tap pi rows (per-step
             List<Double> r1OvVal = new ArrayList<>();        // R/X/G/B follow the rounded tap, like the CPU)
@@ -790,13 +775,24 @@ public final class GpuBatchTransformerControl {
      *  effective base), the slack's own absorbed share at the scenario's effective factor sum, and
      *  the absolute DS-row targets for seeding the next call. Dead or non-converged slots carry 0. */
     @SuppressWarnings("java:S107")
-    /** Merge the carried absolute DS-row target seeds into an override list (replace via
-     *  lastIndexOf, never duplicate — the device scatter has no ordering). Shared by every
-     *  orchestrator that re-solves after the main chunk solve. */
+    /** Merge the carried absolute DS-row target seeds into an override list — replace an existing
+     *  entry for the row, never duplicate it (the device scatter has no ordering). Shared by every
+     *  orchestrator that re-solves after the main chunk solve.
+     *
+     *  <p>The lookup goes through a flat-row → position INDEX, not a scan: this runs
+     *  {@code realCount * nds} times over a list that ends up the same size, so the obvious
+     *  {@code lastIndexOf} made it quadratic — measured on a 6.5k-bus network with 554 DS
+     *  participants and 500 scenarios, the two orchestrators that re-solve (HVDC AC-emulation and
+     *  VoltageMonitoring) spent 97 s of a 101 s batch in here, against 1.5 s of actual device
+     *  solving. */
     static void seedDsTargets(int nds, int[] dsPhiRow, double[] dsSeed, double[][] chunkResults,
             int realCount, int n, List<Integer> ovIdx, List<Double> ovVal) {
         if (nds <= 0) {
             return;
+        }
+        java.util.Map<Integer, Integer> posOf = new java.util.HashMap<>(2 * ovIdx.size() + 16);
+        for (int k = 0; k < ovIdx.size(); k++) {
+            posOf.put(ovIdx.get(k), k);                      // later duplicates win, as lastIndexOf did
         }
         for (int s2 = 0; s2 < realCount; s2++) {
             double[] r = chunkResults[s2];
@@ -805,10 +801,11 @@ public final class GpuBatchTransformerControl {
             }
             for (int i = 0; i < nds; i++) {
                 int flat = s2 * n + dsPhiRow[i];
-                int at = ovIdx.lastIndexOf(Integer.valueOf(flat));
-                if (at >= 0) {
+                Integer at = posOf.get(flat);
+                if (at != null) {
                     ovVal.set(at, dsSeed[s2 * nds + i]);
                 } else {
+                    posOf.put(flat, ovIdx.size());
                     ovIdx.add(flat);
                     ovVal.add(dsSeed[s2 * nds + i]);
                 }

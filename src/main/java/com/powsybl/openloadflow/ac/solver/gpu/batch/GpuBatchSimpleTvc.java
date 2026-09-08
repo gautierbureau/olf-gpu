@@ -128,21 +128,9 @@ final class GpuBatchSimpleTvc {
                     baseTargets, dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, anchor, slackC, seed);
             dsAnchorUse = anchor;
             dsSlackUse = slackC;
-            for (int s = 0; s < realCount; s++) {
-                if (chunkResults[s] == null || (int) chunkResults[s][n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
-                    continue;
-                }
-                for (int i = 0; i < nds; i++) {              // absolute DS-row target seeds
-                    int flat = s * n + dsPhiRow[i];
-                    int at = ovIdx.lastIndexOf(Integer.valueOf(flat));
-                    if (at >= 0) {
-                        ovVal.set(at, seed[s * nds + i]);
-                    } else {
-                        ovIdx.add(flat);
-                        ovVal.add(seed[s * nds + i]);
-                    }
-                }
-            }
+            // absolute DS-row target seeds (the shared, index-backed merge — an inline
+            // lastIndexOf scan here was quadratic in realCount * nds)
+            GpuBatchTransformerControl.seedDsTargets(nds, dsPhiRow, seed, chunkResults, realCount, n, ovIdx, ovVal);
         }
         // rounding to a non-base tap switches the CPU branch's FULL per-step R/X/G/B, not just rho:
         // extend the base r1 overrides with the rounded tap's whole pi row per (scenario, member).

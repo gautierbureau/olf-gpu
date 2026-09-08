@@ -92,6 +92,13 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         LoadFlowParameters lfp = JsonLoadFlowParameters.read(paramsFile);
         SecurityAnalysisParameters sap = new SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
+        // OLF_GPU_CENSUS_THREADS: OpenSecurityAnalysisParameters.threadCount for BOTH arms — the
+        // CPU baseline is only honest at the thread count production runs (default here is OLF's 1).
+        int threads = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_CENSUS_THREADS", "1"));
+        if (threads > 1) {
+            sap.addExtension(com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters.class,
+                    new com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters().setThreadCount(threads));
+        }
 
         List<Contingency> ctgs = new ArrayList<>();
         int limit = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_CENSUS_LIMIT", "0"));
@@ -133,6 +140,7 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         System.out.printf("  CPU-routing reasons : %s%n",
                 GpuBatchScopeCensus.snapshot().isEmpty() ? "(none — everything batched)"
                         : GpuBatchScopeCensus.snapshot());
+        System.out.printf("  threads             : %d%n", threads);
         System.out.printf("  wall                : %d ms%n", ms);
         if (batched < 0) {
             System.out.printf("  *** WHOLE-RUN CPU FALLBACK — an unsupported outer loop or an extraction "

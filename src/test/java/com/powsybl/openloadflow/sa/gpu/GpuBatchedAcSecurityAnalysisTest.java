@@ -615,6 +615,51 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get());
     }
 
+    /** MULTI-CHUNK parity: the same contingencies with the chunk capped at 2, so the batch spans
+     *  several chunks — every other test fits in one, so nothing else here exercises a chunk
+     *  boundary at all. Mixed generator + branch outages (generator loss pulls in the
+     *  loss-pre-distribution override composition). Same results as the CPU, at 1e-12.
+     *
+     *  <p>HONEST SCOPE: this covers chunk-boundary PARITY. It does NOT reproduce the 2026-09-08
+     *  stale-per-chunk-index regression (an index over the per-chunk override list that outlived
+     *  its list): on a case this small the composition path either does not run or a stale index
+     *  still lands in range, so the test passes with and without the fix. That regression was
+     *  caught on rte6515 (4 chunks of 643) and is only reachable at that scale. */
+    @org.junit.jupiter.api.Test
+    void deviceMultiChunkMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        // GENERATOR outages on purpose: their scheduled active-power loss goes through the loss
+        // pre-distribution, which COMPOSES per-scenario DS-row overrides — the per-chunk scratch
+        // whose staleness across chunks is what this test is here to catch.
+        List<Contingency> ctgs = List.of(
+                new Contingency("B2-G", new com.powsybl.contingency.GeneratorContingency("B2-G")),
+                new Contingency("B3-G", new com.powsybl.contingency.GeneratorContingency("B3-G")),
+                new Contingency("B6-G", new com.powsybl.contingency.GeneratorContingency("B6-G")),
+                new Contingency("B8-G", new com.powsybl.contingency.GeneratorContingency("B8-G")),
+                new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("L2-3-1", new BranchContingency("L2-3-1")),
+                new Contingency("L6-11-1", new BranchContingency("L6-11-1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        String prev = System.getProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY);
+        System.setProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY, "2");   // -> 4 chunks
+        try {
+            assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+            // > one chunk's worth proves the multi-chunk path ran (one generator outage is
+            // CPU-routed by qualification on this network, which is by design)
+            assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() > 2,
+                    "the batch must span several chunks");
+        } finally {
+            if (prev == null) {
+                System.clearProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY);
+            } else {
+                System.setProperty(GpuBatchContextCache.MAX_BATCH_PROPERTY, prev);
+            }
+        }
+    }
+
     /** DEVICE-mode CONTINUOUS shunt VC (WITH_GENERATOR — OLF's DEFAULT shuntVoltageControlMode):
      *  the SimpleTvc two-phase flow for shunts (GpuBatchSimpleShuntVc) — per scenario, the VC-ON
      *  toggle-diff activation solves the continuous b (the controlled bus V pinned, the bus Q

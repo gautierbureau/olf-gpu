@@ -180,6 +180,7 @@ public final class GpuBatchHvdcAcEmulation {
                                double[] baseState, double[] x0PerScenario, boolean[][] disabledMask,
                                double[] baseTargets, List<Integer> ovIndexList, List<Double> ovValueList) {
         int[][] status = new int[chunkSize][ctls.size()];
+        java.util.Map<Integer, Integer> posOf = indexOf(ovIndexList);
         double[] warm = new double[n];
         for (int s = 0; s < realCount; s++) {
             if (x0PerScenario != null) {
@@ -198,9 +199,9 @@ public final class GpuBatchHvdcAcEmulation {
                 disabledMask[s][c.hvElemIndex()] = true;
                 // base frame: baseTargets (or the row's existing override — e.g. a lost load on the
                 // converter bus) already carry the base injections
-                mergeOverride(ovIndexList, ovValueList, s * n + c.bus1PRow(),
+                mergeOverride(ovIndexList, ovValueList, posOf, s * n + c.bus1PRow(),
                         baseTargets[c.bus1PRow()], c.baseD1(), d[0]);
-                mergeOverride(ovIndexList, ovValueList, s * n + c.bus2PRow(),
+                mergeOverride(ovIndexList, ovValueList, posOf, s * n + c.bus2PRow(),
                         baseTargets[c.bus2PRow()], c.baseD2(), d[1]);
             }
         }
@@ -210,16 +211,28 @@ public final class GpuBatchHvdcAcEmulation {
     /** Compose one converter-bus status override ONTO any override already present at the row
      *  (e.g. a lost-load target on the converter bus — a row must NEVER carry two overrides, the
      *  parallel scatter has no ordering): value = (existing override | baseTargets) - baseD + d. */
-    private static void mergeOverride(List<Integer> ovIdx, List<Double> ovVal, int flat,
+    private static void mergeOverride(List<Integer> ovIdx, List<Double> ovVal,
+                                      java.util.Map<Integer, Integer> posOf, int flat,
                                       double baseTarget, double baseD, double d) {
-        int at = ovIdx.lastIndexOf(flat);
-        double from = at >= 0 ? ovVal.get(at) : baseTarget;
-        if (at >= 0) {
+        Integer at = posOf.get(flat);
+        double from = at != null ? ovVal.get(at) : baseTarget;
+        if (at != null) {
             ovVal.set(at, from - baseD + d);
         } else {
+            posOf.put(flat, ovIdx.size());
             ovIdx.add(flat);
             ovVal.add(from - baseD + d);
         }
+    }
+
+    /** flat-row → position index over an override list (the lookup mergeOverride needs; a scan
+     *  would be quadratic in scenarios × hvdcs over a list that grows with both). */
+    private static java.util.Map<Integer, Integer> indexOf(List<Integer> ovIdx) {
+        java.util.Map<Integer, Integer> posOf = new java.util.HashMap<>(2 * ovIdx.size() + 16);
+        for (int k = 0; k < ovIdx.size(); k++) {
+            posOf.put(ovIdx.get(k), k);
+        }
+        return posOf;
     }
 
     /** Seed the NON-LINEAR-at-base statuses (a saturated/frozen base — the extraction gate used to
@@ -333,6 +346,7 @@ public final class GpuBatchHvdcAcEmulation {
                 List<Integer> ovIdx = new ArrayList<>(baseOvIndexList);
                 List<Double> ovVal = new ArrayList<>(baseOvValueList);
                 GpuBatchTransformerControl.seedDsTargets(nds, dsPhiRow, dsSeed, chunkResults, realCount, n, ovIdx, ovVal);
+                java.util.Map<Integer, Integer> posOf = indexOf(ovIdx);
                 double[] x0Full = new double[chunkSize * n];
                 for (int s = 0; s < chunkSize; s++) {
                     double[] src = s < realCount && chunkResults[s] != null ? chunkResults[s] : baseState;
@@ -347,18 +361,18 @@ public final class GpuBatchHvdcAcEmulation {
                         if (status[s][h] == LINEAR) {
                             disabledMask[s][c.hvElemIndex()] = false;
                             if (c.baseStatus() != LINEAR) {  // strip the base injections from the targets
-                                mergeOverride(ovIdx, ovVal, s * n + c.bus1PRow(),
+                                mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus1PRow(),
                                         baseTargets[c.bus1PRow()], c.baseD1(), 0);
-                                mergeOverride(ovIdx, ovVal, s * n + c.bus2PRow(),
+                                mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus2PRow(),
                                         baseTargets[c.bus2PRow()], c.baseD2(), 0);
                             }
                         } else {
                             disabledMask[s][c.hvElemIndex()] = true;
                             double[] d = status[s][h] == SAT_1_TO_2 ? saturationDeltas(c, true)
                                     : saturationDeltas(c, false);
-                            mergeOverride(ovIdx, ovVal, s * n + c.bus1PRow(),
+                            mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus1PRow(),
                                     baseTargets[c.bus1PRow()], c.baseD1(), d[0]);
-                            mergeOverride(ovIdx, ovVal, s * n + c.bus2PRow(),
+                            mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus2PRow(),
                                     baseTargets[c.bus2PRow()], c.baseD2(), d[1]);
                         }
                     }

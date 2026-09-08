@@ -83,7 +83,8 @@ final class GpuBatchChunkSolver {
         GpuAcNewtonSolver.setBatchRlCurves(handle,
                 rlCurves != null ? rlCurves.cvIdx() : null,
                 rlCurves != null ? rlCurves.cvIn() : null,
-                rlCurves != null ? rlCurves.cvPts() : null);
+                rlCurves != null ? rlCurves.cvPts() : null,
+                rlCurves != null && rlCurves.extrapolate() ? 1 : 0);
         // Voltage-dependent SVC reactive limits: install the quadratic coefficients (zero on
         // SVC-less entries — the kernel's limit(v) then degenerates to the packed static limit).
         GpuAcNewtonSolver.setBatchRlSvcLimits(handle,

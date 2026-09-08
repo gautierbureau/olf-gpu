@@ -44,8 +44,11 @@ public final class GpuBatchRlCurves {
     private GpuBatchRlCurves() {
     }
 
-    /** The packed channel, null when the network needs none (no participating curve gen). */
-    public record Channel(int[] cvIdx, double[] cvIn, double[] cvPts) {
+    /** The packed channel, null when the network needs none (no participating curve gen).
+     *  {@code extrapolate} = OLF's extrapolateReactiveLimits: the kernel continues the boundary
+     *  two-point slope past [minP, maxP] instead of clamping (the base evals in cvIn come from
+     *  OLF's own gen.getMinQ()/getMaxQ(), which already honor the flag). */
+    public record Channel(int[] cvIdx, double[] cvIn, double[] cvPts, boolean extrapolate) {
     }
 
     /** True when any generator carries a reactive capability CURVE (the guard input for the
@@ -61,7 +64,7 @@ public final class GpuBatchRlCurves {
      *  PARTICIPATING curve generator exists (static snapshots stay exact). */
     public static Channel build(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                 GpuAcData gpuData, GpuDsParams dsParams, boolean distributedSlack,
-                                double[] baseTargets) {
+                                double[] baseTargets, boolean extrapolate) {
         if (!distributedSlack) {
             return null;                                     // P never moves — the base snapshot is exact
         }
@@ -115,7 +118,7 @@ public final class GpuBatchRlCurves {
         return new Channel(
                 cvIdx.stream().flatMapToInt(java.util.stream.IntStream::of).toArray(),
                 cvIn.stream().flatMapToDouble(java.util.stream.DoubleStream::of).toArray(),
-                cvPts.stream().mapToDouble(Double::doubleValue).toArray());
+                cvPts.stream().mapToDouble(Double::doubleValue).toArray(), extrapolate);
     }
 
     @SuppressWarnings("java:S107")

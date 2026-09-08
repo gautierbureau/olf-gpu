@@ -210,12 +210,6 @@ final class GpuSaRunScope {
                     .anyMatch(ol -> ReactiveLimitsOuterLoop.NAME.equals(ol.getName()))) {
                 unsupportedOuterLoops.add("ReactiveLimits[remoteGroupPinDynamicsUnrepresentable]");
             }
-            // Curve-limit extrapolation: the device curve evaluator implements the CLAMP branch only
-            // (OLF default); slope extrapolation outside [minP, maxP] -> CPU.
-            if (olfGuardParams.isExtrapolateReactiveLimits()
-                    && com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchRlCurves.hasCurveGenerators(lfNetwork)) {
-                unsupportedOuterLoops.add("ReactiveLimits[extrapolateReactiveLimits+curves]");
-            }
         }
         // Parameterization the device loops DO model — wire the run's values in place of the
         // device defaults (maxOuterLoopIterations, reactiveLimitsMaxPqPvSwitch), and make a
@@ -327,6 +321,7 @@ final class GpuSaRunScope {
                 olfGuardParams.isTransformerVoltageControlUseInitialTapPosition(), cfgHvdcFreezing, cfgHvdcLimits,
                 cfgSecondaryVc, olfGuardParams.getMinPlausibleTargetVoltage(), olfGuardParams.getMaxPlausibleTargetVoltage(),
                 cfgVoltageMonitoring, cfgContinuousPhase, defaultLossDist && dsActive,
+                olfGuardParams.isExtrapolateReactiveLimits(),
                 olfParams.getNewtonRaphsonStoppingCriteriaType()
                         == com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA
                         ? new BatchConfig.PerEqCriteria(olfParams.getNewtonRaphsonConvEpsPerEq(),

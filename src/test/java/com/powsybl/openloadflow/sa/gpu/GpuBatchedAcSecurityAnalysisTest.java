@@ -835,6 +835,34 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
     }
 
+    /** Curve-limit EXTRAPOLATION (extrapolateReactiveLimits — ON in the RTE production params;
+     *  was a whole-run CPU gate on any curve network): the curve stops at P = 41 MW just above
+     *  B2-G's base 40 MW, so the post-outage DS raise pushes P OUTSIDE the range and the limit
+     *  must continue on the BOUNDARY TWO-POINT SLOPE (ReactiveCapabilityCurveUtil
+     *  .extrapolateReactiveLimitsSlope) instead of clamping — rlCurveEval's extrapolate branch,
+     *  fed live by rlCurveLimitsBatch at the DS-moved targets. GPU SA == CPU SA at 1e-11 (the
+     *  curve channel's established share-reconstruction tolerance). */
+    @org.junit.jupiter.api.Test
+    void deviceCurveExtrapolationMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        com.powsybl.iidm.network.Generator g2 = network.getGenerator("B2-G");
+        g2.newReactiveCapabilityCurve()
+                .beginPoint().setP(0).setMinQ(-40).setMaxQ(55).endPoint()
+                .beginPoint().setP(45).setMinQ(-40).setMaxQ(45).endPoint()
+                .add();
+        network.getGenerator("B1-G").newMinMaxReactiveLimits().setMinQ(-990).setMaxQ(990).add();
+        List<Contingency> ctgs = List.of(new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("L1-5-1", new BranchContingency("L1-5-1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setExtrapolateReactiveLimits(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the extrapolating curve run must ENGAGE the batch (was a whole-run CPU gate)");
+    }
+
     /** PER_EQUATION_TYPE stopping criteria: the batch installs per-row thresholds
      *  (setBatchRowCriteria — every row's |F| under its type threshold, OLF's
      *  PerEquationTypeStoppingCriteria) and the base LF stays on the CPU; shallow explicit

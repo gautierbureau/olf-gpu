@@ -323,7 +323,8 @@ public final class GpuAcNewtonSolver {
 
     /** Install (or clear, with nulls) the reactive-capability-CURVE channel on a batch context —
      *  per-scenario dynamic RL limits evaluated at the current targets (see GpuBatchRlCurves). */
-    public static native void setBatchRlCurves(long handle, int[] cvIdx, double[] cvIn, double[] cvPts);
+    public static native void setBatchRlCurves(long handle, int[] cvIdx, double[] cvIn, double[] cvPts,
+                                               int extrapolate);
 
     /** Remote-member RL entries (plan-B1): per-entry remote kinds + compare rows (PILOT v column for
      *  remote group members — both RL switch conditions test the pilot's V against the GROUP target).

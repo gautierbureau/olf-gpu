@@ -325,7 +325,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
         // contingency whose injection overrides touch a curve bus's P row (or any strategy pair,
         // whose anchor shifts move every DS row) breaks the channel's DS-only linkage -> CPU.
         GpuBatchRlCurves.Channel rlCurves = reactiveLimits
-                ? GpuBatchRlCurves.build(network, equationSystem, gpuData, config.dsParams(), distributedSlack, baseTargets)
+                ? GpuBatchRlCurves.build(network, equationSystem, gpuData, config.dsParams(), distributedSlack, baseTargets,
+                        config.rlCurveExtrapolate())
                 : null;
         int[] curvePRows = rlCurves != null
                 ? java.util.stream.IntStream.range(0, rlCurves.cvIdx().length / 4)

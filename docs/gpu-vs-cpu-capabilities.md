@@ -328,11 +328,31 @@ Before building tier B, MEASURE: run the production/validation networks with
    kernel (a tan-phi channel next to the participation factors).
 6. **useLoadModel + load-based balance** — per-round vdl target rescale; needs a per-scenario
    scale channel over `vdlIn`'s target slot (stride-3 verbatim pack).
-7. **extrapolateReactiveLimits + curve generators** — small: add the slope-extrapolation
-   branch to the device curve evaluator (`rlCurveLimitsBatch` implements CLAMP only).
-8. **Monitoring-SVC shapes failing `GpuBatchVoltageMonitoring.supported`** — extend the
-   orchestrator (remote monitoring SVC would ride the existing pilot-referenced
-   `rlCmpVrow` compare machinery).
+7. ~~extrapolateReactiveLimits + curve generators~~ ✅ **landed 2026-09-08** — `rlCurveEval`
+   gained OLF's `ReactiveCapabilityCurveUtil.extrapolateReactiveLimitsSlope` branch (boundary
+   two-point slope continued past [minP, maxP], with the intersecting-limits corner collapsing
+   BOTH bounds to their mean), fed per context by `setBatchRlCurves`'s new extrapolate flag
+   (the base evals in `cvIn` already came from OLF's own `gen.getMinQ()`, which honors the
+   flag). Note this gate fired on ANY curve network under the RTE production parameters —
+   `extrapolateReactiveLimits: true` is in `rte-loadflow-default-parameters.json`.
+   `deviceCurveExtrapolationMatchesCpu` at 1e-11; A/B: clamp instead of slope = 1.38 kV.
+8. ~~Monitoring-SVC shapes failing `GpuBatchVoltageMonitoring.supported`~~ — **RE-SCOPED
+   2026-09-08 after measuring: NEARLY DEAD upstream, keep the gate.** The two rejected shapes:
+   (a) a MONITORING_VOLTAGE generator with no standby automaton is structurally impossible
+   (`LfStaticVarCompensatorImpl` assigns that control type only inside
+   `if (standbyAutomaton.isStandby())`) — dead defensive check; (b) a REMOTE monitoring SVC
+   IS modeled by the LfNetwork (probed: control created, controlled bus remote, standing by)
+   but `MonitoringVoltageOuterLoop.isNeeded` filters controller buses by
+   `isGeneratorVoltageControlled()` — a remote monitoring SVC's CONTROLLER bus is not itself
+   voltage-controlled, so the loop is never instantiated and the automaton never fires
+   (probed: controlled bus 383.6 kV under a 385 kV low threshold, `vcEnabled=false`, the run's
+   outer-loop list contains no VoltageMonitoring). The one live corner is a MIXED network
+   where a LOCAL monitoring SVC turns `isNeeded` on and the remote one then activates through
+   `check()`; supporting it is not orchestrator-only work — the RL pack's remote branch would
+   first need the local branch's monitoring flip (`bus.getMinQ()/getMaxQ()` reads a
+   MONITORING generator's `targetQ`, not its limits, so such a bus is not even packed today)
+   and the RL kernel's remote path would have to honor `rlMonitored`. Tier C if a real
+   network ever shows the mixed shape.
 
 **Tier C — hard structural (schedule only with a driving network):**
 9. **Generator VC under the transformer-controlled level** (`transformerControlSupported`) —
@@ -344,7 +364,10 @@ Before building tier B, MEASURE: run the production/validation networks with
 11. **Voltage-controlling-shunt DISTR_Q contributor** — a SHUNT_B-aware remote-group Q sum
     (extraction-level).
 
-**Not features (dead gates — OLF itself cannot produce the shape):** continuous
+**Not features (dead gates — OLF itself cannot produce the shape):** monitoring SVC without
+a standby automaton (the control type is assigned only when the automaton is in standby) and
+the REMOTE monitoring SVC standalone (`MonitoringVoltageOuterLoop.isNeeded` never creates the
+loop — item 8 above; the mixed-network corner stays gated); continuous
 PhaseControl LIMITER with a remote controlled branch (`LfNetworkLoaderImpl` logs
 "not supported yet" and creates NO phase control — our local-only restriction never rejects
 anything OLF supports); equation arrays beyond BUS_TARGET_P/Q (OLF's vectorized creator
@@ -634,8 +657,9 @@ rejection with its reason, `LAST_GPU_PRECOMPUTED_COUNT` proves engagement).
 3. ~~Remote VC pin-dynamics gates~~ — RETIRED 2026-09-08: singleton groups carry a
    relocation table too, so every clean group shape is representable (§5 backlog item 4).
 4. Parameterization: `loadPowerFactorConstant` or `useLoadModel` with load-based balance;
-   `extrapolateReactiveLimits` with curve generators; a custom
-   `ContingencyActivePowerLossDistribution` SPI. (The balance-type guard itself is
+   a custom `ContingencyActivePowerLossDistribution` SPI
+   (~~`extrapolateReactiveLimits` with curve generators~~ retired 2026-09-08 — the device
+   curve evaluator implements the slope branch, §5 backlog item 7). (The balance-type guard itself is
    future-proofing — all six current types are modeled.)
 5. Base-only CPU (contingencies still batch): threadCount>1 disables base-on-GPU only
    (~~frozen-HVDC base~~ retired 2026-09-08 — the batch-of-1 route derives the hv bits

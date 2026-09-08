@@ -55,9 +55,13 @@ public final class GpuBatchHvdcAcEmulation {
     static final int FROZEN = 3;
 
     /** One packed AC-emulation HVDC: the hv element index (per-scenario disabled bit), the two
-     *  converter buses' P-target rows, OLF's own linear p1/p2 terms, and the emulation limits. */
+     *  converter buses' P-target rows, OLF's own linear p1/p2 terms, the emulation limits, and the
+     *  BASE frame — the base status plus the base VSC station targetP contributions ALREADY inside
+     *  baseTargets (0 for a linear base; a saturated/frozen base carries its injections there, so
+     *  every status override composes as {@code baseTargets - baseD + d(status)}). */
     record Ctl(int hvElemIndex, int bus1PRow, int bus2PRow, Evaluable p1, Evaluable p2,
-               double pMax12, double pMax21, double loss1, double loss2, double r) {
+               double pMax12, double pMax21, double loss1, double loss2, double r,
+               int baseStatus, double baseD1, double baseD2) {
     }
 
     static List<Ctl> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
@@ -76,12 +80,21 @@ public final class GpuBatchHvdcAcEmulation {
         for (int h = 0; h < packed.size(); h++) {
             LfHvdc hvdc = packed.get(h);
             var ac = hvdc.getAcEmulationControl();
+            int baseStatus = switch (ac.getAcEmulationStatus()) {
+                case LINEAR_MODE -> LINEAR;
+                case SATURATION_MODE_FROM_CS1_TO_CS2 -> SAT_1_TO_2;
+                case SATURATION_MODE_FROM_CS2_TO_CS1 -> SAT_2_TO_1;
+                case FROZEN -> FROZEN;
+            };
             out.add(new Ctl(hvOffset + h,
                     phiRows.get(hvdc.getBus1().getNum()), phiRows.get(hvdc.getBus2().getNum()),
                     hvdc.getP1(), hvdc.getP2(),
                     ac.getPMaxFromCS1toCS2(), ac.getPMaxFromCS2toCS1(),
                     hvdc.getConverterStation1().getLossFactor() / 100,
-                    hvdc.getConverterStation2().getLossFactor() / 100, hvdc.getR()));
+                    hvdc.getConverterStation2().getLossFactor() / 100, hvdc.getR(),
+                    baseStatus,
+                    baseStatus == LINEAR ? 0 : hvdc.getConverterStation1().getTargetP(),
+                    baseStatus == LINEAR ? 0 : hvdc.getConverterStation2().getTargetP()));
         }
         return out;
     }
@@ -183,13 +196,53 @@ public final class GpuBatchHvdcAcEmulation {
                 double[] d = frozenDeltas(c, c.p1().eval(), c.p2().eval());
                 status[s][h] = FROZEN;
                 disabledMask[s][c.hvElemIndex()] = true;
-                ovIndexList.add(s * n + c.bus1PRow());
-                ovValueList.add(baseTargets[c.bus1PRow()] + d[0]);
-                ovIndexList.add(s * n + c.bus2PRow());
-                ovValueList.add(baseTargets[c.bus2PRow()] + d[1]);
+                // base frame: baseTargets (or the row's existing override — e.g. a lost load on the
+                // converter bus) already carry the base injections
+                mergeOverride(ovIndexList, ovValueList, s * n + c.bus1PRow(),
+                        baseTargets[c.bus1PRow()], c.baseD1(), d[0]);
+                mergeOverride(ovIndexList, ovValueList, s * n + c.bus2PRow(),
+                        baseTargets[c.bus2PRow()], c.baseD2(), d[1]);
             }
         }
         return status;
+    }
+
+    /** Compose one converter-bus status override ONTO any override already present at the row
+     *  (e.g. a lost-load target on the converter bus — a row must NEVER carry two overrides, the
+     *  parallel scatter has no ordering): value = (existing override | baseTargets) - baseD + d. */
+    private static void mergeOverride(List<Integer> ovIdx, List<Double> ovVal, int flat,
+                                      double baseTarget, double baseD, double d) {
+        int at = ovIdx.lastIndexOf(flat);
+        double from = at >= 0 ? ovVal.get(at) : baseTarget;
+        if (at >= 0) {
+            ovVal.set(at, from - baseD + d);
+        } else {
+            ovIdx.add(flat);
+            ovVal.add(from - baseD + d);
+        }
+    }
+
+    /** Seed the NON-LINEAR-at-base statuses (a saturated/frozen base — the extraction gate used to
+     *  route such runs whole-run CPU): entries the freeze did not claim keep the BASE status with
+     *  the hv bit set and NO target override (baseTargets already carry the base injections), and
+     *  PADDING slots get the base bits so they still converge at iteration 0. An entry whose bit is
+     *  already set while its status is LINEAR is a contingency outage — left alone. */
+    static void seedBaseStatuses(int chunkSize, int realCount, List<Ctl> ctls,
+                                 int[][] status, boolean[][] disabledMask) {
+        for (int h = 0; h < ctls.size(); h++) {
+            Ctl c = ctls.get(h);
+            if (c.baseStatus() == LINEAR) {
+                continue;
+            }
+            for (int s = 0; s < chunkSize; s++) {
+                if (s >= realCount) {
+                    disabledMask[s][c.hvElemIndex()] = true;
+                } else if (status[s][h] == LINEAR && !disabledMask[s][c.hvElemIndex()]) {
+                    status[s][h] = c.baseStatus();
+                    disabledMask[s][c.hvElemIndex()] = true;
+                }
+            }
+        }
     }
 
     /** Post-solve driver: the unfreeze pass (all FROZEN → LINEAR, one re-solve) then the AC-emulation
@@ -293,14 +346,20 @@ public final class GpuBatchHvdcAcEmulation {
                         }
                         if (status[s][h] == LINEAR) {
                             disabledMask[s][c.hvElemIndex()] = false;
+                            if (c.baseStatus() != LINEAR) {  // strip the base injections from the targets
+                                mergeOverride(ovIdx, ovVal, s * n + c.bus1PRow(),
+                                        baseTargets[c.bus1PRow()], c.baseD1(), 0);
+                                mergeOverride(ovIdx, ovVal, s * n + c.bus2PRow(),
+                                        baseTargets[c.bus2PRow()], c.baseD2(), 0);
+                            }
                         } else {
                             disabledMask[s][c.hvElemIndex()] = true;
                             double[] d = status[s][h] == SAT_1_TO_2 ? saturationDeltas(c, true)
                                     : saturationDeltas(c, false);
-                            ovIdx.add(s * n + c.bus1PRow());
-                            ovVal.add(baseTargets[c.bus1PRow()] + d[0]);
-                            ovIdx.add(s * n + c.bus2PRow());
-                            ovVal.add(baseTargets[c.bus2PRow()] + d[1]);
+                            mergeOverride(ovIdx, ovVal, s * n + c.bus1PRow(),
+                                    baseTargets[c.bus1PRow()], c.baseD1(), d[0]);
+                            mergeOverride(ovIdx, ovVal, s * n + c.bus2PRow(),
+                                    baseTargets[c.bus2PRow()], c.baseD2(), d[1]);
                         }
                     }
                 }
@@ -327,13 +386,16 @@ public final class GpuBatchHvdcAcEmulation {
                 }
             }
         } finally {
-            // the hv disabled bits are chunk-local scratch: restore them so the next chunk's slot
-            // cleanup (which only tracks contingency-disabled elements) starts from a clean mask
+            // the hv disabled bits are chunk-local scratch: restore them to the BASE configuration
+            // (set only for a non-LINEAR-at-base hvdc) so the next chunk's slot cleanup (which only
+            // tracks contingency-disabled elements) starts from a clean mask
             for (int s = 0; s < realCount; s++) {
                 for (int h = 0; h < nh; h++) {
-                    if (status[s][h] != LINEAR) {
-                        disabledMask[s][ctls.get(h).hvElemIndex()] = false;
+                    Ctl c = ctls.get(h);
+                    if (ctgOut[s][h]) {
+                        continue;                            // outage bit belongs to the contingency
                     }
+                    disabledMask[s][c.hvElemIndex()] = c.baseStatus() != LINEAR;
                 }
             }
         }

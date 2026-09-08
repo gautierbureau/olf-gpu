@@ -35,6 +35,7 @@ import com.powsybl.openloadflow.equations.EquationVector;
 import com.powsybl.openloadflow.equations.JacobianMatrix;
 import com.powsybl.openloadflow.equations.TargetVector;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.network.LfHvdc;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfNetworkListener;
 import com.powsybl.openloadflow.network.LfSynchronousNetwork;
@@ -283,9 +284,25 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // Pure-NR batch-of-1: skipRlPhase=1 disables the in-kernel reactive-limit phase and
             // the huge slackDistTol makes the distributed-slack phase a no-op (fabs(rem) <= tol
             // -> return) — OLF's outer loops run on the CPU around this solver, exactly as before.
+            // AC-emulation HVDC statuses: OLF's freezing/limits loops DEACTIVATE the hvdc coupling
+            // terms for any non-LINEAR status (the injections ride the target vector as VSC station
+            // targetP, re-extracted every solve) — mirror it with the hv element's disabled bit,
+            // which fillHvdcBatch honors. Without this the fill emitted the LINEAR coupling on top
+            // of the frozen/saturated injections (the former frozen-HVDC cpu-base-only condition).
+            boolean[][] elementMask = new boolean[1][cachedData.getTotalElementCount()];
+            List<LfHvdc> hvPacked = network.getHvdcs().stream()
+                    .filter(h -> h.getBus1() != null && h.getBus2() != null && h.isAcEmulation())
+                    .toList();                               // the packer's exact enumeration order
+            int hvOffset = cachedData.getTotalElementCount() - hvPacked.size();
+            for (int h = 0; h < hvPacked.size(); h++) {
+                if (hvPacked.get(h).getAcEmulationControl().getAcEmulationStatus()
+                        != LfHvdc.AcEmulationControl.AcEmulationStatus.LINEAR_MODE) {
+                    elementMask[0][hvOffset + h] = true;
+                }
+            }
             double[] out = GpuAcNewtonSolver.solveBatchContext(context.handle.get(),
                     x0, target, new int[][] {activation.rowMode()}, activation.rowMode(),
-                    new boolean[1][cachedData.getTotalElementCount()],
+                    elementMask,
                     new int[0], new double[0],
                     new int[0], new double[0], new double[0], new double[0], new double[0], null, null,
                     null, null,

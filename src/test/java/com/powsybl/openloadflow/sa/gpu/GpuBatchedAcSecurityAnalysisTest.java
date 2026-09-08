@@ -1834,6 +1834,68 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** DEVICE-mode HVDC AC emulation with a SATURATED BASE (was a whole-run CPU gate — the pack
+     *  assumed every AC-emu HVDC starts LINEAR): maxP 100 MW sits under the ~135 MW unconstrained
+     *  droop flow, so the BASE limits loop pins hvdc23 at SAT_1_TO_2 (CPU-probed: base cs2.P = 100).
+     *  The orchestrator's base frame composes every status override as (existing override |
+     *  baseTargets) - baseD + d(status) and seeds the base statuses/hv bits (padding slots
+     *  included). The l4 load outage (NOT a converter bus, so the strip rows are clean) RELIEVES
+     *  the corridor to LINEAR (CPU-probed: relieved flow 68.4 < 100) — the once-divergent
+     *  base-injection strip; the l14_BIS outage pushes more through the corridor and keeps the
+     *  saturation (an l14 outage would ISLAND b3/b4 — the hvdc is not an AC connectivity branch —
+     *  the documented islanded-hv-endpoint CPU route). GPU SA == CPU SA at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceHvdcSaturatedBaseMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.HvdcNetworkFactory.createHvdcLinkedByTwoLinesAndSwitch(
+                com.powsybl.iidm.network.HvdcConverterStation.HvdcType.VSC);
+        network.getHvdcLine("hvdc23").setMaxP(100);
+        network.getLineStream().forEach(l -> l.setR(1).setX(10));
+        com.powsybl.iidm.network.Line l14 = network.getLine("l14");
+        network.newLine().setId("l14_BIS")
+                .setVoltageLevel1(l14.getTerminal1().getVoltageLevel().getId()).setBus1(l14.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l14.getTerminal2().getVoltageLevel().getId()).setBus2(l14.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(3).setX(25)
+                .setG1(l14.getG1()).setB1(l14.getB1()).setG2(l14.getG2()).setB2(l14.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("l14_BIS", new BranchContingency("l14_BIS")),
+                new Contingency("l4", new com.powsybl.contingency.LoadContingency("l4")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setHvdcAcEmulation(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the saturated-base hvdc run must ENGAGE the batch (was a whole-run CPU gate)");
+    }
+
+    /** SATURATED base + a LOST LOAD ON THE CONVERTER BUS itself (the symmetric 2-bus network:
+     *  the l2 load shares b2 with cs2): the status overrides must COMPOSE onto the load-loss
+     *  override already present at that row — a row must never carry two target overrides (the
+     *  parallel scatter has no ordering; the first cut duplicated the row and the result depended
+     *  on a scatter race). The other converter bus is the SLACK (its P row is the phi identity).
+     *  opr 1.0 MW under the ~2.4 MW droop flow pins the base; the l2 outage relieves. 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceHvdcSaturatedBaseConverterBusLoadLossMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.HvdcNetworkFactory.createHvdcInAcEmulationInSymetricNetwork();
+        network.getHvdcLine("hvdc12").newExtension(com.powsybl.iidm.network.extensions.HvdcOperatorActivePowerRangeAdder.class)
+                .withOprFromCS1toCS2(1.0f).withOprFromCS2toCS1(1.0f).add();
+        com.powsybl.iidm.network.Line l12 = network.getLine("l12");
+        network.newLine().setId("l12_BIS")
+                .setVoltageLevel1(l12.getTerminal1().getVoltageLevel().getId()).setBus1(l12.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l12.getTerminal2().getVoltageLevel().getId()).setBus2(l12.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l12.getR() * 2).setX(l12.getX() * 2)
+                .setG1(l12.getG1()).setB1(l12.getB1()).setG2(l12.getG2()).setB2(l12.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency("l12_BIS", new BranchContingency("l12_BIS")),
+                new Contingency("l2", new com.powsybl.contingency.LoadContingency("l2")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setHvdcAcEmulation(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setSlackBusPMaxMismatch(1e-4);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the saturated-base hvdc run must ENGAGE the batch (was a whole-run CPU gate)");
+    }
+
     /** DS-carry regression for the HVDC AC-emulation orchestrator: same freeze/saturation scenarios,
      *  with slackBusPMaxMismatch tightened to 0.01 MW (both arms) so the MW-scale network's loss
      *  deltas actually DISTRIBUTE in the main solve — the freeze/limit re-solves must carry that

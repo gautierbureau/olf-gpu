@@ -589,6 +589,12 @@ final class GpuBatchChunkSolver {
                         } else {
                             hvdcStatus = new int[chunkSize][hvdcControllers.size()];
                         }
+                        // A NON-LINEAR-at-base hvdc (saturated/frozen base — no longer a whole-run
+                        // gate): entries the freeze did not claim keep the base status + hv bit
+                        // (no override, baseTargets already carry the base injections); padding
+                        // slots get the base bits so they converge at iteration 0.
+                        GpuBatchHvdcAcEmulation.seedBaseStatuses(chunkSize, realCount, hvdcControllers,
+                                hvdcStatus, disabledMask);
                     }
                     boolean dbgPairRl = pairPhase && nrl > 0 && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_RL"));
                     boolean svcActive = svcControllers != null && !svcControllers.ctls().isEmpty();

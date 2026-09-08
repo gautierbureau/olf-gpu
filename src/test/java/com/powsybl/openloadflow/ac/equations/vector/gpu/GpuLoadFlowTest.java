@@ -242,6 +242,24 @@ class GpuLoadFlowTest {
         assertTrue(worstV < tolKv, "bus voltages must match (max dV = " + worstV + " kV)");
     }
 
+    /** LF-level startWithFrozenACEmulation: the base runs the FreezingHvdcACEmulation loop — the
+     *  first solve has every AC-emu HVDC FROZEN (coupling terms deactivated on the CPU, injections
+     *  in the target vector), the unfreeze re-solve is linear. The batch-of-1 route mirrors the
+     *  per-solve statuses with the hv element disabled bits (was the LAST cpu-base-only condition
+     *  in the SA provider). Same iterations, no fallback. */
+    @Test
+    void hvdcFrozenStartMatchesCpu() {
+        long before = com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
+        compareWithParams(HvdcNetworkFactory::createHvdcInAcEmulationInSymetricNetwork, "hvdc frozen start",
+                p -> {
+                    p.setHvdcAcEmulation(true).setDistributedSlack(true).setUseReactiveLimits(true);
+                    OpenLoadFlowParameters.create(p).setStartWithFrozenACEmulation(true);
+                }, 1e-9);
+        org.junit.jupiter.api.Assertions.assertEquals(before,
+                com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
+                "the frozen-start solves must stay on the GPU (no CPU fallback)");
+    }
+
     @Test
     void hvdcAcEmulation() {
         compare(() -> {

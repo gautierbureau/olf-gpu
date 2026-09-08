@@ -93,10 +93,19 @@ final class GpuSaRunScope {
 
         // SIMPLE (WITH_GENERATOR) TVC: continuous first solve (VC-on activation deltas) then a single
         // round-to-closest-tap re-solve (GpuBatchSimpleTvc); same stage-1 structural scope.
-        // HVDC AC-emulation loops WITH HVDCs present (GpuBatchHvdcAcEmulation): the device pack extracts
-        // the LINEAR coupling, so every AC-emu HVDC must start LINEAR (a saturated/frozen base -> CPU).
+        // HVDC AC-emulation loops WITH HVDCs present (GpuBatchHvdcAcEmulation). A SATURATED/FROZEN
+        // base is representable since 2026-09-08 (the orchestrator's base-frame overrides:
+        // baseTargets - baseD + d(status), base statuses seeded with the hv bits) — but ONLY the
+        // orchestrator seeds those bits, so a non-linear base still requires the freeze or limits
+        // loop to actually RUN (controllers built); without either (startWithFrozenACEmulation
+        // explicitly off and no limits loop) the base coupling would double-count -> keep the gate.
+        boolean hvdcLoopsRun = com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters
+                .getOrDefault(securityAnalysisParameters).isStartWithFrozenACEmulation()
+                || acParameters.getOuterLoops().stream().anyMatch(ol ->
+                        "AcHvdcAcEmulationLimits".equals(ol.getName()) || "FreezingHvdcACEmulation".equals(ol.getName()));
         boolean hvdcBatchable = noHvdc
-                || com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchHvdcAcEmulation.allLinearAtBase(lfNetwork);
+                || com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchHvdcAcEmulation.allLinearAtBase(lfNetwork)
+                || hvdcLoopsRun;
         // Secondary voltage control (GpuBatchSecondaryVc): batched device sensitivities + the zone
         // system replayed per scenario on the host; stage-1 scope is LOCAL generator VC only.
         boolean svcBatchable = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSecondaryVc.supported(lfNetwork);

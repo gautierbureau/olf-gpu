@@ -291,10 +291,20 @@ Before building tier B, MEASURE: run the production/validation networks with
 1. ~~Continuous shunt voltage control~~ ✅ **landed 2026-09-08** (`GpuBatchSimpleShuntVc`,
    see the §2 ShuntVoltageControl row; stage-1 scope standalone of the other decision
    orchestrators).
-2. **AC-emu HVDC saturated/frozen at base** (`hvdcBatchable` + the `frozenHvdcBase`
-   cpuBaseOnly) — pack the saturated-segment coupling as the base state; the
-   freeze/unfreeze + limit-switch machinery already runs per scenario
-   (`GpuBatchHvdcAcEmulation`). Closing it also retires the LAST base-on-CPU condition.
+2. ~~AC-emu HVDC saturated/frozen at base~~ ✅ **landed 2026-09-08** — the orchestrator's
+   BASE FRAME: every status override composes as (existing row override | baseTargets) −
+   baseD + d(status) (baseD = the base VSC station injections already inside baseTargets),
+   base statuses/hv bits seeded (padding slots included), LINEAR-relief strips the base
+   injections; the sequential batch-of-1 derives the hv bits from the live AC-emulation
+   statuses per solve, retiring the LAST base-on-CPU condition (`frozenHvdcBase`).
+   Found on the way: converter-bus status overrides now MERGE onto an existing override at
+   the same row (e.g. a lost load on the converter bus) — the row-duplication was a latent
+   scatter race in the frozen path too. Tests: `deviceHvdcSaturatedBaseMatchesCpu` (clean
+   strip, keep-sat + relieve arms), `deviceHvdcSaturatedBaseConverterBusLoadLossMatchesCpu`
+   (merge-compose), `GpuLoadFlowTest.hvdcFrozenStartMatchesCpu` (sequential frozen start,
+   no fallback); A/B: strip off = 2e-3 kV, baseD zeroed = 2e-3 kV. Residual gate: a
+   non-linear base with NEITHER the freeze nor the limits loop running (nothing seeds the
+   bits) stays whole-run CPU — unreachable with the SA-level freeze default TRUE.
 3. **SecondaryVc with remote generator VC** — per §D: OLF's own loop is general; the port
    collapsed controller/controlled index sets, so this is orchestrator restructuring plus
    the (already-batched) DISTR_Q machinery — no kernel work expected.
@@ -607,7 +617,10 @@ rejection with its reason, `LAST_GPU_PRECOMPUTED_COUNT` proves engagement).
    2026-09-08 — §2);
    SecondaryVc with non-LOCAL generator VC; continuous PhaseControl LIMITER with a
    remote controlled branch; monitoring SVCs failing `GpuBatchVoltageMonitoring.supported`;
-   AC-emu HVDC not all-LINEAR at base.
+   AC-emu HVDC not all-LINEAR at base ONLY when neither the freeze nor the limits loop
+   runs (nothing would seed the base statuses; unreachable with the SA-level freeze
+   default TRUE — the saturated/frozen base itself batches since 2026-09-08, §5 backlog
+   item 2).
 3. Remote VC groups that are pin-dynamics-unrepresentable: ALL enabled members pinnable
    (pilot-vEq corner is modeled, but the gate covers the residual shapes) or a pinnable
    FREE member with no relocation table (<2 merged members).
@@ -615,8 +628,9 @@ rejection with its reason, `LAST_GPU_PRECOMPUTED_COUNT` proves engagement).
    `extrapolateReactiveLimits` with curve generators; a custom
    `ContingencyActivePowerLossDistribution` SPI. (The balance-type guard itself is
    future-proofing — all six current types are modeled.)
-5. Base-only CPU (contingencies still batch): frozen-HVDC base; threadCount>1 disables
-   base-on-GPU only.
+5. Base-only CPU (contingencies still batch): threadCount>1 disables base-on-GPU only
+   (~~frozen-HVDC base~~ retired 2026-09-08 — the batch-of-1 route derives the hv bits
+   from the live AC-emulation statuses per solve).
 
 ### F.1 Whole-network extraction rejects (`GpuAcDataExtractor` throws → per-run fallback; §E)
 

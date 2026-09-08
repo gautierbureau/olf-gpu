@@ -95,11 +95,12 @@ final class GpuBatchPrecomputer {
 
             List<BatchContingency> batch = new ArrayList<>();
             for (PropagatedContingency pc : contingencies) {
-                List<LfGenerator> gens = pc.getGeneratorIdsToLose().isEmpty() ? List.of() : GpuContingencyMapper.generatorOutages(net, pc);
+                java.util.Set<String> lostLfBusIds = GpuContingencyMapper.lostLfBusIds(net, network, pc);
+                List<LfGenerator> gens = pc.getGeneratorIdsToLose().isEmpty() ? List.of() : GpuContingencyMapper.generatorOutages(net, pc, lostLfBusIds);
                 // ZIP/voltage-dependent load model: per-scenario load removal is not a target override — CPU.
                 boolean loadsBatchable = !context.getParameters().getNetworkParameters().isUseLoadModel();
                 List<LoadLoss> loads =
-                        pc.getLoadIdsToLose().isEmpty() ? List.of() : (loadsBatchable ? GpuContingencyMapper.loadOutages(network, net, pc) : null);
+                        pc.getLoadIdsToLose().isEmpty() ? List.of() : (loadsBatchable ? GpuContingencyMapper.loadOutages(network, net, pc, lostLfBusIds) : null);
                 // Node-breaker contingency PROPAGATION opens the target's breakers alongside it, and
                 // switches are zero-impedance LfBranches — split them out so the impedant part still
                 // meets the <=2-branch mask rule; the switch part becomes a per-scenario zi-element
@@ -110,6 +111,9 @@ final class GpuBatchPrecomputer {
                         .toList();
                 List<LfBranch> branches = pc.getBranchIdsToOpen().isEmpty() ? List.of()
                         : GpuContingencyMapper.closedBranchOutages(net, pc, ziOutages);
+                List<BatchContingency.SideOpen> sideOpens =
+                        pc.getBranchIdsToOpen().isEmpty() && pc.getBusIdsToLose().isEmpty() ? List.of()
+                        : GpuContingencyMapper.sideOpens(net, pc);
                 // Shunt section shifts (both directions; full disconnection of any aggregate = minus the
                 // section admittance): per-scenario admittance overrides, combinable with everything.
                 List<ShuntShift> shifts =
@@ -117,11 +121,21 @@ final class GpuBatchPrecomputer {
                 // AC-emulation HVDC outage: the hv element's per-scenario disabled bit (the stations'
                 // injection losses ride the generator channel above); unresolvable/setpoint -> CPU.
                 List<com.powsybl.openloadflow.network.LfHvdc> hvdcs = GpuContingencyMapper.hvdcOutages(net, pc);
-                if (branches != null && gens != null && loads != null && shifts != null && hvdcs != null
+                if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                    System.err.println("QUALIFY_TRACE compose " + pc.getContingency().getId()
+                            + " branches=" + (branches == null ? "null" : branches.size())
+                            + " gens=" + (gens == null ? "null" : gens.size())
+                            + " loads=" + (loads == null ? "null" : loads.size())
+                            + " shifts=" + (shifts == null ? "null" : shifts.size())
+                            + " hvdcs=" + (hvdcs == null ? "null" : hvdcs.size())
+                            + " zi=" + ziOutages.size()
+                            + " sideOpens=" + (sideOpens == null ? "null" : sideOpens.size()));
+                }
+                if (branches != null && gens != null && loads != null && shifts != null && hvdcs != null && sideOpens != null
                         && (!branches.isEmpty() || !gens.isEmpty() || !loads.isEmpty() || !shifts.isEmpty()
-                            || !ziOutages.isEmpty() || !hvdcs.isEmpty())) {
-                    batch.add(BatchContingency.branchesInjectionsAndHvdcs(pc.getContingency().getId(), branches, gens, loads,
-                            shifts, List.of(), ziOutages, hvdcs));
+                            || !ziOutages.isEmpty() || !hvdcs.isEmpty() || !sideOpens.isEmpty())) {
+                    batch.add(new BatchContingency(pc.getContingency().getId(), branches, gens, loads,
+                            shifts, List.of(), List.of(), List.of(), ziOutages, hvdcs, sideOpens));
                     // Batched OPERATOR STRATEGIES stage 1: TrueCondition (always-applied) strategies
                     // matching this contingency become EXTRA batch scenarios — the (ctg, strategy)
                     // pair is just another BatchContingency with the actions COMPOSED onto the

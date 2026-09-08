@@ -542,6 +542,31 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 "N-1, N-3 and N-4 must all batch on-device");
     }
 
+    /** SINGLE-SIDE branch opening (2026-09-08): a BOUNDARY-line contingency on a tie line opens the
+     *  tie-line branch on ONE side only (DisabledBranchStatus SIDE_x) — the batch masks the closed
+     *  element and enables a pre-packed side-open OB view for the surviving terminal (same slots,
+     *  unchanged CSR pattern, per-scenario element mask). Both boundary sides + a full-line control
+     *  at 1e-12, count asserted. */
+    @org.junit.jupiter.api.Test
+    void deviceBusLossMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        // BUS LOSS = every incident branch opened on the LOST side (DisabledBranchStatus SIDE_x per
+        // OLF's PropagatedContingency): the batch masks each closed element and enables its
+        // pre-packed side-open OB view at the SURVIVING terminal (dangling-half charging included);
+        // the lost bus islands (frozen rows) and its injections ride the scheduled-loss accounting.
+        Network network = com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory.create14();
+        network.getGenerators().forEach(g -> g.newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(300).add());
+        List<Contingency> ctgs = List.of(
+                new Contingency("N-1", new BranchContingency("L2-3-1")),
+                new Contingency("bus-B5", new com.powsybl.contingency.BusContingency("B5")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the N-1 AND the bus-loss scenario must batch on-device");
+    }
+
     /** DEVICE-mode IncrementalShuntVoltageControl: in-kernel dV/dB sensitivities + OLF's section
      *  decisions per scenario (GpuBatchIncrementalShuntVc); GPU SA == CPU SA at 1e-12. */
     @org.junit.jupiter.api.Test

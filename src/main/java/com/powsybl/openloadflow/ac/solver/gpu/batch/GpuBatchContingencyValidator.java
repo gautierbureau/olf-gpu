@@ -72,8 +72,13 @@ public final class GpuBatchContingencyValidator {
         }
 
         static Qualification rejected(BatchContingency c, Disqualification reason) {
+            return rejected(c, reason, "");
+        }
+
+        static Qualification rejected(BatchContingency c, Disqualification reason, String detail) {
             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {   // test logback is broken — stderr lever
-                System.err.println("QUALIFY_TRACE rejected " + c.contingencyId() + " reason=" + reason);
+                System.err.println("QUALIFY_TRACE rejected " + c.contingencyId() + " reason=" + reason
+                        + (detail.isEmpty() ? "" : " (" + detail + ")"));
             }
             return new Qualification(c, false, reason, List.of());
         }
@@ -117,11 +122,18 @@ public final class GpuBatchContingencyValidator {
                                            boolean handleIslanding) {
         List<LfBranch> branches = contingency.outagedBranches();
 
-        // The GPU disabled mask can only mask branches the element pack contains.
+        // The GPU disabled mask can only mask branches the element pack contains — the SIDE-OPENED
+        // ones included (their closed element is masked; the pre-packed view is enabled by index).
         for (LfBranch branch : branches) {
             if (elementMapper.getElementIndex(branch) < 0) {
                 LOGGER.debug("Contingency {} rejected: branch not in GPU element model", contingency.contingencyId());
-                return Qualification.rejected(contingency, Disqualification.NOT_IN_GPU_MODEL);
+                return Qualification.rejected(contingency, Disqualification.NOT_IN_GPU_MODEL, "branch " + branch.getId());
+            }
+        }
+        for (BatchContingency.SideOpen so : contingency.sideOpenBranches()) {
+            if (elementMapper.getElementIndex(so.branch()) < 0) {
+                LOGGER.debug("Contingency {} rejected: side-open branch not in GPU element model", contingency.contingencyId());
+                return Qualification.rejected(contingency, Disqualification.NOT_IN_GPU_MODEL, "side-open " + so.branch().getId());
             }
         }
 
@@ -130,6 +142,9 @@ public final class GpuBatchContingencyValidator {
         // edge (N-2 removes both at once) and check whether any vertex leaves the main component.
         List<LfBranch> closed = new java.util.ArrayList<>(branches.stream()
                 .filter(b -> b.getBus1() != null && b.getBus2() != null).toList());
+        // A branch opened on ONE side carries no through-flow either: its edge leaves the graph the
+        // same as a full outage (the surviving terminal keeps only the equivalent-shunt injection).
+        contingency.sideOpenBranches().forEach(so -> closed.add(so.branch()));
         // Outaged ZERO-IMPEDANCE branches (node-breaker propagation opens the target's breakers
         // alongside it) are connectivity edges too: they must take part in the islanding analysis,
         // and the DEAD-STUB shape (one side left islanded) is the one the frozen-rows machinery
@@ -174,7 +189,7 @@ public final class GpuBatchContingencyValidator {
                 if (!islanded.contains(zi.getBus1()) && !islanded.contains(zi.getBus2())) {
                     LOGGER.debug("Contingency {} rejected: switch outage {} leaves both sides energized "
                             + "(zero-impedance spanning tree would change)", contingency.contingencyId(), zi.getId());
-                    return Qualification.rejected(contingency, Disqualification.NOT_IN_GPU_MODEL);
+                    return Qualification.rejected(contingency, Disqualification.NOT_IN_GPU_MODEL, "zi both-sides-energized " + zi.getId());
                 }
             }
             if (islanded.isEmpty()) {

@@ -39,8 +39,8 @@ final class GpuContingencyMapper {
 
     /** The contingency's lost generators (any count, possibly alongside branches and loads), or null
      *  when any of them is unresolvable. Bus losses stay out of scope. */
-    static List<LfGenerator> generatorOutages(LfNetwork net, PropagatedContingency pc) {
-        if (pc.getGeneratorIdsToLose().isEmpty() || !pc.getBusIdsToLose().isEmpty()) {
+    static List<LfGenerator> generatorOutages(LfNetwork net, PropagatedContingency pc, java.util.Set<String> lostLfBusIds) {
+        if (pc.getGeneratorIdsToLose().isEmpty()) {
             return null;
         }
         List<LfGenerator> gens = new java.util.ArrayList<>();
@@ -49,9 +49,39 @@ final class GpuContingencyMapper {
             if (gen == null || gen.getBus() == null || gen.getBus().isDisabled()) {
                 return null;
             }
+            if (lostLfBusIds.contains(gen.getBus().getId())) {
+                continue;                                    // bus loss: the injection freezes WITH its bus
+            }                                                // (islanded frozen rows + scheduled-loss accounting)
             gens.add(gen);
         }
         return gens;
+    }
+
+    /** The LF-bus ids the contingency LOSES outright (bus/busbar loss): each busIdsToLose entry is a
+     *  BUS-BREAKER-view id — resolve to the containing BUS-VIEW bus (any connected terminal), which is
+     *  the LfBus id space. Their rows freeze via the islanding machinery, so injections there must
+     *  NOT also become explicit target overrides (double counting). */
+    static java.util.Set<String> lostLfBusIds(LfNetwork net, Network network, PropagatedContingency pc) {
+        if (pc.getBusIdsToLose().isEmpty()) {
+            return java.util.Set.of();
+        }
+        java.util.Set<String> out = new java.util.HashSet<>();
+        for (String busId : pc.getBusIdsToLose()) {
+            if (net.getBusById(busId) != null) {             // breaker-mode LfNetwork: same id space
+                out.add(busId);
+                continue;
+            }
+            com.powsybl.iidm.network.Bus bb = network.getBusBreakerView().getBus(busId);
+            if (bb == null) {
+                continue;
+            }
+            bb.getConnectedTerminalStream()                  // bus-view LfNetwork: translate
+                    .map(t -> t.getBusView().getBus())
+                    .filter(java.util.Objects::nonNull)
+                    .findFirst()
+                    .ifPresent(b -> out.add(b.getId()));
+        }
+        return out;
     }
 
     /** The contingency's outaged AC-EMULATION hvdcs (per-scenario hv element disable), or null when
@@ -77,8 +107,8 @@ final class GpuContingencyMapper {
     /** The contingency's lost loads as per-bus injection deltas (pu, from the propagation's PowerShift),
      *  or null when unresolvable. Guards: bus losses out of scope; the ZIP/voltage-dependent load model
      *  makes per-scenario load removal unrepresentable as a target override (checked by the caller). */
-    static List<LoadLoss> loadOutages(Network network, LfNetwork net, PropagatedContingency pc) {
-        if (pc.getLoadIdsToLose().isEmpty() || !pc.getBusIdsToLose().isEmpty()) {
+    static List<LoadLoss> loadOutages(Network network, LfNetwork net, PropagatedContingency pc, java.util.Set<String> lostLfBusIds) {
+        if (pc.getLoadIdsToLose().isEmpty()) {
             return null;
         }
         List<LoadLoss> out = new java.util.ArrayList<>();
@@ -91,6 +121,9 @@ final class GpuContingencyMapper {
             if (bus == null || bus.isDisabled()) {
                 return null;
             }
+            if (lostLfBusIds.contains(bus.getId())) {
+                continue;                                    // bus loss: freezes with its bus (no override)
+            }
             out.add(new LoadLoss(bus, e.getValue().getActive(), e.getValue().getReactive()));
         }
         return out;
@@ -99,9 +132,6 @@ final class GpuContingencyMapper {
     /** The contingency's shunt admittance shifts (pu deltas, negated: the propagation's shift is the
      *  admittance REMOVED), or null when a shunt is unresolvable. */
     static List<ShuntShift> shuntShifts(LfNetwork net, PropagatedContingency pc) {
-        if (!pc.getBusIdsToLose().isEmpty()) {
-            return null;
-        }
         List<ShuntShift> out = new java.util.ArrayList<>();
         for (Map.Entry<String, com.powsybl.openloadflow.network.AdmittanceShift> e : pc.getShuntIdsToShift().entrySet()) {
             LfShunt shunt = net.getShuntById(e.getKey());
@@ -133,6 +163,58 @@ final class GpuContingencyMapper {
      *  2026-09-08; the per-element mask carries any count and the validator rejects fragmenting
      *  sets), or null when the branch part is out of batch scope. Generators are allowed alongside
      *  (branch+generator combos batch since 2026-07-17); buses and loads are not. */
+    /** The contingency's SINGLE-SIDE branch openings (node-breaker propagation opening one breaker):
+     *  each becomes a masked closed-branch element plus the pre-packed side-open OB view for the
+     *  surviving terminal, or null when a one-sided shape is out of scope (zero-impedance). */
+    static List<com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency.SideOpen> sideOpens(
+            LfNetwork net, PropagatedContingency pc) {
+        List<com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency.SideOpen> out = new ArrayList<>();
+        for (Map.Entry<String, DisabledBranchStatus> e : pc.getBranchIdsToOpen().entrySet()) {
+            if (e.getValue() == DisabledBranchStatus.BOTH_SIDES) {
+                continue;
+            }
+            LfBranch branch = net.getBranchById(e.getKey());
+            if (branch == null || branch.getBus1() == null || branch.getBus2() == null) {
+                return null;                                 // unresolvable (closedBranchOutages nulls too)
+            }
+            if (branch.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
+                trace(pc, "one-side open zero-impedance " + e.getKey());
+                return null;                                 // zi one-side: spanning-tree re-pick — CPU
+            }
+            out.add(new com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency.SideOpen(branch,
+                    e.getValue() == DisabledBranchStatus.SIDE_1 ? 1 : 2));
+        }
+        // BUS/BUSBAR LOSS: OLF's findBranchToOpenDirectlyImpactedByContingency opens every branch
+        // INCIDENT to a lost bus on the LOST side (SIDE_1 when bus1 is the lost bus) — replicate.
+        for (String busId : pc.getBusIdsToLose()) {
+            com.powsybl.openloadflow.network.LfBus bus = net.getBusById(busId);
+            if (bus == null) {
+                trace(pc, "unresolvable lost bus " + busId);
+                return null;
+            }
+            for (LfBranch branch : bus.getBranches()) {
+                if (pc.getBranchIdsToOpen().get(branch.getId()) == DisabledBranchStatus.BOTH_SIDES) {
+                    continue;                                // already a full outage
+                }
+                if (branch.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
+                    trace(pc, "lost bus " + busId + " has zero-impedance incident " + branch.getId());
+                    return null;                             // zi incident: spanning-tree re-pick — CPU
+                }
+                if (branch.getBus1() == null || branch.getBus2() == null) {
+                    continue;                                // already open-ended — nothing carries flow
+                }
+                com.powsybl.openloadflow.network.LfBus other = branch.getBus1() == bus ? branch.getBus2() : branch.getBus1();
+                if (pc.getBusIdsToLose().contains(other.getId())) {
+                    trace(pc, "branch between two lost buses " + branch.getId());
+                    return null;                             // fully dead branch between lost buses — CPU (rare)
+                }
+                out.add(new com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency.SideOpen(branch,
+                        branch.getBus1() == bus ? 1 : 2));
+            }
+        }
+        return out;
+    }
+
     private static void trace(PropagatedContingency pc, String why) {
         if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {   // test logback is broken — stderr lever
             System.err.println("QUALIFY_TRACE mapper drops " + pc.getContingency().getId() + ": " + why);
@@ -142,23 +224,18 @@ final class GpuContingencyMapper {
     static List<LfBranch> closedBranchOutages(LfNetwork net, PropagatedContingency pc, List<LfBranch> ziOutages) {
         java.util.Set<String> ziIds = ziOutages.stream().map(LfBranch::getId)
                 .collect(java.util.stream.Collectors.toSet());
-        if (!pc.getBusIdsToLose().isEmpty()) {
-            trace(pc, "busIdsToLose");
-            return null;
-        }
         List<LfBranch> branches = new ArrayList<>(pc.getBranchIdsToOpen().size());
         for (Map.Entry<String, DisabledBranchStatus> e : pc.getBranchIdsToOpen().entrySet()) {
             if (ziIds.contains(e.getKey())) {
                 continue;
             }
-            if (e.getValue() != DisabledBranchStatus.BOTH_SIDES) {
-                trace(pc, "one-side open " + e.getKey() + " " + e.getValue());
-                return null;
-            }
             LfBranch branch = net.getBranchById(e.getKey());
             if (branch == null || branch.getBus1() == null || branch.getBus2() == null) {
                 trace(pc, "unresolvable " + e.getKey());
                 return null;
+            }
+            if (e.getValue() != DisabledBranchStatus.BOTH_SIDES) {
+                continue;                                    // ONE-SIDE opening: handled by sideOpens()
             }
             branches.add(branch);
         }

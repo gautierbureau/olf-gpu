@@ -112,6 +112,7 @@ final class GpuBatchChunkSolver {
         // The ROW MODE is per-scenario too: a non-fragmenting outage shares the base row (same PV/slack
         // layout); a fragmenting one gets a cloned base row with its islanded buses frozen to identity.
         boolean[][] disabledMask = new boolean[chunkSize][nElements];
+
         int[][] disabledIdx = new int[chunkSize][];      // element indices each slot currently disables (1-2), null = none
         int[][] rowModePerScenario = new int[chunkSize][];   // per-scenario row mode (re-assigned every chunk)
         // Per-scenario target overrides (generator contingencies): flat (dTargetIndex = slot*n + row, value)
@@ -248,8 +249,17 @@ final class GpuBatchChunkSolver {
                             List<LfBranch> branches = contingencies.get(ci).outagedBranches();
                             List<LfShunt> shunts = contingencies.get(ci).outagedShunts();
                             List<com.powsybl.openloadflow.network.LfHvdc> hvdcs = contingencies.get(ci).outagedHvdcs();
-                            int[] eis = new int[branches.size() + shunts.size() + hvdcs.size()];
+                            List<BatchContingency.SideOpen> sideOpens = contingencies.get(ci).sideOpenBranches();
+                            int[] eis = new int[branches.size() + shunts.size() + hvdcs.size() + sideOpens.size()];
                             int ei = 0;
+                            for (BatchContingency.SideOpen so : sideOpens) {
+                                // OLF's AC path treats a side-opened branch as FULLY out (measured:
+                                // a bus loss is bit-identical to the full outage of its incident
+                                // branches — the dangling half carries no model); mask the element.
+                                int cbIdx2 = elementMapper.getElementIndex(so.branch());   // qualification guarantees >= 0
+                                disabledMask[s][cbIdx2] = true;
+                                eis[ei++] = cbIdx2;
+                            }
                             for (LfBranch branch : branches) {
                                 int idx = elementMapper.getElementIndex(branch);          // qualification guarantees >= 0
                                 disabledMask[s][idx] = true;

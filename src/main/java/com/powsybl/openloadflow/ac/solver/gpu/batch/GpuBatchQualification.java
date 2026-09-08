@@ -325,6 +325,15 @@ final class GpuBatchQualification {
                 continue;
             }
             BatchContingency c = contingencies.get(i);
+            // SIDE-OPEN scope (conservative): a branch that carries a VARIABLE (BRANCH_RHO1 /
+            // BRANCH_ALPHA1) or belongs to a DISTR_RHO group changes the live es shape when
+            // half-opened — CPU for those; plain impedance branches batch.
+            if (!c.sideOpenBranches().isEmpty() && c.sideOpenBranches().stream().anyMatch(so ->
+                    distrRhoControllers.contains(so.branch())
+                    || es.getVariableSet().getVariable(so.branch().getNum(), AcVariableType.BRANCH_RHO1).getRow() >= 0
+                    || es.getVariableSet().getVariable(so.branch().getNum(), AcVariableType.BRANCH_ALPHA1).getRow() >= 0)) {
+                continue;                                    // var-carrying / DISTR_RHO side-open — CPU
+            }
             if (!c.lostGenerators().isEmpty() || !c.lostLoads().isEmpty() || !c.shuntShifts().isEmpty()
                     || !c.tapOverrides().isEmpty() || !c.reclosedBranches().isEmpty()
                     || !c.outagedZiBranches().isEmpty()

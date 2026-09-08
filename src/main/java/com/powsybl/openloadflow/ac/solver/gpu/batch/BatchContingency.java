@@ -26,7 +26,31 @@ import java.util.Objects;
 public record BatchContingency(String contingencyId, List<LfBranch> outagedBranches, List<LfGenerator> lostGenerators,
                                List<LoadLoss> lostLoads, List<ShuntShift> shuntShifts, List<TapR1Override> tapOverrides,
                                List<LfShunt> outagedShunts, List<LfBranch> reclosedBranches,
-                               List<LfBranch> outagedZiBranches, List<LfHvdc> outagedHvdcs) {
+                               List<LfBranch> outagedZiBranches, List<LfHvdc> outagedHvdcs,
+                               List<SideOpen> sideOpenBranches) {
+
+    /** A branch opened on ONE side by the contingency (node-breaker propagation): the closed-branch
+     *  element is masked and the pre-packed side-open OB view enabled — {@code side} is the OPEN
+     *  side (1 or 2), i.e. the remaining flow terms sit at the OTHER bus. */
+    public record SideOpen(LfBranch branch, int side) {
+        public SideOpen {
+            Objects.requireNonNull(branch);
+            if (side != 1 && side != 2) {
+                throw new IllegalArgumentException("side must be 1 or 2");
+            }
+        }
+    }
+
+    /** 10-arg compatibility constructor (no side-open branches). */
+    @SuppressWarnings("java:S107")
+    public BatchContingency(String contingencyId, List<LfBranch> outagedBranches, List<LfGenerator> lostGenerators,
+                            List<LoadLoss> lostLoads, List<ShuntShift> shuntShifts, List<TapR1Override> tapOverrides,
+                            List<LfShunt> outagedShunts, List<LfBranch> reclosedBranches,
+                            List<LfBranch> outagedZiBranches, List<LfHvdc> outagedHvdcs) {
+        this(contingencyId, outagedBranches, lostGenerators, lostLoads, shuntShifts, tapOverrides,
+                outagedShunts, reclosedBranches, outagedZiBranches, outagedHvdcs, List.of());
+    }
+
     public BatchContingency {
         Objects.requireNonNull(contingencyId);
         Objects.requireNonNull(outagedBranches);
@@ -35,10 +59,13 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
         Objects.requireNonNull(shuntShifts);
         Objects.requireNonNull(tapOverrides);
         Objects.requireNonNull(outagedShunts);
+        Objects.requireNonNull(sideOpenBranches);
         boolean isInjection = !lostGenerators.isEmpty() || !lostLoads.isEmpty() || !shuntShifts.isEmpty()
                 || !tapOverrides.isEmpty() || !outagedHvdcs.isEmpty();
         boolean isShunt = !outagedShunts.isEmpty();
-        boolean isBranch = !outagedBranches.isEmpty();
+        // a PURE switch (zi) outage is a valid shape (it used to THROW and silently kill the precompute)
+        boolean isBranch = !outagedBranches.isEmpty() || !sideOpenBranches.isEmpty()
+                || !outagedZiBranches.isEmpty();
         // Batchable shapes: N branches (the element mask is per-element; the validator rejects
         // fragmenting sets), N generators, N loads, and branch+injection COMBOS (independent
         // mechanisms: element mask vs target/row-mode overrides); fixed shunts stay exclusive
@@ -56,6 +83,7 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
         tapOverrides = List.copyOf(tapOverrides);
         outagedShunts = List.copyOf(outagedShunts);
         outagedHvdcs = List.copyOf(outagedHvdcs);
+        sideOpenBranches = List.copyOf(sideOpenBranches);
     }
 
     /** A branch outage (N-1 .. N-k). */

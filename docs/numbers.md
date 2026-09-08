@@ -77,3 +77,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-08 | f76daae+dirty | 23.56 | 18.93 | 27.49 | x1.45 | 0/0/0 | 7.79 | 4.46 | 499/500 | 122/133 (92%) | curve-limit extrapolation batched (tier B item 7) |
 | 2026-09-08 | 24b7ecf | 21.28 | 18.97 | 26.13 | x1.38 | 0/0/0 | 7.45 | 4.47 | 499/500 | 122/133 (92%) | pilot-is-controller DISTR_Q fix + scope census + chunk shrink-retry |
 | 2026-09-08 | ae58f89 | 24.45 | 19.69 | 26.14 | x1.33 | 0/0/0 | 7.56 | 4.44 | 499/500 | 122/133 (92%) | chunk sizing from cuDSS memory estimates (no shrink-retry on rte6515 @2000) |
+| 2026-09-08 | b927cc2 | 24.75 | 20.10 | 28.39 | x1.41 | 0/0/0 | 7.57 | 4.47 | 499/500 | 122/133 (92%) | quadratic DS-seed merge fixed (rte6515 SA 563s -> 49.6s) |

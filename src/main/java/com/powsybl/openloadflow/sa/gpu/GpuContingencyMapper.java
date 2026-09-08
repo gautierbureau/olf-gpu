@@ -26,8 +26,8 @@ import java.util.Set;
 /**
  * Maps an OLF {@link PropagatedContingency} to the batchable device shapes the GPU N-1 path
  * understands — lost generators, lost loads (as per-bus injection deltas), shunt admittance shifts,
- * a single fixed-shunt disconnection, and 0–2 closed-branch outages — returning {@code null} for
- * anything out of batch scope (bus losses, unresolvable elements, &gt;2 branches, partial opens),
+ * a single fixed-shunt disconnection, and 0–N closed-branch outages — returning {@code null} for
+ * anything out of batch scope (bus losses, unresolvable elements, partial opens),
  * which routes the contingency to the CPU path. Nearly-pure functions over the network + contingency.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
@@ -129,26 +129,35 @@ final class GpuContingencyMapper {
         return shunt != null && !shunt.isDisabled() && shunt.getOriginalIds().size() == 1 ? shunt : null;
     }
 
-    /** The contingency's closed-branch outages (0-2, BOTH_SIDES only), or null when the branch part is
-     *  out of batch scope. Generators are allowed alongside (branch+generator combos batch since 2026-07-17);
-     *  buses and loads are not. */
+    /** The contingency's closed-branch outages (0-N, BOTH_SIDES only — the <=2 cap was lifted
+     *  2026-09-08; the per-element mask carries any count and the validator rejects fragmenting
+     *  sets), or null when the branch part is out of batch scope. Generators are allowed alongside
+     *  (branch+generator combos batch since 2026-07-17); buses and loads are not. */
+    private static void trace(PropagatedContingency pc, String why) {
+        if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {   // test logback is broken — stderr lever
+            System.err.println("QUALIFY_TRACE mapper drops " + pc.getContingency().getId() + ": " + why);
+        }
+    }
+
     static List<LfBranch> closedBranchOutages(LfNetwork net, PropagatedContingency pc, List<LfBranch> ziOutages) {
         java.util.Set<String> ziIds = ziOutages.stream().map(LfBranch::getId)
                 .collect(java.util.stream.Collectors.toSet());
-        int n = pc.getBranchIdsToOpen().size() - ziIds.size();   // the switch part is masked separately
-        if (n > 2 || !pc.getBusIdsToLose().isEmpty()) {
+        if (!pc.getBusIdsToLose().isEmpty()) {
+            trace(pc, "busIdsToLose");
             return null;
         }
-        List<LfBranch> branches = new ArrayList<>(Math.max(n, 0));
+        List<LfBranch> branches = new ArrayList<>(pc.getBranchIdsToOpen().size());
         for (Map.Entry<String, DisabledBranchStatus> e : pc.getBranchIdsToOpen().entrySet()) {
             if (ziIds.contains(e.getKey())) {
                 continue;
             }
             if (e.getValue() != DisabledBranchStatus.BOTH_SIDES) {
+                trace(pc, "one-side open " + e.getKey() + " " + e.getValue());
                 return null;
             }
             LfBranch branch = net.getBranchById(e.getKey());
             if (branch == null || branch.getBus1() == null || branch.getBus2() == null) {
+                trace(pc, "unresolvable " + e.getKey());
                 return null;
             }
             branches.add(branch);

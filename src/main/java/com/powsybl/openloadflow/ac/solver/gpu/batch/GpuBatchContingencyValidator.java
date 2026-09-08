@@ -72,6 +72,9 @@ public final class GpuBatchContingencyValidator {
         }
 
         static Qualification rejected(BatchContingency c, Disqualification reason) {
+            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {   // test logback is broken — stderr lever
+                System.err.println("QUALIFY_TRACE rejected " + c.contingencyId() + " reason=" + reason);
+            }
             return new Qualification(c, false, reason, List.of());
         }
     }

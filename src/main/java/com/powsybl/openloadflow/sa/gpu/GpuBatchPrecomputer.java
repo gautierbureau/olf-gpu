@@ -173,6 +173,10 @@ final class GpuBatchPrecomputer {
             Map<String, double[]> states = new HashMap<>();
             Map<String, int[]> islandedBuses = new HashMap<>();
             for (BatchScenarioResult r : results) {
+                if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                    System.err.println("QUALIFY_TRACE result " + r.contingencyId() + " status=" + r.convergenceStatus()
+                            + " iters=" + r.iterations() + " norm=" + r.finalMismatch());
+                }
                 if (r.hasConverged()) {
                     states.put(r.contingencyId(), r.state());
                     if (r.islandedBusNums().length > 0) {
@@ -184,7 +188,7 @@ final class GpuBatchPrecomputer {
             for (var v : es.getIndex().getSortedVariablesToFind()) {
                 baseVariableRows.put(v, v.getRow());
             }
-            LOGGER.info("GPU batched SA: precomputed {} of {} branch (N-1/N-2) contingencies on the device",
+            LOGGER.info("GPU batched SA: precomputed {} of {} branch (N-1..N-k) contingencies on the device",
                     states.size(), batch.size());
 
             return new PrecomputedBatch(states, islandedBuses, baseVariableRows, es);

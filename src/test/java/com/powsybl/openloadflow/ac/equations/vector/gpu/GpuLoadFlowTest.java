@@ -162,6 +162,47 @@ class GpuLoadFlowTest {
                 "the controllable-shunt solve must run ON the GPU, not silently fall back");
     }
 
+    /** Sequential-solver MONITORING SVC (stand-by automaton) activating IN THE BASE load flow:
+     *  the low-voltage threshold sits above the standing-by voltage, so OLF's VoltageMonitoring
+     *  loop activates the automaton mid-run — the activation re-extract must carry the flipped
+     *  row modes onto the device (the last cpuBaseOnly guard besides frozen HVDC). */
+    @Test
+    void monitoringSvcActivatesInBase() {
+        long before = com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
+        compareWithParams(() -> {
+            Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithStaticVarCompensator();
+            com.powsybl.iidm.network.StaticVarCompensator svc1 = network.getStaticVarCompensator("svc1");
+            svc1.setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE)
+                    .setRegulating(true);
+            svc1.newExtension(com.powsybl.iidm.network.extensions.StandbyAutomatonAdder.class)
+                    .withHighVoltageThreshold(400).withLowVoltageThreshold(393)
+                    .withLowVoltageSetpoint(394).withHighVoltageSetpoint(395)
+                    .withB0(-0.001f).withStandbyStatus(true).add();
+            return network;
+        }, "monitoring svc base activation",
+                p -> com.powsybl.openloadflow.OpenLoadFlowParameters.create(p).setSvcVoltageMonitoring(true), 1e-9);
+        org.junit.jupiter.api.Assertions.assertEquals(before,
+                com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
+                "the monitoring-SVC base solve must run ON the GPU, not silently fall back");
+        // prove the automaton genuinely ACTIVATED mid-base (else the test is hollow): activation
+        // makes the SVC hold its bus at the LOW setpoint (394), far from the standing-by state
+        Network check = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithStaticVarCompensator();
+        com.powsybl.iidm.network.StaticVarCompensator svc = check.getStaticVarCompensator("svc1");
+        svc.setVoltageSetpoint(385).setRegulationMode(com.powsybl.iidm.network.StaticVarCompensator.RegulationMode.VOLTAGE)
+                .setRegulating(true);
+        svc.newExtension(com.powsybl.iidm.network.extensions.StandbyAutomatonAdder.class)
+                .withHighVoltageThreshold(400).withLowVoltageThreshold(393)
+                .withLowVoltageSetpoint(394).withHighVoltageSetpoint(395)
+                .withB0(-0.001f).withStandbyStatus(true).add();
+        LoadFlowParameters cp = new LoadFlowParameters();
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(cp).setSvcVoltageMonitoring(true)
+                .setAcSolverType(GpuNewtonRaphsonFactory.NAME);
+        new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory())).run(check, cp);
+        org.junit.jupiter.api.Assertions.assertEquals(394.0,
+                svc.getTerminal().getBusView().getBus().getV(), 1e-6,
+                "the stand-by automaton must have ACTIVATED at the low setpoint in the base");
+    }
+
     /** compare() with a parameter customizer applied to BOTH arms and a configurable tolerance. */
     private void compareWithParams(Supplier<Network> networkSupplier, String label,
                                    java.util.function.Consumer<LoadFlowParameters> customize, double tolKv) {

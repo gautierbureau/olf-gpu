@@ -4752,6 +4752,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitched.p, 0, nS * sizeof(char), ctx->stream));
     // Apply ONLY the current phase's outer loop this pass (sequential, like OLF) — never both at once.
     bool inDsPhase = (phase == 0);
+    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+        std::fprintf(stderr, "BATCH_TRACE pass done: outer=%d phase=%d (0=DS,1=RL)\n", outer, phase);
+    }
     if (inDsPhase) {                                       // distributed-slack outer loop: spread the slack mismatch
         if (ctx->dsSlackOnly) {
             slackOnlyDsCheck<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->dsSlackPhiRow, ctx->dsSlackTargetP,

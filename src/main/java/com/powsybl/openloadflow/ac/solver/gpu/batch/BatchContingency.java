@@ -39,13 +39,15 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
                 || !tapOverrides.isEmpty() || !outagedHvdcs.isEmpty();
         boolean isShunt = !outagedShunts.isEmpty();
         boolean isBranch = !outagedBranches.isEmpty();
-        // Batchable shapes: 1-2 branches, N generators, N loads, and branch+injection COMBOS
-        // (independent mechanisms: element mask vs target/row-mode overrides); fixed shunts
-        // stay exclusive (their DISTR_Q interplay is validated separately).
-        if (!isInjection && !isShunt && !isBranch || outagedBranches.size() > 2
+        // Batchable shapes: N branches (the element mask is per-element; the validator rejects
+        // fragmenting sets), N generators, N loads, and branch+injection COMBOS (independent
+        // mechanisms: element mask vs target/row-mode overrides); fixed shunts stay exclusive
+        // (their DISTR_Q interplay is validated separately). The former <=2-branch cap was
+        // validated-scope only — lifted 2026-09-08 (N-3/N-4 at 1e-12).
+        if (!isInjection && !isShunt && !isBranch
                 || isShunt && (isInjection || isBranch)) {
             throw new IllegalArgumentException(
-                    "a batched contingency is 1-2 branches and/or injection loss(es), or fixed shunt(s) alone");
+                    "a batched contingency is branch(es) and/or injection loss(es), or fixed shunt(s) alone");
         }
         outagedBranches = List.copyOf(outagedBranches);
         lostGenerators = List.copyOf(lostGenerators);
@@ -56,7 +58,7 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
         outagedHvdcs = List.copyOf(outagedHvdcs);
     }
 
-    /** A branch outage (N-1 or N-2). */
+    /** A branch outage (N-1 .. N-k). */
     public BatchContingency(String contingencyId, List<LfBranch> outagedBranches) {
         this(contingencyId, outagedBranches, List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
     }

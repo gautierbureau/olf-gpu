@@ -226,9 +226,6 @@ final class GpuStrategyComposer {
                 return null;                                 // out of stage-1 scope — CPU per-strategy path
             }
         }
-        if (branches.size() > 2) {
-            return null;
-        }
         return new BatchContingency(contingencyId + GpuBatchStatus.STRATEGY_KEY_SEP + strategy.getId(),
                 branches, ctgGens, loads, shifts, taps, List.of(), reclosed, ctgZiOutages, ctgHvdcs);
     }

@@ -201,13 +201,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         boolean frozenHvdcBase = !lfNetwork.getHvdcs().isEmpty()
                 && com.powsybl.openloadflow.OpenLoadFlowParameters.get(securityAnalysisParameters.getLoadFlowParameters())
                         .isStartWithFrozenACEmulation();
-        // A MONITORING SVC can activate mid-run in the BASE load flow (VoltageMonitoring loop) — another
-        // configuration the SEQUENTIAL GPU solver path does not handle (the batch does, via the
-        // per-scenario activation deltas): keep the base on the CPU, the batch still runs.
-        boolean monitoringSvcBase = lfNetwork.getBuses().stream()
-                .flatMap(b -> b.getGenerators().stream())
-                .anyMatch(g -> g.getGeneratorControlType()
-                        == com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.MONITORING_VOLTAGE);
+        // MONITORING-SVC mid-base activation solves on the sequential path since the batch-of-1
+        // route (2026-09-08): the VoltageMonitoring loop's activation flips es equations, the
+        // activation re-extract carries the new row modes — no CPU-base condition anymore
+        // (GpuLoadFlowTest.monitoringSvcActivatesInBase).
         // SLOPE-SVC rows (row mode 2) solve on the sequential path since the batch-of-1 route
         // (2026-09-08) — no CPU-base condition anymore.
         // CONTROLLER-mode phase control (row mode 3) solves on the sequential path since the
@@ -215,7 +212,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // PER_EQUATION_TYPE stopping criteria run on the sequential path since the batch-of-1
         // route (2026-09-08): the batch-of-1 solve installs the per-row thresholds
         // (setBatchRowCriteria) and stops on the SAME decision as the CPU — no CPU-base condition.
-        boolean cpuBaseOnly = frozenHvdcBase || monitoringSvcBase;
+        boolean cpuBaseOnly = frozenHvdcBase;
         if (!scope.batchDisabled() && !multiThread && gpuBaseLoadFlowEnabled() && !cpuBaseOnly
                 && GpuAcNewtonSolver.isAvailable()
                 && acParameters.getSolverFactory().getClass() == NewtonRaphsonFactory.class) {

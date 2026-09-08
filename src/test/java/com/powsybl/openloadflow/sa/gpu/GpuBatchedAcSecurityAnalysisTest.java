@@ -518,6 +518,30 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertJavaGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** N-k branch outages (the former <=2 cap was validated-scope only, lifted 2026-09-08): the
+     *  per-element mask carries any outage count and the validator rejects fragmenting sets — an
+     *  N-3 and an N-4 on ieee14 batch alongside a plain N-1 at 1e-12, count asserted. */
+    @org.junit.jupiter.api.Test
+    void deviceMultiBranchOutageMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.ieeecdf.converter.IeeeCdfNetworkFactory.create14();
+        // ieee14's tight Q limits collapse under N-3-class redistributions (the CPU MAX_ITERATIONs
+        // too) — widen them so the scenarios are physically feasible on BOTH arms
+        network.getGenerators().forEach(g -> g.newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(300).add());
+        List<Contingency> ctgs = List.of(
+                new Contingency("N-1", new BranchContingency("L2-3-1")),
+                new Contingency("N-3", new BranchContingency("L2-4-1"), new BranchContingency("L3-4-1"),
+                        new BranchContingency("L4-5-1")),
+                new Contingency("N-4", new BranchContingency("L2-4-1"), new BranchContingency("L3-4-1"),
+                        new BranchContingency("L4-5-1"), new BranchContingency("L2-5-1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(3, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "N-1, N-3 and N-4 must all batch on-device");
+    }
+
     /** DEVICE-mode IncrementalShuntVoltageControl: in-kernel dV/dB sensitivities + OLF's section
      *  decisions per scenario (GpuBatchIncrementalShuntVc); GPU SA == CPU SA at 1e-12. */
     @org.junit.jupiter.api.Test

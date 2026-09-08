@@ -70,7 +70,7 @@ validation project sets it false to fail loudly instead).
 | Controllable shunt (SHUNT_B as variable) | ✅ **2026-09-08** | the BATCH-OF-1 route (the sequential solve runs on the batch context in pure-NR mode) carries SHUNT_B rows; GpuLoadFlowTest.controllableShunt: 0 kV dV, same iterations, no fallback |
 | Fixed shunts | ✅ | per-bus G,B pack |
 | Zero-impedance branches | 🔶 | only shapes with DUMMY_P/DUMMY_Q; one-side-open ZI ❌; both-ends-controlled / 3-winding star ❌. Part II §E.5 |
-| ZIP / exponential load models | ✅ **2026-09-08** | vdl fills via the batch-of-1 route; GpuLoadFlowTest.zipLoadModel: 3.4e-13 kV, no fallback |
+| ZIP / exponential load models | ✅ **2026-09-08** | vdl fills via the batch-of-1 route; GpuLoadFlowTest.zipLoadModel: 3.4e-13 kV, no fallback; formulas codegen-proven (java2cuda vdl family, generated evalVdl) |
 | SVC (slope, standby automaton) | ✅ **2026-09-08** | SLOPE rows (mode 2) solve via the batch-of-1 route; the MONITORING (standby-automaton) mid-base activation is validated too (GpuLoadFlowTest.monitoringSvcActivatesInBase: the automaton fires IN the base LF, activation asserted at the low setpoint, 0 kV dV, no fallback) — cpuBaseOnly is down to frozen-HVDC-start alone |
 | HVDC AC emulation | 🔶 | packed (droop, P0, losses) when both buses present and AC-emulation mode; otherwise represented only through terminal P injections |
 | Batteries / LCC / VSC / dangling lines / tie lines / areas | 🔶 | no first-class handling: fine while they only contribute plain P/Q bus targets; anything introducing an unsupported term/variable throws. Part II §E.7 |

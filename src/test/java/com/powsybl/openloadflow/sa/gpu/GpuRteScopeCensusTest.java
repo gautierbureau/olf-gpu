@@ -169,6 +169,11 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
                         : GpuBatchScopeCensus.snapshot());
         System.out.printf("  threads             : %d%n", threads);
         System.out.printf("  wall                : %d ms%n", ms);
+        if (System.getenv("OLF_PROBE_STATE_UPDATE") != null) {
+            System.out.printf("  onStateUpdate split : updateVariables=%d ms updateNetworkState=%d ms%n",
+                    com.powsybl.openloadflow.ac.equations.vector.AcNetworkVector.VARS_NS.sum() / 1_000_000,
+                    com.powsybl.openloadflow.ac.equations.vector.AcNetworkVector.STATE_NS.sum() / 1_000_000);
+        }
         if (batched < 0) {
             System.out.printf("  *** WHOLE-RUN CPU FALLBACK — an unsupported outer loop or an extraction "
                     + "reject killed the batch (run with OLF_GPU_BATCH_TRACE=1 for the scope reason)%n");

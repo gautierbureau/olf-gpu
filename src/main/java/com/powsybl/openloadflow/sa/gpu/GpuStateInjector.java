@@ -109,7 +109,7 @@ final class GpuStateInjector {
         }
         if (remap.identity) {                                // the common case: the outage islanded nothing,
             System.arraycopy(deviceState, 0, remap.buf, 0, remap.buf.length);   // so the rows still line up
-            es.getStateVector().set(remap.buf);
+            es.getStateVector().setValuesOnly(remap.buf);
             return;
         }
         int[] baseRowOf = remap.baseRowOf;
@@ -118,7 +118,11 @@ final class GpuStateInjector {
             int baseRow = baseRowOf[row];
             mapped[row] = baseRow >= 0 ? deviceState[baseRow] : 0;
         }
-        es.getStateVector().set(mapped);
+        // VALUES ONLY: the injected state feeds result building (flows, currents, voltages) and never a
+        // Jacobian — the next solve on this equation system starts with its own full state set. That
+        // skips refreshing every branch's partial derivatives, which measured 993 ms of the 1119 ms
+        // this notification cost over 2000 contingencies.
+        es.getStateVector().setValuesOnly(mapped);
     }
 
     /** Mirrors the CPU solve's connectivity processing for an injected state: islanded buses (frozen

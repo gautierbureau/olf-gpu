@@ -3207,7 +3207,8 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
             if (mode[ridx] != 1) return;                     // islanded / frozen this scenario
             double q = qBuf[ridx] + rlLoadQ[i];              // own q via fillRemoteMemberQBatch
             if (q < rliMin - tol) {
-                savedTarget[rst] = target[ridx];             // the DISTR_Q row target (0)
+                savedTarget[rst] = target[ridx];             // the DISTR_Q row target (NOT 0 in general:
+                                                             // see updateDistrQTargetsBatch)
                 mode[ridx] = 4;
                 target[ridx] = rliMin - rlLoadQ[i];
                 limitType[rst] = 1;

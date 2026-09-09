@@ -17,7 +17,10 @@ import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
+import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.equations.EquationSystem;
+import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonFactory;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
@@ -472,7 +475,15 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 }
             }
         }
-        PostContingencyComputationStatus status = PostContingencyComputationStatus.CONVERGED;
+        // A converged device solve is not automatically a CONVERGED post-contingency RESULT: OLF's
+        // AcloadFlowEngine rejects a solution whose voltages are outside the realistic band, and a
+        // rejected result reports NO violations at all. Skipping that check does not make the GPU
+        // arm optimistic by a violation or two — it makes it report a full violation set where the
+        // CPU reports none.
+        PostContingencyComputationStatus status = isStateUnrealistic(precomputed.equationSystem(), network,
+                context.getParameters())
+                ? PostContingencyComputationStatus.FAILED
+                : PostContingencyComputationStatus.CONVERGED;
         var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions,
                 securityAnalysisParameters.getIncreasedViolationsParameters());
         LoadFlowModel loadFlowModel = securityAnalysisParameters.getLoadFlowParameters().isDc() ? LoadFlowModel.DC : LoadFlowModel.AC;
@@ -480,6 +491,20 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 new AbstractNetworkResult.StateMonitorIndexes(monitorIndex, zeroImpedanceMonitoredIndex), createResultExtension,
                 preContingencyNetworkResult, contingency, loadFlowModel, securityAnalysisParameters.getLoadFlowParameters().getDcPowerFactor(),
                 securityAnalysisParameters.getModifiedMonitoredElementsParameters());
+        if (status != PostContingencyComputationStatus.CONVERGED) {
+            // OLF only builds the network result and detects violations for a CONVERGED result
+            // (AbstractSecurityAnalysis.runPostContingencySimulation) — an unrealistic state reports
+            // an empty violation list, not the violations of a state it rejected.
+            PHASE_NS.computeIfAbsent(" post-contingency call (all of it)", k -> new java.util.concurrent.atomic.LongAdder())
+                    .add(System.nanoTime() - tPost);
+            return new PostContingencyResult(contingency, status, new LimitViolationsResult(List.of()),
+                    new NetworkResult(List.of(), List.of(), List.of()),
+                    new ConnectivityResult(lfContingency.getCreatedSynchronousComponentsCount(), 0,
+                            lfContingency.getDisconnectedLoadActivePower() * PerUnit.SB,
+                            lfContingency.getDisconnectedGenerationActivePower() * PerUnit.SB,
+                            lfContingency.getDisconnectedElementIds()),
+                    preDistributedActivePower * PerUnit.SB);
+        }
         long tRes = System.nanoTime();
         postContingencyNetworkResult.update();
         long tDet = System.nanoTime();
@@ -508,6 +533,43 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                         new NetworkResult(postContingencyNetworkResult.getBranchResults(), postContingencyNetworkResult.getBusResults(),
                                 postContingencyNetworkResult.getThreeWindingsTransformerResults())),
                 connectivityResult, preDistributedActivePower * PerUnit.SB);
+    }
+
+    /**
+     * OLF's realistic-voltage check, ported from {@code AcloadFlowEngine.isStateUnrealistic}: every
+     * non-fictitious {@code BUS_V} variable whose value leaves
+     * {@code [minRealisticVoltage, maxRealisticVoltage]} counts, but only on buses whose nominal
+     * voltage reaches {@code minNominalVoltageRealisticVoltageCheck}. One such bus makes the whole
+     * run {@code UNREALISTIC_STATE}, which the security analysis maps to {@code FAILED}.
+     *
+     * <p>Walks the variables and reads the STATE VECTOR, exactly as OLF does, rather than reading
+     * {@code bus.getV()} — same numbers here, but the point of a port is not to paraphrase.
+     *
+     * <p>{@code OLF_GPU_UNREALISTIC_TRACE} names the offending buses.
+     */
+    private static boolean isStateUnrealistic(EquationSystem<AcVariableType, AcEquationType> es,
+                                              LfNetwork network, AcLoadFlowParameters parameters) {
+        double minNominalV = parameters.getMinNominalVoltageRealisticVoltageCheck();
+        boolean trace = System.getenv("OLF_GPU_UNREALISTIC_TRACE") != null;
+        boolean unrealistic = false;
+        for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
+            if (v.getType() != AcVariableType.BUS_V || network.getBus(v.getElementNum()).isFictitious()) {
+                continue;
+            }
+            double value = es.getStateVector().get(v.getRow());
+            if ((value < parameters.getMinRealisticVoltage() || value > parameters.getMaxRealisticVoltage())
+                    && network.getBus(v.getElementNum()).getNominalV() >= minNominalV) {
+                unrealistic = true;
+                if (!trace) {
+                    return true;
+                }
+                System.err.printf("UNREALISTIC bus=%s v=%.9f nominalV=%.3f band=[%.3f, %.3f]%n",
+                        network.getBus(v.getElementNum()).getId(), value,
+                        network.getBus(v.getElementNum()).getNominalV(),
+                        parameters.getMinRealisticVoltage(), parameters.getMaxRealisticVoltage());
+            }
+        }
+        return unrealistic;
     }
 
     /** OLF's DISTR_Q target, reproduced from {@code AcTargetVector} (which keeps it private):

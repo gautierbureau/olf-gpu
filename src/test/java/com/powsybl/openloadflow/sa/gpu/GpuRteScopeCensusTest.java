@@ -297,6 +297,10 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         if (dump != null) {
             List<String> lines = new ArrayList<>();
             for (PostContingencyResult p : result.getPostContingencyResults()) {
+                // the STATUS line first: a contingency the two arms disagree about is usually one that
+                // one arm did not converge, and a violation-set diff alone shows that as "N extra
+                // violations" rather than as what it is.
+                lines.add(p.getContingency().getId() + "|@STATUS|" + p.getStatus() + "||");
                 for (var v : p.getLimitViolationsResult().getLimitViolations()) {
                     lines.add(p.getContingency().getId() + "|" + v.getSubjectId() + "|" + v.getSide()
                             + "|" + v.getLimitType() + "|" + v.getOperationalLimitsGroupId());

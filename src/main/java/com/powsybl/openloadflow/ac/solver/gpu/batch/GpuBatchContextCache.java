@@ -148,6 +148,9 @@ public final class GpuBatchContextCache {
 
     public static int resolveChunkSize(int nb, int n, GpuAcData gpuData) {
         Integer explicit = Integer.getInteger(MAX_BATCH_PROPERTY);
+        if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
+            System.err.printf("CHUNK_SIZING nb=%d explicit=%s%n", nb, explicit);
+        }
         if (explicit != null && explicit > 0) {
             return Math.min(nb, explicit);
         }

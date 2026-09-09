@@ -126,7 +126,7 @@ final class GpuBatchChunkSolver {
     }
 
     @SuppressWarnings({"java:S107", "java:S3776"})
-    private static void solveQualifiedInChunksAt(int chunkSize,
+    private static void solveQualifiedInChunksAt(int chunkCap,
                                                List<Integer> batchedIndices, List<BatchContingency> contingencies,
                                                GpuBatchElementMapper elementMapper, GpuAcData gpuData,
                                                double[] baseState, double[] baseTargets, int[] baseRowMode,
@@ -151,7 +151,13 @@ final class GpuBatchChunkSolver {
                                                List<GpuBatchContinuousPhase.Ctl> continuousPhaseControllers,
                                                BatchConfig config) {
         int nb = batchedIndices.size();
-        int nChunks = (nb + chunkSize - 1) / chunkSize;
+        int nChunks = (nb + chunkCap - 1) / chunkCap;
+        // BALANCE the chunks over that count instead of filling each to the cap and leaving a ragged
+        // tail. The device context is allocated at the chunk size and every solve is that wide, so a
+        // tail chunk holding 72 of 642 slots still solves a 642-wide batch — 570 of them padding.
+        // Splitting 1998 scenarios as 4 x 500 rather than 3 x 642 + 72 measured 13.7 s vs 15.6 s of
+        // batched time on rte6515, at LOWER device memory (the size only ever goes down from the cap).
+        int chunkSize = (nb + nChunks - 1) / nChunks;
 
         // Reuse a cached analyzed context when the pattern/admittances/chunk/mode match (across
         // SA runs on the same network) — the context is NOT destroyed here, it stays cached.

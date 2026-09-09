@@ -115,6 +115,14 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
             }
         }
 
+        // OLF_GPU_CENSUS_CHUNK: force the batch chunk size (the system property cannot be set from the
+        // command line — the parent pom owns surefire's argLine — and chunk size is the knob a
+        // throughput measurement most needs to sweep).
+        String chunk = System.getenv("OLF_GPU_CENSUS_CHUNK");
+        if (chunk != null) {
+            System.setProperty(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.MAX_BATCH_PROPERTY, chunk);
+        }
+
         GpuBatchScopeCensus.reset();
         long t0 = System.nanoTime();
         SecurityAnalysisResult result = runSecurityAnalysis(network, ctgs, List.of(), sap);

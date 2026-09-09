@@ -43,6 +43,7 @@
 #include <cudss.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <memory>
@@ -60,6 +61,12 @@
 #include "hvdc.cuh"
 #include "hvdc_scatter.h"
 #include "vdl.cuh"
+
+// OLF_GPU_PHASE_TIME accounting: how much of a solveBatchContext call is device outer-loop passes
+// vs Newton iterations. A pass that re-solves is the expensive one; a pass that only re-checks is not.
+long long gOuterPasses = 0;
+long long gNewtonIters = 0;
+long long gSolvePasses = 0;
 
 using namespace powsybl::openloadflow;
 
@@ -4387,6 +4394,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // DS->RL transition with a distributed base). solvePass=false skips the inner Newton for such a pass.
     bool solvePass = true;
     for (int outer = 0; outer < maxOuter; outer++) {
+    gOuterPasses++;
+    if (solvePass) {
+        gSolvePasses++;
+    }
     std::copy(active.begin(), active.end(), wasActive.begin());   // scenarios (re)solved in this inner pass
     CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
     int nActive = 0;
@@ -4459,6 +4470,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     std::vector<double> hMu(lsMode == 1 ? nS : 0, -1.0);
 
     for (int it = 0; it <= maxIter && nActive > 0; it++) {
+        gNewtonIters++;
         bool fOnly = it == maxIter || (ctx->mode == 4 && it > 0);
         fillActiveBatch(fOnly);
 
@@ -5396,6 +5408,29 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createBa
     return reinterpret_cast<jlong>(ctx);
 }
 
+// OLF_GPU_PHASE_TIME: split one solveBatchContext JNI call into the three things it does —
+// marshalling the Java arrays in, the solve itself, and packing the per-scenario result arrays out.
+// The Java-side timer sees only the total, and on a 642-scenario chunk the total carries roughly a
+// second of fixed cost that the Newton iterations do not explain.
+static bool jniPhaseTime() {
+    static const bool on = std::getenv("OLF_GPU_PHASE_TIME") != nullptr;
+    return on;
+}
+
+static long long nowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+extern long long gOuterPasses;
+extern long long gNewtonIters;
+extern long long gSolvePasses;
+
+static long long marshalNs = 0;
+static long long solveNs = 0;
+static long long packNs = 0;
+static long long calls = 0;
+
 extern "C" JNIEXPORT jobjectArray JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBatchContext(
         JNIEnv* env, jclass, jlong handle, jdoubleArray jx0Base, jdoubleArray jtargetBase,
@@ -5412,6 +5447,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jint maxOuterProductive, jint rlMaxSwitch, jint dsRejectResidual, jint skipRlPhase,
         jint nziBase, jintArray jZiOnSlotElem, jintArray jZiOffSlotElem) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    long long tMarshal0 = jniPhaseTime() ? nowNs() : 0;
     std::vector<int> r1OvSlotElemVec;
     std::vector<double> r1OvValVec;
     if (jR1OvSlotElem != nullptr) {
@@ -5554,6 +5590,10 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
             env->GetDoubleArrayRegion(jrlVtOvVal, 0, static_cast<jsize>(rlVtOvValVec.size()), rlVtOvValVec.data());
         }
 
+        if (jniPhaseTime()) {
+            marshalNs += nowNs() - tMarshal0;
+        }
+        long long tSolve0 = jniPhaseTime() ? nowNs() : 0;
         res = solveBatchContext(ctx, x0.data(), target.data(), rowMode.data(), baseRowMode.data(), disabled.data(),
                                 nOv, ovIndex.data(), ovValue.data(),
                                 nDsOv > 0 ? dsOvBus.data() : nullptr, dsOvFactorDelta.data(),
@@ -5579,6 +5619,9 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
                                 ziOnSlotElemVec.empty() ? nullptr : ziOnSlotElemVec.data(),
                                 static_cast<int>(ziOffSlotElemVec.size() / 2),
                                 ziOffSlotElemVec.empty() ? nullptr : ziOffSlotElemVec.data());
+        if (jniPhaseTime()) {
+            solveNs += nowNs() - tSolve0;
+        }
         if (jRlStateOut != nullptr && !rlStateOutVec.empty()) {
             env->SetIntArrayRegion(jRlStateOut, 0, static_cast<jsize>(rlStateOutVec.size()), rlStateOutVec.data());
         }
@@ -5595,6 +5638,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
     }
 
     // Pack per-scenario results: [state(n), iterations, finalMismatch, convergenceStatus].
+    long long tPack0 = jniPhaseTime() ? nowNs() : 0;
     int n = ctx->n;
     int nS = ctx->nScenarios;
     jclass doubleArrayClass = env->FindClass("[D");
@@ -5606,6 +5650,14 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         env->SetDoubleArrayRegion(row, n, 3, tail);
         env->SetObjectArrayElement(out, s, row);
         env->DeleteLocalRef(row);
+    }
+    if (jniPhaseTime()) {
+        packNs += nowNs() - tPack0;
+        calls++;
+        fprintf(stderr, "JNI_PHASE_TIME calls=%lld marshal=%lld ms solve=%lld ms pack=%lld ms "
+                "| outerPasses=%lld (solving=%lld) newtonIters=%lld\n",
+                calls, marshalNs / 1000000, solveNs / 1000000, packNs / 1000000,
+                gOuterPasses, gSolvePasses, gNewtonIters);
     }
     return out;
 }

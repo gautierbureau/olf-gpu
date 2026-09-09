@@ -136,6 +136,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         /** The batch precomputed on the device once the base load flow converged (see
          *  GpuBatchPrecomputer); PrecomputedBatch.empty() until then / on CPU fallback. */
         private PrecomputedBatch precomputed = PrecomputedBatch.empty();
+        /** The state injector's row permutation, kept across this partition's contingencies. */
+        private final GpuStateInjector.Remap remap = new GpuStateInjector.Remap();
         // The run's actual outer loops, captured in runSimulations: the device must run the distributed-slack /
         // reactive-limits passes ONLY when OLF would (i.e. when the outer loop is in the configured list), never
         // unconditionally from network capability. Default to OLF's defaults until runSimulations sets them.
@@ -378,7 +380,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 .filter(Objects::nonNull)
                 .toList();
         com.powsybl.openloadflow.network.action.LfActionUtils.applyListOfActions(lfActions, network, lfContingency, networkParameters);
-        GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state);
+        GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
+                runState.get().remap);
         AcSolverUtil.updateNetwork(network, precomputed.equationSystem());
         var postActionsViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions,
                 securityAnalysisParameters.getIncreasedViolationsParameters());
@@ -422,7 +425,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         Stopwatch stopwatch = Stopwatch.createStarted();
 
         long tInj = System.nanoTime();
-        GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state);
+        GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
+                runState.get().remap);
         long tUpd = System.nanoTime();
         PHASE_NS.computeIfAbsent("   injectState()", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(tUpd - tInj);

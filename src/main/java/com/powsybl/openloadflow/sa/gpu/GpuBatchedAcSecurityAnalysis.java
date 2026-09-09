@@ -457,7 +457,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         String qProbe = System.getenv("OLF_GPU_Q_PROBE");
         if (qProbe != null) {
             for (LfBus b : network.getBuses()) {
-                if (b.getId().startsWith(qProbe)) {
+                if (java.util.Arrays.stream(qProbe.split(",")).anyMatch(b.getId()::startsWith)) {
                     double q = b.getQ().eval() + b.getLoadTargetQ();
                     // DISTR_Q shares the DEVIATION from targetQ, not q itself: its target is
                     // (qPct-1)*targetQ_i + qPct*sum_j targetQ_j (AcTargetVector), so two members with
@@ -472,6 +472,12 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                             + "distrQResid=%s minQ=%.9f maxQ=%.9f overMaxBy=%.9f%n",
                             contingency.getId(), b.getId(), q, b.getGenerationTargetQ(), b.getLoadTargetQ(),
                             b.getRemoteControlReactivePercent(), resid, b.getMinQ(), b.getMaxQ(), q - b.getMaxQ());
+                    // A CURVE reactive limit is a function of the GENERATOR's targetP, so a limit that
+                    // disagrees between arms is a P disagreement, not a limit-model disagreement.
+                    for (var g : b.getGenerators()) {
+                        System.err.printf("Q_PROBE_GEN ctg=%s bus=%s gen=%s targetP=%.9f minQ=%.9f maxQ=%.9f%n",
+                                contingency.getId(), b.getId(), g.getId(), g.getTargetP(), g.getMinQ(), g.getMaxQ());
+                    }
                 }
             }
         }

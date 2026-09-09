@@ -90,3 +90,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-09 | 881a533+dirty | 24.61 | 21.88 | 31.00 | x1.42 | 0/0/0 | 8.35 | 4.45 | 499/500 | 122/133 (92%) | DS water-fill re-derives from the anchor each pass like OLF's resetToInitialState (fidelity; does not close the rte6515 gap) |
 | 2026-09-09 | d461c05+dirty | 22.28 | 19.08 | 27.51 | x1.44 | 0/0/0 | 7.56 | 4.42 | 499/500 | 122/133 (92%) | DISTR_Q target: port AcTargetVector instead of assuming 0 |
 | 2026-09-09 | 12686fa+dirty | 23.40 | 20.00 | 27.44 | x1.37 | 0/0/0 | 7.66 | 4.43 | 499/500 | 122/133 (92%) | post-contingency realistic-voltage check (port of AcloadFlowEngine.isStateUnrealistic) |
+| 2026-09-09 | 0ccc0bc+dirty | 22.47 | 19.41 | 26.41 | x1.36 | 0/0/0 | 7.75 | 4.44 | 499/500 | 122/133 (92%) | probes only: generator targetP + curve limits in the Q probe |

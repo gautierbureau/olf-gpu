@@ -67,6 +67,9 @@
 long long gOuterPasses = 0;
 long long gNewtonIters = 0;
 long long gSolvePasses = 0;
+long long gActiveIterSum = 0;
+long long gWidthIterSum = 0;
+long long gCompactIters = 0;
 
 using namespace powsybl::openloadflow;
 
@@ -4621,6 +4624,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             break;
         }
 
+        // Scenarios still being FACTORIZED this iteration. Summed over iterations this is the batch's
+        // real work measure: the CPU pays each contingency its own iteration count, so a batch is only
+        // as efficient as its retirement — a batch that keeps every scenario alive until the last
+        // straggler converges pays the WORST case for all of them.
+        gActiveIterSum += nActive;
         if (lsMode == 1) {                                   // LINE_SEARCH: remember the pre-step iterates
             CUDA_CHECK(cudaMemcpyAsync(ctx->dXprevLs.p, ctx->dX.p, static_cast<size_t>(n) * nS * sizeof(double),
                                        cudaMemcpyDeviceToDevice, ctx->stream));
@@ -4703,6 +4711,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         //      inactive scenarios' frozen states are not perturbed by stale solutions (the
         //      full-width update kernel adds dx over ALL scenarios). ----
         bool compactSolve = !deviceFixedIter && ctx->mode == 3 && nActive > 0 && nActive * 2 <= nS;
+        if (!compactSolve) {
+            gWidthIterSum += nS;                             // full-width factorization this iteration
+        }
         if (compactSolve) {
             if (ctx->compactCap == 0) {                       // lazy first-engage setup
                 ctx->compactCap = nS / 2;
@@ -4740,6 +4751,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             while (static_cast<int>(cmap.size()) < w) {
                 cmap.push_back(cmap[0]);
             }
+            gWidthIterSum += w;                              // compacted width actually factorized
+            gCompactIters++;
             CUDA_CHECK(cudaMemcpyAsync(ctx->dMapC.p, cmap.data(), w * sizeof(int), cudaMemcpyHostToDevice, ctx->stream));
             gatherScenarios<<<grid(nnz * w), BLOCK, 0, ctx->stream>>>(nnz, w, ctx->dMapC.as<int>(), ctx->dVals.as<double>(), ctx->dValsC.as<double>());
             gatherScenarios<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n, w, ctx->dMapC.as<int>(), ctx->dB.as<double>(), ctx->dBC.as<double>());
@@ -5425,6 +5438,9 @@ static long long nowNs() {
 extern long long gOuterPasses;
 extern long long gNewtonIters;
 extern long long gSolvePasses;
+extern long long gActiveIterSum;
+extern long long gWidthIterSum;
+extern long long gCompactIters;
 
 static long long marshalNs = 0;
 static long long solveNs = 0;
@@ -5655,9 +5671,9 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         packNs += nowNs() - tPack0;
         calls++;
         fprintf(stderr, "JNI_PHASE_TIME calls=%lld marshal=%lld ms solve=%lld ms pack=%lld ms "
-                "| outerPasses=%lld (solving=%lld) newtonIters=%lld\n",
+                "| outerPasses=%lld (solving=%lld) newtonIters=%lld activeIterSum=%lld widthIterSum=%lld compactIters=%lld\n",
                 calls, marshalNs / 1000000, solveNs / 1000000, packNs / 1000000,
-                gOuterPasses, gSolvePasses, gNewtonIters);
+                gOuterPasses, gSolvePasses, gNewtonIters, gActiveIterSum, gWidthIterSum, gCompactIters);
     }
     return out;
 }

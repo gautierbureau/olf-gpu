@@ -95,9 +95,19 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         // OLF_GPU_CENSUS_THREADS: OpenSecurityAnalysisParameters.threadCount for BOTH arms — the
         // CPU baseline is only honest at the thread count production runs (default here is OLF's 1).
         int threads = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_CENSUS_THREADS", "1"));
-        if (threads > 1) {
-            sap.addExtension(com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters.class,
-                    new com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters().setThreadCount(threads));
+        // OLF_GPU_CENSUS_NOFREEZE: turn OFF the SA's startWithFrozenACEmulation for BOTH arms. The
+        // freeze/unfreeze pair is a second solve per contingency on either path, and the only way to
+        // know whether the device port pays MORE for it than the CPU does is to price it on both.
+        boolean noFreeze = "1".equals(System.getenv("OLF_GPU_CENSUS_NOFREEZE"));
+        if (threads > 1 || noFreeze) {
+            var ext = new com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters();
+            if (threads > 1) {
+                ext.setThreadCount(threads);
+            }
+            if (noFreeze) {
+                ext.setStartWithFrozenACEmulation(false);
+            }
+            sap.addExtension(com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters.class, ext);
         }
 
         List<Contingency> ctgs = new ArrayList<>();

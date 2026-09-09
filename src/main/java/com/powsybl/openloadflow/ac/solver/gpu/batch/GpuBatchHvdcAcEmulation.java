@@ -393,6 +393,16 @@ public final class GpuBatchHvdcAcEmulation {
                         }
                     }
                 }
+                if (GpuBatchPhaseStats.ENABLED) {
+                    int na = 0;
+                    for (int s = 0; s < realCount; s++) {
+                        if (affected[s]) {
+                            na++;
+                        }
+                    }
+                    GpuBatchPhaseStats.add("HvdcAcEmulation.affectedSum", na);
+                    GpuBatchPhaseStats.add("HvdcAcEmulation.realCountSum", realCount);
+                }
                 GpuBatchPhaseStats.addNs("HvdcAcEmulation.prepNs", System.nanoTime() - tPrep);
                 GpuBatchPhaseStats.bump("HvdcAcEmulation.solves");
                 long tDev = System.nanoTime();

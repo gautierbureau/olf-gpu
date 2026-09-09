@@ -107,6 +107,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      *  split. Most of a batched run's wall time is not the batch: the engine still applies each
      *  contingency, injects the precomputed state, updates the network and detects violations one
      *  contingency at a time, and that tail is invisible in the batch timings. */
+    private static final ThreadLocal<Long> RUN_START_NS = new ThreadLocal<>();
+
     static final java.util.Map<String, java.util.concurrent.atomic.LongAdder> PHASE_NS =
             new java.util.concurrent.ConcurrentSkipListMap<>();
 
@@ -179,6 +181,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // base/fall-through GPU solver swap is ALSO skipped — concurrent partition load flows on
         // the single-device sequential solver would race in native code (SIGSEGV in cuLaunchKernel,
         // measured 2026-07-17).
+        RUN_START_NS.set(System.nanoTime());
         boolean multiThread = OpenSecurityAnalysisParameters.getOrDefault(securityAnalysisParameters).getThreadCount() > 1;
         RunState rs = new RunState();
         runState.set(rs);
@@ -271,9 +274,12 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         } finally {
             runState.remove();                               // pooled partition threads must not leak a run's state
             if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
+                // CUMULATIVE over the JVM, never cleared: threadCount > 1 runs one partition per
+                // thread through this same static map, and clearing here would hand whichever
+                // partition finished first the whole run's numbers and the rest almost nothing.
+                // Read the LAST block printed — like JNI_PHASE_TIME, it is the running total.
                 PHASE_NS.forEach((k, v) ->
-                        System.err.printf("SA_PHASE_TIME  %-40s %6d ms%n", k, v.sum() / 1_000_000));
-                PHASE_NS.clear();
+                        System.err.printf("SA_PHASE_TIME  %-40s %6d ms (cumulative)%n", k, v.sum() / 1_000_000));
             }
         }
     }
@@ -309,6 +315,11 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     @Override
     protected void afterPreContingencySimulation(AcLoadFlowParameters parameters) {
         super.afterPreContingencySimulation(parameters);
+        Long t0 = RUN_START_NS.get();
+        if (t0 != null) {
+            PHASE_NS.computeIfAbsent("base load flow + setup", k -> new java.util.concurrent.atomic.LongAdder())
+                    .add(System.nanoTime() - t0);
+        }
         RunState rs = runState.get();
         long tPre = System.nanoTime();
         rs.precomputed = GpuBatchPrecomputer.precompute(network, rs.lfNetwork, rs.context,
@@ -406,12 +417,18 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
 
         // Inject the precomputed post-contingency state (the branch is already disabled by
         // lfContingency.apply()), then reuse the engine's result-building unchanged.
+        long tPost = System.nanoTime();
         logPostContingencyStart(network, lfContingency);
         Stopwatch stopwatch = Stopwatch.createStarted();
 
         long tInj = System.nanoTime();
         GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state);
+        long tUpd = System.nanoTime();
+        PHASE_NS.computeIfAbsent("   injectState()", k -> new java.util.concurrent.atomic.LongAdder())
+                .add(tUpd - tInj);
         AcSolverUtil.updateNetwork(network, precomputed.equationSystem());
+        PHASE_NS.computeIfAbsent("   AcSolverUtil.updateNetwork()", k -> new java.util.concurrent.atomic.LongAdder())
+                .add(System.nanoTime() - tUpd);
         PHASE_NS.computeIfAbsent("  state injection + network update", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tInj);
 
@@ -425,7 +442,12 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 securityAnalysisParameters.getModifiedMonitoredElementsParameters());
         long tRes = System.nanoTime();
         postContingencyNetworkResult.update();
+        long tDet = System.nanoTime();
+        PHASE_NS.computeIfAbsent("   networkResult.update()", k -> new java.util.concurrent.atomic.LongAdder())
+                .add(tDet - tRes);
         postContingencyLimitViolationManager.detectViolations(network);
+        PHASE_NS.computeIfAbsent("   detectViolations()", k -> new java.util.concurrent.atomic.LongAdder())
+                .add(System.nanoTime() - tDet);
         PHASE_NS.computeIfAbsent("  result build + violation detection", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tRes);
 
@@ -438,6 +460,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 lfContingency.getDisconnectedElementIds());
 
         // No device-side slack distribution in the prototype: only the pre-distribution counts.
+        PHASE_NS.computeIfAbsent(" post-contingency call (all of it)", k -> new java.util.concurrent.atomic.LongAdder())
+                .add(System.nanoTime() - tPost);
         return new PostContingencyResult(contingency, status,
                 new LimitViolationsResult(postContingencyLimitViolationManager.getLimitViolations()),
                 GpuStateInjector.filterIslanded(network, precomputed.islandedBuses().get(contingency.getId()), contingency.getId(),

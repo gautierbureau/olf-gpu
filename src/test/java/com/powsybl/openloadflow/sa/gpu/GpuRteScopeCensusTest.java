@@ -145,6 +145,15 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
                 result.getPreContingencyResult().getStatus(),
                 result.getPreContingencyResult().getLimitViolationsResult().getLimitViolations().size());
         System.out.printf("  post-ctg statuses   : %s%n", statuses);
+        // How MUCH of the run actually has something to report: the per-contingency violation
+        // detection is the largest host-side block, so whether a device-side pre-screen could skip
+        // it depends entirely on how many contingencies are violation-free.
+        long withViolations = result.getPostContingencyResults().stream()
+                .filter(p -> !p.getLimitViolationsResult().getLimitViolations().isEmpty()).count();
+        long totalViolations = result.getPostContingencyResults().stream()
+                .mapToLong(p -> p.getLimitViolationsResult().getLimitViolations().size()).sum();
+        System.out.printf("  ctg with violations : %d of %d (%d violations total)%n",
+                withViolations, result.getPostContingencyResults().size(), totalViolations);
         System.out.printf("  CPU-routing reasons : %s%n",
                 GpuBatchScopeCensus.snapshot().isEmpty() ? "(none — everything batched)"
                         : GpuBatchScopeCensus.snapshot());

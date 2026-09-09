@@ -128,6 +128,15 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         // OLF_GPU_CENSUS_CHUNK: force the batch chunk size (the system property cannot be set from the
         // command line — the parent pom owns surefire's argLine — and chunk size is the knob a
         // throughput measurement most needs to sweep).
+        // OLF_GPU_CENSUS_CPU_BASE=1: keep the batched contingency solves on the device but run the BASE
+        // load flow on the CPU solver. The reference filtering compares each contingency against the base,
+        // with zero tolerance, so a base that differs from the CPU's by a few ulps is enough to move
+        // violations. This isolates that.
+        if ("1".equals(System.getenv("OLF_GPU_CENSUS_CPU_BASE"))) {
+            System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY, "false");
+        } else {
+            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY);
+        }
         String chunk = System.getenv("OLF_GPU_CENSUS_CHUNK");
         if (chunk != null) {
             System.setProperty(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.MAX_BATCH_PROPERTY, chunk);
@@ -188,10 +197,17 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         String busDump = System.getenv("OLF_GPU_CENSUS_BUS_DUMP");
         if (busDump != null) {
             List<String> lines = new ArrayList<>();
+            // The BASE state too, under the id "BASE": the reference filtering compares each arm's
+            // post-contingency value against its OWN base, so a base difference is as decisive as a
+            // post difference. Double.toString round-trips exactly — %f would hide the last bits,
+            // which are the whole question here.
+            for (var br : result.getPreContingencyResult().getNetworkResult().getBusResults()) {
+                lines.add("BASE|" + br.getVoltageLevelId() + "|" + br.getBusId() + "|" + Double.toString(br.getV()));
+            }
             for (PostContingencyResult p : result.getPostContingencyResults()) {
                 for (var br : p.getNetworkResult().getBusResults()) {
-                    lines.add(String.format("%s|%s|%s|%.12f", p.getContingency().getId(),
-                            br.getVoltageLevelId(), br.getBusId(), br.getV()));
+                    lines.add(p.getContingency().getId() + "|" + br.getVoltageLevelId() + "|"
+                            + br.getBusId() + "|" + Double.toString(br.getV()));
                 }
             }
             java.util.Collections.sort(lines);

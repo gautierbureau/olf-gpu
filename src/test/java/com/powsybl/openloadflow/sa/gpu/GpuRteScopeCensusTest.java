@@ -90,6 +90,18 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         Path paramsFile = Path.of("rte-loadflow-default-parameters.json");
         assumeTrue(Files.exists(paramsFile), "rte-loadflow-default-parameters.json not found");
         LoadFlowParameters lfp = JsonLoadFlowParameters.read(paramsFile);
+        // OLF_GPU_CENSUS_CONV_EPS: DIAGNOSTIC ONLY — tighten the inner-Newton stopping criterion on BOTH
+        // arms to ask whether a residual GPU/CPU difference is just the slack each solver is allowed at
+        // the production tolerance (1e-4 per equation by default). Never a production setting, and never
+        // a way to claim agreement: the production comparison is the one at the production tolerance.
+        if ("1".equals(System.getenv("OLF_GPU_CENSUS_NO_DS"))) {
+            lfp.setDistributedSlack(false);                   // diagnostic: is a gap the slack redistribution?
+        }
+        String convEps = System.getenv("OLF_GPU_CENSUS_CONV_EPS");
+        if (convEps != null) {
+            com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                    .setNewtonRaphsonConvEpsPerEq(Double.parseDouble(convEps));
+        }
         SecurityAnalysisParameters sap = new SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
         // OLF_GPU_CENSUS_THREADS: OpenSecurityAnalysisParameters.threadCount for BOTH arms — the
@@ -111,12 +123,20 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         }
 
         List<Contingency> ctgs = new ArrayList<>();
+        // OLF_GPU_CENSUS_ONLY=<branch,branch,...>: run just these contingencies. For chasing a handful
+        // of cases where the two arms disagree, without paying the whole N-1 each iteration.
+        String only = System.getenv("OLF_GPU_CENSUS_ONLY");
+        java.util.Set<String> onlyIds = only == null ? null
+                : new java.util.HashSet<>(java.util.Arrays.asList(only.split(",")));
         int limit = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_CENSUS_LIMIT", "0"));
         for (Branch<?> b : network.getBranches()) {
             Bus b1 = b.getTerminal1().getBusView().getBus();
             Bus b2 = b.getTerminal2().getBusView().getBus();
             if (b1 == null || b2 == null
                     || !b1.isInMainSynchronousComponent() || !b2.isInMainSynchronousComponent()) {
+                continue;
+            }
+            if (onlyIds != null && !onlyIds.contains(b.getId())) {
                 continue;
             }
             ctgs.add(new Contingency(b.getId(), new BranchContingency(b.getId())));
@@ -137,6 +157,14 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         } else {
             System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_BASE_LOADFLOW_PROPERTY);
         }
+        // OLF_GPU_CENSUS_OUTER_MODE=DEVICE|JAVA: which batched outer-loop engine runs. Comparing the two
+        // against the CPU separates a device-kernel difference from an orchestration one.
+        String outerMode = System.getenv("OLF_GPU_CENSUS_OUTER_MODE");
+        if (outerMode != null) {
+            System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY, outerMode);
+        } else {
+            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
+        }
         String chunk = System.getenv("OLF_GPU_CENSUS_CHUNK");
         if (chunk != null) {
             System.setProperty(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.MAX_BATCH_PROPERTY, chunk);
@@ -147,10 +175,15 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         // STATES actually are at a bus whose violation they disagree about.
         List<com.powsybl.security.monitor.StateMonitor> monitors = new ArrayList<>();
         String monitorVl = System.getenv("OLF_GPU_CENSUS_MONITOR_VL");
-        if (monitorVl != null) {
+        String monitorBranch = System.getenv("OLF_GPU_CENSUS_MONITOR_BRANCH");
+        if (monitorVl != null || monitorBranch != null) {
             monitors.add(new com.powsybl.security.monitor.StateMonitor(
-                    com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(),
-                    new java.util.HashSet<>(java.util.Arrays.asList(monitorVl.split(","))), java.util.Set.of()));
+                    com.powsybl.contingency.ContingencyContext.all(),
+                    monitorBranch == null ? java.util.Set.of()
+                            : new java.util.HashSet<>(java.util.Arrays.asList(monitorBranch.split(","))),
+                    monitorVl == null ? java.util.Set.of()
+                            : new java.util.HashSet<>(java.util.Arrays.asList(monitorVl.split(","))),
+                    java.util.Set.of()));
         }
 
         GpuBatchScopeCensus.reset();
@@ -204,14 +237,40 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
             for (var br : result.getPreContingencyResult().getNetworkResult().getBusResults()) {
                 lines.add("BASE|" + br.getVoltageLevelId() + "|" + br.getBusId() + "|" + Double.toString(br.getV()));
             }
+            for (var br : result.getPreContingencyResult().getNetworkResult().getBranchResults()) {
+                lines.add("BRANCH|BASE|" + br.getBranchId()
+                        + "|p1=" + Double.toString(br.getP1()) + "|q1=" + Double.toString(br.getQ1())
+                        + "|i1=" + Double.toString(br.getI1())
+                        + "|p2=" + Double.toString(br.getP2()) + "|q2=" + Double.toString(br.getQ2())
+                        + "|i2=" + Double.toString(br.getI2()));
+            }
             for (PostContingencyResult p : result.getPostContingencyResults()) {
                 for (var br : p.getNetworkResult().getBusResults()) {
                     lines.add(p.getContingency().getId() + "|" + br.getVoltageLevelId() + "|"
                             + br.getBusId() + "|" + Double.toString(br.getV()));
                 }
+                for (var br : p.getNetworkResult().getBranchResults()) {
+                    lines.add("BRANCH|" + p.getContingency().getId() + "|" + br.getBranchId()
+                            + "|p1=" + Double.toString(br.getP1()) + "|q1=" + Double.toString(br.getQ1())
+                            + "|i1=" + Double.toString(br.getI1())
+                            + "|p2=" + Double.toString(br.getP2()) + "|q2=" + Double.toString(br.getQ2())
+                            + "|i2=" + Double.toString(br.getI2()));
+                }
             }
             java.util.Collections.sort(lines);
             Files.write(Path.of(busDump), lines);
+        }
+        if (System.getenv("OLF_GPU_CENSUS_CONNECTIVITY") != null) {
+            for (PostContingencyResult p : result.getPostContingencyResults()) {
+                var cr = p.getConnectivityResult();
+                System.out.printf("CONNECTIVITY %s components=%d lostLoad=%s lostGen=%s disconnected=%d preDist=%s%n",
+                        p.getContingency().getId(), cr.getCreatedSynchronousComponentCount(),
+                        Double.toString(cr.getDisconnectedLoadActivePower()),
+                        Double.toString(cr.getDisconnectedGenerationActivePower()),
+                        cr.getDisconnectedElements().size(),
+                        Double.toString(p.getConnectivityResult().getDisconnectedGenerationActivePower()
+                                + p.getConnectivityResult().getDisconnectedLoadActivePower()));
+            }
         }
         String dump = System.getenv("OLF_GPU_CENSUS_VIOLATION_DUMP");
         if (dump != null) {

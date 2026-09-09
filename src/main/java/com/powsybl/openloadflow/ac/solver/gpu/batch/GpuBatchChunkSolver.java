@@ -116,6 +116,19 @@ final class GpuBatchChunkSolver {
         }
     }
 
+    private static int countTrue(boolean[] flags) {
+        if (flags == null) {
+            return 0;
+        }
+        int n = 0;
+        for (boolean f : flags) {
+            if (f) {
+                n++;
+            }
+        }
+        return n;
+    }
+
     /** cuDSS reports an out-of-device-memory as status 2 (CUDSS_STATUS_ALLOC_FAILED); a CUDA OOM
      *  surfaces as its own message. Both mean "this chunk does not fit", not "this network cannot
      *  be batched". */
@@ -484,25 +497,44 @@ final class GpuBatchChunkSolver {
                             if (preLossBySlot[s] == 0) {
                                 continue;
                             }
-                            boolean participantFrozen = false;   // islanded DS participant: CPU excludes a
-                            int ci = group.get(chunkStart + s);  // disabled bus — out of stage-1 scope, skip
+                            // A FRAGMENTING contingency puts some DS participants in another
+                            // synchronous component. OLF distributes over
+                            // getSynchronousNetworks().getFirst(), so they take no share — mark them
+                            // and let the water-fill exclude them, rather than skipping the whole
+                            // pre-distribution (which left the device DS loop to water-fill the
+                            // mismatch during the solve, at a different point inside the slack band).
+                            int ci = group.get(chunkStart + s);
                             int[] frozen = frozenRowsByIndex[ci];
-                            for (int i = 0; i < nds && !participantFrozen; i++) {
+                            boolean[] islandedDs = null;
+                            for (int i = 0; i < nds; i++) {
                                 for (int fr : frozen) {
                                     if (fr == gpuData.dsPhiRow()[i]) {
-                                        participantFrozen = true;
+                                        if (islandedDs == null) {
+                                            islandedDs = new boolean[nds];
+                                        }
+                                        islandedDs[i] = true;
                                     }
                                 }
-                            }
-                            if (participantFrozen) {
-                                continue;
                             }
                             double[] shares = GpuBatchLossPreDistribution.distribute(gpuData, preLossBySlot[s],
                                     dsOvBus.length > 0 ? dsOvBus[s] : -1,
                                     dsOvFactorDelta.length > 0 ? dsOvFactorDelta[s] : 0,
                                     dsOvBaseDelta.length > 0 ? dsOvBaseDelta[s] : 0,
                                     dsOvMaxDelta.length > 0 ? dsOvMaxDelta[s] : 0,
-                                    dsOvMinDelta.length > 0 ? dsOvMinDelta[s] : 0);
+                                    dsOvMinDelta.length > 0 ? dsOvMinDelta[s] : 0, islandedDs);
+                            if (System.getenv("OLF_GPU_PRELOSS_TRACE") != null) {
+                                double absorbed = 0;
+                                if (shares != null) {
+                                    for (int i = 0; i < nds; i++) {
+                                        absorbed += shares[i];
+                                    }
+                                }
+                                System.err.printf("PRELOSS ctg=%s mismatch=%.6f pu absorbed=%.6f pu slackShare=%.6f "
+                                        + "islandedDsParticipants=%d%n",
+                                        contingencies.get(ci).contingencyId(), preLossBySlot[s], absorbed,
+                                        shares == null ? 0.0 : shares[nds],
+                                        countTrue(islandedDs));
+                            }
                             if (shares == null) {
                                 continue;
                             }

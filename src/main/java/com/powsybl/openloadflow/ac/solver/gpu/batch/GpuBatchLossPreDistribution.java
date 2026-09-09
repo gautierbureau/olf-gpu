@@ -40,13 +40,22 @@ final class GpuBatchLossPreDistribution {
      * Distribute {@code mismatch} (pu, CPU sign: lost generation − lost load) exactly like the
      * device water-fill would, from the scenario's effective base anchors.
      *
+     * <p>{@code islanded} marks the DS participants a network-FRAGMENTING contingency has put in
+     * another synchronous component. OLF's own distribution runs on
+     * {@code network.getSynchronousNetworks().getFirst()}, so those generators take no share and do
+     * not count towards the factor sum — exactly what excluding them here reproduces. Before this
+     * existed the whole pre-distribution was skipped for such a contingency and the device's DS loop
+     * water-filled the mismatch during the solve instead, landing at a different point inside the
+     * slack band: measured 1.07 MW of branch-flow difference against the CPU on rte6515, enough to
+     * flip apparent-power violations.
+     *
      * @return {@code double[nds + 1]}: the participant shares (target/anchor deltas per DS row)
      *         followed by the slack bus's own absorbed share, or {@code null} when nothing can move
      *         (no participants, zero mismatch).
      */
     static double[] distribute(GpuAcData gpuData, double mismatch,
                                int ovBus, double ovFactorDelta, double ovBaseDelta,
-                               double ovMaxDelta, double ovMinDelta) {
+                               double ovMaxDelta, double ovMinDelta, boolean[] islanded) {
         int nds = gpuData.dsPhiRow().length;
         if (nds == 0 || mismatch == 0) {
             return null;
@@ -59,14 +68,20 @@ final class GpuBatchLossPreDistribution {
         if (gpuData.dsMode() == 1) {                        // REMAINING_MARGIN: direction-dependent margins
             double sumM = 0;
             for (int i = 0; i < nds; i++) {
+                if (islanded != null && islanded[i]) {
+                    continue;                                // in another synchronous component now
+                }
                 sumM += dirUp ? gpuData.dsMarginUp()[i] : gpuData.dsMarginDown()[i];
             }
             double slackM = dirUp ? gpuData.dsSlackMarginUp() : gpuData.dsSlackMarginDown();
             fs = sumM + slackM > 0 ? sumM / (sumM + slackM) : 0.0;
         } else {
             fs = 0;
-            for (double f : gpuData.dsFactor()) {
-                fs += f;
+            for (int i = 0; i < nds; i++) {
+                if (islanded != null && islanded[i]) {
+                    continue;                                // in another synchronous component now
+                }
+                fs += gpuData.dsFactor()[i];
             }
         }
         if (fs <= 0) {
@@ -77,7 +92,7 @@ final class GpuBatchLossPreDistribution {
         for (int iter = 0; iter < nds && Math.abs(rem) > P_RESIDUE_EPS; iter++) {
             double fsumActive = 0.0;                         // re-normalize over the still-unsaturated buses
             for (int i = 0; i < nds; i++) {
-                double f = effFactor(gpuData, dirUp, i, ovBus, ovFactorDelta);
+                double f = effFactor(gpuData, dirUp, i, ovBus, ovFactorDelta, islanded);
                 double maxD = gpuData.dsMaxDelta()[i] - (ovBus == i ? ovMaxDelta : 0.0);
                 double minD = gpuData.dsMinDelta()[i] - (ovBus == i ? ovMinDelta : 0.0);
                 boolean sat = rem > 0 ? cum[i] >= maxD : cum[i] <= minD;
@@ -90,7 +105,7 @@ final class GpuBatchLossPreDistribution {
             }
             double done = 0.0;
             for (int i = 0; i < nds; i++) {
-                double f = effFactor(gpuData, dirUp, i, ovBus, ovFactorDelta);
+                double f = effFactor(gpuData, dirUp, i, ovBus, ovFactorDelta, islanded);
                 double maxD = gpuData.dsMaxDelta()[i] - (ovBus == i ? ovMaxDelta : 0.0);
                 double minD = gpuData.dsMinDelta()[i] - (ovBus == i ? ovMinDelta : 0.0);
                 boolean sat = rem > 0 ? cum[i] >= maxD : cum[i] <= minD;
@@ -115,7 +130,11 @@ final class GpuBatchLossPreDistribution {
         return out;
     }
 
-    private static double effFactor(GpuAcData gpuData, boolean dirUp, int i, int ovBus, double ovFactorDelta) {
+    private static double effFactor(GpuAcData gpuData, boolean dirUp, int i, int ovBus, double ovFactorDelta,
+                                    boolean[] islanded) {
+        if (islanded != null && islanded[i]) {
+            return 0.0;                                      // excluded: it is not in this component any more
+        }
         double f = gpuData.dsMode() == 1
                 ? Math.max(0.0, dirUp ? gpuData.dsMarginUp()[i] : gpuData.dsMarginDown()[i])
                 : gpuData.dsFactor()[i];

@@ -757,7 +757,8 @@ final class GpuBatchChunkSolver {
                     boolean dbgPairRl = pairPhase && nrl > 0 && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_RL"));
                     boolean svcActive = svcControllers != null && !svcControllers.ctls().isEmpty();
                     boolean monActive = monitoringControllers != null && !monitoringControllers.isEmpty();
-                    int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl || svcActive || monActive) && nrl > 0 ? new int[chunkSize * nrl] : null;
+                    int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl || svcActive || monActive
+                            || System.getenv("OLF_GPU_RL_TRACE") != null) && nrl > 0 ? new int[chunkSize * nrl] : null;
                     // DISTR_Q weight overrides: per-chunk context state (orchestrator re-solves keep
                     // the slot assignment); cleared when the chunk has none.
                     GpuAcNewtonSolver.setBatchDqWeightOverrides(handle,
@@ -830,6 +831,31 @@ final class GpuBatchChunkSolver {
                         }
                         GpuBatchPhaseStats.add("main.iterMax", itMax);
                         GpuBatchPhaseStats.bump("main.solves");
+                    }
+                    if (System.getenv("OLF_GPU_RL_TRACE") != null && rlStateOut != null) {
+                        // rlStateOut packs (limitType & 3) | (switchCount << 2) per (controller, scenario):
+                        // switchCount > 0 means the DEVICE switched that controller during THIS solve, which
+                        // is exactly the decision OLF's ReactiveLimitsOuterLoop makes (and logs) on the CPU.
+                        for (int s = 0; s < realCount; s++) {
+                            int switched = 0;
+                            int pinned = 0;
+                            StringBuilder ids = new StringBuilder();
+                            for (int i = 0; i < nrl; i++) {
+                                int v = rlStateOut[s * nrl + i];
+                                if ((v & 3) != 0) {
+                                    pinned++;
+                                }
+                                if ((v >> 2) > 0) {
+                                    switched++;
+                                    if (ids.length() < 300) {
+                                        ids.append(" rl").append(i).append("(vRow=")
+                                           .append(gpuData.rlVrow()[i]).append(",lt=").append(v & 3).append(')');
+                                    }
+                                }
+                            }
+                            System.err.printf("GPU_RL ctg=%s switchedThisSolve=%d pinnedTotal=%d%s%n",
+                                    contingencies.get(group.get(chunkStart + s)).contingencyId(), switched, pinned, ids);
+                        }
                     }
                     long tOrch0 = System.nanoTime();
                     // Which scenarios already hold a REACTIVE-LIMITS-stabilized state: none yet when the

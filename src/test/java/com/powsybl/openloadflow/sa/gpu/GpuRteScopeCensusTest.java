@@ -94,6 +94,9 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         // arms to ask whether a residual GPU/CPU difference is just the slack each solver is allowed at
         // the production tolerance (1e-4 per equation by default). Never a production setting, and never
         // a way to claim agreement: the production comparison is the one at the production tolerance.
+        if ("1".equals(System.getenv("OLF_GPU_CENSUS_NO_RL"))) {
+            lfp.setUseReactiveLimits(false);                  // diagnostic: is a gap the reactive-limits loop?
+        }
         if ("1".equals(System.getenv("OLF_GPU_CENSUS_NO_DS"))) {
             lfp.setDistributedSlack(false);                   // diagnostic: is a gap the slack redistribution?
         }
@@ -110,9 +113,12 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         // "the two arms disagree about the physics" from "the two arms disagree about a tie".
         String violTol = System.getenv("OLF_GPU_CENSUS_VIOL_TOL");
         if (violTol != null) {
+            // BOTH thresholds: the rule is min(absolute, value * proportional) and the PROPORTIONAL
+            // default is 0.0, so setting the absolute alone leaves the min at zero and changes nothing.
             double t = Double.parseDouble(violTol);
-            sap.getIncreasedViolationsParameters().setLowVoltageAbsoluteThreshold(t);
-            sap.getIncreasedViolationsParameters().setHighVoltageAbsoluteThreshold(t);
+            sap.getIncreasedViolationsParameters()
+                    .setLowVoltageAbsoluteThreshold(t).setLowVoltageProportionalThreshold(t)
+                    .setHighVoltageAbsoluteThreshold(t).setHighVoltageProportionalThreshold(t);
         }
         // OLF_GPU_CENSUS_THREADS: OpenSecurityAnalysisParameters.threadCount for BOTH arms — the
         // CPU baseline is only honest at the thread count production runs (default here is OLF's 1).
@@ -184,7 +190,12 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         // post-contingency bus voltages, which is the only way to ask how far apart the two arms'
         // STATES actually are at a bus whose violation they disagree about.
         List<com.powsybl.security.monitor.StateMonitor> monitors = new ArrayList<>();
-        String monitorVl = System.getenv("OLF_GPU_CENSUS_MONITOR_VL");
+        // OLF_GPU_CENSUS_MONITOR_ALL_VL=1: monitor EVERY voltage level, so a single contingency's whole
+        // voltage profile can be diffed between the arms and the difference located spatially.
+        String monitorVl = "1".equals(System.getenv("OLF_GPU_CENSUS_MONITOR_ALL_VL"))
+                ? network.getVoltageLevelStream().map(com.powsybl.iidm.network.Identifiable::getId)
+                        .collect(java.util.stream.Collectors.joining(","))
+                : System.getenv("OLF_GPU_CENSUS_MONITOR_VL");
         String monitorBranch = System.getenv("OLF_GPU_CENSUS_MONITOR_BRANCH");
         if (monitorVl != null || monitorBranch != null) {
             monitors.add(new com.powsybl.security.monitor.StateMonitor(

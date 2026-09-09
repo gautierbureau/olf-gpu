@@ -87,3 +87,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-09 | b59aeae+dirty | 22.28 | 18.64 | 27.78 | x1.49 | 0/0/0 | 7.48 | 4.48 | 499/500 | 122/133 (92%) | GPU SA forced single-partition so the BASE load flow always runs on the device |
 | 2026-09-09 | a82b381+dirty | 22.98 | 19.66 | 26.73 | x1.36 | 0/0/0 | 7.45 | 4.46 | 499/500 | 122/133 (92%) | loss pre-distribution runs for fragmenting contingencies (islanded DS participants excluded, not the whole thing skipped) |
 | 2026-09-09 | deec3e1+dirty | 23.81 | 20.20 | 28.62 | x1.42 | 0/0/0 | 8.64 | 5.07 | 499/500 | 122/133 (92%) | CPU-route contingencies that strand a DS participant (device water-fill renormalizes over the wrong set) |
+| 2026-09-09 | 881a533+dirty | 24.61 | 21.88 | 31.00 | x1.42 | 0/0/0 | 8.35 | 4.45 | 499/500 | 122/133 (92%) | DS water-fill re-derives from the anchor each pass like OLF's resetToInitialState (fidelity; does not close the rte6515 gap) |

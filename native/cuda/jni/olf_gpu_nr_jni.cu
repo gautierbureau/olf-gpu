@@ -3444,6 +3444,23 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
     if (fsGlobal <= 0.0 || fabs(rem) <= fsGlobal * slackDistTol) {
         return;
     }
+    // OLF's ActivePowerDistribution.run RESETS every participant to its INITIAL target
+    // (step.resetToInitialState) and adds back what that undid (previousStateInfo.previousMismatch()),
+    // then re-derives the WHOLE distribution from the anchor. Accumulating each pass on top of the
+    // previous one is not the same function once anyone saturates: the re-normalisation over the
+    // still-unsaturated participants is taken against a different remaining amount. Ported here for
+    // FIDELITY — it is not what closes the residual rte6515 gap (that is the reactive-limits loop),
+    // but the incremental form was not what OLF does.
+    double absorbedNow = 0.0;
+    for (int i = 0; i < nds; i++) {
+        double base = dsBaseTargetP[i];
+        if (dsAnchorShift != nullptr) { base += dsAnchorShift[(size_t) s * nds + i]; }
+        if (ov == i) { base -= dsOvBaseDelta[s]; }
+        size_t idx = (size_t) s * n + dsPhiRow[i];
+        absorbedNow += target[idx] - base;
+        target[idx] = base;                                 // reset to the anchor
+    }
+    rem = fsGlobal * ((qBuf[(size_t) s * n + slackPhiRow] - slackTgt) + absorbedNow);
     bool changed = false;
     for (int iter = 0; iter < nds && fabs(rem) > residueEps; iter++) {
         double fsumActive = 0.0;                            // re-normalize factors over the still-unsaturated buses

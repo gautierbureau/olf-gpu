@@ -230,6 +230,11 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         System.out.printf("  CPU-routing reasons : %s%n",
                 GpuBatchScopeCensus.snapshot().isEmpty() ? "(none — everything batched)"
                         : GpuBatchScopeCensus.snapshot());
+        // A silent CPU fallback of the BASE load flow is invisible in the results but decisive for the
+        // violations: the reference would then come from the CPU solver while the contingencies come
+        // from the device, and they disagree about anything filtered against the base.
+        System.out.printf("  base/seq CPU fallbacks: %d%n",
+                com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get());
         System.out.printf("  threads             : %d%n", threads);
         System.out.printf("  wall                : %d ms%n", ms);
         if (batched < 0) {

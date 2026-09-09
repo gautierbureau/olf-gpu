@@ -20,8 +20,10 @@ import com.powsybl.openloadflow.graph.NaiveGraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.sa.AcSecurityAnalysis;
+import com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisProvider;
 import com.powsybl.openloadflow.util.PowsyblOpenLoadFlowVersion;
+import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisProvider;
 import com.powsybl.security.SecurityAnalysisReport;
 import com.powsybl.security.SecurityAnalysisRunParameters;
@@ -78,6 +80,61 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
         GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.set(-1);
     }
 
+    /** System property: allow the GPU provider to honour {@code threadCount > 1} again. Off by
+     *  default — see {@link #forceSinglePartition}. */
+    public static final String ALLOW_MULTI_THREAD_PROPERTY = "olf.gpu.sa.allowMultiThread";
+
+    /**
+     * Force the GPU security analysis onto ONE partition.
+     *
+     * <p>On this path everything is meant to run on the device, the base load flow included — that is
+     * the point of the provider, and the batched contingency solves are anchored on the base state it
+     * produces. OLF partitions the contingency list across threads and gives each partition its own
+     * LfNetwork and its own base load flow, and the GPU base load flow is skipped when there is more
+     * than one, because concurrent partition load flows race in native code on the single device.
+     *
+     * <p>That leaves the reference (a CPU-solved base) and the contingency states (device-solved)
+     * coming from different solvers. Post-contingency violations are filtered against the base with
+     * NO tolerance, so a far-field bus that should reproduce the base exactly instead lands a couple
+     * of ulps away and trips the comparison: measured on rte6515 at 2000 contingencies, threadCount 1
+     * reports VL-1512 zero times and threadCount 4 reports it 500 times. A threading option must not
+     * change which violations a security analysis reports.
+     *
+     * <p>So until the two paths are validated as equivalent, the GPU provider runs single-partition
+     * and keeps every solve on the device. The CPU provider is unaffected and remains the way to use
+     * many threads. Lift this with {@code -Dolf.gpu.sa.allowMultiThread=true} once parity is
+     * established.
+     */
+    private static int forceSinglePartition(SecurityAnalysisParameters securityAnalysisParameters) {
+        if (Boolean.getBoolean(ALLOW_MULTI_THREAD_PROPERTY)) {
+            return -1;
+        }
+        OpenSecurityAnalysisParameters ext =
+                securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class);
+        if (ext == null || ext.getThreadCount() <= 1) {
+            return -1;
+        }
+        int requested = ext.getThreadCount();
+        LOGGER.warn("GPU security analysis: threadCount {} ignored, running single-partition so the BASE "
+                + "load flow also runs on the device (a CPU-solved base and device-solved contingencies "
+                + "disagree about violations). Use the CPU provider for multi-threading, or set -D{}=true",
+                requested, ALLOW_MULTI_THREAD_PROPERTY);
+        ext.setThreadCount(1);
+        return requested;
+    }
+
+    /** Put back the caller's threadCount once the run is over: the parameters belong to the caller,
+     *  who may well reuse them for a CPU run — silently leaving them at 1 would change THAT run. */
+    private static void restoreThreadCount(SecurityAnalysisParameters securityAnalysisParameters, int requested) {
+        if (requested > 1) {
+            OpenSecurityAnalysisParameters ext =
+                    securityAnalysisParameters.getExtension(OpenSecurityAnalysisParameters.class);
+            if (ext != null) {
+                ext.setThreadCount(requested);
+            }
+        }
+    }
+
     @Override
     public String getName() {
         return NAME;
@@ -99,6 +156,7 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
             return super.run(network, workingVariantId, contingenciesProvider, runParameters);
         }
 
+        int requestedThreads = forceSinglePartition(runParameters.getSecurityAnalysisParameters());
         resetLastGpuPrecomputedCount();                  // the counter ACCUMULATES over the run's partitions
         LOGGER.info("Version: {} (GPU-batched AC security analysis)", new PowsyblOpenLoadFlowVersion());
         OpenLoadFlowParameters loadFlowParametersExt = OpenLoadFlowParameters.get(loadFlowParameters);
@@ -117,6 +175,7 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
         GpuBatchedAcSecurityAnalysis securityAnalysis = new GpuBatchedAcSecurityAnalysis(
                 network, matrixFactory, selectedConnectivityFactory, runParameters.getMonitors(), runParameters.getReportNode());
         return securityAnalysis.run(workingVariantId, runParameters.getSecurityAnalysisParameters(), contingenciesProvider,
-                runParameters.getComputationManager(), runParameters.getOperatorStrategies(), runParameters.getActions(), runParameters.getLimitReductions());
+                runParameters.getComputationManager(), runParameters.getOperatorStrategies(), runParameters.getActions(), runParameters.getLimitReductions())
+                .whenComplete((r, t) -> restoreThreadCount(runParameters.getSecurityAnalysisParameters(), requestedThreads));
     }
 }

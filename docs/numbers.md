@@ -84,3 +84,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-09 | 3e64cc7+dirty | 22.06 | 19.73 | 27.81 | x1.41 | 0/0/0 | 7.57 | 4.43 | 499/500 | 122/133 (92%) | injectState: cached row permutation + dense base-row table (2.02 -> 1.55 s per 2000 ctg) |
 | 2026-09-09 | bf2cfe7+dirty | 21.68 | 19.06 | 26.76 | x1.40 | 0/0/0 | 7.69 | 4.43 | 499/500 | 122/133 (92%) | chunk sizing priced ONCE per extraction (was racing free device memory across partitions) |
 | 2026-09-09 | c77c936+dirty | 22.31 | 19.01 | 27.12 | x1.43 | 0/0/0 | 7.62 | 4.42 | 499/500 | 122/133 (92%) | values-only state injection (OLF patch: StateVector.setValuesOnly skips the derivative refresh) |
+| 2026-09-09 | b59aeae+dirty | 22.28 | 18.64 | 27.78 | x1.49 | 0/0/0 | 7.48 | 4.48 | 499/500 | 122/133 (92%) | GPU SA forced single-partition so the BASE load flow always runs on the device |

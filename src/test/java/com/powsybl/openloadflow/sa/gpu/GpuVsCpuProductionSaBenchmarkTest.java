@@ -125,9 +125,12 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
 
     @Test
     void threadCountAboveOneRunsSafelyOnGpuProvider() throws Exception {
-        // The GPU path is mono-threaded by design (device lock serializes each partition's batch;
-        // no solver swap under multithreading), while CPU fallback work parallelizes — so
-        // threadCount=2 must COMPLETE, not crash, with the same statuses as the stock CPU run.
+        // The GPU provider IGNORES threadCount > 1 and runs single-partition, so that the base load
+        // flow also runs on the device: OLF gives each partition its own base load flow, and the GPU
+        // one is unsafe concurrently on a single device, which would leave a CPU-solved reference
+        // filtering device-solved contingencies — measured to change the reported violations. So the
+        // run must COMPLETE with the stock CPU run's statuses AND the same violation count, and it
+        // must leave the caller's threadCount as it found it.
         Network network = Network.read(CASES.resolve(CASE));
         List<Contingency> contingencies = loadContingencies(network).subList(0, 20);
         Path paramsFile = Path.of("rte-loadflow-default-parameters.json");
@@ -141,6 +144,10 @@ class GpuVsCpuProductionSaBenchmarkTest extends AbstractOpenSecurityAnalysisTest
         try {
             SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, Collections.emptyList(), sap);
             assertEquals(statusCounts(cpu), statusCounts(gpu), "threadCount=2: statuses must match stock CPU");
+            assertEquals(violationCount(cpu), violationCount(gpu),
+                    "threadCount=2: the GPU provider must report the same violations as the stock CPU run");
+            assertEquals(2, sap.getExtension(OpenSecurityAnalysisParameters.class).getThreadCount(),
+                    "the caller's threadCount must be restored — they may reuse these parameters for a CPU run");
         } finally {
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(new SparseMatrixFactory(),
                     new EvenShiloachGraphDecrementalConnectivityFactory<>());

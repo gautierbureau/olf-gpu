@@ -516,6 +516,38 @@ final class GpuBatchChunkSolver {
                                     }
                                 }
                             }
+                            // PROOF OF ROOT CAUSE, not a fix (OLF_GPU_ISLANDED_DS_EXCLUDE=1): take the
+                            // islanded participant out of the DEVICE's distributed-slack factor sum through
+                            // the per-scenario single-bus override. On LINE-3317-350 alone this takes the
+                            // branch-flow error against the CPU from 1.053 MW to 8.8e-12 — the device was
+                            // handing a share of every redistribution to a generator no longer in this
+                            // synchronous component. Applied to the WHOLE run it regresses badly (violation
+                            // set difference 45 -> 682, and 29 more scenarios failing on the device), so the
+                            // override channel is NOT a faithful way to express an islanded participant:
+                            // its factor/base/headroom deltas mean "this bus lost a generator", not "this
+                            // bus is in another component". The real fix is a per-scenario participant mask
+                            // in the kernel.
+                            if (System.getenv("OLF_GPU_ISLANDED_DS_EXCLUDE") != null
+                                    && islandedDs != null && hasDs && dsOvBus[s] < 0) {
+                                int only = -1;
+                                int count = 0;
+                                for (int i = 0; i < nds; i++) {
+                                    if (islandedDs[i]) {
+                                        only = i;
+                                        count++;
+                                    }
+                                }
+                                if (count == 1) {
+                                    dsOvBus[s] = only;
+                                    dsOvFactorDelta[s] = gpuData.dsFactor()[only];
+                                    dsOvBaseDelta[s] = 0;
+                                    dsOvMaxDelta[s] = gpuData.dsMaxDelta()[only];
+                                    dsOvMinDelta[s] = gpuData.dsMinDelta()[only];
+                                }
+                            }
+                            if (System.getenv("OLF_GPU_NO_PRELOSS") != null) {
+                                continue;                    // A/B: the pre-distribution seed off
+                            }
                             double[] shares = GpuBatchLossPreDistribution.distribute(gpuData, preLossBySlot[s],
                                     dsOvBus.length > 0 ? dsOvBus[s] : -1,
                                     dsOvFactorDelta.length > 0 ? dsOvFactorDelta[s] : 0,
@@ -529,6 +561,20 @@ final class GpuBatchChunkSolver {
                                         absorbed += shares[i];
                                     }
                                 }
+                                double fsAll = 0;
+                                double fsIslanded = 0;
+                                for (int i = 0; i < nds; i++) {
+                                    fsAll += gpuData.dsFactor()[i];
+                                    if (islandedDs != null && islandedDs[i]) {
+                                        fsIslanded += gpuData.dsFactor()[i];
+                                    }
+                                }
+                                System.err.printf("ISLANDED_DS ctg=%s count=%d%n",
+                                        contingencies.get(ci).contingencyId(), countTrue(islandedDs));
+                                System.err.printf("PRELOSS_FACTORS ctg=%s factorSumAll=%.6f factorSumIslanded=%.6f "
+                                        + "(%.2f%% of the participation is in the island)%n",
+                                        contingencies.get(ci).contingencyId(), fsAll, fsIslanded,
+                                        fsAll > 0 ? 100.0 * fsIslanded / fsAll : 0.0);
                                 System.err.printf("PRELOSS ctg=%s mismatch=%.6f pu absorbed=%.6f pu slackShare=%.6f "
                                         + "islandedDsParticipants=%d%n",
                                         contingencies.get(ci).contingencyId(), preLossBySlot[s], absorbed,
@@ -742,6 +788,29 @@ final class GpuBatchChunkSolver {
                             nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
                     tMainSolveNs += System.nanoTime() - tSolve0;
+                    if (System.getenv("OLF_GPU_PRELOSS_TRACE") != null && nds > 0 && !pairPhase) {
+                        // Did the DEVICE's own distributed-slack pass move power AFTER the host-side
+                        // pre-distribution? The CPU's loop should see only the loss-nonlinearity
+                        // residual and stay inside the slack band; if ours redistributes again, the
+                        // two land at different points inside that band.
+                        double[] ft = GpuAcNewtonSolver.readBatchTargets(handle);
+                        for (int s = 0; s < realCount; s++) {
+                            if (preLossBySlot[s] == 0) {
+                                continue;
+                            }
+                            double moved = 0;
+                            double seeded = 0;
+                            for (int i = 0; i < nds; i++) {
+                                int row = gpuData.dsPhiRow()[i];
+                                moved += ft[s * n + row] - baseTargets[row];
+                                seeded += dsAnchorShift == null ? 0 : dsAnchorShift[s * nds + i];
+                            }
+                            System.err.printf("PRELOSS_AFTER ctg=%s preDistributed=%.6f deviceFinal=%.6f "
+                                    + "deltaFromDeviceDsLoop=%.6f pu%n",
+                                    contingencies.get(group.get(chunkStart + s)).contingencyId(),
+                                    seeded, moved, moved - seeded);
+                        }
+                    }
                     if (GpuBatchPhaseStats.ENABLED) {
                         int itMax = 0;
                         for (int s = 0; s < realCount; s++) {

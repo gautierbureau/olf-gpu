@@ -254,6 +254,24 @@ final class GpuBatchQualification {
     /** The contingency's SCHEDULED active power loss (pu): mirror of LfContingency's
      *  disconnectedGenerationActivePower - disconnectedLoadActivePower, incl. islanded buses'
      *  injections (with the same non-AC-emulation HVDC generation exclusion). */
+    /** How many distributed-slack participants this contingency puts in another synchronous component. */
+    private static int islandedDsParticipants(int[] frozenRows, GpuAcData gpuData) {
+        int[] dsPhiRow = gpuData.dsPhiRow();
+        if (dsPhiRow == null || dsPhiRow.length == 0 || frozenRows.length == 0) {
+            return 0;
+        }
+        int count = 0;
+        for (int row : dsPhiRow) {
+            for (int frozen : frozenRows) {
+                if (frozen == row) {
+                    count++;
+                    break;
+                }
+            }
+        }
+        return count;
+    }
+
     private static double scheduledActivePowerLoss(BatchContingency c, List<LfBus> islandedBuses) {
         double loss = 0;
         for (com.powsybl.openloadflow.network.LfGenerator g : c.lostGenerators()) {
@@ -475,8 +493,8 @@ final class GpuBatchQualification {
                 if (curvePRows != null && c.contingencyId().indexOf(GpuBatchStatus.STRATEGY_KEY_SEP) >= 0) {
                     continue;                                // pair anchor shifts skew the curve linkage — CPU
                 }
-                batchedIndices.add(i);
                 FrozenIsland fi = islandedFrozen(es, q.islandedBuses());
+                batchedIndices.add(i);
                 islandedNumsByIndex[i] = q.islandedBuses().stream().mapToInt(LfBus::getNum).toArray();
                 if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"))) {
                     System.err.println("FROZEN-ISLAND '" + c.contingencyId().replace(GpuBatchStatus.STRATEGY_KEY_SEP, '|') + "' buses="

@@ -323,6 +323,15 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     .add(System.nanoTime() - t0);
         }
         RunState rs = runState.get();
+        if (System.getenv("OLF_GPU_Q_PROBE") != null && rs.lfNetwork != null) {
+            String qp = System.getenv("OLF_GPU_Q_PROBE");
+            for (LfBus b : rs.lfNetwork.getBuses()) {
+                if (b.getId().startsWith(qp)) {
+                    System.err.printf("Q_PROBE_BASE bus=%s q=%.9f maxQ=%.9f%n",
+                            b.getId(), b.getQ().eval() + b.getLoadTargetQ(), b.getMaxQ());
+                }
+            }
+        }
         long tPre = System.nanoTime();
         rs.precomputed = GpuBatchPrecomputer.precompute(network, rs.lfNetwork, rs.context,
                 rs.contingencies, rs.operatorStrategies, rs.actions, rs.batchDistributedSlack,

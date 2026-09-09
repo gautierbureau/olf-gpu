@@ -844,6 +844,9 @@ final class GpuBatchChunkSolver {
                                 int v = rlStateOut[s * nrl + i];
                                 if ((v & 3) != 0) {
                                     pinned++;
+                                    if (ids.length() < 4000) {
+                                        ids.append(" p").append(i).append('/').append(v & 3);
+                                    }
                                 }
                                 if ((v >> 2) > 0) {
                                     switched++;

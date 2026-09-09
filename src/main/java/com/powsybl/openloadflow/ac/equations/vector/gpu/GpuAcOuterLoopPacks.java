@@ -386,6 +386,14 @@ public final class GpuAcOuterLoopPacks {
             mon[i] = rlMonitored.get(i);
             rem[i] = rlRemote.get(i);
         }
+        if (System.getenv("OLF_GPU_RL_PACK_DUMP") != null) {
+            for (int i = 0; i < rlBusNum.size(); i++) {
+                System.err.printf("RL_PACK entry=%d bus=%s vRow=%d minQ=%.9f maxQ=%.9f remote=%d monitored=%d%n",
+                        i, network.getBus(rlBusNum.get(i)).getId(), rlVrow.get(i), rlMinQ.get(i), rlMaxQ.get(i),
+                        rlRemote.get(i), rlMonitored.get(i));
+            }
+        }
+
         return new RlPack(GpuAcArrays.toIntArray(rlVrow), GpuAcArrays.toDoubleArray(rlMinQ),
                 GpuAcArrays.toDoubleArray(rlMaxQ), GpuAcArrays.toDoubleArray(rlLoadQ),
                 GpuAcArrays.toDoubleArray(rlVtarget), GpuAcArrays.toDoubleArray(rlSvcBmin),

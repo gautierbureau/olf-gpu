@@ -54,6 +54,17 @@ public final class GpuBatchContextCache {
 
     private static CachedBatchContext cachedContext;
 
+    /** The auto-sized chunk RECOMMENDATION for the extraction it was computed on, remembered for the
+     *  whole run. {@code recommendBatchSize} prices the chunk against FREE device memory, so asking it
+     *  again once another partition has allocated its context returns a smaller answer: under
+     *  threadCount &gt; 1 the partitions were resolving 498, then 250, then 500, then 250 for the same
+     *  network — different sizes evict each other from the single-entry context cache, each eviction
+     *  paying a fresh cuDSS analysis, and the size a run picks depends on who won a race for memory.
+     *  Remembering the first answer makes the sizing reproducible, which matters more than the seconds:
+     *  chunk boundaries decide which scenarios share a solve. */
+    private static volatile int recommendedChunk;
+    private static volatile GpuAcData recommendedFor;
+
     static {
         Runtime.getRuntime().addShutdownHook(new Thread(GpuBatchContextCache::clearContextCache,
                 "olf-gpu-batch-context-cleanup"));
@@ -100,6 +111,10 @@ public final class GpuBatchContextCache {
             return cachedContext.handle;
         }
         if (cachedContext != null) {                         // evict a stale context (different network/chunk/mode)
+            if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
+                System.err.printf("CONTEXT_EVICT cached chunk=%d -> requested chunk=%d (a cuDSS ANALYSIS is "
+                        + "paid again)%n", cachedContext.chunkSize, chunkSize);
+            }
             GpuAcNewtonSolver.destroyBatchContext(cachedContext.handle);
             cachedContext = null;
         }
@@ -121,6 +136,8 @@ public final class GpuBatchContextCache {
             GpuAcNewtonSolver.destroyBatchContext(cachedContext.handle);
             cachedContext = null;
         }
+        recommendedFor = null;                               // a failed solve may have been the size's fault
+        recommendedChunk = 0;
     }
 
     /**
@@ -146,6 +163,20 @@ public final class GpuBatchContextCache {
         maxSafeChunk = Math.min(maxSafeChunk, Math.max(1, chunk / 2));
     }
 
+    /** The run's chunk recommendation for this extraction, priced ONCE (see {@link #recommendedChunk}).
+     *  {@code AUTO_MAX_CHUNK} rather than the caller's contingency count is deliberate: the answer must
+     *  not depend on which partition asked first. */
+    private static synchronized int rememberedRecommendation(int n, GpuAcData gpuData) {
+        if (recommendedFor != null && recommendedFor.sameAs(gpuData) && recommendedChunk > 0) {
+            return recommendedChunk;
+        }
+        // sized on the shared structure (its exact nnz + a cuDSS LU probe cached there, so
+        // only the first query per extraction pays the probe analysis)
+        recommendedChunk = GpuAcNewtonSolver.recommendBatchSize(GpuAcStructures.handle(n, gpuData), AUTO_MAX_CHUNK);
+        recommendedFor = gpuData;
+        return recommendedChunk;
+    }
+
     public static int resolveChunkSize(int nb, int n, GpuAcData gpuData) {
         Integer explicit = Integer.getInteger(MAX_BATCH_PROPERTY);
         if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
@@ -155,10 +186,7 @@ public final class GpuBatchContextCache {
             return Math.min(nb, explicit);
         }
         try {
-            // sized on the shared structure (its exact nnz + a cuDSS LU probe cached there, so
-            // only the first query per extraction pays the probe analysis)
-            int rec = GpuAcNewtonSolver.recommendBatchSize(GpuAcStructures.handle(n, gpuData),
-                    Math.min(nb, AUTO_MAX_CHUNK));
+            int rec = rememberedRecommendation(n, gpuData);
             return Math.min(Math.min(nb, maxSafeChunk), Math.max(1, rec));
         } catch (Throwable t) {
             LOGGER.debug("GPU batch auto-size unavailable ({}); using default chunk {}", t.toString(), DEFAULT_MAX_BATCH);

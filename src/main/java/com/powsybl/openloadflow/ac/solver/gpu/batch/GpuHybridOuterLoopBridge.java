@@ -46,6 +46,10 @@ import com.powsybl.openloadflow.network.LfNetwork;
  */
 public final class GpuHybridOuterLoopBridge {
 
+    /** {@code OLF_OL_TRACE}: print every outer-loop CHECK and its status, in the same format as
+     *  {@code AcloadFlowEngine}'s, so this engine's sequence can be diffed against OLF's own. */
+    private static final boolean OL_TRACE = System.getenv("OLF_OL_TRACE") != null;
+
     private final LfNetwork network;
     private final EquationSystem<AcVariableType, AcEquationType> equationSystem;
     private final int n;
@@ -222,6 +226,12 @@ public final class GpuHybridOuterLoopBridge {
             ctx.setLastSolverResult(solverResult);
             OuterLoopResult result = loop.check(ctx, ReportNode.NO_OP);
             lastStatuses[loopIdx] = result.status();
+            if (OL_TRACE) {
+                // Same format as AcloadFlowEngine's OLF_OL_TRACE, so the two engines' check sequences
+                // can be diffed line by line.
+                System.err.printf("OL_CHECK loop=%s iteration=%d status=%s%n",
+                        loop.getName(), ctx.getIteration(), result.status());
+            }
 
             if (result.status() != OuterLoopStatus.STABLE) {
                 // UNSTABLE: this loop mutated the activation / targets / taps -> a device re-solve is required

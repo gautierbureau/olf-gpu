@@ -164,6 +164,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // a provider run and a direct-solver run caused the pegase full-suite failure — see BatchConfig's javadoc.
         private BatchConfig batchConfig = BatchConfig.DEVICE_DEFAULTS;
         private com.powsybl.loadflow.LoadFlowParameters loadFlowParameters;
+        /** The run's security-analysis parameters — needed at precompute time because the SA's own
+         *  CONTINGENCY parameter override has not been applied yet (see afterPreContingencySimulation). */
+        private SecurityAnalysisParameters securityAnalysisParameters;
     }
 
     private final ThreadLocal<RunState> runState = ThreadLocal.withInitial(RunState::new);
@@ -192,6 +195,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         RunState rs = new RunState();
         runState.set(rs);
         rs.loadFlowParameters = securityAnalysisParameters.getLoadFlowParameters();
+        rs.securityAnalysisParameters = securityAnalysisParameters;
         // STRUCTURAL: run the base (pre-contingency) load flow on the GPU solver when the device
         // is available and the user left the default CPU Newton-Raphson. This absorbs the one-time
         // CUDA init into the base phase (so the batched contingency pass that follows is warm) and
@@ -321,6 +325,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     @Override
     protected void afterPreContingencySimulation(AcLoadFlowParameters parameters) {
         super.afterPreContingencySimulation(parameters);
+        applyContingencyOuterLoops(parameters);
         Long t0 = RUN_START_NS.get();
         if (t0 != null) {
             PHASE_NS.computeIfAbsent("base load flow + setup", k -> new java.util.concurrent.atomic.LongAdder())
@@ -544,6 +549,42 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                         new NetworkResult(postContingencyNetworkResult.getBranchResults(), postContingencyNetworkResult.getBusResults(),
                                 postContingencyNetworkResult.getThreeWindingsTransformerResults())),
                 connectivityResult, preDistributedActivePower * PerUnit.SB);
+    }
+
+    /**
+     * Give the precompute the CONTINGENCY outer-loop list, not the pre-contingency one.
+     *
+     * <p>{@code AbstractSecurityAnalysis} calls {@code afterPreContingencySimulation} — where the batch is
+     * precomputed — BEFORE {@code applyGenericContingencyParameters}, and it is the latter that rebuilds
+     * the outer-loop list with {@code FreezingHvdcACEmulation} in it when the security analysis asks to
+     * start contingencies with the AC emulation frozen (its default). So at precompute time the
+     * parameters still carry the BASE loop list.
+     *
+     * <p>That matters for the JAVA outer-loop mode, which drives OLF's own loop objects built from this
+     * list: without the freezing loop it runs a strictly shorter sequence than the CPU. Measured on
+     * rte6515 / LINE-2634-61, the CPU checks FreezingHvdcACEmulation, gets UNSTABLE, re-solves and then
+     * re-checks every loop; the hybrid never checked it at all, and its state came out 2.405e-04 off the
+     * CPU network-wide (23029 of 29832 buses over 1e-9) where the DEVICE mode was at 3.45e-13.
+     *
+     * <p>Recomputes the same list the SA is about to install, by the same call. The DEVICE mode does not
+     * depend on it — it implements the freezing itself in {@code GpuBatchHvdcAcEmulation} — but the list
+     * is what the run's own gates read, so aligning it early can only make them agree with the SA.
+     */
+    private void applyContingencyOuterLoops(AcLoadFlowParameters parameters) {
+        SecurityAnalysisParameters saParameters = runState.get().securityAnalysisParameters;
+        if (saParameters == null) {
+            return;
+        }
+        var openSaParameters = OpenSecurityAnalysisParameters.getOrDefault(saParameters);
+        if (!openSaParameters.isStartWithFrozenACEmulation()) {
+            return;                                          // the SA will not override the list
+        }
+        var loadFlowParameters = saParameters.getLoadFlowParameters();
+        var openLoadFlowParameters = com.powsybl.openloadflow.OpenLoadFlowParameters.clone(
+                com.powsybl.openloadflow.OpenLoadFlowParameters.get(loadFlowParameters));
+        openLoadFlowParameters.setStartWithFrozenACEmulation(true);
+        parameters.setOuterLoops(com.powsybl.openloadflow.OpenLoadFlowParameters.createAcOuterLoops(
+                loadFlowParameters, openLoadFlowParameters));
     }
 
     /**

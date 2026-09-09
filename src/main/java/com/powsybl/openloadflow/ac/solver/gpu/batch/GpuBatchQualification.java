@@ -494,6 +494,17 @@ final class GpuBatchQualification {
                     continue;                                // pair anchor shifts skew the curve linkage — CPU
                 }
                 FrozenIsland fi = islandedFrozen(es, q.islandedBuses());
+                // A contingency that BOTH splits the network AND strands a distributed-slack participant.
+                // OLF distributes the scheduled loss over getSynchronousNetworks().getFirst(); the device
+                // water-fill still renormalizes over a participant set that includes the stranded bus, so
+                // its share is written to a frozen row and never reaches the main component — measured
+                // 1.053 MW of branch-flow error against the CPU on LINE-3317-350, enough to flip
+                // apparent-power and voltage violations. Until the kernel can take a per-scenario
+                // participant set, these go to the CPU: correctness over coverage, 91 of 2000 on rte6515.
+                if (islandedDsParticipants(fi.rows(), gpuData) > 0) {
+                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("VALIDATOR:STRANDS_DS_PARTICIPANT");
+                    continue;
+                }
                 batchedIndices.add(i);
                 islandedNumsByIndex[i] = q.islandedBuses().stream().mapToInt(LfBus::getNum).toArray();
                 if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP"))) {

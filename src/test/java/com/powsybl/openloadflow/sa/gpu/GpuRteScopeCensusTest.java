@@ -104,6 +104,16 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         }
         SecurityAnalysisParameters sap = new SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
+        // OLF_GPU_CENSUS_VIOL_TOL=<kV>: give the post-vs-base violation comparison a non-zero tolerance
+        // on BOTH arms. powsybl defaults the voltage thresholds to 0.0, so an element already violating
+        // at base is re-reported on any strictly-worse value, down to one ulp. Diagnostic: it separates
+        // "the two arms disagree about the physics" from "the two arms disagree about a tie".
+        String violTol = System.getenv("OLF_GPU_CENSUS_VIOL_TOL");
+        if (violTol != null) {
+            double t = Double.parseDouble(violTol);
+            sap.getIncreasedViolationsParameters().setLowVoltageAbsoluteThreshold(t);
+            sap.getIncreasedViolationsParameters().setHighVoltageAbsoluteThreshold(t);
+        }
         // OLF_GPU_CENSUS_THREADS: OpenSecurityAnalysisParameters.threadCount for BOTH arms — the
         // CPU baseline is only honest at the thread count production runs (default here is OLF's 1).
         int threads = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_CENSUS_THREADS", "1"));

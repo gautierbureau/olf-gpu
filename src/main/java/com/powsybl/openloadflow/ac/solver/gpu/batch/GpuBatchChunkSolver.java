@@ -788,6 +788,18 @@ final class GpuBatchChunkSolver {
                             nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
                     tMainSolveNs += System.nanoTime() - tSolve0;
+                    if (System.getenv("OLF_GPU_ITER_TRACE") != null && !pairPhase) {
+                        java.util.Map<Integer, Integer> hist = new java.util.TreeMap<>();
+                        for (int s = 0; s < realCount; s++) {
+                            hist.merge((int) chunkResults[s][n], 1, Integer::sum);
+                        }
+                        System.err.println("ITER_HIST main solve, iterations -> scenarios: " + hist);
+                        for (int s = 0; s < realCount && realCount <= 4; s++) {
+                            System.err.printf("ITER ctg=%s iters=%d%n",
+                                    contingencies.get(group.get(chunkStart + s)).contingencyId(),
+                                    (int) chunkResults[s][n]);
+                        }
+                    }
                     if (System.getenv("OLF_GPU_PRELOSS_TRACE") != null && nds > 0 && !pairPhase) {
                         // Did the DEVICE's own distributed-slack pass move power AFTER the host-side
                         // pre-distribution? The CPU's loop should see only the loss-nonlinearity

@@ -27,6 +27,12 @@ import com.powsybl.openloadflow.network.LfNetwork;
  */
 public final class GpuAcActivationExtractor {
 
+    /** {@code OLF_GPU_DISTRQ_DUMP=<busIdPrefix>}: print the DISTR_Q row assignment for a group —
+     *  which row each controller's equation lands on, its own BUS_V row, the group's controlled bus
+     *  and which members are enabled. Two equations landing on ONE row is a constraint silently
+     *  dropped, and nothing in the device's own residual would show it. */
+    private static final String DISTR_Q_DUMP = System.getenv("OLF_GPU_DISTRQ_DUMP");
+
     private GpuAcActivationExtractor() {
     }
 
@@ -73,7 +79,23 @@ public final class GpuAcActivationExtractor {
             if (e.getType() == AcEquationType.DISTR_Q) {
                 // the controller's BUS_V row — or, when the controller IS the group's controlled bus
                 // (its own row already carries the pilot's V identity), the FREE controller's row
-                targetMap[GpuAcRowIndexing.distrQRow(es, network.getBus(e.getElementNum()))] = e.getColumn();
+                int distrRow = GpuAcRowIndexing.distrQRow(es, network.getBus(e.getElementNum()));
+                if (DISTR_Q_DUMP != null) {
+                    LfBus cb = network.getBus(e.getElementNum());
+                    if (cb.getId().startsWith(DISTR_Q_DUMP)) {
+                        var vc = cb.getGeneratorVoltageControl().orElse(null);
+                        System.err.printf("DISTRQ_ROW controller=%s eqCol=%d assignedRow=%d ownVRow=%d "
+                                + "controlledBus=%s enabled=%b qPct=%.9f members=%s%n",
+                                cb.getId(), e.getColumn(), distrRow,
+                                GpuAcRowIndexing.col(es, cb.getNum(), AcVariableType.BUS_V),
+                                vc == null ? "-" : vc.getControlledBus().getId(),
+                                vc != null && vc.isControllerEnabled(cb),
+                                cb.getRemoteControlReactivePercent(),
+                                vc == null ? "-" : vc.getMergedControllerElements().stream()
+                                        .map(b -> b.getId() + (vc.isControllerEnabled(b) ? "(on)" : "(off)")).toList());
+                    }
+                }
+                targetMap[distrRow] = e.getColumn();
                 continue;
             }
             AcVariableType powerRowVar = switch (e.getType()) {

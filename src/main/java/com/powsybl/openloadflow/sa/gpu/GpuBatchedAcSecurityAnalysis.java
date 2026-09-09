@@ -436,6 +436,21 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         PHASE_NS.computeIfAbsent("  state injection + network update", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tInj);
 
+        // OLF_GPU_Q_PROBE=<busId>: the device's post-contingency q at a controller bus, computed with
+        // OLF's OWN expression (ReactiveLimitsOuterLoop.checkControllerBus:
+        // getQ().eval() + getLoadTargetQ()) against the same limits, on the state just injected. This
+        // is what decides a PV -> PQ switch, so it is the number to compare when the two arms pin
+        // different controllers.
+        String qProbe = System.getenv("OLF_GPU_Q_PROBE");
+        if (qProbe != null) {
+            for (LfBus b : network.getBuses()) {
+                if (b.getId().startsWith(qProbe)) {
+                    double q = b.getQ().eval() + b.getLoadTargetQ();
+                    System.err.printf("Q_PROBE ctg=%s bus=%s q=%.9f minQ=%.9f maxQ=%.9f overMaxBy=%.9f%n",
+                            contingency.getId(), b.getId(), q, b.getMinQ(), b.getMaxQ(), q - b.getMaxQ());
+                }
+            }
+        }
         PostContingencyComputationStatus status = PostContingencyComputationStatus.CONVERGED;
         var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions,
                 securityAnalysisParameters.getIncreasedViolationsParameters());

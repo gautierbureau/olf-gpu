@@ -479,6 +479,14 @@ public final class GpuAcOuterLoopPacks {
                 headroom = Double.POSITIVE_INFINITY;                    // OLF: +-Double.MAX_VALUE bounds (or loads,
                 footroom = Double.NEGATIVE_INFINITY;                    // which OLF rescales unbounded) — the
             }                                                           // water-fill clamp never saturates
+            if (factor > 0 && System.getenv("OLF_GPU_DS_PACK_TRACE") != null
+                    && (footroom > 0 || headroom < 0)) {
+                // The base P is OUTSIDE the bus's own active limits. OLF's water-fill still SETS such a
+                // generator to the bound (newTargetP = minTargetP), which MOVES it -- in the opposite
+                // direction to the mismatch when it starts beyond the bound.
+                System.err.printf("DS_PACK_OUTSIDE bus=%s baseTargetP=%.9f headroom=%.9f footroom=%.9f factor=%.9f%n",
+                        bus.getId(), bus.getTargetP(), headroom, footroom, factor);
+            }
             if (factor > 0) {
                 dsPhiRow.add(phiCol[bn]);
                 dsFactorRaw.add(factor);

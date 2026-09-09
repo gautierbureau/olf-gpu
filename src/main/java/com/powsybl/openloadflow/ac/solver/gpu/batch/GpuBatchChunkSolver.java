@@ -585,20 +585,24 @@ final class GpuBatchChunkSolver {
                             if (shares == null) {
                                 continue;
                             }
-                            if (dsAnchorShift == null) {
-                                dsAnchorShift = new double[chunkSize * nds];
-                                dsSlackShift = new double[chunkSize];
-                            }
+                            // The pre-distribution is a DISPLACEMENT from the anchor, not a new anchor.
+                            // OLF's post-contingency DS calls resetToInitialState, which UNDOES it and
+                            // returns it as previousMismatch, then water-fills
+                            // (preLoss + slackMismatch) ONCE from the anchor. Moving the anchor here
+                            // instead made the device fill only the slack mismatch, and a clamped
+                            // water-fill does not compose: on rte6515/LINE-6180-6074 OLF fills +4.639661
+                            // in one pass and saturates 10 generators at max, while the device filled
+                            // +4.8 then -0.160339 and saturated none. Seeding the TARGETS (so the solve
+                            // starts at the same operating point) while leaving the anchor alone is what
+                            // makes the kernel's reset pick the shares back up as absorbedNow.
                             for (int i = 0; i < nds; i++) {
                                 if (shares[i] == 0) {
                                     continue;
                                 }
-                                dsAnchorShift[s * nds + i] = shares[i];
                                 int flat = s * n + gpuData.dsPhiRow()[i];
                                 // compose with a gen-outage override on the same row
                                 overrides.compose(flat, baseTargets[gpuData.dsPhiRow()[i]], shares[i]);
                             }
-                            dsSlackShift[s] = shares[nds];
                         }
                     }
                     // SIMPLE (WITH_GENERATOR) transformer VC: OLF's initialize() enables continuous VC
@@ -836,16 +840,17 @@ final class GpuBatchChunkSolver {
                                 continue;
                             }
                             double moved = 0;
-                            double seeded = 0;
                             for (int i = 0; i < nds; i++) {
                                 int row = gpuData.dsPhiRow()[i];
                                 moved += ft[s * n + row] - baseTargets[row];
-                                seeded += dsAnchorShift == null ? 0 : dsAnchorShift[s * nds + i];
                             }
-                            System.err.printf("PRELOSS_AFTER ctg=%s preDistributed=%.6f deviceFinal=%.6f "
+                            // preLossBySlot is the mismatch the pre-distribution was asked to absorb;
+                            // `moved` is where the participants ended up relative to the SAME anchor the
+                            // device DS loop resets to, so the delta is what that loop added on top.
+                            System.err.printf("PRELOSS_AFTER ctg=%s preLossMismatch=%.6f deviceFinal=%.6f "
                                     + "deltaFromDeviceDsLoop=%.6f pu%n",
                                     contingencies.get(group.get(chunkStart + s)).contingencyId(),
-                                    seeded, moved, moved - seeded);
+                                    preLossBySlot[s], moved, moved - preLossBySlot[s]);
                         }
                     }
                     if (GpuBatchPhaseStats.ENABLED) {

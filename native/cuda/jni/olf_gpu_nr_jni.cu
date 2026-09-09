@@ -3414,7 +3414,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                                               const double* dsOvMaxDelta, const double* dsOvMinDelta,
                                               int dsMode, const double* dsMarginUp, const double* dsMarginDown,
                                               double slackMarginUp, double slackMarginDown,
-                                              double* target, char* switched, char* dsResidual) {
+                                              double* target, char* switched, char* dsResidual, int dbgTrace) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     if (!rlActive[s]) return;
@@ -3475,6 +3475,10 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         target[idx] = base;                                 // reset to the anchor
     }
     rem = fsGlobal * ((qBuf[(size_t) s * n + slackPhiRow] - slackTgt) + absorbedNow);
+    if (dbgTrace && s == 0) {
+        printf("[DS-WF] entry slackMismatch=%.9f absorbedNow=%.9f fsGlobal=%.9f rem=%.9f nds=%d\n",
+               qBuf[(size_t) s * n + slackPhiRow] - slackTgt, absorbedNow, fsGlobal, rem, nds);
+    }
     bool changed = false;
     for (int iter = 0; iter < nds && fabs(rem) > residueEps; iter++) {
         double fsumActive = 0.0;                            // re-normalize factors over the still-unsaturated buses
@@ -3512,6 +3516,9 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                 done += newCum - cum;
                 changed = true;
             }
+        }
+        if (dbgTrace && s == 0) {
+            printf("[DS-WF] iter=%d fsumActive=%.9f rem=%.9f done=%.9f\n", iter, fsumActive, rem, done);
         }
         rem -= done;
     }
@@ -4918,7 +4925,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dsMode, ctx->dsMode == 1 ? ctx->dDsMarginUp.as<double>() : nullptr,
                     ctx->dsMode == 1 ? ctx->dDsMarginDown.as<double>() : nullptr,
                     ctx->dsSlackMarginUp, ctx->dsSlackMarginDown,
-                    ctx->dTarget.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>());
+                    ctx->dTarget.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>(),
+                    getenv("OLF_GPU_DS_DEBUG") != nullptr ? 1 : 0);
         }
     } else {                                               // reactive-limits outer loop: switch PV->PQ over Q limit
         if (ctx->nrl > 0 && !skipRlPhase) {                  // skipRlPhase: a monitoring interleave solve — the

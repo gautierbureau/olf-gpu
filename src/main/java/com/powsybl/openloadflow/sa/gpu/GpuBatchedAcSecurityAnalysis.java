@@ -330,9 +330,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         if (System.getenv("OLF_GPU_Q_PROBE") != null && rs.lfNetwork != null) {
             String qp = System.getenv("OLF_GPU_Q_PROBE");
             for (LfBus b : rs.lfNetwork.getBuses()) {
-                if (b.getId().startsWith(qp)) {
-                    System.err.printf("Q_PROBE_BASE bus=%s q=%.9f maxQ=%.9f%n",
-                            b.getId(), b.getQ().eval() + b.getLoadTargetQ(), b.getMaxQ());
+                if (java.util.Arrays.stream(qp.split(",")).anyMatch(b.getId()::startsWith)) {
+                    System.err.printf("Q_PROBE_BASE bus=%s q=%.9f maxQ=%.9f busTargetP=%.9f%n",
+                            b.getId(), b.getQ().eval() + b.getLoadTargetQ(), b.getMaxQ(), b.getTargetP());
+                    // the BASE generator P: the reference every arm's slack distribution moves from
+                    for (var g : b.getGenerators()) {
+                        System.err.printf("Q_PROBE_BASE_GEN bus=%s gen=%s targetP=%.9f minP=%.9f maxP=%.9f participating=%b%n",
+                                b.getId(), g.getId(), g.getTargetP(), g.getMinP(), g.getMaxP(), g.isParticipating());
+                    }
                 }
             }
         }

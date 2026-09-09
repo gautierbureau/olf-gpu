@@ -133,9 +133,20 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
             System.setProperty(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.MAX_BATCH_PROPERTY, chunk);
         }
 
+        // OLF_GPU_CENSUS_MONITOR_VL=<vl,vl,...>: monitor those voltage levels so BOTH arms report the
+        // post-contingency bus voltages, which is the only way to ask how far apart the two arms'
+        // STATES actually are at a bus whose violation they disagree about.
+        List<com.powsybl.security.monitor.StateMonitor> monitors = new ArrayList<>();
+        String monitorVl = System.getenv("OLF_GPU_CENSUS_MONITOR_VL");
+        if (monitorVl != null) {
+            monitors.add(new com.powsybl.security.monitor.StateMonitor(
+                    com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(),
+                    new java.util.HashSet<>(java.util.Arrays.asList(monitorVl.split(","))), java.util.Set.of()));
+        }
+
         GpuBatchScopeCensus.reset();
         long t0 = System.nanoTime();
-        SecurityAnalysisResult result = runSecurityAnalysis(network, ctgs, List.of(), sap);
+        SecurityAnalysisResult result = runSecurityAnalysis(network, ctgs, monitors, sap);
         long ms = (System.nanoTime() - t0) / 1_000_000;
 
         int batched = GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get();
@@ -174,6 +185,18 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         }
         // OLF_GPU_CENSUS_VIOLATION_DUMP=<file>: every post-contingency violation as a sorted line, so
         // two runs can be DIFFED. A count tells you something moved; only the set tells you what.
+        String busDump = System.getenv("OLF_GPU_CENSUS_BUS_DUMP");
+        if (busDump != null) {
+            List<String> lines = new ArrayList<>();
+            for (PostContingencyResult p : result.getPostContingencyResults()) {
+                for (var br : p.getNetworkResult().getBusResults()) {
+                    lines.add(String.format("%s|%s|%s|%.12f", p.getContingency().getId(),
+                            br.getVoltageLevelId(), br.getBusId(), br.getV()));
+                }
+            }
+            java.util.Collections.sort(lines);
+            Files.write(Path.of(busDump), lines);
+        }
         String dump = System.getenv("OLF_GPU_CENSUS_VIOLATION_DUMP");
         if (dump != null) {
             List<String> lines = new ArrayList<>();

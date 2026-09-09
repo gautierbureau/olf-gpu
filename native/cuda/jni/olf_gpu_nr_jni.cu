@@ -2979,7 +2979,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                                          const int* mRow, const char* mHasRow,
                                          const int* rlVrowArr, const double* rlMinQ, const double* rlMaxQ,
                                          const double* rlLoadQ, const char* limitType, int cvStride,
-                                         double* target, const char* rlActive,
+                                         double* target, const char* rlActive, const double* mTargetQ,
                                          const int* mQrGroup, const int* qrPtr, const int* qrRows,
                                          const int* mode, const double* pilotQ, int nQr) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -3007,19 +3007,32 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     int gs = mGroupStart[k];
     int gc = mGroupCount[k];
     double sum = 0.0;
-    double frozen = 0.0;
+    double sumTargetQ = 0.0;
     for (int m = gs; m < gs + gc; m++) {
         int re = mRlEntry[m];
         bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != 0;
         sum += pinned ? 0.0 : mKey[m];
         if (pinned) {
+            // a FROZEN member's targetQ IS its q limit: OLF's RL switch calls setGenerationTargetQ(limit),
+            // so getTargetQ() = limit - loadTargetQ. Unpinned members keep their packed targetQ.
             size_t li = cvStride ? (size_t) s * nrl + re : (size_t) re;
             char lt = limitType[(size_t) s * nrl + re];
-            frozen += (lt == 1 ? rlMinQ[li] : rlMaxQ[li]) - rlLoadQ[re];
+            sumTargetQ += (lt == 1 ? rlMinQ[li] : rlMaxQ[li]) - rlLoadQ[re];
+        } else {
+            sumTargetQ += mTargetQ[m];
         }
     }
     double qpk = sum == 0.0 ? 0.0 : mKey[k] / sum;
-    target[(size_t) s * n + mRow[k]] = qpk * frozen;         // 0 when nothing is frozen (the base DISTR_Q target)
+    // AcTargetVector.getGeneratorReactivePowerDistributionTarget, verbatim:
+    //   (qPct_k - 1) * targetQ_k + qPct_k * sum_{j != k} targetQ_j
+    // which is qPct_k * sum_over_ALL_j targetQ_j - targetQ_k. k is never pinned here (the RL kernel
+    // owns a pinned member's row and we returned above), so its own term is the packed targetQ.
+    // This used to read `qpk * frozen` — the same expression with every UNPINNED targetQ assumed
+    // zero. That assumption holds only for groups whose members carry no load and no generator
+    // targetQ; anywhere else the device solved the row against a target short by exactly
+    // qPct_k * sum_unpinned targetQ_j - targetQ_k, and drove the members to equal reactive
+    // injections instead of equally-shared DEVIATIONS from their targets.
+    target[(size_t) s * n + mRow[k]] = qpk * sumTargetQ - mTargetQ[k];
 }
 
 // plan-B4: capture, per (scenario, relocation group), the pilot's Q target from the BASE carrier's
@@ -3790,6 +3803,9 @@ struct BatchSolverContext {
     DeviceBuf dDqMemberGroupCount;
     DeviceBuf dDqMemberRow;                                // per member: its own row (vCol) + whether it OWNS a
     DeviceBuf dDqMemberHasRow;                             // packed DISTR_Q row (non-free with existing equation)
+    DeviceBuf dDqMemberTargetQ;                            // per member: its UNPINNED targetQ (generationTargetQ -
+                                                           // loadTargetQ), the value AcTargetVector reads for every
+                                                           // member the RL loop has not frozen
     int nDqMembers = 0;
     int hasDqQrGroups = 0;                                 // plan-B4: any member linked to a pilot-Q relocation group
     DeviceBuf dDqMemberQrGroup;                            // per member: the pilot's qr candidate group id, -1 = none
@@ -4937,6 +4953,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->ncv > 0 ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
                         ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(), ctx->ncv > 0 ? 1 : 0,
                         ctx->dTarget.as<double>(), ctx->dRlActive.as<char>(),
+                        ctx->dDqMemberTargetQ.as<double>(),
                         ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr,
                         ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr,
                         ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr,
@@ -5942,7 +5959,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
         jintArray jRmqRow, jintArray jRmqElem, jintArray jRmqSide, jintArray jRmqKind, jdoubleArray jRmqWeight,
         jintArray jDqKMember, jintArray jDqJMember, jdoubleArray jMKey, jintArray jMRlEntry,
         jintArray jMGroupStart, jintArray jMGroupCount, jintArray jMRow, jbyteArray jMHasRow,
-        jintArray jMQrGroup) {
+        jintArray jMQrGroup, jdoubleArray jMTargetQ) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
@@ -6010,6 +6027,14 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
         ctx->dDqMemberHasRow.upload(mhr, static_cast<size_t>(nm) * sizeof(char));
         env->ReleaseIntArrayElements(jMRow, mrw, JNI_ABORT);
         env->ReleaseByteArrayElements(jMHasRow, mhr, JNI_ABORT);
+        if (jMTargetQ == nullptr || env->GetArrayLength(jMTargetQ) != nm) {
+            env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
+                          "setBatchRlRemote: dqMemberTargetQ missing or length != members");
+            return;
+        }
+        jdouble* mtq = env->GetDoubleArrayElements(jMTargetQ, nullptr);
+        ctx->dDqMemberTargetQ.upload(mtq, static_cast<size_t>(nm) * sizeof(double));
+        env->ReleaseDoubleArrayElements(jMTargetQ, mtq, JNI_ABORT);
         ctx->nDqMembers = nm;
         ctx->dDqKMember.upload(km, static_cast<size_t>(ndqc) * sizeof(int));
         ctx->dDqJMember.upload(jm, static_cast<size_t>(ndqc) * sizeof(int));

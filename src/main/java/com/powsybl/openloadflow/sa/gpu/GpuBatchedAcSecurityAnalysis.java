@@ -16,6 +16,7 @@ import com.powsybl.iidm.network.Network;
 import com.powsybl.math.matrix.MatrixFactory;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcLoadFlowParameters;
+import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.AcSolverUtil;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonFactory;
@@ -455,8 +456,19 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             for (LfBus b : network.getBuses()) {
                 if (b.getId().startsWith(qProbe)) {
                     double q = b.getQ().eval() + b.getLoadTargetQ();
-                    System.err.printf("Q_PROBE ctg=%s bus=%s q=%.9f minQ=%.9f maxQ=%.9f overMaxBy=%.9f%n",
-                            contingency.getId(), b.getId(), q, b.getMinQ(), b.getMaxQ(), q - b.getMaxQ());
+                    // DISTR_Q shares the DEVIATION from targetQ, not q itself: its target is
+                    // (qPct-1)*targetQ_i + qPct*sum_j targetQ_j (AcTargetVector), so two members with
+                    // different targetQ legitimately settle at different q. Print the parts, and the
+                    // equation's OWN residual at the injected state — the only number that says
+                    // whether the device honoured the constraint or solved a different one.
+                    String resid = precomputed.equationSystem()
+                            .getEquation(b.getNum(), AcEquationType.DISTR_Q)
+                            .map(e -> String.format("%.9f", e.eval() - distrQTarget(network, b)))
+                            .orElse("n/a");
+                    System.err.printf("Q_PROBE ctg=%s bus=%s q=%.9f genTgtQ=%.9f loadTgtQ=%.9f qPct=%.9f "
+                            + "distrQResid=%s minQ=%.9f maxQ=%.9f overMaxBy=%.9f%n",
+                            contingency.getId(), b.getId(), q, b.getGenerationTargetQ(), b.getLoadTargetQ(),
+                            b.getRemoteControlReactivePercent(), resid, b.getMinQ(), b.getMaxQ(), q - b.getMaxQ());
                 }
             }
         }
@@ -496,5 +508,21 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                         new NetworkResult(postContingencyNetworkResult.getBranchResults(), postContingencyNetworkResult.getBusResults(),
                                 postContingencyNetworkResult.getThreeWindingsTransformerResults())),
                 connectivityResult, preDistributedActivePower * PerUnit.SB);
+    }
+
+    /** OLF's DISTR_Q target, reproduced from {@code AcTargetVector} (which keeps it private):
+     *  {@code (qPct_i - 1) * targetQ_i + qPct_i * sum_{j != i} targetQ_j}. Diagnostic only. */
+    private static double distrQTarget(LfNetwork network, LfBus controllerBus) {
+        double qPct = controllerBus.getRemoteControlReactivePercent();
+        double target = (qPct - 1) * controllerBus.getTargetQ();
+        var members = controllerBus.getGeneratorVoltageControl().isPresent()
+                ? controllerBus.getGeneratorVoltageControl().orElseThrow().getMergedControllerElements()
+                : controllerBus.getGeneratorReactivePowerControl().orElseThrow().getControllerBuses();
+        for (LfBus other : members) {
+            if (other != controllerBus) {
+                target += qPct * other.getTargetQ();
+            }
+        }
+        return target;
     }
 }

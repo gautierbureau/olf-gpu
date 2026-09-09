@@ -29,11 +29,38 @@ public final class GpuAcActivationExtractor {
 
     /** {@code OLF_GPU_DISTRQ_DUMP=<busIdPrefix>}: print the DISTR_Q row assignment for a group —
      *  which row each controller's equation lands on, its own BUS_V row, the group's controlled bus
-     *  and which members are enabled. Two equations landing on ONE row is a constraint silently
-     *  dropped, and nothing in the device's own residual would show it. */
+     *  and which members are enabled. Lines carry the extraction pass number: OLF keys DISTR_Q on
+     *  {@code (bus, type)}, so one bus has at most ONE such equation per pass and two lines for the
+     *  same bus are two passes, not two equations. */
     private static final String DISTR_Q_DUMP = System.getenv("OLF_GPU_DISTRQ_DUMP");
 
+    private static final java.util.concurrent.atomic.AtomicInteger PASS = new java.util.concurrent.atomic.AtomicInteger();
+
     private GpuAcActivationExtractor() {
+    }
+
+    /**
+     * Assign one equation to one device row, refusing to overwrite an assignment already made.
+     *
+     * <p>{@code targetMap} carries at most one equation per row: the row IS the constraint's slot in
+     * the batched system. A second write does not add a constraint, it silently DROPS the first —
+     * the device then solves a system one equation short and converges happily on a state that
+     * violates the lost one, with a clean residual, because the residual is only ever computed for
+     * the equations the map still names. Nothing downstream can detect that, so it has to fail here.
+     *
+     * <p>This class of bug has occurred twice (a remote gen-VC pilot that is also a controller put
+     * BUS_TARGET_V and DISTR_Q on the same row), which is why the check is unconditional rather than
+     * behind a debug switch: it costs one array read per equation on a path that runs once per
+     * activation event.
+     */
+    private static void assign(int[] targetMap, String[] writtenBy, int row, int column, String what) {
+        if (targetMap[row] >= 0) {
+            throw new PowsyblException("GPU AC solver: device row " + row + " assigned twice — "
+                    + writtenBy[row] + " (column " + targetMap[row] + ") then " + what + " (column "
+                    + column + "). One of the two constraints would be silently dropped.");
+        }
+        targetMap[row] = column;
+        writtenBy[row] = what;
     }
 
     /**
@@ -49,6 +76,7 @@ public final class GpuAcActivationExtractor {
         java.util.Arrays.fill(mode, 1);
         int[] targetMap = new int[n];
         java.util.Arrays.fill(targetMap, -1);
+        String[] writtenBy = new String[n];
         int nBranches = network.getBranches().size();
         int[] branchRhoCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.BRANCH_RHO1);
         int[] shuntBCol = GpuAcRowIndexing.branchVarCols(es, network.getShunts().size(), AcVariableType.SHUNT_B);
@@ -60,11 +88,13 @@ public final class GpuAcActivationExtractor {
         for (LfBus bus : network.getBuses()) {
             int p = GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_P);
             if (p >= 0) {
-                targetMap[GpuAcRowIndexing.col(es, bus.getNum(), AcVariableType.BUS_PHI)] = p;
+                assign(targetMap, writtenBy, GpuAcRowIndexing.col(es, bus.getNum(), AcVariableType.BUS_PHI), p,
+                        "BUS_TARGET_P " + bus.getId());
             }
             int q = GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_Q);
             if (q >= 0) {
-                targetMap[qRow[bus.getNum()]] = q;          // Q row = V row, or the controlling rho row
+                // Q row = V row, or the controlling rho row
+                assign(targetMap, writtenBy, qRow[bus.getNum()], q, "BUS_TARGET_Q " + bus.getId());
                 // ACTIVE own-Q balance at a (non-free) remote gen-VC member = the RL-PINNED state:
                 // row mode 4, so the family fills route the member's own q here (the frozen dest is
                 // canonically SUPPRESSED) and the DISTR_Q emissions at this row gate off (plan-B2).
@@ -73,6 +103,7 @@ public final class GpuAcActivationExtractor {
                 }
             }
         }
+        int pass = DISTR_Q_DUMP == null ? 0 : PASS.incrementAndGet();
         for (SingleEquation<AcVariableType, AcEquationType> e : es.getIndex().getSortedSingleEquationsToSolve()) {
             // POWER-equation rows (mode stays 1) whose stable row is a non-bus-P/Q variable — assembled by
             // the GPU DISTR_Q / zero-impedance passes; just map the target onto that variable's row.
@@ -84,9 +115,9 @@ public final class GpuAcActivationExtractor {
                     LfBus cb = network.getBus(e.getElementNum());
                     if (cb.getId().startsWith(DISTR_Q_DUMP)) {
                         var vc = cb.getGeneratorVoltageControl().orElse(null);
-                        System.err.printf("DISTRQ_ROW controller=%s eqCol=%d assignedRow=%d ownVRow=%d "
+                        System.err.printf("DISTRQ_ROW pass=%d controller=%s eqCol=%d assignedRow=%d ownVRow=%d "
                                 + "controlledBus=%s enabled=%b qPct=%.9f members=%s%n",
-                                cb.getId(), e.getColumn(), distrRow,
+                                pass, cb.getId(), e.getColumn(), distrRow,
                                 GpuAcRowIndexing.col(es, cb.getNum(), AcVariableType.BUS_V),
                                 vc == null ? "-" : vc.getControlledBus().getId(),
                                 vc != null && vc.isControllerEnabled(cb),
@@ -95,7 +126,8 @@ public final class GpuAcActivationExtractor {
                                         .map(b -> b.getId() + (vc.isControllerEnabled(b) ? "(on)" : "(off)")).toList());
                     }
                 }
-                targetMap[distrRow] = e.getColumn();
+                assign(targetMap, writtenBy, distrRow, e.getColumn(),
+                        "DISTR_Q " + network.getBus(e.getElementNum()).getId());
                 continue;
             }
             AcVariableType powerRowVar = switch (e.getType()) {
@@ -106,7 +138,8 @@ public final class GpuAcActivationExtractor {
                 default -> null;
             };
             if (powerRowVar != null) {
-                targetMap[GpuAcRowIndexing.col(es, e.getElementNum(), powerRowVar)] = e.getColumn();
+                assign(targetMap, writtenBy, GpuAcRowIndexing.col(es, e.getElementNum(), powerRowVar),
+                        e.getColumn(), e.getType() + " elem " + e.getElementNum());
                 continue;
             }
             if (e.getType() == AcEquationType.BRANCH_TARGET_P) {
@@ -118,7 +151,7 @@ public final class GpuAcActivationExtractor {
                 var pc = branch.getPhaseControl().orElseThrow();
                 int a1r = GpuAcRowIndexing.col(es, pc.getControllerBranch().getNum(), AcVariableType.BRANCH_ALPHA1);
                 mode[a1r] = 3;
-                targetMap[a1r] = e.getColumn();
+                assign(targetMap, writtenBy, a1r, e.getColumn(), "BRANCH_TARGET_P " + branch.getId());
                 continue;
             }
             // IDENTITY rows (mode 0): the device row-mode mask writes diag 1 and F = x − target.
@@ -148,7 +181,7 @@ public final class GpuAcActivationExtractor {
                 boolean slopeRow = e.getType() == AcEquationType.BUS_TARGET_V
                         && network.getBus(e.getElementNum()).hasGeneratorsWithSlope();
                 mode[r] = slopeRow ? 2 : 0;
-                targetMap[r] = e.getColumn();
+                assign(targetMap, writtenBy, r, e.getColumn(), e.getType() + " elem " + e.getElementNum());
             }
         }
         return new GpuAcActivation(mode, targetMap);

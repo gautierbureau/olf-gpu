@@ -210,7 +210,8 @@ final class GpuBatchChunkSolver {
                 anyRlRemote ? gpuData.dqMemberGroupCount() : null,
                 anyRlRemote ? gpuData.dqMemberRow() : null,
                 anyRlRemote ? gpuData.dqMemberHasRow() : null,
-                anyRlRemote ? gpuData.dqMemberQrGroup() : null);
+                anyRlRemote ? gpuData.dqMemberQrGroup() : null,
+                anyRlRemote ? gpuData.dqMemberTargetQ() : null);
 
         // The base state / targets are IDENTICAL for every scenario (a single-branch N-1 starts from the
         // same converged base operating point): passed as single length-n rows and tiled on-device. The
@@ -631,6 +632,29 @@ final class GpuBatchChunkSolver {
                     }
                     int[] targetOverrideIndex = overrides.indexArray();
                     double[] targetOverrideValue = overrides.valueArray();
+                    // OLF_GPU_TARGET_ROW=<row>: the target the DEVICE actually solves that row against —
+                    // the base value and every per-scenario override landing on it. A row whose
+                    // converged residual equals minus its OLF target is a row solved against 0.
+                    String tgtRow = System.getenv("OLF_GPU_TARGET_ROW");
+                    if (tgtRow != null) {
+                        int probe = Integer.parseInt(tgtRow);
+                        StringBuilder sb = new StringBuilder(String.format(
+                                "TARGET_ROW row=%d base=%.9f baseMode=%d", probe, baseTargets[probe], baseRowMode[probe]));
+                        if (rowModePerScenario != null) {
+                            for (int s2 = 0; s2 < realCount; s2++) {
+                                if (rowModePerScenario[s2] != null && rowModePerScenario[s2][probe] != baseRowMode[probe]) {
+                                    sb.append(String.format(" mode[s=%d]=%d", s2, rowModePerScenario[s2][probe]));
+                                }
+                            }
+                        }
+                        for (int k2 = 0; k2 < targetOverrideIndex.length; k2++) {
+                            if (targetOverrideIndex[k2] % n == probe) {
+                                sb.append(String.format(" ov[s=%d]=%.9f",
+                                        targetOverrideIndex[k2] / n, targetOverrideValue[k2]));
+                            }
+                        }
+                        System.err.println(sb);
+                    }
                     if (pairPhase && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_OV"))) {
                         for (int s2 = 0; s2 < realCount; s2++) {
                             StringBuilder sb = new StringBuilder("GPU-PAIR-OV "
@@ -845,7 +869,10 @@ final class GpuBatchChunkSolver {
                                 if ((v & 3) != 0) {
                                     pinned++;
                                     if (ids.length() < 4000) {
-                                        ids.append(" p").append(i).append('/').append(v & 3);
+                                        // vRow identifies WHICH controller: it is the bus's stable device
+                                        // row, the same number the DISTR_Q / target dumps print.
+                                        ids.append(" p").append(i).append("(vRow=").append(gpuData.rlVrow()[i])
+                                           .append(",lt=").append(v & 3).append(')');
                                     }
                                 }
                                 if ((v >> 2) > 0) {

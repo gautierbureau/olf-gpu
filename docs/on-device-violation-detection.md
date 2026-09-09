@@ -104,12 +104,29 @@ only bus angles) and the reference filtering.
 - **Zero-impedance branches** and open sides: confirm which ones the host actually reaches.
 - **Per-unit scales**: current uses `PerUnit.ib(bus.getNominalV())` of the SIDE's bus, power uses
   `PerUnit.SB`, bus voltage uses the bus nominal V. The table must store the scale per entry.
-- **Validation must diff violation SETS, not counts.** The GPU base load flow is nondeterministic
-  at ~1e-9 (atomic ordering in the fill kernels), and because the pre-contingency violations filter
-  the post-contingency ones, a single element sitting that close to its limit shifts every
-  contingency at once — observed once as 135152 violations where other runs reported 133154, a
-  difference of exactly 1998, one per batched scenario. A count comparison will therefore show
-  alarming swings that are one knife-edge element.
+- **Validation must diff violation SETS, not counts** — and must expect a knife-edge that is NOT
+  about limits. Violation counts on rte6515 vary between runs (133154 in eleven runs, 133870 and
+  135152 in two others). Diffing the sets names the cause exactly: every one of the 716 extra lines
+  in the 133870 run is the same element, `VL-1512 LOW_VOLTAGE`, and the base violation set is
+  byte-identical.
+
+  `VL-1512` already violates at BASE (60.974857123 kV against a 61.000002 kV limit), so every
+  post-contingency violation of it goes through `LimitViolationManager.violationWeakenedOrEquivalent`,
+  which for LOW_VOLTAGE reports it only when
+  `postValue < baseValue - min(lowVoltageAbsoluteThreshold, baseValue * lowVoltageProportionalThreshold)`.
+  Both of those thresholds default to **0.0** (flow violations get 10%, voltage gets nothing), so
+  the test is `postValue < baseValue` — strictly, by any amount, down to one ulp. In the hundreds of
+  contingencies whose outage is far from that bus the post-contingency voltage equals the base value
+  to the last bits, and the GPU base load flow's ~1e-9 run-to-run wobble (atomic ordering in the fill
+  kernels) decides them all at once.
+
+  So the sensitivity is NOT to the limit — the margin there is 0.025 kV, enormous by comparison. It
+  is to the BASE VALUE, through a zero-tolerance comparison. The CPU never shows it because it is
+  deterministic, not because it is less sensitive; and a CPU-vs-GPU comparison of this case will
+  disagree on such an element for many contingencies without either side being wrong. Any element
+  that violates at base is a candidate. Either give the comparison a small
+  `increased-low-voltage-violations-absolute-threshold`, or exclude base-violating elements from the
+  parity gate.
 
 ## What NOT to do
 

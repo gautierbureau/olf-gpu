@@ -172,6 +172,20 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
                     .sorted()
                     .forEach(v -> System.out.println("BASE-VIOLATION " + v));
         }
+        // OLF_GPU_CENSUS_VIOLATION_DUMP=<file>: every post-contingency violation as a sorted line, so
+        // two runs can be DIFFED. A count tells you something moved; only the set tells you what.
+        String dump = System.getenv("OLF_GPU_CENSUS_VIOLATION_DUMP");
+        if (dump != null) {
+            List<String> lines = new ArrayList<>();
+            for (PostContingencyResult p : result.getPostContingencyResults()) {
+                for (var v : p.getLimitViolationsResult().getLimitViolations()) {
+                    lines.add(p.getContingency().getId() + "|" + v.getSubjectId() + "|" + v.getSide()
+                            + "|" + v.getLimitType() + "|" + v.getOperationalLimitsGroupId());
+                }
+            }
+            java.util.Collections.sort(lines);
+            Files.write(Path.of(dump), lines);
+        }
         System.out.printf("  ctg with violations : %d of %d (%d violations total)%n",
                 withViolations, result.getPostContingencyResults().size(), totalViolations);
         System.out.printf("  CPU-routing reasons : %s%n",

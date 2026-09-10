@@ -150,10 +150,23 @@ public final class GpuAcOuterLoopPacks {
      *  {@code dsMode} 0 = static factors ({@code dsFactor}); 1 = REMAINING_MARGIN (factors are the
      *  direction-dependent per-bus margins {@code dsMarginUp}/{@code dsMarginDown} + the slack's own
      *  {@code dsSlackMarginUp}/{@code Down}, normalized in-kernel per scenario and pass). */
+    /**
+     * @param dgBus       per participating GENERATOR, the index of its bus in {@code dsPhiRow}
+     * @param dgFactor    per generator, its RAW participation factor (same normalization as dsFactor)
+     * @param dgMaxDelta  per generator, {@code maxTargetP - targetP} under OLF's no-sign-change rule
+     * @param dgMinDelta  per generator, {@code minTargetP - targetP}
+     * @param dgMarginUp  per generator, REMAINING_MARGIN's own direction-dependent factor (up)
+     * @param dgMarginDown same, down
+     * @param busGenStart per bus, the first index into the generator arrays (generators are grouped
+     *                    by bus and contiguous, so a bus's row value is the sum over its slice)
+     * @param busGenEnd   per bus, one past its last generator
+     */
     record DsPack(int[] dsPhiRow, double[] dsFactor, int dsSlackPhiRow, double dsSlackTargetP,
                   double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
                   int dsMode, double[] dsMarginUp, double[] dsMarginDown,
-                  double dsSlackMarginUp, double dsSlackMarginDown) {
+                  double dsSlackMarginUp, double dsSlackMarginDown,
+                  int[] dgBus, double[] dgFactor, double[] dgMaxDelta, double[] dgMinDelta,
+                  double[] dgMarginUp, double[] dgMarginDown, int[] busGenStart, int[] busGenEnd) {
     }
 
     static DqPack distrQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
@@ -433,6 +446,14 @@ public final class GpuAcOuterLoopPacks {
         double dsSlackMarginUp = 0;                                     // REMAINING_MARGIN: the slack's own margins
         double dsSlackMarginDown = 0;
         List<Integer> dsPhiRow = new ArrayList<>();
+        List<Integer> dgBus = new ArrayList<>();
+        List<Double> dgFactorRaw = new ArrayList<>();
+        List<Double> dgMaxDelta = new ArrayList<>();
+        List<Double> dgMinDelta = new ArrayList<>();
+        List<Double> dgMarginUp = new ArrayList<>();
+        List<Double> dgMarginDown = new ArrayList<>();
+        List<Integer> busGenStart = new ArrayList<>();
+        List<Integer> busGenEnd = new ArrayList<>();
         List<Double> dsFactorRaw = new ArrayList<>();
         List<Double> dsBaseTargetP = new ArrayList<>();                 // each bus's initial BUS_TARGET_P
         List<Double> dsMaxDelta = new ArrayList<>();                    // headroom ≥ 0
@@ -498,12 +519,54 @@ public final class GpuAcOuterLoopPacks {
                     dsMarginUp.add(m[0]);
                     dsMarginDown.add(m[1]);
                 }
+                // Per GENERATOR as well, contiguous within the bus. OLF's water-fill participates and
+                // SATURATES per generator (ParticipatingElement wraps an LfGenerator, and step.run
+                // clamps each one at its OWN minTargetP/maxTargetP and removes it), so a bus-level
+                // aggregate only reproduces it while nothing saturates. Both groupings are kept: the
+                // bus one owns the equation row and the anchor, the generator one owns the factors
+                // and the limits.
+                busGenStart.add(dgFactorRaw.size());
+                for (LfGenerator g : bus.getGenerators()) {
+                    double gf = dsParams.factor(g);
+                    if (gf == 0) {
+                        continue;                            // OLF: isParticipating(gen) && factor != 0
+                    }
+                    double minTp = g.getMinTargetP();
+                    double maxTp = g.getMaxTargetP();
+                    double tp = g.getTargetP();
+                    if (tp < 0) {                            // OLF: distribution never flips a gen's sign
+                        maxTp = Math.min(maxTp, 0);
+                    } else {
+                        minTp = Math.max(minTp, 0);
+                    }
+                    dgBus.add(dsPhiRow.size() - 1);
+                    dgFactorRaw.add(gf);
+                    boolean unbounded = !dsParams.useActiveLimits() || dsParams.isLoadBased();
+                    dgMaxDelta.add(unbounded ? Double.POSITIVE_INFINITY : maxTp - tp);
+                    dgMinDelta.add(unbounded ? Double.NEGATIVE_INFINITY : minTp - tp);
+                    if (dsParams.isRemainingMargin()) {
+                        double minP = g.getMinP();
+                        double maxP = g.getMaxP();
+                        if (tp < 0) {
+                            maxP = Math.min(maxP, 0);
+                        } else {
+                            minP = Math.max(minP, 0);
+                        }
+                        dgMarginUp.add(Math.max(0.0, maxP - tp));
+                        dgMarginDown.add(Math.max(0.0, tp - minP));
+                    }
+                }
+                busGenEnd.add(dgFactorRaw.size());
             }
         }
         double dsSum = dsFactorRaw.stream().mapToDouble(Double::doubleValue).sum() + dsSlackFactor;
         double[] dsFactor = new double[dsPhiRow.size()];
         for (int i = 0; i < dsFactor.length; i++) {
             dsFactor[i] = dsFactorRaw.get(i) / dsSum;
+        }
+        double[] dgFactor = new double[dgFactorRaw.size()];     // SAME denominator, so Σ over a bus's
+        for (int i = 0; i < dgFactor.length; i++) {             // generators is exactly its dsFactor
+            dgFactor[i] = dgFactorRaw.get(i) / dsSum;
         }
         // A pack with participants but no slack row is unusable; one with NEITHER participants nor a
         // participating slack means DS never fires. But a PARTICIPATING SLACK ALONE is kept (nds == 0,
@@ -519,13 +582,25 @@ public final class GpuAcOuterLoopPacks {
             dsMarginUp.clear();
             dsMarginDown.clear();
             dsSlackPhiRow = -1;
+            dgBus.clear();
+            dgFactor = new double[0];
+            dgMaxDelta.clear();
+            dgMinDelta.clear();
+            dgMarginUp.clear();
+            dgMarginDown.clear();
+            busGenStart.clear();
+            busGenEnd.clear();
         }
         return new DsPack(GpuAcArrays.toIntArray(dsPhiRow), dsFactor, dsSlackPhiRow, dsSlackTargetP,
                 GpuAcArrays.toDoubleArray(dsBaseTargetP), GpuAcArrays.toDoubleArray(dsMaxDelta),
                 GpuAcArrays.toDoubleArray(dsMinDelta),
                 dsParams.isRemainingMargin() ? 1 : 0,
                 GpuAcArrays.toDoubleArray(dsMarginUp), GpuAcArrays.toDoubleArray(dsMarginDown),
-                dsSlackMarginUp, dsSlackMarginDown);
+                dsSlackMarginUp, dsSlackMarginDown,
+                GpuAcArrays.toIntArray(dgBus), dgFactor,
+                GpuAcArrays.toDoubleArray(dgMaxDelta), GpuAcArrays.toDoubleArray(dgMinDelta),
+                GpuAcArrays.toDoubleArray(dgMarginUp), GpuAcArrays.toDoubleArray(dgMarginDown),
+                GpuAcArrays.toIntArray(busGenStart), GpuAcArrays.toIntArray(busGenEnd));
     }
 
     /**

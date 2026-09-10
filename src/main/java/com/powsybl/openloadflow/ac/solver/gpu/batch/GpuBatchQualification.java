@@ -33,6 +33,21 @@ final class GpuBatchQualification {
     private GpuBatchQualification() {
     }
 
+    /** System property: BATCH the contingencies that strand a distributed-slack participant in
+     *  another synchronous component (default false = route them to the CPU).
+     *
+     *  <p>The device side is complete and correct: the per-scenario participant mask reaches the
+     *  kernel, and both the slack's retained share and the stopping gate are renormalized over the
+     *  survivors (leaving them global is what made the first attempt at this fail). What is NOT yet
+     *  right is a difference these scenarios merely EXPOSE — OLF water-fills per generator, the pack
+     *  aggregates per bus, and only a mismatch this large saturates anything. Flip this on to measure
+     *  that gap; leave it off to keep violation parity exact. */
+    static final String BATCH_STRANDED_DS_PROPERTY = "olf.gpu.sa.batchStrandedDs";
+
+    private static boolean batchStrandedDsEnabled() {
+        return Boolean.parseBoolean(System.getProperty(BATCH_STRANDED_DS_PROPERTY, "false"));
+    }
+
     static final int[] NO_FROZEN_ROWS = new int[0];
     static final double[] NO_FROZEN_TARGETS = new double[0];
 
@@ -255,22 +270,29 @@ final class GpuBatchQualification {
      *  disconnectedGenerationActivePower - disconnectedLoadActivePower, incl. islanded buses'
      *  injections (with the same non-AC-emulation HVDC generation exclusion). */
     /** How many distributed-slack participants this contingency puts in another synchronous component. */
-    private static int islandedDsParticipants(int[] frozenRows, GpuAcData gpuData) {
+    /** The distributed-slack participants whose P-target row this contingency froze — i.e. those it
+     *  put in another synchronous component. OLF distributes over
+     *  {@code getSynchronousNetworks().getFirst()}, so these are simply not participants for this
+     *  scenario, and the device renormalizes the remaining factors over the survivors. */
+    private static int[] islandedDsParticipants(int[] frozenRows, GpuAcData gpuData) {
         int[] dsPhiRow = gpuData.dsPhiRow();
         if (dsPhiRow == null || dsPhiRow.length == 0 || frozenRows.length == 0) {
-            return 0;
+            return NO_ISLANDED_DS;
         }
+        int[] found = new int[dsPhiRow.length];
         int count = 0;
-        for (int row : dsPhiRow) {
+        for (int i = 0; i < dsPhiRow.length; i++) {
             for (int frozen : frozenRows) {
-                if (frozen == row) {
-                    count++;
+                if (frozen == dsPhiRow[i]) {
+                    found[count++] = i;
                     break;
                 }
             }
         }
-        return count;
+        return count == 0 ? NO_ISLANDED_DS : java.util.Arrays.copyOf(found, count);
     }
+
+    private static final int[] NO_ISLANDED_DS = new int[0];
 
     private static double scheduledActivePowerLoss(BatchContingency c, List<LfBus> islandedBuses) {
         double loss = 0;
@@ -300,7 +322,10 @@ final class GpuBatchQualification {
                         GenOutage[][] genOutagesByIndex, int islandingCount,
                         double[] activePowerLossByIndex,
                         int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
-                        int[][] drOvContribByIndex, double[][] drOvCByIndex) {
+                        int[][] drOvContribByIndex, double[][] drOvCByIndex,
+                        /** Per scenario, the distributed-slack participants this contingency strands in
+                         *  another synchronous component — the set the device must renormalize over. */
+                        int[][] islandedDsByIndex) {
     }
 
     /**
@@ -336,6 +361,7 @@ final class GpuBatchQualification {
         // member's rho; the FREE member's outage shifts the pilot-Q role — CPU (A6).
         int[][] drOvContribByIndex = new int[contingencies.size()][];
         double[][] drOvCByIndex = new double[contingencies.size()][];
+        int[][] islandedDsByIndex = new int[contingencies.size()][];
         int islandingCount = 0;
         for (int i = 0; i < qualifications.size(); i++) {
             GpuBatchContingencyValidator.Qualification q = qualifications.get(i);
@@ -495,15 +521,47 @@ final class GpuBatchQualification {
                 }
                 FrozenIsland fi = islandedFrozen(es, q.islandedBuses());
                 // A contingency that BOTH splits the network AND strands a distributed-slack participant.
-                // OLF distributes the scheduled loss over getSynchronousNetworks().getFirst(); the device
-                // water-fill still renormalizes over a participant set that includes the stranded bus, so
-                // its share is written to a frozen row and never reaches the main component — measured
-                // 1.053 MW of branch-flow error against the CPU on LINE-3317-350, enough to flip
-                // apparent-power and voltage violations. Until the kernel can take a per-scenario
-                // participant set, these go to the CPU: correctness over coverage, 91 of 2000 on rte6515.
-                if (islandedDsParticipants(fi.rows(), gpuData) > 0) {
+                // OLF distributes over getSynchronousNetworks().getFirst(), so a stranded participant is
+                // not a participant at all: its share must not be computed, and the factors of the ones
+                // that remain must be renormalized WITHOUT it. Masking it out of the distribution loops
+                // alone is not enough and was reverted once for exactly that reason — the slack keeps the
+                // retained share it had while the stranded bus still counted, and the pass retires with
+                // most of the mismatch undistributed. The device now takes the per-scenario participant
+                // set and derives BOTH the shares and the stopping gate from it.
+                islandedDsByIndex[i] = islandedDsParticipants(fi.rows(), gpuData);
+                if (islandedDsByIndex[i].length > 0 && !batchStrandedDsEnabled()) {
+                    // The renormalization below is correct and measured (see the field's javadoc), but
+                    // a SECOND difference remains on these scenarios and it is not this one: OLF's
+                    // water-fill saturates per GENERATOR while the device pack aggregates per BUS, and a
+                    // fragmenting outage is the only thing on this network with a mismatch big enough to
+                    // saturate anything (12.86 pu, ~29% of the participation). Measured on the 9
+                    // reproducers: 10 differing violation lines with active limits ON, 1 with them OFF,
+                    // 0 with distributed slack off entirely. So these stay on the CPU until the pack is
+                    // per-generator — correctness over coverage, 91 of 2000 on rte6515.
                     com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("VALIDATOR:STRANDS_DS_PARTICIPANT");
                     continue;
+                }
+                if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP")) && q.islandedBuses().size() > 0) {
+                    // The count that must match OLF's participant drop: OLF re-runs
+                    // filterParticipatingBuses on the surviving component, so if it loses N buses and
+                    // this masks fewer, the device still distributes to a bus OLF has dropped.
+                    System.err.println("ISLANDED-DS '" + c.contingencyId() + "' islandedBuses="
+                            + q.islandedBuses().size() + " maskedParticipants=" + islandedDsByIndex[i].length
+                            + " participatingIslandedBuses=" + q.islandedBuses().stream()
+                                    .filter(b -> b.isParticipating()).count());
+                    // Per bus, so an unmatched participant is EXPLAINED rather than assumed harmless:
+                    // the pack emits no row for a zero-factor bus, and masking one would be a no-op —
+                    // but a nonzero-factor bus missing from the pack would be a real hole.
+                    for (LfBus b : q.islandedBuses()) {
+                        double maxP = b.getGenerators().stream()
+                                .filter(com.powsybl.openloadflow.network.LfGenerator::isParticipating)
+                                .mapToDouble(com.powsybl.openloadflow.network.LfGenerator::getMaxTargetP).sum();
+                        System.err.println("  ISLANDED-BUS " + b.getId() + " num=" + b.getNum()
+                                + " participating=" + b.isParticipating()
+                                + " participatingGens=" + b.getGenerators().stream()
+                                        .filter(com.powsybl.openloadflow.network.LfGenerator::isParticipating).count()
+                                + " ΣmaxTargetP=" + maxP);
+                    }
                 }
                 batchedIndices.add(i);
                 islandedNumsByIndex[i] = q.islandedBuses().stream().mapToInt(LfBus::getNum).toArray();
@@ -522,6 +580,6 @@ final class GpuBatchQualification {
         }
         return new ScenarioPlan(batchedIndices, frozenRowsByIndex, islandedNumsByIndex,
                 frozenTargetsByIndex, genOutagesByIndex, islandingCount, activePowerLossByIndex,
-                dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex);
+                dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex);
     }
 }

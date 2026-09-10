@@ -337,6 +337,33 @@ public final class GpuAcNewtonSolver {
     public static native int[] screenViolationsBatch(long tableHandle, double[] states, int nScenarios,
                                                      int n, double band, int capacity);
 
+    /**
+     * Install (or clear, with null) the per-scenario distributed-slack participants that a
+     * fragmenting contingency strands in another synchronous component, as {@code {slot, participant}}
+     * pairs indexing {@code dsPhiRow}.
+     *
+     * <p>OLF distributes over {@code getSynchronousNetworks().getFirst()}, so a stranded participant
+     * is not a participant: the device drops it from the distribution AND renormalizes the survivors'
+     * shares — including the slack's retained share and the stopping tolerance — over the set that
+     * remains. Doing only the first half leaves the pass retiring with most of the mismatch
+     * undistributed.
+     */
+    public static native void setBatchDsIslanded(long handle, int[] slotParticipantPairs);
+
+    /**
+     * Install the PER-GENERATOR distributed-slack participants: the factors and limits OLF's
+     * water-fill actually saturates on, grouped by bus ({@code busGenStart}/{@code busGenEnd} slice
+     * the generator arrays, so a bus's row value is the sum over its slice).
+     *
+     * <p>OLF's {@code ParticipatingElement} wraps an {@code LfGenerator} and {@code step.run} clamps
+     * each at its own {@code minTargetP}/{@code maxTargetP} and removes it, so a bus-level aggregate
+     * reproduces OLF only while nothing saturates.
+     */
+    public static native void setBatchDsGenerators(long handle, int[] genBus, double[] genFactor,
+                                                   double[] genMaxDelta, double[] genMinDelta,
+                                                   double[] genMarginUp, double[] genMarginDown,
+                                                   int[] busGenStart, int[] busGenEnd);
+
     /** Release a violation table (idempotent for handle 0). */
     public static native void destroyViolationTable(long tableHandle);
 

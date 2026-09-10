@@ -3352,13 +3352,19 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
                                    const int* dsOvBus, const double* dsOvBaseDelta,
                                    const double* dsAnchorShift, const double* dsSlackShift,
                                    int dsMode, const double* dsMarginUp, const double* dsMarginDown,
-                                   double slackMarginUp, double slackMarginDown) {
+                                   double slackMarginUp, double slackMarginDown,
+                                   const char* dsIslanded, const double* dsFactor) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     if (!rlActive[s]) return;
     double absorbed = 0.0;
+    double fsActive = 0.0;                                   // Σ f over the participants still in the main component
     int ov = dsOvBus != nullptr ? dsOvBus[s] : -1;
     for (int i = 0; i < nds; i++) {
+        if (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i]) {
+            continue;                                        // in another component: not a participant here
+        }
+        fsActive += dsFactor[i];
         // A composed injection override on a participant bus (redispatch action, load delta) shifts
         // the row target WITHOUT being distributed power — the effective base must shift with it,
         // or the retain math counts the override as absorbed slack and the waterfill CANCELS it
@@ -3375,6 +3381,14 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
     double slackTgt = slackTargetP + (dsSlackShift != nullptr ? dsSlackShift[s] : 0.0);
     double tot = (qBuf[(size_t) s * n + slackPhiRow] - slackTgt) + absorbed;   // total-from-anchor, OLF's
     double rho = oneMinusFactorSum;                                            // remainingMismatch at run() start
+    if (dsIslanded != nullptr && dsMode != 1) {
+        // The factors were normalized over ALL participants (W), so rho = w_slack/W. Dropping the
+        // stranded ones renormalizes over W' = W - Σ_stranded w, and w_slack/W' = rho/(Σ_active f + rho).
+        // Leaving rho global is exactly what made the first attempt at this fail: the participants
+        // were masked out of the distribution loops while the slack kept the share it had when they
+        // were still in, so the pass retired with most of the mismatch undistributed.
+        rho = fsActive + rho > 0 ? rho / (fsActive + rho) : 0.0;
+    }
     if (dsMode == 1) {
         // REMAINING_MARGIN: the slack's retained share is its own margin share in the DIRECTION of the
         // total-from-anchor (OLF evaluates the direction-dependent factors once per run at the anchor).
@@ -3385,6 +3399,9 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
         }
         double sum = slackM;
         for (int i = 0; i < nds; i++) {
+            if (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i]) {
+                continue;                                    // REMAINING_MARGIN needs no rescale: dropping
+            }                                                // the stranded margins IS the renormalization
             double m = tot > 0 ? dsMarginUp[i] : dsMarginDown[i];
             if (dsAnchorShift != nullptr) {
                 double sh = dsAnchorShift[(size_t) s * nds + i];
@@ -3414,6 +3431,12 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                                               const double* dsOvMaxDelta, const double* dsOvMinDelta,
                                               int dsMode, const double* dsMarginUp, const double* dsMarginDown,
                                               double slackMarginUp, double slackMarginDown,
+                                              const char* dsIslanded,
+                                              int ngen, const int* dgBus, const double* dgFactor,
+                                              const double* dgMaxDelta, const double* dgMinDelta,
+                                              const double* dgMarginUp, const double* dgMarginDown,
+                                              const int* busGenStart, const int* busGenEnd,
+                                              double* genCum, char* genRemoved,
                                               double* target, char* switched, char* dsResidual, int dbgTrace) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
@@ -3438,6 +3461,9 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
     if (dsMode == 1) {
         double sumM = 0.0;
         for (int i = 0; i < nds; i++) {
+            if (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i]) {
+                continue;
+            }
             double m = dirUp ? dsMarginUp[i] : dsMarginDown[i];
             if (dsAnchorShift != nullptr) {
                 double sh = dsAnchorShift[(size_t) s * nds + i];
@@ -3451,9 +3477,25 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         }
         fsGlobal = sumM + slackM > 0 ? sumM / (sumM + slackM) : 0.0;
     } else {
+        double fsActive = 0.0;
+        double fsAll = 0.0;
         for (int i = 0; i < nds; i++) {
-            fsGlobal += dsFactor[i];
+            fsAll += dsFactor[i];
+            if (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i]) {
+                continue;
+            }
+            fsActive += dsFactor[i];
         }
+        // With every participant present this is Σf, bit-for-bit what it was. With some stranded it
+        // is the survivors' share of the RENORMALIZED set, 1 - rho' = fsActive/(fsActive + rho) with
+        // rho = 1 - Σf the slack's original share — the same formula computeSlackRetain uses for
+        // rho', so the two halves of the split still add up to the whole mismatch. The gate below
+        // then scales the tolerance by the share these participants really carry, which is what
+        // OLF's gate tests on its surviving participant set.
+        double rho = 1.0 - fsAll;
+        fsGlobal = fsActive == fsAll
+                ? fsActive
+                : (fsActive + rho > 0 ? fsActive / (fsActive + rho) : 0.0);
     }
     if (fsGlobal <= 0.0 || fabs(rem) <= fsGlobal * slackDistTol) {
         return;
@@ -3467,6 +3509,9 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
     // but the incremental form was not what OLF does.
     double absorbedNow = 0.0;
     for (int i = 0; i < nds; i++) {
+        if (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i]) {
+            continue;                                        // its row is frozen; it never absorbed anything
+        }
         double base = dsBaseTargetP[i];
         if (dsAnchorShift != nullptr) { base += dsAnchorShift[(size_t) s * nds + i]; }
         if (ov == i) { base -= dsOvBaseDelta[s]; }
@@ -3476,13 +3521,132 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
     }
     rem = fsGlobal * ((qBuf[(size_t) s * n + slackPhiRow] - slackTgt) + absorbedNow);
     if (dbgTrace && s == 0) {
-        printf("[DS-WF] entry slackMismatch=%.9f absorbedNow=%.9f fsGlobal=%.9f rem=%.9f nds=%d\n",
-               qBuf[(size_t) s * n + slackPhiRow] - slackTgt, absorbedNow, fsGlobal, rem, nds);
+        printf("[DS-WF] entry slackMismatch=%.9f absorbedNow=%.9f fsGlobal=%.9f rem=%.9f nds=%d ngen=%d anchorShift=%d\n",
+               qBuf[(size_t) s * n + slackPhiRow] - slackTgt, absorbedNow, fsGlobal, rem, nds, ngen,
+               dsAnchorShift != nullptr ? 1 : 0);
     }
     bool changed = false;
+    // PER-GENERATOR water-fill, the shape of OLF's GenerationActivePowerDistributionStep.run: factors
+    // renormalized over the elements still in the list at each iteration start, one pass using the
+    // mismatch as of that start, each element clamped at its OWN limit and REMOVED when it strictly
+    // overshoots. A bus's row is then the sum of its generators' cumulative deltas.
+    //
+    // Used whenever the pack carries generators and THIS scenario is not re-anchored. A pair leg's
+    // dsAnchorShift is a BUS-level displacement (the parent contingency's absorption, carried so the
+    // leg does not undo it) and nothing in the pack says how to split it across a bus's generators, so
+    // a re-anchored scenario keeps the aggregate loop below — unchanged, and no less faithful than it
+    // was. The test is on the VALUE, not on the pointer: an orchestrator re-solve passes the carry
+    // arrays for every scenario, all zeros for a plain N-1, and taking that as "re-anchored" quietly
+    // sent every post-orchestrator pass down the aggregate path (measured: the first two DS rounds of
+    // LINE-3320-350 matched the CPU digit for digit, the third did not).
+    bool anchored = false;
+    if (dsAnchorShift != nullptr) {
+        for (int i = 0; i < nds; i++) {
+            if (dsAnchorShift[(size_t) s * nds + i] != 0.0) {
+                anchored = true;
+                break;
+            }
+        }
+    }
+    bool perGen = ngen > 0 && !anchored;
+    if (perGen) {
+        for (int g = 0; g < ngen; g++) {                     // fresh list, fresh cumulative deltas
+            genCum[(size_t) s * ngen + g] = 0.0;
+            genRemoved[(size_t) s * ngen + g] = 0;
+        }
+        for (int iter = 0; iter < ngen && fabs(rem) > residueEps; iter++) {
+            double fsumActive = 0.0;                         // normalizeParticipationFactors, over the remaining
+            for (int g = 0; g < ngen; g++) {
+                int i = dgBus[g];
+                if (genRemoved[(size_t) s * ngen + g] || ov == i
+                        || (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i])) {
+                    continue;
+                }
+                fsumActive += dsMode == 1 ? (dirUp ? dgMarginUp[g] : dgMarginDown[g]) : dgFactor[g];
+            }
+            // The bus that lost a generator stays on the AGGREGATE treatment: the override channel
+            // carries {factor, base, headroom, footroom} deltas for the bus, not the identity of the
+            // generator, so a per-generator entry cannot express it. Its share is added to the same
+            // denominator, so the normalization is the one the old loop used.
+            double ovF = 0.0;
+            double ovBase = 0.0;
+            double ovMaxD = 0.0;
+            double ovMinD = 0.0;
+            bool ovActive = false;
+            if (ov >= 0 && (dsIslanded == nullptr || !dsIslanded[(size_t) s * nds + ov])) {
+                ovBase = dsBaseTargetP[ov] - dsOvBaseDelta[s];
+                ovMaxD = dsMaxDelta[ov] - dsOvMaxDelta[s];
+                ovMinD = dsMinDelta[ov] - dsOvMinDelta[s];
+                ovF = dsMode == 1 ? fmax(0.0, dirUp ? dsMarginUp[ov] : dsMarginDown[ov])
+                                  : dsFactor[ov] - dsOvFactorDelta[s];
+                double ovCum = target[(size_t) s * n + dsPhiRow[ov]] - ovBase;
+                ovActive = ovF > 0 && !((rem > 0) ? (ovCum >= ovMaxD) : (ovCum <= ovMinD));
+                if (ovActive) {
+                    fsumActive += ovF;
+                }
+            }
+            if (fsumActive <= 0.0) {
+                break;                                       // every participant removed — residual stays at the slack
+            }
+            double done = 0.0;
+            for (int g = 0; g < ngen; g++) {
+                int i = dgBus[g];
+                if (genRemoved[(size_t) s * ngen + g] || ov == i
+                        || (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i])) {
+                    continue;
+                }
+                double f = dsMode == 1 ? (dirUp ? dgMarginUp[g] : dgMarginDown[g]) : dgFactor[g];
+                double cum = genCum[(size_t) s * ngen + g];
+                double newCum = cum + rem * (f / fsumActive);
+                // OLF removes an element only on a STRICT overshoot: one that lands exactly on its
+                // limit stays in the list another iteration, where it takes weight and moves nothing.
+                if (rem > 0 && newCum > dgMaxDelta[g]) {
+                    newCum = dgMaxDelta[g];
+                    genRemoved[(size_t) s * ngen + g] = 1;
+                } else if (rem < 0 && newCum < dgMinDelta[g]) {
+                    newCum = dgMinDelta[g];
+                    genRemoved[(size_t) s * ngen + g] = 1;
+                }
+                if (newCum != cum) {
+                    genCum[(size_t) s * ngen + g] = newCum;
+                    done += newCum - cum;
+                    changed = true;
+                }
+            }
+            if (ovActive) {
+                size_t idx = (size_t) s * n + dsPhiRow[ov];
+                double cum = target[idx] - ovBase;
+                double newCum = fmin(fmax(cum + rem * (ovF / fsumActive), ovMinD), ovMaxD);
+                if (newCum != cum) {
+                    target[idx] = ovBase + newCum;
+                    done += newCum - cum;
+                    changed = true;
+                }
+            }
+            // The bus rows: anchor + Σ over the bus's generators, whose slice is contiguous.
+            for (int i = 0; i < nds; i++) {
+                if (ov == i || (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i])) {
+                    continue;                                // ov keeps its own value; a frozen row is not written
+                }
+                double sum = 0.0;
+                for (int g = busGenStart[i]; g < busGenEnd[i]; g++) {
+                    sum += genCum[(size_t) s * ngen + g];
+                }
+                target[(size_t) s * n + dsPhiRow[i]] = dsBaseTargetP[i] + sum;
+            }
+            if (dbgTrace && s == 0) {
+                printf("[DS-WF] iter=%d fsumActive=%.9f rem=%.9f done=%.9f (per-generator)\n",
+                       iter, fsumActive, rem, done);
+            }
+            rem -= done;
+        }
+    } else {
     for (int iter = 0; iter < nds && fabs(rem) > residueEps; iter++) {
         double fsumActive = 0.0;                            // re-normalize factors over the still-unsaturated buses
         for (int i = 0; i < nds; i++) {
+            if (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i]) {
+                continue;
+            }
             double f = dsFactor[i], base = dsBaseTargetP[i], maxD = dsMaxDelta[i], minD = dsMinDelta[i];
             double sh = dsAnchorShift != nullptr ? dsAnchorShift[(size_t) s * nds + i] : 0.0;
             if (dsAnchorShift != nullptr) { base += sh; maxD -= sh; minD -= sh; }
@@ -3499,6 +3663,9 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         }
         double done = 0.0;
         for (int i = 0; i < nds; i++) {
+            if (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i]) {
+                continue;                                    // writing here would land on a frozen row
+            }
             double f = dsFactor[i], base = dsBaseTargetP[i], maxD = dsMaxDelta[i], minD = dsMinDelta[i];
             double sh = dsAnchorShift != nullptr ? dsAnchorShift[(size_t) s * nds + i] : 0.0;
             if (dsAnchorShift != nullptr) { base += sh; maxD -= sh; minD -= sh; }
@@ -3521,6 +3688,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
             printf("[DS-WF] iter=%d fsumActive=%.9f rem=%.9f done=%.9f\n", iter, fsumActive, rem, done);
         }
         rem -= done;
+    }
     }
     if (changed) {
         switched[s] = 1;
@@ -3846,6 +4014,24 @@ struct BatchSolverContext {
     DeviceBuf dDsMarginUp, dDsMarginDown;                  //   dependent per-bus margins, normalized in-kernel)
     double dsSlackMarginUp = 0.0, dsSlackMarginDown = 0.0; //   the slack's own margins (its retained share)
     DeviceBuf dDsRetain;
+    // Per-GENERATOR participants (setBatchDsGenerators). OLF's water-fill participates and saturates
+    // per generator — ParticipatingElement wraps an LfGenerator and step.run clamps each at its OWN
+    // limits and REMOVES it — so a bus-level aggregate only reproduces OLF while nothing saturates.
+    // The bus arrays keep owning the equation row and the anchor; these own the factors and limits.
+    int ngen = 0;
+    DeviceBuf dgBus, dgFactor, dgMaxDelta, dgMinDelta, dgMarginUp, dgMarginDown;
+    DeviceBuf dBusGenStart, dBusGenEnd;
+    // Per (scenario, generator): its cumulative delta from the anchor, and whether the water-fill has
+    // REMOVED it. Removal is not the same as "sitting at its bound": OLF removes an element only when
+    // it strictly OVERSHOOTS, so one that lands exactly on its limit stays in the normalization for
+    // another iteration — where it absorbs weight and moves nothing.
+    DeviceBuf dGenCum, dGenRemoved;
+    // Per (scenario, participant) chars, 1 = this participant is in ANOTHER synchronous component in
+    // this scenario. OLF distributes over getSynchronousNetworks().getFirst(), so an islanded
+    // participant is simply not a participant: its share must not be computed, and — decisively — the
+    // set it is renormalized against must shrink with it. Empty = every participant participates.
+    int nDsIslanded = 0;
+    DeviceBuf dDsIslanded;
     DeviceBuf dDsResidual;                                   // nS chars: waterfill left an out-of-tolerance residual                                   // per scenario (nS): frozen slack-retained mismatch share
     bool dsSlackOnly = false;                                // DS enabled with the SLACK generator as the only participant:
     DeviceBuf dDsSlackAbsorbed;                              // nS doubles — mismatch absorbed into the slack's own target so far
@@ -4910,7 +5096,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     hasDsAnchor ? dDsSlackShift.as<double>() : nullptr,
                     ctx->dsMode, ctx->dsMode == 1 ? ctx->dDsMarginUp.as<double>() : nullptr,
                     ctx->dsMode == 1 ? ctx->dDsMarginDown.as<double>() : nullptr,
-                    ctx->dsSlackMarginUp, ctx->dsSlackMarginDown);
+                    ctx->dsSlackMarginUp, ctx->dsSlackMarginDown,
+                    ctx->nDsIslanded > 0 ? ctx->dDsIslanded.as<char>() : nullptr,
+                    ctx->dDsFactor.as<double>());
             if (!ctx->dDsResidual.p) ctx->dDsResidual.alloc(nS * sizeof(char));
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsResidual.p, 0, nS * sizeof(char), ctx->stream));
             distributeSlackBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nds, nS, n, SLACK_DIST_TOL, P_RESIDUE_EPS,
@@ -4925,6 +5113,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dsMode, ctx->dsMode == 1 ? ctx->dDsMarginUp.as<double>() : nullptr,
                     ctx->dsMode == 1 ? ctx->dDsMarginDown.as<double>() : nullptr,
                     ctx->dsSlackMarginUp, ctx->dsSlackMarginDown,
+                    ctx->nDsIslanded > 0 ? ctx->dDsIslanded.as<char>() : nullptr,
+                    ctx->ngen, ctx->dgBus.as<int>(), ctx->dgFactor.as<double>(),
+                    ctx->dgMaxDelta.as<double>(), ctx->dgMinDelta.as<double>(),
+                    ctx->dgMarginUp.as<double>(), ctx->dgMarginDown.as<double>(),
+                    ctx->dBusGenStart.as<int>(), ctx->dBusGenEnd.as<int>(),
+                    ctx->dGenCum.as<double>(), ctx->dGenRemoved.as<char>(),
                     ctx->dTarget.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>(),
                     getenv("OLF_GPU_DS_DEBUG") != nullptr ? 1 : 0);
         }
@@ -6126,6 +6320,82 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     env->ReleaseIntArrayElements(jIdx, idx, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jW, w, JNI_ABORT);
     ctx->nDqOv = nOv;
+}
+
+// Per-GENERATOR distributed-slack participants: the factors and limits OLF's water-fill actually
+// saturates on, grouped by bus (a bus's row value is the sum over its contiguous slice).
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDsGenerators(
+        JNIEnv* env, jclass, jlong handle, jintArray jBus, jdoubleArray jFactor,
+        jdoubleArray jMaxDelta, jdoubleArray jMinDelta, jdoubleArray jMarginUp, jdoubleArray jMarginDown,
+        jintArray jBusGenStart, jintArray jBusGenEnd) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jBus == nullptr || env->GetArrayLength(jBus) == 0) {
+        ctx->ngen = 0;
+        return;
+    }
+    int ngen = env->GetArrayLength(jBus);
+    auto upI = [&](jintArray a, DeviceBuf& buf) {
+        jint* p = env->GetIntArrayElements(a, nullptr);
+        buf.upload(p, (size_t) env->GetArrayLength(a) * sizeof(int));
+        env->ReleaseIntArrayElements(a, p, JNI_ABORT);
+    };
+    auto upD = [&](jdoubleArray a, DeviceBuf& buf) {
+        if (a == nullptr || env->GetArrayLength(a) == 0) {
+            return;
+        }
+        jdouble* p = env->GetDoubleArrayElements(a, nullptr);
+        buf.upload(p, (size_t) env->GetArrayLength(a) * sizeof(double));
+        env->ReleaseDoubleArrayElements(a, p, JNI_ABORT);
+    };
+    upI(jBus, ctx->dgBus);
+    upD(jFactor, ctx->dgFactor);
+    upD(jMaxDelta, ctx->dgMaxDelta);
+    upD(jMinDelta, ctx->dgMinDelta);
+    upD(jMarginUp, ctx->dgMarginUp);
+    upD(jMarginDown, ctx->dgMarginDown);
+    upI(jBusGenStart, ctx->dBusGenStart);
+    upI(jBusGenEnd, ctx->dBusGenEnd);
+    ctx->dGenCum.alloc((size_t) ctx->nScenarios * ngen * sizeof(double));
+    ctx->dGenRemoved.alloc((size_t) ctx->nScenarios * ngen * sizeof(char));
+    ctx->ngen = ngen;
+}
+
+// Distributed-slack participants STRANDED in another synchronous component: install (or clear, with
+// null) the per-scenario mask as {slot, participant} pairs. A contingency that fragments the network
+// leaves some participating buses outside the main component; OLF drops them from the participant
+// set, so the device must renormalize over the survivors — see distributeSlackBatch.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDsIslanded(
+        JNIEnv* env, jclass, jlong handle, jintArray jPairs) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jPairs == nullptr || env->GetArrayLength(jPairs) == 0 || ctx->nds == 0) {
+        ctx->nDsIslanded = 0;
+        return;
+    }
+    // Expanded to a dense (scenario, participant) mask on the host: the kernel reads it once per
+    // participant inside loops it already walks, so a scan over a pair list would be the only cost
+    // the mask adds to scenarios that have no islanded participant at all.
+    size_t maskLen = static_cast<size_t>(ctx->nScenarios) * ctx->nds;
+    std::vector<char> mask(maskLen, 0);
+    int nPairs = env->GetArrayLength(jPairs) / 2;
+    jint* pairs = env->GetIntArrayElements(jPairs, nullptr);
+    for (int k = 0; k < nPairs; k++) {
+        int s = pairs[2 * k];
+        int i = pairs[2 * k + 1];
+        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nds) {
+            mask[(size_t) s * ctx->nds + i] = 1;
+        }
+    }
+    env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
+    ctx->dDsIslanded.upload(mask.data(), maskLen);
+    ctx->nDsIslanded = nPairs;
 }
 
 // DISTR_RHO coefficient overrides: install (or clear, with nulls) the per-scenario 1/count'

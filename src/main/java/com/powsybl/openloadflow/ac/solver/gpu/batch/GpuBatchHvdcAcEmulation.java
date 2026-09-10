@@ -415,7 +415,16 @@ public final class GpuBatchHvdcAcEmulation {
                         rowModePerScenario, baseRowMode, disabledMask,
                         ovIdx.stream().mapToInt(Integer::intValue).toArray(),
                         ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorCarry, dsSlackCarry, null, null,
+                        // The distribution rides in on the TARGET SEED (seedDsTargets, above); the anchor
+                        // must NOT move with it. OLF's ActivePowerDistribution.run always resets to the
+                        // initial targets and re-derives the WHOLE distribution from
+                        // mismatch + previousMismatch — within a contingency the anchor never moves (it is
+                        // re-anchored only by NetworkState.save, i.e. per contingency, and before an
+                        // operator strategy leg). Carrying an anchor here made the device INCREMENT from the
+                        // current distribution where OLF re-derives, and clamped water-fills do not compose:
+                        // measured on LINE-1938-692 as a pass entered with absorbedNow=0 and rem=-0.0167
+                        // instead of the CPU's full ~13.2 re-derivation.
+                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, null, null, null, null,
                         parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                         config.lsMode(), config.maxDv(), config.maxDphi(),
                         config.lsMode() == 2 ? varType : null, x0Full,

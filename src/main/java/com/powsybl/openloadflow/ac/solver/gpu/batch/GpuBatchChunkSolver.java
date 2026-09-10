@@ -54,6 +54,7 @@ final class GpuBatchChunkSolver {
                                                double[][] rowCriteria, GpuBatchRlCurves.Channel rlCurves,
                                                int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
                                                int[][] drOvContribByIndex, double[][] drOvCByIndex,
+                                               int[][] islandedDsByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
@@ -81,7 +82,7 @@ final class GpuBatchChunkSolver {
                 solveQualifiedInChunksAt(chunkSize, remaining, contingencies, elementMapper, gpuData, baseState,
                         baseTargets, baseRowMode, frozenRowsByIndex, frozenTargetsByIndex, genOutagesByIndex,
                         activePowerLossByIndex, hvdcElemIndex, rowCriteria, rlCurves,
-                        dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex,
+                        dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
                         n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                         varType, transformerControllers, incrementalTvcControllers, incrementalShuntControllers,
                         simpleShuntGroups, incrementalFlowControllers, esContext, hvdcControllers, svcControllers,
@@ -149,6 +150,7 @@ final class GpuBatchChunkSolver {
                                                double[][] rowCriteria, GpuBatchRlCurves.Channel rlCurves,
                                                int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
                                                int[][] drOvContribByIndex, double[][] drOvCByIndex,
+                                               int[][] islandedDsByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
@@ -308,6 +310,9 @@ final class GpuBatchChunkSolver {
                 for (int chunkStart = 0; chunkStart < nbg; chunkStart += chunkSize) {
                     int realCount = Math.min(chunkSize, nbg - chunkStart);
                     overrides.clear();
+                    // {slot, participant} pairs: the distributed-slack participants this scenario
+                    // strands in another synchronous component (see distributeSlackBatch).
+                    List<Integer> dsIslandedList = new ArrayList<>();
                     List<Integer> dqOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_Q reweight)
                     List<Double> dqOvWList = new ArrayList<>();
                     List<Integer> drOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_RHO renorm, plan A5)
@@ -358,6 +363,12 @@ final class GpuBatchChunkSolver {
                                     drOvIdxList.add(s);
                                     drOvIdxList.add(drOvContribByIndex[ci][k]);
                                     drOvCList.add(drOvCByIndex[ci][k]);
+                                }
+                            }
+                            if (islandedDsByIndex != null && islandedDsByIndex[ci] != null) {
+                                for (int participant : islandedDsByIndex[ci]) {
+                                    dsIslandedList.add(s);
+                                    dsIslandedList.add(participant);
                                 }
                             }
                             List<LfBranch> branches = contingencies.get(ci).outagedBranches();
@@ -796,6 +807,15 @@ final class GpuBatchChunkSolver {
                             drOvIdxList.isEmpty() ? null : drOvIdxList.stream().mapToInt(Integer::intValue).toArray(),
                             drOvCList.isEmpty() ? null : drOvCList.stream().mapToDouble(Double::doubleValue).toArray());
                     GpuAcNewtonSolver.setBatchActiveRowCounts(handle, nActive);
+                    // Per-generator participants: run-constant, but the context is per chunk.
+                    GpuAcNewtonSolver.setBatchDsGenerators(handle, gpuData.dgBus(), gpuData.dgFactor(),
+                            gpuData.dgMaxDelta(), gpuData.dgMinDelta(),
+                            gpuData.dgMarginUp(), gpuData.dgMarginDown(),
+                            gpuData.busGenStart(), gpuData.busGenEnd());
+                    // Cleared when the chunk strands nobody, so a chunk never inherits the previous
+                    // chunk's participant mask through the reused context.
+                    GpuAcNewtonSolver.setBatchDsIslanded(handle,
+                            dsIslandedList.isEmpty() ? null : dsIslandedList.stream().mapToInt(Integer::intValue).toArray());
                     long tSolve0 = System.nanoTime();
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,

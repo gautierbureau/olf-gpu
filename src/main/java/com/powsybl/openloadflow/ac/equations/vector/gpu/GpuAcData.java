@@ -87,6 +87,8 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
                         int dsMode, double[] dsMarginUp, double[] dsMarginDown,
                         double dsSlackMarginUp, double dsSlackMarginDown,
+                        int[] dgBus, double[] dgFactor, double[] dgMaxDelta, double[] dgMinDelta,
+                        double[] dgMarginUp, double[] dgMarginDown, int[] busGenStart, int[] busGenEnd,
                         int[] baseOpenCbElements, int[] baseOpenZiElements, int[] baseOpenZiBranchNums,
                         int[] ziBranchNums, double[] vdlIn, int[] vdlIdx, int[] qrPtr, int[] qrRows,
                         int[] obQAlt, int[] ziQAlt) {

@@ -131,6 +131,8 @@ public final class GpuAcDataExtractor {
                 ds.dsPhiRow(), ds.dsFactor(), ds.dsSlackPhiRow(), ds.dsSlackTargetP(),
                 ds.dsBaseTargetP(), ds.dsMaxDelta(), ds.dsMinDelta(),
                 ds.dsMode(), ds.dsMarginUp(), ds.dsMarginDown(), ds.dsSlackMarginUp(), ds.dsSlackMarginDown(),
+                ds.dgBus(), ds.dgFactor(), ds.dgMaxDelta(), ds.dgMinDelta(),
+                ds.dgMarginUp(), ds.dgMarginDown(), ds.busGenStart(), ds.busGenEnd(),
                 family.baseOpenCb().stream().mapToInt(Integer::intValue).toArray(),
                 family.baseOpenZi().stream().mapToInt(Integer::intValue).toArray(),
                 family.baseOpenZiNums().stream().mapToInt(Integer::intValue).toArray(),

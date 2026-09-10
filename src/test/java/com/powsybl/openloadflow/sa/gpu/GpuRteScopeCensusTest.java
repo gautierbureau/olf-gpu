@@ -100,6 +100,14 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         if ("1".equals(System.getenv("OLF_GPU_CENSUS_NO_DS"))) {
             lfp.setDistributedSlack(false);                   // diagnostic: is a gap the slack redistribution?
         }
+        // OLF_GPU_CENSUS_NO_ACTIVE_LIMITS=1: let the slack water-fill run UNBOUNDED on both arms.
+        // OLF saturates per GENERATOR while the device pack aggregates per BUS, so the two can only
+        // diverge once something saturates — which needs a mismatch far larger than a normal outage's.
+        // With the limits off nothing saturates, so this separates "the split is wrong" from "the
+        // saturation granularity is wrong".
+        if ("1".equals(System.getenv("OLF_GPU_CENSUS_NO_ACTIVE_LIMITS"))) {
+            com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setUseActiveLimits(false);
+        }
         String convEps = System.getenv("OLF_GPU_CENSUS_CONV_EPS");
         if (convEps != null) {
             com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
@@ -214,6 +222,13 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
             System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_SCREEN_VIOLATIONS_PROPERTY, "false");
         } else {
             System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_SCREEN_VIOLATIONS_PROPERTY);
+        }
+        // OLF_GPU_CENSUS_BATCH_STRANDED=1: batch the contingencies that strand a distributed-slack
+        // participant instead of routing them to the CPU.
+        if ("1".equals(System.getenv("OLF_GPU_CENSUS_BATCH_STRANDED"))) {
+            System.setProperty("olf.gpu.sa.batchStrandedDs", "true");
+        } else {
+            System.clearProperty("olf.gpu.sa.batchStrandedDs");
         }
         String chunk = System.getenv("OLF_GPU_CENSUS_CHUNK");
         if (chunk != null) {

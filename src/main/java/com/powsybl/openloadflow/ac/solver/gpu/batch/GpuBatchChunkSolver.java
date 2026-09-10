@@ -338,12 +338,23 @@ final class GpuBatchChunkSolver {
                     }
                     double[] preLossBySlot = new double[chunkSize];   // scheduled active power loss per slot (plain phase)
                     for (int s = 0; s < chunkSize; s++) {
-                        if (disabledIdx[s] != null) {        // clear this slot's outage(s) from the previous chunk
-                            for (int ei : disabledIdx[s]) {
-                                disabledMask[s][ei] = false;
-                            }
-                            disabledIdx[s] = null;
-                        }
+                        // Clear the WHOLE slot, not just the outage this slot carried. The chunk
+                        // loop reuses one disabledMask per slot, and it used to be reset by replaying
+                        // disabledIdx — which records only the contingency's own outaged elements. But
+                        // the HVDC machinery also sets bits here (seedBaseStatuses marks a non-LINEAR
+                        // entry's hv element, and the freeze/status paths follow it), and those were
+                        // never recorded. They therefore SURVIVED into the next chunk, leaving an hv
+                        // element disabled for whatever unrelated scenario landed in that slot.
+                        //
+                        // The result was a scenario-dependent-on-its-predecessors batch: correct when
+                        // run alone, wrong after any preceding chunk. Measured on rte6515 at 9042
+                        // branch contingencies: 18 differing violation lines against the CPU, and the
+                        // affected set changed with the chunk size (64 -> 140 lines, 1024 -> 10)
+                        // because the chunking decides which scenario inherits which stale bit. With
+                        // the full clear: ZERO. A slot is nElements booleans; the fill costs nothing
+                        // measurable (9042 contingencies: 82.6 s either way).
+                        java.util.Arrays.fill(disabledMask[s], false);
+                        disabledIdx[s] = null;
                         for (int e : gpuData.baseOpenCbElements()) {
                             disabledMask[s][e] = true;           // base-open elements stay OUT unless this scenario recloses them
                         }

@@ -294,6 +294,27 @@ final class GpuBatchQualification {
 
     private static final int[] NO_ISLANDED_DS = new int[0];
 
+    /** The reactive-limits controllers this contingency puts in another synchronous component: their
+     *  BUS_V row is one of the frozen island rows. OLF disables those buses, so its ReactiveLimits
+     *  loop never sees them; the device must not either, or it pins a PV bus OLF leaves alone. */
+    private static int[] islandedRlControllers(int[] frozenRows, GpuAcData gpuData) {
+        int[] rlVrow = gpuData.rlVrow();
+        if (rlVrow == null || rlVrow.length == 0 || frozenRows.length == 0) {
+            return NO_ISLANDED_DS;
+        }
+        int[] found = new int[rlVrow.length];
+        int count = 0;
+        for (int i = 0; i < rlVrow.length; i++) {
+            for (int frozen : frozenRows) {
+                if (frozen == rlVrow[i]) {
+                    found[count++] = i;
+                    break;
+                }
+            }
+        }
+        return count == 0 ? NO_ISLANDED_DS : java.util.Arrays.copyOf(found, count);
+    }
+
     private static double scheduledActivePowerLoss(BatchContingency c, List<LfBus> islandedBuses) {
         double loss = 0;
         for (com.powsybl.openloadflow.network.LfGenerator g : c.lostGenerators()) {
@@ -325,7 +346,9 @@ final class GpuBatchQualification {
                         int[][] drOvContribByIndex, double[][] drOvCByIndex,
                         /** Per scenario, the distributed-slack participants this contingency strands in
                          *  another synchronous component — the set the device must renormalize over. */
-                        int[][] islandedDsByIndex) {
+                        int[][] islandedDsByIndex,
+                        /** Per scenario, the reactive-limits controllers stranded in another component. */
+                        int[][] islandedRlByIndex) {
     }
 
     /**
@@ -362,6 +385,7 @@ final class GpuBatchQualification {
         int[][] drOvContribByIndex = new int[contingencies.size()][];
         double[][] drOvCByIndex = new double[contingencies.size()][];
         int[][] islandedDsByIndex = new int[contingencies.size()][];
+        int[][] islandedRlByIndex = new int[contingencies.size()][];
         int islandingCount = 0;
         for (int i = 0; i < qualifications.size(); i++) {
             GpuBatchContingencyValidator.Qualification q = qualifications.get(i);
@@ -529,6 +553,7 @@ final class GpuBatchQualification {
                 // most of the mismatch undistributed. The device now takes the per-scenario participant
                 // set and derives BOTH the shares and the stopping gate from it.
                 islandedDsByIndex[i] = islandedDsParticipants(fi.rows(), gpuData);
+                islandedRlByIndex[i] = islandedRlControllers(fi.rows(), gpuData);
                 if (islandedDsByIndex[i].length > 0 && !batchStrandedDsEnabled()) {
                     // The renormalization below is correct and measured (see the field's javadoc), but
                     // a SECOND difference remains on these scenarios and it is not this one: OLF's
@@ -556,11 +581,23 @@ final class GpuBatchQualification {
                         double maxP = b.getGenerators().stream()
                                 .filter(com.powsybl.openloadflow.network.LfGenerator::isParticipating)
                                 .mapToDouble(com.powsybl.openloadflow.network.LfGenerator::getMaxTargetP).sum();
+                        // Everything the island still COUPLES to the main component through: an HVDC
+                        // whose other station is live, a controller in a remote group, a controlled
+                        // shunt. Each is a place a frozen 1<0 row can leak a spurious injection.
+                        var vc = b.getGeneratorVoltageControl().orElse(null);
                         System.err.println("  ISLANDED-BUS " + b.getId() + " num=" + b.getNum()
                                 + " participating=" + b.isParticipating()
                                 + " participatingGens=" + b.getGenerators().stream()
                                         .filter(com.powsybl.openloadflow.network.LfGenerator::isParticipating).count()
-                                + " ΣmaxTargetP=" + maxP);
+                                + " ΣmaxTargetP=" + maxP
+                                + " hvdcs=" + b.getHvdcs().size()
+                                + " shunts=" + (b.getShunt().isPresent() ? 1 : 0)
+                                + " controllerShunt=" + (b.getControllerShunt().isPresent() ? 1 : 0)
+                                + " svcShunt=" + (b.getSvcShunt().isPresent() ? 1 : 0)
+                                + " genVc=" + (vc != null)
+                                + " genVcControlledBus=" + (vc != null ? vc.getControlledBus().getId() : "-")
+                                + " genVcControllers=" + (vc != null ? vc.getMergedControllerElements().size() : 0)
+                                + " loads=" + b.getLoads().size());
                     }
                 }
                 batchedIndices.add(i);
@@ -580,6 +617,7 @@ final class GpuBatchQualification {
         }
         return new ScenarioPlan(batchedIndices, frozenRowsByIndex, islandedNumsByIndex,
                 frozenTargetsByIndex, genOutagesByIndex, islandingCount, activePowerLossByIndex,
-                dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex);
+                dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
+                islandedRlByIndex);
     }
 }

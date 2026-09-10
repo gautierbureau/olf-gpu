@@ -54,7 +54,7 @@ final class GpuBatchChunkSolver {
                                                double[][] rowCriteria, GpuBatchRlCurves.Channel rlCurves,
                                                int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
                                                int[][] drOvContribByIndex, double[][] drOvCByIndex,
-                                               int[][] islandedDsByIndex,
+                                               int[][] islandedDsByIndex, int[][] islandedRlByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
@@ -83,6 +83,7 @@ final class GpuBatchChunkSolver {
                         baseTargets, baseRowMode, frozenRowsByIndex, frozenTargetsByIndex, genOutagesByIndex,
                         activePowerLossByIndex, hvdcElemIndex, rowCriteria, rlCurves,
                         dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
+                        islandedRlByIndex,
                         n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                         varType, transformerControllers, incrementalTvcControllers, incrementalShuntControllers,
                         simpleShuntGroups, incrementalFlowControllers, esContext, hvdcControllers, svcControllers,
@@ -150,7 +151,7 @@ final class GpuBatchChunkSolver {
                                                double[][] rowCriteria, GpuBatchRlCurves.Channel rlCurves,
                                                int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
                                                int[][] drOvContribByIndex, double[][] drOvCByIndex,
-                                               int[][] islandedDsByIndex,
+                                               int[][] islandedDsByIndex, int[][] islandedRlByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
@@ -313,6 +314,7 @@ final class GpuBatchChunkSolver {
                     // {slot, participant} pairs: the distributed-slack participants this scenario
                     // strands in another synchronous component (see distributeSlackBatch).
                     List<Integer> dsIslandedList = new ArrayList<>();
+                    List<Integer> rlIslandedList = new ArrayList<>();
                     List<Integer> dqOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_Q reweight)
                     List<Double> dqOvWList = new ArrayList<>();
                     List<Integer> drOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_RHO renorm, plan A5)
@@ -369,6 +371,12 @@ final class GpuBatchChunkSolver {
                                 for (int participant : islandedDsByIndex[ci]) {
                                     dsIslandedList.add(s);
                                     dsIslandedList.add(participant);
+                                }
+                            }
+                            if (islandedRlByIndex != null && islandedRlByIndex[ci] != null) {
+                                for (int controller : islandedRlByIndex[ci]) {
+                                    rlIslandedList.add(s);
+                                    rlIslandedList.add(controller);
                                 }
                             }
                             List<LfBranch> branches = contingencies.get(ci).outagedBranches();
@@ -816,6 +824,8 @@ final class GpuBatchChunkSolver {
                     // chunk's participant mask through the reused context.
                     GpuAcNewtonSolver.setBatchDsIslanded(handle,
                             dsIslandedList.isEmpty() ? null : dsIslandedList.stream().mapToInt(Integer::intValue).toArray());
+                    GpuAcNewtonSolver.setBatchRlIslanded(handle,
+                            rlIslandedList.isEmpty() ? null : rlIslandedList.stream().mapToInt(Integer::intValue).toArray());
                     long tSolve0 = System.nanoTime();
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
@@ -1160,6 +1170,30 @@ final class GpuBatchChunkSolver {
                         orchNs.merge("TransformerControl.orchestrateTransformerControl", System.nanoTime() - tOr10, Long::sum);
                     }
                     tOrchestratorNs += System.nanoTime() - tOrch0;
+                    if (System.getenv("OLF_GPU_RL_TRACE") != null && rlStateOut != null) {
+                        // The FINAL reactive-limits state, after every orchestrator re-solve. The
+                        // per-solve trace above only sees the main solve, and OLF pins late in its
+                        // outer-loop sequence (DS, HVDC freeze, monitoring, THEN ReactiveLimits), so
+                        // comparing the main solve's count against the CPU's compares two different
+                        // points in the trajectory.
+                        for (int s = 0; s < realCount; s++) {
+                            int pinned = 0;
+                            for (int i = 0; i < nrl; i++) {
+                                if ((rlStateOut[s * nrl + i] & 3) != 0) {
+                                    pinned++;
+                                }
+                            }
+                            StringBuilder ids = new StringBuilder();
+                            for (int i = 0; i < nrl; i++) {
+                                if ((rlStateOut[s * nrl + i] & 3) != 0) {
+                                    ids.append(' ').append(i).append("(vRow=").append(gpuData.rlVrow()[i])
+                                       .append(",lt=").append(rlStateOut[s * nrl + i] & 3).append(')');
+                                }
+                            }
+                            System.err.printf("GPU_RL_FINAL ctg=%s pinnedTotal=%d%s%n",
+                                    contingencies.get(group.get(chunkStart + s)).contingencyId(), pinned, ids);
+                        }
+                    }
                     for (int s = 0; s < realCount; s++) {
                         resultsByIndex[group.get(chunkStart + s)] = chunkResults[s];
                     }

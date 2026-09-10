@@ -3176,12 +3176,21 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
                                     int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
                                     const double* rowSlope, double* savedTarget, int cvStride,
                                     const char* rlRemote, const int* rlCmpVrow,
-                                    const double* rlSvcBmin, const double* rlSvcBmax, const double* rlV2Base) {
+                                    const double* rlSvcBmin, const double* rlSvcBmax, const double* rlV2Base,
+                                    const char* rlIslanded) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
     int s = tid / nrl;
     if (!rlActive[s]) return;
+    // A controller the contingency put in ANOTHER synchronous component is not a controller at all:
+    // OLF disables that bus and its outer loops never see it. Its rows here are FROZEN at a flat
+    // 1<0, so the q read out of qBuf is a placeholder, not a measurement — and switching on it pins
+    // a PV bus that OLF leaves alone, which perturbs the MAIN component through any remote-control
+    // or DISTR_Q group the controller belongs to. Measured on LINE-3320-350: the device pinned
+    // VL-6432_0, an ISLANDED bus, giving it 20 pinned controllers against OLF's 19 and one extra
+    // LOW_VOLTAGE violation at VL-1624.
+    if (rlIslanded != nullptr && rlIslanded[(size_t) s * nrl + i]) return;
     // SVC reactive limits are VOLTAGE-DEPENDENT: LfStaticVarCompensatorImpl evaluates
     // Bmin/Bmax*(v*nomV)^2 at the LIVE bus V on every CPU check (and a pinned bus re-freezes at
     // the moved limit via busesWithUpdatedQLimits). rlMinQ/rlMaxQ hold the base-V aggregates;
@@ -3436,7 +3445,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                                               const double* dgMaxDelta, const double* dgMinDelta,
                                               const double* dgMarginUp, const double* dgMarginDown,
                                               const int* busGenStart, const int* busGenEnd,
-                                              double* genCum, char* genRemoved,
+                                              double* genCum, char* genRemoved, double* genFactorWork,
                                               double* target, char* switched, char* dsResidual, int dbgTrace) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
@@ -3553,6 +3562,8 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         for (int g = 0; g < ngen; g++) {                     // fresh list, fresh cumulative deltas
             genCum[(size_t) s * ngen + g] = 0.0;
             genRemoved[(size_t) s * ngen + g] = 0;
+            genFactorWork[(size_t) s * ngen + g] =
+                    dsMode == 1 ? (dirUp ? dgMarginUp[g] : dgMarginDown[g]) : dgFactor[g];
         }
         for (int iter = 0; iter < ngen && fabs(rem) > residueEps; iter++) {
             double fsumActive = 0.0;                         // normalizeParticipationFactors, over the remaining
@@ -3562,7 +3573,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                         || (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i])) {
                     continue;
                 }
-                fsumActive += dsMode == 1 ? (dirUp ? dgMarginUp[g] : dgMarginDown[g]) : dgFactor[g];
+                fsumActive += genFactorWork[(size_t) s * ngen + g];
             }
             // The bus that lost a generator stays on the AGGREGATE treatment: the override channel
             // carries {factor, base, headroom, footroom} deltas for the bus, not the identity of the
@@ -3595,9 +3606,11 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                         || (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i])) {
                     continue;
                 }
-                double f = dsMode == 1 ? (dirUp ? dgMarginUp[g] : dgMarginDown[g]) : dgFactor[g];
+                // normalizeParticipationFactors: divide the STORED factor, then use it.
+                double f = genFactorWork[(size_t) s * ngen + g] / fsumActive;
+                genFactorWork[(size_t) s * ngen + g] = f;
                 double cum = genCum[(size_t) s * ngen + g];
-                double newCum = cum + rem * (f / fsumActive);
+                double newCum = cum + rem * f;
                 // OLF removes an element only on a STRICT overshoot: one that lands exactly on its
                 // limit stays in the list another iteration, where it takes weight and moves nothing.
                 if (rem > 0 && newCum > dgMaxDelta[g]) {
@@ -3611,6 +3624,11 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                     genCum[(size_t) s * ngen + g] = newCum;
                     done += newCum - cum;
                     changed = true;
+                }
+                if (dbgTrace && s == 0 && genRemoved[(size_t) s * ngen + g]
+                        && (newCum == dgMaxDelta[g] || newCum == dgMinDelta[g])) {
+                    printf("[DS-SAT] iter=%d gen=%d newCum=%.9f maxD=%.9f minD=%.9f\n",
+                           iter, g, newCum, dgMaxDelta[g], dgMinDelta[g]);
                 }
             }
             if (ovActive) {
@@ -4026,12 +4044,21 @@ struct BatchSolverContext {
     // it strictly OVERSHOOTS, so one that lands exactly on its limit stays in the normalization for
     // another iteration — where it absorbs weight and moves nothing.
     DeviceBuf dGenCum, dGenRemoved;
+    // The WORKING factors, normalized IN PLACE each iteration exactly as OLF's
+    // normalizeParticipationFactors mutates ParticipatingElement.factor: by iteration k a survivor's
+    // factor has been divided k times. f/Sigma_survivors(raw) is the same number algebraically and a
+    // different one in floating point, which is enough to flip a clamp decision at a knife-edge.
+    DeviceBuf dGenFactorWork;
     // Per (scenario, participant) chars, 1 = this participant is in ANOTHER synchronous component in
     // this scenario. OLF distributes over getSynchronousNetworks().getFirst(), so an islanded
     // participant is simply not a participant: its share must not be computed, and — decisively — the
     // set it is renormalized against must shrink with it. Empty = every participant participates.
     int nDsIslanded = 0;
     DeviceBuf dDsIslanded;
+    // Same idea for the reactive-limits pass: per (scenario, controller), 1 = its bus is in another
+    // synchronous component in this scenario, so the loop must not look at it.
+    int nRlIslanded = 0;
+    DeviceBuf dRlIslanded;
     DeviceBuf dDsResidual;                                   // nS chars: waterfill left an out-of-tolerance residual                                   // per scenario (nS): frozen slack-retained mismatch share
     bool dsSlackOnly = false;                                // DS enabled with the SLACK generator as the only participant:
     DeviceBuf dDsSlackAbsorbed;                              // nS doubles — mismatch absorbed into the slack's own target so far
@@ -5118,7 +5145,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dgMaxDelta.as<double>(), ctx->dgMinDelta.as<double>(),
                     ctx->dgMarginUp.as<double>(), ctx->dgMarginDown.as<double>(),
                     ctx->dBusGenStart.as<int>(), ctx->dBusGenEnd.as<int>(),
-                    ctx->dGenCum.as<double>(), ctx->dGenRemoved.as<char>(),
+                    ctx->dGenCum.as<double>(), ctx->dGenRemoved.as<char>(), ctx->dGenFactorWork.as<double>(),
                     ctx->dTarget.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>(),
                     getenv("OLF_GPU_DS_DEBUG") != nullptr ? 1 : 0);
         }
@@ -5143,7 +5170,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dRowSlope.as<double>(), ctx->dRlSavedTarget.as<double>(), ctx->ncv > 0 ? 1 : 0,
                     ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
                     ctx->nRlRemote > 0 ? ctx->dRlCmpVrow.as<int>() : nullptr,
-                    ctx->dRlSvcBmin.as<double>(), ctx->dRlSvcBmax.as<double>(), ctx->dRlV2Base.as<double>());
+                    ctx->dRlSvcBmin.as<double>(), ctx->dRlSvcBmax.as<double>(), ctx->dRlV2Base.as<double>(),
+                    ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr);
             if (ctx->nRlRemote > 0 && ctx->nDqMembers > 0) {
                 // keep the survivors' DISTR_Q row targets in step with the pin states (plan-B3)
                 updateDistrQTargetsBatch<<<grid(ctx->nDqMembers * nS), BLOCK, 0, ctx->stream>>>(
@@ -6360,8 +6388,38 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     upI(jBusGenStart, ctx->dBusGenStart);
     upI(jBusGenEnd, ctx->dBusGenEnd);
     ctx->dGenCum.alloc((size_t) ctx->nScenarios * ngen * sizeof(double));
+    ctx->dGenFactorWork.alloc((size_t) ctx->nScenarios * ngen * sizeof(double));
     ctx->dGenRemoved.alloc((size_t) ctx->nScenarios * ngen * sizeof(char));
     ctx->ngen = ngen;
+}
+
+// Reactive-limits controllers STRANDED in another synchronous component: install (or clear, with
+// null) the per-scenario mask as {slot, controller} pairs.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlIslanded(
+        JNIEnv* env, jclass, jlong handle, jintArray jPairs) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jPairs == nullptr || env->GetArrayLength(jPairs) == 0 || ctx->nrl == 0) {
+        ctx->nRlIslanded = 0;
+        return;
+    }
+    size_t maskLen = static_cast<size_t>(ctx->nScenarios) * ctx->nrl;
+    std::vector<char> mask(maskLen, 0);
+    int nPairs = env->GetArrayLength(jPairs) / 2;
+    jint* pairs = env->GetIntArrayElements(jPairs, nullptr);
+    for (int k = 0; k < nPairs; k++) {
+        int s = pairs[2 * k];
+        int i = pairs[2 * k + 1];
+        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nrl) {
+            mask[(size_t) s * ctx->nrl + i] = 1;
+        }
+    }
+    env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
+    ctx->dRlIslanded.upload(mask.data(), maskLen);
+    ctx->nRlIslanded = nPairs;
 }
 
 // Distributed-slack participants STRANDED in another synchronous component: install (or clear, with

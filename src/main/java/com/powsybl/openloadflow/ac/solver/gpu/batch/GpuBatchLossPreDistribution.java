@@ -109,13 +109,19 @@ final class GpuBatchLossPreDistribution {
         if (ngen > 0 && ovBus < 0) {
             double[] genCum = new double[ngen];
             boolean[] removed = new boolean[ngen];
+            // normalizeParticipationFactors mutates the stored factor in place; mirror that, or the
+            // seed takes a different floating-point path from the kernel it is meant to match.
+            double[] fWork = new double[ngen];
+            for (int g = 0; g < ngen; g++) {
+                fWork[g] = genFactor(gpuData, dirUp, g);
+            }
             for (int iter = 0; iter < ngen && Math.abs(rem) > P_RESIDUE_EPS; iter++) {
                 double fsumActive = 0.0;
                 for (int g = 0; g < ngen; g++) {
                     if (removed[g] || islanded != null && islanded[gpuData.dgBus()[g]]) {
                         continue;
                     }
-                    fsumActive += genFactor(gpuData, dirUp, g);
+                    fsumActive += fWork[g];
                 }
                 if (fsumActive <= 0.0) {
                     break;
@@ -125,7 +131,8 @@ final class GpuBatchLossPreDistribution {
                     if (removed[g] || islanded != null && islanded[gpuData.dgBus()[g]]) {
                         continue;
                     }
-                    double newCum = genCum[g] + rem * (genFactor(gpuData, dirUp, g) / fsumActive);
+                    fWork[g] /= fsumActive;
+                    double newCum = genCum[g] + rem * fWork[g];
                     // OLF removes on a STRICT overshoot only.
                     if (rem > 0 && newCum > gpuData.dgMaxDelta()[g]) {
                         newCum = gpuData.dgMaxDelta()[g];

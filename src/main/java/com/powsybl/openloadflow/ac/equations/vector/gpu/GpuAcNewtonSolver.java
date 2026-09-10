@@ -351,6 +351,16 @@ public final class GpuAcNewtonSolver {
     public static native void setBatchDsIslanded(long handle, int[] slotParticipantPairs);
 
     /**
+     * Install (or clear, with null) the per-scenario reactive-limits controllers a fragmenting
+     * contingency strands in another synchronous component, as {@code {slot, controller}} pairs.
+     *
+     * <p>OLF disables those buses, so its ReactiveLimits loop never sees them. The device holds their
+     * rows frozen at a flat 1&#8736;0, so the q it would read is a placeholder — switching on it pins a
+     * PV bus OLF leaves alone and perturbs the main component through the controller's group.
+     */
+    public static native void setBatchRlIslanded(long handle, int[] slotControllerPairs);
+
+    /**
      * Install the PER-GENERATOR distributed-slack participants: the factors and limits OLF's
      * water-fill actually saturates on, grouped by bus ({@code busGenStart}/{@code busGenEnd} slice
      * the generator arrays, so a bus's row value is the sum over its slice).

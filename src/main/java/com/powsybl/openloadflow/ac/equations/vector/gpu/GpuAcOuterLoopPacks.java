@@ -387,6 +387,11 @@ public final class GpuAcOuterLoopPacks {
                         addSvcQuadratic(bus, rlSvcBmin, rlSvcBmax, rlV2Base);
                     }
                     rlVrow.add(vCol[bn]);
+                    if (System.getenv("OLF_GPU_RL_TRACE") != null) {
+                        // entry -> bus, so a device pin can be named and lined up against OLF's RL_SWITCH
+                        System.err.println("GPU_RL_ENTRY idx=" + (rlVrow.size() - 1) + " vRow=" + vCol[bn]
+                                + " bus=" + bus.getId());
+                    }
                     rlMinQ.add(minQ);
                     rlMaxQ.add(maxQ);
                     rlLoadQ.add(bus.getLoadTargetQ());
@@ -538,6 +543,12 @@ public final class GpuAcOuterLoopPacks {
                         maxTp = Math.min(maxTp, 0);
                     } else {
                         minTp = Math.max(minTp, 0);
+                    }
+                    if (System.getenv("OLF_GPU_DS_GEN_TRACE") != null) {
+                        System.err.println("GPU_DS_GEN idx=" + dgFactorRaw.size() + " bus=" + bus.getId()
+                                + " gen=" + g.getId() + " factor=" + gf
+                                + " targetP=" + g.getTargetP()
+                                + " maxTargetP=" + g.getMaxTargetP() + " minTargetP=" + g.getMinTargetP());
                     }
                     dgBus.add(dsPhiRow.size() - 1);
                     dgFactorRaw.add(gf);

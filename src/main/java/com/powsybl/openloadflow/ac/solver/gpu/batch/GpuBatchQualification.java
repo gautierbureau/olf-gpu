@@ -196,18 +196,41 @@ final class GpuBatchQualification {
      *  assignment, which the fixed batch pattern cannot represent (measured 0.47 kV wrong on the
      *  tr1 outage of createWithGeneratorRemoteControl) — route to CPU, exactly like the DISTR_RHO
      *  controller-outage rejection. */
+    /**
+     * Whether the island a contingency creates SPLITS something the batched path cannot express: an
+     * HVDC endpoint (the CPU zeroes the pair's station targets via {@code hvdcsWithoutPower} —
+     * unmodeled), or a remote generator-voltage-control group with buses on BOTH sides of the split.
+     *
+     * <p>A group that goes into the island WHOLE is not a split and batches fine: {@link
+     * #islandedFrozen} pins the BUS_V and BUS_PHI row of every islanded bus to the clean identity
+     * state, so the whole group's equations — the pilot's target-V row and every controller's DISTR_Q
+     * row — leave the solved system together. Nothing survives that needs its reactive keys
+     * renormalized, and no pilot is left without controllers. Testing only "is this bus in a remote
+     * group" rejected those too, which is what kept the last 2 of 2000 rte6515 branch contingencies
+     * off the GPU: LINE-3938-646 islands {@code [GEN-646_GSU_VL_0, VL-646_0]}, a controller and its
+     * pilot, and LINE-1525-590 islands {@code [VL-1522_1, VL-1522_0, VL-1525_0]}, both controllers
+     * and their pilot.
+     */
     private static boolean islandsRemoteVcMember(EquationSystem<AcVariableType, AcEquationType> es,
                                                  List<LfBus> islandedBuses) {
+        java.util.Set<LfBus> islanded = new java.util.HashSet<>(islandedBuses);
         for (LfBus bus : islandedBuses) {
             if (!bus.getHvdcs().isEmpty()) {
                 return true;                                 // islanded HVDC endpoint: the CPU zeroes the pair's
             }                                                // station targets (hvdcsWithoutPower) — unmodeled, CPU
-            if (es.getEquation(bus.getNum(), AcEquationType.DISTR_Q).isPresent()
-                    || bus.getGeneratorVoltageControl()
-                            .map(vc -> vc.getControlledBus() != bus
-                                    || vc.getControllerElements().stream().anyMatch(cb -> cb != bus))
-                            .orElse(false)) {
-                return true;
+            var vc = bus.getGeneratorVoltageControl().orElse(null);
+            boolean remoteGroupMember = es.getEquation(bus.getNum(), AcEquationType.DISTR_Q).isPresent()
+                    || vc != null && (vc.getControlledBus() != bus
+                            || vc.getControllerElements().stream().anyMatch(cb -> cb != bus));
+            if (!remoteGroupMember) {
+                continue;
+            }
+            // A DISTR_Q row whose control handle is not reachable from the bus cannot be PROVEN
+            // wholly islanded, so it keeps the old conservative answer.
+            if (vc == null
+                    || !islanded.contains(vc.getControlledBus())
+                    || !islanded.containsAll(vc.getControllerElements())) {
+                return true;                                 // the island splits the group — CPU
             }
         }
         return false;

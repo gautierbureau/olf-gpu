@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.sa.gpu;
 
 import com.google.common.base.Stopwatch;
 import com.powsybl.action.Action;
+import com.powsybl.commons.PowsyblException;
 import com.powsybl.commons.report.ReportNode;
 import com.powsybl.contingency.Contingency;
 import com.powsybl.contingency.strategy.OperatorStrategy;
@@ -37,6 +38,7 @@ import com.powsybl.openloadflow.network.impl.PropagatedContingency;
 import com.powsybl.openloadflow.sa.AbstractNetworkResult;
 import com.powsybl.openloadflow.sa.AcSecurityAnalysis;
 import com.powsybl.openloadflow.sa.ContingencyActivePowerLossDistribution;
+import com.powsybl.openloadflow.sa.LimitReductionManager;
 import com.powsybl.openloadflow.sa.LimitViolationManager;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters;
 import com.powsybl.openloadflow.sa.PostContingencyNetworkResult;
@@ -167,6 +169,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         /** The run's security-analysis parameters — needed at precompute time because the SA's own
          *  CONTINGENCY parameter override has not been applied yet (see afterPreContingencySimulation). */
         private SecurityAnalysisParameters securityAnalysisParameters;
+        /** The run's flattened limit thresholds, built on first use and valid for the whole run
+         *  (see GpuLimitTable); null when the accelerated detection is off. */
+        private GpuLimitScanner limitScanner;
     }
 
     private final ThreadLocal<RunState> runState = ThreadLocal.withInitial(RunState::new);
@@ -291,6 +296,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 PHASE_NS.forEach((k, v) ->
                         System.err.printf("SA_PHASE_TIME  %-40s %6d ms (cumulative)%n", k, v.sum() / 1_000_000));
             }
+            if (System.getenv("OLF_GPU_VIOL_CROSSCHECK") != null) {
+                System.err.println("VIOL_CROSSCHECK contingencies compared against the stock detection: "
+                        + CROSSCHECKED.sum());
+            }
         }
     }
 
@@ -311,6 +320,79 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
 
     private static boolean gpuBaseLoadFlowEnabled() {
         return Boolean.parseBoolean(System.getProperty(GPU_BASE_LOADFLOW_PROPERTY, "true"));
+    }
+
+    /** System property: detect post-contingency violations by scanning the run's limits as flat
+     *  arrays ({@link GpuLimitTable}) instead of walking OLF's per-call suppliers and lists
+     *  (default on). Set to false for the A/B — the two must report the SAME violations, since the
+     *  scan makes the same decisions on the same values. */
+    public static final String GPU_TABLE_VIOLATIONS_PROPERTY = "olf.gpu.sa.tableViolations";
+
+    /** How many contingencies the cross-check actually compared — printed at the end of the run, so
+     *  "no failures" cannot be confused with "never ran". */
+    private static final java.util.concurrent.atomic.LongAdder CROSSCHECKED = new java.util.concurrent.atomic.LongAdder();
+
+    private static boolean tableViolationsEnabled() {
+        return Boolean.parseBoolean(System.getProperty(GPU_TABLE_VIOLATIONS_PROPERTY, "true"));
+    }
+
+    /**
+     * Detect the post-contingency violations of a device-solved contingency.
+     *
+     * <p>The scan is the largest block of GPU security analysis wall time that is not a device solve
+     * (rte6515 at 2000 contingencies, 1 thread: 10.6 s of 39.3 s), and 98.4% of it is the walk
+     * rather than the reporting — so it is worth doing over flat arrays even before it moves to the
+     * device. The table is built once per run and cached on the partition's RunState.
+     */
+    private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitReduction> limitReductions,
+                                  LimitViolationManager reference, SecurityAnalysisParameters saParameters, String contingencyId) {
+        if (!tableViolationsEnabled()) {
+            manager.detectViolations(network);
+            return;
+        }
+        RunState rs = runState.get();
+        if (rs.limitScanner == null) {
+            rs.limitScanner = new GpuLimitScanner(GpuLimitTable.build(network,
+                    LimitReductionManager.create(limitReductions)));
+        }
+        rs.limitScanner.detectViolations(network, manager);
+        if (System.getenv("OLF_GPU_VIOL_CROSSCHECK") != null) {
+            crossCheck(network, manager, limitReductions, reference, saParameters, contingencyId);
+        }
+    }
+
+    /** {@code OLF_GPU_VIOL_CROSSCHECK=1}: run the stock detection on the SAME state and demand the
+     *  same violations, field for field and in the same order. A toy network cannot exercise the
+     *  cases that make the flattening delicate — three-winding legs, tie lines, several operational
+     *  limits groups, temporary limits — so the check runs on whatever network the caller is running,
+     *  and fails loudly on the first contingency that disagrees. */
+    private static void crossCheck(LfNetwork network, LimitViolationManager manager, List<LimitReduction> limitReductions,
+                                   LimitViolationManager reference, SecurityAnalysisParameters saParameters, String contingencyId) {
+        CROSSCHECKED.increment();
+        var stock = new LimitViolationManager(reference, limitReductions, saParameters.getIncreasedViolationsParameters());
+        stock.detectViolations(network);
+        List<com.powsybl.contingency.violations.LimitViolation> fromTable = manager.getLimitViolations();
+        List<com.powsybl.contingency.violations.LimitViolation> fromStock = stock.getLimitViolations();
+        if (fromTable.size() != fromStock.size()) {
+            throw new PowsyblException("GPU violation table: " + contingencyId + " reported " + fromTable.size()
+                    + " violations, the stock detection " + fromStock.size());
+        }
+        for (int i = 0; i < fromTable.size(); i++) {
+            String a = describe(fromTable.get(i));
+            String b = describe(fromStock.get(i));
+            if (!a.equals(b)) {
+                throw new PowsyblException("GPU violation table: " + contingencyId + " violation " + i
+                        + " is " + a + ", the stock detection says " + b);
+            }
+        }
+    }
+
+    /** Every reported field of a violation, so the cross-check catches a wrong scale or a wrong
+     *  temporary limit — not only a wrong verdict. */
+    private static String describe(com.powsybl.contingency.violations.LimitViolation v) {
+        return v.getSubjectId() + "|" + v.getSide() + "|" + v.getLimitType() + "|" + v.getOperationalLimitsGroupId()
+                + "|" + v.getLimitName() + "|" + v.getAcceptableDuration() + "|" + v.getLimit()
+                + "|" + v.getLimitReduction() + "|" + v.getValue();
     }
 
     @Override
@@ -537,7 +619,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         long tDet = System.nanoTime();
         PHASE_NS.computeIfAbsent("   networkResult.update()", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(tDet - tRes);
-        postContingencyLimitViolationManager.detectViolations(network);
+        detectViolations(network, postContingencyLimitViolationManager, limitReductions,
+                preContingencyLimitViolationManager, securityAnalysisParameters, contingency.getId());
         PHASE_NS.computeIfAbsent("   detectViolations()", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tDet);
         PHASE_NS.computeIfAbsent("  result build + violation detection", k -> new java.util.concurrent.atomic.LongAdder())

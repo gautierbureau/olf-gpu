@@ -200,6 +200,14 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
             System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_DISABLE_BATCH_PROPERTY);
             System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_SEQUENTIAL_LOADFLOW_PROPERTY);
         }
+        // OLF_GPU_CENSUS_NO_TABLE_VIOL=1: detect post-contingency violations through OLF's own walk
+        // instead of the flattened limit table — the A/B arm for the accelerated detection, which
+        // must report exactly the same violation set.
+        if ("1".equals(System.getenv("OLF_GPU_CENSUS_NO_TABLE_VIOL"))) {
+            System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_TABLE_VIOLATIONS_PROPERTY, "false");
+        } else {
+            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_TABLE_VIOLATIONS_PROPERTY);
+        }
         String chunk = System.getenv("OLF_GPU_CENSUS_CHUNK");
         if (chunk != null) {
             System.setProperty(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.MAX_BATCH_PROPERTY, chunk);

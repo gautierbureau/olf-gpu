@@ -1,7 +1,27 @@
 # On-device limit-violation detection — scope
 
-**Status**: scoped, not started. Written 2026-09-09 from measurements on rte6515_full, 2000
-branch contingencies, RTE production parameters.
+**Status**: step 1 (the flat table + a host scanner over it) LANDED 2026-09-10; the kernel itself is
+next. Written 2026-09-09, re-measured 2026-09-10 on rte6515_full, 2000 branch contingencies, RTE
+production parameters, DEVICE arm, 1 thread.
+
+## Step 1 landed: the table, scanned on the host
+
+The table this document called day 1 is built (`GpuLimitTable`) and scanned by `GpuLimitScanner`.
+A/B at 2000 contingencies, violation sets **identical (0 differing lines, 133134 violations each)**:
+
+| arm | wall | detectViolations |
+|---|---|---|
+| flat table (`olf.gpu.sa.tableViolations` on, default) | **36.1 s** | **6.9 s** |
+| OLF's own walk (property off) | 38.8 s | 10.8 s |
+
+So flattening alone took 36% off detection without touching the device — the walk through
+per-call suppliers and `List<LfLimitsGroup>` was more than a third of it. What remains (6.9 s) is
+evaluating the six per-branch quantities and comparing them, which is exactly what the kernel takes,
+and ~0.1 s of violation building, which stays on the host either way.
+
+Validated two ways: `GpuLimitTableTest` in the suite, and `OLF_GPU_VIOL_CROSSCHECK=1`, which runs
+BOTH detectors on every contingency of a census and compares field for field — 287 contingencies,
+19482 violations, zero disagreements.
 
 ## Why
 
@@ -75,6 +95,24 @@ x ~500 scenarios per chunk saturates on its own):
 **Host**: rebuild each record into a `LimitViolation` from its table entry and pass it through the
 existing `addLimitViolation`, which keeps the reference/increased-violations filtering against the
 pre-contingency manager unchanged. ~67 records per contingency instead of 54,000 comparisons.
+
+### Revised 2026-09-10: the device SCREENS, the host CONFIRMS
+
+The original design had the device emit the value it computed. That value would differ from the
+host's in the last bits (FMA contraction, a different `sin`/`cos`), and violations of an element that
+already violates at BASE are decided by a comparison with **zero tolerance** — so a few ulps there
+move real reported violations (see the knife-edge below). Two changes remove the exposure entirely:
+
+- the kernel compares against a **relaxed threshold** (`value > threshold * (1 - band)`), so it can
+  only ever emit MORE candidates than OLF would, never fewer;
+- it does **not** stop at the first exceeded limit of a group — it emits all of them, so the host is
+  free to reject the first;
+- the host, holding the exact values already (the network vector is updated for the result anyway),
+  re-tests each candidate with OLF's exact `>` and takes the first that confirms.
+
+The record then needs no value at all — an int per candidate. Correctness stops depending on device
+precision and depends only on the band being wider than the device-vs-host discrepancy, which is
+measurable (and a debug mode should report the observed maximum against the band).
 
 **Safety valve**: a bounded per-scenario record capacity with an overflow flag; a scenario that
 overflows falls back to the host `detectViolations`. Also the natural kill switch for the whole

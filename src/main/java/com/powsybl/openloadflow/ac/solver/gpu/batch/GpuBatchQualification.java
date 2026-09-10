@@ -180,27 +180,40 @@ final class GpuBatchQualification {
      *  assignment, which the fixed batch pattern cannot represent (measured 0.47 kV wrong on the
      *  tr1 outage of createWithGeneratorRemoteControl) — route to CPU, exactly like the DISTR_RHO
      *  controller-outage rejection. */
+    /** What an island does to the remote generator-voltage-control groups it touches. */
+    private enum VcSplit {
+        /** No remote group affected, or every group the island touches goes into it WHOLE. */
+        CONTAINED,
+        /** A group survives with FEWER controllers — batchable once its reactive keys are renormalized. */
+        RENORMALIZE,
+        /** The island kills a control outright (pilot gone with controllers left, or the last
+         *  controller gone with the pilot left), or touches an HVDC endpoint. Not modelled — CPU. */
+        UNMODELED
+    }
+
     /**
-     * Whether the island a contingency creates SPLITS something the batched path cannot express: an
-     * HVDC endpoint (the CPU zeroes the pair's station targets via {@code hvdcsWithoutPower} —
-     * unmodeled), or a remote generator-voltage-control group with buses on BOTH sides of the split.
+     * Classify the island, and collect into {@code lostControllers} the islanded controller buses
+     * whose group survives without them.
      *
-     * <p>A group that goes into the island WHOLE is not a split and batches fine: {@link
-     * #islandedFrozen} pins the BUS_V and BUS_PHI row of every islanded bus to the clean identity
-     * state, so the whole group's equations — the pilot's target-V row and every controller's DISTR_Q
-     * row — leave the solved system together. Nothing survives that needs its reactive keys
-     * renormalized, and no pilot is left without controllers. Testing only "is this bus in a remote
-     * group" rejected those too, which is what kept the last 2 of 2000 rte6515 branch contingencies
-     * off the GPU: LINE-3938-646 islands {@code [GEN-646_GSU_VL_0, VL-646_0]}, a controller and its
-     * pilot, and LINE-1525-590 islands {@code [VL-1522_1, VL-1522_0, VL-1525_0]}, both controllers
-     * and their pilot.
+     * <p>A group that goes into the island WHOLE is not a split: {@link #islandedFrozen} pins the
+     * BUS_V and BUS_PHI row of every islanded bus, so the pilot's target-V row and every
+     * controller's DISTR_Q row leave the solved system together.
+     *
+     * <p>A group that merely LOSES a controller is still solvable: OLF renormalizes the reactive
+     * keys over the enabled controllers, which is exactly what {@link #distrQWeightOverrides}
+     * replays for a lost generator — so the same channel carries it.
+     *
+     * <p>What is NOT modelled is a control that DIES: the pilot islanded while a controller
+     * survives, or the last controller islanded while the pilot survives. OLF then switches the
+     * survivors to PQ, which is a row-mode change this path does not express yet.
      */
-    private static boolean islandsRemoteVcMember(EquationSystem<AcVariableType, AcEquationType> es,
-                                                 List<LfBus> islandedBuses) {
+    private static VcSplit classifyVcSplit(EquationSystem<AcVariableType, AcEquationType> es,
+                                           List<LfBus> islandedBuses, List<LfBus> lostControllers) {
         java.util.Set<LfBus> islanded = new java.util.HashSet<>(islandedBuses);
+        VcSplit result = VcSplit.CONTAINED;
         for (LfBus bus : islandedBuses) {
             if (!bus.getHvdcs().isEmpty()) {
-                return true;                                 // islanded HVDC endpoint: the CPU zeroes the pair's
+                return VcSplit.UNMODELED;                    // islanded HVDC endpoint: the CPU zeroes the pair's
             }                                                // station targets (hvdcsWithoutPower) — unmodeled, CPU
             var vc = bus.getGeneratorVoltageControl().orElse(null);
             boolean remoteGroupMember = es.getEquation(bus.getNum(), AcEquationType.DISTR_Q).isPresent()
@@ -209,15 +222,23 @@ final class GpuBatchQualification {
             if (!remoteGroupMember) {
                 continue;
             }
-            // A DISTR_Q row whose control handle is not reachable from the bus cannot be PROVEN
-            // wholly islanded, so it keeps the old conservative answer.
-            if (vc == null
-                    || !islanded.contains(vc.getControlledBus())
-                    || !islanded.containsAll(vc.getControllerElements())) {
-                return true;                                 // the island splits the group — CPU
+            if (vc == null) {
+                return VcSplit.UNMODELED;                    // DISTR_Q row with no reachable control handle
             }
+            boolean pilotIslanded = islanded.contains(vc.getControlledBus());
+            List<LfBus> surviving = vc.getControllerElements().stream()
+                    .filter(cb -> !islanded.contains(cb))
+                    .toList();
+            if (pilotIslanded && surviving.isEmpty()) {
+                continue;                                    // the whole group left with the island
+            }
+            if (pilotIslanded || surviving.isEmpty()) {
+                return VcSplit.UNMODELED;                    // the control dies
+            }
+            lostControllers.add(bus);
+            result = VcSplit.RENORMALIZE;
         }
-        return false;
+        return result;
     }
 
     /** The renormalized DISTR_Q weights after losing {@code lost}: replay the CPU's
@@ -480,7 +501,10 @@ final class GpuBatchQualification {
                     }
                 }
                 if (!c.outagedBranches().isEmpty()) {        // COMBO: the branch part must also qualify
-                    if (islandsRemoteVcMember(es, q.islandedBuses())) {
+                    // COMBO (generator + branch): stay conservative — this path already carries the
+                    // generator outage's own DISTR_Q rediff, so a SECOND one from an islanded
+                    // controller would have to compose with it. Only a fully contained island batches.
+                    if (classifyVcSplit(es, q.islandedBuses(), new ArrayList<>()) != VcSplit.CONTAINED) {
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:GEN_ON_ISLAND");
                         continue;
                     }
@@ -545,9 +569,27 @@ final class GpuBatchQualification {
                     frozenTargetsByIndex[i] = NO_FROZEN_TARGETS;
                 }                                            // else: not a packed fixed shunt / DISTR_Q contributor → CPU
             } else {
-                if (islandsRemoteVcMember(es, q.islandedBuses())) {
+                List<LfBus> lostVcControllers = new ArrayList<>();
+                VcSplit vcSplit = classifyVcSplit(es, q.islandedBuses(), lostVcControllers);
+                if (vcSplit == VcSplit.UNMODELED) {
                     com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");
-                    continue;                                // DISTR_Q group member islanded — CPU
+                    continue;                                // the island kills a voltage control — CPU
+                }
+                if (vcSplit == VcSplit.RENORMALIZE) {
+                    // The group survives without its islanded controller(s). Renormalize its reactive
+                    // keys over the survivors through the SAME channel a generator outage uses: the
+                    // islanded bus's generators are gone from this synchronous component, which is
+                    // what distrQWeightOverrides replays.
+                    List<com.powsybl.openloadflow.network.LfGenerator> goneControllers = lostVcControllers.stream()
+                            .flatMap(b -> b.getGenerators().stream())
+                            .toList();
+                    double[][] vcOv = distrQWeightOverrides(es, gpuData, goneControllers);
+                    if (vcOv == null) {
+                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:DISTR_Q_WEIGHT_REDIFF");
+                        continue;
+                    }
+                    dqOvContribByIndex[i] = java.util.Arrays.stream(vcOv[0]).mapToInt(d -> (int) d).toArray();
+                    dqOvWByIndex[i] = vcOv[1];
                 }
                 double[][] drOv = distrRhoOverrides(es, gpuData, distrRhoControllers, c.outagedBranches());
                 if (drOv == null) {

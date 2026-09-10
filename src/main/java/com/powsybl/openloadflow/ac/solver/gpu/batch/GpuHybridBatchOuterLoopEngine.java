@@ -939,6 +939,10 @@ public final class GpuHybridBatchOuterLoopEngine {
         // events (BusState.restore alone triggers the q-limit, disabling-status and abs-variable ones per
         // bus), and a muted listener still costs a dispatch per event. Detaching means nothing dispatches.
         DirtyTracker tracker = new DirtyTracker(in.ctrlBuses(), in.gens(), loads, genVcs);
+        if (GpuBatchPhaseStats.ENABLED) {
+            System.err.println("HYBRID_LISTENERS " + in.network().getListeners().stream()
+                    .map(l -> l.getClass().getSimpleName()).toList());
+        }
         // CUMULATIVE per scenario, not per round: a scenario that moves bus B in one round and bus C in
         // the next still has B at its own value on the network, so its record must keep B too — otherwise
         // the next restore reverts B to base and the scenario silently loses it.

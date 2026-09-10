@@ -62,6 +62,8 @@ import java.util.Map;
  */
 public final class GpuHybridBatchOuterLoopEngine {
 
+    private static final int[] EMPTY_INT = new int[0];
+
     private static final org.slf4j.Logger LOGGER =
             org.slf4j.LoggerFactory.getLogger(GpuHybridBatchOuterLoopEngine.class);
 
@@ -560,6 +562,240 @@ public final class GpuHybridBatchOuterLoopEngine {
         }
     }
 
+    /**
+     * Which elements a scenario's outer-loop step actually mutated.
+     *
+     * <p>The engine used to save and restore ~7100 elements per scenario per round — every controller
+     * bus, every generator, every load, every generator voltage control — when a step touches ~80 of
+     * them (measured, {@code OLF_GPU_DIRTY_PROBE}). This records the touched ones so the swap between
+     * two scenarios costs the size of their dirty sets instead of the size of the network.
+     *
+     * <p>Bus GRANULARITY for anything a {@link HybridScenarioState} covers: {@code BusState} saves a bus
+     * together with its generators and loads, so a touched generator marks its bus dirty and the bus is
+     * saved and restored whole. Generators, loads and voltage controls are ALSO tracked in their own
+     * right, because the engine keeps network-wide arrays for them (a generator on a non-controller bus
+     * is moved by distributed slack and no BusState covers it).
+     *
+     * <p>MUTED during restore: several of the listener events (notably the load disabling-status one)
+     * fire while state is being put back, and recording those would mark everything dirty.
+     */
+    private static final class DirtyTracker extends com.powsybl.openloadflow.network.AbstractLfNetworkListener {
+
+        private final java.util.Map<LfBus, Integer> busIndex = new java.util.IdentityHashMap<>();
+        private final java.util.Map<LfGenerator, Integer> genIndex = new java.util.IdentityHashMap<>();
+        private final java.util.Map<com.powsybl.openloadflow.network.LfLoad, Integer> loadIndex = new java.util.IdentityHashMap<>();
+        private final java.util.Map<com.powsybl.openloadflow.network.GeneratorVoltageControl, Integer> vcIndex = new java.util.IdentityHashMap<>();
+        private final java.util.Map<com.powsybl.openloadflow.network.LfShunt, LfBus> shuntBus = new java.util.IdentityHashMap<>();
+        private final java.util.Map<LfGenerator, LfBus> genBus = new java.util.IdentityHashMap<>();
+
+        private final java.util.BitSet buses = new java.util.BitSet();
+        private final java.util.BitSet gens = new java.util.BitSet();
+        private final java.util.BitSet loads = new java.util.BitSet();
+        private final java.util.BitSet vcs = new java.util.BitSet();
+        private boolean recording;
+
+        DirtyTracker(List<LfBus> ctrlBuses, List<LfGenerator> allGens,
+                     List<com.powsybl.openloadflow.network.LfLoad> allLoads,
+                     List<com.powsybl.openloadflow.network.GeneratorVoltageControl> allVcs) {
+            for (int i = 0; i < ctrlBuses.size(); i++) {
+                LfBus bus = ctrlBuses.get(i);
+                busIndex.put(bus, i);
+                bus.getGenerators().forEach(g -> genBus.put(g, bus));
+                bus.getShunt().ifPresent(sh -> shuntBus.put(sh, bus));
+                bus.getControllerShunt().ifPresent(sh -> shuntBus.put(sh, bus));
+                bus.getSvcShunt().ifPresent(sh -> shuntBus.put(sh, bus));
+            }
+            for (int i = 0; i < allGens.size(); i++) {
+                genIndex.put(allGens.get(i), i);
+            }
+            for (int i = 0; i < allLoads.size(); i++) {
+                loadIndex.put(allLoads.get(i), i);
+            }
+            for (int i = 0; i < allVcs.size(); i++) {
+                vcIndex.put(allVcs.get(i), i);
+            }
+        }
+
+        void start() {
+            buses.clear();
+            gens.clear();
+            loads.clear();
+            vcs.clear();
+            recording = true;
+        }
+
+        void stop() {
+            recording = false;
+        }
+
+        java.util.BitSet accumulateBuses(java.util.BitSet into) {
+            return accumulate(into, buses);
+        }
+
+        java.util.BitSet accumulateGens(java.util.BitSet into) {
+            return accumulate(into, gens);
+        }
+
+        java.util.BitSet accumulateLoads(java.util.BitSet into) {
+            return accumulate(into, loads);
+        }
+
+        java.util.BitSet accumulateVcs(java.util.BitSet into) {
+            return accumulate(into, vcs);
+        }
+
+        private static java.util.BitSet accumulate(java.util.BitSet into, java.util.BitSet round) {
+            java.util.BitSet out = into == null ? new java.util.BitSet() : into;
+            out.or(round);
+            return out;
+        }
+
+        private void markBus(LfBus bus) {
+            if (recording) {
+                Integer i = busIndex.get(bus);
+                if (i != null) {
+                    buses.set(i);
+                }
+            }
+        }
+
+        private void markGenerator(LfGenerator g) {
+            if (recording) {
+                Integer i = genIndex.get(g);
+                if (i != null) {
+                    gens.set(i);
+                }
+                LfBus bus = genBus.get(g);
+                if (bus != null) {
+                    markBus(bus);
+                }
+            }
+        }
+
+        private void markLoad(com.powsybl.openloadflow.network.LfLoad load) {
+            if (recording) {
+                Integer i = loadIndex.get(load);
+                if (i != null) {
+                    loads.set(i);
+                }
+                markBus(load.getBus());
+            }
+        }
+
+        @Override
+        public void onGeneratorVoltageControlChange(LfBus b, boolean e) {
+            markBus(b);
+        }
+
+        @Override
+        public void onGeneratorReactivePowerControlChange(LfBus b, boolean e) {
+            markBus(b);
+        }
+
+        @Override
+        public void onGenerationReactivePowerTargetChange(LfBus b, double o, double nw) {
+            markBus(b);
+        }
+
+        @Override
+        public void onQLimitTypeChange(LfBus b, LfBus.QLimitType t) {
+            markBus(b);
+        }
+
+        @Override
+        public void onGenerationTargetQFrozenChange(LfBus b, boolean f) {
+            markBus(b);
+        }
+
+        @Override
+        public void onGenerationActivePowerTargetChange(LfGenerator g, double o, double nw) {
+            markGenerator(g);
+        }
+
+        @Override
+        public void onGeneratorControlTypeChange(LfGenerator g, LfGenerator.GeneratorControlType t) {
+            markGenerator(g);
+        }
+
+        @Override
+        public void onLoadActivePowerTargetChange(com.powsybl.openloadflow.network.LfLoad l, double o, double nw) {
+            markLoad(l);
+        }
+
+        @Override
+        public void onLoadReactivePowerTargetChange(com.powsybl.openloadflow.network.LfLoad l, double o, double nw) {
+            markLoad(l);
+        }
+
+        @Override
+        public void onLoadAbsVariableTargetPChange(com.powsybl.openloadflow.network.LfLoad l, double o, double nw) {
+            markLoad(l);
+        }
+
+        @Override
+        public void onLoadOriginalDisablingStatusChange(com.powsybl.openloadflow.network.LfLoad l) {
+            markLoad(l);
+        }
+
+        @Override
+        public void onShuntVoltageControlChange(com.powsybl.openloadflow.network.LfShunt sh, boolean e) {
+            markShunt(sh);
+        }
+
+        @Override
+        public void onShuntSusceptanceChange(com.powsybl.openloadflow.network.LfShunt sh, double b) {
+            markShunt(sh);
+        }
+
+        private void markShunt(com.powsybl.openloadflow.network.LfShunt sh) {
+            if (recording) {
+                LfBus bus = shuntBus.get(sh);
+                if (bus != null) {
+                    markBus(bus);
+                }
+            }
+        }
+
+        @Override
+        public void onGeneratorVoltageControlTargetChange(com.powsybl.openloadflow.network.GeneratorVoltageControl c, double t) {
+            if (recording) {
+                Integer i = vcIndex.get(c);
+                if (i != null) {
+                    vcs.set(i);
+                }
+            }
+        }
+
+        @Override
+        public void onDisableChange(com.powsybl.openloadflow.network.LfElement el, boolean d) {
+            if (recording) {
+                if (el instanceof LfBus b) {
+                    markBus(b);
+                } else if (el instanceof LfGenerator g) {
+                    markGenerator(g);
+                } else if (el instanceof com.powsybl.openloadflow.network.LfLoad l) {
+                    markLoad(l);
+                }
+            }
+        }
+    }
+
+    private static <T> List<T> subList(List<T> all, int[] indices) {
+        List<T> out = new ArrayList<>(indices.length);
+        for (int i : indices) {
+            out.add(all.get(i));
+        }
+        return out;
+    }
+
+    private static double[] valuesOf(int[] indices, java.util.function.IntToDoubleFunction get) {
+        double[] out = new double[indices.length];
+        for (int k = 0; k < indices.length; k++) {
+            out[k] = get.applyAsDouble(indices[k]);
+        }
+        return out;
+    }
+
     /** A device-side allocation failure, as the native layer reports it. */
     private static boolean isDeviceAllocationFailure(RuntimeException e) {
         String m = e.getMessage();
@@ -682,7 +918,6 @@ public final class GpuHybridBatchOuterLoopEngine {
         HybridScenarioState baseCompact = new HybridScenarioState(in.ctrlBuses(), in.hvdcs(), in.transformerBranches());
         List<LfBranch> networkDisabled = new ArrayList<>();
         HybridScenarioState[] snaps = new HybridScenarioState[nS];
-        double[][] genSnap = new double[nS][];
         // Load-based distributed slack (balanceType PROPORTIONAL_TO_[CONFORM_]LOAD) mutates LfLoad targetP — and
         // targetQ under loadPowerFactorConstant — across ARBITRARY buses, which the compact bus/branch snapshot
         // does not cover. Isolate them per scenario with an explicit flat array over ALL loads (parallel to the
@@ -697,9 +932,30 @@ public final class GpuHybridBatchOuterLoopEngine {
                 .filter(vc -> vc.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN)
                 .distinct().toList();
         double[] baseVcTarget = genVcs.stream().mapToDouble(com.powsybl.openloadflow.network.GeneratorVoltageControl::getTargetValue).toArray();
-        double[][] vcSnap = new double[nS][];
-        double[][] loadSnapP = new double[nS][];
-        double[][] loadSnapQ = new double[nS][];
+        // Dirty-tracking: a scenario's outer-loop step touches ~80 of the ~7100 elements the engine used
+        // to save and restore wholesale, so each scenario records only what it moved and the swap between
+        // two scenarios costs their dirty sets, not the network.
+        DirtyTracker tracker = new DirtyTracker(in.ctrlBuses(), in.gens(), loads, genVcs);
+        in.network().addListener(tracker);
+        // CUMULATIVE per scenario, not per round: a scenario that moves bus B in one round and bus C in
+        // the next still has B at its own value on the network, so its record must keep B too — otherwise
+        // the next restore reverts B to base and the scenario silently loses it.
+        java.util.BitSet[] busBits = new java.util.BitSet[nS];
+        java.util.BitSet[] genBits = new java.util.BitSet[nS];
+        java.util.BitSet[] loadBits = new java.util.BitSet[nS];
+        java.util.BitSet[] vcBits = new java.util.BitSet[nS];
+        int[][] dirtyBuses = new int[nS][];
+        int[][] dirtyGens = new int[nS][];
+        double[][] dirtyGenP = new double[nS][];
+        int[][] dirtyLoads = new int[nS][];
+        double[][] dirtyLoadP = new double[nS][];
+        double[][] dirtyLoadQ = new double[nS][];
+        int[][] dirtyVcs = new int[nS][];
+        double[][] dirtyVcTarget = new double[nS][];
+        int[] curBuses = EMPTY_INT;
+        int[] curGens = EMPTY_INT;
+        int[] curLoads = EMPTY_INT;
+        int[] curVcs = EMPTY_INT;
         int[][] rowMode = new int[nS][];
         // live-row -> base-row map per scenario (null = identity): a member outage that removes a
         // VARIABLE from the live es shrinks the layout; the outage set is fixed per scenario, and
@@ -750,24 +1006,39 @@ public final class GpuHybridBatchOuterLoopEngine {
             for (LfBranch b : networkDisabled) {
                 b.setDisabled(false);
             }
-            baseCompact.restore();
+            // revert only what the previous scenario moved (the listener is muted while restoring)
+            tracker.stop();
+            for (int i : curBuses) {
+                baseCompact.restoreBus(i);
+            }
+            baseCompact.restoreHvdcsAndBranches();
+            for (int i : curGens) {
+                in.gens().get(i).setTargetP(in.baseGenP()[i]);
+            }
+            for (int i : curLoads) {
+                loads.get(i).setTargetP(baseLoadP[i]);
+                loads.get(i).setTargetQ(baseLoadQ[i]);
+            }
+            for (int i : curVcs) {
+                genVcs.get(i).setTargetValue(baseVcTarget[i]);
+            }
+            curBuses = EMPTY_INT;
+            curGens = EMPTY_INT;
+            curLoads = EMPTY_INT;
+            curVcs = EMPTY_INT;
+            // initialTargetP is the distributed-slack anchor and is NOT tracked (no listener, and
+            // BusDcState restores it for a dirty bus) — re-anchor it for every generator, as before.
             for (int g = 0; g < in.gens().size(); g++) {
-                in.gens().get(g).setTargetP(in.baseGenP()[g]);
                 in.gens().get(g).setInitialTargetP(in.originalGenP()[g]);
-            }
-            for (int l = 0; l < loads.size(); l++) {
-                loads.get(l).setTargetP(baseLoadP[l]);
-                loads.get(l).setTargetQ(baseLoadQ[l]);
-            }
-            for (int v = 0; v < genVcs.size(); v++) {
-                genVcs.get(v).setTargetValue(baseVcTarget[v]);
             }
             for (LfBranch b : in.ctgs().get(s).outagedBranches()) {
                 b.setDisabled(true);
             }
             networkDisabled = in.ctgs().get(s).outagedBranches();
             liveToBase[s] = liveToBaseMap(in.es(), baseRowByVar, n);
+            tracker.start();
             GpuAcActivation act = bridges[s].initializeScenario(compactState(in.baseState(), liveToBase[s]));
+            tracker.stop();
             rowMode[s] = expandModes(act.rowMode(), liveToBase[s], n);
             scenTargets[s] = expandTargets(act.applyTargets(new AcTargetVector(in.network(), in.es()).getArray()),
                     liveToBase[s], in.baseState(), n);
@@ -796,11 +1067,24 @@ public final class GpuHybridBatchOuterLoopEngine {
             }
             scenDqW[s] = liveDqWeights(in.gpuData(), dqMemberBus);
             scenDrC[s] = liveDrCoefs(in.gpuData(), drKBranch, drJBranch);
-            snaps[s] = new HybridScenarioState(in.ctrlBuses(), in.hvdcs(), in.transformerBranches());
-            genSnap[s] = in.gens().stream().mapToDouble(LfGenerator::getTargetP).toArray();
-            loadSnapP[s] = loads.stream().mapToDouble(LfLoad::getTargetP).toArray();
-            loadSnapQ[s] = loads.stream().mapToDouble(LfLoad::getTargetQ).toArray();
-            vcSnap[s] = genVcs.stream().mapToDouble(com.powsybl.openloadflow.network.GeneratorVoltageControl::getTargetValue).toArray();
+            busBits[s] = tracker.accumulateBuses(busBits[s]);
+            genBits[s] = tracker.accumulateGens(genBits[s]);
+            loadBits[s] = tracker.accumulateLoads(loadBits[s]);
+            vcBits[s] = tracker.accumulateVcs(vcBits[s]);
+            dirtyBuses[s] = busBits[s].stream().toArray();
+            snaps[s] = new HybridScenarioState(subList(in.ctrlBuses(), dirtyBuses[s]),
+                    in.hvdcs(), in.transformerBranches());
+            dirtyGens[s] = genBits[s].stream().toArray();
+            dirtyGenP[s] = valuesOf(dirtyGens[s], i -> in.gens().get(i).getTargetP());
+            dirtyLoads[s] = loadBits[s].stream().toArray();
+            dirtyLoadP[s] = valuesOf(dirtyLoads[s], i -> loads.get(i).getTargetP());
+            dirtyLoadQ[s] = valuesOf(dirtyLoads[s], i -> loads.get(i).getTargetQ());
+            dirtyVcs[s] = vcBits[s].stream().toArray();
+            dirtyVcTarget[s] = valuesOf(dirtyVcs[s], i -> genVcs.get(i).getTargetValue());
+            curBuses = dirtyBuses[s];
+            curGens = dirtyGens[s];
+            curLoads = dirtyLoads[s];
+            curVcs = dirtyVcs[s];
             tJava += System.nanoTime() - tj0;
             nJavaCalls++;
         }
@@ -954,30 +1238,45 @@ public final class GpuHybridBatchOuterLoopEngine {
                 for (LfBranch b : networkDisabled) {
                     b.setDisabled(false);
                 }
+                // Revert exactly what the PREVIOUS scenario moved, then apply this one's dirty set. The
+                // listener is muted throughout: restoring fires its own events, and recording those would
+                // mark the whole network dirty.
+                tracker.stop();
+                for (int i : curBuses) {
+                    baseCompact.restoreBus(i);
+                }
+                for (int i : curGens) {
+                    in.gens().get(i).setTargetP(in.baseGenP()[i]);
+                }
+                for (int i : curLoads) {
+                    loads.get(i).setTargetP(baseLoadP[i]);
+                    loads.get(i).setTargetQ(baseLoadQ[i]);
+                }
+                for (int i : curVcs) {
+                    genVcs.get(i).setTargetValue(baseVcTarget[i]);
+                }
                 if (snaps[s] != null) {
-                    snaps[s].restore();
-                    for (int g = 0; g < in.gens().size(); g++) {
-                        in.gens().get(g).setTargetP(genSnap[s][g]);
+                    snaps[s].restore();                      // this scenario's dirty buses + HVDCs + branches
+                    for (int k = 0; k < dirtyGens[s].length; k++) {
+                        in.gens().get(dirtyGens[s][k]).setTargetP(dirtyGenP[s][k]);
                     }
-                    for (int l = 0; l < loads.size(); l++) {
-                        loads.get(l).setTargetP(loadSnapP[s][l]);
-                        loads.get(l).setTargetQ(loadSnapQ[s][l]);
+                    for (int k = 0; k < dirtyLoads[s].length; k++) {
+                        loads.get(dirtyLoads[s][k]).setTargetP(dirtyLoadP[s][k]);
+                        loads.get(dirtyLoads[s][k]).setTargetQ(dirtyLoadQ[s][k]);
                     }
-                    for (int v = 0; v < genVcs.size(); v++) {
-                        genVcs.get(v).setTargetValue(vcSnap[s][v]);
+                    for (int k = 0; k < dirtyVcs[s].length; k++) {
+                        genVcs.get(dirtyVcs[s][k]).setTargetValue(dirtyVcTarget[s][k]);
                     }
+                    curBuses = dirtyBuses[s];
+                    curGens = dirtyGens[s];
+                    curLoads = dirtyLoads[s];
+                    curVcs = dirtyVcs[s];
                 } else {
-                    baseCompact.restore();
-                    for (int g = 0; g < in.gens().size(); g++) {
-                        in.gens().get(g).setTargetP(in.baseGenP()[g]);
-                    }
-                    for (int l = 0; l < loads.size(); l++) {
-                        loads.get(l).setTargetP(baseLoadP[l]);
-                        loads.get(l).setTargetQ(baseLoadQ[l]);
-                    }
-                    for (int v = 0; v < genVcs.size(); v++) {
-                        genVcs.get(v).setTargetValue(baseVcTarget[v]);
-                    }
+                    baseCompact.restoreHvdcsAndBranches();   // buses/gens/loads are already back at base
+                    curBuses = EMPTY_INT;
+                    curGens = EMPTY_INT;
+                    curLoads = EMPTY_INT;
+                    curVcs = EMPTY_INT;
                 }
                 // anchor initialTargetP at the ORIGINAL generation for the distributed-slack cumulative accounting.
                 for (int g = 0; g < in.gens().size(); g++) {
@@ -996,7 +1295,9 @@ public final class GpuHybridBatchOuterLoopEngine {
                     DIRTY_PROBE.startScenario();
                 }
                 // load state -> OLF outer loops -> re-extract (state compacted to the live layout)
+                tracker.start();
                 GpuAcActivation act = bridges[s].applyOuterLoopStep(compactState(st, liveToBase[s]));
+                tracker.stop();
                 if (DIRTY_PROBE != null) {
                     DIRTY_PROBE.endScenario(in.ctrlBuses().size());
                 }
@@ -1061,13 +1362,26 @@ public final class GpuHybridBatchOuterLoopEngine {
                 // snapshot save-skip: only persist a scenario that continues to the next round.
                 if (!willRetire) {
                     long tsv0 = System.nanoTime();
-                    snaps[s] = new HybridScenarioState(in.ctrlBuses(), in.hvdcs(), in.transformerBranches());
+                    busBits[s] = tracker.accumulateBuses(busBits[s]);
+                    genBits[s] = tracker.accumulateGens(genBits[s]);
+                    loadBits[s] = tracker.accumulateLoads(loadBits[s]);
+                    vcBits[s] = tracker.accumulateVcs(vcBits[s]);
+                    dirtyBuses[s] = busBits[s].stream().toArray();
+                    snaps[s] = new HybridScenarioState(subList(in.ctrlBuses(), dirtyBuses[s]),
+                            in.hvdcs(), in.transformerBranches());
                     long tsv1 = System.nanoTime();
                     tSnapElem += tsv1 - tsv0;
-                    genSnap[s] = in.gens().stream().mapToDouble(LfGenerator::getTargetP).toArray();
-                    loadSnapP[s] = loads.stream().mapToDouble(LfLoad::getTargetP).toArray();
-                    loadSnapQ[s] = loads.stream().mapToDouble(LfLoad::getTargetQ).toArray();
-                    vcSnap[s] = genVcs.stream().mapToDouble(com.powsybl.openloadflow.network.GeneratorVoltageControl::getTargetValue).toArray();
+                    dirtyGens[s] = genBits[s].stream().toArray();
+                    dirtyGenP[s] = valuesOf(dirtyGens[s], i -> in.gens().get(i).getTargetP());
+                    dirtyLoads[s] = loadBits[s].stream().toArray();
+                    dirtyLoadP[s] = valuesOf(dirtyLoads[s], i -> loads.get(i).getTargetP());
+                    dirtyLoadQ[s] = valuesOf(dirtyLoads[s], i -> loads.get(i).getTargetQ());
+                    dirtyVcs[s] = vcBits[s].stream().toArray();
+                    dirtyVcTarget[s] = valuesOf(dirtyVcs[s], i -> genVcs.get(i).getTargetValue());
+                    curBuses = dirtyBuses[s];
+                    curGens = dirtyGens[s];
+                    curLoads = dirtyLoads[s];
+                    curVcs = dirtyVcs[s];
                     tSnapArr += System.nanoTime() - tsv1;
                     tSnap += System.nanoTime() - tsv0;
                 }
@@ -1078,12 +1392,27 @@ public final class GpuHybridBatchOuterLoopEngine {
         }
         GpuAcNewtonSolver.destroyBatchContext(handle);
         if (GpuBatchPhaseStats.ENABLED) {
+            long cumBuses = 0;
+            long cumOther = 0;
+            int counted = 0;
+            for (int s2 = 0; s2 < nS; s2++) {
+                if (busBits[s2] != null) {
+                    counted++;
+                    cumBuses += busBits[s2].cardinality();
+                    cumOther += genBits[s2].cardinality() + loadBits[s2].cardinality() + vcBits[s2].cardinality();
+                }
+            }
+            System.err.printf("HYBRID_DIRTY_CUM scenarios=%d avgDirtyBuses=%.1f of %d avgDirtyOther=%.1f%n",
+                    counted, counted == 0 ? 0 : cumBuses / (double) counted, in.ctrlBuses().size(),
+                    counted == 0 ? 0 : cumOther / (double) counted);
             System.err.printf("HYBRID_SNAP_SPLIT scenarios=%d elementState=%d ms targetArrays=%d ms "
                     + "| perSnapshot: ctrlBuses=%d hvdcs=%d transformers=%d gens=%d loads=%d genVcs=%d%n",
                     nS, tSnapElem / 1_000_000, tSnapArr / 1_000_000,
                     in.ctrlBuses().size(), in.hvdcs().size(), in.transformerBranches().size(),
                     in.gens().size(), loads.size(), genVcs.size());
         }
+
+        in.network().removeListener(tracker);            // per-chunk listener must not outlive the chunk
 
         // Hand the network back the way we found it. Every scenario iteration re-enables the PREVIOUS
         // scenario's outage at its START, so on exit the LAST scenario's branches are still disabled and

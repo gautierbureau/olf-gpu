@@ -63,6 +63,19 @@ public final class HybridScenarioState {
         this.branchStates = transformerBranches.stream().map(BranchState::save).toList();
     }
 
+    /** Restore ONE captured controller bus, by its index in the controllerBuses list this was built from.
+     *  Dirty-tracking restores a handful of buses instead of all of them. */
+    public void restoreBus(int index) {
+        busStates.get(index).restore();
+    }
+
+    /** Restore only the HVDC + transformer-branch part. Those lists are small (single digits here) and are
+     *  always restored whole; only the bus part is dirty-tracked. */
+    public void restoreHvdcsAndBranches() {
+        hvdcStates.forEach(HvdcState::restore);
+        branchStates.forEach(BranchState::restore);
+    }
+
     /** Restore the captured controller-bus + HVDC + transformer-branch state onto their live network elements. */
     public void restore() {
         busStates.forEach(BusState::restore);

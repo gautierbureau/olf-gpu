@@ -65,6 +65,20 @@
 // OLF_GPU_PHASE_TIME accounting: how much of a solveBatchContext call is device outer-loop passes
 // vs Newton iterations. A pass that re-solves is the expensive one; a pass that only re-checks is not.
 long long gOuterPasses = 0;
+// The outer loops the device driver can run, in OLF's configured order.
+enum DeviceLoopKind {
+    LOOP_DS = 0,             // DistributedSlack
+    LOOP_HVDC_FREEZE = 1,    // FreezingHvdcACEmulation
+    LOOP_HVDC_LIMITS = 2,    // AcHvdcAcEmulationLimits
+    LOOP_RL = 3              // ReactiveLimits (OLF runs it LAST, after the HVDC and monitoring loops)
+};
+// GpuBatchHvdcAcEmulation's status codes, shared with the host.
+constexpr int HV_LINEAR = 0;
+constexpr int HV_SAT_1_TO_2 = 1;
+constexpr int HV_SAT_2_TO_1 = 2;
+constexpr int HV_FROZEN = 3;
+constexpr int MAX_DEVICE_LOOPS = 8;
+
 long long gNewtonIters = 0;
 int gLastPassIters = 0;   // debug: inner-Newton steps taken by the pass just finished
 long long gSolvePasses = 0;
@@ -3169,6 +3183,87 @@ __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nEle
     return;
 }
 
+// OLF AbstractHvdcAcEmulationFlowEquationTerm.getAbsActivePowerWithLosses + HvdcUtils losses.
+__device__ inline double hvdcAbsActivePowerWithLosses(double pController, double lossController,
+                                                      double lossNonController, double r) {
+    double lineInputPower = (1.0 - lossController) * fabs(pController);
+    double losses = r * lineInputPower * lineInputPower;     // HvdcUtils.getHvdcLineLosses(p, 1, r)
+    return (1.0 - lossNonController) * (lineInputPower - losses);
+}
+
+/** OLF's FreezingHvdcACEmulation (mode 0) and AcHvdcAcEmulationLimits (mode 1) as one driver phase.
+ *  Transitions are applied INCREMENTALLY to the converter-bus target rows — target += newDelta -
+ *  appliedDelta — so they compose with whatever else already overrides that row (a lost load on a
+ *  converter bus, the DS carry) without rebuilding the whole override list, which is what the host
+ *  orchestrator had to do on every round. */
+__global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nElements, int hvOffset,
+                                         int mode,
+                                         const int* hvElem, const int* hvBus1Row, const int* hvBus2Row,
+                                         const double* hvIn, const char* hvCtgOut,
+                                         const double* x, double* target, char* disabled,
+                                         int* status, double* appliedD1, double* appliedD2,
+                                         const char* rlActive, char* switched) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nh * nScenarios) return;
+    int h = tid % nh;
+    int s = tid / nh;
+    if (!rlActive[s] || hvCtgOut[(size_t) s * nh + h]) return;    // outaged: the contingency owns that bit
+    const double* p = hvIn + (size_t) h * 9;                 // p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2
+    int st = status[(size_t) s * nh + h];
+    int next = st;
+    if (mode == 0) {                                         // FreezingHvdcACEmulation: unfreeze
+        if (st != HV_FROZEN) return;
+        next = HV_LINEAR;
+    } else {                                                 // AcHvdcAcEmulationLimits
+        size_t elemSlot = (size_t) s * nElements + hvElem[h];
+        if (st == HV_LINEAR && disabled[elemSlot]) return;
+        const double* xs = x + (size_t) s * n;
+        double ph1 = xs[hvBus1Row[h]];
+        double ph2 = xs[hvBus2Row[h]];
+        double pp1 = hvdc::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
+        double pp2 = hvdc::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
+        if (st == HV_LINEAR) {                               // OLF checkAcEmulationMode
+            if (pp1 >= 0) {
+                if (pp1 > p[2]) { next = HV_SAT_1_TO_2; }
+            } else if (pp2 > p[3]) {
+                next = HV_SAT_2_TO_1;
+            }
+        } else if (st == HV_SAT_1_TO_2 || st == HV_SAT_2_TO_1) {
+            if ((pp1 > 0 && pp1 < p[2]) || (pp2 > 0 && pp2 < p[3])) {
+                next = HV_LINEAR;
+            } else if (pp1 < 0 && st == HV_SAT_1_TO_2) {
+                next = HV_SAT_2_TO_1;
+            } else if (pp2 < 0 && st == HV_SAT_2_TO_1) {
+                next = HV_SAT_1_TO_2;
+            }
+        }
+    }
+    if (next == st) return;
+    double nd1 = 0.0;
+    double nd2 = 0.0;
+    size_t elemSlot = (size_t) s * nElements + hvElem[h];
+    if (next == HV_LINEAR) {
+        disabled[elemSlot] = 0;                              // re-enabled: its own equation terms carry the flow
+    } else {
+        disabled[elemSlot] = 1;
+        if (next == HV_SAT_1_TO_2) {
+            nd1 = -p[2];
+            nd2 = hvdcAbsActivePowerWithLosses(p[2], p[4], p[5], p[6]);
+        } else {
+            nd1 = hvdcAbsActivePowerWithLosses(p[3], p[5], p[4], p[6]);
+            nd2 = -p[3];
+        }
+    }
+    double want1 = nd1 - p[7];                               // composition: base - baseD + d
+    double want2 = nd2 - p[8];
+    target[(size_t) s * n + hvBus1Row[h]] += want1 - appliedD1[(size_t) s * nh + h];
+    target[(size_t) s * n + hvBus2Row[h]] += want2 - appliedD2[(size_t) s * nh + h];
+    appliedD1[(size_t) s * nh + h] = want1;
+    appliedD2[(size_t) s * nh + h] = want2;
+    status[(size_t) s * nh + h] = next;
+    switched[s] = 1;                                         // this outer loop is UNSTABLE for s
+}
+
 __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, int maxSwitch,
                                     const int* rlVrow, const double* rlMinQ, const double* rlMaxQ,
                                     const double* rlLoadQ, const double* rlVtarget, const double* qBuf,
@@ -4060,6 +4155,17 @@ struct BatchSolverContext {
     // synchronous component in this scenario, so the loop must not look at it.
     int nRlIslanded = 0;
     DeviceBuf dRlIslanded;
+    // HVDC AC-emulation outer loops (FreezingHvdcACEmulation + AcHvdcAcEmulationLimits) as DRIVER
+    // PHASES rather than host orchestrators. OLF runs both BETWEEN DistributedSlack and
+    // ReactiveLimits; run from the host after the whole solve they land after RL instead, which is
+    // what put the device's last DS check on a pre-pin state.
+    int nhv = 0;                                             // AC-emulation HVDCs in the loop tables
+    int hvLimitsActive = 0;                                  // AcHvdcAcEmulationLimits configured
+    DeviceBuf dHvElem, dHvBus1Row, dHvBus2Row;               // per hvdc
+    DeviceBuf dHvIn;                                         // per hvdc x9: p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2
+    DeviceBuf dHvCtgOut;                                     // per (scenario, hvdc): outaged BY the contingency
+    DeviceBuf dHvStatus;                                     // per (scenario, hvdc): LINEAR/SAT_1_2/SAT_2_1/FROZEN
+    DeviceBuf dHvAppliedD1, dHvAppliedD2;                    // the converter-row delta currently APPLIED
     DeviceBuf dDsResidual;                                   // nS chars: waterfill left an out-of-tolerance residual                                   // per scenario (nS): frozen slack-retained mismatch share
     bool dsSlackOnly = false;                                // DS enabled with the SLACK generator as the only participant:
     DeviceBuf dDsSlackAbsorbed;                              // nS doubles — mismatch absorbed into the slack's own target so far
@@ -4638,7 +4744,35 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // engine stabilizes them in that order. Match it: phase 0 = distributed slack, phase 1 = reactive limits.
     // (Switching PV->PQ before the slack is balanced leaves a large active imbalance that the undamped device
     // Newton diverges on — DS must stabilize first.)
-    int phase = (ctx->nds > 0 || ctx->dsSlackOnly) ? 0 : 1;  // start with distributed slack if present, else reactive limits
+    // The outer loops this solve drives, IN OLF'S CONFIGURED ORDER. OLF's engine
+    // (AcloadFlowEngine.runOuterLoops) walks its configured list in order, drives each loop to
+    // STABLE — re-solving after every unstable check — then moves to the next, restarts from the
+    // top, and stops when a full sweep changes nothing. The driver below already has exactly those
+    // semantics; what it lacked was the LIST: it hard-coded two loops, so every other loop had to be
+    // bolted on as a host orchestrator running AFTER the whole solve, landing out of order. Naming
+    // the order explicitly is what lets the remaining loops move into their proper slot.
+    //
+    // OLF's contingency order: DistributedSlack, FreezingHvdcACEmulation, AcHvdcAcEmulationLimits,
+    // VoltageMonitoring, ReactiveLimits. Only the two ends are in the kernel today; the middle three
+    // are still host orchestrators, which is the remaining infidelity.
+    int loopOrder[MAX_DEVICE_LOOPS];
+    int nLoops = 0;
+    if (ctx->nds > 0 || ctx->dsSlackOnly) {
+        loopOrder[nLoops++] = LOOP_DS;
+    }
+    if (ctx->nhv > 0) {
+        loopOrder[nLoops++] = LOOP_HVDC_FREEZE;              // OLF: FreezingHvdcACEmulation
+        if (ctx->hvLimitsActive) {
+            loopOrder[nLoops++] = LOOP_HVDC_LIMITS;          // OLF: AcHvdcAcEmulationLimits
+        }
+    }
+    if (ctx->nrl > 0) {
+        loopOrder[nLoops++] = LOOP_RL;
+    }
+    if (nLoops == 0) {
+        loopOrder[nLoops++] = LOOP_RL;                       // nothing to drive: the old code's phase-1 fallback
+    }
+    int loopIdx = 0;
     bool seqChanged = false;                                 // did any outer loop re-solve during the current RL->DS sequence
     std::vector<int> prodIters(nS, 0);                       // PER-SCENARIO productive outer iterations: OLF's
                                                              // maxOuterLoopIterations is a per-RUN budget — a global
@@ -5114,9 +5248,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitched.p, 0, nS * sizeof(char), ctx->stream));
     // Apply ONLY the current phase's outer loop this pass (sequential, like OLF) — never both at once.
-    bool inDsPhase = (phase == 0);
+    bool inDsPhase = (loopOrder[loopIdx] == LOOP_DS);
     if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
-        std::fprintf(stderr, "BATCH_TRACE pass done: outer=%d phase=%d (0=DS,1=RL)\n", outer, phase);
+        std::fprintf(stderr, "BATCH_TRACE pass done: outer=%d loop=%d/%d kind=%s\n", outer, loopIdx, nLoops,
+                     loopOrder[loopIdx] == LOOP_DS ? "DistributedSlack"
+                     : loopOrder[loopIdx] == LOOP_HVDC_FREEZE ? "FreezingHvdcACEmulation"
+                     : loopOrder[loopIdx] == LOOP_HVDC_LIMITS ? "AcHvdcAcEmulationLimits" : "ReactiveLimits");
     }
     if (inDsPhase && getenv("OLF_GPU_DS_DEBUG") && nS > 0) {
         // Is scenario 0 actually CONVERGED at the moment the DS loop reads its mismatch? OLF checks
@@ -5133,7 +5270,17 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         std::fprintf(stderr, "[DS-CONV] outer=%d innerNewtonIters=%d ||F||2=%.9e ||F||inf=%.9e\n",
                      outer, gLastPassIters, std::sqrt(ssq), inf);
     }
-    if (inDsPhase) {                                       // distributed-slack outer loop: spread the slack mismatch
+    int loopKind = loopOrder[loopIdx];
+    if (loopKind == LOOP_HVDC_FREEZE || loopKind == LOOP_HVDC_LIMITS) {
+        hvdcAcEmulationLoopBatch<<<grid(ctx->nhv * nS), BLOCK, 0, ctx->stream>>>(
+                ctx->nhv, nS, n, ctx->nElements, ctx->hvOffset,
+                loopKind == LOOP_HVDC_FREEZE ? 0 : 1,
+                ctx->dHvElem.as<int>(), ctx->dHvBus1Row.as<int>(), ctx->dHvBus2Row.as<int>(),
+                ctx->dHvIn.as<double>(), ctx->dHvCtgOut.as<char>(),
+                ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dDisabled.as<char>(),
+                ctx->dHvStatus.as<int>(), ctx->dHvAppliedD1.as<double>(), ctx->dHvAppliedD2.as<double>(),
+                ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
+    } else if (inDsPhase) {                                // distributed-slack outer loop: spread the slack mismatch
         if (ctx->dsSlackOnly) {
             slackOnlyDsCheck<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->dsSlackPhiRow, ctx->dsSlackTargetP,
                     SLACK_DIST_TOL, ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
@@ -5178,7 +5325,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     getenv("OLF_GPU_DS_DEBUG") != nullptr ? 1 : 0);
         }
     } else {                                               // reactive-limits outer loop: switch PV->PQ over Q limit
-        if (ctx->nrl > 0 && !skipRlPhase) {                  // skipRlPhase: a monitoring interleave solve — the
+        if (loopKind == LOOP_RL && ctx->nrl > 0 && !skipRlPhase) {                  // skipRlPhase: a monitoring interleave solve — the
             if (ctx->ncv > 0) {                              // curve limits at the CURRENT (post-DS) targets
                 rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
                         ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
@@ -5325,14 +5472,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         seqChanged = true;
         solvePass = true;                                   // mutated targets/modes -> a real re-solve is due
     } else {                                               // this outer loop stabilized
-        if (inDsPhase && ctx->nrl > 0) {
-            phase = 1;                                      // distributed slack done -> move to reactive limits
-        } else {
+        if (++loopIdx >= nLoops) {                          // ...move to the next loop in OLF's order
             if (!seqChanged) {
-                break;                                      // a full DS->RL sequence re-solved nothing -> converged
+                break;                                      // a full sweep re-solved nothing -> converged
             }
             seqChanged = false;
-            phase = (ctx->nds > 0 || ctx->dsSlackOnly) ? 0 : 1;   // restart the sequence at the first loop (distributed slack)
+            loopIdx = 0;                                    // restart the sweep at the first loop
         }
         for (int s = 0; s < nS; s++) {
             active[s] = live[s];                            // re-CHECK every live scenario in the next phase...
@@ -6419,6 +6564,65 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->dGenFactorWork.alloc((size_t) ctx->nScenarios * ngen * sizeof(double));
     ctx->dGenRemoved.alloc((size_t) ctx->nScenarios * ngen * sizeof(char));
     ctx->ngen = ngen;
+}
+
+// The HVDC AC-emulation outer loops' tables + their per-scenario starting state (the statuses and
+// applied converter-row deltas the host's pre-solve freeze produced). Install to run those loops as
+// DRIVER PHASES in OLF's order; clear (null) to leave them to the host orchestrator.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchHvdcLoops(
+        JNIEnv* env, jclass, jlong handle, jintArray jElem, jintArray jBus1Row, jintArray jBus2Row,
+        jdoubleArray jIn, jbyteArray jCtgOut, jintArray jStatus,
+        jdoubleArray jAppliedD1, jdoubleArray jAppliedD2, jint limitsActive) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jElem == nullptr || env->GetArrayLength(jElem) == 0) {
+        ctx->nhv = 0;
+        return;
+    }
+    int nh = env->GetArrayLength(jElem);
+    auto upI = [&](jintArray a, DeviceBuf& b) {
+        jint* q = env->GetIntArrayElements(a, nullptr);
+        b.upload(q, (size_t) env->GetArrayLength(a) * sizeof(int));
+        env->ReleaseIntArrayElements(a, q, JNI_ABORT);
+    };
+    auto upD = [&](jdoubleArray a, DeviceBuf& b) {
+        jdouble* q = env->GetDoubleArrayElements(a, nullptr);
+        b.upload(q, (size_t) env->GetArrayLength(a) * sizeof(double));
+        env->ReleaseDoubleArrayElements(a, q, JNI_ABORT);
+    };
+    upI(jElem, ctx->dHvElem);
+    upI(jBus1Row, ctx->dHvBus1Row);
+    upI(jBus2Row, ctx->dHvBus2Row);
+    upD(jIn, ctx->dHvIn);
+    upI(jStatus, ctx->dHvStatus);
+    upD(jAppliedD1, ctx->dHvAppliedD1);
+    upD(jAppliedD2, ctx->dHvAppliedD2);
+    jbyte* co = env->GetByteArrayElements(jCtgOut, nullptr);
+    ctx->dHvCtgOut.upload(co, (size_t) env->GetArrayLength(jCtgOut));
+    env->ReleaseByteArrayElements(jCtgOut, co, JNI_ABORT);
+    ctx->nhv = nh;
+    ctx->hvLimitsActive = limitsActive;
+}
+
+/** Read the HVDC statuses back after a solve, so the host keeps its own view in step. */
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchHvdcStatus(
+        JNIEnv* env, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || ctx->nhv == 0) {
+        return nullptr;
+    }
+    size_t len = (size_t) ctx->nScenarios * ctx->nhv;
+    std::vector<int> host(len);
+    if (cudaMemcpy(host.data(), ctx->dHvStatus.p, len * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) {
+        return nullptr;
+    }
+    jintArray out = env->NewIntArray((jsize) len);
+    env->SetIntArrayRegion(out, 0, (jsize) len, host.data());
+    return out;
 }
 
 // Reactive-limits controllers STRANDED in another synchronous component: install (or clear, with

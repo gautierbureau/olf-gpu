@@ -195,6 +195,17 @@ public final class GpuBatchHvdcAcEmulation {
     static int[][] applyFreeze(int chunkSize, int realCount, int n, List<Ctl> ctls,
                                double[] baseState, double[] x0PerScenario, boolean[][] disabledMask,
                                double[] baseTargets, List<Integer> ovIndexList, List<Double> ovValueList) {
+        return applyFreeze(chunkSize, realCount, n, ctls, baseState, x0PerScenario, disabledMask,
+                baseTargets, ovIndexList, ovValueList, null, null);
+    }
+
+    /** As above, additionally recording the converter-row delta each freeze APPLIED (relative to the
+     *  base-status delta), which is what the in-kernel loops need to keep applying transitions
+     *  incrementally instead of rebuilding the override list. */
+    static int[][] applyFreeze(int chunkSize, int realCount, int n, List<Ctl> ctls,
+                               double[] baseState, double[] x0PerScenario, boolean[][] disabledMask,
+                               double[] baseTargets, List<Integer> ovIndexList, List<Double> ovValueList,
+                               double[] appliedD1, double[] appliedD2) {
         int[][] status = new int[chunkSize][ctls.size()];
         java.util.Map<Integer, Integer> posOf = indexOf(ovIndexList);
         double[] warm = new double[n];
@@ -210,6 +221,10 @@ public final class GpuBatchHvdcAcEmulation {
                     continue;                                // outaged hvdc — stays as the contingency left it
                 }
                 double[] d = frozenDeltas(c, c.p1At(warm), c.p2At(warm));
+                if (appliedD1 != null) {
+                    appliedD1[s * ctls.size() + h] = d[0] - c.baseD1();
+                    appliedD2[s * ctls.size() + h] = d[1] - c.baseD2();
+                }
                 status[s][h] = FROZEN;
                 disabledMask[s][c.hvElemIndex()] = true;
                 // base frame: baseTargets (or the row's existing override — e.g. a lost load on the

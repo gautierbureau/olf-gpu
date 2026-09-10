@@ -390,6 +390,7 @@ final class GpuBatchQualification {
         for (int i = 0; i < qualifications.size(); i++) {
             GpuBatchContingencyValidator.Qualification q = qualifications.get(i);
             if (!q.qualified()) {
+                com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:SIDE_OPEN_UNPACKED");
                 continue;
             }
             BatchContingency c = contingencies.get(i);
@@ -400,6 +401,7 @@ final class GpuBatchQualification {
                     distrRhoControllers.contains(so.branch())
                     || es.getVariableSet().getVariable(so.branch().getNum(), AcVariableType.BRANCH_RHO1).getRow() >= 0
                     || es.getVariableSet().getVariable(so.branch().getNum(), AcVariableType.BRANCH_ALPHA1).getRow() >= 0)) {
+                com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:VAR_CARRYING_SIDE_OPEN");
                 continue;                                    // var-carrying / DISTR_RHO side-open — CPU
             }
             if (!c.lostGenerators().isEmpty() || !c.lostLoads().isEmpty() || !c.shuntShifts().isEmpty()
@@ -426,6 +428,7 @@ final class GpuBatchQualification {
                     }
                 }
                 if (!recloseOk) {
+                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:RECLOSE_UNPACKED_BASE_OPEN");
                     continue;                                // reclose of an unpacked base-open branch — CPU
                 }
                 boolean tapOk = true;
@@ -437,15 +440,18 @@ final class GpuBatchQualification {
                     }
                 }
                 if (!tapOk) {
+                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:CONTROLLED_OR_UNPACKED_TAP");
                     continue;                                // controlled/unpacked transformer tap — CPU
                 }
                 if (!c.shuntShifts().isEmpty()
                         && !canBatchShuntOutage(c.shuntShifts().stream().map(ShuntShift::shunt).toList(), elementMapper, gpuData)) {
+                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:SHUNT_UNPACKED_OR_DISTRQ");
                     continue;                                // unpacked / DISTR_Q-contributing shunt — CPU
                 }
                 GenOutage[] gos = GpuBatchInjectionOutages.computeInjectionOutages(es, gpuData, dsSum, slackParticipates,
                         dsParams, c.lostGenerators(), c.lostLoads());
                 if (gos == null) {                           // slack / >1 DS bus / remote gen — route to CPU
+                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:SHUNT_SHAPE");
                     continue;
                 }
                 // Curve-limits channel active: its p_now linkage models the DS delta ONLY. An injection
@@ -461,11 +467,13 @@ final class GpuBatchQualification {
                         }
                     }
                     if (skewsCurve) {
+                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:GEN_OUTAGE_SHAPE");
                         continue;
                     }
                 }
                 if (!c.outagedBranches().isEmpty()) {        // COMBO: the branch part must also qualify
                     if (islandsRemoteVcMember(es, q.islandedBuses())) {
+                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:GEN_ON_ISLAND");
                         continue;
                     }
                     double[][] drOv = distrRhoOverrides(es, gpuData, distrRhoControllers, c.outagedBranches());
@@ -473,6 +481,7 @@ final class GpuBatchQualification {
                         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                             System.err.println("QUAL_REJECT drOv " + c.contingencyId());
                         }
+                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:DISTR_RHO_GROUP_OUTAGE");
                         continue;                            // multi-member / no-survivor group outage — CPU
                     }
                     if (drOv[0].length > 0) {
@@ -496,6 +505,7 @@ final class GpuBatchQualification {
                         }
                     }
                     if (genOnIsland) {
+                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ZI_OUTAGE_SHAPE");
                         continue;
                     }
                     frozenRowsByIndex[i] = fi.rows();
@@ -511,6 +521,7 @@ final class GpuBatchQualification {
                         && es.getEquation(g.getBus().getNum(), AcEquationType.DISTR_Q).isPresent())) {
                     double[][] ov = distrQWeightOverrides(es, gpuData, c.lostGenerators());
                     if (ov == null) {
+                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:DISTR_Q_WEIGHT_REDIFF");
                         continue;                            // weight rediff unavailable — CPU
                     }
                     dqOvContribByIndex[i] = java.util.Arrays.stream(ov[0]).mapToInt(d -> (int) d).toArray();
@@ -527,6 +538,7 @@ final class GpuBatchQualification {
                 }                                            // else: not a packed fixed shunt / DISTR_Q contributor → CPU
             } else {
                 if (islandsRemoteVcMember(es, q.islandedBuses())) {
+                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");
                     continue;                                // DISTR_Q group member islanded — CPU
                 }
                 double[][] drOv = distrRhoOverrides(es, gpuData, distrRhoControllers, c.outagedBranches());
@@ -534,6 +546,7 @@ final class GpuBatchQualification {
                     if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                         System.err.println("QUAL_REJECT drOv2 " + c.contingencyId());
                     }
+                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:DISTR_RHO_GROUP_OUTAGE2");
                     continue;                                // multi-member / no-survivor group outage — CPU
                 }
                 if (drOv[0].length > 0) {
@@ -541,6 +554,7 @@ final class GpuBatchQualification {
                     drOvCByIndex[i] = drOv[1];
                 }
                 if (curvePRows != null && c.contingencyId().indexOf(GpuBatchStatus.STRATEGY_KEY_SEP) >= 0) {
+                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:PAIR_CURVE_LINKAGE");
                     continue;                                // pair anchor shifts skew the curve linkage — CPU
                 }
                 FrozenIsland fi = islandedFrozen(es, q.islandedBuses());
@@ -564,6 +578,7 @@ final class GpuBatchQualification {
                     // 0 with distributed slack off entirely. So these stay on the CPU until the pack is
                     // per-generator — correctness over coverage, 91 of 2000 on rte6515.
                     com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("VALIDATOR:STRANDS_DS_PARTICIPANT");
+                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:OTHER");
                     continue;
                 }
                 if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP")) && q.islandedBuses().size() > 0) {

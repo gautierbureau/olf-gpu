@@ -783,12 +783,17 @@ final class GpuBatchChunkSolver {
                     List<Integer> preHvdcOvIdx = null;
                     List<Double> preHvdcOvVal = null;
                     int[][] hvdcStatus = null;
+                    double[] hvAppliedD1 = null;
+                    double[] hvAppliedD2 = null;
                     if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
+                        hvAppliedD1 = new double[chunkSize * hvdcControllers.size()];
+                        hvAppliedD2 = new double[chunkSize * hvdcControllers.size()];
                         preHvdcOvIdx = new ArrayList<>(overrides.indexList());
                         preHvdcOvVal = new ArrayList<>(overrides.valueList());
                         if (config.hvdcFreezing()) {
                             hvdcStatus = GpuBatchHvdcAcEmulation.applyFreeze(chunkSize, realCount, n, hvdcControllers,
-                                    baseState, x0Full, disabledMask, baseTargets, overrides.mutableIndexList(), overrides.mutableValueList());
+                                    baseState, x0Full, disabledMask, baseTargets, overrides.mutableIndexList(),
+                                    overrides.mutableValueList(), hvAppliedD1, hvAppliedD2);
                             targetOverrideIndex = overrides.indexArray();
                             targetOverrideValue = overrides.valueArray();
                         } else {
@@ -826,6 +831,53 @@ final class GpuBatchChunkSolver {
                             dsIslandedList.isEmpty() ? null : dsIslandedList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchRlIslanded(handle,
                             rlIslandedList.isEmpty() ? null : rlIslandedList.stream().mapToInt(Integer::intValue).toArray());
+                    // Run the HVDC AC-emulation loops as DRIVER PHASES, in OLF's order between
+                    // DistributedSlack and ReactiveLimits, instead of as host orchestrators after the
+                    // whole solve. Off by default until it is proven against the CPU violation set.
+                    byte[] ctgOutOf = null;
+                    boolean hvdcLoopsInKernel = hvdcControllers != null && !hvdcControllers.isEmpty()
+                            && Boolean.getBoolean("olf.gpu.sa.hvdcLoopsInKernel");
+                    if (hvdcLoopsInKernel) {
+                        int nh = hvdcControllers.size();
+                        int[] hvElem = new int[nh];
+                        int[] hvB1 = new int[nh];
+                        int[] hvB2 = new int[nh];
+                        double[] hvIn = new double[nh * 9];
+                        for (int h = 0; h < nh; h++) {
+                            GpuBatchHvdcAcEmulation.Ctl c = hvdcControllers.get(h);
+                            hvElem[h] = c.hvElemIndex() - (elementMapper.getClosedBranchCount()
+                                    + elementMapper.getOpenBranchCount() + elementMapper.getShuntCount());
+                            hvB1[h] = c.bus1PRow();
+                            hvB2[h] = c.bus2PRow();
+                            hvIn[h * 9] = c.p0();
+                            hvIn[h * 9 + 1] = c.k();
+                            hvIn[h * 9 + 2] = c.pMax12();
+                            hvIn[h * 9 + 3] = c.pMax21();
+                            hvIn[h * 9 + 4] = c.loss1();
+                            hvIn[h * 9 + 5] = c.loss2();
+                            hvIn[h * 9 + 6] = c.r();
+                            hvIn[h * 9 + 7] = c.baseD1();
+                            hvIn[h * 9 + 8] = c.baseD2();
+                        }
+                        for (int h = 0; h < nh; h++) {
+                            hvElem[h] = hvdcControllers.get(h).hvElemIndex();   // GLOBAL element index
+                        }
+                        ctgOutOf = new byte[chunkSize * nh];
+                        byte[] ctgOut = ctgOutOf;
+                        int[] flatStatus = new int[chunkSize * nh];
+                        for (int s2 = 0; s2 < chunkSize; s2++) {
+                            for (int h = 0; h < nh; h++) {
+                                flatStatus[s2 * nh + h] = hvdcStatus[s2][h];
+                                // "the contingency outaged it" is the bit set on a LINEAR entry
+                                ctgOut[s2 * nh + h] = (byte) (hvdcStatus[s2][h] == GpuBatchHvdcAcEmulation.LINEAR
+                                        && disabledMask[s2][hvdcControllers.get(h).hvElemIndex()] ? 1 : 0);
+                            }
+                        }
+                        GpuAcNewtonSolver.setBatchHvdcLoops(handle, hvElem, hvB1, hvB2, hvIn, ctgOut,
+                                flatStatus, hvAppliedD1, hvAppliedD2, config.hvdcLimits() ? 1 : 0);
+                    } else {
+                        GpuAcNewtonSolver.setBatchHvdcLoops(handle, null, null, null, null, null, null, null, null, 0);
+                    }
                     long tSolve0 = System.nanoTime();
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
@@ -847,6 +899,26 @@ final class GpuBatchChunkSolver {
                             nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
                     tMainSolveNs += System.nanoTime() - tSolve0;
+                    if (hvdcLoopsInKernel) {
+                        // The driver phases mutated the hv element bits and the converter-bus targets
+                        // ON THE DEVICE. The host keeps mirrors of both, and the orchestrators that
+                        // run next re-upload them — so without this sync they would clobber the loops'
+                        // work with the pre-solve state.
+                        int[] devStatus = GpuAcNewtonSolver.readBatchHvdcStatus(handle);
+                        int nh = hvdcControllers.size();
+                        if (devStatus != null) {
+                            for (int s2 = 0; s2 < chunkSize; s2++) {
+                                for (int h = 0; h < nh; h++) {
+                                    int st = devStatus[s2 * nh + h];
+                                    hvdcStatus[s2][h] = st;
+                                    int elem = hvdcControllers.get(h).hvElemIndex();
+                                    if (ctgOutOf[s2 * nh + h] == 0) {
+                                        disabledMask[s2][elem] = st != GpuBatchHvdcAcEmulation.LINEAR;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if (System.getenv("OLF_GPU_ITER_TRACE") != null && !pairPhase) {
                         java.util.Map<Integer, Integer> hist = new java.util.TreeMap<>();
                         for (int s = 0; s < realCount; s++) {
@@ -1008,7 +1080,7 @@ final class GpuBatchChunkSolver {
                                 config.lsMode() == 2 ? varType : null, config);
                         orchNs.merge("IncrementalTvc.orchestrate", System.nanoTime() - t00, Long::sum);
                     }
-                    if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
+                    if (hvdcControllers != null && !hvdcControllers.isEmpty() && !hvdcLoopsInKernel) {
                         long tOr1 = System.nanoTime();   // TIMED_GpuBatchHvdcAcEmulation
                         chunkResults = GpuBatchHvdcAcEmulation.orchestrate(handle, chunkSize, realCount, n, nrl, rlStateOut, rlSolvedPerScenario,
                                 chunkResults, hvdcControllers, hvdcStatus, config.hvdcLimits(),
@@ -1026,7 +1098,7 @@ final class GpuBatchChunkSolver {
                                 config.lsMode() == 2 ? varType : null, config);
                         orchNs.merge("HvdcAcEmulation.orchestrate#1", System.nanoTime() - tOr1, Long::sum);
                     }
-                    if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
+                    if (hvdcControllers != null && !hvdcControllers.isEmpty() && !hvdcLoopsInKernel) {
                         long tOr2 = System.nanoTime();   // TIMED_GpuBatchHvdcAcEmulation
                         chunkResults = GpuBatchHvdcAcEmulation.orchestrate(handle, chunkSize, realCount, n, nrl, rlStateOut, rlSolvedPerScenario,
                                 chunkResults, hvdcControllers, hvdcStatus, config.hvdcLimits(),

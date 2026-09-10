@@ -361,6 +361,24 @@ public final class GpuAcNewtonSolver {
     public static native void setBatchRlIslanded(long handle, int[] slotControllerPairs);
 
     /**
+     * Install the HVDC AC-emulation outer loops' tables and their per-scenario starting state, so
+     * FreezingHvdcACEmulation and AcHvdcAcEmulationLimits run as DRIVER PHASES in OLF's order —
+     * between DistributedSlack and ReactiveLimits — instead of as host orchestrators after the whole
+     * solve. Pass a null/empty {@code elem} to leave them to the host orchestrator.
+     *
+     * @param in per hvdc x9: {@code p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2}
+     * @param ctgOut per (scenario, hvdc): the contingency itself outaged it, so the loops leave it alone
+     * @param status per (scenario, hvdc) starting status, and {@code appliedD1/D2} the converter-row
+     *        deltas the pre-solve freeze already applied — transitions are applied incrementally
+     */
+    public static native void setBatchHvdcLoops(long handle, int[] elem, int[] bus1Row, int[] bus2Row,
+                                                double[] in, byte[] ctgOut, int[] status,
+                                                double[] appliedD1, double[] appliedD2, int limitsActive);
+
+    /** The HVDC statuses after a solve, {@code nScenarios * nHvdc}, or null when none are installed. */
+    public static native int[] readBatchHvdcStatus(long handle);
+
+    /**
      * Install the PER-GENERATOR distributed-slack participants: the factors and limits OLF's
      * water-fill actually saturates on, grouped by bus ({@code busGenStart}/{@code busGenEnd} slice
      * the generator arrays, so a bus's row value is the sum over its slice).

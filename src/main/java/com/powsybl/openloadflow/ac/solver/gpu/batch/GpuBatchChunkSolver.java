@@ -566,9 +566,6 @@ final class GpuBatchChunkSolver {
                                     }
                                 }
                             }
-                            if (System.getenv("OLF_GPU_NO_PRELOSS") != null) {
-                                continue;                    // A/B: the pre-distribution seed off
-                            }
                             double[] shares = GpuBatchLossPreDistribution.distribute(gpuData, preLossBySlot[s],
                                     dsOvBus.length > 0 ? dsOvBus[s] : -1,
                                     dsOvFactorDelta.length > 0 ? dsOvFactorDelta[s] : 0,

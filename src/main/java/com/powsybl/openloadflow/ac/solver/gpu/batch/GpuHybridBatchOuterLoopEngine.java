@@ -935,8 +935,10 @@ public final class GpuHybridBatchOuterLoopEngine {
         // Dirty-tracking: a scenario's outer-loop step touches ~80 of the ~7100 elements the engine used
         // to save and restore wholesale, so each scenario records only what it moved and the swap between
         // two scenarios costs their dirty sets, not the network.
+        // ATTACHED ONLY around the outer-loop step, never during restore: restoring fires the same
+        // events (BusState.restore alone triggers the q-limit, disabling-status and abs-variable ones per
+        // bus), and a muted listener still costs a dispatch per event. Detaching means nothing dispatches.
         DirtyTracker tracker = new DirtyTracker(in.ctrlBuses(), in.gens(), loads, genVcs);
-        in.network().addListener(tracker);
         // CUMULATIVE per scenario, not per round: a scenario that moves bus B in one round and bus C in
         // the next still has B at its own value on the network, so its record must keep B too — otherwise
         // the next restore reverts B to base and the scenario silently loses it.
@@ -992,6 +994,11 @@ public final class GpuHybridBatchOuterLoopEngine {
         long tSolve = 0;
         long tJava = 0;
         long tSnap = 0;
+        long revertedBuses = 0;
+        long appliedBuses = 0;
+        long visits = 0;
+        long tRevert = 0;
+        long tApply = 0;
         long tSnapElem = 0;                                  // HybridScenarioState (OLF BusState/HvdcState/BranchState objects)
         long tSnapArr = 0;                                   // the four target arrays (built with streams)
         long nJavaCalls = 0;
@@ -1006,8 +1013,7 @@ public final class GpuHybridBatchOuterLoopEngine {
             for (LfBranch b : networkDisabled) {
                 b.setDisabled(false);
             }
-            // revert only what the previous scenario moved (the listener is muted while restoring)
-            tracker.stop();
+            // revert only what the previous scenario moved (tracker not attached: nothing dispatches)
             for (int i : curBuses) {
                 baseCompact.restoreBus(i);
             }
@@ -1037,7 +1043,9 @@ public final class GpuHybridBatchOuterLoopEngine {
             networkDisabled = in.ctgs().get(s).outagedBranches();
             liveToBase[s] = liveToBaseMap(in.es(), baseRowByVar, n);
             tracker.start();
+            in.network().addListener(tracker);
             GpuAcActivation act = bridges[s].initializeScenario(compactState(in.baseState(), liveToBase[s]));
+            in.network().removeListener(tracker);
             tracker.stop();
             rowMode[s] = expandModes(act.rowMode(), liveToBase[s], n);
             scenTargets[s] = expandTargets(act.applyTargets(new AcTargetVector(in.network(), in.es()).getArray()),
@@ -1238,23 +1246,42 @@ public final class GpuHybridBatchOuterLoopEngine {
                 for (LfBranch b : networkDisabled) {
                     b.setDisabled(false);
                 }
-                // Revert exactly what the PREVIOUS scenario moved, then apply this one's dirty set. The
-                // listener is muted throughout: restoring fires its own events, and recording those would
-                // mark the whole network dirty.
-                tracker.stop();
+                // Revert exactly what the PREVIOUS scenario moved, then apply this one's dirty set.
+                // The tracker is not attached here, so none of the restore's own events dispatch.
+                long trev0 = System.nanoTime();
+                // Revert only the DIFFERENCE. An element dirty in BOTH the previous scenario and this one
+                // is about to be overwritten by the apply below, so resetting it to base first is pure
+                // waste — and the sets overlap heavily, because both are "what this chunk has touched".
+                java.util.BitSet keepBuses = busBits[s];
+                java.util.BitSet keepGens = genBits[s];
+                java.util.BitSet keepLoads = loadBits[s];
+                java.util.BitSet keepVcs = vcBits[s];
+                visits++;
+                appliedBuses += dirtyBuses[s] == null ? 0 : dirtyBuses[s].length;
                 for (int i : curBuses) {
-                    baseCompact.restoreBus(i);
+                    if (keepBuses == null || !keepBuses.get(i)) {
+                        revertedBuses++;
+                        baseCompact.restoreBus(i);
+                    }
                 }
                 for (int i : curGens) {
-                    in.gens().get(i).setTargetP(in.baseGenP()[i]);
+                    if (keepGens == null || !keepGens.get(i)) {
+                        in.gens().get(i).setTargetP(in.baseGenP()[i]);
+                    }
                 }
                 for (int i : curLoads) {
-                    loads.get(i).setTargetP(baseLoadP[i]);
-                    loads.get(i).setTargetQ(baseLoadQ[i]);
+                    if (keepLoads == null || !keepLoads.get(i)) {
+                        loads.get(i).setTargetP(baseLoadP[i]);
+                        loads.get(i).setTargetQ(baseLoadQ[i]);
+                    }
                 }
                 for (int i : curVcs) {
-                    genVcs.get(i).setTargetValue(baseVcTarget[i]);
+                    if (keepVcs == null || !keepVcs.get(i)) {
+                        genVcs.get(i).setTargetValue(baseVcTarget[i]);
+                    }
                 }
+                long tapp0 = System.nanoTime();
+                tRevert += tapp0 - trev0;
                 if (snaps[s] != null) {
                     snaps[s].restore();                      // this scenario's dirty buses + HVDCs + branches
                     for (int k = 0; k < dirtyGens[s].length; k++) {
@@ -1271,12 +1298,14 @@ public final class GpuHybridBatchOuterLoopEngine {
                     curGens = dirtyGens[s];
                     curLoads = dirtyLoads[s];
                     curVcs = dirtyVcs[s];
+                    tApply += System.nanoTime() - tapp0;
                 } else {
                     baseCompact.restoreHvdcsAndBranches();   // buses/gens/loads are already back at base
                     curBuses = EMPTY_INT;
                     curGens = EMPTY_INT;
                     curLoads = EMPTY_INT;
                     curVcs = EMPTY_INT;
+                    tApply += System.nanoTime() - tapp0;
                 }
                 // anchor initialTargetP at the ORIGINAL generation for the distributed-slack cumulative accounting.
                 for (int g = 0; g < in.gens().size(); g++) {
@@ -1296,7 +1325,9 @@ public final class GpuHybridBatchOuterLoopEngine {
                 }
                 // load state -> OLF outer loops -> re-extract (state compacted to the live layout)
                 tracker.start();
+                in.network().addListener(tracker);
                 GpuAcActivation act = bridges[s].applyOuterLoopStep(compactState(st, liveToBase[s]));
+                in.network().removeListener(tracker);
                 tracker.stop();
                 if (DIRTY_PROBE != null) {
                     DIRTY_PROBE.endScenario(in.ctrlBuses().size());
@@ -1405,14 +1436,17 @@ public final class GpuHybridBatchOuterLoopEngine {
             System.err.printf("HYBRID_DIRTY_CUM scenarios=%d avgDirtyBuses=%.1f of %d avgDirtyOther=%.1f%n",
                     counted, counted == 0 ? 0 : cumBuses / (double) counted, in.ctrlBuses().size(),
                     counted == 0 ? 0 : cumOther / (double) counted);
+            System.err.printf("HYBRID_RESTORE_SPLIT scenarios=%d revert=%d ms apply=%d ms | perVisit: "
+                    + "reverted=%.1f applied=%.1f buses of %d%n",
+                    nS, tRevert / 1_000_000, tApply / 1_000_000,
+                    visits == 0 ? 0 : revertedBuses / (double) visits,
+                    visits == 0 ? 0 : appliedBuses / (double) visits, in.ctrlBuses().size());
             System.err.printf("HYBRID_SNAP_SPLIT scenarios=%d elementState=%d ms targetArrays=%d ms "
                     + "| perSnapshot: ctrlBuses=%d hvdcs=%d transformers=%d gens=%d loads=%d genVcs=%d%n",
                     nS, tSnapElem / 1_000_000, tSnapArr / 1_000_000,
                     in.ctrlBuses().size(), in.hvdcs().size(), in.transformerBranches().size(),
                     in.gens().size(), loads.size(), genVcs.size());
         }
-
-        in.network().removeListener(tracker);            // per-chunk listener must not outlive the chunk
 
         // Hand the network back the way we found it. Every scenario iteration re-enables the PREVIOUS
         // scenario's outage at its START, so on exit the LAST scenario's branches are still disabled and

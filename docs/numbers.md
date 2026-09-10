@@ -94,3 +94,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-09 | cb69a35+dirty | 22.36 | 19.23 | 27.31 | x1.42 | 0/0/0 | 7.62 | 4.47 | 499/500 | 122/133 (92%) | loss pre-distribution is a displacement, not a new DS anchor |
 | 2026-09-09 | 85513c4+dirty | 22.23 | 19.85 | 27.92 | x1.41 | 0/0/0 | 7.50 | 4.45 | 499/500 | 122/133 (92%) | precompute sees the CONTINGENCY outer-loop list (JAVA hybrid was missing FreezingHvdcACEmulation) |
 | 2026-09-10 | 23738a1+dirty | 22.73 | 19.23 | 27.78 | x1.44 | 0/0/0 | 7.56 | 4.43 | 499/500 | 122/133 (92%) | hybrid chunking: chunk like DEVICE, restore the network per chunk, drop diagnostic retention |
+| 2026-09-10 | f60263a+dirty | 22.02 | 18.99 | 27.16 | x1.43 | 0/0/0 | 7.64 | 4.41 | 499/500 | 122/133 (92%) | cut per-save allocations in OLF state snapshots (maps to parallel arrays) + allocation-free row-collision guard |

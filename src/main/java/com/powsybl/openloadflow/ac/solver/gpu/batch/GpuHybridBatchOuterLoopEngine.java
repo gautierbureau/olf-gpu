@@ -603,6 +603,8 @@ public final class GpuHybridBatchOuterLoopEngine {
         long tSolve = 0;
         long tJava = 0;
         long tSnap = 0;
+        long tSnapElem = 0;                                  // HybridScenarioState (OLF BusState/HvdcState/BranchState objects)
+        long tSnapArr = 0;                                   // the four target arrays (built with streams)
         long nJavaCalls = 0;
 
         // ---- OLF-faithful pre-round-0 initialization: OLF initialize()s every outer loop BEFORE the
@@ -921,10 +923,13 @@ public final class GpuHybridBatchOuterLoopEngine {
                 if (!willRetire) {
                     long tsv0 = System.nanoTime();
                     snaps[s] = new HybridScenarioState(in.ctrlBuses(), in.hvdcs(), in.transformerBranches());
+                    long tsv1 = System.nanoTime();
+                    tSnapElem += tsv1 - tsv0;
                     genSnap[s] = in.gens().stream().mapToDouble(LfGenerator::getTargetP).toArray();
                     loadSnapP[s] = loads.stream().mapToDouble(LfLoad::getTargetP).toArray();
                     loadSnapQ[s] = loads.stream().mapToDouble(LfLoad::getTargetQ).toArray();
                     vcSnap[s] = genVcs.stream().mapToDouble(com.powsybl.openloadflow.network.GeneratorVoltageControl::getTargetValue).toArray();
+                    tSnapArr += System.nanoTime() - tsv1;
                     tSnap += System.nanoTime() - tsv0;
                 }
             }
@@ -933,6 +938,13 @@ public final class GpuHybridBatchOuterLoopEngine {
             }
         }
         GpuAcNewtonSolver.destroyBatchContext(handle);
+        if (GpuBatchPhaseStats.ENABLED) {
+            System.err.printf("HYBRID_SNAP_SPLIT scenarios=%d elementState=%d ms targetArrays=%d ms "
+                    + "| perSnapshot: ctrlBuses=%d hvdcs=%d transformers=%d gens=%d loads=%d genVcs=%d%n",
+                    nS, tSnapElem / 1_000_000, tSnapArr / 1_000_000,
+                    in.ctrlBuses().size(), in.hvdcs().size(), in.transformerBranches().size(),
+                    in.gens().size(), loads.size(), genVcs.size());
+        }
 
         // Hand the network back the way we found it. Every scenario iteration re-enables the PREVIOUS
         // scenario's outage at its START, so on exit the LAST scenario's branches are still disabled and

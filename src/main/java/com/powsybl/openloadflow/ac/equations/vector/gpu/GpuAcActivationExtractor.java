@@ -50,17 +50,31 @@ public final class GpuAcActivationExtractor {
      *
      * <p>This class of bug has occurred twice (a remote gen-VC pilot that is also a controller put
      * BUS_TARGET_V and DISTR_Q on the same row), which is why the check is unconditional rather than
-     * behind a debug switch: it costs one array read per equation on a path that runs once per
-     * activation event.
+     * behind a debug switch. It must stay ALLOCATION-FREE on the happy path: the JAVA hybrid re-extracts
+     * per scenario per outer-loop step, so a remembered description per row (String[n]) or an eagerly
+     * built message per call is tens of thousands of array/string allocations on a 13040-row system.
      */
-    private static void assign(int[] targetMap, String[] writtenBy, int row, int column, String what) {
+    private static void assign(EquationSystem<AcVariableType, AcEquationType> es, int[] targetMap,
+                               int row, int column, AcEquationType type, int elementNum) {
         if (targetMap[row] >= 0) {
             throw new PowsyblException("GPU AC solver: device row " + row + " assigned twice — "
-                    + writtenBy[row] + " (column " + targetMap[row] + ") then " + what + " (column "
-                    + column + "). One of the two constraints would be silently dropped.");
+                    + describeColumn(es, targetMap[row]) + " then " + type + " elem " + elementNum
+                    + " (column " + column + "). One of the two constraints would be silently dropped.");
         }
         targetMap[row] = column;
-        writtenBy[row] = what;
+    }
+
+    /** The equation occupying {@code column}, for the collision message. Walks the equation list, which
+     *  is fine because it runs only on the way to throwing — the alternative, remembering a description
+     *  per row, costs a String[n] allocation on EVERY extraction, and this method runs per scenario per
+     *  outer-loop step on the hybrid path. */
+    private static String describeColumn(EquationSystem<AcVariableType, AcEquationType> es, int column) {
+        for (SingleEquation<AcVariableType, AcEquationType> e : es.getIndex().getSortedSingleEquationsToSolve()) {
+            if (e.getColumn() == column) {
+                return e.getType() + " elem " + e.getElementNum() + " (column " + column + ")";
+            }
+        }
+        return "column " + column;
     }
 
     /**
@@ -76,7 +90,6 @@ public final class GpuAcActivationExtractor {
         java.util.Arrays.fill(mode, 1);
         int[] targetMap = new int[n];
         java.util.Arrays.fill(targetMap, -1);
-        String[] writtenBy = new String[n];
         int nBranches = network.getBranches().size();
         int[] branchRhoCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.BRANCH_RHO1);
         int[] shuntBCol = GpuAcRowIndexing.branchVarCols(es, network.getShunts().size(), AcVariableType.SHUNT_B);
@@ -88,13 +101,13 @@ public final class GpuAcActivationExtractor {
         for (LfBus bus : network.getBuses()) {
             int p = GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_P);
             if (p >= 0) {
-                assign(targetMap, writtenBy, GpuAcRowIndexing.col(es, bus.getNum(), AcVariableType.BUS_PHI), p,
-                        "BUS_TARGET_P " + bus.getId());
+                assign(es, targetMap, GpuAcRowIndexing.col(es, bus.getNum(), AcVariableType.BUS_PHI), p,
+                        AcEquationType.BUS_TARGET_P, bus.getNum());
             }
             int q = GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_Q);
             if (q >= 0) {
                 // Q row = V row, or the controlling rho row
-                assign(targetMap, writtenBy, qRow[bus.getNum()], q, "BUS_TARGET_Q " + bus.getId());
+                assign(es, targetMap, qRow[bus.getNum()], q, AcEquationType.BUS_TARGET_Q, bus.getNum());
                 // ACTIVE own-Q balance at a (non-free) remote gen-VC member = the RL-PINNED state:
                 // row mode 4, so the family fills route the member's own q here (the frozen dest is
                 // canonically SUPPRESSED) and the DISTR_Q emissions at this row gate off (plan-B2).
@@ -126,8 +139,7 @@ public final class GpuAcActivationExtractor {
                                         .map(b -> b.getId() + (vc.isControllerEnabled(b) ? "(on)" : "(off)")).toList());
                     }
                 }
-                assign(targetMap, writtenBy, distrRow, e.getColumn(),
-                        "DISTR_Q " + network.getBus(e.getElementNum()).getId());
+                assign(es, targetMap, distrRow, e.getColumn(), AcEquationType.DISTR_Q, e.getElementNum());
                 continue;
             }
             AcVariableType powerRowVar = switch (e.getType()) {
@@ -138,8 +150,8 @@ public final class GpuAcActivationExtractor {
                 default -> null;
             };
             if (powerRowVar != null) {
-                assign(targetMap, writtenBy, GpuAcRowIndexing.col(es, e.getElementNum(), powerRowVar),
-                        e.getColumn(), e.getType() + " elem " + e.getElementNum());
+                assign(es, targetMap, GpuAcRowIndexing.col(es, e.getElementNum(), powerRowVar),
+                        e.getColumn(), e.getType(), e.getElementNum());
                 continue;
             }
             if (e.getType() == AcEquationType.BRANCH_TARGET_P) {
@@ -151,7 +163,7 @@ public final class GpuAcActivationExtractor {
                 var pc = branch.getPhaseControl().orElseThrow();
                 int a1r = GpuAcRowIndexing.col(es, pc.getControllerBranch().getNum(), AcVariableType.BRANCH_ALPHA1);
                 mode[a1r] = 3;
-                assign(targetMap, writtenBy, a1r, e.getColumn(), "BRANCH_TARGET_P " + branch.getId());
+                assign(es, targetMap, a1r, e.getColumn(), AcEquationType.BRANCH_TARGET_P, e.getElementNum());
                 continue;
             }
             // IDENTITY rows (mode 0): the device row-mode mask writes diag 1 and F = x − target.
@@ -181,7 +193,7 @@ public final class GpuAcActivationExtractor {
                 boolean slopeRow = e.getType() == AcEquationType.BUS_TARGET_V
                         && network.getBus(e.getElementNum()).hasGeneratorsWithSlope();
                 mode[r] = slopeRow ? 2 : 0;
-                assign(targetMap, writtenBy, r, e.getColumn(), e.getType() + " elem " + e.getElementNum());
+                assign(es, targetMap, r, e.getColumn(), e.getType(), e.getElementNum());
             }
         }
         return new GpuAcActivation(mode, targetMap);

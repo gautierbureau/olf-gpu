@@ -453,8 +453,8 @@ public final class GpuHybridBatchOuterLoopEngine {
             touchedTotal += touched.size();
             ofTotal += ctrlBusCount;
             if (scenarios % 200 == 0) {
-                System.err.printf("DIRTY_PROBE scenarios=%d avgTouchedElements=%.1f of %d controller buses%n",
-                        scenarios, touchedTotal / (double) scenarios, ctrlBusCount);
+                System.err.printf("DIRTY_PROBE scenarios=%d avgTouchedElements=%.1f of %d controller buses | new events: %s%n",
+                        scenarios, touchedTotal / (double) scenarios, ctrlBusCount, newEventCounts());
             }
         }
 
@@ -513,6 +513,50 @@ public final class GpuHybridBatchOuterLoopEngine {
         @Override
         public void onTapPositionChange(LfBranch br, int o, int nw) {
             touched.add(br);
+        }
+
+        // The callbacks added to OLF for exactly this purpose. Counted separately: if any of them never
+        // fires, dirty-tracking built on it would silently fail to restore that field.
+        private long qLimitTypeEvents;
+        private long frozenEvents;
+        private long controlTypeEvents;
+        private long absVariableEvents;
+        private long disablingStatusEvents;
+
+        @Override
+        public void onQLimitTypeChange(LfBus bus, LfBus.QLimitType t) {
+            qLimitTypeEvents++;
+            touched.add(bus);
+        }
+
+        @Override
+        public void onGenerationTargetQFrozenChange(LfBus bus, boolean frozen) {
+            frozenEvents++;
+            touched.add(bus);
+        }
+
+        @Override
+        public void onGeneratorControlTypeChange(LfGenerator g, LfGenerator.GeneratorControlType t) {
+            controlTypeEvents++;
+            touched.add(g);
+        }
+
+        @Override
+        public void onLoadAbsVariableTargetPChange(com.powsybl.openloadflow.network.LfLoad l, double o, double nw) {
+            absVariableEvents++;
+            touched.add(l);
+        }
+
+        @Override
+        public void onLoadOriginalDisablingStatusChange(com.powsybl.openloadflow.network.LfLoad l) {
+            disablingStatusEvents++;
+            touched.add(l);
+        }
+
+        String newEventCounts() {
+            return "qLimitType=" + qLimitTypeEvents + " targetQFrozen=" + frozenEvents
+                    + " controlType=" + controlTypeEvents + " absVariableTargetP=" + absVariableEvents
+                    + " disablingStatus=" + disablingStatusEvents;
         }
     }
 

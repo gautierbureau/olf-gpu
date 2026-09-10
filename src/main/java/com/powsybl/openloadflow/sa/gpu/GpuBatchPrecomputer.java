@@ -17,6 +17,7 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
+import com.powsybl.openloadflow.ac.solver.AbstractNewtonParameters;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
@@ -195,7 +196,7 @@ final class GpuBatchPrecomputer {
                             net, context, baseState, batch, es, target,
                             reactiveLimitTol, slackDistTol, convEpsPerEq, config, reportNode)
                     : GpuBatchedSecurityAnalysisSolver.solveBatchN1(
-                            net, baseState, batch, es, target, new NewtonRaphsonParameters(),
+                            net, baseState, batch, es, target, deviceSolverParameters(context),
                             distributedSlack, reactiveLimits,
                             reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
             Map<String, double[]> states = new HashMap<>();
@@ -261,4 +262,27 @@ final class GpuBatchPrecomputer {
         }
         return "MAPPER:no-batchable-element";
     }
+    /**
+     * The Newton parameters the DEVICE arm solves with — the RUN's, not fresh defaults.
+     *
+     * <p>This used to be {@code new NewtonRaphsonParameters()}, whose
+     * {@code DEFAULT_MAX_ITERATIONS} is 15. The RTE production parameters configure
+     * {@code maxNewtonRaphsonIterations = 30}, so the device gave every scenario HALF the Newton
+     * budget OLF gives it: one needing 16-30 iterations was declared non-converged on the device and
+     * offloaded to the per-contingency CPU fallback, which then converged it. Correct results — the
+     * fallback is the safety net — but wasted coverage, and it made "the device did not converge" a
+     * strictly different predicate from "OLF will not converge". That difference is exactly why a
+     * rejected scenario must be REPLAYED on the CPU rather than reported as diverged.
+     *
+     * <p>{@code getMaxIterations()} is the only field the batched path reads, so any Newton-family
+     * solver's budget carries over; there is deliberately no silent default left.
+     */
+    private static NewtonRaphsonParameters deviceSolverParameters(AcLoadFlowContext context) {
+        NewtonRaphsonParameters nrp = new NewtonRaphsonParameters();
+        if (context.getParameters().getAcSolverParameters() instanceof AbstractNewtonParameters<?> run) {
+            nrp.setMaxIterations(run.getMaxIterations());
+        }
+        return nrp;
+    }
+
 }

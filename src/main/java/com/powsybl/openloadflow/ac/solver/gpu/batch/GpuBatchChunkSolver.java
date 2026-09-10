@@ -505,7 +505,7 @@ final class GpuBatchChunkSolver {
                     }
                     double[] dsAnchorShift = null;
                     double[] dsSlackShift = null;
-                    if (!pairPhase && hasDs && config.contingencyLossPreDistribution()) {
+                    if (!pairPhase && (hasDs || dsSlackOnly) && config.contingencyLossPreDistribution()) {
                         // CPU parity (DefaultContingencyActivePowerLossDistribution): with DS on, the
                         // contingency's SCHEDULED lost active power is distributed ONCE over the
                         // participating generators BEFORE the post-contingency solve — the CPU's DS loop
@@ -515,6 +515,36 @@ final class GpuBatchChunkSolver {
                         // trio: participant target overrides + anchor shifts + the slack's own share.
                         for (int s = 0; s < realCount; s++) {
                             if (preLossBySlot[s] == 0) {
+                                continue;
+                            }
+                            if (!hasDs) {
+                                // SLACK-ONLY (the slack bus is the only participant): OLF distributes
+                                // the whole scheduled loss into the slack generator's own target, so
+                                // its target for this scenario is base + loss. The device has no
+                                // BUS_TARGET_P row at the slack — its P is free — so dsSlackTargetP is
+                                // a RUN CONSTANT and that displacement has nowhere to live except
+                                // dDsSlackAbsorbed, which dsSlackShift seeds.
+                                //
+                                // Without this the whole block was skipped (the gate was hasDs), the
+                                // accumulator started at 0, and slackOnlyDsCheck measured the mismatch
+                                // against the BASE slack target: on the deviceHvdc* networks that is
+                                // -3.006957565 pu where OLF sees -0.006957565, so the check fired on
+                                // the first pass and absorbed the lot. OLF reports STABLE there (0.0070
+                                // < the 0.01 band) and fires only after the HVDC unfreeze, on -0.013703031
+                                // — which our accumulator, 3.0 too low, then read as -0.006745466 and
+                                // let pass. Same single distribution, wrong pass, and the two arms end
+                                // their Newton sequences on different calls.
+                                if (dsSlackShift == null) {
+                                    dsSlackShift = new double[chunkSize];
+                                }
+                                dsSlackShift[s] = preLossBySlot[s];
+                                if (System.getenv("OLF_GPU_PRELOSS_TRACE") != null) {
+                                    System.err.printf("PRELOSS_SLACKONLY ctg=%s loss=%s slackBase=%s -> slackTarget=%s%n",
+                                            contingencies.get(group.get(chunkStart + s)).contingencyId(),
+                                            Double.toString(preLossBySlot[s]),
+                                            Double.toString(gpuData.dsSlackTargetP()),
+                                            Double.toString(gpuData.dsSlackTargetP() + preLossBySlot[s]));
+                                }
                                 continue;
                             }
                             // A FRAGMENTING contingency puts some DS participants in another
@@ -839,20 +869,9 @@ final class GpuBatchChunkSolver {
                     // (between DistributedSlack and ReactiveLimits), instead of as host orchestrators
                     // after the whole solve. Measured over 2000 rte6515 branch contingencies: ZERO
                     // violation differences against the CPU where the host orchestrators leave one,
-                    // and faster (19.1 s vs 20.7 s).
-                    //
-                    // Still OPT-IN because of one known residual: with the loops in the driver the
-                    // FIRST solve leaves the slack 0.0067 pu (0.67 MW) away from where the host-
-                    // orchestrator path leaves it, which makes slackOnlyDsCheck fire one pass EARLY.
-                    // OLF's DistributedSlack check reports STABLE there and fires only after the
-                    // unfreeze, so the two implementations perform the same single distribution at
-                    // different points in the sequence. Both converge, but OLF's last Newton call is
-                    // then a DS polish (||F|| 6.6e-14) where ours is the unfreeze solve (1.8e-9), and
-                    // that leaves the final state 1e-12 pu apart — 4e-10 kV on the three synthetic
-                    // deviceHvdc* tests, which assert at 1e-12 kV. Fix the slack baseline first, then
-                    // flip this default.
+                    // and faster. Set the property to "false" for the A/B.
                     boolean hvdcLoopsInKernel = hvdcControllers != null && !hvdcControllers.isEmpty()
-                            && Boolean.getBoolean("olf.gpu.sa.hvdcLoopsInKernel");
+                            && !"false".equalsIgnoreCase(System.getProperty("olf.gpu.sa.hvdcLoopsInKernel"));
                     if (hvdcLoopsInKernel) {
                         int nh = hvdcControllers.size();
                         int[] hvElem = new int[nh];

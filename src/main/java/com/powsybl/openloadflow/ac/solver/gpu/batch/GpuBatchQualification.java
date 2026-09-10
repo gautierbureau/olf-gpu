@@ -211,13 +211,28 @@ final class GpuBatchQualification {
      */
     private static VcSplit classifyVcSplit(EquationSystem<AcVariableType, AcEquationType> es,
                                            List<LfBus> islandedBuses, List<LfBus> lostControllers,
-                                           List<LfBus> deadControlBuses) {
+                                           List<LfBus> deadControlBuses,
+                                           List<com.powsybl.openloadflow.network.LfHvdc> islandedHvdcs) {
         java.util.Set<LfBus> islanded = new java.util.HashSet<>(islandedBuses);
         VcSplit result = VcSplit.CONTAINED;
         for (LfBus bus : islandedBuses) {
             if (!bus.getHvdcs().isEmpty()) {
-                return VcSplit.UNMODELED;                    // islanded HVDC endpoint: the CPU zeroes the pair's
-            }                                                // station targets (hvdcsWithoutPower) — unmodeled, CPU
+                // An islanded HVDC endpoint. OLF (LfContingency.processHvdcsWithoutPower) sets BOTH
+                // converter stations' targetP to 0 — and in AC emulation those targets ARE already 0,
+                // because the injection is an equation term rather than a bus target. So the whole of
+                // it is: stop the AC-emulation equation injecting, i.e. mask the hv element. A
+                // NON-AC-emulation station does carry its targetP in the bus target, and zeroing that
+                // is not expressed here, so those still go to the CPU.
+                for (var h : bus.getHvdcs()) {
+                    if (!h.isAcEmulation()) {
+                        return VcSplit.UNMODELED;
+                    }
+                    if (!islandedHvdcs.contains(h)) {
+                        islandedHvdcs.add(h);
+                    }
+                }
+                continue;
+            }
             var vc = bus.getGeneratorVoltageControl().orElse(null);
             boolean remoteGroupMember = es.getEquation(bus.getNum(), AcEquationType.DISTR_Q).isPresent()
                     || vc != null && (vc.getControlledBus() != bus
@@ -395,7 +410,12 @@ final class GpuBatchQualification {
                          *  another synchronous component — the set the device must renormalize over. */
                         int[][] islandedDsByIndex,
                         /** Per scenario, the reactive-limits controllers stranded in another component. */
-                        int[][] islandedRlByIndex) {
+                        int[][] islandedRlByIndex,
+                        /** Per scenario, AC-emulation HVDCs with an ISLANDED endpoint. OLF's
+                         *  processHvdcsWithoutPower zeroes both converter stations' targetP; in AC
+                         *  emulation those targets are already 0 (the injection is an equation term,
+                         *  not a target), so masking the element is the whole of it. */
+                        List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex) {
     }
 
     /**
@@ -423,6 +443,8 @@ final class GpuBatchQualification {
         // Per-contingency DISTR_Q weight overrides: a gen outage at a remote-VC controller bus makes
         // the CPU renormalize the group's qPct keys (LfContingency.processLostGenerators ->
         // updateReactiveKeys); replay the toggle host-side and diff the extracted weights.
+        @SuppressWarnings("unchecked")
+        List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex = new List[contingencies.size()];
         int[][] dqOvContribByIndex = new int[contingencies.size()][];
         double[][] dqOvWByIndex = new double[contingencies.size()][];
         // Per-contingency DISTR_RHO coefficient overrides (plan A5): outaging a NON-FREE member of a
@@ -522,7 +544,8 @@ final class GpuBatchQualification {
                     // COMBO (generator + branch): stay conservative — this path already carries the
                     // generator outage's own DISTR_Q rediff, so a SECOND one from an islanded
                     // controller would have to compose with it. Only a fully contained island batches.
-                    if (classifyVcSplit(es, q.islandedBuses(), new ArrayList<>(), new ArrayList<>()) != VcSplit.CONTAINED) {
+                    if (classifyVcSplit(es, q.islandedBuses(), new ArrayList<>(), new ArrayList<>(),
+                            new ArrayList<>()) != VcSplit.CONTAINED) {
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:GEN_ON_ISLAND");
                         continue;
                     }
@@ -589,7 +612,12 @@ final class GpuBatchQualification {
             } else {
                 List<LfBus> lostVcControllers = new ArrayList<>();
                 List<LfBus> deadControlBuses = new ArrayList<>();
-                VcSplit vcSplit = classifyVcSplit(es, q.islandedBuses(), lostVcControllers, deadControlBuses);
+                List<com.powsybl.openloadflow.network.LfHvdc> islandedHvdcs = new ArrayList<>();
+                VcSplit vcSplit = classifyVcSplit(es, q.islandedBuses(), lostVcControllers, deadControlBuses,
+                        islandedHvdcs);
+                if (!islandedHvdcs.isEmpty()) {
+                    islandedHvdcsByIndex[i] = islandedHvdcs;
+                }
                 if (vcSplit == VcSplit.UNMODELED) {
                     com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");
                     continue;                                // an islanded HVDC endpoint — CPU
@@ -710,6 +738,6 @@ final class GpuBatchQualification {
         return new ScenarioPlan(batchedIndices, frozenRowsByIndex, islandedNumsByIndex,
                 frozenTargetsByIndex, genOutagesByIndex, islandingCount, activePowerLossByIndex,
                 dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
-                islandedRlByIndex);
+                islandedRlByIndex, islandedHvdcsByIndex);
     }
 }

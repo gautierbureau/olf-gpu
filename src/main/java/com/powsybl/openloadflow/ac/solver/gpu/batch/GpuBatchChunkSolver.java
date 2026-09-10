@@ -55,6 +55,7 @@ final class GpuBatchChunkSolver {
                                                int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
                                                int[][] drOvContribByIndex, double[][] drOvCByIndex,
                                                int[][] islandedDsByIndex, int[][] islandedRlByIndex,
+                                               List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
@@ -83,7 +84,7 @@ final class GpuBatchChunkSolver {
                         baseTargets, baseRowMode, frozenRowsByIndex, frozenTargetsByIndex, genOutagesByIndex,
                         activePowerLossByIndex, hvdcElemIndex, rowCriteria, rlCurves,
                         dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
-                        islandedRlByIndex,
+                        islandedRlByIndex, islandedHvdcsByIndex,
                         n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                         varType, transformerControllers, incrementalTvcControllers, incrementalShuntControllers,
                         simpleShuntGroups, incrementalFlowControllers, esContext, hvdcControllers, svcControllers,
@@ -152,6 +153,7 @@ final class GpuBatchChunkSolver {
                                                int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
                                                int[][] drOvContribByIndex, double[][] drOvCByIndex,
                                                int[][] islandedDsByIndex, int[][] islandedRlByIndex,
+                                               List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
@@ -393,6 +395,13 @@ final class GpuBatchChunkSolver {
                             List<LfBranch> branches = contingencies.get(ci).outagedBranches();
                             List<LfShunt> shunts = contingencies.get(ci).outagedShunts();
                             List<com.powsybl.openloadflow.network.LfHvdc> hvdcs = contingencies.get(ci).outagedHvdcs();
+                            if (islandedHvdcsByIndex != null && islandedHvdcsByIndex[ci] != null) {
+                                // An AC-emulation HVDC whose endpoint this contingency islanded: OLF
+                                // zeroes both stations' targetP, which in AC emulation they already
+                                // are, so masking the element is the whole of it.
+                                hvdcs = new ArrayList<>(hvdcs);
+                                hvdcs.addAll(islandedHvdcsByIndex[ci]);
+                            }
                             List<BatchContingency.SideOpen> sideOpens = contingencies.get(ci).sideOpenBranches();
                             int[] eis = new int[branches.size() + shunts.size() + hvdcs.size() + sideOpens.size()];
                             int ei = 0;

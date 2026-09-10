@@ -223,10 +223,10 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         } else {
             System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_SCREEN_VIOLATIONS_PROPERTY);
         }
-        // OLF_GPU_CENSUS_BATCH_STRANDED=1: batch the contingencies that strand a distributed-slack
-        // participant instead of routing them to the CPU.
-        if ("1".equals(System.getenv("OLF_GPU_CENSUS_BATCH_STRANDED"))) {
-            System.setProperty("olf.gpu.sa.batchStrandedDs", "true");
+        // OLF_GPU_CENSUS_BATCH_STRANDED=0: the A/B arm — route the contingencies that strand a
+        // distributed-slack participant to the CPU instead of batching them (they batch by default).
+        if ("0".equals(System.getenv("OLF_GPU_CENSUS_BATCH_STRANDED"))) {
+            System.setProperty("olf.gpu.sa.batchStrandedDs", "false");
         } else {
             System.clearProperty("olf.gpu.sa.batchStrandedDs");
         }

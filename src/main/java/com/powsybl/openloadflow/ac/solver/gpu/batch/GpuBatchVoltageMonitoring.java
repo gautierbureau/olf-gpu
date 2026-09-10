@@ -299,16 +299,6 @@ public final class GpuBatchVoltageMonitoring {
                 }
                 GpuBatchPhaseStats.add("VoltageMonitoring.iterMax", itMax);
             }
-            if (System.getenv("OLF_GPU_MONB_TRACE") != null) {
-                for (int s = 0; s < realCount; s++) {
-                    double dmax = 0;
-                    for (int i = 0; i < n; i++) {
-                        dmax = Math.max(dmax, Math.abs(r2[s][i] - chunkResults[s][i]));
-                    }
-                    System.err.printf("MONB round=%d s=%d owed=%b iters=%d status=%d maxDx=%.6e%n",
-                            round, s, owed[s], (int) r2[s][n], (int) r2[s][n + 2], dmax);
-                }
-            }
             for (int s = 0; s < realCount; s++) {
                 if (owed[s]) {                               // untouched scenarios KEEP their converged state
                     chunkResults[s] = r2[s];

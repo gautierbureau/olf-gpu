@@ -34,18 +34,19 @@ final class GpuBatchQualification {
     }
 
     /** System property: BATCH the contingencies that strand a distributed-slack participant in
-     *  another synchronous component (default false = route them to the CPU).
+     *  another synchronous component. Default TRUE; set it to "false" for the A/B.
      *
-     *  <p>The device side is complete and correct: the per-scenario participant mask reaches the
-     *  kernel, and both the slack's retained share and the stopping gate are renormalized over the
-     *  survivors (leaving them global is what made the first attempt at this fail). What is NOT yet
-     *  right is a difference these scenarios merely EXPOSE — OLF water-fills per generator, the pack
-     *  aggregates per bus, and only a mismatch this large saturates anything. Flip this on to measure
-     *  that gap; leave it off to keep violation parity exact. */
+     *  <p>Both halves are done. The per-scenario participant mask reaches the kernel and both the
+     *  slack's retained share and the stopping gate are renormalized over the survivors (leaving
+     *  them global is what made the first attempt at this fail); and the water-fill the mask feeds
+     *  is now per GENERATOR with OLF's strict-overshoot removal, not per bus — which is what the
+     *  fragmenting mismatch (12.86 pu, ~29% of the participation on rte6515) was large enough to
+     *  expose. Measured over 2000 rte6515 branch contingencies: 0 differing violation lines either
+     *  way, 99.9% batched and 20.3 s with it on against 95.4% and 24.5 s with it off. */
     static final String BATCH_STRANDED_DS_PROPERTY = "olf.gpu.sa.batchStrandedDs";
 
     private static boolean batchStrandedDsEnabled() {
-        return Boolean.parseBoolean(System.getProperty(BATCH_STRANDED_DS_PROPERTY, "false"));
+        return !"false".equalsIgnoreCase(System.getProperty(BATCH_STRANDED_DS_PROPERTY));
     }
 
     static final int[] NO_FROZEN_ROWS = new int[0];
@@ -569,14 +570,7 @@ final class GpuBatchQualification {
                 islandedDsByIndex[i] = islandedDsParticipants(fi.rows(), gpuData);
                 islandedRlByIndex[i] = islandedRlControllers(fi.rows(), gpuData);
                 if (islandedDsByIndex[i].length > 0 && !batchStrandedDsEnabled()) {
-                    // The renormalization below is correct and measured (see the field's javadoc), but
-                    // a SECOND difference remains on these scenarios and it is not this one: OLF's
-                    // water-fill saturates per GENERATOR while the device pack aggregates per BUS, and a
-                    // fragmenting outage is the only thing on this network with a mismatch big enough to
-                    // saturate anything (12.86 pu, ~29% of the participation). Measured on the 9
-                    // reproducers: 10 differing violation lines with active limits ON, 1 with them OFF,
-                    // 0 with distributed slack off entirely. So these stay on the CPU until the pack is
-                    // per-generator — correctness over coverage, 91 of 2000 on rte6515.
+                    // The A/B arm only: route them to the CPU as before. 91 of 2000 on rte6515.
                     com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("VALIDATOR:STRANDS_DS_PARTICIPANT");
                     com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:OTHER");
                     continue;

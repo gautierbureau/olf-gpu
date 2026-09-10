@@ -566,35 +566,6 @@ final class GpuBatchChunkSolver {
                                     }
                                 }
                             }
-                            // PROOF OF ROOT CAUSE, not a fix (OLF_GPU_ISLANDED_DS_EXCLUDE=1): take the
-                            // islanded participant out of the DEVICE's distributed-slack factor sum through
-                            // the per-scenario single-bus override. On LINE-3317-350 alone this takes the
-                            // branch-flow error against the CPU from 1.053 MW to 8.8e-12 — the device was
-                            // handing a share of every redistribution to a generator no longer in this
-                            // synchronous component. Applied to the WHOLE run it regresses badly (violation
-                            // set difference 45 -> 682, and 29 more scenarios failing on the device), so the
-                            // override channel is NOT a faithful way to express an islanded participant:
-                            // its factor/base/headroom deltas mean "this bus lost a generator", not "this
-                            // bus is in another component". The real fix is a per-scenario participant mask
-                            // in the kernel.
-                            if (System.getenv("OLF_GPU_ISLANDED_DS_EXCLUDE") != null
-                                    && islandedDs != null && hasDs && dsOvBus[s] < 0) {
-                                int only = -1;
-                                int count = 0;
-                                for (int i = 0; i < nds; i++) {
-                                    if (islandedDs[i]) {
-                                        only = i;
-                                        count++;
-                                    }
-                                }
-                                if (count == 1) {
-                                    dsOvBus[s] = only;
-                                    dsOvFactorDelta[s] = gpuData.dsFactor()[only];
-                                    dsOvBaseDelta[s] = 0;
-                                    dsOvMaxDelta[s] = gpuData.dsMaxDelta()[only];
-                                    dsOvMinDelta[s] = gpuData.dsMinDelta()[only];
-                                }
-                            }
                             if (System.getenv("OLF_GPU_NO_PRELOSS") != null) {
                                 continue;                    // A/B: the pre-distribution seed off
                             }
@@ -880,8 +851,7 @@ final class GpuBatchChunkSolver {
                         double[] hvIn = new double[nh * 9];
                         for (int h = 0; h < nh; h++) {
                             GpuBatchHvdcAcEmulation.Ctl c = hvdcControllers.get(h);
-                            hvElem[h] = c.hvElemIndex() - (elementMapper.getClosedBranchCount()
-                                    + elementMapper.getOpenBranchCount() + elementMapper.getShuntCount());
+                            hvElem[h] = c.hvElemIndex();          // GLOBAL element index
                             hvB1[h] = c.bus1PRow();
                             hvB2[h] = c.bus2PRow();
                             hvIn[h * 9] = c.p0();
@@ -893,9 +863,6 @@ final class GpuBatchChunkSolver {
                             hvIn[h * 9 + 6] = c.r();
                             hvIn[h * 9 + 7] = c.baseD1();
                             hvIn[h * 9 + 8] = c.baseD2();
-                        }
-                        for (int h = 0; h < nh; h++) {
-                            hvElem[h] = hvdcControllers.get(h).hvElemIndex();   // GLOBAL element index
                         }
                         ctgOutOf = new byte[chunkSize * nh];
                         byte[] ctgOut = ctgOutOf;
@@ -1166,19 +1133,6 @@ final class GpuBatchChunkSolver {
                                 config.lsMode() == 2 ? varType : null, config);
                         orchNs.merge("HvdcAcEmulation.orchestrate#2", System.nanoTime() - tOr2, Long::sum);
                     }
-                    if (System.getenv("OLF_GPU_HVDC_STATUS_DUMP") != null && hvdcControllers != null
-                            && !hvdcControllers.isEmpty()) {
-                        // The FINAL per-hvdc status, after the driver phases OR the orchestrators.
-                        // The two arms must agree entry for entry; the first entry they disagree
-                        // about is the one whose loop the kernel drives differently.
-                        for (int s = 0; s < realCount; s++) {
-                            String id = contingencies.get(group.get(chunkStart + s)).contingencyId();
-                            for (int h = 0; h < hvdcControllers.size(); h++) {
-                                System.err.printf("GPU_HVDC_STATUS ctg=%s h=%d elem=%d status=%d%n",
-                                        id, h, hvdcControllers.get(h).hvElemIndex(), hvdcStatus[s][h]);
-                            }
-                        }
-                    }
                     if (monActive && rlStateOut != null) {
                         long tOr3 = System.nanoTime();   // TIMED_GpuBatchVoltageMonitoring
                         chunkResults = GpuBatchVoltageMonitoring.orchestrate(handle, chunkSize, realCount, n, nrl,
@@ -1328,18 +1282,6 @@ final class GpuBatchChunkSolver {
                             for (int i = 0; i < nds; i++) {
                                 System.err.printf("GPU_DS_TARGET ctg=%s i=%d target=%s%n",
                                         id, i, Double.toString(ft[s * n + gpuData.dsPhiRow()[i]]));
-                            }
-                        }
-                    }
-                    if (System.getenv("OLF_GPU_ALL_TARGET_DUMP") != null) {
-                        // EVERY target row at the end of the chunk. When two arms agree on the
-                        // statuses, the RL pins and the row modes, the only remaining input to the
-                        // equations is the target vector — so this is what localizes the divergence.
-                        double[] allT = GpuAcNewtonSolver.readBatchTargets(handle);
-                        for (int s = 0; s < realCount; s++) {
-                            String id = contingencies.get(group.get(chunkStart + s)).contingencyId();
-                            for (int r = 0; r < n; r++) {
-                                System.err.printf("GPU_TGT %s %d %s%n", id, r, Double.toString(allT[s * n + r]));
                             }
                         }
                     }

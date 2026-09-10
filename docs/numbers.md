@@ -93,3 +93,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-09 | 0ccc0bc+dirty | 22.47 | 19.41 | 26.41 | x1.36 | 0/0/0 | 7.75 | 4.44 | 499/500 | 122/133 (92%) | probes only: generator targetP + curve limits in the Q probe |
 | 2026-09-09 | cb69a35+dirty | 22.36 | 19.23 | 27.31 | x1.42 | 0/0/0 | 7.62 | 4.47 | 499/500 | 122/133 (92%) | loss pre-distribution is a displacement, not a new DS anchor |
 | 2026-09-09 | 85513c4+dirty | 22.23 | 19.85 | 27.92 | x1.41 | 0/0/0 | 7.50 | 4.45 | 499/500 | 122/133 (92%) | precompute sees the CONTINGENCY outer-loop list (JAVA hybrid was missing FreezingHvdcACEmulation) |
+| 2026-09-10 | 23738a1+dirty | 22.73 | 19.23 | 27.78 | x1.44 | 0/0/0 | 7.56 | 4.43 | 499/500 | 122/133 (92%) | hybrid chunking: chunk like DEVICE, restore the network per chunk, drop diagnostic retention |

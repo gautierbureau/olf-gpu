@@ -145,6 +145,12 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         java.util.Set<String> onlyIds = only == null ? null
                 : new java.util.HashSet<>(java.util.Arrays.asList(only.split(",")));
         int limit = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_CENSUS_LIMIT", "0"));
+        // OLF_GPU_CENSUS_SKIP=<n>: drop the first n eligible branches. With LIMIT it selects a WINDOW of
+        // the contingency list, which is what isolates a fault that only appears deep into a full run:
+        // the same scenarios then land in the FIRST batch chunk instead of the seventh, separating
+        // "this contingency's data" from "the seventh iteration of the chunk loop".
+        int skip = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_CENSUS_SKIP", "0"));
+        int seen = 0;
         for (Branch<?> b : network.getBranches()) {
             Bus b1 = b.getTerminal1().getBusView().getBus();
             Bus b2 = b.getTerminal2().getBusView().getBus();
@@ -153,6 +159,9 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
                 continue;
             }
             if (onlyIds != null && !onlyIds.contains(b.getId())) {
+                continue;
+            }
+            if (seen++ < skip) {
                 continue;
             }
             ctgs.add(new Contingency(b.getId(), new BranchContingency(b.getId())));

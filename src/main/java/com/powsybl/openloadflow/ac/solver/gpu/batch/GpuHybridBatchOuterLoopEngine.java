@@ -7,6 +7,7 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
+import com.powsybl.commons.PowsyblException;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcOuterLoopContext;
 import com.powsybl.openloadflow.ac.AcTargetVector;
@@ -60,6 +61,9 @@ import java.util.Map;
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public final class GpuHybridBatchOuterLoopEngine {
+
+    private static final org.slf4j.Logger LOGGER =
+            org.slf4j.LoggerFactory.getLogger(GpuHybridBatchOuterLoopEngine.class);
 
     private static final int MAX_ROUNDS = 40;
 
@@ -235,6 +239,15 @@ public final class GpuHybridBatchOuterLoopEngine {
                          int maxIterations, int maxOuter, int rejectRouteThreshold,
                          double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                          double[][] rowCriteria) {
+
+        /** The same inputs over a SLICE of the scenarios — {@code ctgs} is the only per-scenario field. */
+        Inputs withCtgs(List<BatchContingency> chunkCtgs) {
+            return new Inputs(structure, mode, gpuData, nElements, network, es, context, n,
+                    baseState, baseTargets, baseRowMode, chunkCtgs, mapper, gens, baseGenP, originalGenP,
+                    ctrlBuses, hvdcs, transformerBranches, lsMode, lsMaxDv, lsMaxDphi, varType,
+                    maxIterations, maxOuter, rejectRouteThreshold, tol, reactiveLimitTol, slackDistTol,
+                    convEpsPerEq, rowCriteria);
+        }
     }
 
     /**
@@ -242,12 +255,15 @@ public final class GpuHybridBatchOuterLoopEngine {
      * fallback. The arrays are indexed by the scenario order in {@link Inputs#ctgs}.
      *
      * @param states          [nS][n+3] final device state per scenario: x(n), iterations, ||F||inf, status
-     * @param round0States    [nS][] the round-0 device state (base targets, pure inner)
+     * @param round0States    [nS][] the round-0 device state (base targets, pure inner) — NULL when the
+     *                        solve was CHUNKED (diagnostic only, and holding it for every scenario of a
+     *                        full run costs hundreds of MB); likewise rowMode and scenTargets
      * @param rowMode         [nS][] final per-scenario device row mode
      * @param scenTargets     [nS][] final per-scenario target vector
      * @param retired         [nS] scenario reached a terminal state (converged OR routed) within the round budget
      * @param routedByBudget  [nS] scenario was routed to the CPU fallback (straggler / budget / device reject)
-     * @param bridges         [nS] the per-scenario outer-loop bridges (loop names / unstable counts, diagnostics)
+     * @param bridges         [nS] the per-scenario outer-loop bridges (loop names / unstable counts,
+     *                        diagnostics) — NULL when the solve was CHUNKED, for the same reason
      */
     public record Result(double[][] states, double[][] round0States, int[][] rowMode, double[][] scenTargets,
                          boolean[] retired, boolean[] routedByBudget, GpuHybridOuterLoopBridge[] bridges,
@@ -297,7 +313,131 @@ public final class GpuHybridBatchOuterLoopEngine {
                 d.dsMode(), d.dsMarginUp(), d.dsMarginDown(), d.dsSlackMarginUp(), d.dsSlackMarginDown());
     }
 
+    /**
+     * Solve every scenario, in CHUNKS sized like the DEVICE path's.
+     *
+     * <p>The uniform batched factorization holds an LU per scenario, so one context for the whole
+     * contingency set is priced against the whole set: on rte6515 with 9042 branch contingencies
+     * {@code createBatchContext} returned {@code CUDA error: out of memory}, the precomputer's
+     * catch-all swallowed it, and the ENTIRE run silently fell back to per-contingency CPU solves —
+     * a 0% batched share that reads like a scope rejection rather than an allocation failure. The
+     * DEVICE path never had this because it has always chunked.
+     *
+     * <p>Chunking is a pure partition here: {@code ctgs} is the only per-scenario field of
+     * {@link Inputs}, every result array is indexed by scenario, and the per-scenario bridges restore
+     * the base network state, so a chunk boundary changes nothing but which scenarios share a device
+     * context. A run whose recommended chunk already covers everything takes the single-context path
+     * unchanged.
+     *
+     * <p>An allocation failure that still happens (the auto-size probe is an estimate) halves the
+     * chunk and retries the SAME scenarios, remembering the ceiling for later runs — the chunk
+     * solver's rule, so both paths converge on the same size on a small card.
+     */
     public static Result solve(Inputs in) {
+        long t0 = System.nanoTime();
+        Result r = solveAll(in);
+        if (GpuBatchPhaseStats.ENABLED) {
+            // The hybrid's cost is three distinct things and only one of them is the device: the batched
+            // inner solves, OLF's Java outer loops replayed PER SCENARIO, and the per-scenario state
+            // snapshots that let a scenario be resumed in the next round. Printing the split is the
+            // difference between optimising the hybrid and guessing at it.
+            long wall = System.nanoTime() - t0;
+            System.err.printf("HYBRID_PHASE_TIME scenarios=%d rounds=%d wall=%d ms | deviceSolve=%d ms "
+                    + "javaOuterLoops=%d ms snapshots=%d ms | javaCalls=%d other=%d ms%n",
+                    in.ctgs().size(), r.rounds(), wall / 1_000_000, r.solveNanos() / 1_000_000,
+                    r.javaNanos() / 1_000_000, r.snapshotNanos() / 1_000_000, r.javaCalls(),
+                    (wall - r.solveNanos() - r.javaNanos() - r.snapshotNanos()) / 1_000_000);
+        }
+        return r;
+    }
+
+    private static Result solveAll(Inputs in) {
+        int nS = in.ctgs().size();
+        int chunk = GpuBatchContextCache.resolveChunkSize(nS, in.n(), in.gpuData());
+        if (chunk >= nS) {
+            return solveChunk(in);
+        }
+        // Only `states` (plus the per-scenario flags) is consumed in production; rowMode / scenTargets /
+        // round0States are diagnostics a validation test reads, and that test runs cases small enough to
+        // take the single-chunk path above. Retaining all four at full size is ~2.4 GB of heap at 6474
+        // scenarios on a 13040-row system (675 + 675 + 675 + 338 MB) and OOMs the JVM two thirds of the
+        // way through a full run, so the chunked path keeps only what is used.
+        double[][] states = new double[nS][];
+        boolean[] retired = new boolean[nS];
+        boolean[] routedByBudget = new boolean[nS];
+        int rounds = 0;
+        long tSolve = 0;
+        long tJava = 0;
+        long tSnap = 0;
+        long nJavaCalls = 0;
+        int start = 0;
+        while (start < nS) {
+            int size = Math.min(chunk, nS - start);
+            Result r;
+            try {
+                r = solveChunk(in.withCtgs(in.ctgs().subList(start, start + size)));
+            } catch (RuntimeException e) {
+                if (chunk <= 1 || !isDeviceAllocationFailure(e)) {
+                    throw e;
+                }
+                GpuBatchContextCache.noteChunkAllocFailure(chunk);
+                int retryChunk = Math.max(1, chunk / 2);
+                LOGGER.warn("GPU hybrid SA: device allocation failed at chunk {} ({}); retrying at chunk {}",
+                        chunk, e.getMessage(), retryChunk);
+                // the test harness's logback appenders are broken — a silent shrink would look like an
+                // unexplained slowdown, so say it on stderr too (the chunk solver's convention)
+                System.err.println("GPU_HYBRID_CHUNK_SHRINK device allocation failed at chunk " + chunk
+                        + "; retrying at " + retryChunk);
+                chunk = retryChunk;
+                continue;
+            }
+            System.arraycopy(r.states(), 0, states, start, size);
+            System.arraycopy(r.retired(), 0, retired, start, size);
+            System.arraycopy(r.routedByBudget(), 0, routedByBudget, start, size);
+            // NOT the bridges: each one retains a full per-scenario set of OLF outer-loop objects and
+            // their contexts (reactive-limits / distributed-slack context data included). Holding 6474 of
+            // them across the whole run is what still exhausted the heap after the arrays above were
+            // trimmed; dropping them lets each chunk's bridges be collected when the chunk ends.
+
+            rounds = Math.max(rounds, r.rounds());   // rounds is a DEPTH, not a total
+            tSolve += r.solveNanos();
+            tJava += r.javaNanos();
+            tSnap += r.snapshotNanos();
+            nJavaCalls += r.javaCalls();
+            start += size;
+        }
+        return new Result(states, null, null, null,
+                retired, routedByBudget, null, rounds, tSolve, tJava, tSnap, nJavaCalls);
+    }
+
+    /** Every per-scenario array the native solve dereferences must have exactly {@code nA} non-null
+     *  rows; a null row faults inside JNI with no Java frame identifying it. */
+    private static void checkScenarioRows(int[][] rowMode, boolean[][] disabled, int nA) {
+        require("rowMode", rowMode == null ? -1 : rowMode.length, nA);
+        require("disabled", disabled == null ? -1 : disabled.length, nA);
+        for (int i = 0; i < nA; i++) {
+            if (rowMode[i] == null || disabled[i] == null) {
+                throw new PowsyblException("GPU hybrid: null per-scenario row at active index " + i + " of " + nA
+                        + " (rowMode=" + (rowMode[i] != null) + " disabled=" + (disabled[i] != null) + ")");
+            }
+        }
+    }
+
+    private static void require(String what, int actual, int expected) {
+        if (actual != expected) {
+            throw new PowsyblException("GPU hybrid: " + what + " has " + actual
+                    + " rows, expected " + expected + " (the context's active scenario count)");
+        }
+    }
+
+    /** A device-side allocation failure, as the native layer reports it. */
+    private static boolean isDeviceAllocationFailure(RuntimeException e) {
+        String m = e.getMessage();
+        return m != null && (m.contains("out of memory") || m.contains("OUT_OF_MEMORY")
+                || m.contains("batched context creation failed"));
+    }
+
+    private static Result solveChunk(Inputs in) {
         int nS = in.ctgs().size();
         int n = in.n();
 
@@ -641,6 +781,10 @@ public final class GpuHybridBatchOuterLoopEngine {
             GpuAcNewtonSolver.setBatchDrCoefOverrides(handle,
                     drOvIdx.isEmpty() ? null : drOvIdx.stream().mapToInt(Integer::intValue).toArray(),
                     drOvC.isEmpty() ? null : drOvC.stream().mapToDouble(Double::doubleValue).toArray());
+            // The native side resolves every per-scenario row as a JNI handle without a null check, so a
+            // null row is a SIGSEGV inside solveBatchContext with no Java frame to blame (observed twice,
+            // deterministically, ~chunk 7 of a chunked 9042 run). Name it here instead.
+            checkScenarioRows(rowModeC, disabledC, nA);
             long ts0 = System.nanoTime();
             double[][] statesC = GpuAcNewtonSolver.solveBatchContext(handle, in.baseState(), in.baseTargets(),
                     rowModeC, in.baseRowMode(), disabledC,
@@ -789,6 +933,29 @@ public final class GpuHybridBatchOuterLoopEngine {
             }
         }
         GpuAcNewtonSolver.destroyBatchContext(handle);
+
+        // Hand the network back the way we found it. Every scenario iteration re-enables the PREVIOUS
+        // scenario's outage at its START, so on exit the LAST scenario's branches are still disabled and
+        // its outer-loop mutations are still applied. That was invisible while a run was one chunk; with
+        // chunking the next chunk captures ITS baseCompact from this corrupted network and never
+        // re-enables those branches, and a bus that loses its angle variable while keeping an active
+        // BUS_TARGET_P then blows up in extractActivation (index -1) or, worse, reaches the device as a
+        // bad row and segfaults inside the JNI call.
+        for (LfBranch b : networkDisabled) {
+            b.setDisabled(false);
+        }
+        baseCompact.restore();
+        for (int g = 0; g < in.gens().size(); g++) {
+            in.gens().get(g).setTargetP(in.baseGenP()[g]);
+            in.gens().get(g).setInitialTargetP(in.originalGenP()[g]);
+        }
+        for (int l = 0; l < loads.size(); l++) {
+            loads.get(l).setTargetP(baseLoadP[l]);
+            loads.get(l).setTargetQ(baseLoadQ[l]);
+        }
+        for (int v = 0; v < genVcs.size(); v++) {
+            genVcs.get(v).setTargetValue(baseVcTarget[v]);
+        }
 
         return new Result(states, round0States, rowMode, scenTargets, retired, routedByBudget, bridges,
                 rounds, tSolve, tJava, tSnap, nJavaCalls);

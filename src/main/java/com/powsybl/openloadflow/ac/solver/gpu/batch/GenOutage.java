@@ -13,6 +13,10 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
  * ({@code toPq}) flip its BUS_V row to the reactive-power equation and set {@code vRow}→{@code qTarget}.
  * Mirrors {@code LfContingency.processLostGenerators}.
  *
+ * <p>{@code pRow < 0} means "no P change": the entry only carries the row-mode flip and its Q
+ * target. That is how an island that KILLS a remote voltage control is expressed — every surviving
+ * member bus of the control has to solve its own reactive balance again, and nothing about P moves.
+ *
  * <p>When the lost generator sits on a distributed-slack participant bus, {@code dsBus} is that bus's
  * DS-pack index (else -1) and the {@code ds*Delta} fields carry the reweight the device applies: the
  * bus's participation factor, base target P, headroom and footroom each shrink by the lost gen's share,

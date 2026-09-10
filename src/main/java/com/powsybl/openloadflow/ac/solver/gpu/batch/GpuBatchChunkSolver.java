@@ -492,7 +492,9 @@ final class GpuBatchChunkSolver {
                             GenOutage[] gos = genOutagesByIndex[ci];
                             if (gos != null) {               // generator loss(es): per-BUS target overrides (merged by bus;
                                 for (GenOutage go : gos) {   // at most one DS-participant bus per contingency by construction)
-                                    overrides.add(s * n + go.pRow(), go.pTarget());
+                                    if (go.pRow() >= 0) {    // pRow < 0: a row-mode-only entry (a voltage
+                                        overrides.add(s * n + go.pRow(), go.pTarget());   // control the island killed)
+                                    }
                                     if (go.qOverride()) {    // Q target sheds the lost gens' Q: on the PV->PQ flip AND
                                         // on an ALREADY-PQ bus losing fixed-Q gens (#21)
                                         overrides.add(s * n + go.vRow(), go.qTarget());

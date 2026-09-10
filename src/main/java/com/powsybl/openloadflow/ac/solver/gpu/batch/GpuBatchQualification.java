@@ -184,6 +184,8 @@ final class GpuBatchQualification {
     private enum VcSplit {
         /** No remote group affected, or every group the island touches goes into it WHOLE. */
         CONTAINED,
+        /** The island KILLS a control — every surviving member bus solves its own reactive balance. */
+        CONTROL_DIES,
         /** A group survives with FEWER controllers — batchable once its reactive keys are renormalized. */
         RENORMALIZE,
         /** The island kills a control outright (pilot gone with controllers left, or the last
@@ -208,7 +210,8 @@ final class GpuBatchQualification {
      * survivors to PQ, which is a row-mode change this path does not express yet.
      */
     private static VcSplit classifyVcSplit(EquationSystem<AcVariableType, AcEquationType> es,
-                                           List<LfBus> islandedBuses, List<LfBus> lostControllers) {
+                                           List<LfBus> islandedBuses, List<LfBus> lostControllers,
+                                           List<LfBus> deadControlBuses) {
         java.util.Set<LfBus> islanded = new java.util.HashSet<>(islandedBuses);
         VcSplit result = VcSplit.CONTAINED;
         for (LfBus bus : islandedBuses) {
@@ -233,7 +236,22 @@ final class GpuBatchQualification {
                 continue;                                    // the whole group left with the island
             }
             if (pilotIslanded || surviving.isEmpty()) {
-                return VcSplit.UNMODELED;                    // the control dies
+                // The control DIES (OLF: VoltageControl.isDisabled — every controlled bus disabled,
+                // or every controller element disabled). updateRemoteVoltageControlEquations then
+                // deactivates the pilot's BUS_TARGET_V and every controller's DISTR_Q, so each
+                // SURVIVING member bus goes back to solving its own reactive balance. On the device
+                // that is exactly a PV->PQ row-mode flip with the bus's own Q target.
+                List<LfBus> survivors = new ArrayList<>(surviving);
+                if (!pilotIslanded) {
+                    survivors.add(vc.getControlledBus());
+                }
+                for (LfBus sb : survivors) {
+                    if (!deadControlBuses.contains(sb)) {
+                        deadControlBuses.add(sb);
+                    }
+                }
+                result = result == VcSplit.CONTAINED ? VcSplit.CONTROL_DIES : result;
+                continue;
             }
             lostControllers.add(bus);
             result = VcSplit.RENORMALIZE;
@@ -504,7 +522,7 @@ final class GpuBatchQualification {
                     // COMBO (generator + branch): stay conservative — this path already carries the
                     // generator outage's own DISTR_Q rediff, so a SECOND one from an islanded
                     // controller would have to compose with it. Only a fully contained island batches.
-                    if (classifyVcSplit(es, q.islandedBuses(), new ArrayList<>()) != VcSplit.CONTAINED) {
+                    if (classifyVcSplit(es, q.islandedBuses(), new ArrayList<>(), new ArrayList<>()) != VcSplit.CONTAINED) {
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:GEN_ON_ISLAND");
                         continue;
                     }
@@ -570,10 +588,32 @@ final class GpuBatchQualification {
                 }                                            // else: not a packed fixed shunt / DISTR_Q contributor → CPU
             } else {
                 List<LfBus> lostVcControllers = new ArrayList<>();
-                VcSplit vcSplit = classifyVcSplit(es, q.islandedBuses(), lostVcControllers);
+                List<LfBus> deadControlBuses = new ArrayList<>();
+                VcSplit vcSplit = classifyVcSplit(es, q.islandedBuses(), lostVcControllers, deadControlBuses);
                 if (vcSplit == VcSplit.UNMODELED) {
                     com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");
-                    continue;                                // the island kills a voltage control — CPU
+                    continue;                                // an islanded HVDC endpoint — CPU
+                }
+                if (!deadControlBuses.isEmpty()) {
+                    // Row-mode-only GenOutage entries (pRow < 0, no P change): each surviving member
+                    // bus of the killed control solves its own reactive balance again, at its own
+                    // target Q (LfBus.getTargetQ() = generation - load, which is precisely the target
+                    // OLF's re-activated BUS_TARGET_Q carries).
+                    List<GenOutage> vcOff = new ArrayList<>();
+                    for (LfBus sb : deadControlBuses) {
+                        var vVar = es.getVariableSet().getVariable(sb.getNum(), AcVariableType.BUS_V);
+                        if (vVar == null || vVar.getRow() < 0) {
+                            vcOff = null;
+                            break;
+                        }
+                        vcOff.add(new GenOutage(-1, 0, vVar.getRow(), sb.getTargetQ(), true, true,
+                                -1, 0, 0, 0, 0));
+                    }
+                    if (vcOff == null) {
+                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");
+                        continue;                            // no V row to flip — CPU
+                    }
+                    genOutagesByIndex[i] = vcOff.toArray(new GenOutage[0]);
                 }
                 if (vcSplit == VcSplit.RENORMALIZE) {
                     // The group survives without its islanded controller(s). Renormalize its reactive

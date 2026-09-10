@@ -375,6 +375,19 @@ public final class GpuAcNewtonSolver {
                                                 double[] in, byte[] ctgOut, int[] status,
                                                 double[] appliedD1, double[] appliedD2, int limitsActive);
 
+    /**
+     * MonitoringVoltage controller table (OLF outer-loop order 6) for the DRIVER phase: per
+     * controller its monitored V row and {@code band = {lowThreshold, highThreshold, lowTargetV,
+     * highTargetV}}, plus the CSR list ({@code deltaPtr}) of (row, mode, target) writes its
+     * activation applies. A null/empty {@code vRow} clears the table.
+     */
+    public static native void setBatchMonitoringLoops(long handle, int[] vRow, double[] band,
+                                                      int[] deltaPtr, int[] deltaRow,
+                                                      int[] deltaMode, double[] deltaTarget);
+
+    /** How many (controller, scenario) monitoring automatons fired in the last solve. */
+    public static native int readBatchMonitoringActivations(long handle);
+
     /** The HVDC statuses after a solve, {@code nScenarios * nHvdc}, or null when none are installed. */
     public static native int[] readBatchHvdcStatus(long handle);
 

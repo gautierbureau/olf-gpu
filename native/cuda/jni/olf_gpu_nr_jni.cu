@@ -70,7 +70,8 @@ enum DeviceLoopKind {
     LOOP_DS = 0,             // DistributedSlack
     LOOP_HVDC_FREEZE = 1,    // FreezingHvdcACEmulation
     LOOP_HVDC_LIMITS = 2,    // AcHvdcAcEmulationLimits
-    LOOP_RL = 3              // ReactiveLimits (OLF runs it LAST, after the HVDC and monitoring loops)
+    LOOP_MONITORING = 3,     // MonitoringVoltage (OLF order 6) — the standby-SVC automaton
+    LOOP_RL = 4              // ReactiveLimits (OLF order 7 — LAST of the loops the driver owns)
 };
 // GpuBatchHvdcAcEmulation's status codes, shared with the host.
 constexpr int HV_LINEAR = 0;
@@ -3438,6 +3439,44 @@ __global__ void gatherSensiBatch(int n, int nScenarios, int k, int m, int ki, co
 // puts the whole mismatch into the slack gen's own target — no flow change, but the outer loop reports
 // UNSTABLE and triggers a re-solve that polishes the state by one more Newton run. Mirror it exactly:
 // track the absorbed total, flag a switch while the residual mismatch stays above the outer gate.
+/** MonitoringVoltage (OLF MonitoringVoltageOuterLoop): a standby SVC whose monitored bus leaves its
+ *  band switches to voltage control at the corresponding setpoint. One-way — once a controller has
+ *  fired for a scenario it is never re-checked, exactly as OLF's activatedTargetV bookkeeping. */
+__global__ void monitoringLoopBatch(int nmon, int nScenarios, int n,
+                                    const int* monVRow, const double* monBand,
+                                    const int* deltaPtr, const int* deltaRow,
+                                    const int* deltaMode, const double* deltaTarget,
+                                    const double* x, double* target, int* mode,
+                                    double* activated, const char* rlActive, char* switched) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= nmon * nScenarios) return;
+    int c = k % nmon;
+    int s = k / nmon;
+    if (!rlActive[s]) return;
+    size_t slot = (size_t) s * nmon + c;
+    if (!isnan(activated[slot])) return;                     // already switched — a normal PV bus now
+    double v = x[(size_t) s * n + monVRow[c]];
+    double lowThr = monBand[c * 4];
+    double highThr = monBand[c * 4 + 1];
+    double lowTgt = monBand[c * 4 + 2];
+    double highTgt = monBand[c * 4 + 3];
+    double chosen;
+    if (v > highThr) {
+        chosen = highTgt;
+    } else if (v < lowThr) {
+        chosen = lowTgt;
+    } else {
+        return;
+    }
+    activated[slot] = chosen;
+    for (int d = deltaPtr[c]; d < deltaPtr[c + 1]; d++) {
+        int row = deltaRow[d];
+        mode[(size_t) s * n + row] = deltaMode[d];
+        target[(size_t) s * n + row] = row == monVRow[c] ? chosen : deltaTarget[d];
+    }
+    switched[s] = 1;
+}
+
 __global__ void slackOnlyDsCheck(int nScenarios, int n, int slackPhiRow, double slackTargetP,
                                  double slackDistTol, const double* qBuf, const char* rlActive,
                                  double* absorbed, char* switched) {
@@ -4139,6 +4178,12 @@ struct BatchSolverContext {
     // REMOVED it. Removal is not the same as "sitting at its bound": OLF removes an element only when
     // it strictly OVERSHOOTS, so one that lands exactly on its limit stays in the normalization for
     // another iteration — where it absorbs weight and moves nothing.
+    // MonitoringVoltage (OLF order 6): the standby-SVC automaton, as a DRIVER PHASE. Per controller:
+    // the monitored V row, its band and the two setpoints; plus a CSR list of (row, mode, target) the
+    // activation writes. dMonActivated holds the chosen target per (controller, scenario), NaN until
+    // it fires — OLF never re-checks a controller it has already switched.
+    int nmon = 0;
+    DeviceBuf dMonVRow, dMonBand, dMonDeltaPtr, dMonDeltaRow, dMonDeltaMode, dMonDeltaTarget, dMonActivated;
     DeviceBuf dGenCum, dGenRemoved;
     // The WORKING factors, normalized IN PLACE each iteration exactly as OLF's
     // normalizeParticipationFactors mutates ParticipatingElement.factor: by iteration k a survivor's
@@ -4724,6 +4769,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (ctx->nds > 0) {                                  // slack-retained share: 0 until frozen at the first pass
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsRetain.p, 0, nS * sizeof(double), ctx->stream));
         }
+        if (ctx->nmon > 0) {                                 // per-SOLVE state, like the RL limit types:
+            std::vector<double> nan(static_cast<size_t>(ctx->nmon) * nS, std::nan(""));   // nothing has
+            CUDA_CHECK(cudaMemcpyAsync(ctx->dMonActivated.p, nan.data(),   // fired yet in this solve
+                    nan.size() * sizeof(double), cudaMemcpyHostToDevice, ctx->stream));
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        }
         if (ctx->dsSlackOnly) {
             if (dsSlackShift != nullptr) {                   // strategy pairs: seed with the parent contingency's
                 CUDA_CHECK(cudaMemcpyAsync(ctx->dDsSlackAbsorbed.p, dsSlackShift,   // absorbed total (the device
@@ -4752,9 +4803,13 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // bolted on as a host orchestrator running AFTER the whole solve, landing out of order. Naming
     // the order explicitly is what lets the remaining loops move into their proper slot.
     //
-    // OLF's contingency order: DistributedSlack, FreezingHvdcACEmulation, AcHvdcAcEmulationLimits,
-    // VoltageMonitoring, ReactiveLimits. Only the two ends are in the kernel today; the middle three
-    // are still host orchestrators, which is the remaining infidelity.
+    // OLF's contingency order: DistributedSlack(1), FreezingHvdcACEmulation(2),
+    // AcHvdcAcEmulationLimits(3), SecondaryVoltageControl(5), MonitoringVoltage(6),
+    // ReactiveLimits(7). All but SecondaryVoltageControl are driver phases here, in that order.
+    // The loops OLF runs AFTER ReactiveLimits (PhaseControl, transformer and shunt voltage control)
+    // are still host orchestrators: their position relative to RL is right, but OLF restarts the
+    // WHOLE sweep whenever one of them changes something, so an earlier loop is re-checked and here
+    // it is not. Folding them needs the discrete tap/section tables on the device.
     int loopOrder[MAX_DEVICE_LOOPS];
     int nLoops = 0;
     if (ctx->nds > 0 || ctx->dsSlackOnly) {
@@ -4765,6 +4820,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (ctx->hvLimitsActive) {
             loopOrder[nLoops++] = LOOP_HVDC_LIMITS;          // OLF: AcHvdcAcEmulationLimits
         }
+    }
+    if (ctx->nmon > 0) {
+        loopOrder[nLoops++] = LOOP_MONITORING;               // OLF: MonitoringVoltage, before ReactiveLimits
     }
     if (ctx->nrl > 0) {
         loopOrder[nLoops++] = LOOP_RL;
@@ -5253,7 +5311,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         std::fprintf(stderr, "BATCH_TRACE pass done: outer=%d loop=%d/%d kind=%s\n", outer, loopIdx, nLoops,
                      loopOrder[loopIdx] == LOOP_DS ? "DistributedSlack"
                      : loopOrder[loopIdx] == LOOP_HVDC_FREEZE ? "FreezingHvdcACEmulation"
-                     : loopOrder[loopIdx] == LOOP_HVDC_LIMITS ? "AcHvdcAcEmulationLimits" : "ReactiveLimits");
+                     : loopOrder[loopIdx] == LOOP_HVDC_LIMITS ? "AcHvdcAcEmulationLimits"
+                     : loopOrder[loopIdx] == LOOP_MONITORING ? "MonitoringVoltage" : "ReactiveLimits");
     }
     if (inDsPhase && getenv("OLF_GPU_DS_DEBUG") && nS > 0) {
         // Is scenario 0 actually CONVERGED at the moment the DS loop reads its mismatch? OLF checks
@@ -5271,7 +5330,14 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                      outer, gLastPassIters, std::sqrt(ssq), inf);
     }
     int loopKind = loopOrder[loopIdx];
-    if (loopKind == LOOP_HVDC_FREEZE || loopKind == LOOP_HVDC_LIMITS) {
+    if (loopKind == LOOP_MONITORING) {
+        monitoringLoopBatch<<<grid(ctx->nmon * nS), BLOCK, 0, ctx->stream>>>(
+                ctx->nmon, nS, n, ctx->dMonVRow.as<int>(), ctx->dMonBand.as<double>(),
+                ctx->dMonDeltaPtr.as<int>(), ctx->dMonDeltaRow.as<int>(),
+                ctx->dMonDeltaMode.as<int>(), ctx->dMonDeltaTarget.as<double>(),
+                ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dMode.as<int>(),
+                ctx->dMonActivated.as<double>(), ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
+    } else if (loopKind == LOOP_HVDC_FREEZE || loopKind == LOOP_HVDC_LIMITS) {
         hvdcAcEmulationLoopBatch<<<grid(ctx->nhv * nS), BLOCK, 0, ctx->stream>>>(
                 ctx->nhv, nS, n, ctx->nElements, ctx->hvOffset,
                 loopKind == LOOP_HVDC_FREEZE ? 0 : 1,
@@ -6613,6 +6679,61 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     env->ReleaseByteArrayElements(jCtgOut, co, JNI_ABORT);
     ctx->nhv = nh;
     ctx->hvLimitsActive = limitsActive;
+}
+
+/** MonitoringVoltage controller table (OLF order 6). Empty array clears it. */
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchMonitoringLoops(
+        JNIEnv* env, jclass, jlong handle, jintArray jVRow, jdoubleArray jBand,
+        jintArray jDeltaPtr, jintArray jDeltaRow, jintArray jDeltaMode, jdoubleArray jDeltaTarget) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jVRow == nullptr || env->GetArrayLength(jVRow) == 0) {
+        ctx->nmon = 0;
+        return;
+    }
+    auto upI = [&](jintArray a, DeviceBuf& b) {
+        jint* q = env->GetIntArrayElements(a, nullptr);
+        b.upload(q, (size_t) env->GetArrayLength(a) * sizeof(int));
+        env->ReleaseIntArrayElements(a, q, JNI_ABORT);
+    };
+    auto upD = [&](jdoubleArray a, DeviceBuf& b) {
+        jdouble* q = env->GetDoubleArrayElements(a, nullptr);
+        b.upload(q, (size_t) env->GetArrayLength(a) * sizeof(double));
+        env->ReleaseDoubleArrayElements(a, q, JNI_ABORT);
+    };
+    upI(jVRow, ctx->dMonVRow);
+    upD(jBand, ctx->dMonBand);
+    upI(jDeltaPtr, ctx->dMonDeltaPtr);
+    upI(jDeltaRow, ctx->dMonDeltaRow);
+    upI(jDeltaMode, ctx->dMonDeltaMode);
+    upD(jDeltaTarget, ctx->dMonDeltaTarget);
+    ctx->nmon = env->GetArrayLength(jVRow);
+    ctx->dMonActivated.alloc(static_cast<size_t>(ctx->nmon) * ctx->nScenarios * sizeof(double));
+}
+
+/** How many (controller, scenario) monitoring automatons FIRED in the last solve. The host keeps
+ *  the ACTIVATIONS counter meaningful now that the loop is a driver phase rather than an
+ *  orchestrator — it is the coverage guard that a test case really exercises an activation. */
+extern "C" JNIEXPORT jint JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchMonitoringActivations(
+        JNIEnv*, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || ctx->nmon == 0 || !ctx->dMonActivated.p) {
+        return 0;
+    }
+    size_t cnt = static_cast<size_t>(ctx->nmon) * ctx->nScenarios;
+    std::vector<double> host(cnt);
+    cudaMemcpy(host.data(), ctx->dMonActivated.p, cnt * sizeof(double), cudaMemcpyDeviceToHost);
+    jint fired = 0;
+    for (double v : host) {
+        if (!std::isnan(v)) {
+            fired++;
+        }
+    }
+    return fired;
 }
 
 /** Read the HVDC statuses back after a solve, so the host keeps its own view in step. */

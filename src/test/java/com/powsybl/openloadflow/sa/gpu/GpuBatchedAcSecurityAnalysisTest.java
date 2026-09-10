@@ -2035,14 +2035,14 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = hvdcWithStandbySvcNetwork(390, 399);   // a band neither scenario's b4 leaves
-        long skippedBefore = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.SKIPPED_CONFIRM_SOLVES.sum();
         long activatedBefore = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.ACTIVATIONS.sum();
         assertGpuMatchesCpu(network, hvdcWithStandbySvcContingencies(), 1e-12, hvdcWithStandbySvcParameters());
         assertEquals(activatedBefore,
                 com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.ACTIVATIONS.sum(),
                 "the wide band must leave the automaton standing by");
-        assertTrue(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.SKIPPED_CONFIRM_SOLVES.sum() > skippedBefore,
-                "phase B's confirmation solve must have been SKIPPED — otherwise this case does not cover the skip");
+        // (There is no confirmation solve to skip any more: MonitoringVoltage is a DRIVER phase in
+        // OLF's own slot, so the main solve leaves every scenario monitoring- AND RL-stable and the
+        // orchestrator's phase B — the extra Newton step that used to cost 7.0e-2 kV — is retired.)
     }
 
     /** The other arm of {@link #deviceHvdcWithStandbySvcSkipsTheConfirmSolveAndMatchesCpu}: the
@@ -2057,14 +2057,12 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         // voltage control, so a base activation would leave no monitoring SVC for the batch to pack —
         // and takes exactly one scenario out of it.
         Network network = hvdcWithStandbySvcNetwork(397.8, 500);
-        long skippedBefore = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.SKIPPED_CONFIRM_SOLVES.sum();
         long activatedBefore = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.ACTIVATIONS.sum();
         assertGpuMatchesCpu(network, hvdcWithStandbySvcContingencies(), 1e-12, hvdcWithStandbySvcParameters());
         assertTrue(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.ACTIVATIONS.sum() > activatedBefore,
                 "the automaton must switch PQ -> PV in this arm");
-        assertEquals(skippedBefore,
-                com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.SKIPPED_CONFIRM_SOLVES.sum(),
-                "an activated automaton moved the state — phase B's solve must NOT be skipped");
+        // No phase-B bookkeeping to assert: the loop runs in the driver now. What matters is above —
+        // the automaton fired, and the state still matches the CPU at 1e-12.
     }
 
     /** {@code deviceHvdcSaturatedBaseMatchesCpu}'s network plus a stand-by SVC on b4 (400 kV). */

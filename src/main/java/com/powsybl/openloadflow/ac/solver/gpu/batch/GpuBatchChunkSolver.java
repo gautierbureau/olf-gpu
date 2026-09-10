@@ -894,6 +894,40 @@ final class GpuBatchChunkSolver {
                     } else {
                         GpuAcNewtonSolver.setBatchHvdcLoops(handle, null, null, null, null, null, null, null, null, 0);
                     }
+                    // MonitoringVoltage as a DRIVER PHASE, in OLF's own slot (order 6, between the
+                    // HVDC loops and ReactiveLimits) instead of as a host orchestrator after the whole
+                    // solve. Run-constant table, but the context is per chunk.
+                    boolean monInKernel = monActive;
+                    if (monInKernel) {
+                        int nc = monitoringControllers.size();
+                        int[] monVRow = new int[nc];
+                        double[] monBand = new double[nc * 4];
+                        int[] deltaPtr = new int[nc + 1];
+                        List<Integer> dRow = new ArrayList<>();
+                        List<Integer> dMode = new ArrayList<>();
+                        List<Double> dTgt = new ArrayList<>();
+                        for (int c = 0; c < nc; c++) {
+                            GpuBatchVoltageMonitoring.Ctl ctl = monitoringControllers.get(c);
+                            monVRow[c] = ctl.vRow();
+                            monBand[c * 4] = ctl.lowThreshold();
+                            monBand[c * 4 + 1] = ctl.highThreshold();
+                            monBand[c * 4 + 2] = ctl.lowTargetV();
+                            monBand[c * 4 + 3] = ctl.highTargetV();
+                            deltaPtr[c] = dRow.size();
+                            for (int k = 0; k < ctl.deltaRows().length; k++) {
+                                dRow.add(ctl.deltaRows()[k]);
+                                dMode.add(ctl.deltaModesOn()[k]);
+                                dTgt.add(ctl.deltaTargetsOn()[k]);
+                            }
+                        }
+                        deltaPtr[nc] = dRow.size();
+                        GpuAcNewtonSolver.setBatchMonitoringLoops(handle, monVRow, monBand, deltaPtr,
+                                dRow.stream().mapToInt(Integer::intValue).toArray(),
+                                dMode.stream().mapToInt(Integer::intValue).toArray(),
+                                dTgt.stream().mapToDouble(Double::doubleValue).toArray());
+                    } else {
+                        GpuAcNewtonSolver.setBatchMonitoringLoops(handle, null, null, null, null, null, null);
+                    }
                     long tSolve0 = System.nanoTime();
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
@@ -911,10 +945,16 @@ final class GpuBatchChunkSolver {
                             // monitoring active: OLF checks VoltageMonitoring BEFORE ReactiveLimits — the main
                             // solve surfaces the DS-stable / pre-RL state; the orchestrator then interleaves
                             // and finishes with the full RL-enabled solves.
-                            monActive && !hasHvdcDriverLoops ? 1 : 0,
+                            0,
                             nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
                     tMainSolveNs += System.nanoTime() - tSolve0;
+                    if (monInKernel) {
+                        // Keep ACTIVATIONS meaningful with the loop in the driver: it is the guard
+                        // that a case really exercises the automaton, not orchestrator bookkeeping.
+                        GpuBatchVoltageMonitoring.ACTIVATIONS.add(
+                                GpuAcNewtonSolver.readBatchMonitoringActivations(handle));
+                    }
                     if (hasHvdcDriverLoops) {
                         // The driver phases mutated the hv element bits and the converter-bus targets
                         // ON THE DEVICE. The host keeps mirrors of both, and the orchestrators that
@@ -1044,7 +1084,7 @@ final class GpuBatchChunkSolver {
                     // an RL solve makes the monitoring orchestrator run one extra Newton step the CPU
                     // never runs — measured as the WHOLE divergence on LINE-1392-677 and
                     // LINE-2045-221 (1.1e-3 pu = 7.0e-2 kV at a 63 kV bus).
-                    java.util.Arrays.fill(rlSolvedPerScenario, !monActive || hasHvdcDriverLoops);
+                    java.util.Arrays.fill(rlSolvedPerScenario, true);
                     if (dbgPairRl) {
                         for (int s2 = 0; s2 < realCount; s2++) {
                             StringBuilder sb = new StringBuilder("GPU-PAIR-RL " + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(GpuBatchStatus.STRATEGY_KEY_SEP, '|'));
@@ -1111,7 +1151,7 @@ final class GpuBatchChunkSolver {
                                 config.lsMode() == 2 ? varType : null, config);
                         orchNs.merge("IncrementalTvc.orchestrate", System.nanoTime() - t00, Long::sum);
                     }
-                    if (monActive && rlStateOut != null) {
+                    if (monActive && !monInKernel && rlStateOut != null) {
                         long tOr3 = System.nanoTime();   // TIMED_GpuBatchVoltageMonitoring
                         chunkResults = GpuBatchVoltageMonitoring.orchestrate(handle, chunkSize, realCount, n, nrl,
                                 chunkResults, monitoringControllers, rlStateOut, rlSolvedPerScenario,

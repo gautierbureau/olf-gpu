@@ -33,22 +33,6 @@ final class GpuBatchQualification {
     private GpuBatchQualification() {
     }
 
-    /** System property: BATCH the contingencies that strand a distributed-slack participant in
-     *  another synchronous component. Default TRUE; set it to "false" for the A/B.
-     *
-     *  <p>Both halves are done. The per-scenario participant mask reaches the kernel and both the
-     *  slack's retained share and the stopping gate are renormalized over the survivors (leaving
-     *  them global is what made the first attempt at this fail); and the water-fill the mask feeds
-     *  is now per GENERATOR with OLF's strict-overshoot removal, not per bus — which is what the
-     *  fragmenting mismatch (12.86 pu, ~29% of the participation on rte6515) was large enough to
-     *  expose. Measured over 2000 rte6515 branch contingencies: 0 differing violation lines either
-     *  way, 99.9% batched and 20.3 s with it on against 95.4% and 24.5 s with it off. */
-    static final String BATCH_STRANDED_DS_PROPERTY = "olf.gpu.sa.batchStrandedDs";
-
-    private static boolean batchStrandedDsEnabled() {
-        return !"false".equalsIgnoreCase(System.getProperty(BATCH_STRANDED_DS_PROPERTY));
-    }
-
     static final int[] NO_FROZEN_ROWS = new int[0];
     static final double[] NO_FROZEN_TARGETS = new double[0];
 
@@ -592,12 +576,6 @@ final class GpuBatchQualification {
                 // set and derives BOTH the shares and the stopping gate from it.
                 islandedDsByIndex[i] = islandedDsParticipants(fi.rows(), gpuData);
                 islandedRlByIndex[i] = islandedRlControllers(fi.rows(), gpuData);
-                if (islandedDsByIndex[i].length > 0 && !batchStrandedDsEnabled()) {
-                    // The A/B arm only: route them to the CPU as before. 91 of 2000 on rte6515.
-                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("VALIDATOR:STRANDS_DS_PARTICIPANT");
-                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:OTHER");
-                    continue;
-                }
                 if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP")) && q.islandedBuses().size() > 0) {
                     // The count that must match OLF's participant drop: OLF re-runs
                     // filterParticipatingBuses on the surviving component, so if it loses N buses and

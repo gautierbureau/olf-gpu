@@ -832,18 +832,13 @@ final class GpuBatchChunkSolver {
                             dsIslandedList.isEmpty() ? null : dsIslandedList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchRlIslanded(handle,
                             rlIslandedList.isEmpty() ? null : rlIslandedList.stream().mapToInt(Integer::intValue).toArray());
-                    // Run the HVDC AC-emulation loops as DRIVER PHASES, in OLF's order between
-                    // DistributedSlack and ReactiveLimits, instead of as host orchestrators after the
-                    // whole solve. Off by default until it is proven against the CPU violation set.
+                    // The two HVDC AC-emulation loops run as DRIVER PHASES, in OLF's own position
+                    // between DistributedSlack and ReactiveLimits. Running them instead as host
+                    // orchestrators after the whole solve put them out of OLF's order and left one
+                    // differing violation line over 2000 rte6515 branch contingencies.
                     byte[] ctgOutOf = null;
-                    // Run the two HVDC AC-emulation loops as DRIVER PHASES, in OLF's own position
-                    // (between DistributedSlack and ReactiveLimits), instead of as host orchestrators
-                    // after the whole solve. Measured over 2000 rte6515 branch contingencies: ZERO
-                    // violation differences against the CPU where the host orchestrators leave one,
-                    // and faster. Set the property to "false" for the A/B.
-                    boolean hvdcLoopsInKernel = hvdcControllers != null && !hvdcControllers.isEmpty()
-                            && !"false".equalsIgnoreCase(System.getProperty("olf.gpu.sa.hvdcLoopsInKernel"));
-                    if (hvdcLoopsInKernel) {
+                    boolean hasHvdcDriverLoops = hvdcControllers != null && !hvdcControllers.isEmpty();
+                    if (hasHvdcDriverLoops) {
                         int nh = hvdcControllers.size();
                         int[] hvElem = new int[nh];
                         int[] hvB1 = new int[nh];
@@ -897,11 +892,11 @@ final class GpuBatchChunkSolver {
                             // monitoring active: OLF checks VoltageMonitoring BEFORE ReactiveLimits — the main
                             // solve surfaces the DS-stable / pre-RL state; the orchestrator then interleaves
                             // and finishes with the full RL-enabled solves.
-                            monActive && !hvdcLoopsInKernel ? 1 : 0,
+                            monActive && !hasHvdcDriverLoops ? 1 : 0,
                             nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
                     tMainSolveNs += System.nanoTime() - tSolve0;
-                    if (hvdcLoopsInKernel) {
+                    if (hasHvdcDriverLoops) {
                         // The driver phases mutated the hv element bits and the converter-bus targets
                         // ON THE DEVICE. The host keeps mirrors of both, and the orchestrators that
                         // run next re-upload them — so without this sync they would clobber the loops'
@@ -1024,13 +1019,13 @@ final class GpuBatchChunkSolver {
                     // An orchestrator that RL-solves a scenario sets its flag, and VoltageMonitoring uses
                     // it to skip a confirmation solve that could only re-derive what it was handed.
                     boolean[] rlSolvedPerScenario = new boolean[chunkSize];
-                    // With the HVDC loops in the driver, the driver's own loop LIST ends with
-                    // ReactiveLimits, so the main solve leaves every scenario RL-stable and OLF's
-                    // rule applies: a loop that reports STABLE never re-solves. Leaving these
-                    // scenarios "owing" an RL solve makes the monitoring orchestrator run one extra
-                    // Newton step that the CPU never runs — measured as the WHOLE divergence on
-                    // LINE-1392-677 and LINE-2045-221 (1.1e-3 pu = 7.0e-2 kV at a 63 kV bus).
-                    java.util.Arrays.fill(rlSolvedPerScenario, !monActive || hvdcLoopsInKernel);
+                    // When the network has HVDC the driver's loop LIST ends with ReactiveLimits, so
+                    // the main solve leaves every scenario RL-stable and OLF's rule applies: a loop
+                    // that reports STABLE never re-solves. Reporting those scenarios as still "owing"
+                    // an RL solve makes the monitoring orchestrator run one extra Newton step the CPU
+                    // never runs — measured as the WHOLE divergence on LINE-1392-677 and
+                    // LINE-2045-221 (1.1e-3 pu = 7.0e-2 kV at a 63 kV bus).
+                    java.util.Arrays.fill(rlSolvedPerScenario, !monActive || hasHvdcDriverLoops);
                     if (dbgPairRl) {
                         for (int s2 = 0; s2 < realCount; s2++) {
                             StringBuilder sb = new StringBuilder("GPU-PAIR-RL " + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(GpuBatchStatus.STRATEGY_KEY_SEP, '|'));
@@ -1096,42 +1091,6 @@ final class GpuBatchChunkSolver {
                                 baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                                 config.lsMode() == 2 ? varType : null, config);
                         orchNs.merge("IncrementalTvc.orchestrate", System.nanoTime() - t00, Long::sum);
-                    }
-                    if (hvdcControllers != null && !hvdcControllers.isEmpty() && !hvdcLoopsInKernel) {
-                        long tOr1 = System.nanoTime();   // TIMED_GpuBatchHvdcAcEmulation
-                        chunkResults = GpuBatchHvdcAcEmulation.orchestrate(handle, chunkSize, realCount, n, nrl, rlStateOut, rlSolvedPerScenario,
-                                chunkResults, hvdcControllers, hvdcStatus, config.hvdcLimits(),
-                                rowModePerScenario, baseRowMode, disabledMask,
-                                preHvdcOvIdx, preHvdcOvVal,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("HvdcAcEmulation.orchestrate#1", System.nanoTime() - tOr1, Long::sum);
-                    }
-                    if (hvdcControllers != null && !hvdcControllers.isEmpty() && !hvdcLoopsInKernel) {
-                        long tOr2 = System.nanoTime();   // TIMED_GpuBatchHvdcAcEmulation
-                        chunkResults = GpuBatchHvdcAcEmulation.orchestrate(handle, chunkSize, realCount, n, nrl, rlStateOut, rlSolvedPerScenario,
-                                chunkResults, hvdcControllers, hvdcStatus, config.hvdcLimits(),
-                                rowModePerScenario, baseRowMode, disabledMask,
-                                preHvdcOvIdx, preHvdcOvVal,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("HvdcAcEmulation.orchestrate#2", System.nanoTime() - tOr2, Long::sum);
                     }
                     if (monActive && rlStateOut != null) {
                         long tOr3 = System.nanoTime();   // TIMED_GpuBatchVoltageMonitoring

@@ -223,23 +223,6 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         } else {
             System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_SCREEN_VIOLATIONS_PROPERTY);
         }
-        // OLF_GPU_CENSUS_BATCH_STRANDED=0: the A/B arm — route the contingencies that strand a
-        // distributed-slack participant to the CPU instead of batching them (they batch by default).
-        if ("0".equals(System.getenv("OLF_GPU_CENSUS_BATCH_STRANDED"))) {
-            System.setProperty("olf.gpu.sa.batchStrandedDs", "false");
-        } else {
-            System.clearProperty("olf.gpu.sa.batchStrandedDs");
-        }
-        // OLF_GPU_CENSUS_HVDC_IN_KERNEL=1: run FreezingHvdcACEmulation / AcHvdcAcEmulationLimits as
-        // driver phases in OLF's order rather than as host orchestrators after the whole solve.
-        if ("1".equals(System.getenv("OLF_GPU_CENSUS_HVDC_IN_KERNEL"))) {
-            System.setProperty("olf.gpu.sa.hvdcLoopsInKernel", "true");
-        } else if ("0".equals(System.getenv("OLF_GPU_CENSUS_HVDC_IN_KERNEL"))) {
-            // the A/B arm: the loops are ON by default now, so the off arm has to say so explicitly
-            System.setProperty("olf.gpu.sa.hvdcLoopsInKernel", "false");
-        } else {
-            System.clearProperty("olf.gpu.sa.hvdcLoopsInKernel");
-        }
         String chunk = System.getenv("OLF_GPU_CENSUS_CHUNK");
         if (chunk != null) {
             System.setProperty(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.MAX_BATCH_PROPERTY, chunk);

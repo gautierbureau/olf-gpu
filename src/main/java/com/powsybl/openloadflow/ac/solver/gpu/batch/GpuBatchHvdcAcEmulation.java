@@ -238,6 +238,53 @@ public final class GpuBatchHvdcAcEmulation {
         return status;
     }
 
+    /**
+     * Re-derive the converter-bus target overrides and the hv element bits from a set of statuses,
+     * onto {@code ovIdx}/{@code ovVal} seeded with the PRE-FREEZE list. This is the orchestrator's
+     * per-round rebuild, extracted so the in-kernel loops can leave the HOST's mirrors consistent
+     * with what they did on the device — otherwise the orchestrators that run next re-upload a
+     * pre-freeze override list and re-apply a freeze the kernel already lifted.
+     */
+    static void applyStatusOverrides(int chunkSize, int realCount, int n, List<Ctl> ctls,
+                                     int[][] status, byte[] ctgOut, boolean[][] disabledMask,
+                                     double[] baseTargets, List<Integer> ovIdx, List<Double> ovVal,
+                                     double[] appliedD1, double[] appliedD2) {
+        java.util.Map<Integer, Integer> posOf = indexOf(ovIdx);
+        int nh = ctls.size();
+        for (int s = 0; s < realCount; s++) {
+            for (int h = 0; h < nh; h++) {
+                Ctl c = ctls.get(h);
+                if (ctgOut[s * nh + h] != 0) {
+                    continue;                                // the contingency owns that bit
+                }
+                if (status[s][h] == LINEAR) {
+                    disabledMask[s][c.hvElemIndex()] = false;
+                    if (c.baseStatus() != LINEAR) {          // strip the base injections from the targets
+                        mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus1PRow(),
+                                baseTargets[c.bus1PRow()], c.baseD1(), 0);
+                        mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus2PRow(),
+                                baseTargets[c.bus2PRow()], c.baseD2(), 0);
+                    }
+                } else {
+                    disabledMask[s][c.hvElemIndex()] = true;
+                    // A STILL-FROZEN entry (its scenario retired before the unfreeze phase reached
+                    // it) must keep the delta the pre-solve freeze applied — recomputing it here is
+                    // impossible (it was taken at the warm-start flows), but it is exactly what the
+                    // applied-delta arrays hold. Seeding the list PRE-freeze and skipping this entry
+                    // silently dropped its override.
+                    double[] d = status[s][h] == SAT_1_TO_2 ? saturationDeltas(c, true)
+                            : status[s][h] == SAT_2_TO_1 ? saturationDeltas(c, false)
+                            : new double[] {appliedD1[s * nh + h] + c.baseD1(),
+                                            appliedD2[s * nh + h] + c.baseD2()};
+                    mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus1PRow(),
+                            baseTargets[c.bus1PRow()], c.baseD1(), d[0]);
+                    mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus2PRow(),
+                            baseTargets[c.bus2PRow()], c.baseD2(), d[1]);
+                }
+            }
+        }
+    }
+
     /** Compose one converter-bus status override ONTO any override already present at the row
      *  (e.g. a lost-load target on the converter bus — a row must NEVER carry two overrides, the
      *  parallel scatter has no ordering): value = (existing override | baseTargets) - baseD + d. */

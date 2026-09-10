@@ -835,6 +835,22 @@ final class GpuBatchChunkSolver {
                     // DistributedSlack and ReactiveLimits, instead of as host orchestrators after the
                     // whole solve. Off by default until it is proven against the CPU violation set.
                     byte[] ctgOutOf = null;
+                    // Run the two HVDC AC-emulation loops as DRIVER PHASES, in OLF's own position
+                    // (between DistributedSlack and ReactiveLimits), instead of as host orchestrators
+                    // after the whole solve. Measured over 2000 rte6515 branch contingencies: ZERO
+                    // violation differences against the CPU where the host orchestrators leave one,
+                    // and faster (19.1 s vs 20.7 s).
+                    //
+                    // Still OPT-IN because of one known residual: with the loops in the driver the
+                    // FIRST solve leaves the slack 0.0067 pu (0.67 MW) away from where the host-
+                    // orchestrator path leaves it, which makes slackOnlyDsCheck fire one pass EARLY.
+                    // OLF's DistributedSlack check reports STABLE there and fires only after the
+                    // unfreeze, so the two implementations perform the same single distribution at
+                    // different points in the sequence. Both converge, but OLF's last Newton call is
+                    // then a DS polish (||F|| 6.6e-14) where ours is the unfreeze solve (1.8e-9), and
+                    // that leaves the final state 1e-12 pu apart — 4e-10 kV on the three synthetic
+                    // deviceHvdc* tests, which assert at 1e-12 kV. Fix the slack baseline first, then
+                    // flip this default.
                     boolean hvdcLoopsInKernel = hvdcControllers != null && !hvdcControllers.isEmpty()
                             && Boolean.getBoolean("olf.gpu.sa.hvdcLoopsInKernel");
                     if (hvdcLoopsInKernel) {
@@ -895,7 +911,7 @@ final class GpuBatchChunkSolver {
                             // monitoring active: OLF checks VoltageMonitoring BEFORE ReactiveLimits — the main
                             // solve surfaces the DS-stable / pre-RL state; the orchestrator then interleaves
                             // and finishes with the full RL-enabled solves.
-                            monActive ? 1 : 0,
+                            monActive && !hvdcLoopsInKernel ? 1 : 0,
                             nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
                     tMainSolveNs += System.nanoTime() - tSolve0;
@@ -908,15 +924,24 @@ final class GpuBatchChunkSolver {
                         int nh = hvdcControllers.size();
                         if (devStatus != null) {
                             for (int s2 = 0; s2 < chunkSize; s2++) {
-                                for (int h = 0; h < nh; h++) {
-                                    int st = devStatus[s2 * nh + h];
-                                    hvdcStatus[s2][h] = st;
-                                    int elem = hvdcControllers.get(h).hvElemIndex();
-                                    if (ctgOutOf[s2 * nh + h] == 0) {
-                                        disabledMask[s2][elem] = st != GpuBatchHvdcAcEmulation.LINEAR;
-                                    }
-                                }
+                                System.arraycopy(devStatus, s2 * nh, hvdcStatus[s2], 0, nh);
                             }
+                            // Re-derive the host's OVERRIDE LIST and hv bits from those statuses, on
+                            // top of the PRE-FREEZE list. Syncing only the bits is not enough: every
+                            // orchestrator that runs next rebuilds its targets from this list, so a
+                            // stale post-freeze list re-applies a freeze the kernel already lifted
+                            // (measured: 566 differing lines over 2000 with only the bits synced).
+                            List<Integer> idx = new ArrayList<>(preHvdcOvIdx);
+                            List<Double> val = new ArrayList<>(preHvdcOvVal);
+                            GpuBatchHvdcAcEmulation.applyStatusOverrides(chunkSize, realCount, n,
+                                    hvdcControllers, hvdcStatus, ctgOutOf, disabledMask, baseTargets, idx, val,
+                                    hvAppliedD1, hvAppliedD2);
+                            overrides.mutableIndexList().clear();
+                            overrides.mutableIndexList().addAll(idx);
+                            overrides.mutableValueList().clear();
+                            overrides.mutableValueList().addAll(val);
+                            targetOverrideIndex = overrides.indexArray();
+                            targetOverrideValue = overrides.valueArray();
                         }
                     }
                     if (System.getenv("OLF_GPU_ITER_TRACE") != null && !pairPhase) {
@@ -1013,7 +1038,13 @@ final class GpuBatchChunkSolver {
                     // An orchestrator that RL-solves a scenario sets its flag, and VoltageMonitoring uses
                     // it to skip a confirmation solve that could only re-derive what it was handed.
                     boolean[] rlSolvedPerScenario = new boolean[chunkSize];
-                    java.util.Arrays.fill(rlSolvedPerScenario, !monActive);
+                    // With the HVDC loops in the driver, the driver's own loop LIST ends with
+                    // ReactiveLimits, so the main solve leaves every scenario RL-stable and OLF's
+                    // rule applies: a loop that reports STABLE never re-solves. Leaving these
+                    // scenarios "owing" an RL solve makes the monitoring orchestrator run one extra
+                    // Newton step that the CPU never runs — measured as the WHOLE divergence on
+                    // LINE-1392-677 and LINE-2045-221 (1.1e-3 pu = 7.0e-2 kV at a 63 kV bus).
+                    java.util.Arrays.fill(rlSolvedPerScenario, !monActive || hvdcLoopsInKernel);
                     if (dbgPairRl) {
                         for (int s2 = 0; s2 < realCount; s2++) {
                             StringBuilder sb = new StringBuilder("GPU-PAIR-RL " + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(GpuBatchStatus.STRATEGY_KEY_SEP, '|'));
@@ -1115,6 +1146,19 @@ final class GpuBatchChunkSolver {
                                 baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                                 config.lsMode() == 2 ? varType : null, config);
                         orchNs.merge("HvdcAcEmulation.orchestrate#2", System.nanoTime() - tOr2, Long::sum);
+                    }
+                    if (System.getenv("OLF_GPU_HVDC_STATUS_DUMP") != null && hvdcControllers != null
+                            && !hvdcControllers.isEmpty()) {
+                        // The FINAL per-hvdc status, after the driver phases OR the orchestrators.
+                        // The two arms must agree entry for entry; the first entry they disagree
+                        // about is the one whose loop the kernel drives differently.
+                        for (int s = 0; s < realCount; s++) {
+                            String id = contingencies.get(group.get(chunkStart + s)).contingencyId();
+                            for (int h = 0; h < hvdcControllers.size(); h++) {
+                                System.err.printf("GPU_HVDC_STATUS ctg=%s h=%d elem=%d status=%d%n",
+                                        id, h, hvdcControllers.get(h).hvElemIndex(), hvdcStatus[s][h]);
+                            }
+                        }
                     }
                     if (monActive && rlStateOut != null) {
                         long tOr3 = System.nanoTime();   // TIMED_GpuBatchVoltageMonitoring
@@ -1265,6 +1309,18 @@ final class GpuBatchChunkSolver {
                             for (int i = 0; i < nds; i++) {
                                 System.err.printf("GPU_DS_TARGET ctg=%s i=%d target=%s%n",
                                         id, i, Double.toString(ft[s * n + gpuData.dsPhiRow()[i]]));
+                            }
+                        }
+                    }
+                    if (System.getenv("OLF_GPU_ALL_TARGET_DUMP") != null) {
+                        // EVERY target row at the end of the chunk. When two arms agree on the
+                        // statuses, the RL pins and the row modes, the only remaining input to the
+                        // equations is the target vector — so this is what localizes the divergence.
+                        double[] allT = GpuAcNewtonSolver.readBatchTargets(handle);
+                        for (int s = 0; s < realCount; s++) {
+                            String id = contingencies.get(group.get(chunkStart + s)).contingencyId();
+                            for (int r = 0; r < n; r++) {
+                                System.err.printf("GPU_TGT %s %d %s%n", id, r, Double.toString(allT[s * n + r]));
                             }
                         }
                     }

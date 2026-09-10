@@ -234,6 +234,9 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         // driver phases in OLF's order rather than as host orchestrators after the whole solve.
         if ("1".equals(System.getenv("OLF_GPU_CENSUS_HVDC_IN_KERNEL"))) {
             System.setProperty("olf.gpu.sa.hvdcLoopsInKernel", "true");
+        } else if ("0".equals(System.getenv("OLF_GPU_CENSUS_HVDC_IN_KERNEL"))) {
+            // the A/B arm: the loops are ON by default now, so the off arm has to say so explicitly
+            System.setProperty("olf.gpu.sa.hvdcLoopsInKernel", "false");
         } else {
             System.clearProperty("olf.gpu.sa.hvdcLoopsInKernel");
         }

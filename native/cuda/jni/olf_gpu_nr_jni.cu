@@ -5423,18 +5423,26 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             }
         }
     }
-    if (inDsPhase && ctx->nds > 0 && getenv("OLF_GPU_DS_DEBUG")) {
-        double slackP = 0.0;
-        double retain0 = 0.0;
-        double tgt0 = 0.0;
-        CUDA_CHECK(cudaMemcpy(&slackP, ctx->dQbuf.as<double>() + ctx->dsSlackPhiRow, sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(&retain0, ctx->dDsRetain.as<double>(), sizeof(double), cudaMemcpyDeviceToHost));
-        int row0 = 0;
-        CUDA_CHECK(cudaMemcpy(&row0, ctx->dDsPhiRow.as<int>(), sizeof(int), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(&tgt0, ctx->dTarget.as<double>() + row0, sizeof(double), cudaMemcpyDeviceToHost));
-        std::fprintf(stderr, "[DS-DEV] scen0 pass: slackP=%.6f slackTargetP=%.6f retain=%.6f rem=%.6f tol=%.1e part0Target=%.6f switched=%d\n",
-                slackP, ctx->dsSlackTargetP, retain0, (slackP - ctx->dsSlackTargetP) - retain0, SLACK_DIST_TOL,
-                tgt0, (int) rlSwitched[0]);
+    if (inDsPhase && (ctx->nds > 0 || ctx->dsSlackOnly) && getenv("OLF_GPU_DS_DEBUG")) {
+        // EVERY scenario, not just 0: the question "did OLF's DS fire on this check and did ours?"
+        // is per scenario, and the scenario that disagrees is rarely slot 0.
+        std::vector<double> qbufH(static_cast<size_t>(n) * nS);
+        std::vector<double> retainH(nS, 0.0);
+        std::vector<double> absH(nS, 0.0);
+        CUDA_CHECK(cudaMemcpy(qbufH.data(), ctx->dQbuf.p, sizeof(double) * qbufH.size(), cudaMemcpyDeviceToHost));
+        if (ctx->nds > 0 && ctx->dDsRetain.p) {
+            CUDA_CHECK(cudaMemcpy(retainH.data(), ctx->dDsRetain.p, sizeof(double) * nS, cudaMemcpyDeviceToHost));
+        }
+        if (ctx->dsSlackOnly && ctx->dDsSlackAbsorbed.p) {
+            CUDA_CHECK(cudaMemcpy(absH.data(), ctx->dDsSlackAbsorbed.p, sizeof(double) * nS, cudaMemcpyDeviceToHost));
+        }
+        for (int s = 0; s < nS; s++) {
+            double slackP = qbufH[static_cast<size_t>(s) * n + ctx->dsSlackPhiRow];
+            double rem = (slackP - ctx->dsSlackTargetP) - retainH[s] - absH[s];
+            std::fprintf(stderr, "[DS-DEV] outer=%d s=%d live=%d slackP=%.9f slackTargetP=%.9f retain=%.9f rem=%.9f tol=%.3e fires=%d\n",
+                    outer, s, (int) live[s], slackP, ctx->dsSlackTargetP, retainH[s], rem, SLACK_DIST_TOL,
+                    std::fabs(rem) > SLACK_DIST_TOL ? 1 : 0);
+        }
     }
     if (inDsPhase && ctx->nds > 0 && dsRejectResidual) {
         // slackDistributionFailureBehavior != LEAVE_ON_SLACK_BUS: a scenario whose participants all

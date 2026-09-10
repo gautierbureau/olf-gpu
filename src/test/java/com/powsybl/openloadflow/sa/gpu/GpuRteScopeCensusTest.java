@@ -208,6 +208,13 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         } else {
             System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_TABLE_VIOLATIONS_PROPERTY);
         }
+        // OLF_GPU_CENSUS_NO_SCREEN_VIOL=1: scan every limit on the host instead of screening the
+        // states on the device — the A/B arm for the violation kernel.
+        if ("1".equals(System.getenv("OLF_GPU_CENSUS_NO_SCREEN_VIOL"))) {
+            System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_SCREEN_VIOLATIONS_PROPERTY, "false");
+        } else {
+            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_SCREEN_VIOLATIONS_PROPERTY);
+        }
         String chunk = System.getenv("OLF_GPU_CENSUS_CHUNK");
         if (chunk != null) {
             System.setProperty(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.MAX_BATCH_PROPERTY, chunk);

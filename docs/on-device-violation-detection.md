@@ -23,6 +23,28 @@ Validated two ways: `GpuLimitTableTest` in the suite, and `OLF_GPU_VIOL_CROSSCHE
 BOTH detectors on every contingency of a census and compares field for field — 287 contingencies,
 19482 violations, zero disagreements.
 
+## Step 3: the kernel
+
+`native/cuda/jni/olf_gpu_violations.cu` — a SEPARATE translation unit that needs no cuDSS and
+nothing from the solver's context, only the generated flow formulas, so it compiles in seconds and
+cannot perturb the solver's codegen (adding a parameter to a solve kernel has flipped a 1e-12 test
+before).
+
+- `uploadViolationTable` uploads the flattened table ONCE per run — a contingency cannot change a
+  threshold — and returns a handle;
+- `screenViolationsBatch` uploads a chunk of states (the same arrays the host is about to inject)
+  and runs one thread per (scenario, branch) and one per (scenario, bus), emitting candidates into a
+  per-scenario buffer with `atomicAdd`;
+- a scenario whose candidates exceed the buffer is not wrong — its count comes back above the
+  capacity and the host screens it itself.
+
+Records come back unordered (threads finish when they finish) and are SORTED on the host, which is
+why a bus record is encoded ABOVE every limit index: one ascending sort restores table order for the
+"first exceeded of the group wins" rule and leaves the bus block at the end.
+
+It takes nothing from the batch solver — no context, no chunk lifetime, no share of the memory
+ceiling that already OOMs at 2781 scenarios.
+
 ## Why
 
 `LimitViolationManager.detectViolations` is the largest remaining block of the GPU security
@@ -95,6 +117,24 @@ x ~500 scenarios per chunk saturates on its own):
 **Host**: rebuild each record into a `LimitViolation` from its table entry and pass it through the
 existing `addLimitViolation`, which keeps the reference/increased-violations filtering against the
 pre-contingency manager unchanged. ~67 records per contingency instead of 54,000 comparisons.
+
+### Step 2 landed: the screen/confirm split, proven in Java first
+
+`GpuViolationScreen` computes each branch's flows from the SAME packed element data the solver
+uploads (`cbIn`/`cbIdx`, `obIn`/`obIdx`, a controlled tap read out of the state vector) and emits
+candidates against a relaxed threshold; `GpuLimitScanner.detectFromCandidates` re-tests each with
+OLF's exact `>` on OLF's own value.
+
+Doing this in Java BEFORE writing any CUDA answers the question the kernel actually turns on — does
+a flow computed independently of OLF's evaluables select the same violations? On rte6515/300 with
+`OLF_GPU_VIOL_CROSSCHECK=1`: **287 contingencies, 19482 violations, zero field-level disagreements,
+and 0 branches uncovered** (every branch with limits maps to the closed or open pack). The kernel now
+has an oracle, and the whole host half — descriptor, candidate encoding, confirm, fallback — is
+already exercised on real data.
+
+Table size on rte6515, which is the work per contingency the kernel takes over:
+9042 branches (8825 with limits), **34714 groups (I 17509, S 17205, P 0), 138817 limit entries**,
+6520 buses.
 
 ### Revised 2026-09-10: the device SCREENS, the host CONFIRMS
 

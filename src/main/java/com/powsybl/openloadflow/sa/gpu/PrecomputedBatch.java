@@ -26,11 +26,13 @@ import java.util.Map;
  */
 record PrecomputedBatch(Map<String, double[]> states, Map<String, int[]> islandedBuses,
                         Map<Variable<AcVariableType>, Integer> baseVariableRows,
-                        EquationSystem<AcVariableType, AcEquationType> equationSystem) {
+                        EquationSystem<AcVariableType, AcEquationType> equationSystem,
+                        com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData gpuData,
+                        com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper elementMapper) {
 
     /** Nothing precomputed — every contingency falls back to the sequential CPU path. */
     static PrecomputedBatch empty() {
-        return new PrecomputedBatch(Map.of(), Map.of(), Map.of(), null);
+        return new PrecomputedBatch(Map.of(), Map.of(), Map.of(), null, null, null);
     }
 
     /** True when the batch precompute reached the device solve (an equation system is captured). */

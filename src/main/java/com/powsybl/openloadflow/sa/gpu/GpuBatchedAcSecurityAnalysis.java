@@ -172,6 +172,12 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         /** The run's flattened limit thresholds, built on first use and valid for the whole run
          *  (see GpuLimitTable); null when the accelerated detection is off. */
         private GpuLimitScanner limitScanner;
+        private GpuLimitTable limitTable;
+        /** Non-null when the state is screened against the table instead of fully scanned. */
+        private GpuViolationScreen violationScreen;
+        private int[] uncoveredBranches = new int[0];
+        /** Every scenario's screened candidates, computed in one pass over the precomputed states. */
+        private Map<String, int[]> candidates = Map.of();
     }
 
     private final ThreadLocal<RunState> runState = ThreadLocal.withInitial(RunState::new);
@@ -336,6 +342,31 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         return Boolean.parseBoolean(System.getProperty(GPU_TABLE_VIOLATIONS_PROPERTY, "true"));
     }
 
+    /** System property: SCREEN the post-contingency states on the DEVICE against the limit table
+     *  and confirm only the candidates on the host, instead of scanning every limit (default on).
+     *  Set to false for the A/B — the two must report the same violations, because the screen only
+     *  ever proposes and the host still decides with OLF's own value. */
+    public static final String GPU_SCREEN_VIOLATIONS_PROPERTY = "olf.gpu.sa.screenViolations";
+
+    private static boolean screenViolationsEnabled() {
+        return Boolean.parseBoolean(System.getProperty(GPU_SCREEN_VIOLATIONS_PROPERTY, "true"));
+    }
+
+    /** The branches the screen cannot evaluate (zero-impedance, or absent from the packed model):
+     *  they keep the full host scan, so coverage is a performance property and never a correctness one. */
+    private static int[] uncoveredBranches(GpuLimitTable table, GpuViolationScreen screen) {
+        java.util.List<Integer> uncovered = new java.util.ArrayList<>();
+        for (int b = 0; b < table.branches().length; b++) {
+            if (table.groupStart(b) != table.groupEnd(b) && !screen.covers(b)) {
+                uncovered.add(b);
+            }
+        }
+        if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
+            System.err.println("VIOL_SCREEN branches with limits not covered by the screen: " + uncovered.size());
+        }
+        return uncovered.stream().mapToInt(Integer::intValue).toArray();
+    }
+
     /**
      * Detect the post-contingency violations of a device-solved contingency.
      *
@@ -345,17 +376,45 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * device. The table is built once per run and cached on the partition's RunState.
      */
     private void detectViolations(LfNetwork network, LimitViolationManager manager, List<LimitReduction> limitReductions,
-                                  LimitViolationManager reference, SecurityAnalysisParameters saParameters, String contingencyId) {
+                                  LimitViolationManager reference, SecurityAnalysisParameters saParameters,
+                                  String contingencyId) {
         if (!tableViolationsEnabled()) {
             manager.detectViolations(network);
             return;
         }
         RunState rs = runState.get();
         if (rs.limitScanner == null) {
-            rs.limitScanner = new GpuLimitScanner(GpuLimitTable.build(network,
-                    LimitReductionManager.create(limitReductions)));
+            GpuLimitTable table = GpuLimitTable.build(network, LimitReductionManager.create(limitReductions));
+            rs.limitScanner = new GpuLimitScanner(table);
+            rs.limitTable = table;
+            if (screenViolationsEnabled() && rs.precomputed.gpuData() != null) {
+                rs.violationScreen = GpuViolationScreen.build(network, table, rs.precomputed.gpuData(),
+                        rs.precomputed.elementMapper(), rs.precomputed.equationSystem(),
+                        rs.precomputed.baseVariableRows());
+                rs.uncoveredBranches = uncoveredBranches(table, rs.violationScreen);
+                // Screen the WHOLE run at once: the states are all precomputed already, and one
+                // device call per 512 scenarios is what makes the kernel worth its upload.
+                long tScreen = System.nanoTime();
+                rs.candidates = rs.violationScreen.screenAll(rs.precomputed.states(),
+                        rs.precomputed.baseVariableRows().size());
+                PHASE_NS.computeIfAbsent("  violation screen (all scenarios)",
+                        k -> new java.util.concurrent.atomic.LongAdder()).add(System.nanoTime() - tScreen);
+                if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
+                    System.err.println("VIOL_SCREEN scenarios=" + rs.candidates.size()
+                            + " screened on the device=" + rs.violationScreen.onDevice()
+                            + " overflowed to the host scan=" + rs.violationScreen.overflows()
+                            + " in " + (System.nanoTime() - tScreen) / 1_000_000 + " ms");
+                }
+            }
         }
-        rs.limitScanner.detectViolations(network, manager);
+        if (rs.violationScreen != null) {
+            int[] candidates = rs.candidates.get(contingencyId);
+            rs.limitScanner.detectFromCandidates(network, manager,
+                    candidates != null ? candidates : rs.violationScreen.screen(rs.precomputed.states().get(contingencyId)),
+                    rs.violationScreen, rs.uncoveredBranches);
+        } else {
+            rs.limitScanner.detectViolations(network, manager);
+        }
         if (System.getenv("OLF_GPU_VIOL_CROSSCHECK") != null) {
             crossCheck(network, manager, limitReductions, reference, saParameters, contingencyId);
         }

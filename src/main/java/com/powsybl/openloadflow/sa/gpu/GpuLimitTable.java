@@ -74,6 +74,8 @@ final class GpuLimitTable {
     // --- the sorted limits of each group, most severe first (OLF's order, kept verbatim) ---
     private final double[] limitThreshold;                   // LfLimit.getReducedValue(), per unit
     private final LfBranch.LfLimit[] limits;
+    private final int[] limitGroup;                          // back-pointer: a screen emits limit indices
+    private final int[] groupBranch;                         // the branch a group belongs to
 
     // --- buses ---
     private final LfBus[] buses;
@@ -86,6 +88,16 @@ final class GpuLimitTable {
                           int[] groupLimitStart, int[] groupLimitEnd,
                           double[] limitThreshold, LfBranch.LfLimit[] limits,
                           LfBus[] buses, double[] busHighLimit, double[] busLowLimit, double[] busScale) {
+        this.limitGroup = new int[limitThreshold.length];
+        this.groupBranch = new int[groupSide.length];
+        for (int b = 0; b < branches.length; b++) {
+            for (int g = branchGroupStart[b]; g < branchGroupEnd[b]; g++) {
+                this.groupBranch[g] = b;
+                for (int l = groupLimitStart[g]; l < groupLimitEnd[g]; l++) {
+                    this.limitGroup[l] = g;
+                }
+            }
+        }
         this.branches = branches;
         this.branchGroupStart = branchGroupStart;
         this.branchGroupEnd = branchGroupEnd;
@@ -165,6 +177,17 @@ final class GpuLimitTable {
 
     int groupCount() {
         return groupSide.length;
+    }
+
+    /** The group a limit belongs to — a screen emits limit indices, and the "first exceeded of the
+     *  group wins" rule is applied by the consumer, which needs to know where a group ends. */
+    int limitGroup(int limit) {
+        return limitGroup[limit];
+    }
+
+    /** The branch index (into {@link #branches()}) a group belongs to. */
+    int groupBranch(int group) {
+        return groupBranch[group];
     }
 
     int limitCount() {

@@ -14,11 +14,14 @@ import com.powsybl.iidm.network.Network;
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchConfig;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchContingency;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.BatchScenarioResult;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSolver;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.LoadLoss;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.OuterLoopMode;
@@ -179,6 +182,14 @@ final class GpuBatchPrecomputer {
                 return PrecomputedBatch.empty();
             }
 
+            // The packed element data and the branch->element map, for the violation screen (see
+            // GpuViolationScreen). Extracted HERE rather than lifted out of the solver: at this point
+            // it is the cache hit the solver is about to take, and the plain (no base-open) flavor is
+            // self-consistent with the plain mapper below — a base-open branch simply maps to no
+            // element and falls back to the host scan.
+            GpuAcData screenData = GpuAcDataCache.extract(net, es, distributedSlack, reactiveLimits, config.dsParams());
+            GpuBatchElementMapper screenMapper = new GpuBatchElementMapper(net);
+
             List<BatchScenarioResult> results = config.outerLoopMode() == OuterLoopMode.JAVA
                     ? GpuBatchedSecurityAnalysisSolver.solveBatchN1JavaOuterLoops(
                             net, context, baseState, batch, es, target,
@@ -210,7 +221,7 @@ final class GpuBatchPrecomputer {
             LOGGER.info("GPU batched SA: precomputed {} of {} branch (N-1..N-k) contingencies on the device",
                     states.size(), batch.size());
 
-            return new PrecomputedBatch(states, islandedBuses, baseVariableRows, es);
+            return new PrecomputedBatch(states, islandedBuses, baseVariableRows, es, screenData, screenMapper);
         } catch (Exception e) {
             // full stack at WARN: a swallowed exception here silently un-accelerates the whole run —
             // the 2026-09-06 bridge AIOOBE hid behind the message-only log for days

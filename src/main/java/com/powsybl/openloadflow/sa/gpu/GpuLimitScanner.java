@@ -99,6 +99,96 @@ final class GpuLimitScanner {
         manager.detectVoltageAngleViolations(network);
     }
 
+    /**
+     * Report the violations among a SCREEN's candidates, plus a full scan of whatever the screen
+     * does not cover.
+     *
+     * <p>The screen may only over-emit (see {@link GpuViolationScreen}), so every candidate is
+     * re-tested here with OLF's exact {@code >} against OLF's OWN value — the same
+     * {@code branch.getI1().eval()} the stock detection reads. That is what makes the reported set
+     * independent of the arithmetic that produced the candidates, on the host or on a device.
+     *
+     * <p>Candidates arrive in table order, so a group's entries are consecutive and most-severe
+     * first: the first that confirms wins and the rest of that group is skipped, which is OLF's
+     * {@code break}.
+     */
+    void detectFromCandidates(LfNetwork network, LimitViolationManager manager, int[] candidates,
+                              GpuViolationScreen screen, int[] uncoveredBranches) {
+        LfBranch[] branches = table.branches();
+        int reportedGroup = -1;
+        int currentBranch = -1;
+        int i = 0;
+        int busBase = table.limitCount();
+        for (; i < candidates.length && candidates[i] < busBase; i++) {
+            int limit = candidates[i];
+            int group = table.limitGroup(limit);
+            if (group == reportedGroup) {
+                continue;                                    // this group already reported its most serious limit
+            }
+            int b = table.groupBranch(group);
+            LfBranch branch = branches[b];
+            if (branch.isDisabled()) {
+                continue;                                    // the contingency took it out
+            }
+            if (b != currentBranch) {
+                java.util.Arrays.fill(quantityCached, false);
+                currentBranch = b;
+            }
+            if (confirm(branch, group, limit, manager)) {
+                reportedGroup = group;
+            }
+        }
+        for (; i < candidates.length; i++) {
+            int record = candidates[i];
+            int busIndex = GpuViolationScreen.busOf(table, record);
+            LfBus bus = table.buses()[busIndex];
+            if (bus.isDisabled()) {
+                continue;
+            }
+            double v = bus.getV();
+            if (GpuViolationScreen.isHighVoltage(table, record)) {
+                if (v > table.busHighLimit(busIndex)) {
+                    manager.addBusLimitViolation(LimitViolationManager.createBusLimitViolation(bus,
+                            com.powsybl.contingency.violations.LimitViolationType.HIGH_VOLTAGE,
+                            table.busHighLimit(busIndex) * table.busScale(busIndex), v * table.busScale(busIndex)), bus);
+                }
+            } else if (v < table.busLowLimit(busIndex)) {
+                manager.addBusLimitViolation(LimitViolationManager.createBusLimitViolation(bus,
+                        com.powsybl.contingency.violations.LimitViolationType.LOW_VOLTAGE,
+                        table.busLowLimit(busIndex) * table.busScale(busIndex), v * table.busScale(busIndex)), bus);
+            }
+        }
+        for (int b : uncoveredBranches) {
+            LfBranch branch = branches[b];
+            if (branch.isDisabled()) {
+                continue;
+            }
+            java.util.Arrays.fill(quantityCached, false);
+            for (int g = table.groupStart(b); g < table.groupEnd(b); g++) {
+                scanGroup(branch, g, manager);
+            }
+        }
+        manager.detectVoltageAngleViolations(network);
+    }
+
+    /** Re-test one candidate exactly and report it if it holds. */
+    private boolean confirm(LfBranch branch, int group, int limit, LimitViolationManager manager) {
+        byte side = table.side(group);
+        byte quantity = table.quantity(group);
+        double value = quantity(branch, side, quantity);
+        if (quantity == GpuLimitTable.QTY_S && Double.isNaN(value)) {
+            return false;
+        }
+        double compared = quantity == GpuLimitTable.QTY_P ? Math.abs(value) : value;
+        if (compared <= table.threshold(limit)) {
+            return false;                                    // inside the band, but not actually violating
+        }
+        manager.addBranchLimitViolation(LimitViolationManager.createLimitViolation(branch,
+                table.groupId(group), table.limit(limit), GpuLimitTable.violationType(quantity),
+                table.scale(group), value, side == 1 ? TwoSides.ONE : TwoSides.TWO));
+        return true;
+    }
+
     private void scanGroup(LfBranch branch, int group, LimitViolationManager manager) {
         byte side = table.side(group);
         byte quantity = table.quantity(group);

@@ -891,6 +891,19 @@ final class GpuBatchChunkSolver {
                         GpuBatchPhaseStats.add("main.iterMax", itMax);
                         GpuBatchPhaseStats.bump("main.solves");
                     }
+                    if (System.getenv("OLF_GPU_DS_TARGET_DUMP") != null && nds > 0) {
+                        // The FINAL distributed target on every participant row, after every
+                        // orchestrator. Both arms are converged, so if their reported states differ
+                        // their TARGETS must differ — this is the only direct way to see where.
+                        double[] ft = GpuAcNewtonSolver.readBatchTargets(handle);
+                        for (int s = 0; s < realCount; s++) {
+                            String id = contingencies.get(group.get(chunkStart + s)).contingencyId();
+                            for (int i = 0; i < nds; i++) {
+                                System.err.printf("GPU_DS_TARGET ctg=%s i=%d target=%s%n",
+                                        id, i, Double.toString(ft[s * n + gpuData.dsPhiRow()[i]]));
+                            }
+                        }
+                    }
                     if (System.getenv("OLF_GPU_RL_TRACE") != null && rlStateOut != null) {
                         // rlStateOut packs (limitType & 3) | (switchCount << 2) per (controller, scenario):
                         // switchCount > 0 means the DEVICE switched that controller during THIS solve, which
@@ -1170,6 +1183,19 @@ final class GpuBatchChunkSolver {
                         orchNs.merge("TransformerControl.orchestrateTransformerControl", System.nanoTime() - tOr10, Long::sum);
                     }
                     tOrchestratorNs += System.nanoTime() - tOrch0;
+                    if (System.getenv("OLF_GPU_DS_TARGET_DUMP") != null && nds > 0) {
+                        // The FINAL distributed target on every participant row, after every
+                        // orchestrator. Both arms are converged, so if their reported states differ
+                        // their TARGETS must differ — this is the only direct way to see where.
+                        double[] ft = GpuAcNewtonSolver.readBatchTargets(handle);
+                        for (int s = 0; s < realCount; s++) {
+                            String id = contingencies.get(group.get(chunkStart + s)).contingencyId();
+                            for (int i = 0; i < nds; i++) {
+                                System.err.printf("GPU_DS_TARGET ctg=%s i=%d target=%s%n",
+                                        id, i, Double.toString(ft[s * n + gpuData.dsPhiRow()[i]]));
+                            }
+                        }
+                    }
                     if (System.getenv("OLF_GPU_RL_TRACE") != null && rlStateOut != null) {
                         // The FINAL reactive-limits state, after every orchestrator re-solve. The
                         // per-solve trace above only sees the main solve, and OLF pins late in its

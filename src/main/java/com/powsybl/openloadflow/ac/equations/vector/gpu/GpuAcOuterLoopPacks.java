@@ -514,6 +514,9 @@ public final class GpuAcOuterLoopPacks {
                         bus.getId(), bus.getTargetP(), headroom, footroom, factor);
             }
             if (factor > 0) {
+                if (System.getenv("OLF_GPU_DS_TARGET_DUMP") != null) {
+                    System.err.println("GPU_DS_BUS idx=" + dsPhiRow.size() + " bus=" + bus.getId());
+                }
                 dsPhiRow.add(phiCol[bn]);
                 dsFactorRaw.add(factor);
                 dsBaseTargetP.add(bus.getTargetP());

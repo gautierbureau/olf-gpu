@@ -66,6 +66,7 @@
 // vs Newton iterations. A pass that re-solves is the expensive one; a pass that only re-checks is not.
 long long gOuterPasses = 0;
 long long gNewtonIters = 0;
+int gLastPassIters = 0;   // debug: inner-Newton steps taken by the pass just finished
 long long gSolvePasses = 0;
 long long gActiveIterSum = 0;
 long long gWidthIterSum = 0;
@@ -4726,7 +4727,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     std::vector<char> lsHaveLast(lsMode == 1 ? nS : 0, 0);
     std::vector<double> hMu(lsMode == 1 ? nS : 0, -1.0);
 
+    // OLF_GPU_FORCE_FIRST_STEP=1 (diagnostic): mirror OLF's "always at least one Newton step".
+    const bool forceFirstStep = std::getenv("OLF_GPU_FORCE_FIRST_STEP") != nullptr;
     for (int it = 0; it <= maxIter && nActive > 0; it++) {
+        gLastPassIters = it;
         gNewtonIters++;
         bool fOnly = it == maxIter || (ctx->mode == 4 && it > 0);
         fillActiveBatch(fOnly);
@@ -4822,6 +4826,15 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 // PerEquationTypeStoppingCriteria — stop when EVERY row clears its type threshold.
                 bool converged = ctx->perRowCriteria ? (finite && maxRatio < 1.0)
                         : convEpsPerEq > 0.0 ? (std::sqrt(ssq) < thr2Of(s)) : (norm < tol);
+                // OLF's NewtonRaphson.run() computes the initial mismatch but only uses it to pick the
+                // step scaling — it then enters runIteration UNCONDITIONALLY, and runIteration steps
+                // FIRST and tests AFTER. So OLF always takes at least one step, even from a state that
+                // already satisfies the criterion. We test before stepping, so a solve re-entered with
+                // slightly moved targets (every outer-loop re-solve does exactly that) can retire
+                // having moved nothing, leaving the state one step behind OLF's.
+                if (forceFirstStep && it == 0) {
+                    converged = false;
+                }
                 if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
                     std::fprintf(stderr, "BATCH_TRACE s=%d it=%d infnorm=%.17e norm2=%.17e thr=%.17e conv=%d\n",
                                  s, it, norm, std::sqrt(ssq), thr2Of(s), converged ? 1 : 0);
@@ -5104,6 +5117,21 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     bool inDsPhase = (phase == 0);
     if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
         std::fprintf(stderr, "BATCH_TRACE pass done: outer=%d phase=%d (0=DS,1=RL)\n", outer, phase);
+    }
+    if (inDsPhase && getenv("OLF_GPU_DS_DEBUG") && nS > 0) {
+        // Is scenario 0 actually CONVERGED at the moment the DS loop reads its mismatch? OLF checks
+        // its slack mismatch on a converged state; if ours is only part-way there, the mismatch it
+        // measures is not the same quantity, and a threshold at the same scale flips.
+        std::vector<double> f0(n);
+        CUDA_CHECK(cudaMemcpy(f0.data(), ctx->dF.as<double>(), n * sizeof(double), cudaMemcpyDeviceToHost));
+        double ssq = 0.0;
+        double inf = 0.0;
+        for (int i = 0; i < n; i++) {
+            ssq += f0[i] * f0[i];
+            inf = fmax(inf, fabs(f0[i]));
+        }
+        std::fprintf(stderr, "[DS-CONV] outer=%d innerNewtonIters=%d ||F||2=%.9e ||F||inf=%.9e\n",
+                     outer, gLastPassIters, std::sqrt(ssq), inf);
     }
     if (inDsPhase) {                                       // distributed-slack outer loop: spread the slack mismatch
         if (ctx->dsSlackOnly) {

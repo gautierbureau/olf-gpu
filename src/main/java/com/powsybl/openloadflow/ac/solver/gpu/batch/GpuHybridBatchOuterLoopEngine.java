@@ -1436,6 +1436,9 @@ public final class GpuHybridBatchOuterLoopEngine {
             System.err.printf("HYBRID_DIRTY_CUM scenarios=%d avgDirtyBuses=%.1f of %d avgDirtyOther=%.1f%n",
                     counted, counted == 0 ? 0 : cumBuses / (double) counted, in.ctrlBuses().size(),
                     counted == 0 ? 0 : cumOther / (double) counted);
+            if (System.getenv("OLF_BUSSTATE_PROFILE") != null) {
+                System.err.println("BUSSTATE_PROFILE " + com.powsybl.openloadflow.network.BusState.profile());
+            }
             System.err.printf("HYBRID_RESTORE_SPLIT scenarios=%d revert=%d ms apply=%d ms | perVisit: "
                     + "reverted=%.1f applied=%.1f buses of %d%n",
                     nS, tRevert / 1_000_000, tApply / 1_000_000,

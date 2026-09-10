@@ -297,6 +297,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     /** System property toggle for the GPU base/fall-through load flow (default on). */
     public static final String GPU_BASE_LOADFLOW_PROPERTY = "olf.gpu.sa.gpuBaseLoadFlow";
 
+    /** System property: skip the batch entirely and let OLF's engine solve every contingency
+     *  sequentially — the A/B arm for "does batching pay for the multiplexing?". */
+    public static final String GPU_DISABLE_BATCH_PROPERTY = "olf.gpu.sa.disableBatch";
+
     /** System property: keep the GPU solver for SEQUENTIAL fall-through contingency solves
      *  (default off = revert to the CPU Newton-Raphson after the base LF). */
     public static final String GPU_SEQUENTIAL_LOADFLOW_PROPERTY = "olf.gpu.sa.gpuSequentialLoadFlow";
@@ -345,6 +349,13 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     }
                 }
             }
+        }
+        if (Boolean.getBoolean(GPU_DISABLE_BATCH_PROPERTY)) {
+            // A/B arm: OLF's own engine drives every contingency sequentially (its outer loops, its
+            // one-restore-per-contingency), with the GPU solver underneath if
+            // olf.gpu.sa.gpuSequentialLoadFlow is on. This is the comparison that says whether BATCHING
+            // pays for the multiplexing it forces on the hybrid.
+            return;
         }
         long tPre = System.nanoTime();
         rs.precomputed = GpuBatchPrecomputer.precompute(network, rs.lfNetwork, rs.context,

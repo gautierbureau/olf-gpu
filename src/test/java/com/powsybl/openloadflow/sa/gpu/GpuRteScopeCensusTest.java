@@ -190,6 +190,16 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         } else {
             System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
         }
+        // OLF_GPU_CENSUS_SEQ_GPU=1: no batch at all — OLF's engine runs each contingency sequentially
+        // with the GPU solver underneath. The arm that prices BATCHING against the per-scenario
+        // save/restore it forces the hybrid to pay.
+        if ("1".equals(System.getenv("OLF_GPU_CENSUS_SEQ_GPU"))) {
+            System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_DISABLE_BATCH_PROPERTY, "true");
+            System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_SEQUENTIAL_LOADFLOW_PROPERTY, "true");
+        } else {
+            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_DISABLE_BATCH_PROPERTY);
+            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_SEQUENTIAL_LOADFLOW_PROPERTY);
+        }
         String chunk = System.getenv("OLF_GPU_CENSUS_CHUNK");
         if (chunk != null) {
             System.setProperty(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.MAX_BATCH_PROPERTY, chunk);

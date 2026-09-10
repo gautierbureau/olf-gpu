@@ -430,6 +430,92 @@ public final class GpuHybridBatchOuterLoopEngine {
         }
     }
 
+    /** {@code OLF_GPU_DIRTY_PROBE=1}: how many DISTINCT elements a scenario's outer-loop step actually
+     *  mutates, versus the 1006 controller buses the snapshot saves and restores wholesale. Decides
+     *  whether dirty-tracking the snapshot is worth building at all. */
+    private static final DirtyProbe DIRTY_PROBE =
+            System.getenv("OLF_GPU_DIRTY_PROBE") != null ? new DirtyProbe() : null;
+
+    private static final class DirtyProbe extends com.powsybl.openloadflow.network.AbstractLfNetworkListener {
+
+        private final java.util.Set<Object> touched = new java.util.HashSet<>();
+        private long scenarios;
+        private long touchedTotal;
+        private long ofTotal;
+        private boolean attached;
+
+        void startScenario() {
+            touched.clear();
+        }
+
+        void endScenario(int ctrlBusCount) {
+            scenarios++;
+            touchedTotal += touched.size();
+            ofTotal += ctrlBusCount;
+            if (scenarios % 200 == 0) {
+                System.err.printf("DIRTY_PROBE scenarios=%d avgTouchedElements=%.1f of %d controller buses%n",
+                        scenarios, touchedTotal / (double) scenarios, ctrlBusCount);
+            }
+        }
+
+        void attachTo(LfNetwork network) {
+            if (!attached) {
+                network.addListener(this);
+                attached = true;
+            }
+        }
+
+        @Override
+        public void onGeneratorVoltageControlChange(LfBus controllerBus, boolean e) {
+            touched.add(controllerBus);
+        }
+
+        @Override
+        public void onGeneratorReactivePowerControlChange(LfBus controllerBus, boolean e) {
+            touched.add(controllerBus);
+        }
+
+        @Override
+        public void onGenerationReactivePowerTargetChange(LfBus bus, double o, double nw) {
+            touched.add(bus);
+        }
+
+        @Override
+        public void onGenerationActivePowerTargetChange(LfGenerator g, double o, double nw) {
+            touched.add(g);
+        }
+
+        @Override
+        public void onLoadActivePowerTargetChange(com.powsybl.openloadflow.network.LfLoad l, double o, double nw) {
+            touched.add(l);
+        }
+
+        @Override
+        public void onLoadReactivePowerTargetChange(com.powsybl.openloadflow.network.LfLoad l, double o, double nw) {
+            touched.add(l);
+        }
+
+        @Override
+        public void onShuntVoltageControlChange(com.powsybl.openloadflow.network.LfShunt sh, boolean e) {
+            touched.add(sh);
+        }
+
+        @Override
+        public void onShuntSusceptanceChange(com.powsybl.openloadflow.network.LfShunt sh, double b) {
+            touched.add(sh);
+        }
+
+        @Override
+        public void onDisableChange(com.powsybl.openloadflow.network.LfElement el, boolean d) {
+            touched.add(el);
+        }
+
+        @Override
+        public void onTapPositionChange(LfBranch br, int o, int nw) {
+            touched.add(br);
+        }
+    }
+
     /** A device-side allocation failure, as the native layer reports it. */
     private static boolean isDeviceAllocationFailure(RuntimeException e) {
         String m = e.getMessage();
@@ -596,6 +682,9 @@ public final class GpuHybridBatchOuterLoopEngine {
 
         double[][] states = new double[nS][];
         double[][] round0States = null;
+        if (DIRTY_PROBE != null) {
+            DIRTY_PROBE.attachTo(in.network());
+        }
         int ctxSize = nS;
         long handle = createHandle(in.structure(), nS, in.mode(), in.gpuData(), in.rowCriteria());
 
@@ -859,8 +948,14 @@ public final class GpuHybridBatchOuterLoopEngine {
                 double[] st = new double[n];
                 System.arraycopy(states[s], 0, st, 0, n);
                 long tj0 = System.nanoTime();
+                if (DIRTY_PROBE != null) {
+                    DIRTY_PROBE.startScenario();
+                }
                 // load state -> OLF outer loops -> re-extract (state compacted to the live layout)
                 GpuAcActivation act = bridges[s].applyOuterLoopStep(compactState(st, liveToBase[s]));
+                if (DIRTY_PROBE != null) {
+                    DIRTY_PROBE.endScenario(in.ctrlBuses().size());
+                }
                 // capture this scenario's controller-branch pi-model rows: the outer loops may have moved a tap,
                 // which changes R/X/Y/ksi on the network (PiModelArray reads them from the CURRENT tap) — the
                 // device row must follow, or the next round solves with a stale admittance.

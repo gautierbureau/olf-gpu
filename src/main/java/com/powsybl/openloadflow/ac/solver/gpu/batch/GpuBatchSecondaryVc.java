@@ -189,6 +189,42 @@ public final class GpuBatchSecondaryVc {
             return chunkResults;
         }
         var esCtx = controllers.esCtx();
+        // The observables below evaluate OLF's OWN EquationTerms, which means loading each scenario's
+        // state into the SHARED EquationSystem state vector. StateVector.set() notifies AcNetworkVector,
+        // which recomputes every branch's flows — so on the way out the network is left holding the LAST
+        // SCENARIO's flows, not the base's. The pre-contingency network result is built afterwards and
+        // reports exactly those: measured 7.218 MW / 65.65 A out on rte6515's LINE-4458-653, which alone
+        // produced 16 differing violation lines over 200 contingencies (violations are filtered against
+        // the base). Snapshot it here and put it back before returning.
+        final double[] esStateOnEntry = esCtx.stateVector().get().clone();
+        try {
+            return orchestrateInternal(handle, chunkSize, realCount, n, nrl, chunkResults, controllers,
+                    rlState, rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex,
+                    targetOverrideValue, dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
+                    dsPhiRow, dsFactor, r1OvSlotElem, r1OvVal, shOvSlotElem, shOvGb, nziBase, ziOnSlotElem,
+                    ziOffSlotElem, baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol,
+                    convEpsPerEq, varType, config);
+        } finally {
+            esCtx.stateVector().set(esStateOnEntry);
+        }
+    }
+
+    @SuppressWarnings({"java:S107", "java:S3776"})
+    private static double[][] orchestrateInternal(long handle, int chunkSize, int realCount, int n, int nrl,
+            double[][] chunkResults, Controllers controllers, int[] rlState,
+            int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
+            int[] targetOverrideIndex, double[] targetOverrideValue,
+            int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
+            int[] dsPhiRow, double[] dsFactor,
+            int[] r1OvSlotElem, double[] r1OvVal, int[] shOvSlotElem, double[] shOvGb,
+            int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem,
+            double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
+            double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, int[] varType,
+            BatchConfig config) {
+        List<CtlBus> ctls = controllers.ctls();
+        List<Zone> zones = controllers.zones();
+        int nc = ctls.size();
+        var esCtx = controllers.esCtx();
         double[][] targetV = new double[chunkSize][nc];      // per-scenario CURRENT generator-VC targets
         for (int s = 0; s < chunkSize; s++) {
             for (int c = 0; c < nc; c++) {

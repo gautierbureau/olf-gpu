@@ -71,7 +71,8 @@ enum DeviceLoopKind {
     LOOP_HVDC_FREEZE = 1,    // FreezingHvdcACEmulation
     LOOP_HVDC_LIMITS = 2,    // AcHvdcAcEmulationLimits
     LOOP_MONITORING = 3,     // MonitoringVoltage (OLF order 6) — the standby-SVC automaton
-    LOOP_RL = 4              // ReactiveLimits (OLF order 7 — LAST of the loops the driver owns)
+    LOOP_RL = 4,             // ReactiveLimits (OLF order 7 — LAST of the loops the driver owns)
+    LOOP_HOST = 5            // a slot the HOST owns: the driver pauses here and the host runs it
 };
 // GpuBatchHvdcAcEmulation's status codes, shared with the host.
 constexpr int HV_LINEAR = 0;
@@ -4182,6 +4183,21 @@ struct BatchSolverContext {
     // the monitored V row, its band and the two setpoints; plus a CSR list of (row, mode, target) the
     // activation writes. dMonActivated holds the chosen target per (controller, scenario), NaN until
     // it fires — OLF never re-checks a controller it has already switched.
+    // DRIVER PAUSE/RESUME. Some of OLF's outer loops cannot run on the device without RE-DERIVING
+    // what OLF already computes in Java (SecondaryVoltageControl's sensitivity observables; the
+    // discrete tap/section tables of the transformer and shunt loops). Rather than port that maths —
+    // a wrong target converges cleanly and nothing flags it — the driver PAUSES at their slot in
+    // OLF's order, hands control back, and RESUMES where it stopped. The per-solve device state
+    // (RL pins, monitoring activations, DS absorbed totals, HVDC statuses, x/targets/modes) simply
+    // stays in the context across the pause; only the host-side driver locals need saving.
+    int hostLoopEnabled = 0;                                 // insert LOOP_HOST in OLF's order
+    int driverResume = 0;                                    // this call continues a paused driver
+    int driverPaused = 0;                                    // the last call stopped at LOOP_HOST
+    int pausedLoopIdx = 0;
+    int pausedSeqChanged = 0;
+    std::vector<int> pausedProdIters;
+    std::vector<char> pausedLive, pausedActive;
+    std::vector<char> hostChanged;                           // per scenario: the host loop was UNSTABLE
     int nmon = 0;
     DeviceBuf dMonVRow, dMonBand, dMonDeltaPtr, dMonDeltaRow, dMonDeltaMode, dMonDeltaTarget, dMonActivated;
     DeviceBuf dGenCum, dGenRemoved;
@@ -4635,22 +4651,30 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // x0: either the BASE row tiled across nS (default), or a FULL per-scenario n*nS state
     // (x0Full != null) — the warm-restart hook for multi-call outer sequencing (e.g. the
     // transformer voltage-control orchestrator re-solving scenarios from their previous states).
-    if (x0Full != nullptr) {
-        CUDA_CHECK(cudaMemcpy(ctx->dX.p, x0Full, (size_t) nTot * sizeof(double), cudaMemcpyHostToDevice));
-    } else {
-        CUDA_CHECK(cudaMemcpy(ctx->dX.p, x0, n * sizeof(double), cudaMemcpyHostToDevice));
-    }
-    CUDA_CHECK(cudaMemcpy(ctx->dTarget.p, target, n * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(ctx->dMode.p, rowMode, nTot * sizeof(int), cudaMemcpyHostToDevice));
+    // RESUME: the driver is continuing from a LOOP_HOST pause, so x/targets/modes already hold the
+    // sequence's current state on the device — re-uploading the base rows would throw away the
+    // distributed slack, the HVDC deltas and the monitoring activations it has accumulated.
+    const bool resume = ctx->driverResume != 0;
+    ctx->driverResume = 0;
+    ctx->driverPaused = 0;
     dBaseMode.upload(baseRowMode, n * sizeof(int));         // base (contingency-free) row mode for the RL limit-type seed
-    if (x0Full == nullptr) {
-        tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dX.as<double>());
-    }
-    tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dTarget.as<double>());
-    if (nOv > 0) {                                           // per-scenario target overrides (generator loss)
-        dOvIndex.upload(ovIndex, nOv * sizeof(int));
-        dOvValue.upload(ovValue, nOv * sizeof(double));
-        applyTargetOverrideBatch<<<grid(nOv), BLOCK, 0, ctx->stream>>>(nOv, dOvIndex.as<int>(), dOvValue.as<double>(), ctx->dTarget.as<double>());
+    if (!resume) {
+        if (x0Full != nullptr) {
+            CUDA_CHECK(cudaMemcpy(ctx->dX.p, x0Full, (size_t) nTot * sizeof(double), cudaMemcpyHostToDevice));
+        } else {
+            CUDA_CHECK(cudaMemcpy(ctx->dX.p, x0, n * sizeof(double), cudaMemcpyHostToDevice));
+        }
+        CUDA_CHECK(cudaMemcpy(ctx->dTarget.p, target, n * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->dMode.p, rowMode, nTot * sizeof(int), cudaMemcpyHostToDevice));
+        if (x0Full == nullptr) {
+            tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dX.as<double>());
+        }
+        tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dTarget.as<double>());
+        if (nOv > 0) {                                       // per-scenario target overrides (generator loss)
+            dOvIndex.upload(ovIndex, nOv * sizeof(int));
+            dOvValue.upload(ovValue, nOv * sizeof(double));
+            applyTargetOverrideBatch<<<grid(nOv), BLOCK, 0, ctx->stream>>>(nOv, dOvIndex.as<int>(), dOvValue.as<double>(), ctx->dTarget.as<double>());
+        }
     }
     if (hasDsOverride) {                                     // per-scenario generator-loss DS reweight
         dDsOvBus.upload(dsOvBus, nS * sizeof(int));
@@ -4715,7 +4739,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // does not count.
     int maxOuter = fullLoadflow ? 8 * RL_MAX_OUTER : 1;
     std::vector<char> rlActive(nS), rlSwitched(nS), wasActive(nS);
-    if (fullLoadflow) {                                      // per-solve PV↔PQ state: 0 switches, limitType from base
+    // ...but NOT on a resume: these are per-SOLVE state, and a resumed driver is continuing the SAME
+    // solve. Re-seeding here would discard the RL pins, monitoring activations and absorbed slack the
+    // sequence has already established — which is exactly what makes a resume cheaper than the
+    // orchestrator pattern it replaces: that one resets and re-runs the whole driver every round.
+    if (fullLoadflow && !resume) {                           // per-solve PV↔PQ state: 0 switches, limitType from base
         if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {        // plan-B4: capture each group's pilot-Q target from
             size_t need = static_cast<size_t>(ctx->st->nQr) * nS * sizeof(double);   // the BASE carrier's row,
             if (!ctx->dQrPilotQ.p) ctx->dQrPilotQ.alloc(need);   // BEFORE any RL mode seeding rewrites it
@@ -4821,6 +4849,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             loopOrder[nLoops++] = LOOP_HVDC_LIMITS;          // OLF: AcHvdcAcEmulationLimits
         }
     }
+    if (ctx->hostLoopEnabled) {
+        loopOrder[nLoops++] = LOOP_HOST;                     // OLF: SecondaryVoltageControl (order 5)
+    }
     if (ctx->nmon > 0) {
         loopOrder[nLoops++] = LOOP_MONITORING;               // OLF: MonitoringVoltage, before ReactiveLimits
     }
@@ -4843,7 +4874,39 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // move an already-converged state off the CPU's by ~the stopping residual (measured 4e-4 kV on the
     // DS->RL transition with a distributed base). solvePass=false skips the inner Newton for such a pass.
     bool solvePass = true;
-    for (int outer = 0; outer < maxOuter; outer++) {
+    if (resume) {
+        // Continue the paused sequence: the loop the host owned has just run, so step PAST it and
+        // let its verdict drive the pass exactly as a device loop's would — UNSTABLE re-solves only
+        // the scenarios it changed, STABLE advances without a solve (OLF's rule).
+        loopIdx = ctx->pausedLoopIdx;
+        seqChanged = ctx->pausedSeqChanged != 0;
+        prodIters = ctx->pausedProdIters;
+        live = ctx->pausedLive;
+        bool anyChanged = false;
+        for (int s = 0; s < nS; s++) {
+            char ch = s < (int) ctx->hostChanged.size() ? ctx->hostChanged[s] : 0;
+            active[s] = ch ? 1 : 0;
+            anyChanged |= ch != 0;
+        }
+        if (anyChanged) {
+            seqChanged = true;
+            solvePass = true;                                // the host loop moved targets -> re-solve
+        } else {
+            solvePass = false;
+            for (int s = 0; s < nS; s++) {
+                active[s] = live[s];                         // stable: re-CHECK every live scenario
+            }
+            if (++loopIdx >= nLoops) {                       // ...and advance, as the stable branch does
+                if (!seqChanged) {
+                    loopIdx = nLoops;                        // a full sweep changed nothing -> converged
+                } else {
+                    seqChanged = false;
+                    loopIdx = 0;
+                }
+            }
+        }
+    }
+    for (int outer = 0; outer < maxOuter && loopIdx < nLoops; outer++) {
     gOuterPasses++;
     if (solvePass) {
         gSolvePasses++;
@@ -5330,6 +5393,18 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                      outer, gLastPassIters, std::sqrt(ssq), inf);
     }
     int loopKind = loopOrder[loopIdx];
+    if (loopKind == LOOP_HOST) {
+        // Hand the sequence back. Everything the device holds — x, targets, row modes, RL pins,
+        // monitoring activations, absorbed slack, HVDC statuses — stays put in the context; only
+        // these host-side locals need saving.
+        ctx->pausedLoopIdx = loopIdx;
+        ctx->pausedSeqChanged = seqChanged ? 1 : 0;
+        ctx->pausedProdIters = prodIters;
+        ctx->pausedLive = live;
+        ctx->pausedActive = active;
+        ctx->driverPaused = 1;
+        break;
+    }
     if (loopKind == LOOP_MONITORING) {
         monitoringLoopBatch<<<grid(ctx->nmon * nS), BLOCK, 0, ctx->stream>>>(
                 ctx->nmon, nS, n, ctx->dMonVRow.as<int>(), ctx->dMonBand.as<double>(),
@@ -6679,6 +6754,68 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     env->ReleaseByteArrayElements(jCtgOut, co, JNI_ABORT);
     ctx->nhv = nh;
     ctx->hvLimitsActive = limitsActive;
+}
+
+/** Enable the HOST-owned outer-loop slot (OLF order 5, SecondaryVoltageControl). 0 disables it and
+ *  the driver behaves exactly as if the mechanism did not exist. */
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchHostLoop(
+        JNIEnv*, jclass, jlong handle, jint enabled) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx != nullptr) {
+        ctx->hostLoopEnabled = enabled;
+    }
+}
+
+/** Did the last solve stop at the host-owned slot? */
+extern "C" JNIEXPORT jint JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchDriverPaused(
+        JNIEnv*, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    return ctx == nullptr ? 0 : ctx->driverPaused;
+}
+
+/** Resume the paused driver: {@code hostChanged[s] != 0} is the host loop's UNSTABLE verdict for
+ *  that scenario, which drives the next pass exactly as a device loop's verdict would. */
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDriverResume(
+        JNIEnv* env, jclass, jlong handle, jbyteArray jHostChanged) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->hostChanged.assign(ctx->nScenarios, 0);
+    if (jHostChanged != nullptr) {
+        jsize len = std::min<jsize>(env->GetArrayLength(jHostChanged), ctx->nScenarios);
+        env->GetByteArrayRegion(jHostChanged, 0, len, reinterpret_cast<jbyte*>(ctx->hostChanged.data()));
+    }
+    ctx->driverResume = 1;
+}
+
+/** Write absolute target values at (scenario, row) positions — how a host-owned loop applies its
+ *  decision without disturbing the device-side targets the sequence has already accumulated. */
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchTargetDeltas(
+        JNIEnv* env, jclass, jlong handle, jintArray jRows, jdoubleArray jVals) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || jRows == nullptr) {
+        return;
+    }
+    jsize cnt = env->GetArrayLength(jRows);
+    if (cnt == 0) {
+        return;
+    }
+    std::vector<int> rows(cnt);
+    std::vector<double> vals(cnt);
+    env->GetIntArrayRegion(jRows, 0, cnt, rows.data());
+    env->GetDoubleArrayRegion(jVals, 0, cnt, vals.data());
+    DeviceBuf dR;
+    DeviceBuf dV;
+    dR.upload(rows.data(), (size_t) cnt * sizeof(int));
+    dV.upload(vals.data(), (size_t) cnt * sizeof(double));
+    applyTargetOverrideBatch<<<grid(cnt), BLOCK, 0, ctx->stream>>>(cnt, dR.as<int>(), dV.as<double>(),
+                                                                  ctx->dTarget.as<double>());
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
 }
 
 /** MonitoringVoltage controller table (OLF order 6). Empty array clears it. */

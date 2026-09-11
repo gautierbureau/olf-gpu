@@ -385,6 +385,18 @@ public final class GpuAcNewtonSolver {
                                                       int[] deltaPtr, int[] deltaRow,
                                                       int[] deltaMode, double[] deltaTarget);
 
+    /** Enable the HOST-owned outer-loop slot (OLF order 5); 0 leaves the driver exactly as before. */
+    public static native void setBatchHostLoop(long handle, int enabled);
+
+    /** Did the last solve stop at the host-owned slot rather than finish? */
+    public static native int readBatchDriverPaused(long handle);
+
+    /** Resume the paused driver; {@code hostChanged[s] != 0} is the host loop's UNSTABLE verdict. */
+    public static native void setBatchDriverResume(long handle, byte[] hostChanged);
+
+    /** Absolute target writes at flat {@code (scenario * n + row)} positions, for a host-owned loop. */
+    public static native void setBatchTargetDeltas(long handle, int[] rows, double[] values);
+
     /** How many (controller, scenario) monitoring automatons fired in the last solve. */
     public static native int readBatchMonitoringActivations(long handle);
 

@@ -309,6 +309,19 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         }
     }
 
+    /** True when the base load flow's batch-of-one drives OLF's outer loops on the DEVICE, so this
+     *  analysis must not also drive them in Java. */
+    static boolean driverOuterLoopsEnabled() {
+        return Boolean.getBoolean("olf.gpu.driverOuterLoops")
+                || "1".equals(System.getenv("OLF_GPU_DRIVER_OUTER_LOOPS"));
+    }
+
+    @Override
+    protected com.powsybl.openloadflow.ac.AcloadFlowEngine createLoadFlowEngine(
+            com.powsybl.openloadflow.ac.AcLoadFlowContext context) {
+        return driverOuterLoopsEnabled() ? new GpuDriverOuterLoopEngine(context) : super.createLoadFlowEngine(context);
+    }
+
     /** System property toggle for the GPU base/fall-through load flow (default on). */
     public static final String GPU_BASE_LOADFLOW_PROPERTY = "olf.gpu.sa.gpuBaseLoadFlow";
 

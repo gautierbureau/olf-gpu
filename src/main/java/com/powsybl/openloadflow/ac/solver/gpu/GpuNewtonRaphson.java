@@ -124,7 +124,14 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             if (ol instanceof com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop ds) {
                 slackTol = ds.getSlackBusPMaxMismatch() / com.powsybl.openloadflow.util.PerUnit.SB;
             } else if (ol instanceof com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop rl) {
-                rlTol = rl.getMaxReactivePowerMismatch() / com.powsybl.openloadflow.util.PerUnit.SB;
+                // Same derivation GpuSaRunScope uses for the batched SA: UNIFORM_CRITERIA (the default)
+                // ties the RL band to convEpsPerEq, PER_EQUATION_TYPE_CRITERIA to
+                // maxReactivePowerMismatch/SB. Taking maxReactivePowerMismatch unconditionally gives the
+                // device a different switch threshold from OLF's and it switches far too eagerly.
+                rlTol = p.getAcSolverParameters() instanceof NewtonRaphsonParameters nrp
+                        && nrp.getStoppingCriteria() instanceof DefaultNewtonRaphsonStoppingCriteria dc
+                        ? dc.getConvEpsPerEq()
+                        : rl.getMaxReactivePowerMismatch() / com.powsybl.openloadflow.util.PerUnit.SB;
                 maxSwitch = rl.getMaxPqPvSwitch();
             }
         }

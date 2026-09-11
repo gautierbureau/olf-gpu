@@ -223,6 +223,22 @@ class GpuRteScopeCensusTest extends AbstractOpenSecurityAnalysisTest {
         } else {
             System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_SCREEN_VIOLATIONS_PROPERTY);
         }
+        // OLF_GPU_CENSUS_SVC=1: force SecondaryVoltageControl on. The RTE parameters leave it at
+        // OLF's default (off) so the loop never fires here — but the case DOES carry control zones,
+        // so this is the only way to exercise the loop against the CPU on production data.
+        if ("1".equals(System.getenv("OLF_GPU_CENSUS_SVC"))) {
+            // MUTATE the loaded extension. OpenLoadFlowParameters.create() does
+            // addExtension(new OpenLoadFlowParameters()) — it REPLACES the RTE configuration with
+            // fresh defaults (maxNewtonRaphsonIterations 30 -> 15, the realistic-voltage bounds, the
+            // transformer control mode...), which silently turns this into a different run.
+            com.powsybl.openloadflow.OpenLoadFlowParameters svcExtParams =
+                    lfp.getExtension(com.powsybl.openloadflow.OpenLoadFlowParameters.class);
+            org.junit.jupiter.api.Assertions.assertNotNull(svcExtParams,
+                    "the RTE parameter file must carry an open-load-flow-parameters extension");
+            svcExtParams.setSecondaryVoltageControl(true);
+            var svcExt = network.getExtension(com.powsybl.iidm.network.extensions.SecondaryVoltageControl.class);
+            System.out.printf("SVC_ZONES %d%n", svcExt == null ? 0 : svcExt.getControlZones().size());
+        }
         String chunk = System.getenv("OLF_GPU_CENSUS_CHUNK");
         if (chunk != null) {
             System.setProperty(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.MAX_BATCH_PROPERTY, chunk);

@@ -101,6 +101,36 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
     protected final NewtonRaphsonParameters parameters;
 
+    /**
+     * The run's outer-loop settings, so the batch-of-one can drive the SAME device loops the batched
+     * SA drives. A batch of one is still a batch: nothing about nS == 1 justifies restricting it.
+     *
+     * <p>{@code driverOuterLoops} off keeps the historical behaviour — the solve neutralises the
+     * driver ({@code slackDistTol} 1e300, {@code skipRlPhase} 1) and OLF's Java loops run around it
+     * on the CPU.
+     */
+    private final boolean driverOuterLoops;
+    private final double driverSlackDistTol;
+    private final double driverReactiveLimitTol;
+    private final int driverMaxOuterIterations;
+    private final int driverMaxPqPvSwitch;
+
+    /** Read the bands out of the run's OWN configured loops, so the device decides at OLF's threshold. */
+    static double[] driverSettings(com.powsybl.openloadflow.ac.AcLoadFlowParameters p) {
+        double slackTol = Double.MAX_VALUE;
+        double rlTol = 0;
+        int maxSwitch = 0;
+        for (var ol : p.getOuterLoops()) {
+            if (ol instanceof com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop ds) {
+                slackTol = ds.getSlackBusPMaxMismatch() / com.powsybl.openloadflow.util.PerUnit.SB;
+            } else if (ol instanceof com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop rl) {
+                rlTol = rl.getMaxReactivePowerMismatch() / com.powsybl.openloadflow.util.PerUnit.SB;
+                maxSwitch = rl.getMaxPqPvSwitch();
+            }
+        }
+        return new double[] {slackTol, rlTol, p.getMaxOuterLoopIterations(), maxSwitch};
+    }
+
     private static double deviceConvEpsPerEq(NewtonRaphsonParameters parameters) {
         if (parameters.getStoppingCriteria() instanceof DefaultNewtonRaphsonStoppingCriteria criteria) {
             return criteria.getConvEpsPerEq();
@@ -160,8 +190,26 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                             TargetVector<AcVariableType, AcEquationType> targetVector,
                             EquationVector<AcVariableType, AcEquationType> equationVector,
                             boolean detailedReport) {
+        this(network, parameters, equationSystem, j, targetVector, equationVector, detailedReport,
+                false, Double.MAX_VALUE, 0, 0, 0);
+    }
+
+    @SuppressWarnings("java:S107")
+    public GpuNewtonRaphson(LfNetwork network, NewtonRaphsonParameters parameters,
+                            EquationSystem<AcVariableType, AcEquationType> equationSystem,
+                            JacobianMatrix<AcVariableType, AcEquationType> j,
+                            TargetVector<AcVariableType, AcEquationType> targetVector,
+                            EquationVector<AcVariableType, AcEquationType> equationVector,
+                            boolean detailedReport, boolean driverOuterLoops,
+                            double driverSlackDistTol, double driverReactiveLimitTol,
+                            int driverMaxOuterIterations, int driverMaxPqPvSwitch) {
         super(network, equationSystem, j, targetVector, equationVector, detailedReport);
         this.parameters = Objects.requireNonNull(parameters);
+        this.driverOuterLoops = driverOuterLoops;
+        this.driverSlackDistTol = driverSlackDistTol;
+        this.driverReactiveLimitTol = driverReactiveLimitTol;
+        this.driverMaxOuterIterations = driverMaxOuterIterations;
+        this.driverMaxPqPvSwitch = driverMaxPqPvSwitch;
         EquationSystemIndex<AcVariableType, AcEquationType> index = equationSystem.getIndex();
         // Purge listeners of ALREADY-COLLECTED solvers synchronously (we are on the solve thread,
         // no dispatch in flight) — this caps accumulation on a long-lived LfNetwork at ~1 while
@@ -306,13 +354,17 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     new int[0], new double[0],
                     new int[0], new double[0], new double[0], new double[0], new double[0], null, null,
                     null, null,
-                    parameters.getMaxIterations(), GPU_TOLERANCE, 0.0, 1e300, convEpsPerEq,
+                    parameters.getMaxIterations(), GPU_TOLERANCE,
+                    driverOuterLoops ? driverReactiveLimitTol : 0.0,
+                    driverOuterLoops ? driverSlackDistTol : 1e300, convEpsPerEq,
                     lsMode,
                     parameters.getMaxVoltageChangeStateVectorScalingMaxDv(),
                     parameters.getMaxVoltageChangeStateVectorScalingMaxDphi(),
                     varType, null,
                     null, null, null, null, null, null,
-                    0, 0, 0, 1,
+                    driverOuterLoops ? driverMaxOuterIterations : 0,
+                    driverOuterLoops ? driverMaxPqPvSwitch : 0, 0,
+                    driverOuterLoops ? 0 : 1,                // skipRlPhase: the driver owns RL now
                     0, null, null)[0];
             long t2 = System.nanoTime();
             LOGGER.debug("GPU Newton-Raphson timing: prepare {} ms (context {}), solve {} ms",

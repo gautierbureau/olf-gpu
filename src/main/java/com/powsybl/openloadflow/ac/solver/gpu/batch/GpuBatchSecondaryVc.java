@@ -323,6 +323,9 @@ public final class GpuBatchSecondaryVc {
                     }
                 }
             }
+            if (System.getenv("OLF_GPU_SVC_TRACE") != null) {
+                System.err.printf("SVC_ROUND round=%d anyAdjusts=%b%n", round, anyAdjusts);
+            }
             if (!anyAdjusts) {
                 break;
             }
@@ -444,6 +447,9 @@ public final class GpuBatchSecondaryVc {
                 targetV[s] = newT;
                 affected[s] = true;
                 anyMoved = true;
+                if (System.getenv("OLF_GPU_SVC_TRACE") != null) {
+                    System.err.printf("SVC_MOVED round=%d scenario=%d%n", round, s);
+                }
                 // apply the re-enables: clear the RL pins so the next solve resumes voltage control there
                 for (int c = 0; c < nc; c++) {
                     if (reEnabled[s][c]) {

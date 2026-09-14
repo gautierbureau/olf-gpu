@@ -619,7 +619,25 @@ the engine's current solver is not the GPU driver (CPU-routed contingencies had 
 per-generator DS accumulator is zeroed per solve (a restarted sweep that never reaches DS handed
 garbage to the write-back → NaN targetP).
 
-Result: 61 → 44 failing under the flag. By size: 13 at ≤1e-9 kV and 7 at ≤1e-6 kV — the base's
+**Same day, third pass — 44 → 39, no ENGAGE and nothing above 1e-3 kV left.** Five more base-only
+defects: (1) a converter bus without an active BUS_TARGET_P row (the slack) received the HVDC
+freeze/saturation delta on its PHI identity row (base MAX_ITER, 3 ENGAGE) — packed as ~row now, the
+angle still reads there, no target is ever written; (2) after a host loop's STABLE resume the RL
+check was silently skipped (the resumed call's status vector said "not converged" → rlActive 0):
+the pause saves and the resume restores the per-scenario statuses (SecondaryVoltageControl
+7.3e-2 → 2.5e-8); (3) an SVC's limits are Bmin/Bmax·V² and a never-solved network has NaN V, so
+the packed limits were NaN and the slope SVC never pinned (0.33 kV): the pack evaluates at a flat
+1 pu and restores the NaN; (4) the slack's retained DS share was written back at every check,
+STABLE ones included (ρ·sub-tolerance mismatch, 3.4 kW), now only when a distribution happened;
+(5) the split of that share used LfGenerator.getParticipationFactor(), which OLF fills only inside
+its own distribution step (0 here) — the run's GpuDsParams factors, as the pack uses (l121 severe
+0.71 → 4.2e-4). Remaining 39: 17 at ≤1e-9 kV, 7 at ≤1e-6 kV, 15 between 2e-6 and 4e-4 kV
+(AFTER_GENERATOR/shared TVC, TRPC, node-breaker, l121) — the DS re-anchoring class: OLF resets
+every participant to its INITIAL target and re-derives the whole distribution from the anchor at
+each check, the restarted driver distributes from the written-back base; and the driver re-enters
+the sweep once more than OLF after a STABLE host check (checks only, no solve).
+
+Result (second pass): 61 → 44 failing under the flag. By size: 13 at ≤1e-9 kV and 7 at ≤1e-6 kV — the base's
 converged state differs from OLF's at solver-tolerance level (a different linear solver), and
 AFTER_GENERATOR transformer control FREEZES state-dependent quantities (generator Q under the
 controlled level, the tap rounded from the solved ratio), so the frozen targets differ by ~1e-5 pu;

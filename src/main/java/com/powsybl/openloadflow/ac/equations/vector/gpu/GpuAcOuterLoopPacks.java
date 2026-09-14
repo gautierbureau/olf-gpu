@@ -359,6 +359,19 @@ public final class GpuAcOuterLoopPacks {
         List<Integer> rlPRow = new ArrayList<>();
         List<Double> rlTargetP = new ArrayList<>();
         List<String> rlBusId = new ArrayList<>();
+        // A never-solved network has NaN bus voltages, and an SVC's reactive limits are Bmin/Bmax·V²:
+        // packing them (and the quadratic reference v²) at NaN left the entry's limits NaN and the
+        // device never pinned it (the base load flow on the driver; a chunk extracts after a solve).
+        // Evaluate at a flat 1 pu instead — the kernel's limit(v) = base + B·(v² − v²ref) is exact at
+        // any finite reference — and put the NaN back.
+        List<LfBus> flatVBuses = new ArrayList<>();
+        for (LfBus bus : network.getBuses()) {
+            if (Double.isNaN(bus.getV())) {
+                flatVBuses.add(bus);
+                bus.setV(1.0);
+            }
+        }
+        try {
         if (reactiveLimits) {                                   // empty pack when the RL outer loop is disabled
             for (LfBus bus : network.getBuses()) {
                 int bn = bus.getNum();
@@ -431,6 +444,11 @@ public final class GpuAcOuterLoopPacks {
                     rlTargetP.add(bus.getTargetP());
                     rlBusId.add(bus.getId());
                 }
+            }
+        }
+        } finally {
+            for (LfBus bus : flatVBuses) {
+                bus.setV(Double.NaN);
             }
         }
         byte[] mon = new byte[rlMonitored.size()];

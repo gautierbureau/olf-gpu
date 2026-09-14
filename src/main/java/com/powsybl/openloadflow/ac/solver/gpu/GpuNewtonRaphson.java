@@ -223,9 +223,11 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 genById.put(g.getId(), g);
             }
         }
+        boolean distributed = false;                         // did the driver's DS actually move anything?
         if (genCum != null && data.dgGenId() != null && genCum.length >= data.dgGenId().length) {
             for (int g = 0; g < data.dgGenId().length; g++) {
                 if (genCum[g] != 0) {
+                    distributed = true;
                     LfGenerator gen = genById.get(data.dgGenId()[g]);
                     if (gen != null) {
                         gen.setTargetP(gen.getTargetP() + genCum[g]);
@@ -241,32 +243,48 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 double delta = deviceTargets[row] - data.dsBaseTargetP()[i];
                 LfBus bus = data.dsBusNum() != null && i < data.dsBusNum().length ? network.getBus(data.dsBusNum()[i]) : null;
                 if (bus != null && delta != 0) {
+                    distributed = true;
                     splitByFactor(bus, delta);
                 }
             }
         }
-        if (retain != null && retain.length > 0 && retain[0] != 0 && data.dsSlackPhiRow() >= 0) {
+        // The slack's retained share exists only when a distribution happened: the retain kernel
+        // evaluates rho * mismatch at EVERY check, a STABLE one included, and handing that to the
+        // slack's generators moved them by rho * (a sub-tolerance mismatch) where OLF's loop had
+        // moved nothing — 3.4 kW that a 0.01 MW slack tolerance turned into 0.7 kV on l121.
+        if (distributed && retain != null && retain.length > 0 && retain[0] != 0 && data.dsSlackPhiRow() >= 0) {
+            boolean found = false;
             for (LfBus bus : network.getBuses()) {
                 var v = equationSystem.getVariableSet().getVariable(bus.getNum(), AcVariableType.BUS_PHI);
                 if (v != null && v.getRow() == data.dsSlackPhiRow()) {
+                    found = true;
                     splitByFactor(bus, retain[0]);
                     break;
                 }
             }
+            if (!found && System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+                System.err.println("WB_DS_SLACK no bus with BUS_PHI row " + data.dsSlackPhiRow());
+            }
         }
     }
 
-    private static void splitByFactor(LfBus bus, double delta) {
-        double factorSum = bus.getGenerators().stream()
-                .filter(LfGenerator::isParticipating)
-                .mapToDouble(LfGenerator::getParticipationFactor)
-                .sum();
+    /** Split a bus-level delta over its participating generators with the RUN's balance-type factors
+     *  ({@code GpuDsParams.factor}, what the pack itself uses): {@code LfGenerator.getParticipationFactor()}
+     *  is only filled inside OLF's own distribution step and reads 0 here — the slack bus's generator
+     *  then received nothing where OLF's loop had given it its share (2.7 MW on l121 at tight tolerance). */
+    private void splitByFactor(LfBus bus, double delta) {
+        var dsParams = driverDsParams();
+        double factorSum = 0;
+        for (LfGenerator g : bus.getGenerators()) {
+            factorSum += dsParams.factor(g);
+        }
         if (factorSum <= 0) {
             return;
         }
         for (LfGenerator g : bus.getGenerators()) {
-            if (g.isParticipating()) {
-                g.setTargetP(g.getTargetP() + delta * g.getParticipationFactor() / factorSum);
+            double f = dsParams.factor(g);
+            if (f != 0) {
+                g.setTargetP(g.getTargetP() + delta * f / factorSum);
             }
         }
     }

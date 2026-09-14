@@ -65,6 +65,26 @@ public final class GpuBatchHvdcAcEmulation {
                double pMax12, double pMax21, double loss1, double loss2, double r,
                int baseStatus, double baseD1, double baseD2) {
 
+        // A converter bus whose BUS_TARGET_P is INACTIVE (the slack) is packed as ~phiRow: the angle
+        // still reads at that column, but its row hosts the PHI identity and must never receive a P
+        // target — OLF's slack simply absorbs the station's targetP. Writing there pinned the base
+        // LF's slack angle at the freeze delta (BUS_TARGET_PHI residual 0.014, base MAX_ITER).
+        public int bus1PhiRow() {
+            return bus1PRow >= 0 ? bus1PRow : ~bus1PRow;
+        }
+
+        public int bus2PhiRow() {
+            return bus2PRow >= 0 ? bus2PRow : ~bus2PRow;
+        }
+
+        public boolean bus1PActive() {
+            return bus1PRow >= 0;
+        }
+
+        public boolean bus2PActive() {
+            return bus2PRow >= 0;
+        }
+
         /** OLF's own {@code HvdcAcEmulationSide1ActiveFlowEquationTerm.p1} at a scenario's state.
          *  Called directly on the state array rather than through the equation term: loading a
          *  state into the shared {@code StateVector} notifies {@code AcNetworkVector}, which
@@ -72,12 +92,12 @@ public final class GpuBatchHvdcAcEmulation {
          *  per scenario per check round, which measured 6 s of a 10 s orchestrator on a 9k-branch
          *  case. The row IS the bus's BUS_PHI row (one device row per variable). */
         double p1At(double[] x) {
-            return HvdcAcEmulationSide1ActiveFlowEquationTerm.p1(p0, k, loss1, loss2, r, x[bus1PRow], x[bus2PRow]);
+            return HvdcAcEmulationSide1ActiveFlowEquationTerm.p1(p0, k, loss1, loss2, r, x[bus1PhiRow()], x[bus2PhiRow()]);
         }
 
         /** OLF's own {@code HvdcAcEmulationSide2ActiveFlowEquationTerm.p2}; see {@link #p1At}. */
         double p2At(double[] x) {
-            return HvdcAcEmulationSide2ActiveFlowEquationTerm.p2(p0, k, loss1, loss2, r, x[bus1PRow], x[bus2PRow]);
+            return HvdcAcEmulationSide2ActiveFlowEquationTerm.p2(p0, k, loss1, loss2, r, x[bus1PhiRow()], x[bus2PhiRow()]);
         }
     }
 
@@ -103,8 +123,14 @@ public final class GpuBatchHvdcAcEmulation {
                 case SATURATION_MODE_FROM_CS2_TO_CS1 -> SAT_2_TO_1;
                 case FROZEN -> FROZEN;
             };
+            int r1 = phiRows.get(hvdc.getBus1().getNum());
+            int r2 = phiRows.get(hvdc.getBus2().getNum());
+            boolean p1Active = es.getEquation(hvdc.getBus1().getNum(), AcEquationType.BUS_TARGET_P)
+                    .filter(com.powsybl.openloadflow.equations.Equation::isActive).isPresent();
+            boolean p2Active = es.getEquation(hvdc.getBus2().getNum(), AcEquationType.BUS_TARGET_P)
+                    .filter(com.powsybl.openloadflow.equations.Equation::isActive).isPresent();
             out.add(new Ctl(hvOffset + h,
-                    phiRows.get(hvdc.getBus1().getNum()), phiRows.get(hvdc.getBus2().getNum()),
+                    p1Active ? r1 : ~r1, p2Active ? r2 : ~r2,
                     ac.getP0(), ac.getDroop() * 180 / Math.PI,
                     ac.getPMaxFromCS1toCS2(), ac.getPMaxFromCS2toCS1(),
                     hvdc.getConverterStation1().getLossFactor() / 100,
@@ -229,10 +255,12 @@ public final class GpuBatchHvdcAcEmulation {
                 disabledMask[s][c.hvElemIndex()] = true;
                 // base frame: baseTargets (or the row's existing override — e.g. a lost load on the
                 // converter bus) already carry the base injections
-                mergeOverride(ovIndexList, ovValueList, posOf, s * n + c.bus1PRow(),
-                        baseTargets[c.bus1PRow()], c.baseD1(), d[0]);
-                mergeOverride(ovIndexList, ovValueList, posOf, s * n + c.bus2PRow(),
-                        baseTargets[c.bus2PRow()], c.baseD2(), d[1]);
+                if (c.bus1PActive()) {
+                    mergeOverride(ovIndexList, ovValueList, posOf, s * n + c.bus1PRow(), baseTargets[c.bus1PRow()], c.baseD1(), d[0]);
+                }
+                if (c.bus2PActive()) {
+                    mergeOverride(ovIndexList, ovValueList, posOf, s * n + c.bus2PRow(), baseTargets[c.bus2PRow()], c.baseD2(), d[1]);
+                }
             }
         }
         return status;
@@ -260,10 +288,12 @@ public final class GpuBatchHvdcAcEmulation {
                 if (status[s][h] == LINEAR) {
                     disabledMask[s][c.hvElemIndex()] = false;
                     if (c.baseStatus() != LINEAR) {          // strip the base injections from the targets
-                        mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus1PRow(),
-                                baseTargets[c.bus1PRow()], c.baseD1(), 0);
-                        mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus2PRow(),
-                                baseTargets[c.bus2PRow()], c.baseD2(), 0);
+                        if (c.bus1PActive()) {
+                            mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus1PRow(), baseTargets[c.bus1PRow()], c.baseD1(), 0);
+                        }
+                        if (c.bus2PActive()) {
+                            mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus2PRow(), baseTargets[c.bus2PRow()], c.baseD2(), 0);
+                        }
                     }
                 } else {
                     disabledMask[s][c.hvElemIndex()] = true;
@@ -276,10 +306,12 @@ public final class GpuBatchHvdcAcEmulation {
                             : status[s][h] == SAT_2_TO_1 ? saturationDeltas(c, false)
                             : new double[] {appliedD1[s * nh + h] + c.baseD1(),
                                             appliedD2[s * nh + h] + c.baseD2()};
-                    mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus1PRow(),
-                            baseTargets[c.bus1PRow()], c.baseD1(), d[0]);
-                    mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus2PRow(),
-                            baseTargets[c.bus2PRow()], c.baseD2(), d[1]);
+                    if (c.bus1PActive()) {
+                        mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus1PRow(), baseTargets[c.bus1PRow()], c.baseD1(), d[0]);
+                    }
+                    if (c.bus2PActive()) {
+                        mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus2PRow(), baseTargets[c.bus2PRow()], c.baseD2(), d[1]);
+                    }
                 }
             }
         }

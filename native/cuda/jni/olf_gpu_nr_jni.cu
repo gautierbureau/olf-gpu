@@ -3237,8 +3237,8 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
         size_t elemSlot = (size_t) s * nElements + hvElem[h];
         if (st == HV_LINEAR && disabled[elemSlot]) return;
         const double* xs = x + (size_t) s * n;
-        double ph1 = xs[hvBus1Row[h]];
-        double ph2 = xs[hvBus2Row[h]];
+        double ph1 = xs[hvBus1Row[h] >= 0 ? hvBus1Row[h] : ~hvBus1Row[h]];   // ~row: P row inactive (slack)
+        double ph2 = xs[hvBus2Row[h] >= 0 ? hvBus2Row[h] : ~hvBus2Row[h]];
         double pp1 = hvdc::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
         double pp2 = hvdc::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
         if (st == HV_LINEAR) {                               // OLF checkAcEmulationMode
@@ -3275,8 +3275,12 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
     }
     double want1 = nd1 - p[7];                               // composition: base - baseD + d
     double want2 = nd2 - p[8];
-    target[(size_t) s * n + hvBus1Row[h]] += want1 - appliedD1[(size_t) s * nh + h];
-    target[(size_t) s * n + hvBus2Row[h]] += want2 - appliedD2[(size_t) s * nh + h];
+    if (hvBus1Row[h] >= 0) {                                 // an inactive P row (the slack) absorbs it, as OLF's does
+        target[(size_t) s * n + hvBus1Row[h]] += want1 - appliedD1[(size_t) s * nh + h];
+    }
+    if (hvBus2Row[h] >= 0) {
+        target[(size_t) s * n + hvBus2Row[h]] += want2 - appliedD2[(size_t) s * nh + h];
+    }
     appliedD1[(size_t) s * nh + h] = want1;
     appliedD2[(size_t) s * nh + h] = want2;
     status[(size_t) s * nh + h] = next;
@@ -4296,6 +4300,8 @@ struct BatchSolverContext {
     int driverResume = 0;                                    // this call continues a paused driver
     int driverPaused = 0;                                    // the last call stopped at a LOOP_HOST_*
     int pausedLoopKind = 0;                                  // WHICH host loop the driver stopped at
+    std::vector<int> pausedStatus;                           // per-scenario solve status at the pause: the resumed
+                                                             // call's checks (rlActive = converged) need it back
     int startLoopKind = -1;                                  // a RESTARTED sequence resumes its sweep AT this
                                                              // loop (OLF re-checks the loop that went UNSTABLE
                                                              // after the re-solve, before restarting the sweep)
@@ -5251,6 +5257,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         seqChanged = ctx->pausedSeqChanged != 0;
         prodIters = ctx->pausedProdIters;
         live = ctx->pausedLive;
+        if (ctx->pausedStatus.size() == res.status.size()) {
+            res.status = ctx->pausedStatus;                  // the state is the converged one the pause left: a
+        }                                                    // STABLE host verdict then re-CHECKS RL on it (rlActive)
         bool anyChanged = false;
         for (int s = 0; s < nS; s++) {
             char ch = s < (int) ctx->hostChanged.size() ? ctx->hostChanged[s] : 0;
@@ -5857,8 +5866,14 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             CUDA_CHECK(cudaMemcpy(sw.data(), ctx->dRlSwitched.p, nS, cudaMemcpyDeviceToHost));
             for (char c : sw) nSw += c ? 1 : 0;
         }
-        std::fprintf(stderr, "BATCH_TRACE pass done: outer=%d loop=%d/%d kind=%s solved=%d changedScenarios=%d iters=%d\n",
-                     outer, loopIdx, nLoops, kindName, solvePass ? 1 : 0, nSw, gLastPassIters);
+        int nPinned = 0;
+        if (ctx->nrl > 0) {
+            std::vector<char> lt(static_cast<size_t>(ctx->nrl) * nS);
+            CUDA_CHECK(cudaMemcpy(lt.data(), ctx->dRlLimitType.p, lt.size(), cudaMemcpyDeviceToHost));
+            for (char c : lt) nPinned += c ? 1 : 0;
+        }
+        std::fprintf(stderr, "BATCH_TRACE pass done: outer=%d loop=%d/%d kind=%s solved=%d changedScenarios=%d iters=%d pinned=%d\n",
+                     outer, loopIdx, nLoops, kindName, solvePass ? 1 : 0, nSw, gLastPassIters, nPinned);
     }
     if (inDsPhase && getenv("OLF_GPU_DS_DEBUG") && nS > 0) {
         // Is scenario 0 actually CONVERGED at the moment the DS loop reads its mismatch? OLF checks
@@ -5885,6 +5900,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         ctx->pausedProdIters = prodIters;
         ctx->pausedLive = live;
         ctx->pausedActive = active;
+        ctx->pausedStatus = res.status;
         ctx->driverPaused = 1;
         ctx->pausedLoopKind = loopKind;                      // WHICH host loop to run
         break;
@@ -6044,14 +6060,16 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             }
         }
     }
-    if (!inDsPhase && ctx->nRlRemote > 0 && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {   // TEMP remote-RL trace
+    if (!inDsPhase && (ctx->nRlRemote > 0 || nS == 1) && ctx->nrl > 0 && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {   // RL trace
         std::vector<char> lt(static_cast<size_t>(ctx->nrl) * nS);
         std::vector<char> rem(ctx->nrl);
         std::vector<int> vr(ctx->nrl);
         std::vector<double> qb(static_cast<size_t>(n) * nS);
         std::vector<double> lq(ctx->nrl);
         CUDA_CHECK(cudaMemcpy(lt.data(), ctx->dRlLimitType.p, lt.size(), cudaMemcpyDeviceToHost));
+        if (ctx->nRlRemote > 0) {
         CUDA_CHECK(cudaMemcpy(rem.data(), ctx->dRlRemote.p, rem.size(), cudaMemcpyDeviceToHost));
+        }
         CUDA_CHECK(cudaMemcpy(vr.data(), ctx->dRlVrow.p, vr.size() * sizeof(int), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(qb.data(), ctx->dQbuf.p, qb.size() * sizeof(double), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(lq.data(), ctx->dRlLoadQ.p, lq.size() * sizeof(double), cudaMemcpyDeviceToHost));
@@ -6063,9 +6081,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         CUDA_CHECK(cudaMemcpy(hRlAct.data(), ctx->dRlActive.p, nS, cudaMemcpyDeviceToHost));
         for (int s2 = 0; s2 < nS; s2++) {
             for (int i2 = 0; i2 < ctx->nrl; i2++) {
-                if (rem[i2]) {
-                    std::fprintf(stderr, "RLREMOTE_TRACE s=%d entry=%d lt=%d switched=%d q=%.6f mode=%d tol=%.3e maxQ=%.6f ncv=%d rlActive=%d\n",
-                                 s2, i2, (int) lt[(size_t) s2 * ctx->nrl + i2], (int) rlSwitched[s2],
+                if (rem[i2] || nS == 1) {
+                    std::fprintf(stderr, "RL_TRACE s=%d entry=%d remote=%d lt=%d switched=%d q=%.6f mode=%d tol=%.3e maxQ=%.6f ncv=%d rlActive=%d\n",
+                                 s2, i2, (int) rem[i2], (int) lt[(size_t) s2 * ctx->nrl + i2], (int) rlSwitched[s2],
                                  qb[(size_t) s2 * n + vr[i2]] + lq[i2], hMode[(size_t) s2 * n + vr[i2]], reactiveLimitTol,
                                  hMaxQ[ctx->ncv > 0 ? (size_t) s2 * ctx->nrl + i2 : (size_t) i2], ctx->ncv, (int) hRlAct[s2]);
                 }

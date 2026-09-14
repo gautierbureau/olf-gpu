@@ -74,7 +74,8 @@ public final class GpuAcOuterLoopPacks {
      *  orchestrator may activate it). */
     record RlPack(int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget,
                   double[] rlSvcBmin, double[] rlSvcBmax, double[] rlV2Base,
-                  byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow, int[] rlBusNum) {
+                  byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow, int[] rlBusNum,
+                  double[] rlNominalV, int[] rlPRow, double[] rlTargetP, int[] rlIdRank) {
     }
 
     /** Remote-member OWN reactive-injection contributors (plan-B3): per contribution, the member's
@@ -290,6 +291,21 @@ public final class GpuAcOuterLoopPacks {
      *  limit(v) = packedLimit + b*(v^2 - v2Base) — exact for the SVC part, identically zero on
      *  SVC-less buses. Must run under the SAME control-type view as the min/max capture (the
      *  monitoring flip). */
+    /** Rank of each id in lexicographic order — OLF's BY_ID_COMPARATOR tie-break, as an int the kernel can compare. */
+    private static int[] idRanks(List<String> ids) {
+        List<String> sorted = new ArrayList<>(ids);
+        java.util.Collections.sort(sorted);
+        java.util.Map<String, Integer> rank = new java.util.HashMap<>();
+        for (int i = 0; i < sorted.size(); i++) {
+            rank.putIfAbsent(sorted.get(i), i);
+        }
+        int[] out = new int[ids.size()];
+        for (int i = 0; i < ids.size(); i++) {
+            out[i] = rank.get(ids.get(i));
+        }
+        return out;
+    }
+
     private static void addSvcQuadratic(LfBus bus, List<Double> rlSvcBmin, List<Double> rlSvcBmax,
                                         List<Double> rlV2Base) {
         double v2 = bus.getV() * bus.getV();
@@ -338,6 +354,11 @@ public final class GpuAcOuterLoopPacks {
         List<Byte> rlRemote = new ArrayList<>();
         List<Integer> rlCmpVrow = new ArrayList<>();
         List<Integer> rlBusNum = new ArrayList<>();
+        // forced-PV election keys (OLF switchPvPq: controlled bus nominal V, live target P, id)
+        List<Double> rlNominalV = new ArrayList<>();
+        List<Integer> rlPRow = new ArrayList<>();
+        List<Double> rlTargetP = new ArrayList<>();
+        List<String> rlBusId = new ArrayList<>();
         if (reactiveLimits) {                                   // empty pack when the RL outer loop is disabled
             for (LfBus bus : network.getBuses()) {
                 int bn = bus.getNum();
@@ -360,6 +381,10 @@ public final class GpuAcOuterLoopPacks {
                         rlRemote.add((byte) 1);
                         rlCmpVrow.add(pilotV);                 // switch conditions compare the PILOT's V
                         rlBusNum.add(bn);
+                        rlNominalV.add(vc.getControlledBus().getNominalV());
+                        rlPRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.phiCol()[bn] : -1);
+                        rlTargetP.add(bus.getTargetP());
+                        rlBusId.add(bus.getId());
                     }
                     continue;                                  // never let a base-pinned remote member
                 }                                              // masquerade as a LOCAL basePqCapable entry
@@ -401,6 +426,10 @@ public final class GpuAcOuterLoopPacks {
                     rlRemote.add((byte) 0);
                     rlCmpVrow.add(vCol[bn]);                   // local: compare row = own row
                     rlBusNum.add(bn);
+                    rlNominalV.add(bus.getGeneratorVoltageControl().map(c -> c.getControlledBus().getNominalV()).orElse(bus.getNominalV()));
+                    rlPRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.phiCol()[bn] : -1);
+                    rlTargetP.add(bus.getTargetP());
+                    rlBusId.add(bus.getId());
                 }
             }
         }
@@ -423,7 +452,9 @@ public final class GpuAcOuterLoopPacks {
                 GpuAcArrays.toDoubleArray(rlVtarget), GpuAcArrays.toDoubleArray(rlSvcBmin),
                 GpuAcArrays.toDoubleArray(rlSvcBmax), GpuAcArrays.toDoubleArray(rlV2Base),
                 mon, rem, GpuAcArrays.toIntArray(rlCmpVrow),
-                GpuAcArrays.toIntArray(rlBusNum));
+                GpuAcArrays.toIntArray(rlBusNum),
+                GpuAcArrays.toDoubleArray(rlNominalV), GpuAcArrays.toIntArray(rlPRow), GpuAcArrays.toDoubleArray(rlTargetP),
+                idRanks(rlBusId));
     }
 
     static DsPack distributedSlackPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,

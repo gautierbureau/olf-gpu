@@ -597,8 +597,10 @@ which extracts AFTER a converged base): (1) `rlV2Base` is NaN on a never-solved 
 `0 × NaN` poisoned every RL entry's limit — the quadratic SVC delta is now applied to SVC entries
 only (`svcLim`); (2) a SINGLETON remote group has members but no DISTR_Q row, and
 `setBatchRlRemote` keyed `hasDqQrGroups` on the DISTR_Q rows, so the pilot's control-loss flip
-never armed — keyed on the member list now; (3) a device REJECTION (status −2, the all-pinned /
-forced-PV detector) on the base is a CPU fallback like on the chunks, and `GpuDriverOuterLoopEngine`
+never armed — keyed on the member list now; (3) a device REJECTION (status −2) on the base is a CPU fallback like on the chunks — and since
+2026-09-15 the forced-PV case no longer rejects at all: OLF's "strongest stays PV" election runs
+in-kernel (`rlForcedPvElectBatch`, keys via `setBatchRlElection`), so the forced-PV network solves
+on the device in the chunks AND as the base; `GpuDriverOuterLoopEngine`
 now wraps every device-owned loop in `DeviceDrivenLoop`: STABLE while the solver ran on the device,
 OLF's real loop (initialized late) the moment a solve fell back to the CPU — dropping the loops left
 the fallback base without DS/RL (1.3e-4 kV on the zero-impedance member network).

@@ -81,6 +81,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget,
                         double[] rlSvcBmin, double[] rlSvcBmax, double[] rlV2Base,
                         byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow, int[] rlBusNum,
+                        double[] rlNominalV, int[] rlPRow, double[] rlTargetP, int[] rlIdRank,
                         int[] rmqRow, int[] rmqElem, int[] rmqSide, int[] rmqKind, double[] rmqWeight,
                         double[] rowSlope,
                         int[] dsPhiRow, double[] dsFactor, int dsSlackPhiRow, double dsSlackTargetP,

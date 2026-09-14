@@ -495,6 +495,12 @@ public final class GpuAcNewtonSolver {
     /** Install the voltage-dependent SVC reactive-limit coefficients on a batch context:
      *  per RL entry, limit(v) = packed base limit + svcB*(v^2 - v2Base) — exactly OLF's live
      *  Bmin/Bmax*(v*nomV)^2 evaluation (and the pinned re-freeze via busesWithUpdatedQLimits). */
+    /** OLF's GLOBAL forced-PV election keys per RL entry (ReactiveLimitsOuterLoop.switchPvPq: when every
+     *  PV bus would switch, the strongest stays PV — highest controlled-bus nominal V, then highest bus
+     *  target P, then lowest id): the nominal V, the bus's BUS_TARGET_P row (−1 = none, use staticP)
+     *  and the id rank. Installed on every batch context; the RL pass then runs the election in-kernel. */
+    public static native void setBatchRlElection(long handle, double[] nominalV, int[] pRow, double[] staticTargetP, int[] idRank);
+
     public static native void setBatchRlSvcLimits(long handle, double[] svcBmin, double[] svcBmax,
                                                   double[] v2Base);
 

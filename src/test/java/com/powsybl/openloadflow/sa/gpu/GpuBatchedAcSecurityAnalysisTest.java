@@ -1052,25 +1052,22 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
 
     /** OLF's GLOBAL "all PV buses should switch — strongest stays PV" rule (this network's ONLY
      *  PV buses are the three limited members; the L14 outage drives every one over its limit and
-     *  the CPU FORCES g1 to stay PV at q=1742 > maxQ=1000). The device RL kernel does not run the
-     *  forced-PV election — batching this scenario measured 1.9 kV wrong (the device pinned the
-     *  bus OLF keeps) — so the FORCED-PV DETECTOR must reject it per scenario the moment its RL
-     *  state has zero unpinned PV entries (reachable only on all-PV-pinnable networks), and the
-     *  CPU fallback recomputes it exactly. The batch still ENGAGES. */
+     *  the CPU FORCES g1 to stay PV at q=1742 > maxQ=1000). The device runs the same election
+     *  IN-KERNEL after its pin pass (rlForcedPvElectBatch: highest controlled-bus nominal V, then
+     *  highest live target P, then lowest id — the elected pin is undone), so the scenario SOLVES
+     *  on the device at 1e-12 instead of being rejected to the CPU (pre-election it solved 1.9 kV
+     *  wrong; the detector then rejected it — count 0). */
     @org.junit.jupiter.api.Test
-    void deviceRemoteForcedPvRejectsToCpuAndMatches() {
+    void deviceRemoteForcedPvElectionMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = forcedPvNetwork();
         List<Contingency> ctgs = List.of(new Contingency("L14", new BranchContingency("L14")));
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true);
-        assertGpuMatchesCpuNoEngage(network, ctgs, 1e-12, lfp);
-        // count semantics: -1 = whole-run scope fallback (batch never engaged), 0 = the batch
-        // ENGAGED and the DETECTOR rejected its only scenario (pre-detector this solved WRONG and
-        // reported 1) — exactly the contract under test.
-        assertEquals(0, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
-                "the forced-PV scenario must be REJECTED by the all-pinned detector (not scope-gated)");
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the forced-PV scenario must SOLVE on the device (in-kernel election), not be rejected");
     }
 
     /** JAVA twin on the forced-PV network: OLF's own loop applies the "strongest stays PV" rule

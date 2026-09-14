@@ -127,6 +127,7 @@ public final class GpuAcDataExtractor {
                 rl.rlVrow(), rl.rlMinQ(), rl.rlMaxQ(), rl.rlLoadQ(), rl.rlVtarget(),
                 rl.rlSvcBmin(), rl.rlSvcBmax(), rl.rlV2Base(), rl.rlMonitored(),
                 rl.rlRemote(), rl.rlCmpVrow(), rl.rlBusNum(),
+                rl.rlNominalV(), rl.rlPRow(), rl.rlTargetP(), rl.rlIdRank(),
                 rmq.row(), rmq.elem(), rmq.side(), rmq.kind(), rmq.weight(), rowSlope,
                 ds.dsPhiRow(), ds.dsFactor(), ds.dsSlackPhiRow(), ds.dsSlackTargetP(),
                 ds.dsBaseTargetP(), ds.dsMaxDelta(), ds.dsMinDelta(),

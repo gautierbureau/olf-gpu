@@ -38,16 +38,13 @@ public final class GpuBatchOuterLoopTables {
         // SVC-less entries — the kernel's limit(v) then degenerates to the packed static limit).
         GpuAcNewtonSolver.setBatchRlSvcLimits(handle,
                 gpuData.rlSvcBmin(), gpuData.rlSvcBmax(), gpuData.rlV2Base());
+        // OLF's global forced-PV election keys — the RL pass keeps the strongest bus PV when every
+        // PV bus would switch, instead of rejecting the scenario to the CPU.
+        GpuAcNewtonSolver.setBatchRlElection(handle, gpuData.rlNominalV(), gpuData.rlPRow(), gpuData.rlTargetP(), gpuData.rlIdRank());
         // Remote-member RL entries (plan-B1): install (or clear, on a cached context) the kinds.
         boolean anyRlRemote = false;
         for (byte b : gpuData.rlRemote()) {
             anyRlRemote |= b != 0;
-        }
-        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
-            System.err.println("TABLES anyRlRemote=" + anyRlRemote + " rlRemote=" + java.util.Arrays.toString(gpuData.rlRemote())
-                    + " dqMemberQrGroup=" + java.util.Arrays.toString(gpuData.dqMemberQrGroup())
-                    + " dqMemberRlEntry=" + java.util.Arrays.toString(gpuData.dqMemberRlEntry())
-                    + " qrPtr=" + java.util.Arrays.toString(gpuData.qrPtr()) + " ngen=" + gpuData.dgBus().length);
         }
         GpuAcNewtonSolver.setBatchRlRemote(handle,
                 anyRlRemote ? gpuData.rlRemote() : null,

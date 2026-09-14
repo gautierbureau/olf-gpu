@@ -63,7 +63,7 @@ public final class GpuBatchVoltageMonitoring {
 
     /** One monitored bus: its V row, RL pack index, the automaton band + setpoints, and the VC-ON
      *  activation deltas (row modes + targets; the V-row target is replaced per direction). */
-    record Ctl(int vRow, int rlIdx, double lowThreshold, double highThreshold,
+    public record Ctl(int vRow, int rlIdx, double lowThreshold, double highThreshold,
                double lowTargetV, double highTargetV,
                int[] deltaRows, int[] deltaModesOn, double[] deltaTargetsOn) {
     }
@@ -84,7 +84,7 @@ public final class GpuBatchVoltageMonitoring {
         return true;
     }
 
-    static List<Ctl> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    public static List<Ctl> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                       com.powsybl.openloadflow.equations.TargetVector<AcVariableType, AcEquationType> targetVector,
                                       GpuAcActivation baseActivation, double[] baseTargets, int[] rlVrow) {
         Map<Integer, Integer> busVRows = new LinkedHashMap<>();
@@ -418,5 +418,68 @@ public final class GpuBatchVoltageMonitoring {
                 nziBase, ziOnSlotElem, ziOffSlotElem);
         System.arraycopy(rlStateOut, 0, rlState, 0, rlStateOut.length);
         return r2;
+    }
+
+    /** Install the MonitoringVoltage driver phase's table on a batch context (null/empty clears it).
+     *  Shared by the batched SA's chunk contexts and the base load flow's batch-of-one. */
+    public static void installDriverLoop(long handle, List<Ctl> ctls) {
+        if (ctls == null || ctls.isEmpty()) {
+            GpuAcNewtonSolver.setBatchMonitoringLoops(handle, null, null, null, null, null, null);
+            return;
+        }
+        int nc = ctls.size();
+        int[] monVRow = new int[nc];
+        double[] monBand = new double[nc * 4];
+        int[] deltaPtr = new int[nc + 1];
+        List<Integer> dRow = new ArrayList<>();
+        List<Integer> dMode = new ArrayList<>();
+        List<Double> dTgt = new ArrayList<>();
+        for (int c = 0; c < nc; c++) {
+            Ctl ctl = ctls.get(c);
+            monVRow[c] = ctl.vRow();
+            monBand[c * 4] = ctl.lowThreshold();
+            monBand[c * 4 + 1] = ctl.highThreshold();
+            monBand[c * 4 + 2] = ctl.lowTargetV();
+            monBand[c * 4 + 3] = ctl.highTargetV();
+            deltaPtr[c] = dRow.size();
+            for (int k = 0; k < ctl.deltaRows().length; k++) {
+                dRow.add(ctl.deltaRows()[k]);
+                dMode.add(ctl.deltaModesOn()[k]);
+                dTgt.add(ctl.deltaTargetsOn()[k]);
+            }
+        }
+        deltaPtr[nc] = dRow.size();
+        GpuAcNewtonSolver.setBatchMonitoringLoops(handle, monVRow, monBand, deltaPtr,
+                dRow.stream().mapToInt(Integer::intValue).toArray(),
+                dMode.stream().mapToInt(Integer::intValue).toArray(),
+                dTgt.stream().mapToDouble(Double::doubleValue).toArray());
+    }
+
+    /** Give the driver's activations (scenario 0: the chosen target per controller, NaN = standing by)
+     *  back to the network exactly as OLF's MonitoringVoltageOuterLoop.switchPqPv does: voltage control
+     *  on with the recomputed Q target, the SVC in VOLTAGE control, the automaton's target as setpoint. */
+    public static void writeBack(LfNetwork network, List<Ctl> ctls, double[] activated, int[] rlBusNum) {
+        if (ctls == null || ctls.isEmpty() || activated == null || rlBusNum == null) {
+            return;
+        }
+        for (int c = 0; c < ctls.size() && c < activated.length; c++) {
+            double t = activated[c];
+            Ctl ctl = ctls.get(c);
+            if (Double.isNaN(t) || ctl.rlIdx() < 0 || ctl.rlIdx() >= rlBusNum.length) {
+                continue;
+            }
+            LfBus bus = network.getBus(rlBusNum[ctl.rlIdx()]);
+            if (bus == null || bus.isGeneratorVoltageControlEnabled()) {
+                continue;
+            }
+            bus.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(true);
+            for (LfGenerator g : bus.getGenerators()) {
+                if (g.getGeneratorControlType() == LfGenerator.GeneratorControlType.MONITORING_VOLTAGE) {
+                    g.setGeneratorControlType(LfGenerator.GeneratorControlType.VOLTAGE);
+                    break;
+                }
+            }
+            bus.getGeneratorVoltageControl().ifPresent(vc -> vc.setTargetValue(t));
+        }
     }
 }

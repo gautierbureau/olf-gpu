@@ -51,17 +51,17 @@ public final class GpuBatchHvdcAcEmulation {
     private GpuBatchHvdcAcEmulation() {
     }
 
-    static final int LINEAR = 0;
-    static final int SAT_1_TO_2 = 1;
-    static final int SAT_2_TO_1 = 2;
-    static final int FROZEN = 3;
+    public static final int LINEAR = 0;
+    public static final int SAT_1_TO_2 = 1;
+    public static final int SAT_2_TO_1 = 2;
+    public static final int FROZEN = 3;
 
     /** One packed AC-emulation HVDC: the hv element index (per-scenario disabled bit), the two
      *  converter buses' P-target rows, OLF's own linear p1/p2 terms, the emulation limits, and the
      *  BASE frame — the base status plus the base VSC station targetP contributions ALREADY inside
      *  baseTargets (0 for a linear base; a saturated/frozen base carries its injections there, so
      *  every status override composes as {@code baseTargets - baseD + d(status)}). */
-    record Ctl(int hvElemIndex, int bus1PRow, int bus2PRow, double p0, double k,
+    public record Ctl(int hvElemIndex, int bus1PRow, int bus2PRow, double p0, double k,
                double pMax12, double pMax21, double loss1, double loss2, double r,
                int baseStatus, double baseD1, double baseD2) {
 
@@ -81,7 +81,7 @@ public final class GpuBatchHvdcAcEmulation {
         }
     }
 
-    static List<Ctl> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    public static List<Ctl> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                       int nElements) {
         Map<Integer, Integer> phiRows = new LinkedHashMap<>();
         for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
@@ -118,7 +118,7 @@ public final class GpuBatchHvdcAcEmulation {
 
     /** The packed hv element index of every AC-emulation HVDC (the packer's exact enumeration order) —
      *  for per-scenario outage masking of HVDC contingencies. */
-    static java.util.Map<LfHvdc, Integer> elementIndices(LfNetwork network, int nElements) {
+    public static java.util.Map<LfHvdc, Integer> elementIndices(LfNetwork network, int nElements) {
         List<LfHvdc> packed = network.getHvdcs().stream()
                 .filter(h -> h.getBus1() != null && h.getBus2() != null && h.isAcEmulation())
                 .toList();
@@ -202,7 +202,7 @@ public final class GpuBatchHvdcAcEmulation {
     /** As above, additionally recording the converter-row delta each freeze APPLIED (relative to the
      *  base-status delta), which is what the in-kernel loops need to keep applying transitions
      *  incrementally instead of rebuilding the override list. */
-    static int[][] applyFreeze(int chunkSize, int realCount, int n, List<Ctl> ctls,
+    public static int[][] applyFreeze(int chunkSize, int realCount, int n, List<Ctl> ctls,
                                double[] baseState, double[] x0PerScenario, boolean[][] disabledMask,
                                double[] baseTargets, List<Integer> ovIndexList, List<Double> ovValueList,
                                double[] appliedD1, double[] appliedD2) {
@@ -317,7 +317,7 @@ public final class GpuBatchHvdcAcEmulation {
      *  the hv bit set and NO target override (baseTargets already carry the base injections), and
      *  PADDING slots get the base bits so they still converge at iteration 0. An entry whose bit is
      *  already set while its status is LINEAR is a contingency outage — left alone. */
-    static void seedBaseStatuses(int chunkSize, int realCount, List<Ctl> ctls,
+    public static void seedBaseStatuses(int chunkSize, int realCount, List<Ctl> ctls,
                                  int[][] status, boolean[][] disabledMask) {
         for (int h = 0; h < ctls.size(); h++) {
             Ctl c = ctls.get(h);
@@ -335,4 +335,93 @@ public final class GpuBatchHvdcAcEmulation {
         }
     }
 
+
+    /** Install the two AC-emulation driver phases (freeze, limits) on a batch context: the controller
+     *  tables, each scenario's starting status, the "outaged by the contingency" bits and the deltas the
+     *  host-side freeze already applied. Shared by the batched SA's chunk contexts and the base load
+     *  flow's batch-of-one. Returns the flat ctgOut bits (null when there is nothing to install — the
+     *  context's HVDC loops are then cleared). */
+    public static byte[] installDriverLoops(long handle, List<Ctl> ctls, int chunkSize, int[][] hvdcStatus,
+                                            boolean[][] disabledMask, double[] appliedD1, double[] appliedD2,
+                                            boolean limits) {
+        if (ctls == null || ctls.isEmpty()) {
+            GpuAcNewtonSolver.setBatchHvdcLoops(handle, null, null, null, null, null, null, null, null, 0);
+            return null;
+        }
+        int nh = ctls.size();
+        int[] hvElem = new int[nh];
+        int[] hvB1 = new int[nh];
+        int[] hvB2 = new int[nh];
+        double[] hvIn = new double[nh * 9];
+        for (int h = 0; h < nh; h++) {
+            Ctl c = ctls.get(h);
+            hvElem[h] = c.hvElemIndex();          // GLOBAL element index
+            hvB1[h] = c.bus1PRow();
+            hvB2[h] = c.bus2PRow();
+            hvIn[h * 9] = c.p0();
+            hvIn[h * 9 + 1] = c.k();
+            hvIn[h * 9 + 2] = c.pMax12();
+            hvIn[h * 9 + 3] = c.pMax21();
+            hvIn[h * 9 + 4] = c.loss1();
+            hvIn[h * 9 + 5] = c.loss2();
+            hvIn[h * 9 + 6] = c.r();
+            hvIn[h * 9 + 7] = c.baseD1();
+            hvIn[h * 9 + 8] = c.baseD2();
+        }
+        byte[] ctgOut = new byte[chunkSize * nh];
+        int[] flatStatus = new int[chunkSize * nh];
+        for (int s2 = 0; s2 < chunkSize; s2++) {
+            for (int h = 0; h < nh; h++) {
+                flatStatus[s2 * nh + h] = hvdcStatus[s2][h];
+                // "the contingency outaged it" is the bit set on a LINEAR entry
+                ctgOut[s2 * nh + h] = (byte) (hvdcStatus[s2][h] == LINEAR
+                        && disabledMask[s2][ctls.get(h).hvElemIndex()] ? 1 : 0);
+            }
+        }
+        GpuAcNewtonSolver.setBatchHvdcLoops(handle, hvElem, hvB1, hvB2, hvIn, ctgOut,
+                flatStatus, appliedD1, appliedD2, limits ? 1 : 0);
+        return ctgOut;
+    }
+
+    /** Give the driver's final AC-emulation statuses (scenario 0) back to the network the way OLF's own
+     *  loops do — the same {@code AcEmulationControl} switches, which set the converter stations'
+     *  targetP and re-activate/deactivate the emulation terms through OLF's listeners. */
+    public static void writeBack(LfNetwork network, List<Ctl> ctls, int[] deviceStatus, int nElements) {
+        if (ctls == null || ctls.isEmpty() || deviceStatus == null) {
+            return;
+        }
+        java.util.Map<Integer, LfHvdc> byElem = new java.util.HashMap<>();
+        elementIndices(network, nElements).forEach((h, e) -> byElem.put(e, h));
+        for (int h = 0; h < ctls.size() && h < deviceStatus.length; h++) {
+            LfHvdc hvdc = byElem.get(ctls.get(h).hvElemIndex());
+            if (hvdc == null) {
+                continue;
+            }
+            var control = hvdc.getAcEmulationControl();
+            var now = control.getAcEmulationStatus();
+            switch (deviceStatus[h]) {
+                case LINEAR -> {
+                    if (now != LfHvdc.AcEmulationControl.AcEmulationStatus.LINEAR_MODE) {
+                        control.switchToLinearMode();
+                    }
+                }
+                case SAT_1_TO_2 -> {
+                    if (now != LfHvdc.AcEmulationControl.AcEmulationStatus.SATURATION_MODE_FROM_CS1_TO_CS2) {
+                        control.switchToSaturationFromCS1toCS2(true);
+                    }
+                }
+                case SAT_2_TO_1 -> {
+                    if (now != LfHvdc.AcEmulationControl.AcEmulationStatus.SATURATION_MODE_FROM_CS2_TO_CS1) {
+                        control.switchToSaturationFromCS2toCS1(true);
+                    }
+                }
+                case FROZEN -> {
+                    if (now != LfHvdc.AcEmulationControl.AcEmulationStatus.FROZEN) {
+                        control.switchToFrozenState(true);
+                    }
+                }
+                default -> { }
+            }
+        }
+    }
 }

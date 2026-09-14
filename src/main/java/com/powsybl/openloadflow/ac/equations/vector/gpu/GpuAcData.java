@@ -80,7 +80,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         int[] dbRow, int[] dbCol, double[] dbCoef,
                         int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget,
                         double[] rlSvcBmin, double[] rlSvcBmax, double[] rlV2Base,
-                        byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow,
+                        byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow, int[] rlBusNum,
                         int[] rmqRow, int[] rmqElem, int[] rmqSide, int[] rmqKind, double[] rmqWeight,
                         double[] rowSlope,
                         int[] dsPhiRow, double[] dsFactor, int dsSlackPhiRow, double dsSlackTargetP,
@@ -89,6 +89,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         double dsSlackMarginUp, double dsSlackMarginDown,
                         int[] dgBus, double[] dgFactor, double[] dgMaxDelta, double[] dgMinDelta,
                         double[] dgMarginUp, double[] dgMarginDown, int[] busGenStart, int[] busGenEnd,
+                        int[] dsBusNum, String[] dgGenId,
                         int[] baseOpenCbElements, int[] baseOpenZiElements, int[] baseOpenZiBranchNums,
                         int[] ziBranchNums, double[] vdlIn, int[] vdlIdx, int[] qrPtr, int[] qrRows,
                         int[] obQAlt, int[] ziQAlt) {

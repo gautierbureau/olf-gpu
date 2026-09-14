@@ -68,6 +68,7 @@ public class GpuNewtonRaphsonFactory extends NewtonRaphsonFactory {
         // shared parameters object.
         return new GpuNewtonRaphson(network, (NewtonRaphsonParameters) parameters.getAcSolverParameters(), equationSystem,
                 j, targetVector, equationVector, parameters.isDetailedReport(),
-                driverLoops, d[0], d[1], (int) d[2], (int) d[3]);
+                driverLoops, d[0], d[1], (int) d[2], (int) d[3],
+                driverLoops ? parameters.getOuterLoops() : List.of(), parameters);
     }
 }

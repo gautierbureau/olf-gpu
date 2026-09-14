@@ -166,7 +166,8 @@ public final class GpuAcOuterLoopPacks {
                   int dsMode, double[] dsMarginUp, double[] dsMarginDown,
                   double dsSlackMarginUp, double dsSlackMarginDown,
                   int[] dgBus, double[] dgFactor, double[] dgMaxDelta, double[] dgMinDelta,
-                  double[] dgMarginUp, double[] dgMarginDown, int[] busGenStart, int[] busGenEnd) {
+                  double[] dgMarginUp, double[] dgMarginDown, int[] busGenStart, int[] busGenEnd,
+                  int[] dsBusNum, String[] dgGenId) {
     }
 
     static DqPack distrQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
@@ -459,6 +460,8 @@ public final class GpuAcOuterLoopPacks {
         List<Double> dgMarginDown = new ArrayList<>();
         List<Integer> busGenStart = new ArrayList<>();
         List<Integer> busGenEnd = new ArrayList<>();
+        List<Integer> dsBusNum = new ArrayList<>();                     // WHICH bus each row is (write-back)
+        List<String> dgGenId = new ArrayList<>();                       // WHICH generator each slot is
         List<Double> dsFactorRaw = new ArrayList<>();
         List<Double> dsBaseTargetP = new ArrayList<>();                 // each bus's initial BUS_TARGET_P
         List<Double> dsMaxDelta = new ArrayList<>();                    // headroom ≥ 0
@@ -518,6 +521,7 @@ public final class GpuAcOuterLoopPacks {
                     System.err.println("GPU_DS_BUS idx=" + dsPhiRow.size() + " bus=" + bus.getId());
                 }
                 dsPhiRow.add(phiCol[bn]);
+                dsBusNum.add(bn);
                 dsFactorRaw.add(factor);
                 dsBaseTargetP.add(bus.getTargetP());
                 dsMaxDelta.add(headroom);
@@ -554,6 +558,7 @@ public final class GpuAcOuterLoopPacks {
                                 + " maxTargetP=" + g.getMaxTargetP() + " minTargetP=" + g.getMinTargetP());
                     }
                     dgBus.add(dsPhiRow.size() - 1);
+                    dgGenId.add(g.getId());
                     dgFactorRaw.add(gf);
                     boolean unbounded = !dsParams.useActiveLimits() || dsParams.isLoadBased();
                     dgMaxDelta.add(unbounded ? Double.POSITIVE_INFINITY : maxTp - tp);
@@ -604,6 +609,8 @@ public final class GpuAcOuterLoopPacks {
             dgMarginDown.clear();
             busGenStart.clear();
             busGenEnd.clear();
+            dsBusNum.clear();
+            dgGenId.clear();
         }
         return new DsPack(GpuAcArrays.toIntArray(dsPhiRow), dsFactor, dsSlackPhiRow, dsSlackTargetP,
                 GpuAcArrays.toDoubleArray(dsBaseTargetP), GpuAcArrays.toDoubleArray(dsMaxDelta),
@@ -614,7 +621,8 @@ public final class GpuAcOuterLoopPacks {
                 GpuAcArrays.toIntArray(dgBus), dgFactor,
                 GpuAcArrays.toDoubleArray(dgMaxDelta), GpuAcArrays.toDoubleArray(dgMinDelta),
                 GpuAcArrays.toDoubleArray(dgMarginUp), GpuAcArrays.toDoubleArray(dgMarginDown),
-                GpuAcArrays.toIntArray(busGenStart), GpuAcArrays.toIntArray(busGenEnd));
+                GpuAcArrays.toIntArray(busGenStart), GpuAcArrays.toIntArray(busGenEnd),
+                GpuAcArrays.toIntArray(dsBusNum), dgGenId.toArray(new String[0]));
     }
 
     /**

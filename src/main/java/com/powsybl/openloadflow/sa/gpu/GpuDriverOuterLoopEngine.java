@@ -20,12 +20,11 @@ import java.util.List;
 /**
  * The base load flow's engine when the DEVICE driver owns the outer loops.
  *
- * <p>The base LF already goes through the batch code as a batch of one. With
- * {@code OLF_GPU_DRIVER_OUTER_LOOPS=1} its driver also runs OLF's outer loops, exactly as it does
- * for a 600-scenario chunk — a batch of one is still a batch. This engine then has to STOP driving
- * the same loops in Java, or they are applied twice: the device distributes into its own targets
- * while the network still holds the pre-distribution ones, so OLF's DistributedSlack measures the
- * amount just distributed as a fresh mismatch and distributes it again.
+ * <p>The base LF goes through the batch code as a batch of one. With
+ * {@code OLF_GPU_DRIVER_OUTER_LOOPS=1} the driver runs ALL outer loops: DS and RL as in-kernel
+ * phases, and the remaining loops (SVC, TVC, Phase, TRPC, Shunt) as host-owned pause points
+ * in their correct OLF positions. This engine suppresses those loops from OLF's standard
+ * outer-loop cycle, or they would run twice.
  *
  * <p>Dropping them HERE rather than from {@code parameters.getOuterLoops()} is deliberate: the GPU
  * security analysis derives its own batch configuration and qualification gates from that shared
@@ -37,18 +36,104 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
 
     public GpuDriverOuterLoopEngine(AcLoadFlowContext context) {
         super(context);
+        // Make the engine's AcLoadFlowContext available to the solver's host-loop pause cycle,
+        // so outer-loop contexts share the engine's equation system and Jacobian (not duplicates).
+        com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.GPU_ENGINE_CONTEXT.set(context);
     }
 
-    /** The loops the device driver runs itself, and which must therefore not run here as well. */
+    /** True for loops the device driver runs itself — in-kernel (DS, RL) or host-paused (SVC,
+     *  TVC, Phase, TRPC, Shunt). These must not also run in OLF's engine, or they apply twice. */
     static boolean drivenOnDevice(AcOuterLoop outerLoop) {
-        return outerLoop instanceof DistributedSlackOuterLoop
-                || outerLoop instanceof ReactiveLimitsOuterLoop;
+        if (outerLoop instanceof DistributedSlackOuterLoop || outerLoop instanceof ReactiveLimitsOuterLoop) {
+            return true;  // in-kernel driver phases
+        }
+        switch (outerLoop.getName()) {                       // in-kernel driver phases with their own tables
+            case "FreezingHvdcACEmulation", "AcHvdcAcEmulationLimits", "VoltageMonitoring" -> {
+                return true;
+            }
+            default -> { }
+        }
+        // Host-paused loops: anything with a LOOP_HOST_* kind
+        return com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.loopKindFor(outerLoop.getName())
+                >= com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.HOST_LOOP_SVC;
+    }
+
+    /**
+     * A loop the device driver owns. While the solver runs on the device the driver has already
+     * made this loop's decisions inside the solve, so the check is STABLE and OLF's loop is never
+     * initialized (FreezingHvdcACEmulation.initialize would freeze every emulation on its own). The
+     * moment a solve FALLS BACK to the CPU Newton-Raphson (a device-broken shape, a forced-PV
+     * election the kernel does not run, a rejected extraction) the driver made no decision at all,
+     * and OLF's real loop must run exactly as it does without the GPU — initialized late, on the
+     * state the fallback left. Dropping the loop instead left the fallback base without any
+     * DistributedSlack/ReactiveLimits (1.3e-4 kV on the zero-impedance member network).
+     */
+    static final class DeviceDrivenLoop implements AcOuterLoop {
+        private final AcOuterLoop real;
+        private boolean initialized;
+
+        DeviceDrivenLoop(AcOuterLoop real) {
+            this.real = real;
+        }
+
+        @Override
+        public String getName() {
+            return real.getName();
+        }
+
+        @Override
+        public String getType() {
+            return real.getType();
+        }
+
+        @Override
+        public boolean isNeeded(AcLoadFlowContext context) {
+            return real.isNeeded(context);
+        }
+
+        @Override
+        public void initialize(AcOuterLoopContext context) {
+            // deferred to the first check that OLF's loop actually has to run
+        }
+
+        @Override
+        public com.powsybl.openloadflow.lf.outerloop.OuterLoopResult check(AcOuterLoopContext context,
+                                                                          com.powsybl.commons.report.ReportNode reportNode) {
+            if (com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.lastRunOnDevice()) {
+                return new com.powsybl.openloadflow.lf.outerloop.OuterLoopResult(this,
+                        com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus.STABLE);
+            }
+            if (!initialized) {
+                real.initialize(context);
+                initialized = true;
+            }
+            return real.check(context, reportNode);
+        }
+
+        @Override
+        public void cleanup(AcOuterLoopContext context) {
+            if (initialized) {
+                real.cleanup(context);
+            }
+        }
+
+        @Override
+        public boolean canFixUnrealisticState() {
+            return real.canFixUnrealisticState();
+        }
     }
 
     @Override
     protected List<Pair<AcOuterLoop, AcOuterLoopContext>> engineOuterLoopsAndContexts(AcLoadFlowContext context) {
-        return super.engineOuterLoopsAndContexts(context).stream()
-                .filter(p -> !drivenOnDevice(p.getLeft()))
-                .toList();
+        var all = super.engineOuterLoopsAndContexts(context);
+        List<Pair<AcOuterLoop, AcOuterLoopContext>> out = new java.util.ArrayList<>();
+        for (var p : all) {
+            out.add(drivenOnDevice(p.getLeft()) ? Pair.of(new DeviceDrivenLoop(p.getLeft()), p.getRight()) : p);
+        }
+        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            System.err.println("GPU_DRIVER_ENGINE loops=" + all.stream().map(p -> p.getLeft().getName()).toList()
+                    + " keptOnHost=" + all.stream().filter(p -> !drivenOnDevice(p.getLeft())).map(p -> p.getLeft().getName()).toList());
+        }
+        return out;
     }
 }

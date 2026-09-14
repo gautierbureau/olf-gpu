@@ -417,6 +417,202 @@ Blocked on RTE Nexus access.
   scenarios to CPU fallback and tanks the GPU time. Baseline to beat: GPU warm ~23.5 ms/ctg,
   ×1.42, from `7ac0627`. Run with `OLF_GPU_SA_GPU_CONV_EPS=1e-7` on an idle box.
 
+### #41 — Outer-loop ordering & composition in the DEVICE batch path (investigated 2026-09-11)
+
+**Problem.** The GPU DEVICE batch path runs host orchestrators in a sequence that differs from
+OLF's `DefaultAcOuterLoopConfig` ordering, AND does not implement OLF's nested stabilization
+model (each loop to stability; repeat whole sweep on change). Root cause is architectural: the
+in-kernel driver phases (DS, HVDC, Monitoring, RL) complete before host orchestrators run, so
+loops that OLF positions BEFORE RL (SecondaryVc order 4, VoltageMonitoring order 5) necessarily
+run AFTER RL on the GPU.
+
+**Current GPU host-orchestrator order** (`GpuBatchChunkSolver` lines 1137-1291):
+```
+[In-kernel: DS → HVDC freeze → HVDC limits → (HOST pause) → Monitoring → RL]
+Host orchestrators (sequential, after main solve):
+1. IncrementalTvc        ← OLF order 8
+2. VoltageMonitoring     ← OLF order 5 (if not in-kernel)
+3. SecondaryVc           ← OLF order 4
+4. ContinuousPhase       ← OLF order 7
+5. SimpleShuntVc         ← OLF order 10
+6. SimpleTvc             ← OLF order 8
+7. IncrementalFlowControl ← OLF orders 7+9
+8. IncrementalShuntVc    ← OLF order 10
+9. TransformerControl    ← OLF order 8
+```
+
+vs OLF CPU: DS(0) → HVDC(1,2) → SVC(4) → Monitoring(5) → RL(6) → Phase(7) → TVC(8) → TRPC(9) → Shunt(10).
+
+**Three distinct issues:**
+
+1. **Pre-RL loops running post-RL.** SecondaryVc and VoltageMonitoring are pre-RL on CPU but
+   post-RL on GPU (because RL is in-kernel). VoltageMonitoring can run in-kernel (already
+   implemented). SecondaryVc needs a transposed sensitivity solve and a host-side dense zone
+   system — it cannot be a pure kernel. The `LOOP_HOST` pause/resume mechanism
+   (`olf_gpu_nr_jni.cu:69-75, 4852-4853, 5396-5407`) was built for exactly this: a host-owned
+   loop sitting in its correct OLF position between HVDC_LIMITS and MONITORING, with the driver
+   pausing and resuming around it. Currently used only in base LF, not in batched SA.
+
+2. **Post-RL orchestrators out of OLF's relative order.** IncrementalTvc runs before SecondaryVc
+   and ContinuousPhase, but on CPU TVC (8) is after Phase (7). All three run after RL on both
+   paths, so this is just a sequencing bug — reorder them:
+   ```
+   ContinuousPhase (7) → IncrementalTvc / SimpleTvc / TransformerControl (8) →
+   IncrementalFlowControl/TRPC (9) → IncrementalShuntVc / SimpleShuntVc (10)
+   ```
+
+3. **No nested stabilization.** OLF's engine has a double loop: inner (each loop to stability),
+   outer (repeat sequence on change). GPU orchestrators run once. This means a TVC tap change
+   that destabilizes DS is caught only at the next orchestrator's re-solve (where DS runs
+   in-kernel), not by restarting the sequence from DS. The JAVA hybrid mode
+   (`GpuHybridOuterLoopBridge`) implements the correct nested model.
+
+**Data flow findings** (who needs what — determines porting approach):
+
+| Orchestrator | Sensitivity solve? | RL state R/W? | Discrete tables? |
+|---|---|---|---|
+| SecondaryVc | YES | YES | No |
+| VoltageMonitoring | No | YES | No |
+| IncrementalTvc | YES | No | Tap positions + pi params |
+| ContinuousPhase | No | No | Tap positions + pi params |
+| IncrementalFlowControl | YES | No | Tap positions + pi params |
+| IncrementalShuntVc | YES | No | Section B values |
+| SimpleShuntVc | No | No | Section B values |
+| TransformerControl | No | No | Tap positions + pi params |
+| SimpleTvc | No | No | Tap positions + pi params |
+
+**In-kernel feasibility per loop** (ascending difficulty):
+
+- **VoltageMonitoring**: Already in-kernel (LOOP_MONITORING). Done.
+- **ContinuousPhase / TransformerControl / SimpleTvc**: No sensitivity. Need discrete
+  tap tables on device (per-branch: list of (r1, x, g, b, a1, ksi, y) per tap position).
+  Decision logic (deadband, closest-tap search, ratchet) is simple enough for CUDA.
+  Medium difficulty — blocked on uploading the discrete tables.
+- **IncrementalTvc / IncrementalShuntVc / IncrementalFlowControl**: Need
+  `solveBatchSensitivities` which requires a separate solve step — a transposed solve
+  against the factored J. Cannot be folded into the Newton iteration. Must remain as
+  host orchestrators or use task #40's batched transposed solve to run in-driver.
+- **SecondaryVc**: Needs sensitivity + host-side dense zone system (small matrix LU).
+  Must remain host-orchestrated. The `LOOP_HOST` mechanism is the path: pause the driver,
+  run SVC on host, resume. Not yet wired for batched SA.
+- **SimpleShuntVc**: Rounds continuous B to section — simple, but needs section B tables
+  on device. Low-medium difficulty.
+
+**Actionable next steps (ordered):**
+
+A. **Reorder host orchestrators** in `GpuBatchChunkSolver` to match OLF's relative post-RL
+   ordering. Low risk, immediate fidelity improvement. Validate with the production SA bench.
+
+B. **Wire `LOOP_HOST` for SecondaryVc in the batched SA.** The mechanism exists in the native
+   code; the Java side needs to detect the pause, run the orchestrator, and resume. This puts
+   SVC in its correct pre-RL position (between HVDC and Monitoring in the driver sequence).
+
+C. **Upload discrete tap/section tables to device.** Prerequisite for any in-kernel phase or
+   transformer control. Once available: ContinuousPhase, SimpleTvc, TransformerControl,
+   SimpleShuntVc can become driver phases.
+
+D. **Nested outer-loop sweep.** The extended driver's own nesting (`do { for each loop }
+   while(changed)`) provides OLF's repeat-until-stable semantics — no separate wrapper needed.
+
+E. **Base LF on GPU.** Currently the base LF uses `GpuNewtonRaphson.run()` with only DS+RL
+   in-kernel. All other outer loops run as OLF Java loops on CPU. Solution: enable the
+   `LOOP_HOST_*` slots, enter a `solveBatchContext → readBatchDriverPaused → run OLF loop
+   → setBatchDriverResume` cycle. `GpuDriverOuterLoopEngine` suppresses ALL loops from the
+   Java engine.
+
+### Sensitivity-dependent loops — kernel port assessment (2026-09-12)
+
+`solveBatchSensitivities` is a FORWARD solve (`J dx = e_i`), NOT transposed. This means
+IncrementalTvc and IncrementalShuntVc are NOT blocked on task #40.
+
+| Loop | Solve | Observable | Blocker | Verdict |
+|------|-------|-----------|---------|---------|
+| IncrementalTvc | Forward ✓ | variable column | Upload tap tables | **LANDED 2026-09-14** (`LOOP_TVC_KERNEL`, single controller per controlled bus; shared buses keep the host round-robin) |
+| IncrementalShuntVc | Forward ✓ | variable column | Upload section tables | **PORTABLE** |
+| IncrementalFlowControl | Forward ✓ | OLF `calculateSensi` (CPU) | Java term eval | **Blocked** |
+| SecondaryVc | Needs transposed ❌ | OLF Q-terms (CPU) | Task #40 + Java eval | **Blocked** |
+
+To port IncrementalTvc to kernel: upload per-branch tap model tables (y,g1,g2,b1,b2,ksi,r1,a1
+per tap position) + implement deadband/closest-tap/ratchet as a CUDA kernel + the forward
+sensitivity solve is already available via the existing factorization.
+
+To port IncrementalShuntVc: upload per-sub-controller section B/G tables + one-section-at-a-time
+kernel with magnitude-descending ordering.
+
+IncrementalFlowControl's observable (`calculateSensi`) is `Σ (∂Flow/∂x_j) · (dx_j/dControl)` —
+a dot product of the term's Jacobian row entries with the sensitivity solution. BOTH pieces are
+already on the device: `∂Flow/∂x_j` = the J entries the fill kernels scatter, `dx_j/dControl` =
+the sensitivity solution from `solveBatchSensitivities`. So the observable CAN be computed
+on device as a gather-and-dot from J at the flow term's variable columns. Needs: (a) a map from
+each flow term to its J column positions (the scatter table already has this), (b) a kernel that
+reads J[term_cols] · dx[term_cols] → flow sensitivity. Medium effort, NOT blocked.
+
+### SecondaryVoltageControl — full in-kernel scoping
+
+A full SVC kernel port is **blocked on task #40** (batched transposed solve). The five
+stages: (1) trigger check — easy, needs device-side Q per bus; (2) re-enable — easy,
+reads/writes RL state on device; (3) sensitivity — BLOCKED, needs `J^T λ = e_i` which
+cuDSS 0.8.0 cannot do; (4) zone system — small dense LU, better on host; (5) apply —
+already device-native.
+
+Phased approach: Phase 1 = `LOOP_HOST_SVC` pause/resume (now); Phase 2 = stages 1-2 as
+kernels + device transposed solve (after task #40); Phase 3 = optional batch small systems.
+
+### #42 — Base load flow on the FULL device driver + in-kernel incremental TVC (landed 2026-09-14)
+
+**Outcome.** With `OLF_GPU_DRIVER_OUTER_LOOPS=1` the SA's base load flow is a batch-of-one on the SAME
+driver as the contingency chunks: DistributedSlack, HVDC freeze/limits, MonitoringVoltage,
+ReactiveLimits (and incremental TVC in-kernel when every controlled bus has a single controller) —
+`GpuDriverOuterLoopEngine` keeps NOTHING on the Java engine (`GPU_DRIVER_ENGINE ... keptOnHost=[]`).
+rte6515 / RTE params: base CONVERGED under OLF's own criterion (inf-norm 9.4e-6), 9040/9042 on device.
+
+**What actually blocked it** (the "write-back" was only half of it): the base context received
+`createBatchContext` + row criteria and nothing else, while the chunk solver also installs the RL
+curve channel, the SVC quadratic limits, the remote-member RL kinds (`setBatchRlRemote`) and the
+per-generator DS participants. Without the remote kinds `initRlLimitTypeBatch` read every remote
+member's DISTR_Q share row (base mode 1) as a base PQ pin — limit type seeded, never re-checked —
+and three rte6515 remote controllers came out pinned where OLF's loop never touched them
+(BUS_TARGET_Q residuals of 1.46 pu). `GpuBatchOuterLoopTables.install` is now the ONE installer for
+both paths; `GpuBatchHvdcAcEmulation.installDriverLoops` / `GpuBatchVoltageMonitoring.installDriverLoop`
+likewise. A batch of one drives exactly what a batch of five hundred drives.
+
+**Write-back** (`GpuNewtonRaphson.writeBackDriverMutations`, order matters): HVDC statuses through
+`AcEmulationControl.switchTo*`; monitoring activations (VC on, SVC → VOLTAGE, automaton target);
+DistributedSlack per GENERATOR from the water-fill's own `genCum` (`readBatchDsGenCum`), the slack
+bus's generators splitting the retained share (`readBatchDsRetain`) by factor; ReactiveLimits pins
+via `freezeGenerationTargetQAndDisableGeneratorVoltageControl` at the DEVICE's pinned target (the live
+SVC limit — the packed base-V aggregate was 1.3e-4 pu off on VL-6226_0); taps (`readBatchTvcTaps`).
+The extraction uses the run's own loops and DS params (`DistributedSlackOuterLoop.
+getActivePowerDistribution()` — OLF getter added), never `GpuDsParams.DEFAULT`.
+
+**Measured 2026-09-14 (rte6515, 9042 branch contingencies, `GpuVsCpuRte6515SaTest`):** driver ON
+80.8 s cold (×1.20 vs CPU 8 threads 97 s), driver OFF 82.1 s — the base on the driver costs nothing.
+Both arms' base violations agree to 1e-11 (one value differs in the 10th decimal). The 2 differing
+post-contingency lines are the test's own documented residual ("2 out of 583k", identical with the
+driver off): both sit exactly at the SA's 0.1 % increased-violation proportional threshold
+(post/base = 1.00100 on LINE-2533-1468 under LINE-1550-228 and LINE-2219-439 under LINE-5466-2443).
+
+**Three base-on-driver corners found and fixed the same day** (all invisible from the chunk path,
+which extracts AFTER a converged base): (1) `rlV2Base` is NaN on a never-solved network and
+`0 × NaN` poisoned every RL entry's limit — the quadratic SVC delta is now applied to SVC entries
+only (`svcLim`); (2) a SINGLETON remote group has members but no DISTR_Q row, and
+`setBatchRlRemote` keyed `hasDqQrGroups` on the DISTR_Q rows, so the pilot's control-loss flip
+never armed — keyed on the member list now; (3) a device REJECTION (status −2, the all-pinned /
+forced-PV detector) on the base is a CPU fallback like on the chunks, and `GpuDriverOuterLoopEngine`
+now wraps every device-owned loop in `DeviceDrivenLoop`: STABLE while the solver ran on the device,
+OLF's real loop (initialized late) the moment a solve fell back to the CPU — dropping the loops left
+the fallback base without DS/RL (1.3e-4 kV on the zero-impedance member network).
+
+**Still OPEN under the flag (why it stays opt-in):** `GpuBatchedAcSecurityAnalysisTest` with
+`OLF_GPU_DRIVER_OUTER_LOOPS=1` = 61/136 failing (default path: all green). By shape: 16 "batch must
+ENGAGE" (the base's write-back leaves the network in a state the plan or the JAVA guards reject —
+continuous PhaseControl after the host-paused loop, shunt/TVC/SVC host loops), 12 BUS_2 voltage
+mismatches (transformer/shunt voltage-control networks — the host-paused TVC/shunt slots on the
+base), 3 strategy-pair precompute counts, 3 HVDC (freeze/saturation, DS carry), REMAINING_MARGIN DS.
+Every remote gen-VC test (24/26) passes; the rte6515 production case passes. Next: take the failing
+shapes one by one with `OLF_GPU_BATCH_TRACE=1` (HOST_LOOP lines show the pause/resume sequence),
+starting with the host-paused loops (order 7–10) on the base.
+
 ## Method notes worth keeping
 
 - **A GPU test that only compares against CPU cannot detect that the GPU never ran.**

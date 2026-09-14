@@ -309,6 +309,15 @@ public final class GpuAcNewtonSolver {
      *  slack-only — the pair phase seeds its scenarios with the parent contingency's value. */
     public static native double[] readBatchSlackAbsorbed(long handle);
 
+    /** The driver's DistributedSlack result per (scenario, participating generator): the cumulative
+     *  target delta (pu) the water-fill gave each generator — null when the context has no per-generator
+     *  list. Layout {@code s * ngen + g}, g in the extraction's generator order. */
+    public static native double[] readBatchDsGenCum(long handle);
+
+    /** Per scenario, the slack's RETAINED share of the distributed mismatch (pu) — what OLF's own loop
+     *  gives the slack bus's participating generators, which have no device row of their own. */
+    public static native double[] readBatchDsRetain(long handle);
+
     /**
      * Upload the run's limit thresholds and the branch model they are compared against, once per
      * run: a contingency cannot change a threshold, so this outlives every chunk. Returns 0 when the
@@ -385,10 +394,43 @@ public final class GpuAcNewtonSolver {
                                                       int[] deltaPtr, int[] deltaRow,
                                                       int[] deltaMode, double[] deltaTarget);
 
-    /** Enable the HOST-owned outer-loop slot (OLF order 5); 0 leaves the driver exactly as before. */
-    public static native void setBatchHostLoop(long handle, int enabled);
+    /** Enable HOST-owned outer-loop slots via a bitmask.
+     *  Bit 0 = SecondaryVoltageControl (OLF order 4, pre-RL),
+     *  Bit 1 = PhaseControl (OLF order 7, post-RL),
+     *  Bit 2 = TransformerVoltageControl (OLF order 8),
+     *  Bit 3 = TransformerReactivePowerControl (OLF order 9),
+     *  Bit 4 = ShuntVoltageControl (OLF order 10).
+     *  0 disables all; the driver behaves exactly as before. */
+    public static native void setBatchHostLoop(long handle, int mask);
 
-    /** Did the last solve stop at the host-owned slot rather than finish? */
+    /** Host loop kind constants matching the native {@code DeviceLoopKind} enum. */
+    public static final int HOST_LOOP_SVC = 5;
+    public static final int HOST_LOOP_PHASE = 6;
+    public static final int HOST_LOOP_TVC = 7;
+    public static final int HOST_LOOP_TRPC = 8;
+    public static final int HOST_LOOP_SHUNT = 9;
+
+    /** Upload incremental TVC controller data for the in-kernel outer loop.
+     *  rhoRow/vRow/elemIndex: per-controller int arrays; targetV/halfDb: per-controller doubles;
+     *  tapPtr: CSR pointers [nCtrl+1] into tapData; tapData: flat [totalTaps*8] (y,g1,g2,b1,b2,ksi,r1,a1);
+     *  baseTap: per-controller initial tap index; groupPtr/groupCtrl: CSR grouping of controllers
+     *  sharing a controlled bus (for the one-tap-at-a-time round-robin). */
+    /** Returns 1 when the in-kernel TVC loop owns these controllers, 0 when it refused them (a
+     *  controlled bus shared by several transformers stays on the host orchestrator). */
+    public static native int setBatchTvcControllers(long handle,
+            int[] rhoRow, int[] vRow, double[] targetV, double[] halfDb, int[] elemIndex,
+            int[] tapPtr, double[] tapData, int[] baseTap, int[] groupPtr, int[] groupCtrl,
+            int maxTapShift);
+
+    /** Host loop enable mask bits — use with {@link #setBatchHostLoop}. */
+    public static final int HOST_MASK_SVC = 1 << 0;
+    public static final int HOST_MASK_PHASE = 1 << 1;
+    public static final int HOST_MASK_TVC = 1 << 2;
+    public static final int HOST_MASK_TRPC = 1 << 3;
+    public static final int HOST_MASK_SHUNT = 1 << 4;
+
+    /** Did the last solve stop at a host-owned slot? Returns 0 if not paused, or the
+     *  {@code HOST_LOOP_*} constant identifying WHICH host loop was reached. */
     public static native int readBatchDriverPaused(long handle);
 
     /** Resume the paused driver; {@code hostChanged[s] != 0} is the host loop's UNSTABLE verdict. */
@@ -402,6 +444,14 @@ public final class GpuAcNewtonSolver {
 
     /** The HVDC statuses after a solve, {@code nScenarios * nHvdc}, or null when none are installed. */
     public static native int[] readBatchHvdcStatus(long handle);
+
+    /** Per (scenario, monitoring controller): the target the driver's MonitoringVoltage phase activated
+     *  (pu), NaN while standing by — null without the table. Layout {@code s * nmon + c}. */
+    public static native double[] readBatchMonitoringTargets(long handle);
+
+    /** Per (scenario, incremental TVC controller): the tap index the driver's TransformerVoltageControl
+     *  phase left — null without the table. Layout {@code s * nTvc + c}. */
+    public static native int[] readBatchTvcTaps(long handle);
 
     /**
      * Install the PER-GENERATOR distributed-slack participants: the factors and limits OLF's

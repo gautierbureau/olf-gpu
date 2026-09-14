@@ -51,7 +51,7 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-final class GpuBatchIncrementalTvc {
+public final class GpuBatchIncrementalTvc {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchIncrementalTvc.class);
 
@@ -65,7 +65,7 @@ final class GpuBatchIncrementalTvc {
     /** One incremental controller: the rho variable row (pinned identity — unit-RHS row, target index
      *  and state index all coincide in the device's paired layout), the controlled bus V row, targets,
      *  and the discrete tap table ([y g1 g2 b1 b2 ksi r1 a1] per tap). */
-    record Controller(int rhoRow, int vRow, int ctrlBusNum, double targetV, double halfDeadband,
+    public record Controller(int rhoRow, int vRow, int ctrlBusNum, int branchNum, double targetV, double halfDeadband,
                       double[][] tapRows, int baseTapIdx, int elemIndex) {
         double r1(int tap) {
             return tapRows[tap][6];
@@ -92,7 +92,7 @@ final class GpuBatchIncrementalTvc {
 
     /** Collect the network's incremental transformer voltage controllers (INCREMENTAL mode keeps the
      *  branch VC DISABLED — rho stays a variable pinned by its BRANCH_TARGET_RHO1 identity row). */
-    static List<Controller> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    public static List<Controller> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                              GpuBatchElementMapper elementMapper) {
         List<Controller> out = new ArrayList<>();
         Map<Integer, Integer> busVRows = new LinkedHashMap<>();
@@ -134,11 +134,83 @@ final class GpuBatchIncrementalTvc {
                         baseTap = t;
                     }
                 }
-                out.add(new Controller(rhoRow, vRow, bus.getNum(), vc.getTargetValue(), halfDeadband,
+                out.add(new Controller(rhoRow, vRow, bus.getNum(), branch.getNum(), vc.getTargetValue(), halfDeadband,
                         tapRows, baseTap, elemIndex));
             }
         }
         return out;
+    }
+
+    /** Upload the controller data to the native batch context for an in-kernel TVC loop.
+     *  Flattens the Controller list into the CSR-packed arrays that
+     *  {@link GpuAcNewtonSolver#setBatchTvcControllers} expects. */
+    /** Install the controllers for the in-kernel loop. Returns true when the kernel loop OWNS
+     *  them (every controlled bus has a single controller), false when they stay on the host
+     *  orchestrator. */
+    public static boolean uploadToDevice(long handle, List<Controller> ctrls, int maxTapShift) {
+        if (ctrls == null || ctrls.isEmpty()) {
+            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchTvcControllers(
+                    handle, null, null, null, null, null, null, null, null, null, null, maxTapShift);   // clears a cached context
+            return false;
+        }
+        int nc = ctrls.size();
+        int[] rhoRow = new int[nc];
+        int[] vRow = new int[nc];
+        double[] targetV = new double[nc];
+        double[] halfDb = new double[nc];
+        int[] elemIndex = new int[nc];
+        int[] baseTap = new int[nc];
+        // CSR tap table: tapPtr[c] = offset into flat tapData for controller c
+        int[] tapPtr = new int[nc + 1];
+        int totalTaps = 0;
+        for (int c = 0; c < nc; c++) {
+            Controller ctl = ctrls.get(c);
+            rhoRow[c] = ctl.rhoRow();
+            vRow[c] = ctl.vRow();
+            targetV[c] = ctl.targetV();
+            halfDb[c] = ctl.halfDeadband();
+            elemIndex[c] = ctl.elemIndex();
+            baseTap[c] = ctl.baseTapIdx();
+            tapPtr[c] = totalTaps;
+            totalTaps += ctl.tapRows().length;
+        }
+        tapPtr[nc] = totalTaps;
+        // Flat tap data: [totalTaps * 8] doubles, row-major [y, g1, g2, b1, b2, ksi, r1, a1]
+        double[] tapData = new double[totalTaps * 8];
+        int off = 0;
+        for (Controller ctl : ctrls) {
+            for (double[] row : ctl.tapRows()) {
+                System.arraycopy(row, 0, tapData, off, 8);
+                off += 8;
+            }
+        }
+        // Group structure: controllers sharing a controlled bus (keyed by ctrlBusNum)
+        java.util.Map<Integer, java.util.List<Integer>> byBus = new java.util.LinkedHashMap<>();
+        for (int c = 0; c < nc; c++) {
+            byBus.computeIfAbsent(ctrls.get(c).ctrlBusNum(), k -> new java.util.ArrayList<>()).add(c);
+        }
+        int nGroups = byBus.size();
+        int[] groupPtr = new int[nGroups + 1];
+        int[] groupCtrl = new int[nc];
+        int gi = 0;
+        int ci = 0;
+        for (var group : byBus.values()) {
+            groupPtr[gi] = ci;
+            for (int idx : group) {
+                groupCtrl[ci++] = idx;
+            }
+            gi++;
+        }
+        groupPtr[nGroups] = ci;
+        boolean owned = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchTvcControllers(
+                handle, rhoRow, vRow, targetV, halfDb, elemIndex, tapPtr, tapData, baseTap,
+                groupPtr, groupCtrl, maxTapShift) != 0;
+        LOGGER.info("Uploaded {} incremental TVC controllers to device ({} taps, {} groups): {}",
+                nc, totalTaps, nGroups, owned ? "in-kernel loop" : "host orchestrator (shared controlled bus)");
+        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            System.err.printf("TVC_UPLOAD nCtrl=%d totalTaps=%d nGroups=%d kernel=%b%n", nc, totalTaps, nGroups, owned);
+        }
+        return owned;
     }
 
     /** OLF PiModelArray.updateTapPositionToReachNewR1: closest tap to r1(cur)+deltaR1 within
@@ -395,5 +467,25 @@ final class GpuBatchIncrementalTvc {
             }
         }
         return chunkResults;
+    }
+
+    /** Give the driver's final taps (scenario 0) back to the network — the tap position OLF's own loop
+     *  would have left through updateTapPositionToReachNewR1; the pi model's listeners refresh r1. */
+    public static void writeBackTaps(LfNetwork network, List<Controller> ctrls, int[] taps) {
+        if (ctrls == null || ctrls.isEmpty() || taps == null) {
+            return;
+        }
+        for (int c = 0; c < ctrls.size() && c < taps.length; c++) {
+            Controller ctl = ctrls.get(c);
+            if (taps[c] == ctl.baseTapIdx()) {
+                continue;
+            }
+            LfBranch branch = network.getBranch(ctl.branchNum());
+            if (branch == null) {
+                continue;
+            }
+            var pm = branch.getPiModel();
+            pm.setTapPosition(pm.getTapPositionRange().getMinimum() + taps[c]);
+        }
     }
 }

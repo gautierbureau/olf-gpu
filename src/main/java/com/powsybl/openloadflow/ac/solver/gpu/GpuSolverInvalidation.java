@@ -177,8 +177,13 @@ final class GpuSolverInvalidation
     }
 
     @Override
-    public void onTapPositionChange(LfBranch branch, int oldPosition, int newPosition) {
+    public void onTapPositionChange(LfBranch branch, int oldPosition, int newPosition, boolean modifiedTapImpedance) {
         structureChanged();                                  // r1/a1 in cbIn; run() downgrades to VALUES
+    }
+
+    @Override
+    public void onEquationTermConstantsChanged() {
+        structureChanged();                                  // same as a tap change: pi-model constants in cbIn
     }
 
     @Override

@@ -172,8 +172,13 @@ public final class GpuAcDataCache {
         }
 
         @Override
-        public void onTapPositionChange(LfBranch branch, int oldPosition, int newPosition) {
+        public void onTapPositionChange(LfBranch branch, int oldPosition, int newPosition, boolean modifiedTapImpedance) {
             clear();
+        }
+
+        @Override
+        public void onEquationTermConstantsChanged() {
+            clear();                                         // R/X/rho constants moved: the extraction is stale
         }
 
         @Override

@@ -513,7 +513,7 @@ public final class GpuHybridBatchOuterLoopEngine {
         }
 
         @Override
-        public void onTapPositionChange(LfBranch br, int o, int nw) {
+        public void onTapPositionChange(LfBranch br, int o, int nw, boolean modifiedTapImpedance) {
             touched.add(br);
         }
 

@@ -68,6 +68,14 @@ final class GpuBatchPrecomputer {
                                        List<Action> actions, boolean distributedSlack, boolean reactiveLimits,
                                        double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                                        BatchConfig config, ReportNode reportNode) {
+        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {   // the network the batch starts from
+            for (var b : net.getBuses()) {
+                for (var g : b.getGenerators()) {
+                    System.err.println("BASE_GEN " + g.getId() + " targetP=" + g.getTargetP() + " targetQ=" + g.getTargetQ()
+                            + " vc=" + b.isGeneratorVoltageControlEnabled());
+                }
+            }
+        }
         synchronized (GPU_DEVICE_LOCK) {
             return precomputeLocked(network, net, context, contingencies, strategies, actions, distributedSlack,
                     reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, config, reportNode);

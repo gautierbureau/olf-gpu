@@ -508,6 +508,10 @@ public final class GpuAcOuterLoopPacks {
                 dsSlackPhiRow = phiCol[bn];
                 dsSlackTargetP = bus.getTargetP();
                 dsSlackFactor = dsParams.busFactor(bus);
+                if (System.getenv("OLF_GPU_DS_GEN_TRACE") != null) {
+                    System.err.println("GPU_DS_SLACK bus=" + bus.getId() + " busFactor=" + dsSlackFactor
+                            + " gens=" + bus.getGenerators().stream().map(g -> g.getId() + ":" + dsParams.factor(g)).toList());
+                }
                 if (dsParams.isRemainingMargin()) {
                     double[] m = dsParams.busMargins(bus);
                     dsSlackMarginUp = m[0];
@@ -516,6 +520,11 @@ public final class GpuAcOuterLoopPacks {
                 continue;
             }
             if (GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) < 0) {
+                if (System.getenv("OLF_GPU_DS_GEN_TRACE") != null) {
+                    System.err.println("GPU_DS_SKIP bus=" + bus.getId() + " busFactor=" + dsParams.busFactor(bus)
+                            + " gens=" + bus.getGenerators().stream().map(g -> g.getId() + ":" + dsParams.factor(g)).toList()
+                            + " (no active BUS_TARGET_P row)");
+                }
                 continue;                                               // no active P balance to retarget
             }
             double factor = dsParams.busFactor(bus);

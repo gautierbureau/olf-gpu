@@ -605,7 +605,30 @@ now wraps every device-owned loop in `DeviceDrivenLoop`: STABLE while the solver
 OLF's real loop (initialized late) the moment a solve fell back to the CPU — dropping the loops left
 the fallback base without DS/RL (1.3e-4 kV on the zero-impedance member network).
 
-**Still OPEN under the flag (why it stays opt-in):** `GpuBatchedAcSecurityAnalysisTest` with
+**2026-09-15 — host-paused loops on the base, second pass.** A host loop that changes the equation
+LAYOUT, the row modes or the element values (a tap/section move, a control it enables or disables:
+every TVC/shunt/phase loop does) voids the paused sequence — the resume channel carries targets
+only. The driver now RESTARTS: the driver's own decisions are written back to the network first,
+the pause is cancelled, the extraction re-runs, the RL state is carried by bus, OLF's loop contexts
+persist across the restart (`hostLoopPairs`), and the restarted sweep resumes AT the loop that went
+UNSTABLE (`setBatchDriverStartLoop`) before restarting from the first loop — OLF's `runOuterLoop`
+order. Two other fixes on the way: the driver owns loops only when `GpuDriverOuterLoopEngine` created
+the solver (`AcloadFlowEngine.createSolver` hook; a plain `LoadFlow.run` keeps OLF's engine and the
+legacy pure-Newton mode, or DS/RL ran twice), and `DeviceDrivenLoop` defers to OLF's loop whenever
+the engine's current solver is not the GPU driver (CPU-routed contingencies had lost DS/RL). The
+per-generator DS accumulator is zeroed per solve (a restarted sweep that never reaches DS handed
+garbage to the write-back → NaN targetP).
+
+Result: 61 → 44 failing under the flag. By size: 13 at ≤1e-9 kV and 7 at ≤1e-6 kV — the base's
+converged state differs from OLF's at solver-tolerance level (a different linear solver), and
+AFTER_GENERATOR transformer control FREEZES state-dependent quantities (generator Q under the
+controlled level, the tap rounded from the solved ratio), so the frozen targets differ by ~1e-5 pu;
+inherent to a base on another solver, not a sequence bug (sequences now match call for call).
+Real remaining: 3 HVDC ENGAGE (freeze/saturation/DS carry), 10 medium (shunt VC 9.6e-4, shared
+TVC 4e-4, ...), 11 large (SecondaryVoltageControl 7.3e-2 ×4, slope-SVC pinned 0.33, l121 severe
+0.71, TRPC 1.7e-3, shared incremental TVC 1.2e-3).
+
+**Earlier inventory (2026-09-14):** `GpuBatchedAcSecurityAnalysisTest` with
 `OLF_GPU_DRIVER_OUTER_LOOPS=1` = 61/136 failing (default path: all green). By shape: 16 "batch must
 ENGAGE" (the base's write-back leaves the network in a state the plan or the JAVA guards reject —
 continuous PhaseControl after the host-paused loop, shunt/TVC/SVC host loops), 12 BUS_2 voltage

@@ -34,11 +34,30 @@ import java.util.List;
  */
 public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
 
+    /** The solver of the current engine run (set by {@link #createSolver}): the loops defer to the
+     *  device only while it is the GPU driver AND its last solve ran on the device. */
+    private com.powsybl.openloadflow.ac.solver.AcSolver currentSolver;
+
     public GpuDriverOuterLoopEngine(AcLoadFlowContext context) {
         super(context);
         // Make the engine's AcLoadFlowContext available to the solver's host-loop pause cycle,
         // so outer-loop contexts share the engine's equation system and Jacobian (not duplicates).
         com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.GPU_ENGINE_CONTEXT.set(context);
+    }
+
+    @Override
+    protected com.powsybl.openloadflow.ac.solver.AcSolver createSolver(
+            com.powsybl.openloadflow.ac.solver.AcSolverFactory solverFactory, AcLoadFlowContext context) {
+        currentSolver = super.createSolver(solverFactory, context);
+        if (currentSolver instanceof com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson gpu) {
+            gpu.setDriverEngineActive(true);                 // this engine owns the loops it proxies
+        }
+        return currentSolver;
+    }
+
+    /** The device drove the last solve of this run: the proxied loops' decisions are already made. */
+    boolean deviceDroveLastSolve() {
+        return currentSolver instanceof com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson gpu && gpu.lastRunOnDevice();
     }
 
     /** True for loops the device driver runs itself — in-kernel (DS, RL) or host-paused (SVC,
@@ -69,10 +88,12 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
      * DistributedSlack/ReactiveLimits (1.3e-4 kV on the zero-impedance member network).
      */
     static final class DeviceDrivenLoop implements AcOuterLoop {
+        private final GpuDriverOuterLoopEngine engine;
         private final AcOuterLoop real;
         private boolean initialized;
 
-        DeviceDrivenLoop(AcOuterLoop real) {
+        DeviceDrivenLoop(GpuDriverOuterLoopEngine engine, AcOuterLoop real) {
+            this.engine = engine;
             this.real = real;
         }
 
@@ -99,7 +120,7 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
         @Override
         public com.powsybl.openloadflow.lf.outerloop.OuterLoopResult check(AcOuterLoopContext context,
                                                                           com.powsybl.commons.report.ReportNode reportNode) {
-            if (com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.lastRunOnDevice()) {
+            if (engine.deviceDroveLastSolve()) {
                 return new com.powsybl.openloadflow.lf.outerloop.OuterLoopResult(this,
                         com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus.STABLE);
             }
@@ -128,7 +149,7 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
         var all = super.engineOuterLoopsAndContexts(context);
         List<Pair<AcOuterLoop, AcOuterLoopContext>> out = new java.util.ArrayList<>();
         for (var p : all) {
-            out.add(drivenOnDevice(p.getLeft()) ? Pair.of(new DeviceDrivenLoop(p.getLeft()), p.getRight()) : p);
+            out.add(drivenOnDevice(p.getLeft()) ? Pair.of(new DeviceDrivenLoop(this, p.getLeft()), p.getRight()) : p);
         }
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
             System.err.println("GPU_DRIVER_ENGINE loops=" + all.stream().map(p -> p.getLeft().getName()).toList()

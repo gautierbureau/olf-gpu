@@ -3731,6 +3731,11 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                 ? fsActive
                 : (fsActive + rho > 0 ? fsActive / (fsActive + rho) : 0.0);
     }
+    if (dbgTrace && s == 0) {
+        printf("[DS-GATE] slackMismatch=%.9f retain=%.9f rem=%.9f fsGlobal=%.9f tol=%.9f slackTgt=%.9f fire=%d\n",
+               qBuf[(size_t) s * n + slackPhiRow] - slackTgt, dsRetain[s], rem, fsGlobal, slackDistTol, slackTgt,
+               (fsGlobal > 0.0 && fabs(rem) > fsGlobal * slackDistTol) ? 1 : 0);
+    }
     if (fsGlobal <= 0.0 || fabs(rem) <= fsGlobal * slackDistTol) {
         return;
     }
@@ -4291,6 +4296,9 @@ struct BatchSolverContext {
     int driverResume = 0;                                    // this call continues a paused driver
     int driverPaused = 0;                                    // the last call stopped at a LOOP_HOST_*
     int pausedLoopKind = 0;                                  // WHICH host loop the driver stopped at
+    int startLoopKind = -1;                                  // a RESTARTED sequence resumes its sweep AT this
+                                                             // loop (OLF re-checks the loop that went UNSTABLE
+                                                             // after the re-solve, before restarting the sweep)
     int pausedLoopIdx = 0;
     int pausedSeqChanged = 0;
     std::vector<int> pausedProdIters;
@@ -5109,6 +5117,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
         if (ctx->nds > 0) {                                  // slack-retained share: 0 until frozen at the first pass
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsRetain.p, 0, nS * sizeof(double), ctx->stream));
+            if (ctx->ngen > 0 && ctx->dGenCum.p) {           // per-solve too: the write-back reads it even when
+                CUDA_CHECK(cudaMemsetAsync(ctx->dGenCum.p, 0,   // the DS phase never fired (NaN targetP otherwise)
+                        static_cast<size_t>(ctx->ngen) * nS * sizeof(double), ctx->stream));
+            }
         }
         if (ctx->nmon > 0) {                                 // per-SOLVE state, like the RL limit types:
             std::vector<double> nan(static_cast<size_t>(ctx->nmon) * nS, std::nan(""));   // nothing has
@@ -5208,6 +5220,18 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     int loopIdx = 0;
     bool seqChanged = false;                                 // did any outer loop re-solve during the current RL->DS sequence
+    if (!resume && ctx->startLoopKind >= 0) {
+        // Restart after a host loop mutated the system: the first pass solves, then the sweep picks
+        // up at THAT loop's slot (OLF's runOuterLoop re-checks it until STABLE, and only then does
+        // the sweep restart from the first loop — seqChanged makes that restart happen).
+        for (int i = 0; i < nLoops; i++) {
+            if (loopOrder[i] == ctx->startLoopKind) {
+                loopIdx = i;
+                seqChanged = true;
+            }
+        }
+        ctx->startLoopKind = -1;
+    }
     std::vector<int> prodIters(nS, 0);                       // PER-SCENARIO productive outer iterations: OLF's
                                                              // maxOuterLoopIterations is a per-RUN budget — a global
                                                              // counter capped busy chunks collectively (violation-diff
@@ -7449,6 +7473,33 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
         env->GetByteArrayRegion(jHostChanged, 0, len, reinterpret_cast<jbyte*>(ctx->hostChanged.data()));
     }
     ctx->driverResume = 1;
+}
+
+/** Drop a paused driver sequence without resuming it: the host loop changed the equation layout or
+ *  the row modes, so the next solveBatchContext must START OVER on the re-extracted system. */
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_cancelBatchDriverPause(
+        JNIEnv*, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->driverPaused = 0;
+    ctx->driverResume = 0;
+    ctx->pausedLoopKind = 0;
+}
+
+/** The next FRESH solve resumes its sweep at this loop kind after its first solve (a restarted
+ *  sequence: OLF re-checks the loop that went UNSTABLE before restarting the sweep). The context may
+ *  have been rebuilt since the pause, so the Java side carries the kind across. */
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDriverStartLoop(
+        JNIEnv*, jclass, jlong handle, jint kind) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->startLoopKind = kind;
 }
 
 /** Write absolute target values at (scenario, row) positions — how a host-owned loop applies its

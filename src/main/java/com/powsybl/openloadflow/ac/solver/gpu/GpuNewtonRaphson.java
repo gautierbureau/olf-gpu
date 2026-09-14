@@ -96,13 +96,22 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      *  equation system and Jacobian. Thread-local because the engine and solver run on the same thread. */
     public static final ThreadLocal<com.powsybl.openloadflow.ac.AcLoadFlowContext> GPU_ENGINE_CONTEXT = new ThreadLocal<>();
 
-    /** Did this thread's LAST solve run on the device driver (true) or fall back to the CPU
+    /** Did this solver's LAST solve run on the device driver (true) or fall back to the CPU
      *  Newton-Raphson (false)? {@code GpuDriverOuterLoopEngine} reads it to decide whether OLF's own
      *  loop must run a check the driver would otherwise have owned. */
-    private static final ThreadLocal<Boolean> LAST_RUN_ON_DEVICE = ThreadLocal.withInitial(() -> false);
+    private boolean lastRunOnDevice;
 
-    public static boolean lastRunOnDevice() {
-        return LAST_RUN_ON_DEVICE.get();
+    public boolean lastRunOnDevice() {
+        return lastRunOnDevice;
+    }
+
+    /** Set by {@code GpuDriverOuterLoopEngine} on the solver it created: only then does the driver own
+     *  the outer loops. A plain LoadFlow.run uses OLF's standard engine, which runs every Java loop
+     *  around the solver — the driver must then stay in pure-Newton mode or DS/RL run twice. */
+    private boolean driverEngineActive;
+
+    public void setDriverEngineActive(boolean active) {
+        this.driverEngineActive = active;
     }
 
     // Diagnostics for the invalidation taxonomy: how the cached native context is reconciled across
@@ -129,7 +138,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      * driver ({@code slackDistTol} 1e300, {@code skipRlPhase} 1) and OLF's Java loops run around it
      * on the CPU.
      */
-    private final boolean driverOuterLoops;
+    private final boolean driverOuterLoopsRequested;
+    /** Effective per run: requested AND the driver engine is the one driving this solver. */
+    private boolean driverOuterLoops;
     private final double driverSlackDistTol;
     private final double driverReactiveLimitTol;
     private final int driverMaxOuterIterations;
@@ -371,6 +382,19 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private List<GpuBatchIncrementalTvc.Controller> tvcCtls;
     private boolean tvcOwned;
 
+    /** The host-paused loops' (loop, context) pairs of the CURRENT engine run: OLF keeps one context
+     *  per loop for the whole run (iteration counters, per-loop data), so they must survive a restart
+     *  of the device sequence — created on the first pause, cleaned up when the run completes. */
+    private java.util.Map<Integer, org.apache.commons.lang3.tuple.Pair<
+            com.powsybl.openloadflow.ac.outerloop.AcOuterLoop, com.powsybl.openloadflow.ac.AcOuterLoopContext>> hostLoopPairs;
+
+    /** Per controller bus, the driver's RL state carried across a restart (OLF's switch counters
+     *  persist for the whole outer-loop run), keyed by bus num since the entry order may change. */
+    private java.util.Map<Integer, Integer> rlCarry;
+
+    /** On a restart, the host loop the sequence resumes at (the one that went UNSTABLE). */
+    private int restartLoopKind;
+
     private com.powsybl.openloadflow.ac.outerloop.AcOuterLoop driverLoop(String name) {
         if (acLoadFlowParameters == null) {
             return null;
@@ -454,7 +478,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                             com.powsybl.openloadflow.ac.AcLoadFlowParameters acLoadFlowParameters) {
         super(network, equationSystem, j, targetVector, equationVector, detailedReport);
         this.parameters = Objects.requireNonNull(parameters);
-        this.driverOuterLoops = driverOuterLoops;
+        this.driverOuterLoopsRequested = driverOuterLoops;
+        this.driverOuterLoops = false;
         this.driverSlackDistTol = driverSlackDistTol;
         this.driverReactiveLimitTol = driverReactiveLimitTol;
         this.driverMaxOuterIterations = driverMaxOuterIterations;
@@ -493,6 +518,29 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
     @Override
     public AcSolverResult run(VoltageInitializer voltageInitializer, ReportNode reportNode) {
+        driverOuterLoops = driverOuterLoopsRequested && driverEngineActive;
+        hostLoopPairs = null;
+        rlCarry = null;
+        try {
+            return runImpl(voltageInitializer, reportNode, false);
+        } finally {
+            if (hostLoopPairs != null) {                     // OLF's engine cleans its loops up in order
+                for (var entry : hostLoopPairs.values()) {
+                    entry.getLeft().cleanup(entry.getRight());
+                }
+                hostLoopPairs = null;
+            }
+        }
+    }
+
+    /**
+     * One attempt of the device sequence. A host-paused loop that changes the equation layout, the
+     * row modes or the element values (a tap or section move, a control it enabled or disabled)
+     * voids the paused sequence: OLF re-solves on the mutated system and restarts its sweep, so this
+     * returns through {@code restart = true} — no initializer (the state vector already holds the
+     * device's last state), the extraction re-run, the driver's RL state carried by bus.
+     */
+    private AcSolverResult runImpl(VoltageInitializer voltageInitializer, ReportNode reportNode, boolean restart) {
         if (!GpuAcNewtonSolver.isAvailable()) {
             throw new PowsyblException("GPU Newton-Raphson requested but the native library is not available "
                     + "(build with native/build-gpu.sh and provide cuDSS — see GpuAcNewtonSolver)");
@@ -505,7 +553,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         if (resuming) {
             return runResume(reportNode);
         }
-        AcSolverUtil.initStateVector(network, equationSystem, voltageInitializer);
+        if (!restart) {
+            AcSolverUtil.initStateVector(network, equationSystem, voltageInitializer);
+        }
 
         AcSolverStatus status;
         int iterations = 0;
@@ -586,6 +636,13 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             double[] target = activation.applyTargets(targetVector.getArray());
             double[] x0 = equationSystem.getStateVector().get().clone();
             rlStateOut = driverOuterLoops && cachedData.rlVrow().length > 0 ? new int[cachedData.rlVrow().length] : null;
+            int[] rlStateIn = null;
+            if (restart && rlCarry != null && rlStateOut != null) {
+                rlStateIn = new int[rlStateOut.length];
+                for (int i = 0; i < rlStateIn.length; i++) {
+                    rlStateIn[i] = rlCarry.getOrDefault(cachedData.rlBusNum()[i], 0);
+                }
+            }
             // Device-side state-vector scaling: NONE = undamped Newton; LINE_SEARCH backtracks on the
             // device (mirrors LineSearchStateVectorScaling); MAX_VOLTAGE_CHANGE clamps each step so the
             // largest |Δv|/|Δφ| stays within maxDv/maxDphi (mirrors MaxVoltageChangeStateVectorScaling).
@@ -696,6 +753,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // Host-owned outer-loop slots: the driver pauses at their OLF positions and the
                 // pause/resume cycle after solveBatchContext runs OLF's loop there. 0 clears a cached mask.
                 GpuAcNewtonSolver.setBatchHostLoop(handle, hostMask);
+                if (restart && restartLoopKind > 0) {        // re-check the loop that went UNSTABLE first
+                    GpuAcNewtonSolver.setBatchDriverStartLoop(handle, restartLoopKind);
+                }
+                restartLoopKind = 0;
             }
             double[] out = GpuAcNewtonSolver.solveBatchContext(context.handle.get(),
                     x0, target, new int[][] {activation.rowMode()}, activation.rowMode(),
@@ -710,7 +771,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     parameters.getMaxVoltageChangeStateVectorScalingMaxDv(),
                     parameters.getMaxVoltageChangeStateVectorScalingMaxDphi(),
                     varType, null,
-                    null, null, null, rlStateOut, null, null,
+                    null, null, rlStateIn, rlStateOut, null, null,
                     driverOuterLoops ? driverMaxOuterIterations : 0,
                     driverOuterLoops ? driverMaxPqPvSwitch : 0, 0,
                     driverOuterLoops ? 0 : 1,                // skipRlPhase: the driver owns RL now
@@ -730,6 +791,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // OLF outer loop on the host and resume. Repeat until the driver completes without pausing.
             if (driverOuterLoops && !hostOuterLoops.isEmpty()) {
                 out = handleDriverPauses(out, n, target, elementMask, lsMode, convEpsPerEq);
+                if (out == null) {
+                    return runImpl(voltageInitializer, reportNode, true);   // the host loop changed the system
+                }
                 iterations = (int) out[n];
             }
             if (driverOuterLoops) {
@@ -753,6 +817,26 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             // stderr lever.)
             if (System.getenv("OLF_GPU_RESIDUAL_TRACE") != null) {
                 double[] fx = equationVector.getArray();
+                int nanX = 0;
+                int nanF = 0;
+                int firstNanF = -1;
+                for (int i2 = 0; i2 < n; i2++) {
+                    if (Double.isNaN(out[i2])) {
+                        nanX++;
+                    }
+                    if (i2 < fx.length && Double.isNaN(fx[i2])) {
+                        nanF++;
+                        if (firstNanF < 0) {
+                            firstNanF = i2;
+                        }
+                    }
+                }
+                if (nanX > 0 || nanF > 0) {
+                    System.err.println("RESID_NAN deviceStateNaN=" + nanX + " olfResidualNaN=" + nanF + " firstNanRow=" + firstNanF
+                            + (firstNanF >= 0 ? " eq=" + equationSystem.getIndex().getEquationAtColumn(firstNanF).getType()
+                            + " elem=" + equationSystem.getIndex().getEquationAtColumn(firstNanF).getElementNum() : "")
+                            + " deviceIters=" + iterations + " devNorm=" + out[n + 1]);
+                }
                 double n2 = 0;
                 int worstRow = -1;
                 double worst = 0;
@@ -815,7 +899,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 }
             }
             status = result.isStop() ? AcSolverStatus.CONVERGED : AcSolverStatus.MAX_ITERATION_REACHED;
-            LAST_RUN_ON_DEVICE.set(true);
+            lastRunOnDevice = true;
             // DEVICE-BROKEN result safety net: a non-finite or absurd residual is a device-side
             // numerical failure (e.g. the open zi-with-loaded-far-bus-behind-a-remote-member shape,
             // where the sequential solve returns phi ~1e22 while the SAME system solves on the CPU
@@ -854,7 +938,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             }
         } catch (RuntimeException e) {
             CPU_FALLBACK_COUNT.incrementAndGet();
-            LAST_RUN_ON_DEVICE.set(false);
+            lastRunOnDevice = false;
             // the native context may be mid-iteration inconsistent — rebuild next run
             GpuAcNewtonSolver.destroyBatchContext(context.handle.getAndSet(0));
             cachedData = null;
@@ -918,27 +1002,27 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         }
         var loopMap = buildHostLoopMap();
         // Per-loop persistent context data (iteration count, per-loop state). Outer loops store
-        // their own state via context.setData(); we keep one context per loop across rounds.
-        // Build (outer loop, context) pairs for the host-paused loops. Use the engine's own
-        // AcLoadFlowContext if available (set by GpuDriverOuterLoopEngine before the solve), so the
-        // outer loops share the solver's equation system and Jacobian. When unavailable (standalone
-        // LoadFlow.run, no engine override) the loops run without a loadFlowContext — simple loops
-        // (PhaseControl, SimpleTransformerVoltageControl) work, sensitivity-dependent ones will need
-        // the context wired (Step 5).
-        var ctxMap = new java.util.HashMap<Integer, org.apache.commons.lang3.tuple.Pair<
-                com.powsybl.openloadflow.ac.outerloop.AcOuterLoop,
-                com.powsybl.openloadflow.ac.AcOuterLoopContext>>();
-        var engineContext = GPU_ENGINE_CONTEXT.get();
-        if (engineContext != null) {
-            var pairs = com.powsybl.openloadflow.ac.AcloadFlowEngine.createOuterLoopsAndContexts(engineContext, false);
-            for (var pair : pairs) {
-                int kind = loopKindFor(pair.getLeft().getName());
-                if (kind >= GpuAcNewtonSolver.HOST_LOOP_SVC && loopMap.containsKey(kind)) {
-                    ctxMap.put(kind, pair);
-                    pair.getLeft().initialize(pair.getRight());
+        // their own state via context.setData(); we keep one context per loop for the whole run —
+        // across pauses AND across restarts. Use the engine's own AcLoadFlowContext if available
+        // (set by GpuDriverOuterLoopEngine before the solve), so the outer loops share the solver's
+        // equation system and Jacobian. When unavailable (standalone LoadFlow.run, no engine
+        // override) the loops run without a loadFlowContext — simple loops (PhaseControl,
+        // SimpleTransformerVoltageControl) work, sensitivity-dependent ones will need the context.
+        if (hostLoopPairs == null) {
+            hostLoopPairs = new java.util.HashMap<>();
+            var engineContext = GPU_ENGINE_CONTEXT.get();
+            if (engineContext != null) {
+                var pairs = com.powsybl.openloadflow.ac.AcloadFlowEngine.createOuterLoopsAndContexts(engineContext, false);
+                for (var pair : pairs) {
+                    int kind = loopKindFor(pair.getLeft().getName());
+                    if (kind >= GpuAcNewtonSolver.HOST_LOOP_SVC && loopMap.containsKey(kind)) {
+                        hostLoopPairs.put(kind, pair);
+                        pair.getLeft().initialize(pair.getRight());
+                    }
                 }
             }
         }
+        var ctxMap = hostLoopPairs;
         while (pausedKind != 0) {
             var pair = ctxMap.get(pausedKind);
             if (pair == null) {
@@ -957,6 +1041,40 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                             pausedKind, loop.getName(), loopCtx.getIteration(), result.status());
                 }
                 if (result.status() == com.powsybl.openloadflow.lf.outerloop.OuterLoopStatus.UNSTABLE) {
+                    // What did the loop change? A tap/section move changes element VALUES (pi rows,
+                    // shunt b); enabling or disabling a control changes the equation LAYOUT and the
+                    // row modes. None of that can be patched into a paused sequence (the resume
+                    // channel carries targets only) — OLF re-solves the mutated system and restarts
+                    // its sweep, and so does the driver: cancel the pause, carry the RL state, and
+                    // let runImpl re-extract and start over. Target-only changes resume in place.
+                    GpuAcData probe = GpuAcDataCache.extract(network, equationSystem,
+                            driverDsLoop() != null, driverRlLoop() != null, driverDsParams());
+                    var act2 = GpuAcActivationExtractor.extractActivation(network, equationSystem, n);
+                    boolean modesChanged = !Arrays.equals(act2.rowMode(), activation.rowMode());
+                    if (!probe.sameAs(cachedData) || modesChanged) {
+                        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+                            System.err.println("HOST_LOOP_RESTART loop=" + loop.getName() + " sameStructure="
+                                    + probe.sameStructureAs(cachedData) + " modesChanged=" + modesChanged);
+                        }
+                        loopCtx.setIteration(loopCtx.getIteration() + 1);
+                        // The driver's own decisions so far (distributed P, RL pins, HVDC statuses,
+                        // monitoring activations, taps) live on the device; the restart re-extracts
+                        // from the NETWORK, so hand them back first or the restarted solve starts
+                        // from the original targets and undoes the distribution (4.3e-3 kV on the
+                        // AFTER_GENERATOR transformer-VC base).
+                        writeBackDriverMutations(cachedData);
+                        rlCarry = new java.util.HashMap<>();
+                        if (rlStateOut != null && cachedData.rlBusNum() != null) {
+                            for (int i = 0; i < rlStateOut.length && i < cachedData.rlBusNum().length; i++) {
+                                rlCarry.put(cachedData.rlBusNum()[i], rlStateOut[i]);
+                            }
+                        }
+                        GpuAcNewtonSolver.cancelBatchDriverPause(handle);
+                        restartLoopKind = pausedKind;
+                        invalidation.structureDirty = true;
+                        invalidation.activationDirty = true;
+                        return null;
+                    }
                     // The loop mutated the network. Re-extract targets (the target vector evaluates
                     // against the updated network state, so getArray() reflects the loop's changes).
                     double[] newTargets = activation.applyTargets(targetVector.getArray());
@@ -1000,10 +1118,6 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     driverMaxOuterIterations, driverMaxPqPvSwitch, 0, 0,
                     0, null, null)[0];
             pausedKind = GpuAcNewtonSolver.readBatchDriverPaused(handle);
-        }
-        // Cleanup: finalize outer loops (same as OLF engine's reverse-order cleanup)
-        for (var entry : ctxMap.entrySet()) {
-            entry.getValue().getLeft().cleanup(entry.getValue().getRight());
         }
         return out;
     }

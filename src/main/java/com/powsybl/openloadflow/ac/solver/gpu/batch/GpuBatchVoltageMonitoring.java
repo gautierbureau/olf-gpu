@@ -469,6 +469,10 @@ public final class GpuBatchVoltageMonitoring {
                 continue;
             }
             LfBus bus = network.getBus(rlBusNum[ctl.rlIdx()]);
+            if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+                System.err.println("WB_MON bus=" + (bus == null ? "?" : bus.getId()) + " activatedTarget=" + t
+                        + " vcEnabled=" + (bus != null && bus.isGeneratorVoltageControlEnabled()));
+            }
             if (bus == null || bus.isGeneratorVoltageControlEnabled()) {
                 continue;
             }

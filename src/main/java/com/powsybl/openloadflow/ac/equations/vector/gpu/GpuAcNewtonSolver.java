@@ -436,6 +436,14 @@ public final class GpuAcNewtonSolver {
     /** Resume the paused driver; {@code hostChanged[s] != 0} is the host loop's UNSTABLE verdict. */
     public static native void setBatchDriverResume(long handle, byte[] hostChanged);
 
+    /** Drop a paused driver sequence without resuming it (the host loop changed the equation layout
+     *  or the row modes): the next solveBatchContext starts over on the re-extracted system. */
+    public static native void cancelBatchDriverPause(long handle);
+
+    /** The next fresh solve resumes its sweep at this LOOP_HOST_* kind after its first solve — the
+     *  restarted sequence re-checks the loop that went UNSTABLE, as OLF's runOuterLoop does. */
+    public static native void setBatchDriverStartLoop(long handle, int kind);
+
     /** Absolute target writes at flat {@code (scenario * n + row)} positions, for a host-owned loop. */
     public static native void setBatchTargetDeltas(long handle, int[] rows, double[] values);
 

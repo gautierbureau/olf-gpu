@@ -92,18 +92,42 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
     }
 
     private SecurityAnalysisResult runStock(Network network, List<Contingency> contingencies, List<StateMonitor> monitors) {
+        return runStock(network, contingencies, monitors, dcFastParameters());
+    }
+
+    private SecurityAnalysisResult runStock(Network network, List<Contingency> contingencies, List<StateMonitor> monitors, SecurityAnalysisParameters sap) {
         securityAnalysisProvider = new OpenSecurityAnalysisProvider(new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
-        return runSecurityAnalysis(network, contingencies, monitors, dcFastParameters());
+        return runSecurityAnalysis(network, contingencies, monitors, sap);
     }
 
     private SecurityAnalysisResult runGpu(Network network, List<Contingency> contingencies, List<StateMonitor> monitors) {
+        return runGpu(network, contingencies, monitors, dcFastParameters());
+    }
+
+    private SecurityAnalysisResult runGpu(Network network, List<Contingency> contingencies, List<StateMonitor> monitors, SecurityAnalysisParameters sap) {
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         GpuWoodburyDcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.set(-1);
         try {
-            return runSecurityAnalysis(network, contingencies, monitors, dcFastParameters());
+            return runSecurityAnalysis(network, contingencies, monitors, sap);
         } finally {
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         }
+    }
+
+    /** All branches, generators and loads as single-element contingencies. */
+    private static List<Contingency> allElements(Network network) {
+        List<Contingency> list = new ArrayList<>(allBranches(network));
+        network.getGeneratorStream().forEach(g -> list.add(new Contingency(g.getId(), new com.powsybl.contingency.GeneratorContingency(g.getId()))));
+        network.getLoadStream().forEach(l -> list.add(new Contingency(l.getId(), new com.powsybl.contingency.LoadContingency(l.getId()))));
+        return list;
+    }
+
+    /** The device count accumulates over the connected components, and a contingency impacting two
+     *  components (an HVDC line between them) is solved in each: at least as many as reported. */
+    private static void assertAllOnDevice(SecurityAnalysisResult cpu) {
+        assertTrue(GpuWoodburyDcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() >= cpu.getPostContingencyResults().size(),
+                "every reported contingency on the device: " + GpuWoodburyDcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get()
+                        + " on the device for " + cpu.getPostContingencyResults().size() + " results");
     }
 
     private static String key(LimitViolation v) {
@@ -210,6 +234,80 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         assertSameResults(cpu, gpu);
         assertEquals(contingencies.size(), GpuWoodburyDcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "all outages on the device, the PST's included");
         assertTrue(network.getTwoWindingsTransformerStream().anyMatch(t -> t.hasPhaseTapChanger()), "the case must have a phase shifter");
+    }
+
+    /** Lost generation and load from the contingency itself: the stock's lost-power branch (bus DC states
+     *  saved, processLostPowerChanges, redistribution), replayed on the host and solved on the device. */
+    @Test
+    void generatorAndLoadContingenciesMatchStock() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        Network network = IeeeCdfNetworkFactory.create14();
+        addActivePowerLimits(network, 0.9);
+        List<Contingency> contingencies = allElements(network);
+        SecurityAnalysisResult cpu = runStock(network, contingencies, monitorAll(network));
+        SecurityAnalysisResult gpu = runGpu(network, contingencies, monitorAll(network));
+        assertSameResults(cpu, gpu);
+        assertAllOnDevice(cpu);
+        assertTrue(cpu.getPostContingencyResults().size() > 20, "generators and loads must have produced results");
+    }
+
+    /** Node-breaker busbar-section outages: OLF's cleanup turns them into the incident branch outages plus
+     *  the islanded bus; the connectivity result carries the lost injections. */
+    @Test
+    void busbarSectionContingenciesMatchStock() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        Network network = com.powsybl.openloadflow.network.NodeBreakerNetworkFactory.create();
+        addActivePowerLimits(network, 0.8);
+        List<Contingency> contingencies = new ArrayList<>(allBranches(network));
+        network.getBusbarSectionStream().forEach(b -> contingencies.add(new Contingency(b.getId(), new com.powsybl.contingency.BusbarSectionContingency(b.getId()))));
+        SecurityAnalysisResult cpu = runStock(network, contingencies, monitorAll(network));
+        SecurityAnalysisResult gpu = runGpu(network, contingencies, monitorAll(network));
+        assertSameResults(cpu, gpu);
+        assertAllOnDevice(cpu);
+    }
+
+    /** VSC HVDC: stations are generators in DC; an outage islanding a station leaves the HVDC without power. */
+    @Test
+    void hvdcNetworkMatchesStock() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        Network network = com.powsybl.openloadflow.network.HvdcNetworkFactory.createTwoCcLinkedByAHvdcVscWithGenerators();
+        addActivePowerLimits(network, 0.8);
+        List<Contingency> contingencies = new ArrayList<>(allElements(network));
+        network.getHvdcLineStream().forEach(h -> contingencies.add(new Contingency(h.getId(), new com.powsybl.contingency.HvdcLineContingency(h.getId()))));
+        SecurityAnalysisResult cpu = runStock(network, contingencies, monitorAll(network));
+        SecurityAnalysisResult gpu = runGpu(network, contingencies, monitorAll(network));
+        assertSameResults(cpu, gpu);
+        assertAllOnDevice(cpu);
+    }
+
+    /** A load-based balance type: no array model, the exact host replay builds the column. */
+    @Test
+    void loadBalanceTypeMatchesStock() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        Network network = IeeeCdfNetworkFactory.create14();
+        addActivePowerLimits(network, 0.9);
+        List<Contingency> contingencies = allElements(network);
+        SecurityAnalysisParameters sap = dcFastParameters();
+        sap.getLoadFlowParameters().setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_LOAD);
+        SecurityAnalysisResult cpu = runStock(network, contingencies, monitorAll(network), sap);
+        SecurityAnalysisResult gpu = runGpu(network, contingencies, monitorAll(network), sap);
+        assertSameResults(cpu, gpu);
+        assertAllOnDevice(cpu);
+    }
+
+    /** Two slack buses: the target vector carries the shared mismatch term — the replay reads it as OLF builds it. */
+    @Test
+    void multiSlackMatchesStock() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        Network network = IeeeCdfNetworkFactory.create14();
+        addActivePowerLimits(network, 0.9);
+        List<Contingency> contingencies = allElements(network);
+        SecurityAnalysisParameters sap = dcFastParameters();
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(sap.getLoadFlowParameters()).setMaxSlackBusCount(2);
+        SecurityAnalysisResult cpu = runStock(network, contingencies, monitorAll(network), sap);
+        SecurityAnalysisResult gpu = runGpu(network, contingencies, monitorAll(network), sap);
+        assertSameResults(cpu, gpu);
+        assertAllOnDevice(cpu);
     }
 
     @Test

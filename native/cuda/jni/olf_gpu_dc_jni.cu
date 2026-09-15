@@ -169,6 +169,10 @@ struct DcContext {
     Buf alphaLu, alphaPiv, alphaOut;
     Buf rhsColPtr, rhsRows, rhsValues;
     Buf pairFunc, pairSide, pairCol, pairOut, funcFunc, funcSide, funcOut;
+    // --- DC time series (GpuTimeSeriesDcEngine): one chunk of steps, one solve
+    int tsSteps = 0;
+    Buf tsGenTarget, tsLoadP, tsGenP, tsScMismatch, tsMismatch0, tsMismatch1, tsElements, tsFactors, tsStates;
+    Buf tsGenInit, tsGenPart, tsGenMinT, tsGenMaxT, tsGenMinP, tsGenMaxP, tsGenDroop, tsGenPf;
     // --- DC outer loops on the device (GpuDcLoadFlowEngine)
     // incremental phase control: the controllers, their controlled branch/side/target, the tap a1 tables,
     // and the per-BRANCH direction state of IncrementalContextData.ControllerContext
@@ -1151,6 +1155,228 @@ __global__ void sensiFunctions(int n, int nFunctions, const double* flow, const 
         return;
     }
     out[f] = factorSensi(flow, n, 0, func[f], side[f], ph1Row, ph2Row, a1Row, power);
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// DC time series: a chunk of independent steps over one topology — one factorization, one
+// multi-right-hand-side solve, and every per-step quantity computed in parallel over the chunk
+// ---------------------------------------------------------------------------------------------
+
+/** AbstractLfBus.getGenerationTargetP per (step, bus). */
+__global__ void tsBusGeneration(int nSteps, int nBuses, int nGen, const int* genStart, const double* genTarget, double* genP) {
+    long t = (long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (long) nSteps * nBuses) {
+        return;
+    }
+    int step = (int) (t / nBuses);
+    int b = (int) (t % nBuses);
+    const double* targets = genTarget + (size_t) step * nGen;
+    double sum = 0.0;
+    for (int g = genStart[b]; g < genStart[b + 1]; g++) {
+        sum = __dadd_rn(sum, targets[g]);
+    }
+    genP[(size_t) step * nBuses + b] = sum;
+}
+
+/** DcLoadFlowEngine.getActivePowerMismatch per step, summed in bus order like the CPU. */
+__global__ void tsMismatch(int nSteps, int nBuses, const int* busFlags, const double* genP, const double* loadP, double* out) {
+    int step = blockIdx.x * blockDim.x + threadIdx.x;
+    if (step >= nSteps) {
+        return;
+    }
+    const double* g = genP + (size_t) step * nBuses;
+    const double* l = loadP + (size_t) step * nBuses;
+    double mismatch = 0.0;
+    for (int b = 0; b < nBuses; b++) {
+        if ((busFlags[b] & BUS_DISABLED) == 0) {
+            mismatch = __dadd_rn(mismatch, __dadd_rn(g[b], -l[b]));
+        }
+    }
+    out[step] = -mismatch;
+}
+
+/** The multi-slack share per (step, synchronous component). */
+__global__ void tsScMismatches(int nSteps, int nSc, int nBuses, const int* scBusPtr, const int* scBusList, const int* busFlags,
+                               const double* genP, const double* loadP, double* out) {
+    long t = (long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (long) nSteps * nSc) {
+        return;
+    }
+    int step = (int) (t / nSc);
+    int sc = (int) (t % nSc);
+    const double* g = genP + (size_t) step * nBuses;
+    const double* l = loadP + (size_t) step * nBuses;
+    double sum = 0.0;
+    for (int i = scBusPtr[sc]; i < scBusPtr[sc + 1]; i++) {
+        int b = scBusList[i];
+        if ((busFlags[b] & BUS_DISABLED) == 0) {
+            sum = __dadd_rn(sum, __dadd_rn(g[b], -l[b]));
+        }
+    }
+    out[(size_t) step * nSc + sc] = -sum;
+}
+
+/**
+ * ActivePowerDistribution.run for every step of the chunk at once: one thread per step, each on its
+ * own copy of the generator targets and its own participating-element scratch. Same algorithm as
+ * the single-step kernel, which is OLF's step for step — this is where a chunk of steps stops being
+ * a loop and becomes a parallel section.
+ */
+__global__ void tsDistribute(int nSteps, int nBuses, int nGen, const int* busFlags, const int* busGenStart,
+                             const double* genInitAll, double* genTarget, const double* genMinTAll, const double* genMaxTAll,
+                             const double* genMinPAll, const double* genMaxPAll, const double* genDroopAll, const double* genPfAll,
+                             const int* genPartAll, int refGen, int type, int useActiveLimits, const double* mismatch0,
+                             int* elements, double* factors) {
+    int step = blockIdx.x * blockDim.x + threadIdx.x;
+    if (step >= nSteps) {
+        return;
+    }
+    double mismatch = mismatch0[step];
+    if (!(fabs(mismatch) > P_RESIDUE_EPS)) {
+        return;                                        // DcLoadFlowEngine does not distribute at all below the epsilon
+    }
+    double* target = genTarget + (size_t) step * nGen;
+    int* elems = elements + (size_t) step * nGen;
+    double* facs = factors + (size_t) step * nGen;
+    // every generator attribute the distribution reads is per STEP: a plan series sets a generator's
+    // target AND its initial target, and re-runs OLF's active power control checks, which can turn
+    // its participation off
+    const double* genInit = genInitAll + (size_t) step * nGen;
+    const double* genMinT = genMinTAll + (size_t) step * nGen;
+    const double* genMaxT = genMaxTAll + (size_t) step * nGen;
+    const double* genMinP = genMinPAll + (size_t) step * nGen;
+    const double* genMaxP = genMaxPAll + (size_t) step * nGen;
+    const double* genDroop = genDroopAll + (size_t) step * nGen;
+    const double* genPf = genPfAll + (size_t) step * nGen;
+    const int* genPart = genPartAll + (size_t) step * nGen;
+
+    double refPrevious = 0.0;
+    if (refGen >= 0) {
+        refPrevious = __dadd_rn(refPrevious, -__dadd_rn(genInit[refGen], -target[refGen]));
+        target[refGen] = genInit[refGen];
+    }
+    double stepPrevious = 0.0;
+    for (int b = 0; b < nBuses; b++) {
+        bool busOk = (busFlags[b] & BUS_PARTICIPATING) && !(busFlags[b] & BUS_DISABLED) && !(busFlags[b] & BUS_FICTITIOUS);
+        if (!busOk) {
+            continue;
+        }
+        for (int g = busGenStart[b]; g < busGenStart[b + 1]; g++) {
+            if (genPart[g]) {
+                stepPrevious = __dadd_rn(stepPrevious, -__dadd_rn(genInit[g], -target[g]));
+                target[g] = genInit[g];
+            }
+        }
+    }
+    double remaining = __dadd_rn(mismatch, __dadd_rn(stepPrevious, refPrevious));
+
+    int count = 0;
+    for (int b = 0; b < nBuses; b++) {
+        bool busOk = (busFlags[b] & BUS_PARTICIPATING) && !(busFlags[b] & BUS_DISABLED) && !(busFlags[b] & BUS_FICTITIOUS);
+        if (!busOk) {
+            continue;
+        }
+        for (int g = busGenStart[b]; g < busGenStart[b + 1]; g++) {
+            double f = participationFactor(type, target[g], genMaxP[g], genMinP[g], genDroop[g], genPf[g], remaining);
+            if (stepParticipating(type, genPart[g], genDroop[g], genPf[g]) && f != 0) {
+                elems[count] = g;
+                facs[count] = f;
+                count++;
+            }
+        }
+    }
+    while (count > 0 && fabs(remaining) > P_RESIDUE_EPS) {
+        double norm = javaStreamSum(facs, count);
+        if (!(norm > 0.0)) {
+            break;
+        }
+        for (int k = 0; k < count; k++) {
+            facs[k] = __ddiv_rn(facs[k], norm);
+        }
+        double done = 0.0;
+        int k = 0;
+        while (k < count) {
+            int g = elems[k];
+            double factor = facs[k];
+            double minTargetP = useActiveLimits ? genMinT[g] : -1.7976931348623157e308;
+            double maxTargetP = useActiveLimits ? genMaxT[g] : 1.7976931348623157e308;
+            double targetP = target[g];
+            if (targetP < 0) {
+                maxTargetP = javaMin(maxTargetP, 0.0);
+            } else {
+                minTargetP = javaMax(minTargetP, 0.0);
+            }
+            double newTargetP = __dadd_rn(targetP, __dmul_rn(remaining, factor));
+            bool drop = false;
+            if (remaining > 0 && newTargetP > maxTargetP) {
+                newTargetP = maxTargetP;
+                drop = true;
+            } else if (remaining < 0 && newTargetP < minTargetP) {
+                newTargetP = minTargetP;
+                drop = true;
+            }
+            if (newTargetP != targetP) {
+                target[g] = newTargetP;
+                done = __dadd_rn(done, __dadd_rn(newTargetP, -targetP));
+            }
+            if (drop) {
+                for (int j = k + 1; j < count; j++) {
+                    elems[j - 1] = elems[j];
+                    facs[j - 1] = facs[j];
+                }
+                count--;
+            } else {
+                k++;
+            }
+        }
+        remaining = __dadd_rn(remaining, -done);
+    }
+}
+
+/** DcTargetVector.init per (step, equation column). */
+__global__ void tsFillTarget(int nSteps, int n, int nBuses, int nSc, const int* tKind, const int* tElem, const int* rhsPtr,
+                             const int* rhsKind, const int* rhsElem, const double* rhsCoef, const double* genP,
+                             const double* loadP, const int* busFlags, const int* busSc, const int* scSlackCount,
+                             const double* scMismatch, const double* a1Const, const int* a1Row, const double* power, double* t) {
+    long idx = (long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= (long) nSteps * n) {
+        return;
+    }
+    int step = (int) (idx / n);
+    int c = (int) (idx % n);
+    const double* g = genP + (size_t) step * nBuses;
+    const double* l = loadP + (size_t) step * nBuses;
+    double base;
+    switch (tKind[c]) {
+        case TARGET_BUS_P: {
+            int b = tElem[c];
+            base = __dadd_rn(g[b], -l[b]);
+            if (busFlags[b] & BUS_SLACK) {
+                base = __dadd_rn(base, __ddiv_rn(scMismatch[(size_t) step * nSc + busSc[b]], (double) scSlackCount[busSc[b]]));
+            }
+            break;
+        }
+        case TARGET_ALPHA1:
+            base = a1Const[tElem[c]];
+            break;
+        case TARGET_ZERO_PHI:
+            base = __dadd_rn(A2, -a1Const[tElem[c]]);
+            break;
+        default:
+            base = 0.0;
+    }
+    double rhs = 0.0;
+    for (int r = rhsPtr[c]; r < rhsPtr[c + 1]; r++) {
+        if (rhsKind[r] == RHS_BRANCH) {
+            int b = rhsElem[r];
+            double a1Fixed = a1Row[b] >= 0 ? 0.0 : a1Const[b];
+            rhs = __dadd_rn(rhs, __dmul_rn(__dmul_rn(rhsCoef[r], power[b]), __dadd_rn(A2, -a1Fixed)));
+        } else {
+            rhs = __dadd_rn(rhs, rhsCoef[r]);
+        }
+    }
+    t[(size_t) step * n + c] = __dadd_rn(base, -rhs);
 }
 
 DcContext* ctxOf(jlong h) {
@@ -2692,6 +2918,146 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_sensiValues(JNIEnv* env, jclass
         }
     } catch (const std::exception& e) {
         throwJava(env, std::string("GpuDcSolver.sensiValues: ") + e.what());
+    }
+}
+
+
+/**
+ * One chunk of time-series steps: per step the slack distribution and the target vector, then ONE
+ * multi-right-hand-side solve for the whole chunk. Returns the states (n x steps, column-major),
+ * the generator targets after distribution (steps x generators), the distributed power and the
+ * remaining mismatch per step.
+ */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_timeSeriesChunk(JNIEnv* env, jclass, jlong handle, jint steps,
+                                                                 jdoubleArray jGenTargets, jint nGen, jdoubleArray jLoadP, jint nBuses,
+                                                                 jdoubleArray jGenInit, jintArray jGenPart, jdoubleArray jGenMinT,
+                                                                 jdoubleArray jGenMaxT, jdoubleArray jGenMinP, jdoubleArray jGenMaxP,
+                                                                 jdoubleArray jGenDroop, jdoubleArray jGenPf,
+                                                                 jint participationType, jboolean useActiveLimits, jint referenceGenerator,
+                                                                 jdoubleArray jStates, jdoubleArray jOutGenTargets,
+                                                                 jdoubleArray jDistributed, jdoubleArray jMismatch) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        if (!ctx->assembled || !ctx->analyzed || ctx->nBuses == 0 || ctx->nGen == 0) {
+            throw std::runtime_error("context not set up (assembled, buses, generators)");
+        }
+        if (nGen != ctx->nGen || nBuses != ctx->nBuses) {
+            throw std::runtime_error("generator or bus count does not match the context");
+        }
+        DoubleArray genTargets(env, jGenTargets);
+        DoubleArray loadP(env, jLoadP);
+        if (genTargets.len < (jsize) ((size_t) steps * nGen) || loadP.len < (jsize) ((size_t) steps * nBuses)) {
+            throw std::runtime_error("per-step arrays too small");
+        }
+        int n = ctx->n;
+        int nSc = ctx->nSc;
+        ctx->tsSteps = steps;
+        ctx->tsGenTarget.ensure((size_t) steps * nGen * sizeof(double));
+        DC_CUDA_CHECK(cudaMemcpy(ctx->tsGenTarget.p, genTargets.p, (size_t) steps * nGen * sizeof(double), cudaMemcpyHostToDevice));
+        ctx->tsLoadP.ensure((size_t) steps * nBuses * sizeof(double));
+        DC_CUDA_CHECK(cudaMemcpy(ctx->tsLoadP.p, loadP.p, (size_t) steps * nBuses * sizeof(double), cudaMemcpyHostToDevice));
+        ctx->tsGenP.ensure((size_t) steps * nBuses * sizeof(double));
+        ctx->tsScMismatch.ensure((size_t) steps * std::max(nSc, 1) * sizeof(double));
+        ctx->tsMismatch0.ensure((size_t) steps * sizeof(double));
+        ctx->tsMismatch1.ensure((size_t) steps * sizeof(double));
+        ctx->tsStates.ensure((size_t) n * steps * sizeof(double));
+
+        // the mismatch every step starts from
+        tsBusGeneration<<<grid((long) steps * nBuses), BLOCK, 0, ctx->stream>>>(steps, nBuses, nGen, ctx->busGenStart.as<int>(),
+                ctx->tsGenTarget.as<double>(), ctx->tsGenP.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        tsMismatch<<<grid(steps), BLOCK, 0, ctx->stream>>>(steps, nBuses, ctx->busFlags.as<int>(), ctx->tsGenP.as<double>(),
+                ctx->tsLoadP.as<double>(), ctx->tsMismatch0.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+
+        if (participationType >= 0) {
+            DoubleArray genInit(env, jGenInit);
+            IntArray genPart(env, jGenPart);
+            DoubleArray genMinT(env, jGenMinT);
+            DoubleArray genMaxT(env, jGenMaxT);
+            DoubleArray genMinP(env, jGenMinP);
+            DoubleArray genMaxP(env, jGenMaxP);
+            DoubleArray genDroop(env, jGenDroop);
+            DoubleArray genPf(env, jGenPf);
+            size_t dbls = (size_t) steps * nGen * sizeof(double);
+            ctx->tsGenInit.ensure(dbls);
+            DC_CUDA_CHECK(cudaMemcpy(ctx->tsGenInit.p, genInit.p, dbls, cudaMemcpyHostToDevice));
+            ctx->tsGenMinT.ensure(dbls);
+            DC_CUDA_CHECK(cudaMemcpy(ctx->tsGenMinT.p, genMinT.p, dbls, cudaMemcpyHostToDevice));
+            ctx->tsGenMaxT.ensure(dbls);
+            DC_CUDA_CHECK(cudaMemcpy(ctx->tsGenMaxT.p, genMaxT.p, dbls, cudaMemcpyHostToDevice));
+            ctx->tsGenMinP.ensure(dbls);
+            DC_CUDA_CHECK(cudaMemcpy(ctx->tsGenMinP.p, genMinP.p, dbls, cudaMemcpyHostToDevice));
+            ctx->tsGenMaxP.ensure(dbls);
+            DC_CUDA_CHECK(cudaMemcpy(ctx->tsGenMaxP.p, genMaxP.p, dbls, cudaMemcpyHostToDevice));
+            ctx->tsGenDroop.ensure(dbls);
+            DC_CUDA_CHECK(cudaMemcpy(ctx->tsGenDroop.p, genDroop.p, dbls, cudaMemcpyHostToDevice));
+            ctx->tsGenPf.ensure(dbls);
+            DC_CUDA_CHECK(cudaMemcpy(ctx->tsGenPf.p, genPf.p, dbls, cudaMemcpyHostToDevice));
+            ctx->tsGenPart.ensure((size_t) steps * nGen * sizeof(int));
+            DC_CUDA_CHECK(cudaMemcpy(ctx->tsGenPart.p, genPart.p, (size_t) steps * nGen * sizeof(int), cudaMemcpyHostToDevice));
+            ctx->tsElements.ensure((size_t) steps * nGen * sizeof(int));
+            ctx->tsFactors.ensure((size_t) steps * nGen * sizeof(double));
+            tsDistribute<<<grid(steps), BLOCK, 0, ctx->stream>>>(steps, nBuses, nGen, ctx->busFlags.as<int>(),
+                    ctx->busGenStart.as<int>(), ctx->tsGenInit.as<double>(), ctx->tsGenTarget.as<double>(), ctx->tsGenMinT.as<double>(),
+                    ctx->tsGenMaxT.as<double>(), ctx->tsGenMinP.as<double>(), ctx->tsGenMaxP.as<double>(), ctx->tsGenDroop.as<double>(),
+                    ctx->tsGenPf.as<double>(), ctx->tsGenPart.as<int>(), referenceGenerator, participationType,
+                    useActiveLimits ? 1 : 0, ctx->tsMismatch0.as<double>(), ctx->tsElements.as<int>(), ctx->tsFactors.as<double>());
+            DC_CUDA_CHECK(cudaGetLastError());
+            // the generation after distribution, and the mismatch OLF reports (recomputed, not carried)
+            tsBusGeneration<<<grid((long) steps * nBuses), BLOCK, 0, ctx->stream>>>(steps, nBuses, nGen, ctx->busGenStart.as<int>(),
+                    ctx->tsGenTarget.as<double>(), ctx->tsGenP.as<double>());
+            DC_CUDA_CHECK(cudaGetLastError());
+        }
+        tsMismatch<<<grid(steps), BLOCK, 0, ctx->stream>>>(steps, nBuses, ctx->busFlags.as<int>(), ctx->tsGenP.as<double>(),
+                ctx->tsLoadP.as<double>(), ctx->tsMismatch1.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        if (nSc > 0) {
+            tsScMismatches<<<grid((long) steps * nSc), BLOCK, 0, ctx->stream>>>(steps, nSc, nBuses, ctx->scBusPtr.as<int>(),
+                    ctx->scBusList.as<int>(), ctx->busFlags.as<int>(), ctx->tsGenP.as<double>(), ctx->tsLoadP.as<double>(),
+                    ctx->tsScMismatch.as<double>());
+            DC_CUDA_CHECK(cudaGetLastError());
+        }
+
+        // one target column per step, then the whole chunk in one solve
+        Buf targets;
+        targets.alloc((size_t) n * steps * sizeof(double));
+        tsFillTarget<<<grid((long) steps * n), BLOCK, 0, ctx->stream>>>(steps, n, nBuses, std::max(nSc, 1), ctx->targetKind.as<int>(),
+                ctx->targetElem.as<int>(), ctx->rhsPtr.as<int>(), ctx->rhsKind.as<int>(), ctx->rhsElem.as<int>(),
+                ctx->rhsCoef.as<double>(), ctx->tsGenP.as<double>(), ctx->tsLoadP.as<double>(), ctx->busFlags.as<int>(),
+                ctx->busSc.as<int>(), ctx->scSlackCount.as<int>(), ctx->tsScMismatch.as<double>(), ctx->a1Const.as<double>(),
+                ctx->a1Row.as<int>(), ctx->power.as<double>(), targets.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        for (int col0 = 0; col0 < steps; col0 += S_SOLVE_COLS) {
+            int cols = std::min(S_SOLVE_COLS, steps - col0);
+            ctx->ensureRhs(cols);
+            DC_CUDA_CHECK(cudaMemcpyAsync(ctx->b.p, targets.as<double>() + (size_t) col0 * n,
+                                          (size_t) n * cols * sizeof(double), cudaMemcpyDeviceToDevice, ctx->stream));
+            ctx->solveDense(cols);
+            DC_CUDA_CHECK(cudaMemcpy(ctx->tsStates.as<double>() + (size_t) col0 * n, ctx->x.p,
+                                     (size_t) n * cols * sizeof(double), cudaMemcpyDeviceToDevice));
+        }
+        DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+
+        std::vector<double> states((size_t) n * steps);
+        DC_CUDA_CHECK(cudaMemcpy(states.data(), ctx->tsStates.p, states.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        env->SetDoubleArrayRegion(jStates, 0, (jsize) states.size(), states.data());
+        std::vector<double> outGen((size_t) steps * nGen);
+        DC_CUDA_CHECK(cudaMemcpy(outGen.data(), ctx->tsGenTarget.p, outGen.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        env->SetDoubleArrayRegion(jOutGenTargets, 0, (jsize) outGen.size(), outGen.data());
+        std::vector<double> mismatch0((size_t) steps);
+        std::vector<double> mismatch1((size_t) steps);
+        DC_CUDA_CHECK(cudaMemcpy(mismatch0.data(), ctx->tsMismatch0.p, mismatch0.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        DC_CUDA_CHECK(cudaMemcpy(mismatch1.data(), ctx->tsMismatch1.p, mismatch1.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        std::vector<double> distributed((size_t) steps);
+        for (int i = 0; i < steps; i++) {
+            distributed[i] = mismatch0[i] - mismatch1[i];
+        }
+        env->SetDoubleArrayRegion(jDistributed, 0, steps, distributed.data());
+        env->SetDoubleArrayRegion(jMismatch, 0, steps, mismatch1.data());
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.timeSeriesChunk: ") + e.what());
     }
 }
 

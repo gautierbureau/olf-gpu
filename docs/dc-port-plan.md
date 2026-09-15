@@ -834,6 +834,72 @@ one solve per distinct outaged branch, done once per run. The per-contingency fl
 also stays on the host, because it needs OLF's modified-target build on the network; it is one
 column.
 
+## 4j. Phase 3 — the DC time-series load flow on the device (2026-09-15)
+
+**Phase 3.0 first, as the plan required: where the CPU step actually goes.** Measured on rte6515
+with `DcTimeSeriesBaselineProbe`, which switches the emitted datasets off and on and installs a
+no-solve engine through the new seam, so the step splits into its parts (1000 steps, 200 planned
+generators, one thread):
+
+| phase | ms/step | share |
+|---|---|---|
+| restore + apply set points | 1.21 | 20% |
+| solve (`DcLoadFlowEngine.run`) | 1.74 | 28% |
+| emit branch rows | 2.42 | 40% |
+| emit bus and generator rows | 0.75 | 12% |
+| **total** | **6.12** | |
+
+That is a different verdict from the LODF one (§4h): the part a device engine can take is the
+majority, not a sliver. It also says the row emission is untouchable — 16,990 rows a step is the
+writer's own cost, on any arm.
+
+**Two seams on the ts branch**: `TimeSeriesLoadFlow.run` takes an optional `EnginePlanProvider`,
+and `StepEngine` gains a batched contract (`batchSize` / `prepare` / `solveBatch` / `apply`) plus
+`restoreState`. The batched loop applies each step's set points exactly once and still emits from
+the network, so a batched engine changes nothing about what a step means. `EnginePlan`,
+`StepEngine` and `SolveResult` became public. OLF's own 24 time-series tests pass unchanged.
+
+**`GpuTimeSeriesDcEngine`**: a chunk of 256 steps is one factorization against 256 right-hand
+sides. Per chunk the device computes, for every step in parallel, the bus generation, the slack
+mismatch, `ActivePowerDistribution` (one thread per step, on that step's own copy of the generator
+tables), the multi-slack share and the target column; then one multi-right-hand-side solve for the
+whole chunk. The host reads a step back into the equation system and emits exactly as it does on
+the CPU path.
+
+Two things the port had to get right, both found by the row-for-row gate:
+- **every generator attribute the distribution reads is per STEP**, not per run. A plan series
+  writes the value into the generator's target AND its initial target and re-runs OLF's active
+  power control checks, which can switch its participation off. The device therefore takes eight
+  per-step generator tables, not one; uploading the run's tables gave visibly wrong flows.
+- **`restoreState` must put back both** the generator targets the distribution moved and the initial
+  targets the set points wrote, because the generator rows carry the initial target. Restoring only
+  what the solve dirtied left the last step of the chunk's set point in every row.
+
+**Gate**: `GpuTimeSeriesDcEngineTest`, seven cases (generator plans, load plans, distributed slack
+on generation P and P_MAX, three slack buses, ieee118 with more steps than a chunk, ieee300),
+comparing both engines row for row — dataset, step, status and element identical, values within
+1e-8 MW — plus the per-step statuses, distributed power and slack mismatch, and the device step
+counter. The signed zero of a branch carrying nothing differs between the arms and is not a
+difference.
+
+**Numbers** (rte6515, 1000 steps, 200 planned generators, one thread, 16.99 M streamed rows):
+
+| | CPU | GPU | ratio |
+|---|---|---|---|
+| restore + set points + solve | 2.95 ms/step | 1.07 ms/step | **x2.76** |
+| the whole run, all rows streamed | 6.12 ms/step | 3.16 ms/step | **x1.94** |
+
+The device does restore, set points AND solve in less time than the CPU takes to restore and apply
+set points alone. End to end the run is halved, and what stops it there is the row emission, which
+is the same host work on both arms.
+
+Left for later, in order of value: the emission is 3.2 ms/step of the GPU's 3.16 — running it on
+several host threads while the device solves the next chunk is the obvious next multiplier (OLF
+already partitions by step range, but each partition would build its own device context today). And
+a network needing a DC outer loop — rte6515 has AC-emulation HVDC links, so the probe switches that
+loop off the way the other DC probes do — takes the stock engine step by step; the loop kernels of
+§4g exist and could drive a chunk, re-solving only the steps whose decision changed.
+
 ## 5. Validation and benches
 
 - Parity oracle = stock OLF Woodbury on the same `LfNetwork` (same slack, same

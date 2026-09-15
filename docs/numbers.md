@@ -194,3 +194,20 @@ The third row is the AC session computing on the same card (1.7 GB resident): th
 predefined-result scan 216 ms, OLF's unscale/filter/write 96 ms, the rest OLF's per-contingency
 orchestration. The linear algebra is off the critical path; what remains is host bookkeeping,
 identical on both arms.
+
+### DC — time-series load flow (GpuTimeSeriesDcEngine vs OLF's step engine)
+
+rte6515_full, RTE parameters in DC with the AC-emulation limits loop off (as the other DC probes
+run it), 200 planned generators, one thread, all three datasets streamed into a counting writer
+(16,990 rows a step). `DcTimeSeriesBaselineProbe`.
+
+| date | steps | phase | CPU | GPU | ratio |
+|---|---|---|---|---|---|
+| 2026-09-15 | 1000 | restore + set points + solve | 2.95 ms/step | 1.07 ms/step | x2.76 |
+| 2026-09-15 | 1000 | whole run, all rows | 6.12 ms/step | 3.16 ms/step | x1.94 |
+| 2026-09-15 | 200 | restore + set points + solve | 5.04 ms/step | 1.50 ms/step | x3.36 |
+| 2026-09-15 | 200 | whole run, all rows | 8.73 ms/step | 4.64 ms/step | x1.88 |
+
+CPU per-step split (1000 steps): restore and set points 1.21, solve 1.74, branch rows 2.42, bus and
+generator rows 0.75. The device takes the first two; the row emission is host work on both arms and
+is what caps the end-to-end ratio at about two.

@@ -280,6 +280,22 @@ public final class GpuDcSolver implements AutoCloseable {
         sensiWoodbury(handle(), factorSource, flowSource);
     }
 
+    /**
+     * One chunk of time-series steps: per step the slack distribution and the target vector, then
+     * one multi-right-hand-side solve. {@code participationType} below zero means no distribution.
+     */
+    public void timeSeriesChunk(int steps, double[] generatorTargets, int generatorCount, double[] loadTargetP, int busCount,
+                                double[] generatorInitialTargets, int[] generatorParticipating, double[] generatorMinTargetP,
+                                double[] generatorMaxTargetP, double[] generatorMinP, double[] generatorMaxP,
+                                double[] generatorDroop, double[] generatorParticipationFactor,
+                                int participationType, boolean useActiveLimits, int referenceGenerator, double[] outStates,
+                                double[] outGeneratorTargets, double[] outDistributed, double[] outMismatch) {
+        timeSeriesChunk(handle(), steps, generatorTargets, generatorCount, loadTargetP, busCount, generatorInitialTargets,
+                generatorParticipating, generatorMinTargetP, generatorMaxTargetP, generatorMinP, generatorMaxP, generatorDroop,
+                generatorParticipationFactor, participationType, useActiveLimits, referenceGenerator, outStates,
+                outGeneratorTargets, outDistributed, outMismatch);
+    }
+
     /** One contingency in one call: its elements, the Woodbury update and the factor evaluations. */
     public void sensiContingency(int[] ph1Row, int[] ph2Row, int[] stateColumn, int[] kind, double[] diag, double[] newAlpha,
                                  int factorSource, int flowSource, int[] pairFunction, int[] pairSide, int[] pairColumn,
@@ -480,6 +496,14 @@ public final class GpuDcSolver implements AutoCloseable {
                                                 double[] diag, double[] newAlpha);
 
     private static native void sensiWoodbury(long handle, int factorSource, int flowSource);
+
+    private static native void timeSeriesChunk(long handle, int steps, double[] generatorTargets, int generatorCount,
+                                               double[] loadTargetP, int busCount, double[] generatorInitialTargets,
+                                               int[] generatorParticipating, double[] generatorMinTargetP, double[] generatorMaxTargetP,
+                                               double[] generatorMinP, double[] generatorMaxP, double[] generatorDroop,
+                                               double[] generatorParticipationFactor, int participationType, boolean useActiveLimits,
+                                               int referenceGenerator, double[] outStates, double[] outGeneratorTargets,
+                                               double[] outDistributed, double[] outMismatch);
 
     private static native void sensiContingency(long handle, int[] ph1Row, int[] ph2Row, int[] stateColumn, int[] kind,
                                                 double[] diag, double[] newAlpha, int factorSource, int flowSource,

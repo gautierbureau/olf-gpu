@@ -619,6 +619,30 @@ the engine's current solver is not the GPU driver (CPU-routed contingencies had 
 per-generator DS accumulator is zeroed per solve (a restarted sweep that never reaches DS handed
 garbage to the write-back → NaN targetP).
 
+**Same day, fourth pass — 39 → 0: `GpuBatchedAcSecurityAnalysisTest` 136/136 under the flag.** The
+"DS re-anchoring class" was exactly that, and it was the base integration, not the loop: OLF's
+`ActivePowerDistribution.run` resets every participant to its INITIAL target P before each
+distribution (`resetToInitialState`, adding back what that undid as `previousMismatch`) and
+re-derives everything — factors, sign rule, limits — from there. The device kernel has done that
+since 2026-09-08 (`absorbedNow`), but the base path fed it the batched-SA extraction, whose contract
+anchors at the row targets the solve starts from (right for the SA: converged base, per-scenario
+channels relative to it), and every restart re-anchored at the written-back targets. Now
+`GpuDsParams.anchorOnInitialTargetP` (base path only): the pack anchors the row targets, the
+per-generator limits, the sign rule and the P-proportional factors at `initialTargetP`
+(`anchorOffset` = Σ(tp − tp₀) over the participants — `absorbedNow` then IS OLF's
+`previousMismatch`); the write-back sets `tp = tp₀ + genCum` and, for the slack bus's own
+generators, `tp₀ + retain` with the retain captured at the last check that FIRED
+(`dDsRetainApplied`, NaN when none did — a STABLE check's ρ·mismatch is not a distribution);
+slack-only bases write back `readBatchSlackAbsorbed`. Two more: a restart starts from the network's
+last state through `PreviousValueVoltageInitializer` exactly as `runOuterLoop` does (the old state
+vector was not even the right length after a control was disabled); and the driver's decisions so
+far (P, RL pins, HVDC statuses, activations) are handed to the network BEFORE each host-loop check
+— SecondaryVoltageControl skips a zone's RL-pinned controllers, and a check that still saw them
+enabled went UNSTABLE where OLF's said STABLE (one extra adjust round, 2.5e-8 kV). The SA contract
+is untouched: with static factors, anchoring at the converged base is linearly equivalent
+(caps are absolute, the sign never flips); PROPORTIONAL_TO_GENERATION_P (|tp₀| vs |tp|) and
+REMAINING_MARGIN margins are the only balance types where it is not — latent for the SA, noted.
+
 **Same day, third pass — 44 → 39, no ENGAGE and nothing above 1e-3 kV left.** Five more base-only
 defects: (1) a converter bus without an active BUS_TARGET_P row (the slack) received the HVDC
 freeze/saturation delta on its PHI identity row (base MAX_ITER, 3 ENGAGE) — packed as ~row now, the

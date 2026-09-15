@@ -26,7 +26,7 @@ import java.util.Objects;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-public record GpuDsParams(LoadFlowParameters.BalanceType balanceType, boolean useActiveLimits) {
+public record GpuDsParams(LoadFlowParameters.BalanceType balanceType, boolean useActiveLimits, boolean anchorOnInitialTargetP) {
 
     /** OLF's defaults: PROPORTIONAL_TO_GENERATION_P_MAX with active limits. */
     public static final GpuDsParams DEFAULT =
@@ -34,6 +34,25 @@ public record GpuDsParams(LoadFlowParameters.BalanceType balanceType, boolean us
 
     public GpuDsParams {
         Objects.requireNonNull(balanceType);
+    }
+
+    /** Anchor at the CURRENT target P (the batched SA's contract: its base is converged and every
+     *  per-scenario channel is relative to the row targets it starts from). */
+    public GpuDsParams(LoadFlowParameters.BalanceType balanceType, boolean useActiveLimits) {
+        this(balanceType, useActiveLimits, false);
+    }
+
+    /**
+     * The generator's target P at OLF's distribution ANCHOR. OLF's ActivePowerDistribution.run resets
+     * every participant to its INITIAL target P before each distribution (step.resetToInitialState,
+     * adding back what that undid as previousMismatch) and re-derives the whole distribution from
+     * there — factors, sign rule and limits included. A base load flow driven on the device across
+     * several checks and restarts must anchor there too ({@code anchorOnInitialTargetP}); the
+     * batched SA anchors at the converged base's targets, which is equivalent while the factors do
+     * not depend on the target P (see the DsPack javadoc).
+     */
+    public double anchorTargetP(LfGenerator g) {
+        return anchorOnInitialTargetP ? g.getInitialTargetP() : g.getTargetP();
     }
 
     /** True if the device DS pass models this balance type: the static-factor generation types and the
@@ -63,7 +82,7 @@ public record GpuDsParams(LoadFlowParameters.BalanceType balanceType, boolean us
         if (bus.isParticipating()) {
             for (LfGenerator g : bus.getGenerators()) {
                 if (g.isParticipating()) {
-                    double tp = g.getTargetP();
+                    double tp = anchorTargetP(g);
                     double minP = g.getMinP();
                     double maxP = g.getMaxP();
                     if (tp < 0) {
@@ -114,7 +133,7 @@ public record GpuDsParams(LoadFlowParameters.BalanceType balanceType, boolean us
         }
         return switch (balanceType) {
             case PROPORTIONAL_TO_GENERATION_P_MAX -> g.getDroop() != 0 ? g.getMaxP() / g.getDroop() : 0;
-            case PROPORTIONAL_TO_GENERATION_P -> Math.abs(g.getTargetP());
+            case PROPORTIONAL_TO_GENERATION_P -> Math.abs(anchorTargetP(g));
             case PROPORTIONAL_TO_GENERATION_PARTICIPATION_FACTOR -> g.getParticipationFactor() > 0 ? g.getParticipationFactor() : 0;
             // REMAINING_MARGIN factors are direction-dependent and live in the margins (busMargins /
             // in-kernel); here the value is only a PARTICIPATION INDICATOR (pack membership, slack-only

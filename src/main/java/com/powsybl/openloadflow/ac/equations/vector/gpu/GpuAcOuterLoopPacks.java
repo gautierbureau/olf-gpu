@@ -291,6 +291,19 @@ public final class GpuAcOuterLoopPacks {
      *  limit(v) = packedLimit + b*(v^2 - v2Base) — exact for the SVC part, identically zero on
      *  SVC-less buses. Must run under the SAME control-type view as the min/max capture (the
      *  monitoring flip). */
+    /** Σ over the bus's participating generators of (current − anchor target P): what OLF's
+     *  resetToInitialState undoes and adds back as previousMismatch. 0 when anchoring at the current
+     *  targets. The anchor row target = the row's current target minus this. */
+    static double anchorOffset(LfBus bus, GpuDsParams dsParams) {
+        double off = 0;
+        for (LfGenerator g : bus.getGenerators()) {
+            if (dsParams.factor(g) != 0) {
+                off += g.getTargetP() - dsParams.anchorTargetP(g);
+            }
+        }
+        return off;
+    }
+
     /** Rank of each id in lexicographic order — OLF's BY_ID_COMPARATOR tie-break, as an int the kernel can compare. */
     private static int[] idRanks(List<String> ids) {
         List<String> sorted = new ArrayList<>(ids);
@@ -524,7 +537,7 @@ public final class GpuAcOuterLoopPacks {
             int bn = bus.getNum();
             if (GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_PHI) >= 0) {       // the slack/reference bus
                 dsSlackPhiRow = phiCol[bn];
-                dsSlackTargetP = bus.getTargetP();
+                dsSlackTargetP = bus.getTargetP() - anchorOffset(bus, dsParams);   // the slack's ANCHOR target
                 dsSlackFactor = dsParams.busFactor(bus);
                 if (System.getenv("OLF_GPU_DS_GEN_TRACE") != null) {
                     System.err.println("GPU_DS_SLACK bus=" + bus.getId() + " busFactor=" + dsSlackFactor
@@ -552,7 +565,7 @@ public final class GpuAcOuterLoopPacks {
                 if (dsParams.factor(g) != 0) {
                     double minTp = g.getMinTargetP();
                     double maxTp = g.getMaxTargetP();
-                    double tp = g.getTargetP();
+                    double tp = dsParams.anchorTargetP(g);
                     if (tp < 0) {                                       // OLF: distribution never flips a gen's sign
                         maxTp = Math.min(maxTp, 0);
                     } else {
@@ -581,7 +594,7 @@ public final class GpuAcOuterLoopPacks {
                 dsPhiRow.add(phiCol[bn]);
                 dsBusNum.add(bn);
                 dsFactorRaw.add(factor);
-                dsBaseTargetP.add(bus.getTargetP());
+                dsBaseTargetP.add(bus.getTargetP() - anchorOffset(bus, dsParams));   // the row's ANCHOR target
                 dsMaxDelta.add(headroom);
                 dsMinDelta.add(footroom);
                 if (dsParams.isRemainingMargin()) {
@@ -603,7 +616,7 @@ public final class GpuAcOuterLoopPacks {
                     }
                     double minTp = g.getMinTargetP();
                     double maxTp = g.getMaxTargetP();
-                    double tp = g.getTargetP();
+                    double tp = dsParams.anchorTargetP(g);
                     if (tp < 0) {                            // OLF: distribution never flips a gen's sign
                         maxTp = Math.min(maxTp, 0);
                     } else {

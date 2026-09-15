@@ -207,14 +207,37 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         }
     }
 
-    /** DistributedSlack: OLF's ActivePowerDistribution sets every participating generator's targetP —
-     *  per GENERATOR (each saturates at its own limits), the slack bus's own included. The device's
-     *  water-fill keeps the same per-generator cumulative deltas ({@code genCum}) for the buses that
-     *  have a row, and the slack's share as the retained mismatch ({@code dsRetain}); the slack bus has
-     *  no row, so its generators split the retained share by factor, which is exactly OLF's own split
-     *  while none of them saturates. */
+    /** DistributedSlack, exactly OLF's ActivePowerDistribution: every participating generator ends at
+     *  its ANCHOR target ({@code initialTargetP}) plus the cumulative share the water-fill gave it
+     *  ({@code genCum}, per generator — each saturates at its own limits); the slack bus's own
+     *  generators, which have no device row, split the slack's retained share by factor — the value
+     *  captured at the last check that actually DISTRIBUTED, not the sub-tolerance one a STABLE check
+     *  measures. A solve whose DistributedSlack phase never fired leaves the generators alone. */
     private void writeBackDistributedSlack(double[] deviceTargets, double[] genCum, double[] retain, GpuAcData data) {
-        if (deviceTargets == null || data == null || data.dsPhiRow().length == 0) {
+        if (deviceTargets == null || data == null) {
+            return;
+        }
+        var dsParams = driverDsParams();
+        LfBus slackBus = null;
+        if (data.dsSlackPhiRow() >= 0) {
+            for (LfBus bus : network.getBuses()) {
+                var v = equationSystem.getVariableSet().getVariable(bus.getNum(), AcVariableType.BUS_PHI);
+                if (v != null && v.getRow() == data.dsSlackPhiRow()) {
+                    slackBus = bus;
+                    break;
+                }
+            }
+        }
+        if (data.dsPhiRow().length == 0) {
+            // slack-only participation: the whole distribution is the slack's absorbed total
+            double[] absorbed = GpuAcNewtonSolver.readBatchSlackAbsorbed(context.handle.get());
+            if (slackBus != null && absorbed != null && absorbed.length > 0 && absorbed[0] != 0) {
+                setAnchoredShare(slackBus, absorbed[0], dsParams);
+            }
+            return;
+        }
+        boolean fired = retain != null && retain.length > 0 && !Double.isNaN(retain[0]);
+        if (!fired) {
             return;
         }
         java.util.Map<String, LfGenerator> genById = new java.util.HashMap<>();
@@ -223,15 +246,11 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 genById.put(g.getId(), g);
             }
         }
-        boolean distributed = false;                         // did the driver's DS actually move anything?
         if (genCum != null && data.dgGenId() != null && genCum.length >= data.dgGenId().length) {
             for (int g = 0; g < data.dgGenId().length; g++) {
-                if (genCum[g] != 0) {
-                    distributed = true;
-                    LfGenerator gen = genById.get(data.dgGenId()[g]);
-                    if (gen != null) {
-                        gen.setTargetP(gen.getTargetP() + genCum[g]);
-                    }
+                LfGenerator gen = genById.get(data.dgGenId()[g]);
+                if (gen != null) {
+                    gen.setTargetP(dsParams.anchorTargetP(gen) + genCum[g]);
                 }
             }
         } else {
@@ -240,40 +259,20 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 if (row < 0 || row >= deviceTargets.length) {
                     continue;
                 }
-                double delta = deviceTargets[row] - data.dsBaseTargetP()[i];
                 LfBus bus = data.dsBusNum() != null && i < data.dsBusNum().length ? network.getBus(data.dsBusNum()[i]) : null;
-                if (bus != null && delta != 0) {
-                    distributed = true;
-                    splitByFactor(bus, delta);
+                if (bus != null) {
+                    setAnchoredShare(bus, deviceTargets[row] - data.dsBaseTargetP()[i], dsParams);
                 }
             }
         }
-        // The slack's retained share exists only when a distribution happened: the retain kernel
-        // evaluates rho * mismatch at EVERY check, a STABLE one included, and handing that to the
-        // slack's generators moved them by rho * (a sub-tolerance mismatch) where OLF's loop had
-        // moved nothing — 3.4 kW that a 0.01 MW slack tolerance turned into 0.7 kV on l121.
-        if (distributed && retain != null && retain.length > 0 && retain[0] != 0 && data.dsSlackPhiRow() >= 0) {
-            boolean found = false;
-            for (LfBus bus : network.getBuses()) {
-                var v = equationSystem.getVariableSet().getVariable(bus.getNum(), AcVariableType.BUS_PHI);
-                if (v != null && v.getRow() == data.dsSlackPhiRow()) {
-                    found = true;
-                    splitByFactor(bus, retain[0]);
-                    break;
-                }
-            }
-            if (!found && System.getenv("OLF_GPU_BATCH_TRACE") != null) {
-                System.err.println("WB_DS_SLACK no bus with BUS_PHI row " + data.dsSlackPhiRow());
-            }
+        if (slackBus != null && retain[0] != 0) {
+            setAnchoredShare(slackBus, retain[0], dsParams);
         }
     }
 
-    /** Split a bus-level delta over its participating generators with the RUN's balance-type factors
-     *  ({@code GpuDsParams.factor}, what the pack itself uses): {@code LfGenerator.getParticipationFactor()}
-     *  is only filled inside OLF's own distribution step and reads 0 here — the slack bus's generator
-     *  then received nothing where OLF's loop had given it its share (2.7 MW on l121 at tight tolerance). */
-    private void splitByFactor(LfBus bus, double delta) {
-        var dsParams = driverDsParams();
+    /** Give a bus's participating generators {@code anchor + delta × f / Σf} — OLF's split of a
+     *  bus-level amount from the anchor, with the run's balance-type factors. */
+    private static void setAnchoredShare(LfBus bus, double delta, com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams) {
         double factorSum = 0;
         for (LfGenerator g : bus.getGenerators()) {
             factorSum += dsParams.factor(g);
@@ -284,7 +283,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         for (LfGenerator g : bus.getGenerators()) {
             double f = dsParams.factor(g);
             if (f != 0) {
-                g.setTargetP(g.getTargetP() + delta * f / factorSum);
+                g.setTargetP(dsParams.anchorTargetP(g) + delta * f / factorSum);
             }
         }
     }
@@ -455,7 +454,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         return ds == null
                 ? com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams.DEFAULT
                 : new com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams(
-                        ds.getActivePowerDistribution().getBalanceType(), ds.getActivePowerDistribution().isUseActiveLimits());
+                        ds.getActivePowerDistribution().getBalanceType(), ds.getActivePowerDistribution().isUseActiveLimits(),
+                        true);                               // OLF re-derives from the INITIAL targets at every check
     }
 
     /** Install (or clear) the PER_EQUATION_TYPE per-row stopping thresholds on the batch context,
@@ -571,9 +571,12 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         if (resuming) {
             return runResume(reportNode);
         }
-        if (!restart) {
-            AcSolverUtil.initStateVector(network, equationSystem, voltageInitializer);
-        }
+        // A restart is OLF's post-check re-solve: runOuterLoop starts it from the NETWORK's last state
+        // (PreviousValueVoltageInitializer), which the pause cycle wrote with updateNetwork — and the
+        // equation layout may have changed (a control the host loop disabled removes its variable),
+        // so the previous state vector is not even the right length any more.
+        AcSolverUtil.initStateVector(network, equationSystem,
+                restart ? new com.powsybl.openloadflow.network.util.PreviousValueVoltageInitializer() : voltageInitializer);
 
         AcSolverStatus status;
         int iterations = 0;
@@ -1049,7 +1052,12 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             } else {
                 var loop = pair.getLeft();
                 var loopCtx = pair.getRight();
-                // Load device state into the equation system and network
+                // Load device state into the equation system and network — INCLUDING the driver's own
+                // decisions so far (distributed P, RL pins, HVDC statuses, monitoring activations):
+                // OLF's loop reads them from the network (SecondaryVoltageControl skips the RL-pinned
+                // controllers of a zone; a check that still saw them enabled went UNSTABLE where OLF's
+                // said STABLE, one extra adjust round, 2.5e-8 kV).
+                writeBackDriverMutations(cachedData);
                 equationSystem.getStateVector().set(Arrays.copyOf(out, n));
                 AcSolverUtil.updateNetwork(network, equationSystem);
                 // Run OLF's own outer loop check
@@ -1071,8 +1079,25 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     boolean modesChanged = !Arrays.equals(act2.rowMode(), activation.rowMode());
                     if (!probe.sameAs(cachedData) || modesChanged) {
                         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+                            StringBuilder diff = new StringBuilder();
+                            for (var rc : GpuAcData.class.getRecordComponents()) {   // which arrays changed?
+                                try {
+                                    Object x1 = rc.getAccessor().invoke(probe);
+                                    Object x2 = rc.getAccessor().invoke(cachedData);
+                                    boolean eq = x1 instanceof double[] d1 ? Arrays.equals(d1, (double[]) x2)
+                                            : x1 instanceof int[] i1 ? Arrays.equals(i1, (int[]) x2)
+                                            : x1 instanceof byte[] b1 ? Arrays.equals(b1, (byte[]) x2)
+                                            : x1 instanceof Object[] o1 ? Arrays.equals(o1, (Object[]) x2)
+                                            : java.util.Objects.equals(x1, x2);
+                                    if (!eq) {
+                                        diff.append(' ').append(rc.getName());
+                                    }
+                                } catch (ReflectiveOperationException e) {
+                                    diff.append(" ?").append(rc.getName());
+                                }
+                            }
                             System.err.println("HOST_LOOP_RESTART loop=" + loop.getName() + " sameStructure="
-                                    + probe.sameStructureAs(cachedData) + " modesChanged=" + modesChanged);
+                                    + probe.sameStructureAs(cachedData) + " modesChanged=" + modesChanged + " changed:" + diff);
                         }
                         loopCtx.setIteration(loopCtx.getIteration() + 1);
                         // The driver's own decisions so far (distributed P, RL pins, HVDC statuses,

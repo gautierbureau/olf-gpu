@@ -3675,7 +3675,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                                               const double* dgMarginUp, const double* dgMarginDown,
                                               const int* busGenStart, const int* busGenEnd,
                                               double* genCum, char* genRemoved, double* genFactorWork,
-                                              double* target, char* switched, char* dsResidual, int dbgTrace) {
+                                              double* target, char* switched, char* dsResidual, double* retainApplied, int dbgTrace) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     if (!rlActive[s]) return;
@@ -3742,6 +3742,9 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
     }
     if (fsGlobal <= 0.0 || fabs(rem) <= fsGlobal * slackDistTol) {
         return;
+    }
+    if (retainApplied != nullptr) {
+        retainApplied[s] = dsRetain[s];                      // the slack's share of THIS distribution (write-back)
     }
     // OLF's ActivePowerDistribution.run RESETS every participant to its INITIAL target
     // (step.resetToInitialState) and adds back what that undid (previousStateInfo.previousMismatch()),
@@ -4273,6 +4276,8 @@ struct BatchSolverContext {
     DeviceBuf dDsMarginUp, dDsMarginDown;                  //   dependent per-bus margins, normalized in-kernel)
     double dsSlackMarginUp = 0.0, dsSlackMarginDown = 0.0; //   the slack's own margins (its retained share)
     DeviceBuf dDsRetain;
+    DeviceBuf dDsRetainApplied;                              // per scenario: dsRetain at the last check that FIRED,
+                                                             // NaN while no distribution happened in this solve
     // Per-GENERATOR participants (setBatchDsGenerators). OLF's water-fill participates and saturates
     // per generator — ParticipatingElement wraps an LfGenerator and step.run clamps each at its OWN
     // limits and REMOVES it — so a bus-level aggregate only reproduces OLF while nothing saturates.
@@ -4640,6 +4645,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
         }
         ctx->dsFactorSum = factorSum > 0 ? factorSum : 1.0;
         ctx->dDsRetain.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
+        ctx->dDsRetainApplied.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
     }
 
     // ---- cuDSS handle/config/data (shared by both solve paths) ----
@@ -5123,6 +5129,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
         if (ctx->nds > 0) {                                  // slack-retained share: 0 until frozen at the first pass
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsRetain.p, 0, nS * sizeof(double), ctx->stream));
+            {
+                std::vector<double> nanv(nS, std::numeric_limits<double>::quiet_NaN());
+                CUDA_CHECK(cudaMemcpyAsync(ctx->dDsRetainApplied.p, nanv.data(), nS * sizeof(double), cudaMemcpyHostToDevice, ctx->stream));
+                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            }
             if (ctx->ngen > 0 && ctx->dGenCum.p) {           // per-solve too: the write-back reads it even when
                 CUDA_CHECK(cudaMemsetAsync(ctx->dGenCum.p, 0,   // the DS phase never fired (NaN targetP otherwise)
                         static_cast<size_t>(ctx->ngen) * nS * sizeof(double), ctx->stream));
@@ -5887,8 +5898,16 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             ssq += f0[i] * f0[i];
             inf = fmax(inf, fabs(f0[i]));
         }
-        std::fprintf(stderr, "[DS-CONV] outer=%d innerNewtonIters=%d ||F||2=%.9e ||F||inf=%.9e\n",
-                     outer, gLastPassIters, std::sqrt(ssq), inf);
+        double slackM = std::numeric_limits<double>::quiet_NaN();
+        double retain0 = std::numeric_limits<double>::quiet_NaN();
+        if (ctx->dsSlackPhiRow >= 0) {
+            std::vector<double> q0(n);
+            CUDA_CHECK(cudaMemcpy(q0.data(), ctx->dQbuf.as<double>(), n * sizeof(double), cudaMemcpyDeviceToHost));
+            slackM = q0[ctx->dsSlackPhiRow] - ctx->dsSlackTargetP;
+            if (ctx->dDsRetain.p) CUDA_CHECK(cudaMemcpy(&retain0, ctx->dDsRetain.p, sizeof(double), cudaMemcpyDeviceToHost));
+        }
+        std::fprintf(stderr, "[DS-CONV] outer=%d innerNewtonIters=%d ||F||2=%.9e ||F||inf=%.9e slackMismatchFromAnchor=%.9f retain=%.9f rlActive=%d\n",
+                     outer, gLastPassIters, std::sqrt(ssq), inf, slackM, retain0, (int) rlActive[0]);
     }
     int loopKind = loopOrder[loopIdx];
     if (loopKind >= LOOP_HOST_SVC && loopKind <= LOOP_HOST_SHUNT) {   // any LOOP_HOST_* kind: pause for the host
@@ -5965,6 +5984,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dBusGenStart.as<int>(), ctx->dBusGenEnd.as<int>(),
                     ctx->dGenCum.as<double>(), ctx->dGenRemoved.as<char>(), ctx->dGenFactorWork.as<double>(),
                     ctx->dTarget.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>(),
+                    ctx->dDsRetainApplied.as<double>(),
                     getenv("OLF_GPU_DS_DEBUG") != nullptr ? 1 : 0);
         }
     } else {                                               // reactive-limits outer loop: switch PV->PQ over Q limit
@@ -6950,11 +6970,11 @@ extern "C" JNIEXPORT jdoubleArray JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchDsRetain(
         JNIEnv* env, jclass, jlong handle) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
-    if (ctx == nullptr || !ctx->dDsRetain.p) {
+    if (ctx == nullptr || !ctx->dDsRetainApplied.p) {
         return nullptr;
     }
     std::vector<double> host(ctx->nScenarios);
-    cudaMemcpy(host.data(), ctx->dDsRetain.p, ctx->nScenarios * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(host.data(), ctx->dDsRetainApplied.p, ctx->nScenarios * sizeof(double), cudaMemcpyDeviceToHost);
     jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(ctx->nScenarios));
     env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(ctx->nScenarios), host.data());
     return out;

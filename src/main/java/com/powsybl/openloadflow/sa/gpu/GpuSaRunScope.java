@@ -70,9 +70,15 @@ final class GpuSaRunScope {
         // DISABLED (no DISTR_RHO coupling ever activates), so a shared group is purely the
         // one-tap-at-a-time round-robin over the merged controllers — ported in
         // GpuBatchIncrementalTvc.orchestrate, grouped by the MAIN control's controlled bus.
+        // 2026-09-15: generator voltage controls UNDER the transformer-controlled level no longer gate the
+        // run — the in-kernel phase runs OLF's GeneratorVoltageControlManager freeze/unfreeze and the
+        // fixTransformerVoltageControls check, as long as every candidate is a LOCAL controller and every
+        // transformer controller has a tap table (generatorFreezeSupported).
         boolean transformerControlBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL
-                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
+                && (GpuBatchTransformerControl.transformerControlSupported(lfNetwork)
+                        || GpuBatchTransformerControl.generatorFreezeSupported(lfNetwork,
+                                olfGuardParams.getGeneratorVoltageControlMinNominalVoltage()));
         // INCREMENTAL (OLF's default TVC mode): the DEVICE runs the loop's decisions per scenario around
         // batched solves with in-kernel dV/drho sensitivities (GpuBatchIncrementalTvc); stage-1 scope is
         // the same as the continuous port (no generator VC under the transformer-controlled level).
@@ -328,7 +334,8 @@ final class GpuSaRunScope {
                                 olfParams.getMaxActivePowerMismatch(), olfParams.getMaxReactivePowerMismatch(),
                                 olfParams.getMaxVoltageMismatch(), olfParams.getMaxAngleMismatch(),
                                 olfParams.getMaxRatioMismatch(), olfParams.getMaxSusceptanceMismatch())
-                        : null);
+                        : null,
+                olfGuardParams.getGeneratorVoltageControlMinNominalVoltage());
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
     }

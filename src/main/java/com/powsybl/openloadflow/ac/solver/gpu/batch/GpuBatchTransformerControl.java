@@ -18,6 +18,9 @@ import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.LfVscConverterStation;
+import com.powsybl.openloadflow.network.TransformerVoltageControl;
+import com.powsybl.openloadflow.network.VoltageControl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -164,6 +167,214 @@ public final class GpuBatchTransformerControl {
                     + "exist under the transformer-controlled nominal voltage ({} kV) — CPU fallback", maxControlledNominalV);
         }
         return !genUnderThreshold;
+    }
+
+    /** OLF's GeneratorVoltageControlManager, static part: the min nominal voltage limit (the override,
+     *  or the max nominal voltage over the transformer-controlled buses whose controllers all connect two
+     *  DIFFERENT voltage levels — Double.MIN_VALUE when none). */
+    static double minNominalVoltageLimit(LfNetwork network, double override) {
+        if (override >= 0) {
+            return override;
+        }
+        double limit = Double.MIN_VALUE;
+        for (LfBus bus : network.getBuses()) {
+            if (bus.isDisabled() || !bus.isTransformerVoltageControlled()) {
+                continue;
+            }
+            TransformerVoltageControl tvc = bus.getTransformerVoltageControl().orElse(null);
+            if (tvc == null) {
+                continue;
+            }
+            boolean valid = true;
+            for (LfBranch branch : tvc.getControllerElements()) {
+                if (!branch.isConnectedAtBothSides() || branch.getBus1().getNominalV() == branch.getBus2().getNominalV()) {
+                    valid = false;
+                }
+            }
+            if (valid) {
+                limit = Math.max(limit, bus.getNominalV());
+            }
+        }
+        return limit;
+    }
+
+    /** OLF's GeneratorVoltageControlManager.hasStepUpTransformers, verbatim. */
+    static boolean hasStepUpTransformers(LfBus bus, double limit) {
+        if (bus.getGenerators().stream().anyMatch(LfVscConverterStation.class::isInstance)) {
+            return true;
+        }
+        if (bus.getBranches().stream().anyMatch(b -> b.getVoltageControl().isPresent())) {
+            return false;
+        }
+        double startingNominalVoltage = bus.getNominalV();
+        double minConnectedVoltageLevel = bus.getBranches().stream()
+                .filter(LfBranch::isConnectedAtBothSides)
+                .mapToDouble(b -> Math.max(b.getBus1().getNominalV(), b.getBus2().getNominalV()))
+                .min()
+                .orElse(-1);
+        return minConnectedVoltageLevel > startingNominalVoltage && minConnectedVoltageLevel > limit;
+    }
+
+    /** The generator voltage controls OLF's manager would freeze under the transformer-controlled level:
+     *  the controller buses (in merged order) of every generator-controlled bus at or under the limit that
+     *  have no step-up exemption. Null when one of them is a REMOTE controller (its row is a DISTR_Q share,
+     *  not a V identity — out of the in-kernel scope). */
+    private static List<LfBus> freezeCandidates(LfNetwork network, double limit) {
+        List<LfBus> out = new ArrayList<>();
+        for (LfBus bus : network.getControlledBuses(VoltageControl.Type.GENERATOR)) {
+            if (bus.getNominalV() > limit) {
+                continue;
+            }
+            var vc = bus.getGeneratorVoltageControl().orElse(null);
+            if (vc == null) {
+                continue;
+            }
+            for (LfBus controller : vc.getMergedControllerElements()) {
+                if (hasStepUpTransformers(controller, limit)) {
+                    continue;
+                }
+                if (controller != bus) {
+                    return null;
+                }
+                out.add(controller);
+            }
+        }
+        return out;
+    }
+
+    /** True when the AFTER_GENERATOR loop's generator freeze can run IN-KERNEL on this network: every
+     *  candidate is a LOCAL controller and every transformer controller has a tap table (the kernel
+     *  phase owns the control). Complements {@link #transformerControlSupported} (no candidates at all). */
+    public static boolean generatorFreezeSupported(LfNetwork network, double minNominalVOverride) {
+        double limit = minNominalVoltageLimit(network, minNominalVOverride);
+        if (freezeCandidates(network, limit) == null) {
+            return false;
+        }
+        return network.<LfBranch>getControllerElements(VoltageControl.Type.TRANSFORMER).stream()
+                .allMatch(b -> tapModels(b.getPiModel()).length > 0);
+    }
+
+    /** The GeneratorVoltageControlManager + fixTransformerVoltageControls tables of the in-kernel phase. */
+    public record FreezeTables(int[] vRow, double[] loadQ, int[] busNum, int[] memFixPtr, int[] memFixRow) {
+        public boolean hasCandidates() {
+            return vRow.length > 0;
+        }
+    }
+
+    /** Build the freeze tables: per candidate its controlled-bus V row and load Q (OLF freezes the
+     *  generation target at {@code q.eval()}, the NET injection — the row target is that minus the load);
+     *  per member the V rows of the generator-controlled buses in its not-controlled side's component with
+     *  every transformer controller edge removed (OLF removes the ENABLED ones and the contingency's
+     *  branches — at the base neither exists yet; the kernel then asks which of those buses is still ON).
+     *  Null when a candidate is a remote controller. */
+    public static FreezeTables buildFreezeTables(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+                                                 List<TransformerController> tcs, double minNominalVOverride) {
+        double limit = minNominalVoltageLimit(network, minNominalVOverride);
+        List<LfBus> candidates = freezeCandidates(network, limit);
+        if (candidates == null) {
+            return null;
+        }
+        java.util.Map<Integer, Integer> busVRows = new java.util.HashMap<>();
+        for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
+            if (v.getType() == AcVariableType.BUS_V) {
+                busVRows.put(v.getElementNum(), v.getRow());
+            }
+        }
+        int[] vRow = new int[candidates.size()];
+        double[] loadQ = new double[candidates.size()];
+        int[] busNum = new int[candidates.size()];
+        for (int c = 0; c < candidates.size(); c++) {
+            LfBus bus = candidates.get(c);
+            Integer row = busVRows.get(bus.getNum());
+            if (row == null) {
+                return null;
+            }
+            vRow[c] = row;
+            loadQ[c] = bus.getLoadTargetQ();
+            busNum[c] = bus.getNum();
+        }
+        int nMembers = 0;
+        for (TransformerController tc : tcs) {
+            nMembers += tc.members().length;
+        }
+        int[] memFixPtr = new int[nMembers + 1];
+        List<Integer> memFixRow = new ArrayList<>();
+        var connectivity = network.getConnectivity();
+        connectivity.startTemporaryChanges();
+        try {
+            for (LfBranch branch : network.getBranches()) {
+                if (!branch.isDisabled() && branch.isVoltageController() && branch.getBus1() != null && branch.getBus2() != null) {
+                    connectivity.removeEdge(branch);
+                }
+            }
+            int m = 0;
+            for (TransformerController tc : tcs) {
+                for (Member mem : tc.members()) {
+                    memFixPtr[m++] = memFixRow.size();
+                    LfBranch branch = network.getBranch(mem.branchNum());
+                    var vc = branch != null ? branch.getVoltageControl().orElse(null) : null;
+                    java.util.Collection<LfBus> component;
+                    if (vc == null) {
+                        component = network.getBuses();       // defensive: OLF skips the check (never disables)
+                    } else if (vc.getControlledBus() == branch.getBus1()) {
+                        component = connectivity.getConnectedComponent(branch.getBus2());
+                    } else if (vc.getControlledBus() == branch.getBus2()) {
+                        component = connectivity.getConnectedComponent(branch.getBus1());
+                    } else {
+                        component = network.getBuses();
+                    }
+                    for (LfBus bus : component) {
+                        Integer row = bus.isGeneratorVoltageControlled() ? busVRows.get(bus.getNum()) : null;
+                        if (row != null) {
+                            memFixRow.add(row);
+                        }
+                    }
+                }
+            }
+            memFixPtr[nMembers] = memFixRow.size();
+        } finally {
+            connectivity.undoTemporaryChanges();
+        }
+        return new FreezeTables(vRow, loadQ, busNum, memFixPtr, memFixRow.stream().mapToInt(Integer::intValue).toArray());
+    }
+
+    /** Install the freeze tables on a context whose discrete TVC tables {@link #uploadToDevice} just
+     *  installed (AFTER_GENERATOR only). */
+    public static void uploadFreeze(long handle, FreezeTables fz) {
+        if (fz == null) {
+            GpuAcNewtonSolver.setBatchDiscreteTvcFreeze(handle, null, null, null, null);
+            return;
+        }
+        GpuAcNewtonSolver.setBatchDiscreteTvcFreeze(handle, fz.vRow(), fz.loadQ(), fz.memFixPtr(), fz.memFixRow());
+        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            System.err.printf("TVD_FREEZE_UPLOAD nCandidates=%d fixRows=%d%n", fz.vRow().length, fz.memFixRow().length);
+        }
+    }
+
+    /** Give the freeze state back to the network (batch-of-one): a frozen candidate is
+     *  {@code freezeGenerationTargetQAndDisableGeneratorVoltageControl(rowTarget + loadQ)} (OLF's
+     *  generation target is the net injection), an unfrozen one whose network state still shows OUR
+     *  freeze (control off, target frozen, no reactive-limit type) is re-enabled like
+     *  {@code enableGeneratorVoltageControlsUnderMaxControlledNominalVoltage}. */
+    public static void writeBackFreeze(LfNetwork network, FreezeTables fz, double[] state) {
+        if (fz == null || state == null) {
+            return;
+        }
+        for (int c = 0; c < fz.vRow().length && c * 2 + 1 < state.length; c++) {
+            LfBus bus = network.getBus(fz.busNum()[c]);
+            if (bus == null) {
+                continue;
+            }
+            boolean frozen = (int) state[c * 2] != 0;
+            if (frozen) {
+                if (bus.isGeneratorVoltageControlEnabled()) {
+                    bus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(state[c * 2 + 1] + fz.loadQ()[c]);
+                }
+            } else if (!bus.isGeneratorVoltageControlEnabled() && bus.isGenerationTargetQFrozen()
+                    && bus.getQLimitType().isEmpty()) {
+                bus.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(true);
+            }
+        }
     }
 
     /** Build the orchestrator's controller pack by TOGGLING each control on the shared equation

@@ -60,6 +60,7 @@ final class GpuBatchChunkSolver {
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
                                                List<GpuBatchTransformerControl.TransformerController> transformerControllers,
+                                               GpuBatchTransformerControl.FreezeTables tvdFreeze,
                                                List<GpuBatchIncrementalTvc.Controller> incrementalTvcControllers,
                                                List<GpuBatchIncrementalShuntVc.Controller> incrementalShuntControllers,
                                                List<GpuBatchSimpleShuntVc.Group> simpleShuntGroups,
@@ -86,7 +87,7 @@ final class GpuBatchChunkSolver {
                         dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
                         islandedRlByIndex, islandedHvdcsByIndex,
                         n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
-                        varType, transformerControllers, incrementalTvcControllers, incrementalShuntControllers,
+                        varType, transformerControllers, tvdFreeze, incrementalTvcControllers, incrementalShuntControllers,
                         simpleShuntGroups, incrementalFlowControllers, esContext, hvdcControllers, svcControllers,
                         monitoringControllers, continuousPhaseControllers, config);
                 return;
@@ -158,6 +159,7 @@ final class GpuBatchChunkSolver {
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
                                                List<GpuBatchTransformerControl.TransformerController> transformerControllers,
+                                               GpuBatchTransformerControl.FreezeTables tvdFreeze,
                                                List<GpuBatchIncrementalTvc.Controller> incrementalTvcControllers,
                                                List<GpuBatchIncrementalShuntVc.Controller> incrementalShuntControllers,
                                                List<GpuBatchSimpleShuntVc.Group> simpleShuntGroups,
@@ -220,6 +222,13 @@ final class GpuBatchChunkSolver {
                 && transformerControllers != null && !transformerControllers.isEmpty()) {
             tvdInKernel = GpuBatchTransformerControl.uploadToDevice(handle, transformerControllers,
                     config.simpleTransformerControl() ? 1 : 0, false);
+            if (tvdInKernel) {
+                // AFTER_GENERATOR: OLF's GeneratorVoltageControlManager freeze + fixTransformerVoltageControls
+                GpuBatchTransformerControl.uploadFreeze(handle, config.transformerControl() ? tvdFreeze : null);
+            } else if (tvdFreeze != null && tvdFreeze.hasCandidates()) {
+                throw new com.powsybl.commons.PowsyblException("GPU batch: the transformer voltage control needs the "
+                        + "in-kernel phase (generator freeze under the controlled level) but a control has no tap table");
+            }
         } else {
             GpuBatchTransformerControl.uploadToDevice(handle, null, 0, false);   // clears a cached context's table
         }

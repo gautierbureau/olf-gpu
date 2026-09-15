@@ -360,6 +360,16 @@ public final class GpuBatchedSecurityAnalysisSolver {
                             config.perEqCriteria().angle(), config.perEqCriteria().ratio(), config.perEqCriteria().b(),
                             config.perEqCriteria().eps())
                     : null;
+            List<GpuBatchTransformerControl.TransformerController> tvdControllers =
+                    config.transformerControl() || config.simpleTransformerControl()
+                            ? GpuBatchTransformerControl.buildTransformerControllers(network, equationSystem, targetVector, baseActivation,
+                                    baseTargets, elementMapper, config.tvcUseInitialTapPosition())
+                            : null;
+            // AFTER_GENERATOR: the generator freeze under the transformer-controlled level and the
+            // connectivity fix, for the in-kernel phase (null tables = no candidate needs a remote shape)
+            GpuBatchTransformerControl.FreezeTables tvdFreeze = config.transformerControl() && tvdControllers != null
+                    ? GpuBatchTransformerControl.buildFreezeTables(network, equationSystem, tvdControllers, config.genVcMinNominalV())
+                    : null;
             GpuBatchChunkSolver.solveQualifiedInChunks(batchedIndices, contingencies, elementMapper, gpuData, baseState,
                     baseTargets, baseActivation.rowMode(), plan.frozenRowsByIndex(), plan.frozenTargetsByIndex(), plan.genOutagesByIndex(),
                     plan.activePowerLossByIndex(),
@@ -369,10 +379,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     plan.islandedRlByIndex(), plan.islandedHvdcsByIndex(),
                     n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                     config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
-                    config.transformerControl() || config.simpleTransformerControl()
-                            ? GpuBatchTransformerControl.buildTransformerControllers(network, equationSystem, targetVector, baseActivation,
-                                    baseTargets, elementMapper, config.tvcUseInitialTapPosition())
-                            : null,
+                    tvdControllers, tvdFreeze,
                     config.incrementalTransformerControl()
                             ? GpuBatchIncrementalTvc.buildControllers(network, equationSystem, elementMapper)
                             : null,

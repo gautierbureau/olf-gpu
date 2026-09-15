@@ -507,6 +507,15 @@ public final class GpuAcNewtonSolver {
      *  layout {@code (s * nMembers + m) * 3} — null without the table. */
     public static native double[] readBatchDiscreteTvcState(long handle);
 
+    /** GeneratorVoltageControlManager tables for the AFTER_GENERATOR phase (after setBatchDiscreteTvc): the
+     *  freeze candidates (controller-bus V row, load Q) and fixTransformerVoltageControls' per-member
+     *  PV-candidate row lists (CSR [nMembers+1], null = no connectivity fix). Returns 1 when installed. */
+    public static native int setBatchDiscreteTvcFreeze(long handle, int[] fzVRow, double[] fzLoadQ, int[] memFixPtr, int[] memFixRow);
+
+    /** Per (scenario, freeze candidate): {frozen (0/1), the row target while frozen (generation − load Q)},
+     *  layout {@code (s * nFz + c) * 2} — null without candidates. */
+    public static native double[] readBatchDiscreteTvcFreeze(long handle);
+
     /** Install the WITH_GENERATOR shunt voltage-control tables for the in-kernel ShuntVoltageControl phase
      *  (OLF order 10); see GpuBatchSimpleShuntVc.uploadToDevice. Returns 1 when the kernel loop owns them. */
     @SuppressWarnings("java:S107")

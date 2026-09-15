@@ -737,8 +737,38 @@ state, so the device must not restart its machines from INITIAL against contexts
 CONTROL/COMPLETE (measured 2.2e-3 kV on the carrier-clamp base before the rejection was dropped).
 The host machines (`GpuBatchTransformerControl.orchestrate…`, `GpuBatchSimpleTvc`,
 `GpuBatchSimpleShuntVc.roundAndResolve`) stay for a control the upload refuses (a member without a tap
-table). Scope unchanged: no generator voltage control under the transformer-controlled level
-(`transformerControlSupported` — the GeneratorVoltageControlManager freeze is still not ported).
+table).
+
+**GeneratorVoltageControlManager + fixTransformerVoltageControls (same day, second commit).** The
+last AFTER_GENERATOR gate is gone: generator voltage controls under the transformer-controlled
+level are handled in-kernel. Java (`buildFreezeTables`) replicates the manager's static part —
+`minNominalVoltageLimit` (the `generatorVoltageControlMinNominalVoltage` override, else the max
+nominal voltage over the transformer-controlled buses whose controllers all join two different
+levels, `Double.MIN_VALUE` when none), the candidate controller buses (at or under the limit, no
+`hasStepUpTransformers` exemption; a REMOTE candidate keeps the CPU route, its row is a DISTR_Q
+share) with their controlled-bus V row and load Q, and per member the V rows of the generator-
+controlled buses in the not-controlled side's component with every transformer-controller edge
+removed (`LfNetwork.getConnectivity()` temporary changes). The kernel's INITIAL step, once needRun
+is known: every candidate whose row is still a V identity (mode 0/2 — an RL-pinned one is NOT frozen,
+like OLF's `isGeneratorVoltageControlEnabled` test) saves its mode/target and becomes a Q row at
+`qBuf − loadQ` (OLF freezes the generation target at `q.eval()`, the NET injection, so the row
+target is that minus the load); then each just-enabled member whose PV list holds no bus still in
+mode 0/2 is disabled again (frozen AND pinned buses count as off, exactly `fixTransformerVoltage
+Controls`); then the groups lay out. The COMPLETE transition restores the frozen rows
+(`enableGeneratorVoltageControlsUnderMaxControlledNominalVoltage`). RL ignores a frozen row (mode 1,
+limit type 0) as OLF ignores a bus without QLimitType. Base write-back:
+`freezeGenerationTargetQAndDisableGeneratorVoltageControl(target + loadQ)` while frozen,
+`setGeneratorVoltageControlEnabledAndRecomputeTargetQ(true)` once unfrozen (only a bus whose network
+state shows OUR freeze: control off, target frozen, no QLimitType — the RL write-back keys on the
+QLimitType and never touches it). `getMaxControlledNominalVoltageOverride()` is the second OLF
+getter of the day. Approximations, documented: the component lists are the BASE topology with ALL
+controller edges removed (OLF removes the ENABLED ones plus the contingency's branches per solve),
+so a contingency splitting a not-controlled-side component, or an in-band group whose branch is
+the only path to the PV buses, can differ. Tests: `deviceTransformerControlGeneratorFreezeMatchesCpu`
+(2T2wt at 150 kV: G1 frozen and the controls disabled by the fix; 90 kV / auto: no freeze) and
+`deviceSeveralTvcGeneratorFreezeMatchesCpu` (OLF's four-bus network: auto freezes the 90 kV
+generators; 230 kV freezes all and the fix disables the three controls), 1e-12, count asserted,
+driver off and on.
 
 ### #46 — Continuous PhaseControl in the phase phase (landed 2026-09-15)
 

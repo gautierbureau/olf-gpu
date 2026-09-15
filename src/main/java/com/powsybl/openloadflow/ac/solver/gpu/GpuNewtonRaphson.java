@@ -228,6 +228,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         if (tvdOwned && tvdCtls != null) {
             com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.writeBack(network, tvdCtls,
                     GpuAcNewtonSolver.readBatchDiscreteTvcState(handle));
+            if (tvdFreeze != null && tvdFreeze.hasCandidates()) {
+                com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.writeBackFreeze(network, tvdFreeze,
+                        GpuAcNewtonSolver.readBatchDiscreteTvcFreeze(handle));
+            }
         }
         if (svdOwned && svdGroups != null) {
             com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSimpleShuntVc.writeBack(network, svdGroups,
@@ -434,6 +438,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private boolean cphOwned;
     private List<com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.TransformerController> tvdCtls;
     private boolean tvdOwned;
+    private com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.FreezeTables tvdFreeze;
     private List<com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSimpleShuntVc.Group> svdGroups;
     private boolean svdOwned;
     /** The host-loop bits the CURRENT solve actually pauses for (in-kernel phases clear theirs). */
@@ -763,6 +768,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             cphOwned = false;
             tvdCtls = null;
             tvdOwned = false;
+            tvdFreeze = null;
             svdGroups = null;
             svdOwned = false;
             if (driverOuterLoops) {
@@ -886,6 +892,19 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     invalidation.activationDirty = ad;
                     tvdOwned = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.uploadToDevice(
                             handle, tvdCtls, tvcSimple != null ? 1 : 0, tvcSimple != null);
+                    if (tvdOwned && tvcAfterGen instanceof com.powsybl.openloadflow.ac.outerloop.TransformerVoltageControlOuterLoop tag) {
+                        // GeneratorVoltageControlManager: the generator controls under the transformer-controlled
+                        // level freeze while the transformers act; a REMOTE candidate is out of the kernel's
+                        // scope — the host-paused OLF loop keeps the slot then
+                        tvdFreeze = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.buildFreezeTables(
+                                network, equationSystem, tvdCtls, tag.getMaxControlledNominalVoltageOverride());
+                        if (tvdFreeze == null) {
+                            com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.uploadToDevice(handle, null, 0, false);
+                            tvdOwned = false;
+                        } else {
+                            com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.uploadFreeze(handle, tvdFreeze);
+                        }
+                    }
                     if (tvdOwned) {
                         hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_TVC - GpuAcNewtonSolver.HOST_LOOP_SVC));
                     }

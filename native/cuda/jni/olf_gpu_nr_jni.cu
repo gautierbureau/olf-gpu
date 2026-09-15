@@ -4396,6 +4396,16 @@ struct BatchSolverContext {
     DeviceBuf dTvdSaved, dTvdReject;                                               // per (scenario, delta row) / per scenario
     std::vector<int> hTvdMemElem, hTvdMemBaseTap, hTvdMemTapPtr;
     std::vector<double> hTvdTapData;
+    // GeneratorVoltageControlManager (AFTER_GENERATOR): generator VC controller buses under the max
+    // transformer-controlled nominal voltage are FROZEN at their current Q while the transformers act
+    // (freezeGenerationTargetQAndDisableGeneratorVoltageControl(q.eval()) — OLF's generation target is
+    // the NET injection, so the row target is eval − loadQ), re-enabled at COMPLETE; plus
+    // fixTransformerVoltageControls' PV-bus lists per member (the not-controlled side's component).
+    int nTvdFz = 0;
+    DeviceBuf dTvdFzVRow, dTvdFzLoadQ;                       // per candidate
+    DeviceBuf dTvdFzFrozen, dTvdFzSavedMode, dTvdFzSavedTarget;   // per (scenario, candidate)
+    DeviceBuf dTvdMemFixPtr, dTvdMemFixRow;                  // CSR member -> PV-candidate V rows of its component
+    bool tvdFixTables = false;
     // DISCRETE SHUNT VOLTAGE CONTROL — LOOP_SVD_KERNEL (OLF order 10): ShuntVoltageControlOuterLoop
     // (WITH_GENERATOR): control ON for the first solve, LfShuntImpl.dispatchB at the first check.
     int nSvd = 0, nSvdGroups = 0, nSvdDelta = 0, nSvdSubs = 0, svdEntryOn = 0;
@@ -5496,6 +5506,10 @@ struct TvdTables {
     const double* memMin; const double* memMax; const double* memInit; const double* tapData;
     int* scnStep; int* grpStep; double* grpShMin; double* grpShMax; double* grpShInit;
     int* memState; int* memTap; double* memRoundFrom; double* saved; char* reject;
+    // generator freeze + connectivity fix (AFTER_GENERATOR only)
+    int nFz, hasFix;
+    const int* fzVRow; const double* fzLoadQ; const int* memFixPtr; const int* memFixRow;
+    int* fzFrozen; int* fzSavedMode; double* fzSavedTarget;
 };
 
 // OLF PiModelArray.roundR1ToClosestTap: ClosestTapPositionFinder starts at the CURRENT (base) tap and
@@ -5589,7 +5603,7 @@ __global__ void tvdEntryBatch(TvdTables T, int nScenarios, int n, int nElements,
 
 // One thread per scenario (OLF keeps ONE step for all controls of a run).
 __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements, const char* disabled, const char* rlActive,
-                              int* mode, double* target, double* x, char* switched) {
+                              const double* qBuf, int* mode, double* target, double* x, char* switched) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios || !rlActive[s]) return;
     size_t sn = (size_t) s * n;
@@ -5646,12 +5660,45 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
             T.grpShMin[sg] = sumMin / alive;
             T.grpShMax[sg] = sumMax / alive;
             T.grpShInit[sg] = (T.grpShMin[sg] * a + T.grpShMax[sg] * b) / alive;
-            tvdLayoutGroup(T, s, n, nElements, g, disabled, mode, target, x);
             needRun = true;
         }
         if (!needRun) {
             T.scnStep[s] = 2;                                // every control in band: COMPLETE, STABLE
             return;
+        }
+        // GeneratorVoltageControlManager.disableGeneratorVoltageControlsUnderMaxControlledNominalVoltage:
+        // every candidate whose control is ON right now (not RL-pinned) freezes at its current Q
+        for (int c = 0; c < T.nFz; c++) {
+            size_t sr = sn + T.fzVRow[c];
+            size_t sc = (size_t) s * T.nFz + c;
+            if (T.fzFrozen[sc] || (mode[sr] != 0 && mode[sr] != 2)) continue;
+            T.fzSavedMode[sc] = mode[sr];
+            T.fzSavedTarget[sc] = target[sr];
+            mode[sr] = 1;
+            target[sr] = qBuf[sr] - T.fzLoadQ[c];            // generationTargetQ = q.eval(); row target = gen − load
+            T.fzFrozen[sc] = 1;
+        }
+        // LfNetwork.fixTransformerVoltageControls: a just-enabled controller whose not-controlled side's
+        // component holds no ENABLED generator voltage control (frozen and pinned buses count as off)
+        // is disabled again
+        if (T.hasFix) {
+            for (int g = 0; g < T.nG; g++) {
+                for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
+                    size_t sm = (size_t) s * T.nM + m;
+                    if (T.memState[sm] != 1) continue;
+                    bool pv = false;
+                    for (int k = T.memFixPtr[m]; k < T.memFixPtr[m + 1] && !pv; k++) {
+                        int mr = mode[sn + T.memFixRow[k]];
+                        pv = mr == 0 || mr == 2;
+                    }
+                    if (!pv) T.memState[sm] = 0;
+                }
+            }
+        }
+        for (int g = 0; g < T.nG; g++) {
+            bool any = false;
+            for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) any |= T.memState[(size_t) s * T.nM + m] == 1;
+            if (any) tvdLayoutGroup(T, s, n, nElements, g, disabled, mode, target, x);
         }
         T.scnStep[s] = 1;
         switched[s] = 1;
@@ -5727,6 +5774,15 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
             touched = true;
         }
         if (touched) tvdLayoutGroup(T, s, n, nElements, g, disabled, mode, target, x);
+    }
+    // enableGeneratorVoltageControlsUnderMaxControlledNominalVoltage: the frozen controllers resume
+    for (int c = 0; c < T.nFz; c++) {
+        size_t sc = (size_t) s * T.nFz + c;
+        if (!T.fzFrozen[sc]) continue;
+        size_t sr = sn + T.fzVRow[c];
+        mode[sr] = T.fzSavedMode[sc];
+        target[sr] = T.fzSavedTarget[sc];
+        T.fzFrozen[sc] = 0;
     }
     T.scnStep[s] = 2;
     switched[s] = 1;                                         // OLF controlStep: UNSTABLE in any case (the COMPLETE solve)
@@ -5864,6 +5920,10 @@ static TvdTables tvdTables(BatchSolverContext* ctx) {
     T.grpShMin = ctx->dTvdGrpShMin.as<double>(); T.grpShMax = ctx->dTvdGrpShMax.as<double>(); T.grpShInit = ctx->dTvdGrpShInit.as<double>();
     T.memState = ctx->dTvdMemState.as<int>(); T.memTap = ctx->dTvdMemTap.as<int>(); T.memRoundFrom = ctx->dTvdMemRoundFrom.as<double>();
     T.saved = ctx->dTvdSaved.as<double>(); T.reject = ctx->dTvdReject.as<char>();
+    T.nFz = ctx->nTvdFz; T.hasFix = ctx->tvdFixTables ? 1 : 0;
+    T.fzVRow = ctx->dTvdFzVRow.as<int>(); T.fzLoadQ = ctx->dTvdFzLoadQ.as<double>();
+    T.memFixPtr = ctx->dTvdMemFixPtr.as<int>(); T.memFixRow = ctx->dTvdMemFixRow.as<int>();
+    T.fzFrozen = ctx->dTvdFzFrozen.as<int>(); T.fzSavedMode = ctx->dTvdFzSavedMode.as<int>(); T.fzSavedTarget = ctx->dTvdFzSavedTarget.as<double>();
     return T;
 }
 
@@ -6173,6 +6233,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             CUDA_CHECK(cudaMemset(ctx->dTvdGrpShMax.p, 0, nsg * sizeof(double)));
             CUDA_CHECK(cudaMemset(ctx->dTvdGrpShInit.p, 0, nsg * sizeof(double)));
             CUDA_CHECK(cudaMemset(ctx->dTvdReject.p, 0, nS * sizeof(char)));
+            if (ctx->nTvdFz > 0) CUDA_CHECK(cudaMemset(ctx->dTvdFzFrozen.p, 0, static_cast<size_t>(nS) * ctx->nTvdFz * sizeof(int)));
             tvdEntryBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(tvdTables(ctx), nS, n, ctx->nElements, ctx->tvdEntryOn,
                     ctx->dDisabled.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
             CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -6706,7 +6767,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     auto tvdStep = [&]() {
         if (ctx->nTvd <= 0) return;
         tvdCheckBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(tvdTables(ctx), nS, n, ctx->nElements, ctx->dDisabled.as<char>(),
-                ctx->dRlActive.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dRlSwitched.as<char>());
+                ctx->dRlActive.as<char>(), ctx->dQbuf.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(),
+                ctx->dRlSwitched.as<char>());
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         std::vector<char> rej(nS);
         CUDA_CHECK(cudaMemcpy(rej.data(), ctx->dTvdReject.p, nS, cudaMemcpyDeviceToHost));
@@ -9321,6 +9383,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
         return 0;
     }
     ctx->nTvd = 0;
+    ctx->nTvdFz = 0;
+    ctx->tvdFixTables = false;
     if (jMemRhoRow == nullptr || env->GetArrayLength(jMemRhoRow) == 0) {
         return 0;
     }
@@ -9397,6 +9461,78 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->tvdEntryOn = entryOn;
     ctx->nTvd = nM;
     return 1;
+}
+
+/** GeneratorVoltageControlManager tables for the AFTER_GENERATOR phase installed by setBatchDiscreteTvc:
+ *  the freeze candidates (controller bus V row, load Q) and fixTransformerVoltageControls' per-member
+ *  PV-candidate row lists (CSR, [nM+1]; null = no connectivity fix). Returns 1 when installed. */
+extern "C" JNIEXPORT jint JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDiscreteTvcFreeze(
+        JNIEnv* env, jclass, jlong handle, jintArray jFzVRow, jdoubleArray jFzLoadQ, jintArray jMemFixPtr, jintArray jMemFixRow) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || ctx->nTvd <= 0) {
+        return 0;
+    }
+    auto readI = [&](jintArray a, std::vector<int>& v) {
+        v.resize(env->GetArrayLength(a));
+        env->GetIntArrayRegion(a, 0, static_cast<jsize>(v.size()), v.data());
+    };
+    std::vector<int> vRow, fixPtr, fixRow;
+    std::vector<double> loadQ;
+    if (jFzVRow != nullptr) {
+        readI(jFzVRow, vRow);
+        loadQ.resize(env->GetArrayLength(jFzLoadQ));
+        env->GetDoubleArrayRegion(jFzLoadQ, 0, static_cast<jsize>(loadQ.size()), loadQ.data());
+    }
+    int nFz = static_cast<int>(vRow.size());
+    if (nFz > 0) {
+        ctx->dTvdFzVRow.upload(vRow.data(), nFz * sizeof(int));
+        ctx->dTvdFzLoadQ.upload(loadQ.data(), nFz * sizeof(double));
+        size_t nsc = static_cast<size_t>(ctx->nScenarios) * nFz;
+        ctx->dTvdFzFrozen.ensure(nsc * sizeof(int));
+        ctx->dTvdFzSavedMode.ensure(nsc * sizeof(int));
+        ctx->dTvdFzSavedTarget.ensure(nsc * sizeof(double));
+    }
+    ctx->nTvdFz = nFz;
+    ctx->tvdFixTables = false;
+    if (jMemFixPtr != nullptr) {
+        readI(jMemFixPtr, fixPtr);
+        readI(jMemFixRow, fixRow);
+        if (static_cast<int>(fixPtr.size()) == ctx->nTvd + 1) {
+            ctx->dTvdMemFixPtr.upload(fixPtr.data(), fixPtr.size() * sizeof(int));
+            ctx->dTvdMemFixRow.upload(fixRow.data(), std::max<size_t>(fixRow.size(), 1) * sizeof(int));
+            ctx->tvdFixTables = true;
+        }
+    }
+    return 1;
+}
+
+/** Per (scenario, freeze candidate): {frozen (0/1), the row target while frozen (gen − load)} — layout
+ *  {@code (s * nFz + c) * 2}; null without candidates. */
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchDiscreteTvcFreeze(
+        JNIEnv* env, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || ctx->nTvd <= 0 || ctx->nTvdFz <= 0 || !ctx->dTvdFzFrozen.p) {
+        return nullptr;
+    }
+    int n = ctx->n;
+    size_t cnt = static_cast<size_t>(ctx->nTvdFz) * ctx->nScenarios;
+    std::vector<int> fz(cnt), vrow(ctx->nTvdFz);
+    std::vector<double> tgt(static_cast<size_t>(n) * ctx->nScenarios), out(cnt * 2);
+    cudaMemcpy(fz.data(), ctx->dTvdFzFrozen.p, cnt * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(vrow.data(), ctx->dTvdFzVRow.p, vrow.size() * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(tgt.data(), ctx->dTarget.p, tgt.size() * sizeof(double), cudaMemcpyDeviceToHost);
+    for (int s = 0; s < ctx->nScenarios; s++) {
+        for (int c = 0; c < ctx->nTvdFz; c++) {
+            size_t i = static_cast<size_t>(s) * ctx->nTvdFz + c;
+            out[i * 2] = fz[i];
+            out[i * 2 + 1] = tgt[static_cast<size_t>(s) * n + vrow[c]];
+        }
+    }
+    jdoubleArray res = env->NewDoubleArray(static_cast<jsize>(out.size()));
+    env->SetDoubleArrayRegion(res, 0, static_cast<jsize>(out.size()), out.data());
+    return res;
 }
 
 /** Per (scenario, member): {state (0 off, 1 continuous, 2 fixed), tap index, the r1 fed to the

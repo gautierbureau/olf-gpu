@@ -1164,6 +1164,72 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 "the carrier-clamp scenario batches in-kernel (the mode scan re-picks the carrier)");
     }
 
+    /** AFTER_GENERATOR with generator voltage controls UNDER the transformer-controlled level (OLF's
+     *  GeneratorVoltageControlManager): with the min nominal voltage forced above G1's level the
+     *  generator freezes at its current Q while the transformers act and fixTransformerVoltageControls
+     *  then disables the controls (no PV bus left on the not-controlled side); with the automatic
+     *  limit (33 kV) nothing freezes. Both were a whole-run CPU gate; now the in-kernel phase runs
+     *  them, batched at 1e-12 with the count asserted. */
+    @org.junit.jupiter.api.Test
+    void deviceTransformerControlGeneratorFreezeMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        for (double minNominalV : new double[] {150, -1, 90}) {
+            Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWith2T2wt();
+            var t2wt = network.getTwoWindingsTransformer("T2wT1");
+            var t2wt2 = network.getTwoWindingsTransformer("T2wT2");
+            t2wt.getRatioTapChanger().setTargetDeadband(0).setRegulating(true).setTapPosition(3)
+                    .setRegulationTerminal(t2wt.getTerminal2()).setTargetV(34.0);
+            t2wt2.getRatioTapChanger().setTargetDeadband(0).setRegulating(true).setTapPosition(0)
+                    .setRegulationTerminal(t2wt2.getTerminal2()).setTargetV(34.0);
+            com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+            String bis = l0.getId() + "_BIS";
+            network.newLine().setId(bis)
+                    .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                    .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                    .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
+            List<Contingency> ctgs = List.of(new Contingency(bis, new BranchContingency(bis)),
+                    new Contingency(l0.getId(), new BranchContingency(l0.getId())));
+            com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                    .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+            com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                    .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL)
+                    .setGeneratorVoltageControlMinNominalVoltage(minNominalV);
+            assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+            assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                    "generator freeze under the controlled level must batch in-kernel (minNominalV=" + minNominalV + ")");
+        }
+    }
+
+    /** OLF's testGeneratorVoltageControlMinNominalVoltage network (several transformer voltage controls,
+     *  generators at 90 kV): the automatic limit freezes the 90 kV generators while three transformers act;
+     *  forcing the limit to 230 kV freezes every generator and fixTransformerVoltageControls disables all
+     *  three controls. Batched at 1e-12 in both settings. */
+    @org.junit.jupiter.api.Test
+    void deviceSeveralTvcGeneratorFreezeMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        for (double minNominalV : new double[] {-1, 230}) {
+            Network network = com.powsybl.openloadflow.network.FourBusNetworkFactory.createWithSeveralTransformerVoltageControls();
+            com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+            String bis = l0.getId() + "_BIS";
+            network.newLine().setId(bis)
+                    .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                    .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                    .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
+            List<Contingency> ctgs = List.of(new Contingency(bis, new BranchContingency(bis)),
+                    new Contingency(l0.getId(), new BranchContingency(l0.getId())));
+            com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                    .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+            com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                    .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL)
+                    .setGeneratorVoltageControlMinNominalVoltage(minNominalV);
+            assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+            assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                    "generator freeze must batch in-kernel (minNominalV=" + minNominalV + ")");
+        }
+    }
+
     /** useInitialTapPosition SHARED-ratio semantics (OLF TransformerRatioManager, ported to the
      *  machine 2026-09-07): T2wT2 starts at a DIFFERENT tap so the spread-preserving remap is
      *  non-trivial (group-averaged bounds + normalized-headroom initial; each member's continuous

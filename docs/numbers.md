@@ -304,9 +304,32 @@ loops configured, 69,591,040 rows, end-to-end ms/step:
 | 4 | 2.39 | 1.44 | x1.66 | 0.97 |
 | 8 | 1.97 | 1.39 | x1.42 | 0.74 |
 
-The GPU arm is ahead at every thread count, but the margin narrows, and that is the expected shape:
-emission parallelizes on both arms, while the part only the GPU arm shortens is serialized by the
-device lock and fragmented by partitioning into smaller chunks. Per the standing comparison rule the
-honest headline is the mono-thread GPU against the 8-thread CPU: 2.61 against 1.97 ms/step, so on
-this plan the GPU arm needs about two host threads to match a fully threaded CPU, and four to beat
-it.
+The GPU arm is ahead at every thread count, but the margin NARROWS as threads are added, and the
+4-to-8 step buys it almost nothing: 1.44 to 1.39 while the CPU arm goes 2.39 to 1.97. That is the
+signature of a serialization floor, and the floor was the device lock: a chunk's whole device
+section sat in one global critical section, about 0.6 ms/step against a 1.39 ms/step wall.
+
+#### The same sweep with the lock narrowed to the analysis phase (2026-09-15)
+
+Every context owns its cuDSS handle and its CUDA stream, and factorization and solve on distinct
+handles run concurrently. Only the analysis phase and the handle lifecycle share state between
+handles, so the exclusion moved into the native layer around exactly those calls, and the chunk
+solve now runs unlocked. Same plan, same machine, but a slower session for the host arm, so read the
+ratios and the scaling rather than comparing absolute ms against the table above:
+
+| threads | CPU | GPU | ratio | device section |
+|---|---|---|---|---|
+| 1 | 6.54 to 6.75 | 3.23 to 3.35 | x2.0 | 0.49 |
+| 4 | 2.33 | 1.28 | x1.82 | 0.30 |
+| 8 | 1.89 to 2.28 | 0.99 to 1.06 | x1.9 to x2.15 | 0.35 to 0.40 |
+
+Two things changed. The GPU arm now scales 3.2x from 1 to 8 threads where it scaled 1.9x before, and
+the 4-to-8 step is worth 24% instead of 3%. And the ratio no longer collapses as threads are added:
+it holds near x1.9 across the sweep instead of decaying from x2.30 to x1.42. The device section per
+step also FALLS as threads are added, from 0.49 to about 0.37, which is the concurrency that the
+lock used to forbid.
+
+Per the standing comparison rule the honest headline is the mono-thread GPU against the 8-thread CPU:
+3.29 against 1.89 ms/step. The GPU arm still needs about two host threads to match a fully threaded
+CPU on this plan. What the narrowing bought is that adding threads now helps it as much as it helps
+the CPU.

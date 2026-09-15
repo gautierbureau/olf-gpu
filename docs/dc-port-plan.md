@@ -1101,12 +1101,27 @@ emission, and that is host work identical on both arms. The mechanism to paralle
 exists: OLF partitions the step range over `threadCount` threads, each with its own writer. The GPU
 engine now runs under that unchanged, with one addition.
 
-`GpuDcSolver.DEVICE_LOCK` is a process-wide `ReentrantLock` held around engine creation, `solveBatch`
-and `close`. cuDSS's analysis phase is not thread-safe across host threads: four partition threads
-each creating an engine segfaults the JVM inside `libcudss`. Under the lock the device work
-serializes while the set-point walking and the row emission - the parts that actually parallelize -
-run concurrently. `GpuTimeSeriesDcEngineTest.matchesStockEngineOverPartitions` is the gate: the same
-plan at `threadCount = 4`, rows compared as a sorted multiset because partitions interleave.
+cuDSS's analysis phase is not thread-safe across host threads: four partition threads each creating
+an engine segfaults the JVM inside `libcudss`. The first fix was a process-wide Java lock around
+engine creation, the whole chunk solve and close. It stopped the crash and cost most of the
+threading: the device section became a global critical section, and the sweep showed it - 4 to 8
+threads moved the GPU arm 1.44 to 1.39 ms/step while the CPU arm moved 2.39 to 1.97.
+
+The exclusion is now where it belongs. Every context owns its cuDSS handle and its CUDA stream, and
+factorization and solve on distinct handles run concurrently; it is the analysis phase, and the
+handle lifecycle around it, that touch state the library shares between handles. So the native layer
+holds a `std::mutex` around exactly those calls - both `CUDSS_PHASE_ANALYSIS` sites, `cudssCreate`
+and the destructor - and the chunk solve runs unlocked. Analysis happens once per context, so the
+guard costs nothing on the hot path, and a future caller cannot forget it.
+
+The result: the GPU arm scales 3.2x from 1 to 8 threads instead of 1.9x, and its ratio over the CPU
+arm holds near x1.9 across the sweep instead of decaying from x2.30 to x1.42. The device section per
+step falls as threads are added, which is the concurrency the lock forbade.
+
+`GpuTimeSeriesDcEngineTest.matchesStockEngineOverPartitions` is the gate: the same plan at
+`threadCount = 4`, rows compared as a sorted multiset because partitions interleave. Removing the
+lock also exposed a diagnostics race - each partition's `createEngine` reset the device-step counter,
+losing the other partitions' steps - so that reset moved to plan creation, once per run.
 
 Chunk sizing has a different answer here than on either other path, and the difference is
 instructive:

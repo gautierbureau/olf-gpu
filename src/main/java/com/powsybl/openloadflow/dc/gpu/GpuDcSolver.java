@@ -31,16 +31,14 @@ import java.util.Objects;
  */
 public final class GpuDcSolver implements AutoCloseable {
 
-    /**
-     * Serializes device work across host threads.
-     *
-     * <p>There is one card, so nothing is lost by it — but it is not an optimization, it is
-     * required: cuDSS segfaults when two threads run its analysis phase at the same time (measured,
-     * a JVM crash inside {@code libcudss} on a four-partition time-series run). A caller that
-     * spreads host work over threads — emitting result rows while another partition solves — holds
-     * this around its device calls and nothing else.
+    /*
+     * Thread safety: a caller may drive several contexts from several host threads at once. Each
+     * context owns its cuDSS handle and its CUDA stream, and factorization and solve on distinct
+     * handles run concurrently. Only the analysis phase and the handle lifecycle share state the
+     * library keeps between handles — cuDSS segfaults when two threads analyze at once, measured as
+     * a JVM crash inside libcudss on a four-partition time-series run — and the native layer holds
+     * its own mutex around exactly those. Callers need no lock of their own.
      */
-    public static final java.util.concurrent.locks.ReentrantLock DEVICE_LOCK = new java.util.concurrent.locks.ReentrantLock();
 
     /** Elements per contingency the alpha kernel solves in registers (MAX_K in the native). */
     public static final int MAX_ELEMENTS = 32;

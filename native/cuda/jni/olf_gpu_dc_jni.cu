@@ -30,9 +30,28 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+/**
+ * Serializes the parts of cuDSS that are NOT safe to call from several host threads at once.
+ *
+ * <p>Measured the hard way: four partition threads of a time-series run, each creating its own
+ * context, segfault the JVM inside libcudss during the ANALYSIS phase. Every context has its own
+ * handle and its own stream, and factorization and solve on distinct handles run concurrently
+ * without trouble; it is the analysis - and, to be safe, the handle lifecycle around it - that
+ * touches state the library shares between handles.
+ *
+ * <p>So the exclusion lives HERE, around those calls only, rather than in the caller around every
+ * solve. Analysis happens once per context and handle creation once per context, so this costs
+ * nothing on the hot path and cannot be forgotten by a new caller.
+ */
+std::mutex& cudssGlobalLock() {
+    static std::mutex lock;
+    return lock;
+}
 
 namespace {
 
@@ -190,9 +209,13 @@ struct DcContext {
         if (matB) { cudssMatrixDestroy(matB); }
         if (matX) { cudssMatrixDestroy(matX); }
         if (matA) { cudssMatrixDestroy(matA); }
-        if (data && handle) { cudssDataDestroy(handle, data); }
-        if (config) { cudssConfigDestroy(config); }
-        if (handle) { cudssDestroy(handle); }
+        {
+            // the handle lifecycle shares library state between handles, like the analysis phase
+            std::lock_guard<std::mutex> guard(cudssGlobalLock());
+            if (data && handle) { cudssDataDestroy(handle, data); }
+            if (config) { cudssConfigDestroy(config); }
+            if (handle) { cudssDestroy(handle); }
+        }
         if (stream) { cudaStreamDestroy(stream); }
     }
 
@@ -1610,9 +1633,12 @@ void throwJava(JNIEnv* env, const std::string& msg) {
 /** The cuDSS handle, stream and configuration shared by both context creations. */
 void initCudss(DcContext* ctx) {
     DC_CUDA_CHECK(cudaStreamCreate(&ctx->stream));
-    DC_CUDSS_CHECK(cudssCreate(&ctx->handle));
-    DC_CUDSS_CHECK(cudssSetStream(ctx->handle, ctx->stream));
-    DC_CUDSS_CHECK(cudssConfigCreate(&ctx->config));
+    {
+        std::lock_guard<std::mutex> guard(cudssGlobalLock());
+        DC_CUDSS_CHECK(cudssCreate(&ctx->handle));
+        DC_CUDSS_CHECK(cudssSetStream(ctx->handle, ctx->stream));
+        DC_CUDSS_CHECK(cudssConfigCreate(&ctx->config));
+    }
     // Iterative refinement: OFF by default. KLU (the reference) refines nothing, the LU is backward
     // stable, and each refinement step costs a solve + a SpMV on every column — measured 2.1 s for
     // the 9042-column S with 2 steps. OLF_GPU_DC_IR=<n> overrides (A/B against the parity gate).
@@ -1702,7 +1728,10 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_createContext(JNIEnv* env, jcla
         DC_CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->matA, n, n, ctx->nnz, ctx->rowPtr.p, nullptr, ctx->colIdx.p, ctx->val.p,
                                             DC_CUDSS_CSR_TYPES, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
         ctx->ensureRhs(1);
-        DC_CUDSS_CHECK(cudssExecute(ctx->handle, CUDSS_PHASE_ANALYSIS, ctx->config, ctx->data, ctx->matA, ctx->matX, ctx->matB));
+        {
+            std::lock_guard<std::mutex> guard(cudssGlobalLock());
+            DC_CUDSS_CHECK(cudssExecute(ctx->handle, CUDSS_PHASE_ANALYSIS, ctx->config, ctx->data, ctx->matA, ctx->matX, ctx->matB));
+        }
         DC_CUDSS_CHECK(cudssExecute(ctx->handle, CUDSS_PHASE_FACTORIZATION, ctx->config, ctx->data, ctx->matA, ctx->matX, ctx->matB));
         DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         return reinterpret_cast<jlong>(ctx);
@@ -2317,6 +2346,7 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_fillValues(JNIEnv* env, jclass,
         DC_CUDA_CHECK(cudaGetLastError());
         ctx->ensureRhs(1);
         if (!ctx->analyzed) {
+            std::lock_guard<std::mutex> guard(cudssGlobalLock());
             DC_CUDSS_CHECK(cudssExecute(ctx->handle, CUDSS_PHASE_ANALYSIS, ctx->config, ctx->data, ctx->matA, ctx->matX, ctx->matB));
             ctx->analyzed = true;
         }

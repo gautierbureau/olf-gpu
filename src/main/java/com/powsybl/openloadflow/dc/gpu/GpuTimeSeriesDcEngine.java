@@ -336,6 +336,9 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
             return fallback;
         }
         int chunk = Math.max(1, DEFAULT_CHUNK);
+        // once per RUN: the partitions each create an engine and then accumulate into this, so a
+        // reset inside createEngine would race with another partition's steps and lose them
+        LAST_DEVICE_STEP_COUNT.set(0);
         return new TimeSeriesLoadFlow.EnginePlan() {
             @Override
             public LfNetworkParameters networkParameters() {
@@ -350,7 +353,6 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
             @Override
             public TimeSeriesLoadFlow.StepEngine createEngine(LfNetwork lfNetwork) {
                 DcLoadFlowContext context = new DcLoadFlowContext(lfNetwork, dcParameters);
-                GpuDcSolver.DEVICE_LOCK.lock();
                 try {
                     // the outer loops OLF would actually run on this network: the configured list is
                     // filtered by isNeeded, and the default list carries the HVDC AC-emulation loop
@@ -373,15 +375,12 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
                     GpuDcAssembly assembly = GpuDcAssembly.capture(lfNetwork, context.getEquationSystem(),
                             dcParameters.getEquationSystemCreationParameters());
                     GpuDcSolver solver = GpuDcSolver.createAssembled(assembly);
-                    LAST_DEVICE_STEP_COUNT.set(0);
                     return new GpuTimeSeriesDcEngine(context, assembly, solver, chunk);
                 } catch (UnsupportedOperationException e) {
                     LOGGER.warn("GPU time-series DC: {} — stock engine", e.getMessage());
                     context.close();
                     LAST_DEVICE_STEP_COUNT.set(-1);
                     return fallback.createEngine(lfNetwork);
-                } finally {
-                    GpuDcSolver.DEVICE_LOCK.unlock();
                 }
             }
         };
@@ -477,21 +476,20 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
             chunkDistributed = new double[count];
             chunkMismatch = new double[count];
         }
-        // the device is shared between partitions; the host work around this - the set point walk
-        // before it and the row emission after it - runs in parallel
-        GpuDcSolver.DEVICE_LOCK.lock();
-        try {
-            applyConfiguration(baseHvdcStatus, baseTapIndex);
-            refreshDeviceMatrix();
-            solver.timeSeriesChunk(count, chunkGeneratorTargets, generatorCount, chunkLoadTargets, busCount,
-                    chunkGeneratorInitial, chunkGeneratorParticipating, chunkGeneratorMinTargetP, chunkGeneratorMaxTargetP,
-                    chunkGeneratorMinP, chunkGeneratorMaxP, chunkGeneratorDroop, chunkGeneratorParticipationFactor, chunkHvdcP0,
-                    distributedSlack ? participationType : -1, useActiveLimits, assembly.referenceGenerator,
-                    chunkStates, chunkGeneratorTargets, chunkDistributed, chunkMismatch);
-            runOuterLoops(count);
-        } finally {
-            GpuDcSolver.DEVICE_LOCK.unlock();
-        }
+        // No lock here. Every partition has its own context, its own cuDSS handle and its own CUDA
+        // stream, and those run concurrently; only the analysis phase and the handle lifecycle share
+        // library state between handles, and the native layer excludes those itself. Serializing the
+        // whole chunk instead - which is what this used to do - made the device section a global
+        // critical section and capped the run: 4 to 8 threads moved the GPU arm 1.44 to 1.39 ms/step
+        // while the CPU arm moved 2.39 to 1.97.
+        applyConfiguration(baseHvdcStatus, baseTapIndex);
+        refreshDeviceMatrix();
+        solver.timeSeriesChunk(count, chunkGeneratorTargets, generatorCount, chunkLoadTargets, busCount,
+                chunkGeneratorInitial, chunkGeneratorParticipating, chunkGeneratorMinTargetP, chunkGeneratorMaxTargetP,
+                chunkGeneratorMinP, chunkGeneratorMaxP, chunkGeneratorDroop, chunkGeneratorParticipationFactor, chunkHvdcP0,
+                distributedSlack ? participationType : -1, useActiveLimits, assembly.referenceGenerator,
+                chunkStates, chunkGeneratorTargets, chunkDistributed, chunkMismatch);
+        runOuterLoops(count);
         LAST_DEVICE_STEP_COUNT.addAndGet(count);
     }
 
@@ -817,12 +815,7 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
 
     @Override
     public void close() {
-        GpuDcSolver.DEVICE_LOCK.lock();
-        try {
-            solver.close();
-        } finally {
-            GpuDcSolver.DEVICE_LOCK.unlock();
-        }
+        solver.close();
         context.close();
     }
 

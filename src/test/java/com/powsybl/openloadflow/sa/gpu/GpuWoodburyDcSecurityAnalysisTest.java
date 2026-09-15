@@ -176,8 +176,8 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         SecurityAnalysisResult cpu = runStock(network, contingencies, monitorAll(network));
         SecurityAnalysisResult gpu = runGpu(network, contingencies, monitorAll(network));
         assertSameResults(cpu, gpu);
-        // the two parallel lines batch; the transformers island a bus and go to the stock path
-        assertEquals(2, GpuWoodburyDcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "contingencies solved on the device");
+        // the two parallel lines, and the two transformers that island a bus (modified target) — all on the device
+        assertEquals(4, GpuWoodburyDcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "contingencies solved on the device");
         assertTrue(cpu.getPostContingencyResults().stream().anyMatch(r -> !r.getLimitViolationsResult().getLimitViolations().isEmpty()),
                 "the case must produce post-contingency violations for the comparison to mean anything");
     }
@@ -192,7 +192,7 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         SecurityAnalysisResult gpu = runGpu(network, contingencies, monitorAll(network));
         assertSameResults(cpu, gpu);
         int onDevice = GpuWoodburyDcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get();
-        assertTrue(onDevice >= 15, "expected most of the 20 branch outages on the device, got " + onDevice);
+        assertEquals(20, onDevice, "all 20 branch outages on the device (the radial L7-8-1 islands bus 8: modified target)");
         long violations = cpu.getPostContingencyResults().stream().mapToLong(r -> r.getLimitViolationsResult().getLimitViolations().size()).sum();
         assertTrue(violations > 20, "the case must produce post-contingency violations, got " + violations);
     }

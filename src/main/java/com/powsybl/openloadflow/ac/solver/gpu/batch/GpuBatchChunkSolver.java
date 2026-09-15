@@ -196,6 +196,12 @@ final class GpuBatchChunkSolver {
             tvcInKernel = GpuBatchIncrementalTvc.uploadToDevice(handle, incrementalTvcControllers,
                     config.incTvcMaxTapShift());
         }
+        // IncrementalShuntVoltageControl as a DRIVER PHASE (OLF order 10).
+        boolean shuntInKernel = false;
+        if (incrementalShuntControllers != null && !incrementalShuntControllers.isEmpty()) {
+            shuntInKernel = GpuBatchIncrementalShuntVc.uploadToDevice(handle, incrementalShuntControllers,
+                    config.incShuntMaxSectionShift());
+        }
 
         // The base state / targets are IDENTICAL for every scenario (a single-branch N-1 starts from the
         // same converged base operating point): passed as single length-n rows and tiled on-device. The
@@ -1175,7 +1181,7 @@ final class GpuBatchChunkSolver {
                         orchNs.merge("IncrementalFlowControl.orchestrate", System.nanoTime() - tOr8, Long::sum);
                     }
                     // OLF order 10: ShuntVoltageControl (incremental and simple/continuous)
-                    if (incrementalShuntControllers != null && !incrementalShuntControllers.isEmpty()) {
+                    if (incrementalShuntControllers != null && !incrementalShuntControllers.isEmpty() && !shuntInKernel) {
                         long tOr9 = System.nanoTime();
                         chunkResults = GpuBatchIncrementalShuntVc.orchestrate(handle, chunkSize, realCount, n,
                                 chunkResults, incrementalShuntControllers, rowModePerScenario, baseRowMode, disabledMask,

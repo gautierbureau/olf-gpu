@@ -528,7 +528,7 @@ IncrementalTvc and IncrementalShuntVc are NOT blocked on task #40.
 | Loop | Solve | Observable | Blocker | Verdict |
 |------|-------|-----------|---------|---------|
 | IncrementalTvc | Forward ✓ | variable column | Upload tap tables | **LANDED 2026-09-14** (`LOOP_TVC_KERNEL`, single controller per controlled bus; shared buses keep the host round-robin) |
-| IncrementalShuntVc | Forward ✓ | variable column | Upload section tables | **PORTABLE** |
+| IncrementalShuntVc | Forward ✓ | variable column | Upload section tables | **LANDED 2026-09-15** (`LOOP_SHUNT_KERNEL`, OLF adjustB round-robin per controlled-bus group in-kernel — several controller shunts and sub-controllers per group) |
 | IncrementalFlowControl | Forward ✓ | OLF `calculateSensi` (CPU) | Java term eval | **Blocked** |
 | SecondaryVc | Needs transposed ❌ | OLF Q-terms (CPU) | Task #40 + Java eval | **Blocked** |
 
@@ -679,6 +679,24 @@ base), 3 strategy-pair precompute counts, 3 HVDC (freeze/saturation, DS carry), 
 Every remote gen-VC test (24/26) passes; the rte6515 production case passes. Next: take the failing
 shapes one by one with `OLF_GPU_BATCH_TRACE=1` (HOST_LOOP lines show the pause/resume sequence),
 starting with the host-paused loops (order 7–10) on the base.
+
+### #43 — In-kernel IncrementalShuntVoltageControl (landed 2026-09-15)
+
+`LOOP_SHUNT_KERNEL` at OLF order 10, same shape as the TVC phase: `shcDeadbandCheckBatch` per
+(scenario, controlled-bus group) → one unit-RHS solve per needed controller at its SHUNT_B identity
+row on the driver's own factors (`shcGatherSensiBatch` reads dV at the controlled bus) →
+`shcAdjustBatch`, one thread per (scenario, group), OLF's `adjustB` verbatim: round-robin over the
+|b|-sorted controller shunts, one section per sub-controller per pass, the per-round maxSectionShift
+cap, `updateSectionB` (closest section within one step and the ratchet's allowed range, strict <),
+`updateAllowedDirection` (MAX_DIRECTION_CHANGE 3), remainingDiffV through the sensitivity →
+`shcApplyBatch` pins the section total at the identity row (target + state seed) →
+`shcRebuildOverrides` appends the static (dG, dB) per moved controller to the caller's shunt
+overrides (`applyShuntOverride` SUMS matching entries, so the loop's delta composes additively) —
+redone on a driver resume. Unlike the TVC phase it takes shared groups (the round-robin runs in the
+kernel), so the host orchestrator is now off whenever the tables upload. Base path: the loop's
+`getMaxSectionShift()` (OLF getter), `readBatchShuntPositions` → `LfShunt.Controller.updateSectionB`.
+Tests: the 7 `*Shunt*` SA tests pass driver off and on with a section actually moving
+(`SHUNT_KERNEL ... subsOffBase=1`); no shared-group incremental shunt test exists yet — worth adding.
 
 ## Method notes worth keeping
 

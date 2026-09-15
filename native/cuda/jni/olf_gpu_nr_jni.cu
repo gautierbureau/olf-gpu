@@ -77,7 +77,8 @@ enum DeviceLoopKind {
     LOOP_HOST_TVC = 7,       // TransformerVoltageControl — host pause   (OLF order 8, post-RL)
     LOOP_HOST_TRPC = 8,      // TransformerReactivePowerControl — host   (OLF order 9, post-RL)
     LOOP_HOST_SHUNT = 9,     // ShuntVoltageControl — host pause         (OLF order 10, post-RL)
-    LOOP_TVC_KERNEL = 10     // IncrementalTransformerVoltageControl — IN-KERNEL (OLF order 8)
+    LOOP_TVC_KERNEL = 10,    // IncrementalTransformerVoltageControl — IN-KERNEL (OLF order 8)
+    LOOP_SHUNT_KERNEL = 11   // IncrementalShuntVoltageControl — IN-KERNEL (OLF order 10)
 };
 // GpuBatchHvdcAcEmulation's status codes, shared with the host.
 constexpr int HV_LINEAR = 0;
@@ -4345,6 +4346,21 @@ struct BatchSolverContext {
     // the TVC loop's moves are merged IN FRONT of them (findTapOverride takes the first match).
     std::vector<int> hR1OvBaseSlotElem;
     std::vector<double> hR1OvBaseVal;
+    // INCREMENTAL SHUNT VOLTAGE CONTROL — in-kernel outer loop (LOOP_SHUNT_KERNEL). Controllers are
+    // grouped per controlled bus (OLF adjustB round-robin, |b|-descending); each controller shunt has
+    // sub-controllers (OLF LfShunt.Controller) with their own section B/G tables and ratchet.
+    int nShc = 0, nShcGroups = 0, nShcSubs = 0, shcMaxSectionShift = 3;
+    DeviceBuf dShcBRow, dShcVRow, dShcTargetV, dShcHalfDb, dShcElemAbs, dShcShOvElem;   // per controller
+    DeviceBuf dShcGroupPtr, dShcGroupCtrl;                   // CSR: group -> controllers (sorted)
+    DeviceBuf dShcSubPtr;                                    // CSR: controller -> subs
+    DeviceBuf dShcSecPtr, dShcSecB, dShcSecG, dShcSubMin, dShcSubBase;   // per sub: section tables
+    DeviceBuf dShcPos, dShcRatDir, dShcRatCount, dShcRatAllowed, dShcShift;   // per (scenario, sub)
+    DeviceBuf dShcSensi, dShcBaseB, dShcAppliedDb;           // per (scenario, controller)
+    DeviceBuf dShcOutOfDb, dShcDiffV;                        // per (scenario, group)
+    std::vector<int> hShcBRow, hShcShOvElem, hShcSubPtr, hShcSecPtr, hShcSubBase;
+    std::vector<double> hShcSecB, hShcSecG;
+    std::vector<int> hShOvBaseSlotElem;                      // the caller's shunt overrides at solve entry
+    std::vector<double> hShOvBaseGb;
 
     DeviceBuf dGenCum, dGenRemoved;
     // The WORKING factors, normalized IN PLACE each iteration exactly as OLF's
@@ -4710,9 +4726,17 @@ static void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double max
     // elements (shunt family index, not the global element index). Empty = a 1-entry dummy
     // upload so the kernels' pointers are always valid.
     ctx->nShOv = nShOv;
-    if (nShOv > 0) {
-        ctx->dShOvSlotElem.upload(shOvSlotElem, static_cast<size_t>(nShOv) * 2 * sizeof(int));
-        ctx->dShOvGb.upload(shOvGb, static_cast<size_t>(nShOv) * 2 * sizeof(double));
+    ctx->hShOvBaseSlotElem.assign(shOvSlotElem, shOvSlotElem + (size_t) nShOv * 2);
+    ctx->hShOvBaseGb.assign(shOvGb, shOvGb + (size_t) nShOv * 2);
+    if (nShOv > 0 || ctx->nShc > 0) {
+        // room for the in-kernel shunt loop to append one (dG, dB) per (scenario, controller)
+        size_t capEntries = std::max<size_t>(static_cast<size_t>(nShOv) + (ctx->nShc > 0 ? static_cast<size_t>(nS) * ctx->nShc : 0), 1);
+        ctx->dShOvSlotElem.ensure(capEntries * 2 * sizeof(int));
+        ctx->dShOvGb.ensure(capEntries * 2 * sizeof(double));
+        if (nShOv > 0) {
+            CUDA_CHECK(cudaMemcpy(ctx->dShOvSlotElem.p, shOvSlotElem, static_cast<size_t>(nShOv) * 2 * sizeof(int), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(ctx->dShOvGb.p, shOvGb, static_cast<size_t>(nShOv) * 2 * sizeof(double), cudaMemcpyHostToDevice));
+        }
     } else if (!ctx->dShOvSlotElem.p) {
         int dummyI[2] = {-1, -1};
         double dummyD[2] = {0, 0};
@@ -4900,6 +4924,165 @@ static void tvcRebuildOverrides(BatchSolverContext* ctx) {
     }
     ctx->nR1Ov = nOv;
 }
+// ======================== INCREMENTAL SHUNT VC KERNELS ========================
+// Per (scenario, controlled-bus group): OLF isOutOfDeadband on the group's controlled bus, with at
+// least one live (not outaged) controller shunt.
+__global__ void shcDeadbandCheckBatch(int nGroups, int nScenarios, int n, int nElements,
+                                      const int* groupPtr, const int* groupCtrl,
+                                      const int* vRow, const double* targetV, const double* halfDb, const int* elemAbs,
+                                      const char* disabled, const double* x, const char* rlActive,
+                                      char* outOfDb, double* diffV) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nGroups * nScenarios) return;
+    int g = tid % nGroups;
+    int s = tid / nGroups;
+    outOfDb[tid] = 0;
+    if (!rlActive[s]) return;
+    int c0 = groupCtrl[groupPtr[g]];
+    bool live = false;
+    for (int k = groupPtr[g]; k < groupPtr[g + 1] && !live; k++) {
+        int c = groupCtrl[k];
+        live = elemAbs[c] < 0 || !disabled[(size_t) s * nElements + elemAbs[c]];
+    }
+    double d = targetV[c0] - x[(size_t) s * n + vRow[c0]];
+    diffV[tid] = d;
+    outOfDb[tid] = (live && fabs(d) > halfDb[c0]) ? 1 : 0;
+}
+
+__global__ void shcGatherSensiBatch(int nScenarios, int n, int c, int nShc, const int* vRow,
+                                    const double* dx, double* sensi) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nScenarios) return;
+    sensi[(size_t) s * nShc + c] = dx[(size_t) s * n + vRow[c]];
+}
+
+// OLF IncrementalShuntVoltageControlOuterLoop.adjustB, one thread per (scenario, group): round-robin
+// over the |b|-sorted controller shunts, one section per sub-controller per pass, the per-round
+// maxSectionShift cap, remainingDiffV tracked through the sensitivity; LfShunt.Controller.
+// updateSectionB (closest section within one step and the ratchet's allowed range, strict <, only
+// when closer than the current b); ControllerContext.updateAllowedDirection (MAX_DIRECTION_CHANGE 3).
+__global__ void shcAdjustBatch(int nGroups, int nScenarios, int n, int nElements, int nShc, int nSubs, int maxSectionShift,
+                               const int* groupPtr, const int* groupCtrl, const int* subPtr,
+                               const int* secPtr, const double* secB, const int* subMin,
+                               const double* halfDb, const int* elemAbs, const char* disabled,
+                               const char* outOfDb, const double* diffV, const double* sensi,
+                               int* pos, int* ratDir, int* ratCount, int* ratAllowed, int* shift,
+                               char* switched) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nGroups * nScenarios) return;
+    int g = tid % nGroups;
+    int s = tid / nGroups;
+    if (!outOfDb[tid]) return;
+    int c0 = groupCtrl[groupPtr[g]];
+    double hdb = halfDb[c0];
+    double remaining = diffV[tid];
+    for (int k = groupPtr[g]; k < groupPtr[g + 1]; k++) {   // per-round shift counters
+        int c = groupCtrl[k];
+        for (int u = subPtr[c]; u < subPtr[c + 1]; u++) shift[(size_t) s * nSubs + u] = 0;
+    }
+    bool changed = true;
+    bool moved = false;
+    while (changed) {
+        changed = false;
+        for (int k = groupPtr[g]; k < groupPtr[g + 1]; k++) {
+            int c = groupCtrl[k];
+            if (elemAbs[c] >= 0 && disabled[(size_t) s * nElements + elemAbs[c]]) continue;   // outaged
+            double sv = sensi[(size_t) s * nShc + c];
+            for (int u = subPtr[c]; u < subPtr[c + 1]; u++) {
+                if (fabs(remaining) <= hdb) continue;
+                size_t su = (size_t) s * nSubs + u;
+                if (shift[su] > maxSectionShift) continue;   // reached max section shift this outer loop
+                int cur = pos[su];
+                int p0 = secPtr[u];
+                int nSec = secPtr[u + 1] - p0;
+                double prevB = secB[p0 + cur];
+                double deltaB = remaining / sv;
+                double newB = prevB + deltaB;
+                int allowed = ratAllowed[su];
+                int lo = allowed > 0 ? cur : subMin[u];
+                int hi = allowed < 0 ? cur : nSec - 1;
+                int best = cur;
+                double smallest = fabs(deltaB);
+                for (int p = lo; p <= hi; p++) {
+                    if (abs(p - cur) > 1) continue;          // maxSectionShift = 1 per updateSectionB call
+                    double dist = fabs(newB - secB[p0 + p]);
+                    if (dist < smallest) { best = p; smallest = dist; }
+                }
+                if (best == cur) continue;
+                pos[su] = best;
+                int direction = best > cur ? 1 : -1;
+                if (ratCount[su] < 3) {                      // ControllerContext.updateAllowedDirection
+                    if (ratDir[su] != 0 && ratDir[su] != direction) ratCount[su]++;
+                    ratDir[su] = direction;
+                } else {
+                    ratAllowed[su] = direction;
+                }
+                shift[su]++;
+                remaining -= (secB[p0 + best] - prevB) * sv;
+                changed = true;
+                moved = true;
+            }
+        }
+    }
+    if (moved) switched[s] = 1;
+}
+
+// Per (scenario, controller): the section total B pins the SHUNT_B identity row (target + state
+// seed), exactly the host orchestrator's ovVal.add(baseB + db) / x0Full[bRow] = newB.
+__global__ void shcApplyBatch(int nShc, int nScenarios, int n, const int* bRow, const int* subPtr,
+                              const int* secPtr, const double* secB, const int* subBase, const int* pos,
+                              int nSubs, const double* baseB, double* appliedDb, double* target, double* x) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nShc * nScenarios) return;
+    int c = tid % nShc;
+    int s = tid / nShc;
+    double db = 0.0;
+    for (int u = subPtr[c]; u < subPtr[c + 1]; u++) {
+        db += secB[secPtr[u] + pos[(size_t) s * nSubs + u]] - secB[secPtr[u] + subBase[u]];
+    }
+    if (db == appliedDb[tid]) return;
+    double nb = baseB[tid] + db;
+    target[(size_t) s * n + bRow[c]] = nb;
+    x[(size_t) s * n + bRow[c]] = nb;
+    appliedDb[tid] = db;
+}
+
+/** Rebuild the device shunt-override list = the caller's entries ++ one (dG, dB) per (scenario,
+ *  controller) whose sections moved off their base — additive deltas (applyShuntOverride SUMS every
+ *  matching entry), so the loop's move composes on top of whatever the caller had. Re-done after
+ *  every pass that moved a section and on a driver RESUME. */
+static void shcRebuildOverrides(BatchSolverContext* ctx) {
+    int nS = ctx->nScenarios;
+    std::vector<int> pos(static_cast<size_t>(nS) * ctx->nShcSubs);
+    CUDA_CHECK(cudaMemcpy(pos.data(), ctx->dShcPos.p, pos.size() * sizeof(int), cudaMemcpyDeviceToHost));
+    std::vector<int> slot(ctx->hShOvBaseSlotElem);
+    std::vector<double> val(ctx->hShOvBaseGb);
+    for (int s = 0; s < nS; s++) {
+        for (int c = 0; c < ctx->nShc; c++) {
+            if (ctx->hShcShOvElem[c] < 0) continue;          // no packed element: b rides SHUNT_B only
+            double db = 0.0, dg = 0.0;
+            for (int u = ctx->hShcSubPtr[c]; u < ctx->hShcSubPtr[c + 1]; u++) {
+                int p0 = ctx->hShcSecPtr[u];
+                int pc = pos[static_cast<size_t>(s) * ctx->nShcSubs + u];
+                db += ctx->hShcSecB[p0 + pc] - ctx->hShcSecB[p0 + ctx->hShcSubBase[u]];
+                dg += ctx->hShcSecG[p0 + pc] - ctx->hShcSecG[p0 + ctx->hShcSubBase[u]];
+            }
+            if (db == 0.0 && dg == 0.0) continue;
+            slot.push_back(s);
+            slot.push_back(ctx->hShcShOvElem[c]);
+            val.push_back(dg);
+            val.push_back(db);
+        }
+    }
+    int nOv = static_cast<int>(slot.size() / 2);
+    if (nOv > 0) {
+        ctx->dShOvSlotElem.ensure(slot.size() * sizeof(int));
+        ctx->dShOvGb.ensure(val.size() * sizeof(double));
+        CUDA_CHECK(cudaMemcpy(ctx->dShOvSlotElem.p, slot.data(), slot.size() * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->dShOvGb.p, val.data(), val.size() * sizeof(double), cudaMemcpyHostToDevice));
+    }
+    ctx->nShOv = nOv;
+}
 // ======================== END INCREMENTAL TVC KERNELS ========================
 
 BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const double* target,
@@ -4964,6 +5147,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     ctx->driverPaused = 0;
     if (resume && ctx->nTvc > 0) {
         tvcRebuildOverrides(ctx);                            // uploadBatchOverrides just erased the moves
+    }
+    if (resume && ctx->nShc > 0) {
+        shcRebuildOverrides(ctx);
     }
     dBaseMode.upload(baseRowMode, n * sizeof(int));         // base (contingency-free) row mode for the RL limit-type seed
     if (!resume) {
@@ -5030,7 +5216,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // repeat until a pass switches nothing. Fixed-iter mode (tol <= 0, the throughput benchmark) and
     // family-free networks with no controllers do ONE pass (no outer loop) — byte-identical to before.
     bool fullLoadflow = !deviceFixedIter && (ctx->nrl > 0 || ctx->nds > 0 || ctx->dsSlackOnly
-                                             || ctx->nmon > 0 || ctx->nTvc > 0);
+                                             || ctx->nmon > 0 || ctx->nTvc > 0 || ctx->nShc > 0);
     const int RL_MAX_OUTER = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
     const int RL_MAX_SWITCH = rlMaxSwitch > 0 ? rlMaxSwitch : 3;   // per-bus PV→PQ count cap (OLF maxPqPvSwitch)
     // Outer-loop convergence tolerances (pu) — passed in so the device uses the SAME criteria as the CPU
@@ -5163,6 +5349,26 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             ctx->dTvcDiffV.ensure(nst * sizeof(double));
             ctx->dTvcSensi.ensure(nst * sizeof(double));
         }
+        if (ctx->nShc > 0) {                                 // per-SOLVE state: base sections, fresh ratchets,
+            size_t nsu = static_cast<size_t>(nS) * ctx->nShcSubs;   // the identity row's target as the base b
+            std::vector<int> pos(nsu);
+            for (int s2 = 0; s2 < nS; s2++) {
+                for (int u = 0; u < ctx->nShcSubs; u++) pos[static_cast<size_t>(s2) * ctx->nShcSubs + u] = ctx->hShcSubBase[u];
+            }
+            CUDA_CHECK(cudaMemcpy(ctx->dShcPos.p, pos.data(), nsu * sizeof(int), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemset(ctx->dShcRatDir.p, 0, nsu * sizeof(int)));
+            CUDA_CHECK(cudaMemset(ctx->dShcRatCount.p, 0, nsu * sizeof(int)));
+            CUDA_CHECK(cudaMemset(ctx->dShcRatAllowed.p, 0, nsu * sizeof(int)));
+            size_t nsc = static_cast<size_t>(nS) * ctx->nShc;
+            CUDA_CHECK(cudaMemset(ctx->dShcAppliedDb.p, 0, nsc * sizeof(double)));
+            std::vector<double> tgt(static_cast<size_t>(n) * nS), bb(nsc);
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            CUDA_CHECK(cudaMemcpy(tgt.data(), ctx->dTarget.p, tgt.size() * sizeof(double), cudaMemcpyDeviceToHost));
+            for (int s2 = 0; s2 < nS; s2++) {
+                for (int c = 0; c < ctx->nShc; c++) bb[static_cast<size_t>(s2) * ctx->nShc + c] = tgt[static_cast<size_t>(s2) * n + ctx->hShcBRow[c]];
+            }
+            CUDA_CHECK(cudaMemcpy(ctx->dShcBaseB.p, bb.data(), nsc * sizeof(double), cudaMemcpyHostToDevice));
+        }
         if (ctx->dsSlackOnly) {
             if (dsSlackShift != nullptr) {                   // strategy pairs: seed with the parent contingency's
                 CUDA_CHECK(cudaMemcpyAsync(ctx->dDsSlackAbsorbed.p, dsSlackShift,   // absorbed total (the device
@@ -5229,7 +5435,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     if (ctx->hostLoopMask & (1 << 3)) {
         loopOrder[nLoops++] = LOOP_HOST_TRPC;                // OLF order 9: TransformerReactivePowerControl
     }
-    if (ctx->hostLoopMask & (1 << 4)) {
+    if (ctx->nShc > 0) {
+        loopOrder[nLoops++] = LOOP_SHUNT_KERNEL;             // OLF order 10: ShuntVoltageControl, IN-KERNEL
+    } else if (ctx->hostLoopMask & (1 << 4)) {
         loopOrder[nLoops++] = LOOP_HOST_SHUNT;               // OLF order 10: ShuntVoltageControl
     }
     if (nLoops == 0) {
@@ -5451,6 +5659,85 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                                  ctx->st->rowMap[ctx->hTvcRhoRow[k % nTvc]]);
                 }
             }
+        }
+    };
+    // ---- IncrementalShuntVoltageControl as a DRIVER PHASE (OLF order 10): deadband per controlled bus,
+    //      dV/dB from a unit RHS at each needed controller's SHUNT_B identity row (the driver's own
+    //      factors), OLF's adjustB round-robin per group, the section total pinned at the identity row
+    //      and the static (dG, dB) through the shunt-override list. Groups with several controller
+    //      shunts ARE handled (the round-robin runs in the group kernel). ----
+    auto shcStep = [&]() {
+        int nShc = ctx->nShc;
+        if (nShc <= 0) return;
+        if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5) {
+            static bool warned = false;
+            if (!warned) { std::fprintf(stderr, "in-kernel shunt VC needs a UBATCH mode (3/4/5); mode %d runs it as stable\n", ctx->mode); warned = true; }
+            return;
+        }
+        int nG = ctx->nShcGroups;
+        size_t nsg = static_cast<size_t>(nS) * nG;
+        shcDeadbandCheckBatch<<<grid(static_cast<int>(nsg)), BLOCK, 0, ctx->stream>>>(nG, nS, n, ctx->nElements,
+                ctx->dShcGroupPtr.as<int>(), ctx->dShcGroupCtrl.as<int>(),
+                ctx->dShcVRow.as<int>(), ctx->dShcTargetV.as<double>(), ctx->dShcHalfDb.as<double>(), ctx->dShcElemAbs.as<int>(),
+                ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
+                ctx->dShcOutOfDb.as<char>(), ctx->dShcDiffV.as<double>());
+        std::vector<char> outOfDb(nsg);
+        CUDA_CHECK(cudaMemcpyAsync(outOfDb.data(), ctx->dShcOutOfDb.p, nsg, cudaMemcpyDeviceToHost, ctx->stream));
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        std::vector<int> gPtr(nG + 1), gCtrl(ctx->nShc);
+        CUDA_CHECK(cudaMemcpy(gPtr.data(), ctx->dShcGroupPtr.p, gPtr.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(gCtrl.data(), ctx->dShcGroupCtrl.p, gCtrl.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        std::vector<char> needC(nShc, 0);
+        bool any = false;
+        for (int s2 = 0; s2 < nS; s2++) {
+            for (int g = 0; g < nG; g++) {
+                if (!outOfDb[static_cast<size_t>(s2) * nG + g]) continue;
+                any = true;
+                for (int k = gPtr[g]; k < gPtr[g + 1]; k++) needC[gCtrl[k]] = 1;
+            }
+        }
+        if (!any) return;                                    // every controlled bus inside its deadband: STABLE
+        std::vector<char> ones(nS, 1);
+        CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
+        fillActiveBatch(false);
+        if (!ctx->analyzed) {
+            CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            ctx->analyzed = true;
+        }
+        CUDA_CHECK(cudaMemsetAsync(ctx->dShcSensi.p, 0, static_cast<size_t>(nS) * nShc * sizeof(double), ctx->stream));
+        bool first = true;
+        for (int c = 0; c < nShc; c++) {
+            if (!needC[c]) continue;
+            int row = ctx->st->rowMap[ctx->hShcBRow[c]];
+            if (row < 0) continue;
+            setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
+            int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
+            first = false;
+            CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            shcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nShc, ctx->dShcVRow.as<int>(),
+                    ctx->dDx.as<double>(), ctx->dShcSensi.as<double>());
+        }
+        ctx->factored = true;
+        CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));
+        shcAdjustBatch<<<grid(static_cast<int>(nsg)), BLOCK, 0, ctx->stream>>>(nG, nS, n, ctx->nElements, nShc, ctx->nShcSubs,
+                ctx->shcMaxSectionShift, ctx->dShcGroupPtr.as<int>(), ctx->dShcGroupCtrl.as<int>(), ctx->dShcSubPtr.as<int>(),
+                ctx->dShcSecPtr.as<int>(), ctx->dShcSecB.as<double>(), ctx->dShcSubMin.as<int>(),
+                ctx->dShcHalfDb.as<double>(), ctx->dShcElemAbs.as<int>(), ctx->dDisabled.as<char>(),
+                ctx->dShcOutOfDb.as<char>(), ctx->dShcDiffV.as<double>(), ctx->dShcSensi.as<double>(),
+                ctx->dShcPos.as<int>(), ctx->dShcRatDir.as<int>(), ctx->dShcRatCount.as<int>(), ctx->dShcRatAllowed.as<int>(),
+                ctx->dShcShift.as<int>(), ctx->dRlSwitched.as<char>());
+        shcApplyBatch<<<grid(nShc * nS), BLOCK, 0, ctx->stream>>>(nShc, nS, n, ctx->dShcBRow.as<int>(), ctx->dShcSubPtr.as<int>(),
+                ctx->dShcSecPtr.as<int>(), ctx->dShcSecB.as<double>(), ctx->dShcSubBase.as<int>(), ctx->dShcPos.as<int>(),
+                ctx->nShcSubs, ctx->dShcBaseB.as<double>(), ctx->dShcAppliedDb.as<double>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        shcRebuildOverrides(ctx);
+        if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+            std::vector<int> pos(static_cast<size_t>(nS) * ctx->nShcSubs);
+            CUDA_CHECK(cudaMemcpy(pos.data(), ctx->dShcPos.p, pos.size() * sizeof(int), cudaMemcpyDeviceToHost));
+            int nOut = 0, nMoved = 0;
+            for (char c : outOfDb) nOut += c ? 1 : 0;
+            for (int s2 = 0; s2 < nS; s2++) for (int u = 0; u < ctx->nShcSubs; u++) if (pos[static_cast<size_t>(s2) * ctx->nShcSubs + u] != ctx->hShcSubBase[u]) nMoved++;
+            std::fprintf(stderr, "SHUNT_KERNEL nS=%d nCtrl=%d nGroups=%d outOfDeadband=%d subsOffBase=%d nShOv=%d\n", nS, nShc, nG, nOut, nMoved, ctx->nShOv);
         }
     };
     if (solvePass) {
@@ -5870,6 +6157,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             case LOOP_HOST_TRPC:    kindName = "HOST:TransformerReactivePowerControl"; break;
             case LOOP_HOST_SHUNT:   kindName = "HOST:ShuntVoltageControl"; break;
             case LOOP_TVC_KERNEL:   kindName = "TransformerVoltageControl"; break;
+            case LOOP_SHUNT_KERNEL: kindName = "ShuntVoltageControl"; break;
         }
         int nSw = 0;
         {
@@ -5926,6 +6214,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     if (loopKind == LOOP_TVC_KERNEL) {
         tvcStep();
+    } else if (loopKind == LOOP_SHUNT_KERNEL) {
+        shcStep();
     } else if (loopKind == LOOP_MONITORING) {
         monitoringLoopBatch<<<grid(ctx->nmon * nS), BLOCK, 0, ctx->stream>>>(
                 ctx->nmon, nS, n, ctx->dMonVRow.as<int>(), ctx->dMonBand.as<double>(),
@@ -7482,6 +7772,100 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
     size_t cnt = static_cast<size_t>(ctx->nTvc) * ctx->nScenarios;
     std::vector<int> host(cnt);
     cudaMemcpy(host.data(), ctx->dTvcCurTap.p, cnt * sizeof(int), cudaMemcpyDeviceToHost);
+    jintArray out = env->NewIntArray(static_cast<jsize>(cnt));
+    env->SetIntArrayRegion(out, 0, static_cast<jsize>(cnt), host.data());
+    return out;
+}
+
+/** Upload the incremental SHUNT voltage-control tables for the in-kernel loop. Per controller:
+ *  bRow (SHUNT_B identity row), vRow (controlled bus), targetV, halfDb, elemAbs (global element, -1),
+ *  shOvElem (shunt-pack element for the static (dG, dB) override, -1); groups: groupPtr[nGroups+1] ->
+ *  groupCtrl (controllers, |b|-descending); subs: subPtr[nCtrl+1] -> per sub secPtr[nSubs+1] into
+ *  secB/secG, subMin, subBase. Returns 1 when the kernel loop owns them, 0 when there are none. */
+extern "C" JNIEXPORT jint JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchShuntControllers(
+        JNIEnv* env, jclass, jlong handle,
+        jintArray jBRow, jintArray jVRow, jdoubleArray jTargetV, jdoubleArray jHalfDb, jintArray jElemAbs, jintArray jShOvElem,
+        jintArray jGroupPtr, jintArray jGroupCtrl, jintArray jSubPtr, jintArray jSecPtr, jdoubleArray jSecB, jdoubleArray jSecG,
+        jintArray jSubMin, jintArray jSubBase, jint maxSectionShift) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return 0;
+    }
+    ctx->nShc = 0;
+    if (jBRow == nullptr || env->GetArrayLength(jBRow) == 0) {
+        return 0;
+    }
+    auto readI = [&](jintArray a, std::vector<int>& v) {
+        v.resize(env->GetArrayLength(a));
+        env->GetIntArrayRegion(a, 0, static_cast<jsize>(v.size()), v.data());
+    };
+    auto readD = [&](jdoubleArray a, std::vector<double>& v) {
+        v.resize(env->GetArrayLength(a));
+        env->GetDoubleArrayRegion(a, 0, static_cast<jsize>(v.size()), v.data());
+    };
+    std::vector<int> vRow, elemAbs, groupPtr, groupCtrl, subMin;
+    std::vector<double> targetV, halfDb;
+    readI(jBRow, ctx->hShcBRow);
+    readI(jVRow, vRow);
+    readD(jTargetV, targetV);
+    readD(jHalfDb, halfDb);
+    readI(jElemAbs, elemAbs);
+    readI(jShOvElem, ctx->hShcShOvElem);
+    readI(jGroupPtr, groupPtr);
+    readI(jGroupCtrl, groupCtrl);
+    readI(jSubPtr, ctx->hShcSubPtr);
+    readI(jSecPtr, ctx->hShcSecPtr);
+    readD(jSecB, ctx->hShcSecB);
+    readD(jSecG, ctx->hShcSecG);
+    readI(jSubMin, subMin);
+    readI(jSubBase, ctx->hShcSubBase);
+    int nc = static_cast<int>(ctx->hShcBRow.size());
+    int nSubs = static_cast<int>(ctx->hShcSubBase.size());
+    ctx->dShcBRow.upload(ctx->hShcBRow.data(), nc * sizeof(int));
+    ctx->dShcVRow.upload(vRow.data(), nc * sizeof(int));
+    ctx->dShcTargetV.upload(targetV.data(), nc * sizeof(double));
+    ctx->dShcHalfDb.upload(halfDb.data(), nc * sizeof(double));
+    ctx->dShcElemAbs.upload(elemAbs.data(), nc * sizeof(int));
+    ctx->dShcShOvElem.upload(ctx->hShcShOvElem.data(), nc * sizeof(int));
+    ctx->dShcGroupPtr.upload(groupPtr.data(), groupPtr.size() * sizeof(int));
+    ctx->dShcGroupCtrl.upload(groupCtrl.data(), groupCtrl.size() * sizeof(int));
+    ctx->dShcSubPtr.upload(ctx->hShcSubPtr.data(), ctx->hShcSubPtr.size() * sizeof(int));
+    ctx->dShcSecPtr.upload(ctx->hShcSecPtr.data(), ctx->hShcSecPtr.size() * sizeof(int));
+    ctx->dShcSecB.upload(ctx->hShcSecB.data(), ctx->hShcSecB.size() * sizeof(double));
+    ctx->dShcSecG.upload(ctx->hShcSecG.data(), ctx->hShcSecG.size() * sizeof(double));
+    ctx->dShcSubMin.upload(subMin.data(), nSubs * sizeof(int));
+    ctx->dShcSubBase.upload(ctx->hShcSubBase.data(), nSubs * sizeof(int));
+    ctx->nShcGroups = static_cast<int>(groupPtr.size()) - 1;
+    ctx->nShcSubs = nSubs;
+    ctx->shcMaxSectionShift = maxSectionShift >= 0 ? maxSectionShift : 3;
+    size_t nsu = static_cast<size_t>(ctx->nScenarios) * nSubs;
+    size_t nsc = static_cast<size_t>(ctx->nScenarios) * nc;
+    size_t nsg = static_cast<size_t>(ctx->nScenarios) * ctx->nShcGroups;
+    ctx->dShcPos.ensure(nsu * sizeof(int));
+    ctx->dShcRatDir.ensure(nsu * sizeof(int));
+    ctx->dShcRatCount.ensure(nsu * sizeof(int));
+    ctx->dShcRatAllowed.ensure(nsu * sizeof(int));
+    ctx->dShcShift.ensure(nsu * sizeof(int));
+    ctx->dShcSensi.ensure(nsc * sizeof(double));
+    ctx->dShcBaseB.ensure(nsc * sizeof(double));
+    ctx->dShcAppliedDb.ensure(nsc * sizeof(double));
+    ctx->dShcOutOfDb.ensure(nsg * sizeof(char));
+    ctx->dShcDiffV.ensure(nsg * sizeof(double));
+    ctx->nShc = nc;
+    return 1;
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchShuntPositions(
+        JNIEnv* env, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || ctx->nShc <= 0 || !ctx->dShcPos.p) {
+        return nullptr;
+    }
+    size_t cnt = static_cast<size_t>(ctx->nShcSubs) * ctx->nScenarios;
+    std::vector<int> host(cnt);
+    cudaMemcpy(host.data(), ctx->dShcPos.p, cnt * sizeof(int), cudaMemcpyDeviceToHost);
     jintArray out = env->NewIntArray(static_cast<jsize>(cnt));
     env->SetIntArrayRegion(out, 0, static_cast<jsize>(cnt), host.data());
     return out;

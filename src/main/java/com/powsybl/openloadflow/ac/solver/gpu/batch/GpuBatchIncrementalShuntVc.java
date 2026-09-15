@@ -39,7 +39,7 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-final class GpuBatchIncrementalShuntVc {
+public final class GpuBatchIncrementalShuntVc {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchIncrementalShuntVc.class);
 
@@ -62,8 +62,8 @@ final class GpuBatchIncrementalShuntVc {
 
     /** One controller shunt: the SHUNT_B variable row (pinned identity — unit-RHS row, target index and
      *  state index coincide), the controlled bus V row, and its sub-controllers. */
-    record Controller(int bRow, int vRow, int ctrlBusNum, double targetV, double halfDeadband,
-                      List<Sub> subs, double bMagnitude, int shOvElem, int elemIndexAbs) {
+    public record Controller(int bRow, int vRow, int ctrlBusNum, double targetV, double halfDeadband,
+                      List<Sub> subs, double bMagnitude, int shOvElem, int elemIndexAbs, int shuntNum) {
     }
 
     private static final class Ratchet {
@@ -83,7 +83,7 @@ final class GpuBatchIncrementalShuntVc {
         }
     }
 
-    static List<Controller> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    public static List<Controller> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                              GpuBatchElementMapper elementMapper, int shPackOffset) {
         List<Controller> out = new ArrayList<>();
         Map<Integer, Integer> busVRows = new LinkedHashMap<>();
@@ -140,12 +140,104 @@ final class GpuBatchIncrementalShuntVc {
             double halfDeadband = vc.getTargetDeadband()
                     .orElse(MIN_TARGET_DEADBAND_KV / vc.getControlledBus().getNominalV()) / 2;
             out.add(new Controller(bRow, vRow, vc.getControlledBus().getNum(), vc.getTargetValue(), halfDeadband,
-                    subs, magnitude, elemIndex - shPackOffset, elemIndex));
+                    subs, magnitude, elemIndex - shPackOffset, elemIndex, shunt.getNum()));
         }
         return out;
     }
 
     @SuppressWarnings("unchecked")
+    /** Install the controllers for the in-kernel loop (OLF order 10): groups per controlled bus in
+     *  OLF's |b|-descending order, sub-controller section tables, the run's maxSectionShift. Returns
+     *  true when the kernel loop OWNS them (the host orchestrator must then stay off). */
+    public static boolean uploadToDevice(long handle, List<Controller> ctrls, int maxSectionShift) {
+        if (ctrls == null || ctrls.isEmpty()) {
+            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchShuntControllers(handle,
+                    null, null, null, null, null, null, null, null, null, null, null, null, null, null, maxSectionShift);
+            return false;
+        }
+        int nc = ctrls.size();
+        Map<Integer, List<Integer>> byBus = new LinkedHashMap<>();
+        for (int c = 0; c < nc; c++) {
+            byBus.computeIfAbsent(ctrls.get(c).ctrlBusNum(), k -> new ArrayList<>()).add(c);
+        }
+        int[] groupPtr = new int[byBus.size() + 1];
+        int[] groupCtrl = new int[nc];
+        int g = 0;
+        int k = 0;
+        for (List<Integer> group : byBus.values()) {
+            group.sort(Comparator.comparingDouble((Integer ci) -> ctrls.get(ci).bMagnitude()).reversed());
+            groupPtr[g++] = k;
+            for (int ci : group) {
+                groupCtrl[k++] = ci;
+            }
+        }
+        groupPtr[g] = k;
+        int[] bRow = new int[nc];
+        int[] vRow = new int[nc];
+        double[] targetV = new double[nc];
+        double[] halfDb = new double[nc];
+        int[] elemAbs = new int[nc];
+        int[] shOvElem = new int[nc];
+        int[] subPtr = new int[nc + 1];
+        List<Integer> secPtr = new ArrayList<>();
+        List<Double> secB = new ArrayList<>();
+        List<Double> secG = new ArrayList<>();
+        List<Integer> subMin = new ArrayList<>();
+        List<Integer> subBase = new ArrayList<>();
+        for (int c = 0; c < nc; c++) {
+            Controller ctl = ctrls.get(c);
+            bRow[c] = ctl.bRow();
+            vRow[c] = ctl.vRow();
+            targetV[c] = ctl.targetV();
+            halfDb[c] = ctl.halfDeadband();
+            elemAbs[c] = ctl.elemIndexAbs();
+            shOvElem[c] = ctl.elemIndexAbs() >= 0 ? ctl.shOvElem() : -1;
+            subPtr[c] = subMin.size();
+            for (Sub sub : ctl.subs()) {
+                secPtr.add(secB.size());
+                for (int i = 0; i < sub.sectionsB().length; i++) {
+                    secB.add(sub.sectionsB()[i]);
+                    secG.add(sub.sectionsG()[i]);
+                }
+                subMin.add(sub.minPos());
+                subBase.add(sub.basePos());
+            }
+        }
+        subPtr[nc] = subMin.size();
+        secPtr.add(secB.size());
+        boolean owned = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchShuntControllers(handle,
+                bRow, vRow, targetV, halfDb, elemAbs, shOvElem, groupPtr, groupCtrl, subPtr,
+                secPtr.stream().mapToInt(Integer::intValue).toArray(),
+                secB.stream().mapToDouble(Double::doubleValue).toArray(),
+                secG.stream().mapToDouble(Double::doubleValue).toArray(),
+                subMin.stream().mapToInt(Integer::intValue).toArray(),
+                subBase.stream().mapToInt(Integer::intValue).toArray(), maxSectionShift) != 0;
+        LOGGER.info("Uploaded {} incremental shunt controllers to device ({} groups, {} subs): {}",
+                nc, byBus.size(), subMin.size(), owned ? "in-kernel loop" : "host orchestrator");
+        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            System.err.printf("SHUNT_UPLOAD nCtrl=%d nGroups=%d nSubs=%d kernel=%b%n", nc, byBus.size(), subMin.size(), owned);
+        }
+        return owned;
+    }
+
+    /** Give the driver's final sections (scenario 0) back to the network — what OLF's own loop leaves
+     *  through LfShunt.Controller.updateSectionB; the shunt's b follows through OLF's listeners. */
+    public static void writeBackPositions(LfNetwork network, List<Controller> ctrls, int[] positions) {
+        if (ctrls == null || ctrls.isEmpty() || positions == null) {
+            return;
+        }
+        int u = 0;
+        for (Controller ctl : ctrls) {
+            LfShunt shunt = network.getShunt(ctl.shuntNum());
+            List<LfShunt.Controller> subs = shunt != null ? shunt.getControllers() : List.of();
+            for (int k = 0; k < ctl.subs().size(); k++, u++) {
+                if (u < positions.length && k < subs.size() && subs.get(k).getPosition() != positions[u]) {
+                    subs.get(k).updateSectionB(positions[u]);
+                }
+            }
+        }
+    }
+
     static double shuntSectionG(LfShunt.Controller c, int pos) {
         // no public accessor for the per-section G table (only getG() at the current position) —
         // read-only reflection, same pattern as GpuBatchTransformerControl.tapModels

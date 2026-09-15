@@ -461,6 +461,17 @@ public final class GpuAcNewtonSolver {
      *  phase left — null without the table. Layout {@code s * nTvc + c}. */
     public static native int[] readBatchTvcTaps(long handle);
 
+    /** Install the incremental SHUNT voltage-control tables for the in-kernel loop (OLF order 10);
+     *  see GpuBatchIncrementalShuntVc.uploadToDevice. Returns 1 when the kernel loop owns them. */
+    public static native int setBatchShuntControllers(long handle,
+            int[] bRow, int[] vRow, double[] targetV, double[] halfDb, int[] elemAbs, int[] shOvElem,
+            int[] groupPtr, int[] groupCtrl, int[] subPtr, int[] secPtr, double[] secB, double[] secG,
+            int[] subMin, int[] subBase, int maxSectionShift);
+
+    /** Per (scenario, sub-controller): the section the driver's ShuntVoltageControl phase left —
+     *  null without the table. Layout {@code s * nSubs + u}, subs in upload order. */
+    public static native int[] readBatchShuntPositions(long handle);
+
     /**
      * Install the PER-GENERATOR distributed-slack participants: the factors and limits OLF's
      * water-fill actually saturates on, grouped by bus ({@code busGenStart}/{@code busGenEnd} slice

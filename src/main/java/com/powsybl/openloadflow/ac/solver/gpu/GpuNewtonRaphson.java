@@ -16,6 +16,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivationExtractor
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchHvdcAcEmulation;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchIncrementalShuntVc;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchIncrementalTvc;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOuterLoopTables;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring;
@@ -204,6 +205,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         writeBackReactiveLimits(data, deviceTargets);
         if (tvcOwned && tvcCtls != null) {
             GpuBatchIncrementalTvc.writeBackTaps(network, tvcCtls, GpuAcNewtonSolver.readBatchTvcTaps(handle));
+        }
+        if (shuntOwned && shuntCtls != null) {
+            GpuBatchIncrementalShuntVc.writeBackPositions(network, shuntCtls, GpuAcNewtonSolver.readBatchShuntPositions(handle));
         }
     }
 
@@ -398,6 +402,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private List<GpuBatchVoltageMonitoring.Ctl> monCtls;
     private List<GpuBatchIncrementalTvc.Controller> tvcCtls;
     private boolean tvcOwned;
+    private List<GpuBatchIncrementalShuntVc.Controller> shuntCtls;
+    private boolean shuntOwned;
 
     /** The host-paused loops' (loop, context) pairs of the CURRENT engine run: OLF keeps one context
      *  per loop for the whole run (iteration counters, per-loop data), so they must survive a restart
@@ -715,6 +721,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             monCtls = null;
             tvcCtls = null;
             tvcOwned = false;
+            shuntCtls = null;
+            shuntOwned = false;
             if (driverOuterLoops) {
                 long handle = context.handle.get();
                 int nElements = cachedData.getTotalElementCount();
@@ -770,6 +778,19 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     }
                 } else {
                     GpuBatchIncrementalTvc.uploadToDevice(handle, null, 1);
+                }
+                // IncrementalShuntVoltageControl (OLF order 10) IN-KERNEL, groups included.
+                if (driverLoop("IncrementalShuntVoltageControl")
+                        instanceof com.powsybl.openloadflow.ac.outerloop.IncrementalShuntVoltageControlOuterLoop isvc) {
+                    var mapper = new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper(network);
+                    shuntCtls = GpuBatchIncrementalShuntVc.buildControllers(network, equationSystem, mapper,
+                            mapper.getClosedBranchCount() + mapper.getOpenBranchCount());
+                    shuntOwned = GpuBatchIncrementalShuntVc.uploadToDevice(handle, shuntCtls, isvc.getMaxSectionShift());
+                    if (shuntOwned) {
+                        hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_SHUNT - GpuAcNewtonSolver.HOST_LOOP_SVC));
+                    }
+                } else {
+                    GpuBatchIncrementalShuntVc.uploadToDevice(handle, null, 3);
                 }
                 // Host-owned outer-loop slots: the driver pauses at their OLF positions and the
                 // pause/resume cycle after solveBatchContext runs OLF's loop there. 0 clears a cached mask.

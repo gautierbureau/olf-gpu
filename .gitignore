@@ -7,3 +7,6 @@ native/local-env.sh
 .idea/
 *.iml
 __pycache__/
+rte6515_full.xiidm.gz
+pegase9241_full.xiidm.gz
+hs_err_pid*.log

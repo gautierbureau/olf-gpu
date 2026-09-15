@@ -32,7 +32,7 @@ import java.util.Objects;
 public final class GpuDcSolver implements AutoCloseable {
 
     /** Elements per contingency the alpha kernel solves in registers (MAX_K in the native). */
-    public static final int MAX_ELEMENTS = 8;
+    public static final int MAX_ELEMENTS = 32;
 
     private static final java.lang.ref.Cleaner CLEANER = java.lang.ref.Cleaner.create();
 

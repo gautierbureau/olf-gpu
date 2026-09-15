@@ -99,6 +99,19 @@ class DcWoodburyBaselineProbe {
         System.out.printf("DC-BASELINE %-5s wall %6d ms | %.3f ms/ctg | statuses %s | violations %d%n",
                 klu.name(), klu.wallMs(), klu.wallMs() / (double) contingencies.size(), statusCounts(klu.result()), violationCount(klu.result()));
 
+        if ("1".equals(System.getenv("OLF_DC_GPU"))) {
+            // phase 1: the GPU Woodbury path (device S, in-kernel Woodbury, flows, screen) vs the stock KLU arm
+            assumeTrue(com.powsybl.openloadflow.dc.gpu.GpuDcSolver.isAvailable(), "GPU native library not available");
+            com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.set(-1);
+            Arm gpu = run("GPU", new SparseMatrixFactory(), network, contingencies, monitoredBranches, threads, true);
+            int onDevice = com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get();
+            System.out.printf("DC-BASELINE %-5s wall %6d ms | %.3f ms/ctg | statuses %s | violations %d | x%.2f vs KLU | %d/%d on the device%n",
+                    gpu.name(), gpu.wallMs(), gpu.wallMs() / (double) contingencies.size(), statusCounts(gpu.result()),
+                    violationCount(gpu.result()), klu.wallMs() / (double) gpu.wallMs(), onDevice, contingencies.size());
+            compare(klu, gpu, contingencies.size());
+            assertTrue(onDevice > 0, "the device must have solved contingencies");
+            return;
+        }
         if ("1".equals(System.getenv("OLF_DC_SKIP_CUDSS"))) {
             return;
         }
@@ -108,6 +121,10 @@ class DcWoodburyBaselineProbe {
                 cudss.name(), cudss.wallMs(), cudss.wallMs() / (double) contingencies.size(), statusCounts(cudss.result()),
                 violationCount(cudss.result()), klu.wallMs() / (double) cudss.wallMs());
 
+        compare(klu, cudss, contingencies.size());
+    }
+
+    private static void compare(Arm klu, Arm cudss, int contingencyCount) {
         // --- parity: the two arms run the SAME Java, only the LU differs
         assertEquals(statusCounts(klu.result()), statusCounts(cudss.result()), "post-contingency statuses differ");
         assertEquals(klu.result().getPreContingencyResult().getStatus(), cudss.result().getPreContingencyResult().getStatus());
@@ -166,6 +183,11 @@ class DcWoodburyBaselineProbe {
 
     private static Arm run(String name, MatrixFactory matrixFactory, Network network, List<Contingency> contingencies,
                            List<String> monitoredBranches, int threads) {
+        return run(name, matrixFactory, network, contingencies, monitoredBranches, threads, false);
+    }
+
+    private static Arm run(String name, MatrixFactory matrixFactory, Network network, List<Contingency> contingencies,
+                           List<String> monitoredBranches, int threads, boolean gpuProvider) {
         LoadFlowParameters lfp = JsonLoadFlowParameters.read(PARAMS_FILE);
         lfp.setDc(true);
         SecurityAnalysisParameters sap = new SecurityAnalysisParameters();
@@ -174,8 +196,9 @@ class DcWoodburyBaselineProbe {
                 new OpenSecurityAnalysisParameters().setDcFastMode(true).setThreadCount(threads));
         List<StateMonitor> monitors = List.of(new StateMonitor(com.powsybl.contingency.ContingencyContext.all(),
                 new LinkedHashSet<>(monitoredBranches), Set.of(), Set.of()));
-        OpenSecurityAnalysisProvider provider = new OpenSecurityAnalysisProvider(matrixFactory,
-                new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        OpenSecurityAnalysisProvider provider = gpuProvider
+                ? new com.powsybl.openloadflow.sa.gpu.GpuSecurityAnalysisProvider(matrixFactory, new EvenShiloachGraphDecrementalConnectivityFactory<>())
+                : new OpenSecurityAnalysisProvider(matrixFactory, new EvenShiloachGraphDecrementalConnectivityFactory<>());
         SecurityAnalysisRunParameters runParameters = new SecurityAnalysisRunParameters()
                 .setSecurityAnalysisParameters(sap)
                 .setMonitors(monitors);

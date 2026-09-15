@@ -200,3 +200,18 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-28 | 00dfa37 | 12.44 | 10.52 | 28.41 | x2.70 | 0/0/0 | 7.47 | 4.19 | 499/500 | 122/133 (92%) | IR=4 on zi structures: chunk-composition-dependent factorization accuracy on repaired rows (LLAX class 4e-06 -> 1e-10 kV) |
 | 2026-09-28 | 651a29c+dirty | 12.08 | 10.55 | 27.34 | x2.59 | 0/0/0 | 7.45 | 4.20 | 499/500 | 122/133 (92%) | replicate OLF's ZI spanning tree per contingency + its zeroed coupler flows at every solve start |
 | 2026-09-29 | 1e8ad30 | 12.39 | 10.67 | 28.33 | x2.66 | 0/0/0 | 7.54 | 4.19 | 499/500 | 122/133 (92%) | injection outage at the relocated coupler rows (5840792) |
+
+## DC — Woodbury security analysis (the `dc` branch)
+
+rte6515_full, ALL-branch N-1 of the main synchronous component (9042), RTE production parameters
+switched to DC, `dcFastMode`; probe `DcWoodburyBaselineProbe` (`OLF_DC_GPU=1`). Rule: GPU
+single-thread vs CPU 8 threads (user, 2026-09-15). Parity = violation sets keyed
+subject|limitType|side|limitName + statuses + monitored flows; the two arms share one JVM (KLU first).
+
+| date | commit | monitored | CPU 8t (s) | GPU 1t (s) | GPU ms/ctg | ratio | on device | parity | note |
+|---|---|---|---|---|---|---|---|---|---|
+| 2026-09-15 | phase 0 | 100 | 65.3 (1 thread) | 66.2 (cuDSS drop-in) | 7.32 | x0.99 | — | 0 lines, 1.2e-9 MW | zero-code baseline: the LU is <5% of the wall |
+| 2026-09-15 | 9fed038 | 100 | 66.7 (1 thread) | 29.3 | 3.24 | x2.28 | 6458/9042 | 0 lines | phase 1: breaking outages still on the stock path |
+| 2026-09-15 | f0e981e | 100 | 17.3 | 13.4 | 1.49 | x1.29 | 9042/9042 | 0 lines, 2.5e-10 MW | phase 2a: modified-target columns |
+| 2026-09-15 | 660867b | 0 | 16.5 | 3.65 | 0.40 | x4.52 | 9042/9042 | 0 lines | phase 2b: device criterion, IR off — target met |
+| 2026-09-15 | 660867b | 100 | 18.4 | 8.3 | 0.92 | x2.22 | 9042/9042 | 0 lines, 2.5e-10 MW | the extra 5.7 s is OLF's monitored-result walk, on both arms |

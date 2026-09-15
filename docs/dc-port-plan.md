@@ -561,6 +561,16 @@ upstream-worthy). Parity 1e-10 pu on OLF's own tap scenarios, two taps, switch o
 outage of the node-breaker network, generator + load set points (13 tests in
 `GpuWoodburyDcSecurityAnalysisTest`).
 
+**Base solve on the device (2026-09-15, after phase 5).** The pre-contingency DC solve is the
+device's too (same target vector, cuDSS instead of KLU), so nothing of the DC linear algebra runs
+on the CPU on the device path any more; KLU is only touched by a stock-routed subset. What stays on
+the host by nature: LfNetwork load, contingency propagation, the base slack distribution and the
+target vector, the pre-contingency result and violations, the graph confirmation of flagged
+contingencies, the modified-target columns (host replay / array model) and the result objects.
+**Timing caveat worth knowing**: the cuDSS context creation (CUDA init + analysis + factorization)
+varies from 0.22 s to 2.6 s between otherwise identical runs while the AC session shares the GPU;
+the per-contingency work is stable (~0.2 ms). Report cold numbers with that spread.
+
 ## 5. Validation and benches
 
 - Parity oracle = stock OLF Woodbury on the same `LfNetwork` (same slack, same

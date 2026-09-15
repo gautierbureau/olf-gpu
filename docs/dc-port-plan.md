@@ -1155,3 +1155,35 @@ Measured tables in `docs/numbers.md`. The headline under the standing comparison
 GPU 2.61 ms/step against 8-thread CPU 1.97 ms/step on rte6515_full at 4096 steps, so the GPU arm
 needs about two host threads to match a fully threaded CPU and four to beat it. The device section
 itself is down to 0.62 ms/step; everything above that is emission.
+
+### The emission, after the lock (2026-09-15)
+
+With the device section at a third of a millisecond a step, the branch rows were the run, so the
+emission got the same treatment as the lock: profile first, then remove work rather than move it.
+
+A Flight Recorder profile of a 4096-step run put about a quarter of all execution samples under
+`emitBranchResults`. The cause was not the writer but the network lookups inside it: every emitted
+row recomputed its branch's two per-unit-to-ampere scales by walking terminal, voltage level and
+nominal voltage, twice. Those are functions of the nominal voltages alone, and the branch's pi model
+already baked those in when the network was built, so a branch that outlives a nominal voltage change
+is stale either way. They are now computed once per branch, in `LfBranchImpl`, `LfTieLineBranch` and
+`LfBoundaryLineBranch` (patched OLF).
+
+Branch emission halves, 2.49 to about 1.15 ms/step, and the GPU arm's end-to-end time nearly halves
+with it. Attribution was checked by reverting only that change and re-measuring, which put the
+emission back at 2.49.
+
+Two cautions this exercise produced, both worth carrying:
+
+- **The profiler's leaf frames lied.** With the network cache off, the reference resolution it
+  blamed is a plain field read the JIT inlines away; the samples were the inlined callees underneath
+  it. What the profile is good for is pointing at the METHOD; the reason has to come from reading the
+  code, and the fix has to be A/B measured.
+- **A guard is not always free to add.** The same profile blamed the bus disable propagation in state
+  restore. An early return when the flag is unchanged would skip the propagation that re-enables an
+  HVDC link when its other end comes back, so that one was left alone.
+
+Still open in the emission, in order of measured size: the per-branch identifier resolution (its
+result is an identifier that IIDM permits renaming, so it cannot simply be cached in a field), and
+the zero-impedance flow map, which is rebuilt every step and then consulted once per zero-impedance
+branch by identifier.

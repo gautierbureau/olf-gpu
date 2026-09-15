@@ -333,3 +333,40 @@ Per the standing comparison rule the honest headline is the mono-thread GPU agai
 3.29 against 1.89 ms/step. The GPU arm still needs about two host threads to match a fully threaded
 CPU on this plan. What the narrowing bought is that adding threads now helps it as much as it helps
 the CPU.
+
+#### The emission: the per-row network lookups removed (2026-09-15)
+
+With the device section down to a third of a millisecond, the branch rows were the run. Each emitted
+row recomputed the two per-unit-to-ampere scales of its branch from the network - terminal, voltage
+level, nominal voltage, twice - although those are functions of the nominal voltages alone, which the
+branch's pi model already baked in when the network was built. Computing them once per branch in
+`LfBranchImpl`, `LfTieLineBranch` and `LfBoundaryLineBranch` halves the branch emission.
+
+A/B on the same machine minutes apart, rte6515_full, 4096 steps, 1 thread:
+
+| | branch emit | all emit | CPU total | GPU total |
+|---|---|---|---|---|
+| without the cache | 2.49 | 4.14 | 6.89 | 2.94 |
+| with the cache | 1.13 to 1.18 | 1.54 to 1.89 | 4.47 to 4.80 | 1.52 to 1.56 |
+
+The saving is about 235 ns per branch per step, more than two divisions and a few field reads
+explain on their own; removing the deep call from the hot method most likely lets the rest of the
+emission path inline. The control run above is the attribution: reverting only this change puts the
+branch emission back at 2.49.
+
+#### Where the time-series run stands after both changes
+
+Same plan and machine, two sweeps, and the box is shared with the AC session so the CPU arm is noisy
+while the GPU arm is stable:
+
+| threads | CPU | GPU | device section |
+|---|---|---|---|
+| 1 | 4.28 to 4.66 | 1.49 to 1.64 | 0.53 to 0.65 |
+| 4 | 2.16 to 3.52 | 0.94 to 1.02 | 0.31 to 0.41 |
+| 8 | 1.71 to 2.31 | 1.16 to 1.19 | 0.49 to 0.77 |
+
+The standing comparison has flipped. Mono-thread GPU is 1.49 to 1.64 ms/step against 1.71 to 2.31 for
+the 8-thread CPU, so on this plan one GPU thread now beats a fully threaded CPU, where at the start
+of the day it needed two threads to draw level. The emission is still the largest single term on the
+GPU arm, and the per-branch identifier resolution and the per-step zero-impedance flow map are the
+next two items in it.

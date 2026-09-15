@@ -312,6 +312,30 @@ __global__ void dcFlows(int nCtg, int n, int nBranches, const int* ph1Row, const
     flows[b + (size_t) c * nBranches] = p;
 }
 
+/** ConnectivityBreakAnalysis.isGroupOfElementsBreakingConnectivity, one thread per contingency:
+ *  for every element e of the contingency, the sum over the contingency's elements e2 of
+ *  |p1_{branch(e2)}.calculateSensi(S, column(e))| = |power_{b2} (dph1 - dph2 + da1)| read in column e;
+ *  the maximum of those sums is returned (the host compares it with 1 - 1e-6). */
+__global__ void connectivityCriterion(int nCtg, int n, const int* ctgPtr, const int* ctgElem, const int* elemBranch,
+                                      const int* ph1Row, const int* ph2Row, const int* a1Row, const double* power,
+                                      const double* s, double* maxSum) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= nCtg) {
+        return;
+    }
+    double best = 0.0;
+    for (int e = ctgPtr[c]; e < ctgPtr[c + 1]; e++) {
+        int col = ctgElem[e];
+        double sum = 0.0;
+        for (int e2 = ctgPtr[c]; e2 < ctgPtr[c + 1]; e2++) {
+            int b2 = elemBranch[ctgElem[e2]];
+            sum += fabs(power[b2] * phaseSensi(s, n, col, ph1Row[b2], ph2Row[b2], a1Row[b2]));
+        }
+        best = fmax(best, sum);
+    }
+    maxSum[c] = best;
+}
+
 __device__ inline void emitRecord(int* records, int* counts, int c, int capacity, int record) {
     int slot = atomicAdd(counts + c, 1);
     if (slot < capacity) {
@@ -420,7 +444,13 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_createContext(JNIEnv* env, jcla
         DC_CUDSS_CHECK(cudssCreate(&ctx->handle));
         DC_CUDSS_CHECK(cudssSetStream(ctx->handle, ctx->stream));
         DC_CUDSS_CHECK(cudssConfigCreate(&ctx->config));
-        int ir = 2;                                          // same refinement as libmathcudss
+        // Iterative refinement: OFF by default. KLU (the reference) refines nothing, the LU is backward
+        // stable, and each refinement step costs a solve + a SpMV on every column — measured 2.1 s for
+        // the 9042-column S with 2 steps. OLF_GPU_DC_IR=<n> overrides (A/B against the parity gate).
+        int ir = 0;
+        if (const char* e = std::getenv("OLF_GPU_DC_IR"); e != nullptr && *e != '\0') {
+            ir = std::atoi(e);
+        }
         DC_CUDSS_CHECK(cudssConfigSet(ctx->config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
 #if CUDSS_VERSION >= 800
         cudssMatchingAlg_t matching = CUDSS_MATCHING_ALG_AUTO;   // empty structural diagonal, see header
@@ -605,6 +635,42 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_setLimitTable(JNIEnv* env, jcla
         ctx->dcPowerFactor = dcPowerFactor;
     } catch (const std::exception& e) {
         throwJava(env, std::string("GpuDcSolver.setLimitTable: ") + e.what());
+    }
+}
+
+/** The sensitivity criterion of ConnectivityBreakAnalysis for every contingency (CSR over
+ *  element indices): the max over its elements of the summed |sensitivities|; > 1 - 1e-6 means
+ *  "potentially breaking" and goes to the host's graph confirmation. */
+JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_connectivityCriterion(JNIEnv* env, jclass, jlong handle, jintArray jCtgPtr, jintArray jCtgElem) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        IntArray ctgPtr(env, jCtgPtr);
+        IntArray ctgElem(env, jCtgElem);
+        int nCtg = ctgPtr.len - 1;
+        if (nCtg <= 0) {
+            return env->NewDoubleArray(0);
+        }
+        if (ctx->s.p == nullptr || ctx->nBranches == 0) {
+            throw std::runtime_error("context not set up (elements, branches)");
+        }
+        ctx->ctgPtr.upload(ctgPtr.p, (size_t) ctgPtr.len * sizeof(int));
+        ctx->ctgElem.upload(ctgElem.p, (size_t) std::max<jsize>(ctgElem.len, 1) * sizeof(int));
+        Buf out;
+        out.alloc((size_t) nCtg * sizeof(double));
+        connectivityCriterion<<<grid(nCtg), BLOCK, 0, ctx->stream>>>(nCtg, ctx->n, ctx->ctgPtr.as<int>(), ctx->ctgElem.as<int>(),
+                ctx->elemBranch.as<int>(), ctx->ph1Row.as<int>(), ctx->ph2Row.as<int>(), ctx->a1Row.as<int>(), ctx->power.as<double>(),
+                ctx->s.as<double>(), out.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        std::vector<double> host(nCtg);
+        DC_CUDA_CHECK(cudaMemcpy(host.data(), out.p, (size_t) nCtg * sizeof(double), cudaMemcpyDeviceToHost));
+        jdoubleArray result = env->NewDoubleArray(nCtg);
+        env->SetDoubleArrayRegion(result, 0, nCtg, host.data());
+        return result;
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.connectivityCriterion: ") + e.what());
+        return nullptr;
     }
 }
 

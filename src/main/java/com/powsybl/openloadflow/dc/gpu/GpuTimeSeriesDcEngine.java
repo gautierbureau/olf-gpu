@@ -64,13 +64,21 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuTimeSeriesDcEngine.class);
 
     /** Steps solved together; the device holds one state column per step of the chunk. */
-    public static final int DEFAULT_CHUNK = Integer.getInteger("olf.gpu.dc.ts.chunk", 256);
+    public static final int DEFAULT_CHUNK = Integer.getInteger("olf.gpu.dc.ts.chunk", 1024);
 
     /** The last run's steps solved on the device (-1 when the device never engaged). */
     public static final AtomicInteger LAST_DEVICE_STEP_COUNT = new AtomicInteger(-1);
 
     /** The last run's AC-emulation configurations applied and re-solved (0 = no link ever switched). */
     public static final AtomicInteger LAST_DEVICE_LOOP_REGROUPINGS = new AtomicInteger(0);
+
+    /**
+     * Traces the outer-loop sweep to stderr: the rounds, the configuration groups of each round and
+     * every matrix refresh. The sweep is the subtlest part of the batched engine - a group's
+     * decisions are taken on the device but its termination is per step - so the trace stays, behind
+     * {@code OLF_TS_TRACE}.
+     */
+    private static final boolean TRACE = System.getenv("OLF_TS_TRACE") != null;
 
     private final DcLoadFlowContext context;
     private final LfNetwork network;
@@ -342,6 +350,7 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
             @Override
             public TimeSeriesLoadFlow.StepEngine createEngine(LfNetwork lfNetwork) {
                 DcLoadFlowContext context = new DcLoadFlowContext(lfNetwork, dcParameters);
+                GpuDcSolver.DEVICE_LOCK.lock();
                 try {
                     // the outer loops OLF would actually run on this network: the configured list is
                     // filtered by isNeeded, and the default list carries the HVDC AC-emulation loop
@@ -371,6 +380,8 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
                     context.close();
                     LAST_DEVICE_STEP_COUNT.set(-1);
                     return fallback.createEngine(lfNetwork);
+                } finally {
+                    GpuDcSolver.DEVICE_LOCK.unlock();
                 }
             }
         };
@@ -466,14 +477,21 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
             chunkDistributed = new double[count];
             chunkMismatch = new double[count];
         }
-        applyConfiguration(baseHvdcStatus, baseTapIndex);
-        refreshDeviceMatrix();
-        solver.timeSeriesChunk(count, chunkGeneratorTargets, generatorCount, chunkLoadTargets, busCount,
-                chunkGeneratorInitial, chunkGeneratorParticipating, chunkGeneratorMinTargetP, chunkGeneratorMaxTargetP,
-                chunkGeneratorMinP, chunkGeneratorMaxP, chunkGeneratorDroop, chunkGeneratorParticipationFactor, chunkHvdcP0,
-                distributedSlack ? participationType : -1, useActiveLimits, assembly.referenceGenerator,
-                chunkStates, chunkGeneratorTargets, chunkDistributed, chunkMismatch);
-        runOuterLoops(count);
+        // the device is shared between partitions; the host work around this - the set point walk
+        // before it and the row emission after it - runs in parallel
+        GpuDcSolver.DEVICE_LOCK.lock();
+        try {
+            applyConfiguration(baseHvdcStatus, baseTapIndex);
+            refreshDeviceMatrix();
+            solver.timeSeriesChunk(count, chunkGeneratorTargets, generatorCount, chunkLoadTargets, busCount,
+                    chunkGeneratorInitial, chunkGeneratorParticipating, chunkGeneratorMinTargetP, chunkGeneratorMaxTargetP,
+                    chunkGeneratorMinP, chunkGeneratorMaxP, chunkGeneratorDroop, chunkGeneratorParticipationFactor, chunkHvdcP0,
+                    distributedSlack ? participationType : -1, useActiveLimits, assembly.referenceGenerator,
+                    chunkStates, chunkGeneratorTargets, chunkDistributed, chunkMismatch);
+            runOuterLoops(count);
+        } finally {
+            GpuDcSolver.DEVICE_LOCK.unlock();
+        }
         LAST_DEVICE_STEP_COUNT.addAndGet(count);
     }
 
@@ -523,7 +541,7 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
             if (groups.isEmpty()) {
                 break;
             }
-            if (System.getenv("OLF_TS_TRACE") != null) {
+            if (TRACE) {
                 System.err.printf("TS_SWEEP round=%d groups=%d%n", round, groups.size());
             }
             for (List<Integer> group : groups.values()) {
@@ -536,7 +554,7 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
                 for (int step : steps) {
                     resolve |= needsResolve[step];
                 }
-                if (System.getenv("OLF_TS_TRACE") != null) {
+                if (TRACE) {
                     System.err.printf("TS_SWEEP   group steps=%s config=%s resolve=%s loopIdx=%d lastUnstable=%d%n",
                             group, configurationKey(first, status, hvdcCount, controllerCount), resolve, loopIndex[first], lastUnstable[first]);
                 }
@@ -744,7 +762,7 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
         if (structureChanged) {
             solver.setContributions(refreshed);
         }
-        if (System.getenv("OLF_TS_TRACE") != null) {
+        if (TRACE) {
             System.err.printf("TS_SWEEP   refresh structureChanged=%s nnz=%d%n", structureChanged, refreshed.nonZeroCount());
         }
         solver.refreshBranches(refreshed);
@@ -799,7 +817,12 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
 
     @Override
     public void close() {
-        solver.close();
+        GpuDcSolver.DEVICE_LOCK.lock();
+        try {
+            solver.close();
+        } finally {
+            GpuDcSolver.DEVICE_LOCK.unlock();
+        }
         context.close();
     }
 

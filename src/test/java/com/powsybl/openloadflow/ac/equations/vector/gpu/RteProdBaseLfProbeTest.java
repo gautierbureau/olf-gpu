@@ -63,7 +63,8 @@ class RteProdBaseLfProbeTest {
         Network network = Network.read(CASES.resolve(CASE));
         LoadFlowParameters lfp = JsonLoadFlowParameters.read(paramsFile);
         long t0 = System.nanoTime();
-        LoadFlowResult r = LoadFlow.run(network, lfp);
+        // name the provider: this module also publishes the GPU DC one, so the default lookup is ambiguous
+        LoadFlowResult r = LoadFlow.find("OpenLoadFlow").run(network, lfp);
         long ms = (System.nanoTime() - t0) / 1_000_000;
         System.out.printf("PROBE base LF: ok=%s | %d ms%n", r.isFullyConverged(), ms);
         for (LoadFlowResult.ComponentResult c : r.getComponentResults()) {

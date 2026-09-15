@@ -1093,3 +1093,38 @@ on a plan that moves taps often.
   with the AC session's; unit tests on IEEE/small cases are fine in parallel.
 - **The device gets the RUN's parameters** (dcPowerFactor, balanceType, useTransformerRatio,
   dcApproximationType, limit reductions) — never `new ...Parameters()` in the GPU path.
+
+### Row emission over host threads, and how the chunk is sized (2026-09-15)
+
+Once the device owns restore, set points and solve, what is left of a time-series step is the row
+emission, and that is host work identical on both arms. The mechanism to parallelize it already
+exists: OLF partitions the step range over `threadCount` threads, each with its own writer. The GPU
+engine now runs under that unchanged, with one addition.
+
+`GpuDcSolver.DEVICE_LOCK` is a process-wide `ReentrantLock` held around engine creation, `solveBatch`
+and `close`. cuDSS's analysis phase is not thread-safe across host threads: four partition threads
+each creating an engine segfaults the JVM inside `libcudss`. Under the lock the device work
+serializes while the set-point walking and the row emission - the parts that actually parallelize -
+run concurrently. `GpuTimeSeriesDcEngineTest.matchesStockEngineOverPartitions` is the gate: the same
+plan at `threadCount = 4`, rows compared as a sorted multiset because partitions interleave.
+
+Chunk sizing has a different answer here than on either other path, and the difference is
+instructive:
+
+- **AC batch path** - the chunk IS the cuDSS `UBATCH` batch. It decides whether the batched solve is
+  used at all, and it is worth x2.
+- **DC Woodbury path** - no batch. One factorization, the chunk only sizes kernel launches and the
+  state download. Flat: 64/256/1024 land within run-to-run noise.
+- **DC time-series path** - the chunk is a number of STEPS sharing one factorization, so a larger
+  chunk amortizes per-call overhead and widens the multi-right-hand-side solve. It pays up to about
+  1024-2048 steps and is flat after; `DEFAULT_CHUNK` is 1024.
+
+The time-series chunk has a second role that argues the same way: it is the outer-loop grouping unit.
+Steps are grouped by configuration within a chunk, so a chunk large enough to contain repeated
+configurations shares one refactorization between them. The cap is memory, one right-hand side and
+one state column per step.
+
+Measured tables in `docs/numbers.md`. The headline under the standing comparison rule: mono-thread
+GPU 2.61 ms/step against 8-thread CPU 1.97 ms/step on rte6515_full at 4096 steps, so the GPU arm
+needs about two host threads to match a fully threaded CPU and four to beat it. The device section
+itself is down to 0.62 ms/step; everything above that is emission.

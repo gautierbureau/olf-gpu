@@ -237,3 +237,53 @@ the chunk. Two runs, to show the machine's noise:
 1000/1000 steps on the device. This plan never saturates a link nor moves a tap, so the loops cost
 one decision kernel per chunk; what they buy is that rte6515 runs on the device with its own
 configuration at all.
+
+#### Time-series chunk size — how it is determined (user, 2026-09-15: "how do we determine chunks like AC?")
+
+Three different answers in this port, because three different things sit behind the chunk.
+
+On the AC batch path the chunk IS the cuDSS `UBATCH` batch: one call factorizes and solves that many
+systems, so the batch size decides whether the batched kernel is used at all, and it swings the run
+by x2 on cuDSS 0.8. On the DC Woodbury path there is no batch: the matrix is factorized once and the
+chunk only sizes kernel launches, so it is flat (the table above). On the time-series path the chunk
+is the number of STEPS whose right-hand sides are assembled, solved and downloaded together. One
+factorization serves all of them, so a larger chunk amortizes the per-call overhead over more steps
+and widens the multi-right-hand-side solve. rte6515_full, both loops configured, GPU 1 thread,
+restore + set points + solve:
+
+| chunk | 1000 steps | 4096 steps |
+|---|---|---|
+| 32 | 1.81 ms/step | |
+| 128 | 0.95 ms/step | |
+| 256 | 0.91 ms/step | |
+| 1024 | 0.76 ms/step | 0.62 ms/step (2048) |
+| 4096 | | 0.66 ms/step |
+
+Bigger is better up to about 1024-2048 and then flat or slightly worse, so `DEFAULT_CHUNK` is 1024
+(`-Dolf.gpu.dc.ts.chunk`). The ceiling is memory: a chunk holds one right-hand side and one state
+column per step. The floor on the other side is that a chunk is also the outer-loop grouping unit -
+steps are grouped by configuration WITHIN a chunk, so a chunk too small to contain repeated
+configurations pays a refactorization it could have shared.
+
+#### Time-series row emission over several host threads (2026-09-15)
+
+Once the device takes restore, set points and solve, the row emission is the whole remaining cost,
+and it is host work identical on both arms. OLF's own step-range partitioning parallelizes it: each
+partition thread walks its own steps and writes its own rows, and the device section serializes
+behind `GpuDcSolver.DEVICE_LOCK` (cuDSS analysis is not thread-safe across host threads - concurrent
+analysis calls segfault the JVM). rte6515_full, 4096 steps, 200 planned generators, chunk 1024, both
+loops configured, 69,591,040 rows, end-to-end ms/step:
+
+| threads | CPU | GPU | ratio | CPU "all emit" |
+|---|---|---|---|---|
+| 1 | 6.01 | 2.61 | x2.30 | 3.10 |
+| 2 | 3.95 | 2.06 | x1.92 | 1.94 |
+| 4 | 2.39 | 1.44 | x1.66 | 0.97 |
+| 8 | 1.97 | 1.39 | x1.42 | 0.74 |
+
+The GPU arm is ahead at every thread count, but the margin narrows, and that is the expected shape:
+emission parallelizes on both arms, while the part only the GPU arm shortens is serialized by the
+device lock and fragmented by partitioning into smaller chunks. Per the standing comparison rule the
+honest headline is the mono-thread GPU against the 8-thread CPU: 2.61 against 1.97 ms/step, so on
+this plan the GPU arm needs about two host threads to match a fully threaded CPU, and four to beat
+it.

@@ -22,12 +22,14 @@ import com.powsybl.openloadflow.network.EurostagFactory;
 import com.powsybl.timeseries.DoubleTimeSeries;
 import com.powsybl.timeseries.RegularTimeSeriesIndex;
 import com.powsybl.timeseries.TimeSeries;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.TestFactory;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
@@ -53,9 +55,9 @@ class GpuTimeSeriesDcEngineTest {
     private record Row(String key, double[] values) {
     }
 
-    /** Keeps every streamed row, in order. */
+    /** Keeps every streamed row, in order; thread-safe, since partitions write concurrently. */
     private static final class Recorder implements NetworkResultWriter {
-        private final List<Row> rows = new ArrayList<>();
+        private final List<Row> rows = java.util.Collections.synchronizedList(new ArrayList<>());
 
         @Override
         public void writeBranchResult(String stateId, String subStateId, String status, String branchId,
@@ -206,6 +208,58 @@ class GpuTimeSeriesDcEngineTest {
                 () -> generatorPlan(IeeeCdfNetworkFactory.create300(), 13, 8),
                 () -> dc().setDistributedSlack(true).setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P_MAX)));
         return cases;
+    }
+
+    /**
+     * The same equivalence with the step range split over partition threads, which is how the row
+     * emission - the whole remaining cost once the device takes the solve - is parallelized. Rows
+     * from different partitions interleave, so the comparison is on the sorted multiset.
+     */
+    @Test
+    void matchesStockEngineOverPartitions() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        Network network = IeeeCdfNetworkFactory.create118();
+        List<DoubleTimeSeries> plan = generatorPlan(IeeeCdfNetworkFactory.create118(), 120, 5);
+        TimeSeriesLoadFlowParameters parameters = new TimeSeriesLoadFlowParameters()
+                .setLoadFlowParameters(dc().setDistributedSlack(true))
+                .setThreadCount(4);
+        Recorder cpuRows = new Recorder();
+        TimeSeriesLoadFlowResult cpu = TimeSeriesLoadFlow.run(network, plan, parameters, partition -> cpuRows,
+                TimeSeriesLoadFlow.EnginePlanProvider.DEFAULT);
+        GpuTimeSeriesDcEngine.LAST_DEVICE_STEP_COUNT.set(-1);
+        Recorder gpuRows = new Recorder();
+        TimeSeriesLoadFlowResult gpu = TimeSeriesLoadFlow.run(IeeeCdfNetworkFactory.create118(), plan, parameters,
+                partition -> gpuRows, GpuTimeSeriesDcEngine.planProvider());
+        assertTrue(GpuTimeSeriesDcEngine.LAST_DEVICE_STEP_COUNT.get() >= cpu.getStepResults().size(),
+                "steps solved on the device: " + GpuTimeSeriesDcEngine.LAST_DEVICE_STEP_COUNT.get());
+        assertEquals(cpu.getStepResults().size(), gpu.getStepResults().size(), "step count");
+        for (int s = 0; s < cpu.getStepResults().size(); s++) {
+            assertEquals(cpu.getStepResults().get(s).status(), gpu.getStepResults().get(s).status(), "status of step " + s);
+            assertEquals(cpu.getStepResults().get(s).distributedActivePower(),
+                    gpu.getStepResults().get(s).distributedActivePower(), TOL_MW, "distributed power of step " + s);
+        }
+        // the key - dataset, step, status, element - identifies a row, so sorting on it lines the two
+        // interleavings up; the values are then compared numerically, as everywhere else here
+        List<Row> cpuSorted = cpuRows.rows.stream().sorted(Comparator.comparing(Row::key)).toList();
+        List<Row> gpuSorted = gpuRows.rows.stream().sorted(Comparator.comparing(Row::key)).toList();
+        assertEquals(cpuSorted.size(), gpuSorted.size(), "streamed row count");
+        assertFalse(cpuSorted.isEmpty(), "nothing was streamed");
+        double maxDiff = 0;
+        for (int i = 0; i < cpuSorted.size(); i++) {
+            Row a = cpuSorted.get(i);
+            Row b = gpuSorted.get(i);
+            assertEquals(a.key(), b.key(), "row " + i);
+            for (int v = 0; v < a.values().length; v++) {
+                double x = a.values()[v];
+                double y = b.values()[v];
+                if (Double.isNaN(x) || Double.isNaN(y)) {
+                    assertEquals(Double.isNaN(x), Double.isNaN(y), "row " + i + " value " + v + ": " + x + " vs " + y);
+                } else {
+                    maxDiff = Math.max(maxDiff, Math.abs(x - y));
+                }
+            }
+        }
+        assertTrue(maxDiff < TOL_MW, "max streamed value difference " + maxDiff);
     }
 
     @TestFactory

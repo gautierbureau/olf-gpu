@@ -160,6 +160,24 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
             assertEquals(c.getConnectivityResult().getDisconnectedLoadActivePower(), g.getConnectivityResult().getDisconnectedLoadActivePower(), TOL_MW, id + ": lost load");
             assertEquals(c.getConnectivityResult().getDisconnectedGenerationActivePower(), g.getConnectivityResult().getDisconnectedGenerationActivePower(), TOL_MW, id + ": lost generation");
         }
+
+        // operator strategies: same list, same order, same conditional-action results
+        List<String> cpuOs = cpu.getOperatorStrategyResults().stream().map(r -> r.getOperatorStrategy().getId()).toList();
+        List<String> gpuOs = gpu.getOperatorStrategyResults().stream().map(r -> r.getOperatorStrategy().getId()).toList();
+        assertEquals(cpuOs, gpuOs, "operator strategy result list");
+        for (int i = 0; i < cpuOs.size(); i++) {
+            var c = cpu.getOperatorStrategyResults().get(i);
+            var g = gpu.getOperatorStrategyResults().get(i);
+            String id = "strategy " + cpuOs.get(i);
+            assertEquals(c.getConditionalActionsResults().size(), g.getConditionalActionsResults().size(), id + ": conditional results");
+            for (int k = 0; k < c.getConditionalActionsResults().size(); k++) {
+                var cc = c.getConditionalActionsResults().get(k);
+                var gg = g.getConditionalActionsResults().get(k);
+                assertEquals(cc.getStatus(), gg.getStatus(), id + ": status");
+                assertSameViolations(id, cc.getLimitViolationsResult().getLimitViolations(), gg.getLimitViolationsResult().getLimitViolations());
+                assertSameBranchResults(id, cc.getNetworkResult().getBranchResults(), gg.getNetworkResult().getBranchResults());
+            }
+        }
     }
 
     private static void assertSameViolations(String where, List<LimitViolation> cpu, List<LimitViolation> gpu) {
@@ -308,6 +326,110 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         SecurityAnalysisResult gpu = runGpu(network, contingencies, monitorAll(network), sap);
         assertSameResults(cpu, gpu);
         assertAllOnDevice(cpu);
+    }
+
+    private SecurityAnalysisResult runStockWithStrategies(Network network, List<Contingency> contingencies, List<StateMonitor> monitors,
+                                                          List<com.powsybl.contingency.strategy.OperatorStrategy> strategies, List<com.powsybl.action.Action> actions) {
+        securityAnalysisProvider = new OpenSecurityAnalysisProvider(new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        return runSecurityAnalysis(network, contingencies, monitors, dcFastParameters(), strategies, actions, com.powsybl.commons.report.ReportNode.NO_OP);
+    }
+
+    private SecurityAnalysisResult runGpuWithStrategies(Network network, List<Contingency> contingencies, List<StateMonitor> monitors,
+                                                        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies, List<com.powsybl.action.Action> actions) {
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        GpuWoodburyDcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.set(-1);
+        try {
+            return runSecurityAnalysis(network, contingencies, monitors, dcFastParameters(), strategies, actions, com.powsybl.commons.report.ReportNode.NO_OP);
+        } finally {
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
+    /** OLF's own Woodbury-with-actions scenario: absolute and relative phase-tap actions after the line outage. */
+    @Test
+    void phaseTapActionsMatchStock() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createWithOneT2wtTwoLines();
+        addActivePowerLimits(network, 0.7);
+        List<Contingency> contingencies = allBranches(network);
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.PhaseTapChangerTapPositionAction("pstAbsChange", "PS1", false, 0),
+                new com.powsybl.action.PhaseTapChangerTapPositionAction("pstRelChange", "PS1", true, -1));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("strategyTapAbsChange", ContingencyContext.specificContingency("L1"),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("pstAbsChange")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("strategyTapRelChange", ContingencyContext.specificContingency("L1"),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("pstRelChange")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("strategyOnViolation", ContingencyContext.specificContingency("L2"),
+                        new com.powsybl.contingency.strategy.condition.AnyViolationCondition(), List.of("pstAbsChange")));
+        SecurityAnalysisResult cpu = runStockWithStrategies(network, contingencies, monitorAll(network), strategies, actions);
+        SecurityAnalysisResult gpu = runGpuWithStrategies(network, contingencies, monitorAll(network), strategies, actions);
+        assertSameResults(cpu, gpu);
+        assertAllOnDevice(cpu);
+        assertFalse(cpu.getOperatorStrategyResults().isEmpty(), "the strategies must have produced results");
+    }
+
+    /** Two phase shifters re-tapped together (two action elements in one Woodbury system). */
+    @Test
+    void twoPhaseTapActionsMatchStock() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createWithTwoT2wtTwoLines();
+        addActivePowerLimits(network, 0.7);
+        List<Contingency> contingencies = allBranches(network);
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.PhaseTapChangerTapPositionAction("pst1Change", "PS1", false, 0),
+                new com.powsybl.action.PhaseTapChangerTapPositionAction("pst2Change", "PS2", false, 2));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("strategyTapChange", ContingencyContext.specificContingency("L1"),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("pst1Change", "pst2Change")));
+        SecurityAnalysisResult cpu = runStockWithStrategies(network, contingencies, monitorAll(network), strategies, actions);
+        SecurityAnalysisResult gpu = runGpuWithStrategies(network, contingencies, monitorAll(network), strategies, actions);
+        assertSameResults(cpu, gpu);
+        assertFalse(cpu.getOperatorStrategyResults().isEmpty());
+    }
+
+    /** Switch actions on the node-breaker network: a topological action, the connectivity re-check, the switch element. */
+    @Test
+    void switchActionsMatchStock() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        Network network = com.powsybl.openloadflow.network.NodeBreakerNetworkFactory.create();
+        addActivePowerLimits(network, 0.8);
+        List<Contingency> contingencies = allBranches(network);
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.SwitchAction("openC", "C", true),
+                new com.powsybl.action.SwitchAction("closeC", "C", false));
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = new ArrayList<>();
+        for (Contingency c : contingencies) {
+            strategies.add(new com.powsybl.contingency.strategy.OperatorStrategy("open-" + c.getId(), ContingencyContext.specificContingency(c.getId()),
+                    new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("openC")));
+            strategies.add(new com.powsybl.contingency.strategy.OperatorStrategy("close-" + c.getId(), ContingencyContext.specificContingency(c.getId()),
+                    new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("closeC")));
+        }
+        SecurityAnalysisResult cpu = runStockWithStrategies(network, contingencies, monitorAll(network), strategies, actions);
+        SecurityAnalysisResult gpu = runGpuWithStrategies(network, contingencies, monitorAll(network), strategies, actions);
+        assertSameResults(cpu, gpu);
+        assertFalse(cpu.getOperatorStrategyResults().isEmpty());
+    }
+
+    /** Generator and load set-point actions: right-hand-side shifts, no action element. */
+    @Test
+    void generatorAndLoadActionsMatchStock() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        Network network = IeeeCdfNetworkFactory.create14();
+        addActivePowerLimits(network, 0.9);
+        List<Contingency> contingencies = allBranches(network);
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.GeneratorActionBuilder().withId("gen2Down").withGeneratorId("B2-G").withActivePowerRelativeValue(false).withActivePowerValue(20.0).build(),
+                new com.powsybl.action.LoadActionBuilder().withId("load9Down").withLoadId("B9-L").withRelativeValue(true).withActivePowerValue(-15.0).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("genAndLoad", ContingencyContext.specificContingency("L1-2-1"),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("gen2Down", "load9Down")),
+                new com.powsybl.contingency.strategy.OperatorStrategy("loadOnly", ContingencyContext.specificContingency("L2-3-1"),
+                        new com.powsybl.contingency.strategy.condition.TrueCondition(), List.of("load9Down")));
+        SecurityAnalysisResult cpu = runStockWithStrategies(network, contingencies, monitorAll(network), strategies, actions);
+        SecurityAnalysisResult gpu = runGpuWithStrategies(network, contingencies, monitorAll(network), strategies, actions);
+        assertSameResults(cpu, gpu);
+        assertFalse(cpu.getOperatorStrategyResults().isEmpty());
     }
 
     @Test

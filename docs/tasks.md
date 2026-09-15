@@ -744,15 +744,56 @@ routing the host chain back was measured worse, not better (the chain's re-solve
 the gate lifts. This also answers the "restart with a machine mid-flight" question: the shape is
 unreachable while the gate stands, because SVC is the only loop that can force a restart.
 
-**The lift is SecondaryVoltageControl as a driver phase** — not blocked (see the corrected scoping
-section: OLF's `solveTransposed` IS the Newton direction). Two routes, cheapest first:
-1. **Chunk-path pause/resume.** The kernel already has the `LOOP_HOST_SVC` slot, `hostLoopMask`,
-   `readBatchDriverPaused`/`setBatchDriverResume` and per-scenario `setBatchTargetDeltas` — the base
-   path uses all of it. The chunk solver never sets the mask, so it never pauses. Pausing at slot 4
-   and running today's `GpuBatchSecondaryVc` decision there puts SVC back in OLF's order with no new
-   maths. SVC changes only TARGETS (`GeneratorVoltageControl.setTargetValue`), so the resume needs no
-   restart — the base path's expensive re-extraction case does not arise.
-2. **Full kernel phase**, per the stage list below.
+**ATTEMPTED the same day — SecondaryVoltageControl as a DRIVER PAUSE on the chunk path (opt-in,
+`OLF_GPU_SVC_DRIVER_PAUSE=1`; the gate above is still the default).** The kernel
+already had the `LOOP_HOST_SVC` slot, `hostLoopMask`, `readBatchDriverPaused`/`setBatchDriverResume`
+and flat per-scenario `setBatchTargetDeltas`; only the base path used them. The chunk solver now arms
+the mask when the run has SVC controllers, and after the main solve loops: decide on the paused
+states → push the moved V targets as flat deltas → resume. The decision is the SAME code as the host
+orchestrator (`decideRound`, extracted so the two cannot drift): the per-zone trigger, OLF's
+`tryToReEnableHelpfulControllerBuses`, the batched device sensitivities and the per-scenario zone LU.
+Three things fall out for free: SVC is checked BEFORE the control loops as OLF orders it; the
+distributed slack and reactive-limit state stay on the device (the host orchestrator's
+capture/seed/re-capture DS carry triple is not needed at all — the driver owns DS); and the
+re-solve is the driver's own, so the control loops' machines are not restarted underneath it.
+SVC moves only TARGETS, so no restart path is involved. The unit case passes at 1e-11 driver off and
+on (`deviceSecondaryVcWithAfterGeneratorTvcRoutesToCpu` asserts parity under the flag).
+
+**It does NOT hold at production scale, so it stays opt-in.** rte6515 with both zones actually firing
+(`OLF_GPU_SVC=1 OLF_GPU_SVC_PILOT_SHIFT=1.0` — the case is stable at its own targets, so every zone's
+pilot moves: SEC_VC_ZONE_0 94.320 → 95.320 kV, SEC_VC_ZONE_1 63.945 → 64.945 kV, two control units
+each), all 9040/9042 batched either way:
+
+| chunk path for SVC | differing violations | GPU cold | vs CPU 8 threads |
+|---|---|---|---|
+| host orchestrator (default) | 4 | 207 s | x0.48 |
+| driver pause (`OLF_GPU_SVC_DRIVER_PAUSE=1`) | 323 | 148 s | x0.64 |
+| no SVC, same case (baseline) | 2 | 81 s | x1.20 |
+
+So the pause is the FASTER of the two and the far less accurate one. Note the RTE parameter file does
+not enable the transformer voltage-control LOOP, so the new co-presence gate never trips on rte6515 —
+SVC there is the long-supported standalone shape, and its 2 extra differing lines over the baseline
+are a pre-existing scale gap of the host orchestrator, not of this work. Two concrete defects in the
+pause, both about state the resume channel cannot carry:
+
+1. **The re-enable step never reaches the device.** OLF's `tryToReEnableHelpfulControllerBuses` clears
+   the reactive-limit pin of a zone's pinned controllers when some but not all are at a limit. The
+   host orchestrator applied it by passing the mutated `rlState` as `rlStateIn` to its own re-solve; a
+   RESUME skips the RL seeding entirely (`fullLoadflow && !resume`), so `decideAtPause` mutates a host
+   copy that nothing reads. Needs a context setter that clears `dRlLimitType` for named
+   (scenario, entry) pairs and restores the row from `dRlSavedMode`/`dRlSavedTarget`.
+2. **The switch-back comparison targets are dropped on a no-move round.** `rlVtOv` is a solve ARGUMENT,
+   re-uploaded per call; `decideAtPause` returns null arrays when a round moves nothing, so the resumed
+   solve compares the switch-back against the packed base targets instead of the zone's moved ones.
+   Fix: always rebuild the channel from the accumulated `targetV`, not from the round's delta.
+
+Wall time is a separate question: each pause costs a full sensitivity solve per controlled bus over
+the whole chunk, and SVC makes the case 2.5x slower on the host path too (207 s vs 81 s) — so SVC at
+scale needs a cost pass regardless of which path wins on correctness.
+
+Still on the host inside that pause: the observables (OLF's own `EquationTerm.calculateSensi`) and
+the small zone LU. Moving those into the kernel is a later, optional step — see the stage list below;
+it buys wall time, not correctness.
 
 ### #47 — Discrete TransformerVoltageControl and WITH_GENERATOR shunt VC in-kernel (landed 2026-09-15)
 

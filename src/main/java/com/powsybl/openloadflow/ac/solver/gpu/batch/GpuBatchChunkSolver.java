@@ -892,6 +892,24 @@ final class GpuBatchChunkSolver {
                     // solve. Run-constant table, but the context is per chunk.
                     boolean monInKernel = monActive;
                     GpuBatchVoltageMonitoring.installDriverLoop(handle, monInKernel ? monitoringControllers : null);
+                    // SecondaryVoltageControl as a DRIVER PAUSE at its OLF slot (order 4). Run as a host
+                    // orchestrator it executed AFTER the whole device sweep — i.e. after the control loops
+                    // OLF puts at orders 7-10 — so each decided on a state the other had already moved
+                    // (1.7e-3 kV on a zone whose pilot bus feeds an AFTER_GENERATOR transformer; the
+                    // pre-2026-09-15 host chain was worse still at 2.4e-1 kV, its re-solves not composing).
+                    // Pausing puts it back in OLF's order with no new maths: the same decision code runs on
+                    // the paused states and hands its target moves back as flat deltas.
+                    // EXPERIMENTAL, opt-in: two defects remain at production scale (see tasks #48) — the
+                    // re-enable step never reaches the device (OLF's tryToReEnableHelpfulControllerBuses
+                    // clears RL pins, and a resume has no channel for that), and the rlVtOv comparison
+                    // targets are dropped on a round that moves nothing. Measured on rte6515 with both
+                    // zones firing: 323 differing violations at x0.64 vs CPU, against 4 differing at x0.48
+                    // for the host orchestrator. Default is the host orchestrator; co-presence with a
+                    // control loop is kept out of trouble by the scope gate routing that run to CPU.
+                    boolean svcAsDriverPause = svcActive && rlStateOut != null
+                            && "1".equals(System.getenv("OLF_GPU_SVC_DRIVER_PAUSE"));
+                    GpuAcNewtonSolver.setBatchHostLoop(handle,
+                            svcAsDriverPause ? 1 << (GpuAcNewtonSolver.HOST_LOOP_SVC - GpuAcNewtonSolver.HOST_LOOP_SVC) : 0);
                     long tSolve0 = System.nanoTime();
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
@@ -913,6 +931,47 @@ final class GpuBatchChunkSolver {
                             nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
                     tMainSolveNs += System.nanoTime() - tSolve0;
+                    if (svcAsDriverPause) {
+                        long tSvc0 = System.nanoTime();
+                        int nSvcCtl = svcControllers.ctls().size();
+                        double[][] svcTargetV = new double[chunkSize][nSvcCtl];
+                        for (int s2 = 0; s2 < chunkSize; s2++) {
+                            for (int c = 0; c < nSvcCtl; c++) {
+                                svcTargetV[s2][c] = svcControllers.ctls().get(c).baseTargetV();
+                            }
+                        }
+                        int maxSvcRounds = config.maxOuterIterations() > 0 ? config.maxOuterIterations() : 20;
+                        int svcRounds = 0;
+                        while (GpuAcNewtonSolver.readBatchDriverPaused(handle) == GpuAcNewtonSolver.HOST_LOOP_SVC
+                                && svcRounds++ < maxSvcRounds) {
+                            var dec = GpuBatchSecondaryVc.decideAtPause(handle, chunkSize, realCount, n, nrl,
+                                    chunkResults, svcControllers, rlStateOut, svcTargetV, baseState);
+                            if (dec.targetRows() != null && dec.targetRows().length > 0) {
+                                GpuAcNewtonSolver.setBatchTargetDeltas(handle, dec.targetRows(), dec.targetValues());
+                            }
+                            GpuAcNewtonSolver.setBatchDriverResume(handle, dec.hostChanged());
+                            chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
+                                    rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
+                                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
+                                    dec.rlVtSlotIdx(), dec.rlVtValues(),
+                                    parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                    config.lsMode(), config.maxDv(), config.maxDphi(),
+                                    config.lsMode() == 2 ? varType : null, x0Full,
+                                    shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                    shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                    null, rlStateOut,
+                                    r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                    r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                    config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0,
+                                    nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                    ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
+                        }
+                        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+                            System.err.printf("SVC_PAUSE rounds=%d stillPaused=%d%n", svcRounds,
+                                    GpuAcNewtonSolver.readBatchDriverPaused(handle));
+                        }
+                        orchNs.merge("SecondaryVc.driverPause", System.nanoTime() - tSvc0, Long::sum);
+                    }
                     if (monInKernel) {
                         // Keep ACTIVATIONS meaningful with the loop in the driver: it is the guard
                         // that a case really exercises the automaton, not orchestrator bookkeeping.
@@ -1103,7 +1162,7 @@ final class GpuBatchChunkSolver {
                     // Post-RL host orchestrators below: SVC(4), Monitoring(5), Phase(7), TVC(8), TRPC(9), Shunt(10).
 
                     // OLF order 4: SecondaryVoltageControl
-                    if (svcActive && rlStateOut != null) {
+                    if (svcActive && rlStateOut != null && !svcAsDriverPause) {
                         long tOr4 = System.nanoTime();
                         chunkResults = GpuBatchSecondaryVc.orchestrate(handle, chunkSize, realCount, n, nrl,
                                 chunkResults, svcControllers, rlStateOut,

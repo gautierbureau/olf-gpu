@@ -1312,8 +1312,10 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
      *  BUS_3. SVC is OLF order 4, the transformer loop order 8, and SVC is the last HOST orchestrator on
      *  the chunk path — it runs AFTER the whole device sweep, so each decides on a state the other has
      *  already moved. Measured: 1.7e-3 kV with the control loops in-kernel, 2.4e-1 kV with the
-     *  pre-2026-09-15 host-orchestrator chain (silently wrong before this gate). Whole-run CPU until
-     *  SecondaryVoltageControl is a driver phase; flip this test to assertGpuMatchesCpu then. */
+     *  pre-2026-09-15 host-orchestrator chain (silently wrong, its re-solves not composing). Whole-run
+     *  CPU for now. A driver pause at SVC's own slot makes THIS case match at 1e-11 (run with
+     *  OLF_GPU_SVC_DRIVER_PAUSE=1), but two gaps remain at production scale (tasks #48), so the pause
+     *  is opt-in; flip this test to assertGpuMatchesCpu unconditionally when they close. */
     @org.junit.jupiter.api.Test
     void deviceSecondaryVcWithAfterGeneratorTvcRoutesToCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -1339,9 +1341,13 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
                 .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL)
                 .setSecondaryVoltageControl(true).setMaxPlausibleTargetVoltage(1.6);
-        assertGpuMatchesCpuNoEngage(network, ctgs, 1e-11, lfp);
-        assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() <= 0,
-                "SVC co-present with a control loop must route the whole run to the CPU (order inversion)");
+        if ("1".equals(System.getenv("OLF_GPU_SVC_DRIVER_PAUSE"))) {
+            assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
+        } else {
+            assertGpuMatchesCpuNoEngage(network, ctgs, 1e-11, lfp);
+            assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() <= 0,
+                    "SVC co-present with a control loop routes the whole run to the CPU (order inversion)");
+        }
     }
 
     /** useInitialTapPosition SHARED-ratio semantics (OLF TransformerRatioManager, ported to the

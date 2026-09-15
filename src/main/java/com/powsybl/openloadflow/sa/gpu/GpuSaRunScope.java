@@ -159,20 +159,23 @@ final class GpuSaRunScope {
         boolean simpleShuntVcBatchable =
                 olfGuardParams.getShuntVoltageControlMode() == OpenLoadFlowParameters.ShuntVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL;
         // SecondaryVoltageControl sits at OLF order 4, BEFORE every control loop (phase 7, transformer 8,
-        // RPC 9, shunt 10). On the chunk path SVC is the last HOST orchestrator: it runs AFTER the whole
-        // device sweep, so an in-kernel control loop decides on a state SVC has not seen yet and SVC then
-        // decides on a state whose taps have already moved — the inverse of OLF's order. Measured on a zone
-        // whose pilot bus feeds an AFTER_GENERATOR transformer: 1.7e-3 kV with the control loops in-kernel,
-        // 2.4e-1 kV with the pre-2026-09-15 host-orchestrator chain (that combination was silently wrong
-        // before this gate — the chain re-solves do not compose). Whole-run CPU until SecondaryVoltageControl
-        // is itself a driver phase (tasks #47); `deviceSecondaryVcWithAfterGeneratorTvcRoutesToCpu` is the
-        // parity target that lifts it.
+        // RPC 9, shunt 10). As a HOST ORCHESTRATOR it ran AFTER the whole device sweep, so an in-kernel
+        // control loop decided on a state SVC had not seen yet and SVC then decided on a state whose taps
+        // had already moved — the inverse of OLF's order (1.7e-3 kV on a zone whose pilot bus feeds an
+        // AFTER_GENERATOR transformer; 2.4e-1 kV with the pre-2026-09-15 host chain, whose re-solves do not
+        // compose). A DRIVER PAUSE at SVC's own slot restores OLF's order and passes the unit tests at
+        // 1e-11, but at production scale two gaps remain (tasks #48: OLF's re-enable step never reaches
+        // the device, and the switch-back comparison targets are dropped on a round that moves nothing)
+        // — 323 differing violations on rte6515 with both zones firing, at x0.64 vs CPU (the host
+        // orchestrator: 4 differing, x0.48). So this whole-run CPU gate stands by DEFAULT and the pause
+        // is opt-in behind OLF_GPU_SVC_DRIVER_PAUSE=1.
         java.util.Set<String> svcControlLoops = java.util.Set.of(
                 "TransformerVoltageControl", "SimpleTransformerVoltageControl", "IncrementalTransformerVoltageControl",
                 "PhaseControl", "IncrementalPhaseControl", "IncrementalTransformerReactivePowerControl",
                 "ShuntVoltageControl", "IncrementalShuntVoltageControl");
         List<String> loopNames = acParameters.getOuterLoops().stream().map(AcOuterLoop::getName).toList();
-        boolean svcControlLoopConflict = loopNames.contains("SecondaryVoltageControl")
+        boolean svcControlLoopConflict = !"1".equals(System.getenv("OLF_GPU_SVC_DRIVER_PAUSE"))
+                && loopNames.contains("SecondaryVoltageControl")
                 && loopNames.stream().anyMatch(svcControlLoops::contains);
 
         // DEVICE (CUDA outer loops) vs JAVA (OLF's Java outer loops per scenario) — §5.1 of the design.

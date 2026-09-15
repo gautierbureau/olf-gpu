@@ -109,16 +109,20 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         if ("1".equals(System.getenv("OLF_GPU_SVC"))) {
             com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp).setSecondaryVoltageControl(true);
             System.out.println("  SVC enabled (OLF_GPU_SVC=1)");
-            // OLF_GPU_SVC_PILOT_SHIFT=<kV>: move the first zone's pilot-point target so the loop actually
-            // FIRES (with the case's own targets it is stable at the base and on every contingency)
+            // OLF_GPU_SVC_PILOT_SHIFT=<kV>: move EVERY zone's pilot-point target so the loop actually
+            // FIRES (with the case's own targets it is stable at the base and on every contingency).
+            // rte6515 carries two zones — shifting only one leaves the other's controllers idle and the
+            // run then exercises half the zone systems.
             String shift = System.getenv("OLF_GPU_SVC_PILOT_SHIFT");
             var svc = network.getExtension(com.powsybl.iidm.network.extensions.SecondaryVoltageControl.class);
-            if (shift != null && svc != null && !svc.getControlZones().isEmpty()) {
-                var pilot = svc.getControlZones().get(0).getPilotPoint();
-                double before = pilot.getTargetV();
-                pilot.setTargetV(before + Double.parseDouble(shift));
-                System.out.printf("  SVC pilot '%s' target %.3f -> %.3f kV (OLF_GPU_SVC_PILOT_SHIFT=%s)%n",
-                        svc.getControlZones().get(0).getName(), before, pilot.getTargetV(), shift);
+            if (shift != null && svc != null) {
+                for (var zone : svc.getControlZones()) {
+                    var pilot = zone.getPilotPoint();
+                    double before = pilot.getTargetV();
+                    pilot.setTargetV(before + Double.parseDouble(shift));
+                    System.out.printf("  SVC pilot '%s' target %.3f -> %.3f kV (%d control units)%n",
+                            zone.getName(), before, pilot.getTargetV(), zone.getControlUnits().size());
+                }
             }
         }
         // Non-zero increased-violations thresholds to avoid ulp-level flicker

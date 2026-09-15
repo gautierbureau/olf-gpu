@@ -171,6 +171,94 @@ public final class GpuBatchSecondaryVc {
     }
 
     @SuppressWarnings({"java:S107", "java:S3776"})
+    /** The sensitivity unit rows (each controlled bus's pinned V row) and the observed columns (every
+     *  variable the controller-bus Q terms depend on, plus the pilot V rows). */
+    static int[][] observables(Controllers controllers) {
+        List<Integer> obsList = new ArrayList<>();
+        Map<Integer, Integer> seen = new LinkedHashMap<>();
+        int[] unit = new int[controllers.ctls().size()];
+        for (int c = 0; c < controllers.ctls().size(); c++) {
+            unit[c] = controllers.ctls().get(c).ctldVRow();
+        }
+        for (CtlBus c : controllers.ctls()) {
+            for (EquationTerm<AcVariableType, AcEquationType> t : c.qTerms()) {
+                for (Variable<AcVariableType> v : t.getVariables()) {
+                    seen.computeIfAbsent(v.getRow(), r -> {
+                        obsList.add(r);
+                        return obsList.size() - 1;
+                    });
+                }
+            }
+        }
+        for (Zone z : controllers.zones()) {
+            seen.computeIfAbsent(z.pilotVRow(), r -> {
+                obsList.add(r);
+                return obsList.size() - 1;
+            });
+        }
+        return new int[][] {unit, obsList.stream().mapToInt(Integer::intValue).toArray()};
+    }
+
+    /** What the driver pause hands back to the device: the moved V targets as FLAT target deltas
+     *  ({@code scenario * n + row}), the per-(scenario, RL entry) voltage targets the switch-back must
+     *  compare against, and the per-scenario "this loop changed something" flags OLF's UNSTABLE verdict
+     *  maps to. */
+    public record PauseDecision(int[] targetRows, double[] targetValues, int[] rlVtSlotIdx, double[] rlVtValues,
+                                byte[] hostChanged, boolean anyMoved) {
+    }
+
+    /** The SecondaryVoltageControl check at the driver's OLF-order-4 pause: decide on the states the
+     *  paused sweep produced and return the mutations, without re-solving — the driver's own resume does
+     *  the solve, in OLF's order, with the distributed slack and the reactive-limit state it already
+     *  holds. {@code targetV} carries the zone targets across pauses (OLF keeps them on the network). */
+    @SuppressWarnings("java:S107")
+    public static PauseDecision decideAtPause(long handle, int chunkSize, int realCount, int n, int nrl,
+            double[][] states, Controllers controllers, int[] rlState, double[][] targetV, double[] baseState) {
+        List<CtlBus> ctls = controllers.ctls();
+        int nc = ctls.size();
+        if (nc == 0 || rlState == null) {
+            return new PauseDecision(null, null, null, null, new byte[chunkSize], false);
+        }
+        int[][] uo = observables(controllers);
+        final double[] esStateOnEntry = controllers.esCtx().stateVector().get().clone();
+        boolean[] affected;
+        try {
+            affected = decideRound(handle, chunkSize, realCount, n, nrl, states, controllers, rlState,
+                    targetV, baseState, uo[0], uo[1], 0);
+        } finally {
+            controllers.esCtx().stateVector().set(esStateOnEntry);
+        }
+        byte[] hostChanged = new byte[chunkSize];
+        if (affected == null) {
+            return new PauseDecision(null, null, null, null, hostChanged, false);
+        }
+        List<Integer> rows = new ArrayList<>();
+        List<Double> vals = new ArrayList<>();
+        List<Integer> vtSlotIdx = new ArrayList<>();
+        List<Double> vtVal = new ArrayList<>();
+        for (int s = 0; s < realCount; s++) {
+            hostChanged[s] = (byte) (affected[s] ? 1 : 0);
+            for (int c = 0; c < nc; c++) {
+                if (targetV[s][c] == ctls.get(c).baseTargetV()) {
+                    continue;
+                }
+                CtlBus ctl = ctls.get(c);
+                if ((rlState[s * nrl + ctl.rlIdx()] & 3) == 0) {
+                    rows.add(s * n + ctl.ctldVRow());        // the CONTROLLED bus's V target moves now
+                    vals.add(targetV[s][c]);
+                }                                            // pinned row: the Q pin stays; the override below
+                vtSlotIdx.add(s);                            // steers the RL switch-back and its restored target
+                vtSlotIdx.add(ctl.rlIdx());
+                vtVal.add(targetV[s][c]);
+            }
+        }
+        return new PauseDecision(rows.stream().mapToInt(Integer::intValue).toArray(),
+                vals.stream().mapToDouble(Double::doubleValue).toArray(),
+                vtSlotIdx.stream().mapToInt(Integer::intValue).toArray(),
+                vtVal.stream().mapToDouble(Double::doubleValue).toArray(),
+                hostChanged, true);
+    }
+
     static double[][] orchestrate(long handle, int chunkSize, int realCount, int n, int nrl,
             double[][] chunkResults, Controllers controllers, int[] rlState,
             int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
@@ -207,6 +295,210 @@ public final class GpuBatchSecondaryVc {
         } finally {
             esCtx.stateVector().set(esStateOnEntry);
         }
+    }
+
+    /** ONE decision round of OLF's processSecondaryVoltageControl over the chunk: the per-zone trigger
+     *  (pilot deadband, K spread), tryToReEnableHelpfulControllerBuses, the batched device sensitivities
+     *  and the per-scenario zone system. Mutates {@code targetV} (the moved generator-VC targets) and
+     *  {@code rlState} (re-enabled controllers lose their pin); returns the scenarios that moved, or
+     *  {@code null} when nothing did. Shared by the host orchestrator and the driver-pause path so the
+     *  two can never drift. */
+    @SuppressWarnings({"java:S107", "java:S3776"})
+    private static boolean[] decideRound(long handle, int chunkSize, int realCount, int n, int nrl,
+            double[][] chunkResults, Controllers controllers, int[] rlState, double[][] targetV,
+            double[] baseState, int[] unit, int[] obs, int round) {
+        List<CtlBus> ctls = controllers.ctls();
+        List<Zone> zones = controllers.zones();
+        int nc = ctls.size();
+        int m = obs.length;
+        var esCtx = controllers.esCtx();
+        boolean[] scenAdjusts = new boolean[chunkSize];
+        boolean[][] reEnabled = new boolean[chunkSize][nc];
+        boolean anyAdjusts = false;
+        for (int s = 0; s < realCount; s++) {
+            double[] r = chunkResults[s];
+            if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
+                continue;
+            }
+            esCtx.stateVector().set(java.util.Arrays.copyOf(r, n));
+            // tryToReEnableHelpfulControllerBuses: some-but-not-all pinned -> unpin them
+            for (Zone z : zones) {
+                int pinned = 0;
+                for (int c : z.ctls()) {
+                    if ((rlState[s * nrl + ctls.get(c).rlIdx()] & 3) != 0) {
+                        pinned++;
+                    }
+                }
+                if (pinned > 0 && pinned < z.ctls().length) {
+                    for (int c : z.ctls()) {
+                        if ((rlState[s * nrl + ctls.get(c).rlIdx()] & 3) != 0) {
+                            reEnabled[s][c] = true;
+                        }
+                    }
+                }
+            }
+            // zone triggers: pilot deadband, K alignment spread
+            for (Zone z : zones) {
+                double pilotDv = z.pilotTargetV() - r[z.pilotVRow()];
+                double kMin = Double.POSITIVE_INFINITY;
+                double kMax = Double.NEGATIVE_INFINITY;
+                boolean allAbove = true;
+                boolean allBelow = true;
+                for (int c : z.ctls()) {
+                    CtlBus ctl = ctls.get(c);
+                    double k = qToK(ctl.busQ().eval() + ctl.loadTargetQ(), ctl);
+                    kMin = Math.min(kMin, k);
+                    kMax = Math.max(kMax, k);
+                    allAbove &= k > 1;
+                    allBelow &= k < -1;
+                }
+                boolean allAtLimits = allAbove || allBelow;
+                if (System.getenv("OLF_GPU_SVC_TRACE") != null) {
+                    System.err.println("SVC_TRACE round=" + round + " s=" + s + " pilotDv=" + pilotDv
+                            + " kMin=" + kMin + " kMax=" + kMax);
+                }
+                if (Math.abs(pilotDv) > DV_EPS || !allAtLimits && Math.abs(kMax - kMin) > DK_DIFF_MAX_EPS) {
+                    scenAdjusts[s] = true;
+                    anyAdjusts = true;
+                }
+            }
+        }
+        if (System.getenv("OLF_GPU_SVC_TRACE") != null) {
+            System.err.printf("SVC_ROUND round=%d anyAdjusts=%b%n", round, anyAdjusts);
+        }
+        if (!anyAdjusts) {
+            return null;                                     // every zone inside its bands: OLF's STABLE
+        }
+        // ---- batched device sensitivities dState/dVtarget for every controlled bus ----
+        double[] statesFlat = new double[chunkSize * n];
+        for (int s = 0; s < chunkSize; s++) {
+            double[] src = s < realCount && chunkResults[s] != null ? chunkResults[s] : baseState;
+            System.arraycopy(src, 0, statesFlat, s * n, n);
+        }
+        double[] dxAtObs = GpuAcNewtonSolver.solveBatchSensitivities(handle, statesFlat, unit, obs);
+
+        // ---- OLF processSecondaryVoltageControl per adjusting scenario ----
+        boolean[] affected = new boolean[chunkSize];
+        boolean anyMoved = false;
+        DenseMatrix dx = new DenseMatrix(n, nc);
+        for (int s = 0; s < realCount; s++) {
+            if (!scenAdjusts[s]) {
+                continue;
+            }
+            esCtx.stateVector().set(java.util.Arrays.copyOf(chunkResults[s], n));
+            for (int c = 0; c < nc; c++) {
+                for (int mi = 0; mi < m; mi++) {
+                    dx.set(obs[mi], c, dxAtObs[s * nc * m + c * m + mi]);
+                }
+            }
+            // enabled controllers this scenario: unpinned or just re-enabled
+            List<Integer> enabled = new ArrayList<>();
+            for (int c = 0; c < nc; c++) {
+                if ((rlState[s * nrl + ctls.get(c).rlIdx()] & 3) == 0 || reEnabled[s][c]) {
+                    enabled.add(c);
+                }
+            }
+            if (enabled.isEmpty()) {
+                continue;
+            }
+            Map<Integer, Integer> col = new LinkedHashMap<>();   // ctl -> dense index
+            for (int i = 0; i < enabled.size(); i++) {
+                col.put(enabled.get(i), i);
+            }
+            int ne = enabled.size();
+            // A (zone alignment blocks over ENABLED controllers), K0, rhs = -A*K0
+            DenseMatrix a = new DenseMatrix(ne, ne);
+            for (Zone z : zones) {
+                List<Integer> zc = new ArrayList<>();
+                for (int c : z.ctls()) {
+                    if (col.containsKey(c)) {
+                        zc.add(c);
+                    }
+                }
+                int nControl = zc.size();
+                for (int ci : zc) {
+                    for (int cj : zc) {
+                        int i = col.get(ci);
+                        int j = col.get(cj);
+                        a.set(i, j, i == j ? 1d - 1d / nControl : -1d / nControl);
+                    }
+                }
+            }
+            DenseMatrix k0 = new DenseMatrix(ne, 1);
+            for (int c : enabled) {
+                CtlBus ctl = ctls.get(c);
+                k0.set(col.get(c), 0, qToK(ctl.busQ().eval() + ctl.loadTargetQ(), ctl));
+            }
+            DenseMatrix rhs = a.times(k0, -1);
+            // Jk(i=controlled, j=controller) = 2*sensiQ/(maxQ-minQ); local VC: controlled == controller set
+            DenseMatrix jk = new DenseMatrix(ne, ne);
+            for (int ci : enabled) {                     // controlled bus index (rows of jk pre-transpose)
+                for (int cj : enabled) {                 // controller
+                    CtlBus ctl = ctls.get(cj);
+                    double sq = 0;
+                    for (EquationTerm<AcVariableType, AcEquationType> t : ctl.qTerms()) {
+                        sq += t.calculateSensi(dx, ci);
+                    }
+                    jk.set(col.get(ci), col.get(cj), 2 * sq / (ctl.maxQ() - ctl.minQ()));
+                }
+            }
+            DenseMatrix b = a.times(jk.transpose());
+            // per zone: replace the LAST controlled bus's row with the pilot sensitivities + pilot dv
+            for (Zone z : zones) {
+                List<Integer> zc = new ArrayList<>();
+                for (int c : z.ctls()) {
+                    if (col.containsKey(c)) {
+                        zc.add(c);
+                    }
+                }
+                if (zc.isEmpty()) {
+                    continue;
+                }
+                int last = col.get(zc.get(zc.size() - 1));
+                for (int c : enabled) {
+                    // dVpilot/dVtarget(controlled c) = the pilot V entry of column c
+                    b.set(last, col.get(c), dx.get(z.pilotVRow(), c));
+                }
+                rhs.set(last, 0, z.pilotTargetV() - chunkResults[s][z.pilotVRow()]);
+            }
+            try (LUDecomposition lu = b.decomposeLU()) {
+                lu.solve(rhs);
+            } catch (RuntimeException e) {
+                LOGGER.warn("Secondary VC zone system solve failed for a scenario — left unadjusted ({})", e.toString());
+                continue;
+            }
+            // new targets + plausibility gate (OLF skips the WHOLE adjustment when any is implausible)
+            double[] newT = new double[nc];
+            boolean plausible = true;
+            for (int c = 0; c < nc; c++) {
+                if (col.containsKey(c)) {
+                    newT[c] = targetV[s][c] + rhs.get(col.get(c), 0);
+                    if (newT[c] < controllers.minPlausibleTargetV() || newT[c] > controllers.maxPlausibleTargetV()) {
+                        plausible = false;
+                    }
+                } else {
+                    newT[c] = targetV[s][c];
+                }
+            }
+            if (!plausible) {
+                LOGGER.warn("Secondary VC: implausible new target voltages — scenario left unadjusted");
+                continue;
+            }
+            targetV[s] = newT;
+            affected[s] = true;
+            anyMoved = true;
+            if (System.getenv("OLF_GPU_SVC_TRACE") != null) {
+                System.err.printf("SVC_MOVED round=%d scenario=%d%n", round, s);
+            }
+            // apply the re-enables: clear the RL pins so the next solve resumes voltage control there
+            for (int c = 0; c < nc; c++) {
+                if (reEnabled[s][c]) {
+                    int st = s * nrl + ctls.get(c).rlIdx();
+                    rlState[st] = rlState[st] & ~3;
+                }
+            }
+        }
+        return anyMoved ? affected : null;
     }
 
     @SuppressWarnings({"java:S107", "java:S3776"})
@@ -272,191 +564,16 @@ public final class GpuBatchSecondaryVc {
 
         for (int round = 0; round < maxRounds; round++) {
             // ---- per-scenario OLF check(): re-enable pass, zone triggers ----
-            boolean[] scenAdjusts = new boolean[chunkSize];
-            boolean[][] reEnabled = new boolean[chunkSize][nc];
-            boolean anyAdjusts = false;
-            for (int s = 0; s < realCount; s++) {
-                double[] r = chunkResults[s];
-                if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
-                    continue;
-                }
-                esCtx.stateVector().set(java.util.Arrays.copyOf(r, n));
-                // tryToReEnableHelpfulControllerBuses: some-but-not-all pinned -> unpin them
-                for (Zone z : zones) {
-                    int pinned = 0;
-                    for (int c : z.ctls()) {
-                        if ((rlState[s * nrl + ctls.get(c).rlIdx()] & 3) != 0) {
-                            pinned++;
-                        }
-                    }
-                    if (pinned > 0 && pinned < z.ctls().length) {
-                        for (int c : z.ctls()) {
-                            if ((rlState[s * nrl + ctls.get(c).rlIdx()] & 3) != 0) {
-                                reEnabled[s][c] = true;
-                            }
-                        }
-                    }
-                }
-                // zone triggers: pilot deadband, K alignment spread
-                for (Zone z : zones) {
-                    double pilotDv = z.pilotTargetV() - r[z.pilotVRow()];
-                    double kMin = Double.POSITIVE_INFINITY;
-                    double kMax = Double.NEGATIVE_INFINITY;
-                    boolean allAbove = true;
-                    boolean allBelow = true;
-                    for (int c : z.ctls()) {
-                        CtlBus ctl = ctls.get(c);
-                        double k = qToK(ctl.busQ().eval() + ctl.loadTargetQ(), ctl);
-                        kMin = Math.min(kMin, k);
-                        kMax = Math.max(kMax, k);
-                        allAbove &= k > 1;
-                        allBelow &= k < -1;
-                    }
-                    boolean allAtLimits = allAbove || allBelow;
-                    if (System.getenv("OLF_GPU_SVC_TRACE") != null) {
-                        System.err.println("SVC_TRACE round=" + round + " s=" + s + " pilotDv=" + pilotDv
-                                + " kMin=" + kMin + " kMax=" + kMax);
-                    }
-                    if (Math.abs(pilotDv) > DV_EPS || !allAtLimits && Math.abs(kMax - kMin) > DK_DIFF_MAX_EPS) {
-                        scenAdjusts[s] = true;
-                        anyAdjusts = true;
-                    }
-                }
+            boolean[] affected = decideRound(handle, chunkSize, realCount, n, nrl, chunkResults,
+                    controllers, rlState, targetV, baseState, unit, obs, round);
+            boolean anyMoved = affected != null;
+            if (affected == null) {
+                affected = new boolean[chunkSize];
             }
-            if (System.getenv("OLF_GPU_SVC_TRACE") != null) {
-                System.err.printf("SVC_ROUND round=%d anyAdjusts=%b%n", round, anyAdjusts);
-            }
-            if (!anyAdjusts) {
-                break;
-            }
-            // ---- batched device sensitivities dState/dVtarget for every controlled bus ----
             double[] statesFlat = new double[chunkSize * n];
             for (int s = 0; s < chunkSize; s++) {
                 double[] src = s < realCount && chunkResults[s] != null ? chunkResults[s] : baseState;
                 System.arraycopy(src, 0, statesFlat, s * n, n);
-            }
-            double[] dxAtObs = GpuAcNewtonSolver.solveBatchSensitivities(handle, statesFlat, unit, obs);
-
-            // ---- OLF processSecondaryVoltageControl per adjusting scenario ----
-            boolean[] affected = new boolean[chunkSize];
-            boolean anyMoved = false;
-            DenseMatrix dx = new DenseMatrix(n, nc);
-            for (int s = 0; s < realCount; s++) {
-                if (!scenAdjusts[s]) {
-                    continue;
-                }
-                esCtx.stateVector().set(java.util.Arrays.copyOf(chunkResults[s], n));
-                for (int c = 0; c < nc; c++) {
-                    for (int mi = 0; mi < m; mi++) {
-                        dx.set(obs[mi], c, dxAtObs[s * nc * m + c * m + mi]);
-                    }
-                }
-                // enabled controllers this scenario: unpinned or just re-enabled
-                List<Integer> enabled = new ArrayList<>();
-                for (int c = 0; c < nc; c++) {
-                    if ((rlState[s * nrl + ctls.get(c).rlIdx()] & 3) == 0 || reEnabled[s][c]) {
-                        enabled.add(c);
-                    }
-                }
-                if (enabled.isEmpty()) {
-                    continue;
-                }
-                Map<Integer, Integer> col = new LinkedHashMap<>();   // ctl -> dense index
-                for (int i = 0; i < enabled.size(); i++) {
-                    col.put(enabled.get(i), i);
-                }
-                int ne = enabled.size();
-                // A (zone alignment blocks over ENABLED controllers), K0, rhs = -A*K0
-                DenseMatrix a = new DenseMatrix(ne, ne);
-                for (Zone z : zones) {
-                    List<Integer> zc = new ArrayList<>();
-                    for (int c : z.ctls()) {
-                        if (col.containsKey(c)) {
-                            zc.add(c);
-                        }
-                    }
-                    int nControl = zc.size();
-                    for (int ci : zc) {
-                        for (int cj : zc) {
-                            int i = col.get(ci);
-                            int j = col.get(cj);
-                            a.set(i, j, i == j ? 1d - 1d / nControl : -1d / nControl);
-                        }
-                    }
-                }
-                DenseMatrix k0 = new DenseMatrix(ne, 1);
-                for (int c : enabled) {
-                    CtlBus ctl = ctls.get(c);
-                    k0.set(col.get(c), 0, qToK(ctl.busQ().eval() + ctl.loadTargetQ(), ctl));
-                }
-                DenseMatrix rhs = a.times(k0, -1);
-                // Jk(i=controlled, j=controller) = 2*sensiQ/(maxQ-minQ); local VC: controlled == controller set
-                DenseMatrix jk = new DenseMatrix(ne, ne);
-                for (int ci : enabled) {                     // controlled bus index (rows of jk pre-transpose)
-                    for (int cj : enabled) {                 // controller
-                        CtlBus ctl = ctls.get(cj);
-                        double sq = 0;
-                        for (EquationTerm<AcVariableType, AcEquationType> t : ctl.qTerms()) {
-                            sq += t.calculateSensi(dx, ci);
-                        }
-                        jk.set(col.get(ci), col.get(cj), 2 * sq / (ctl.maxQ() - ctl.minQ()));
-                    }
-                }
-                DenseMatrix b = a.times(jk.transpose());
-                // per zone: replace the LAST controlled bus's row with the pilot sensitivities + pilot dv
-                for (Zone z : zones) {
-                    List<Integer> zc = new ArrayList<>();
-                    for (int c : z.ctls()) {
-                        if (col.containsKey(c)) {
-                            zc.add(c);
-                        }
-                    }
-                    if (zc.isEmpty()) {
-                        continue;
-                    }
-                    int last = col.get(zc.get(zc.size() - 1));
-                    for (int c : enabled) {
-                        // dVpilot/dVtarget(controlled c) = the pilot V entry of column c
-                        b.set(last, col.get(c), dx.get(z.pilotVRow(), c));
-                    }
-                    rhs.set(last, 0, z.pilotTargetV() - chunkResults[s][z.pilotVRow()]);
-                }
-                try (LUDecomposition lu = b.decomposeLU()) {
-                    lu.solve(rhs);
-                } catch (RuntimeException e) {
-                    LOGGER.warn("Secondary VC zone system solve failed for a scenario — left unadjusted ({})", e.toString());
-                    continue;
-                }
-                // new targets + plausibility gate (OLF skips the WHOLE adjustment when any is implausible)
-                double[] newT = new double[nc];
-                boolean plausible = true;
-                for (int c = 0; c < nc; c++) {
-                    if (col.containsKey(c)) {
-                        newT[c] = targetV[s][c] + rhs.get(col.get(c), 0);
-                        if (newT[c] < controllers.minPlausibleTargetV() || newT[c] > controllers.maxPlausibleTargetV()) {
-                            plausible = false;
-                        }
-                    } else {
-                        newT[c] = targetV[s][c];
-                    }
-                }
-                if (!plausible) {
-                    LOGGER.warn("Secondary VC: implausible new target voltages — scenario left unadjusted");
-                    continue;
-                }
-                targetV[s] = newT;
-                affected[s] = true;
-                anyMoved = true;
-                if (System.getenv("OLF_GPU_SVC_TRACE") != null) {
-                    System.err.printf("SVC_MOVED round=%d scenario=%d%n", round, s);
-                }
-                // apply the re-enables: clear the RL pins so the next solve resumes voltage control there
-                for (int c = 0; c < nc; c++) {
-                    if (reEnabled[s][c]) {
-                        int st = s * nrl + ctls.get(c).rlIdx();
-                        rlState[st] = rlState[st] & ~3;
-                    }
-                }
             }
             if (!anyMoved) {
                 break;

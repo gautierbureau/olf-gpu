@@ -231,6 +231,24 @@ flows(ctx, statesHandle, m) -> p[nBranches × m]       // p_b = power_b · (x[ph
 destroyDcContext(ctx)
 ```
 
+**Do we need kernels to assemble the DC matrix on the device? (user question, 2026-09-15)**
+Not for objectives 1 and 3: OLF assembles the DC matrix ONCE per run on the host (it is
+constant — `power` per branch never moves during a Woodbury SA or a sensitivity run), so the
+host CSR is uploaded once and factorized once; every other structure (the ±1 element RHS, the
+factor RHS) is built on the device from row indices. A **DC fill family IS needed for the
+time-series engine and the outer loops (§3.3, §3.5)**, for two things the host must stop
+walking per column: (a) `fillDcTargets` — the target column from per-bus injection tables
+(Σ gen targetP − Σ load p0 − PST `-power·A2`/α rhs terms, HVDC p0), i.e. the DC analogue of the
+AC fill kernels' F side, so a step is applied as array writes, not LfNetwork mutations; (b)
+`fillDcValues` — the CSR values from per-branch `power` (4 entries per branch: +p on both
+diagonals, −p on both off-diagonals, plus the α column entries) for per-scenario matrix values
+on the fixed pattern (HVDC saturation, tap changes that modify impedance) when the UBATCH route
+is taken. Both are trivial formulas, but they must come from the same source of truth as the AC
+kernels: a `closed_branch_dc` family in `codegen/java2cuda` parsed from
+`ClosedBranchSide{1,2}DcFlowEquationTerm` (`eval`/`der`/`rhs`, `computePower`), with its own
+golden and scatter stamp — never hand-written formulas. Phase 3 builds it; phases 0–2 and 4 do
+not need it.
+
 Row indices are the equation-system's own `Variable.getRow()`/`Equation.getColumn()` (stable
 for the run: the DC matrix never changes structure during a Woodbury SA, and the time-series
 API keeps one topology by definition). No extractor/validator of the AC kind is needed: the
@@ -396,6 +414,72 @@ agree). Every phase appends a row to `docs/numbers.md` (cold first).
   useful — lost-power contingencies CPU-route first, as in SA).
 - **Phase 5 (optional) — operator strategies** in SA and sensitivity (action states = one more
   `solveMany`, k×k with actions, connectivity re-check).
+
+## 4b. Phase 0 log (2026-09-15)
+
+Harness: `src/test/.../sa/gpu/dc/DcWoodburyBaselineProbe` (rte6515_full symlinked at the repo
+root from the AC checkout — untracked; all-branch N-1 of the main synchronous component = 9042;
+RTE parameters with `dc=true`, `dcFastMode`; knobs `OLF_DC_MAX_CTG`, `OLF_DC_THREADS`,
+`OLF_DC_MONITORED`, `OLF_DC_SKIP_CUDSS`, `OLF_DC_SKIP_KLU`; `main()` for plain-JVM profiling with
+`java -XX:StartFlightRecording ... -cp target/test-classes:target/classes:$(mvn dependency:build-classpath)`).
+
+**Two bugs in the core fork's cuDSS binding (`libmathcudss`), both fixed on
+`powsybl-math-native-dc` branch `cudss_solver_dc` (c36d2c4, d0e97a4), published as
+`powsybl-math-native 1.6.0-SNAPSHOT-gpu-dc` (the `-gpu` jar with the rebuilt .so; the `dc`
+worktree pins it):**
+1. **NaN on any OLF Jacobian with an empty structural diagonal.** OLF stores J with rows =
+   variables and columns = equations, numbered independently; in the DC system every bus after
+   the slack (whose inactive P equation shifts the equation numbering) has NO diagonal entry —
+   6530 of 6536 columns on rte6515. KLU pivots through it; cuDSS without matching returned NaN
+   (silently — the SA does not check the pre-contingency solve). Fix: `CUDSS_CONFIG_MATCHING_ALG
+   = AUTO` before the analysis. Standalone on the dumped matrix: cuDSS == KLU to 1.3e-12, 1 and
+   300 RHS (and a 6536 × 9042 full-S solve in ONE call works, |S|max 1.74).
+2. **SIGFPE inside libcudss on a dense solve with ZERO columns.** The Woodbury SA issues one on
+   every connected component that owns no contingency element (`calculateElementsStates` with an
+   empty list → an n × 0 RHS). Fix: `solveInto` returns when `cols == 0`. (Isolated by
+   replaying the SA's solve sequence step by step — same matrix, same thread kinds, same RHS
+   pattern all passed; only the empty component reproduced it.)
+   The AC session's `CuDssLoadFlowTest` never saw either: AC's sorted index happens to align the
+   bus P/Q rows with the φ/V columns, and a plain LF never solves a 0-column RHS.
+
+**Results so far** (1 thread, RTX A1000 6 GB, i7-13700H; the second arm runs in the same JVM):
+
+| run | KLU | cuDSS drop-in | parity |
+|---|---|---|---|
+| 300 ctg, 100 monitored | 3536 ms (11.8 ms/ctg) | 2957 ms (9.9 ms/ctg), ×1.20 | 0 differing lines; max violation value diff 3.2e-10 MW; monitored P1 max diff 2.5e-10 MW over 29897 values |
+| 9042 ctg, KLU only, 0 monitored | 57.8 s (6.4 ms/ctg), 98955 violations, all CONVERGED | — | — |
+| 1500 ctg, KLU only | 11.3 s (7.5 ms/ctg) | — | — |
+
+| **9042 ctg, 100 monitored (the phase-0 result)** | **65.3 s (7.22 ms/ctg)** | 66.2 s (7.32 ms/ctg), ×0.99 | **0 differing lines** over 98955 violations; max common-violation value diff 1.16e-9 MW (1.2e-11 pu); monitored P1 max diff 2.5e-10 MW over 904093 values |
+
+**Where the CPU time goes** (JFR, KLU arm, 9042 ctg, 0 monitored, 75.8 s under the profiler,
+6327 samples on the SA worker thread; self-frame attribution):
+
+| share | what |
+|---|---|
+| ~45% | `LimitViolationManager.detectViolations` (`detectBranchSideViolations` 18%, `detectBranchCurrentViolations` 16%, `getLimits1/2` 2%, the rest) — every branch, every contingency |
+| ~35% | `NetworkState.restore` per contingency (`AbstractElement.setDisabled` 9%, `LfLoadImpl.get(Map)` 8%, `BranchState.restore` 6%, `BusDcState.restoreGenerators` 2.5%, `setOriginalLoadsDisablingStatus`, `BusState.restore`) |
+| ~6% | the `isBranchDisabled` predicate (`getBranchesStatus().containsKey`) evaluated per branch inside detection |
+| 3.8% | the modified-target re-solve (lost power / islands / PST contingencies) |
+| 1.4% + 1.1% | `updateNetwork` (bus angles) + `DcTargetVector.init` |
+| 0.3% | `WoodburyEngine` alphas + n-vector combination |
+| ~0% | the `S` multi-RHS solve, the connectivity analysis, the LU |
+| 8% | JVM/GC, no powsybl frame |
+
+So the linear algebra is under 5% of the fast DC SA; the drop-in cuDSS LU cannot pay (measured
+×0.99) and phase 1 must remove the host per-contingency work: detection → device screen (the
+fork's τ-prefix PR attacks the same 45% on the CPU), restore → nothing to restore when the
+device owns the state (the fork's `fastdc-sa-restore` PR attacks the same 35%), the disabled
+predicate → a per-scenario mask. That is the ≥10× in §3.2.
+
+The cuDSS-vs-KLU disagreement (~1e-9 MW) is LU-ordering roundoff on a ~4e4-conditioned DC
+matrix (`max|v|/min|v|` ≈ 3.9e4/0.58) — reported, not tolerated: the phase-1 device path will be
+held to 1e-10 pu against OLF's KLU results (cond·eps ≈ 4e-12 relative is the floor for two
+different direct solvers; the probe asserts 1e-8 MW), and the violation gate stays 0 differing lines.
+Standalone timing of the LU itself: KLU factor+solve of the 6536 matrix ≈ 4–5 ms (1 RHS), 15–31
+ms (300 RHS); cuDSS ≈ 400–500 ms warm per context (analysis + factorization dominate; the AC
+memory's "one context ≈ 425 ms" holds here too) — the drop-in wins only because the SA's
+per-contingency host work, not the LU, is the wall (§3.2).
 
 ## 5. Validation and benches
 

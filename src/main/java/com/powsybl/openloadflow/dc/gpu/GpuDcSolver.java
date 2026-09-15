@@ -121,6 +121,16 @@ public final class GpuDcSolver implements AutoCloseable {
         return setElements(handle(), rowPlus, rowMinus, elemBranch);
     }
 
+    /**
+     * The per-element Woodbury terms, one per S column: {@code diag} is
+     * {@code WoodburyEngine.getAlphaMatrixValue}'s diagonal ({@code 1/power} for an outage,
+     * {@code 1/(oldPower - newPower)} for an action element) and {@code newAlpha} the phase shift a tap
+     * action imposes ({@code 0} otherwise, {@code getAlphaRhsValue}).
+     */
+    public void setElementAttributes(double[] diag, double[] newAlpha) {
+        setElementAttributes(handle(), diag, newAlpha);
+    }
+
     /** One S column back on the host (the LODF/PTDF oracle in tests). */
     public double[] readElementStates(int elem) {
         return readElementStates(handle(), elem);
@@ -191,6 +201,8 @@ public final class GpuDcSolver implements AutoCloseable {
     private static native boolean setElements(long handle, int[] rowPlus, int[] rowMinus, int[] elemBranch);
 
     private static native double[] readElementStates(long handle, int elem);
+
+    private static native void setElementAttributes(long handle, double[] diag, double[] newAlpha);
 
     private static native void setBranches(long handle, int[] ph1Row, int[] ph2Row, int[] a1Row, double[] a1Const, double[] power);
 

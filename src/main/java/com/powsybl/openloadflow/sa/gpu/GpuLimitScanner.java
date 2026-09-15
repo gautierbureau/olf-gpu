@@ -268,10 +268,27 @@ final class GpuLimitScanner {
      */
     void detectFromCandidates(LfNetwork network, LimitViolationManager manager, int[] candidates,
                               java.util.function.Predicate<LfBranch> isBranchDisabled) {
+        detectFromCandidates(network, manager, candidates, isBranchDisabled, new int[0]);
+    }
+
+    /** Same, plus a full scan of the branches the screen could not evaluate (their model changed on the host). */
+    void detectFromCandidates(LfNetwork network, LimitViolationManager manager, int[] candidates,
+                              java.util.function.Predicate<LfBranch> isBranchDisabled, int[] uncoveredBranches) {
         this.view = null;                                    // the values are the network's, the topology the predicate's
         this.state = null;
         this.topology = GpuContingencyTopology.NETWORK;
         confirmBranchCandidates(manager, candidates, isBranchDisabled);
+        LfBranch[] branches = table.branches();
+        for (int b : uncoveredBranches) {
+            LfBranch branch = branches[b];
+            if (isBranchDisabled.test(branch)) {
+                continue;
+            }
+            java.util.Arrays.fill(quantityCached, false);
+            for (int g = table.groupStart(b); g < table.groupEnd(b); g++) {
+                scanGroup(branch, g, manager);
+            }
+        }
         manager.detectVoltageAngleViolations(network);
     }
 

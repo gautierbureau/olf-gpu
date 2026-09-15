@@ -754,11 +754,9 @@ the histogram counts rejected pairs alongside rejected contingencies.
    WITH_GENERATOR TVC are no longer gated at all — neither loop freezes generators);
    ~~non-INCREMENTAL shunt voltage-control mode co-present with another decision orchestrator~~
    (retired 2026-09-15 — every control loop is a driver phase swept in OLF's order);
-   **SecondaryVoltageControl co-present with ANY control loop (phase/transformer/RPC/shunt): whole-run
-   CPU since 2026-09-15 — SVC is OLF order 4 but is the last HOST orchestrator on the chunk path, so
-   it runs after the device sweep and the two decide on each other's stale states (1.7e-3 kV
-   in-kernel, 2.4e-1 kV with the old host chain, which was silently wrong). Lift = SVC as a driver
-   phase, tasks #48**;
+   ~~SecondaryVoltageControl co-present with a control loop~~ (gated for part of 2026-09-15, retired
+   the same day — SVC now runs as a DRIVER PAUSE at its own OLF slot on the chunk path, so the order
+   is OLF's; tasks #48);
    SecondaryVc with non-LOCAL generator VC; continuous PhaseControl LIMITER with a
    remote controlled branch; monitoring SVCs failing `GpuBatchVoltageMonitoring.supported`;
    AC-emu HVDC not all-LINEAR at base ONLY when neither the freeze nor the limits loop

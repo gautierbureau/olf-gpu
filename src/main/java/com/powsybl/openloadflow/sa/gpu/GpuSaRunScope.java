@@ -152,32 +152,17 @@ final class GpuSaRunScope {
         // chain does not model; co-presence with a transformer/phase/RPC/SecondaryVc loop (or
         // VoltageMonitoring with actual SVCs — the loop is inert otherwise) keeps the whole run on
         // the CPU exactly as before (DS/RL/HVDC phases are in-kernel and compose fine).
-        // 2026-09-15: the co-presence gate is reduced to SecondaryVoltageControl, which is handled by the
-        // run-wide svcControlLoopConflict gate below. Every transformer, phase, RPC, monitoring and shunt
+        // 2026-09-15: the co-presence gate is gone entirely. Every transformer, phase, RPC, monitoring and shunt
         // loop is an in-kernel DRIVER PHASE now, swept in OLF's own order with OLF's restart-on-UNSTABLE
         // semantics, so simultaneously unstable loops interleave exactly as on the CPU.
         boolean simpleShuntVcBatchable =
                 olfGuardParams.getShuntVoltageControlMode() == OpenLoadFlowParameters.ShuntVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL;
         // SecondaryVoltageControl sits at OLF order 4, BEFORE every control loop (phase 7, transformer 8,
-        // RPC 9, shunt 10). As a HOST ORCHESTRATOR it ran AFTER the whole device sweep, so an in-kernel
-        // control loop decided on a state SVC had not seen yet and SVC then decided on a state whose taps
-        // had already moved — the inverse of OLF's order (1.7e-3 kV on a zone whose pilot bus feeds an
-        // AFTER_GENERATOR transformer; 2.4e-1 kV with the pre-2026-09-15 host chain, whose re-solves do not
-        // compose). A DRIVER PAUSE at SVC's own slot restores OLF's order and passes the unit tests at
-        // 1e-11, but at production scale two gaps remain (tasks #48: OLF's re-enable step never reaches
-        // the device, and the switch-back comparison targets are dropped on a round that moves nothing)
-        // — 323 differing violations on rte6515 with both zones firing, at x0.64 vs CPU (the host
-        // orchestrator: 4 differing, x0.48). So this whole-run CPU gate stands by DEFAULT and the pause
-        // is opt-in behind OLF_GPU_SVC_DRIVER_PAUSE=1.
-        java.util.Set<String> svcControlLoops = java.util.Set.of(
-                "TransformerVoltageControl", "SimpleTransformerVoltageControl", "IncrementalTransformerVoltageControl",
-                "PhaseControl", "IncrementalPhaseControl", "IncrementalTransformerReactivePowerControl",
-                "ShuntVoltageControl", "IncrementalShuntVoltageControl");
-        List<String> loopNames = acParameters.getOuterLoops().stream().map(AcOuterLoop::getName).toList();
-        boolean svcControlLoopConflict = !"1".equals(System.getenv("OLF_GPU_SVC_DRIVER_PAUSE"))
-                && loopNames.contains("SecondaryVoltageControl")
-                && loopNames.stream().anyMatch(svcControlLoops::contains);
-
+        // RPC 9, shunt 10). As a HOST ORCHESTRATOR it ran AFTER the whole device sweep, so each decided on
+        // a state the other had already moved — the inverse of OLF's order (1.7e-3 kV on a zone whose pilot
+        // bus feeds an AFTER_GENERATOR transformer; 2.4e-1 kV with the pre-2026-09-15 host chain, whose
+        // re-solves do not compose). Since 2026-09-15 the chunk path runs SVC as a DRIVER PAUSE at its own
+        // slot, so the order is OLF's and no co-presence gate is needed (tasks #48).
         // DEVICE (CUDA outer loops) vs JAVA (OLF's Java outer loops per scenario) — §5.1 of the design.
         OuterLoopMode outerLoopMode = readOuterLoopMode();
         LoadFlowParameters lfGuardParams = securityAnalysisParameters.getLoadFlowParameters();
@@ -197,7 +182,7 @@ final class GpuSaRunScope {
                             && !(incrementalShuntBatchable && "IncrementalShuntVoltageControl".equals(name))
                             && !(simpleShuntVcBatchable && "ShuntVoltageControl".equals(name))
                             && !(simpleTvcBatchable && "SimpleTransformerVoltageControl".equals(name))
-                            && !(svcBatchable && !svcControlLoopConflict && "SecondaryVoltageControl".equals(name))
+                            && !(svcBatchable && "SecondaryVoltageControl".equals(name))
                             && !"IncrementalPhaseControl".equals(name)
                             && !"IncrementalTransformerReactivePowerControl".equals(name)
                             && !(continuousPhaseBatchable && "PhaseControl".equals(name))

@@ -531,6 +531,12 @@ public final class GpuAcNewtonSolver {
     /** Per (scenario, sub-controller): the dispatched section, layout {@code s * nSubs + u}. */
     public static native int[] readBatchDiscreteShuntPositions(long handle);
 
+    /** Un-pin reactive-limit entries at a driver pause (SecondaryVoltageControl's re-enable step):
+     *  {@code pairs} is (scenario, RL entry) flattened, {@code newTargets} the voltage target each row
+     *  returns to. A resume skips the RL seeding, so this is the only way a host-side un-pin reaches
+     *  the device. No-op for an entry that is not pinned. */
+    public static native void setBatchRlUnpin(long handle, int[] pairs, double[] newTargets);
+
     /**
      * Install the PER-GENERATOR distributed-slack participants: the factors and limits OLF's
      * water-fill actually saturates on, grouped by bus ({@code busGenStart}/{@code busGenEnd} slice

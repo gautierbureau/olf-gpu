@@ -5483,6 +5483,28 @@ static void shcRebuildOverrides(BatchSolverContext* ctx) {
     ctx->nShOv = nOv;
 }
 // ======================== END INCREMENTAL TVC KERNELS ========================
+// SecondaryVoltageControl's tryToReEnableHelpfulControllerBuses, applied to the DEVICE pin state at a
+// driver pause: a zone whose controllers are only PARTLY at a reactive limit un-pins the limited ones so
+// they can help the zone realign. OLF does it with setGeneratorVoltageControlEnabledAndRecomputeTargetQ
+// (back to PV) + setQLimitType(null); here that is the row's saved PV form, the zone's CURRENT voltage
+// target, and limitType 0. The host orchestrator got this for free by re-seeding rlStateIn on its own
+// re-solve — a RESUME skips the RL seeding, so without this channel the un-pin never reached the device.
+__global__ void rlUnpinBatch(int nPairs, int nS, int n, int nrl, const int* pairs, const double* newTarget,
+                             const int* rlVrow, char* limitType, const char* savedMode, int* mode, double* target) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= nPairs) return;
+    int s = pairs[2 * k];
+    int i = pairs[2 * k + 1];
+    if (s < 0 || s >= nS || i < 0 || i >= nrl) return;
+    size_t st = (size_t) s * nrl + i;
+    if (limitType[st] == 0) return;                          // not pinned: nothing to give back
+    size_t idx = (size_t) s * n + rlVrow[i];
+    char sm = savedMode[st];
+    mode[idx] = (sm == 2) ? 2 : 0;                           // the PV form saved at pin time (2 = slope SVC)
+    target[idx] = newTarget[k];
+    limitType[st] = 0;
+}
+
 // ======================== DISCRETE TRANSFORMER / SHUNT VOLTAGE CONTROL KERNELS ========================
 // OLF's non-incremental voltage-control loops as driver phases:
 //  - TransformerVoltageControlOuterLoop (AFTER_GENERATOR, tvdMode 0): INITIAL (enable the out-of-deadband
@@ -6034,8 +6056,16 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         dDsOvMaxDelta.upload(dsOvMaxDelta, nS * sizeof(double));
         dDsOvMinDelta.upload(dsOvMinDelta, nS * sizeof(double));
     }
-    CUDA_CHECK(cudaMemcpy(ctx->dDisabled.p, disabled,
-                          static_cast<size_t>(ctx->nElements) * nS * sizeof(char), cudaMemcpyHostToDevice));
+    if (!resume) {
+        // NOT on a resume: the HVDC AC-emulation driver phases MUTATE element bits on the device during
+        // the paused sweep (a frozen or saturated emulation has its coupling deactivated), and the host's
+        // mirror of the mask is the pre-solve one. Re-uploading it mid-sequence silently undoes those
+        // loops' work — measured on a 400-contingency rte6515 slice: 5 differing violations against 1,
+        // with NO host decision involved at all (the split alone did it). Contingency outages do not
+        // change during a sweep, so the device copy stays authoritative across the pause.
+        CUDA_CHECK(cudaMemcpy(ctx->dDisabled.p, disabled,
+                              static_cast<size_t>(ctx->nElements) * nS * sizeof(char), cudaMemcpyHostToDevice));
+    }
 
     std::vector<char> active(nS, 1);
 
@@ -6413,6 +6443,17 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (anyChanged) {
             seqChanged = true;
             solvePass = true;                                // the host loop moved targets -> re-solve
+            // ...and it CONSUMES the outer-iteration budget, exactly as a device loop's change does.
+            // Without this a host loop that keeps going UNSTABLE never retires a scenario: each resume
+            // starts a fresh `outer` budget, so the pause/resume cycle spins forever (measured: a
+            // 2000-contingency rte6515 slice with SecondaryVoltageControl did not finish in 28 min).
+            for (int s = 0; s < nS; s++) {
+                if (active[s] && ++prodIters[s] >= RL_MAX_OUTER) {
+                    res.status[s] = -2;                      // budget exhausted -> CPU replays it
+                    live[s] = 0;
+                    active[s] = 0;
+                }
+            }
         } else {
             solvePass = false;
             for (int s = 0; s < nS; s++) {
@@ -7262,6 +7303,13 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                      outer, gLastPassIters, std::sqrt(ssq), inf, slackM, retain0, (int) rlActive[0]);
     }
     int loopKind = loopOrder[loopIdx];
+    // DIAGNOSTIC (OLF_GPU_HOST_LOOP_NOOP=1): keep the host slot in the sweep but treat it as an
+    // in-kernel STABLE loop — no break, no host round trip. Separates "the extra slot changed the
+    // sweep" from "splitting the call changed the sweep".
+    static const bool hostLoopNoop = std::getenv("OLF_GPU_HOST_LOOP_NOOP") != nullptr;
+    if (hostLoopNoop && loopKind >= LOOP_HOST_SVC && loopKind <= LOOP_HOST_SHUNT) {
+        loopKind = -1;                                       // falls through every branch: a STABLE check
+    }
     if (loopKind >= LOOP_HOST_SVC && loopKind <= LOOP_HOST_SHUNT) {   // any LOOP_HOST_* kind: pause for the host
         // Hand the sequence back. Everything the device holds — x, targets, row modes, RL pins,
         // monitoring activations, absorbed slack, HVDC statuses — stays put in the context; only
@@ -9106,6 +9154,34 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
     jintArray out = env->NewIntArray(static_cast<jsize>(cnt));
     env->SetIntArrayRegion(out, 0, static_cast<jsize>(cnt), host.data());
     return out;
+}
+
+/** Un-pin reactive-limit entries at a driver pause (SecondaryVoltageControl's re-enable step):
+ *  {@code pairs} is (scenario, RL entry) flattened, {@code newTarget} the voltage target each row goes
+ *  back to. No-op for an entry that is not pinned. */
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlUnpin(
+        JNIEnv* env, jclass, jlong handle, jintArray jPairs, jdoubleArray jTargets) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || ctx->nrl <= 0 || jPairs == nullptr || jTargets == nullptr) {
+        return;
+    }
+    int nPairs = env->GetArrayLength(jTargets);
+    if (nPairs == 0 || env->GetArrayLength(jPairs) != 2 * nPairs) {
+        return;
+    }
+    std::vector<int> pairs(2 * nPairs);
+    std::vector<double> targets(nPairs);
+    env->GetIntArrayRegion(jPairs, 0, 2 * nPairs, pairs.data());
+    env->GetDoubleArrayRegion(jTargets, 0, nPairs, targets.data());
+    DeviceBuf dPairs;
+    DeviceBuf dTargets;
+    dPairs.upload(pairs.data(), pairs.size() * sizeof(int));
+    dTargets.upload(targets.data(), targets.size() * sizeof(double));
+    rlUnpinBatch<<<grid(nPairs), BLOCK, 0, ctx->stream>>>(nPairs, ctx->nScenarios, ctx->n, ctx->nrl,
+            dPairs.as<int>(), dTargets.as<double>(), ctx->dRlVrow.as<int>(), ctx->dRlLimitType.as<char>(),
+            ctx->dRlSavedMode.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>());
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
 }
 
 /** Did the last solve stop at a host-owned slot? Returns 0 if not paused, or the

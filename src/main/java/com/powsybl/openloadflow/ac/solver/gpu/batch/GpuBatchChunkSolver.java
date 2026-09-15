@@ -899,17 +899,10 @@ final class GpuBatchChunkSolver {
                     // pre-2026-09-15 host chain was worse still at 2.4e-1 kV, its re-solves not composing).
                     // Pausing puts it back in OLF's order with no new maths: the same decision code runs on
                     // the paused states and hands its target moves back as flat deltas.
-                    // EXPERIMENTAL, opt-in: two defects remain at production scale (see tasks #48) — the
-                    // re-enable step never reaches the device (OLF's tryToReEnableHelpfulControllerBuses
-                    // clears RL pins, and a resume has no channel for that), and the rlVtOv comparison
-                    // targets are dropped on a round that moves nothing. Measured on rte6515 with both
-                    // zones firing: 323 differing violations at x0.64 vs CPU, against 4 differing at x0.48
-                    // for the host orchestrator. Default is the host orchestrator; co-presence with a
-                    // control loop is kept out of trouble by the scope gate routing that run to CPU.
+                    // OLF_GPU_SVC_HOST_ORCHESTRATOR=1 restores the old after-the-sweep orchestrator for A/B.
                     boolean svcAsDriverPause = svcActive && rlStateOut != null
-                            && "1".equals(System.getenv("OLF_GPU_SVC_DRIVER_PAUSE"));
-                    GpuAcNewtonSolver.setBatchHostLoop(handle,
-                            svcAsDriverPause ? 1 << (GpuAcNewtonSolver.HOST_LOOP_SVC - GpuAcNewtonSolver.HOST_LOOP_SVC) : 0);
+                            && !"1".equals(System.getenv("OLF_GPU_SVC_HOST_ORCHESTRATOR"));
+                    GpuAcNewtonSolver.setBatchHostLoop(handle, svcAsDriverPause ? 1 : 0);
                     long tSolve0 = System.nanoTime();
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
@@ -940,7 +933,12 @@ final class GpuBatchChunkSolver {
                                 svcTargetV[s2][c] = svcControllers.ctls().get(c).baseTargetV();
                             }
                         }
-                        int maxSvcRounds = config.maxOuterIterations() > 0 ? config.maxOuterIterations() : 20;
+                        // The driver re-pauses at the SVC slot on EVERY sweep restart, and a reactive-limit
+                        // switch restarts the sweep — so the pause count is bounded by the whole outer-loop
+                        // budget, not by the number of zone adjustments. The kernel retires a scenario whose
+                        // budget a host-UNSTABLE verdict exhausts, so this cap is only a safety net; stopping
+                        // early would leave the context PAUSED and the chunk holding mid-sweep states.
+                        int maxSvcRounds = 16 * (config.maxOuterIterations() > 0 ? config.maxOuterIterations() : 20);
                         int svcRounds = 0;
                         while (GpuAcNewtonSolver.readBatchDriverPaused(handle) == GpuAcNewtonSolver.HOST_LOOP_SVC
                                 && svcRounds++ < maxSvcRounds) {
@@ -948,6 +946,9 @@ final class GpuBatchChunkSolver {
                                     chunkResults, svcControllers, rlStateOut, svcTargetV, baseState);
                             if (dec.targetRows() != null && dec.targetRows().length > 0) {
                                 GpuAcNewtonSolver.setBatchTargetDeltas(handle, dec.targetRows(), dec.targetValues());
+                            }
+                            if (dec.unpinPairs() != null && dec.unpinPairs().length > 0) {
+                                GpuAcNewtonSolver.setBatchRlUnpin(handle, dec.unpinPairs(), dec.unpinTargets());
                             }
                             GpuAcNewtonSolver.setBatchDriverResume(handle, dec.hostChanged());
                             chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
@@ -965,6 +966,18 @@ final class GpuBatchChunkSolver {
                                     config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0,
                                     nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                                     ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
+                        }
+                        if (GpuAcNewtonSolver.readBatchDriverPaused(handle) != 0) {
+                            // Safety net only: the budget bookkeeping above should always end the cycle.
+                            // Mid-sweep states must never be reported — cancel and let the CPU replay them.
+                            LOGGER.warn("Secondary VC driver pause did not settle in {} rounds — chunk routed to the CPU",
+                                    maxSvcRounds);
+                            GpuAcNewtonSolver.cancelBatchDriverPause(handle);
+                            for (int s2 = 0; s2 < realCount; s2++) {
+                                if (chunkResults[s2] != null) {
+                                    chunkResults[s2][n + 2] = GpuBatchStatus.STATUS_REJECTED;
+                                }
+                            }
                         }
                         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                             System.err.printf("SVC_PAUSE rounds=%d stillPaused=%d%n", svcRounds,

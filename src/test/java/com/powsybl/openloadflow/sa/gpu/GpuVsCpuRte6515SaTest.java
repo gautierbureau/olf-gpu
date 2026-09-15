@@ -75,10 +75,21 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
 
     /** Generate ALL branch N-1 contingencies from the network. */
     private static List<Contingency> allBranchContingencies(Network network) {
-        return network.getBranchStream()
+        List<Contingency> all = network.getBranchStream()
                 .map(Branch::getId)
                 .map(id -> new Contingency(id, new BranchContingency(id)))
                 .collect(Collectors.toList());
+        // OLF_GPU_SA_MAX_CTG=<n>: run only the first n — a DIAGNOSTIC slice, so a parity question can be
+        // iterated in seconds instead of the full 9042. Never quote a slice as the scope result.
+        String max = System.getenv("OLF_GPU_SA_MAX_CTG");
+        if (max != null) {
+            int n = Integer.parseInt(max);
+            if (n > 0 && n < all.size()) {
+                System.out.printf("  DIAGNOSTIC SLICE: first %d of %d contingencies%n", n, all.size());
+                return all.subList(0, n);
+            }
+        }
+        return all;
     }
 
     private static Map<String, Long> statusCounts(SecurityAnalysisResult r) {

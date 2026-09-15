@@ -204,7 +204,7 @@ public final class GpuBatchSecondaryVc {
      *  compare against, and the per-scenario "this loop changed something" flags OLF's UNSTABLE verdict
      *  maps to. */
     public record PauseDecision(int[] targetRows, double[] targetValues, int[] rlVtSlotIdx, double[] rlVtValues,
-                                byte[] hostChanged, boolean anyMoved) {
+                                int[] unpinPairs, double[] unpinTargets, byte[] hostChanged, boolean anyMoved) {
     }
 
     /** The SecondaryVoltageControl check at the driver's OLF-order-4 pause: decide on the states the
@@ -216,10 +216,14 @@ public final class GpuBatchSecondaryVc {
             double[][] states, Controllers controllers, int[] rlState, double[][] targetV, double[] baseState) {
         List<CtlBus> ctls = controllers.ctls();
         int nc = ctls.size();
+        byte[] hostChanged = new byte[chunkSize];
         if (nc == 0 || rlState == null) {
-            return new PauseDecision(null, null, null, null, new byte[chunkSize], false);
+            return new PauseDecision(null, null, null, null, null, null, hostChanged, false);
         }
         int[][] uo = observables(controllers);
+        // the pin state BEFORE the decision: what decideRound clears is OLF's re-enable, and the device
+        // only learns about it through the un-pin channel (a resume re-seeds no RL state)
+        int[] pinnedBefore = rlState.clone();
         final double[] esStateOnEntry = controllers.esCtx().stateVector().get().clone();
         boolean[] affected;
         try {
@@ -228,22 +232,30 @@ public final class GpuBatchSecondaryVc {
         } finally {
             controllers.esCtx().stateVector().set(esStateOnEntry);
         }
-        byte[] hostChanged = new byte[chunkSize];
-        if (affected == null) {
-            return new PauseDecision(null, null, null, null, hostChanged, false);
-        }
         List<Integer> rows = new ArrayList<>();
         List<Double> vals = new ArrayList<>();
         List<Integer> vtSlotIdx = new ArrayList<>();
         List<Double> vtVal = new ArrayList<>();
+        List<Integer> unpin = new ArrayList<>();
+        List<Double> unpinT = new ArrayList<>();
         for (int s = 0; s < realCount; s++) {
-            hostChanged[s] = (byte) (affected[s] ? 1 : 0);
+            hostChanged[s] = (byte) (affected != null && affected[s] ? 1 : 0);
             for (int c = 0; c < nc; c++) {
-                if (targetV[s][c] == ctls.get(c).baseTargetV()) {
+                CtlBus ctl = ctls.get(c);
+                int e = s * nrl + ctl.rlIdx();
+                if ((pinnedBefore[e] & 3) != 0 && (rlState[e] & 3) == 0) {
+                    unpin.add(s);                            // OLF's re-enable: back to PV at the zone's target
+                    unpin.add(ctl.rlIdx());
+                    unpinT.add(targetV[s][c]);
+                }
+                // The switch-back comparison target is a SOLVE ARGUMENT, re-uploaded per call: it must be
+                // rebuilt from the ACCUMULATED targets on every resume, not from this round's moves — a
+                // round that moves nothing would otherwise drop the channel and the kernel would compare
+                // against the packed base target (323 differing violations on rte6515).
+                if (targetV[s][c] == ctl.baseTargetV()) {
                     continue;
                 }
-                CtlBus ctl = ctls.get(c);
-                if ((rlState[s * nrl + ctl.rlIdx()] & 3) == 0) {
+                if ((rlState[e] & 3) == 0) {
                     rows.add(s * n + ctl.ctldVRow());        // the CONTROLLED bus's V target moves now
                     vals.add(targetV[s][c]);
                 }                                            // pinned row: the Q pin stays; the override below
@@ -256,7 +268,9 @@ public final class GpuBatchSecondaryVc {
                 vals.stream().mapToDouble(Double::doubleValue).toArray(),
                 vtSlotIdx.stream().mapToInt(Integer::intValue).toArray(),
                 vtVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                hostChanged, true);
+                unpin.stream().mapToInt(Integer::intValue).toArray(),
+                unpinT.stream().mapToDouble(Double::doubleValue).toArray(),
+                hostChanged, affected != null);
     }
 
     static double[][] orchestrate(long handle, int chunkSize, int realCount, int n, int nrl,

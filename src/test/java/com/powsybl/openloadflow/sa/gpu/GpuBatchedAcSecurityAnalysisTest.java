@@ -1312,14 +1312,16 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
      *  BUS_3. SVC is OLF order 4, the transformer loop order 8, and SVC is the last HOST orchestrator on
      *  the chunk path — it runs AFTER the whole device sweep, so each decides on a state the other has
      *  already moved. Measured: 1.7e-3 kV with the control loops in-kernel, 2.4e-1 kV with the
-     *  pre-2026-09-15 host-orchestrator chain (silently wrong, its re-solves not composing). Whole-run
-     *  CPU for now. A driver pause at SVC's own slot makes THIS case match at 1e-11 (run with
-     *  OLF_GPU_SVC_DRIVER_PAUSE=1), but two gaps remain at production scale (tasks #48), so the pause
-     *  is opt-in; flip this test to assertGpuMatchesCpu unconditionally when they close. */
+     *  pre-2026-09-15 host-orchestrator chain (silently wrong, its re-solves not composing). Fixed by
+     *  running SVC as a DRIVER PAUSE at its own slot: the same decision code, in OLF's order. */
     @org.junit.jupiter.api.Test
-    void deviceSecondaryVcWithAfterGeneratorTvcRoutesToCpu() {
+    void deviceSecondaryVcWithAfterGeneratorTvcMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        // the A/B fallback restores the after-the-sweep orchestrator, i.e. exactly the ordering this
+        // test exists to catch — it is expected to disagree there
+        org.junit.jupiter.api.Assumptions.assumeFalse(
+                "1".equals(System.getenv("OLF_GPU_SVC_HOST_ORCHESTRATOR")), "driver pause disabled");
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
         var t2wt = network.getTwoWindingsTransformer("T2wT");
         t2wt.getRatioTapChanger().setTargetDeadband(0).setRegulating(true).setTapPosition(0)
@@ -1341,13 +1343,9 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
                 .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL)
                 .setSecondaryVoltageControl(true).setMaxPlausibleTargetVoltage(1.6);
-        if ("1".equals(System.getenv("OLF_GPU_SVC_DRIVER_PAUSE"))) {
-            assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
-        } else {
-            assertGpuMatchesCpuNoEngage(network, ctgs, 1e-11, lfp);
-            assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() <= 0,
-                    "SVC co-present with a control loop routes the whole run to the CPU (order inversion)");
-        }
+        assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "SVC co-present with a control loop must batch (the driver pause keeps OLF's order)");
     }
 
     /** useInitialTapPosition SHARED-ratio semantics (OLF TransformerRatioManager, ported to the

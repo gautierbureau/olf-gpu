@@ -183,6 +183,17 @@ class GpuDcLoadFlowProviderTest {
     }
 
     static void assertSameNetworkState(String where, Network cpu, Network gpu) {
+        assertSameNetworkState(where, cpu, gpu, 0.0);
+    }
+
+    /**
+     * @param generatorTol tolerance on the generator and load dispatch. Zero (bit-identical) whenever
+     *                     the dispatch comes from the slack distribution alone: the same operations in
+     *                     the same order on both arms. A loop that distributes FROM THE SOLVED STATE —
+     *                     area interchange control — feeds it a state that differs by roundoff between
+     *                     two direct solvers, so its dispatch does too.
+     */
+    static void assertSameNetworkState(String where, Network cpu, Network gpu, double generatorTol) {
         for (Bus bus : cpu.getBusView().getBuses()) {
             Bus other = gpu.getBusView().getBus(bus.getId());
             assertNotNull(other, where + ": bus " + bus.getId());
@@ -195,11 +206,10 @@ class GpuDcLoadFlowProviderTest {
         }
         for (Generator g : cpu.getGenerators()) {
             Generator other = gpu.getGenerator(g.getId());
-            // the dispatch is the distribution's: the same operations in the same order, bit for bit
-            assertSameDouble(g.getTerminal().getP(), other.getTerminal().getP(), 0.0, where + ": p of generator " + g.getId());
+            assertSameDouble(g.getTerminal().getP(), other.getTerminal().getP(), generatorTol, where + ": p of generator " + g.getId());
         }
         for (Load l : cpu.getLoads()) {
-            assertSameDouble(l.getTerminal().getP(), gpu.getLoad(l.getId()).getTerminal().getP(), 0.0, where + ": p of load " + l.getId());
+            assertSameDouble(l.getTerminal().getP(), gpu.getLoad(l.getId()).getTerminal().getP(), generatorTol, where + ": p of load " + l.getId());
         }
         for (TwoWindingsTransformer t : cpu.getTwoWindingsTransformers()) {
             if (t.hasPhaseTapChanger()) {

@@ -13,6 +13,8 @@ import com.powsybl.commons.report.ReportNode;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.openloadflow.OpenLoadFlowParameters;
 import com.powsybl.openloadflow.dc.DcAreaInterchangeControlOuterLoop;
+import com.powsybl.openloadflow.dc.DcHvdcAcEmulationLimitsOuterLoop;
+import com.powsybl.openloadflow.dc.DcIncrementalPhaseControlOuterLoop;
 import com.powsybl.openloadflow.dc.DcLoadFlowContext;
 import com.powsybl.openloadflow.dc.DcLoadFlowEngine;
 import com.powsybl.openloadflow.dc.DcLoadFlowParameters;
@@ -64,9 +66,17 @@ public final class GpuDcLoadFlowEngine implements AutoCloseable {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuDcLoadFlowEngine.class);
 
+    /** The last run's device outer-loop decisions (test/validation probes): {@code -1} when the loops
+     *  ran on the host, otherwise the number of taps moved and of AC-emulation switches applied. */
+    public static final java.util.concurrent.atomic.AtomicInteger LAST_DEVICE_TAP_CHANGES = new java.util.concurrent.atomic.AtomicInteger(-1);
+
+    public static final java.util.concurrent.atomic.AtomicInteger LAST_DEVICE_HVDC_SWITCHES = new java.util.concurrent.atomic.AtomicInteger(-1);
+
     private final DcLoadFlowContext context;
     private GpuDcAssembly assembly;
     private GpuDcSolver solver;
+    private GpuDcOuterLoops loops;
+    private boolean deviceLoops;
 
     public GpuDcLoadFlowEngine(DcLoadFlowContext context) {
         this.context = Objects.requireNonNull(context);
@@ -123,7 +133,13 @@ public final class GpuDcLoadFlowEngine implements AutoCloseable {
                 System.err.printf("DC_ASSEMBLY n=%d nnz=%d capture=%.1f ms upload+fill+analysis+factorization=%.1f ms%n",
                         a.size(), a.nonZeroCount(), (t1 - t0) / 1e6, (System.nanoTime() - t1) / 1e6);
             }
-        } else if (assembly.sameStructure(a)) {
+        } else if (assembly.samePattern(a)) {
+            // same non-zero pattern: refill the values and the target on the SAME factorization structure.
+            // The contribution lists move when a term is switched on or off (an HVDC entering or leaving
+            // saturation), so they are re-uploaded too — no new analysis either way.
+            if (!assembly.sameStructure(a)) {
+                solver.setContributions(a);
+            }
             solver.refreshBranches(a);
             solver.setBusLoads(a.busLoadTargetP);
             solver.setGeneratorTargets(a.genTargetP);
@@ -132,8 +148,62 @@ public final class GpuDcLoadFlowEngine implements AutoCloseable {
             solver.close();
             solver = null;
             solver = GpuDcSolver.createAssembled(a);
+            loops = null;
         }
         assembly = a;
+        if (loops != null) {
+            loops.upload(context.getEquationSystem());
+        }
+    }
+
+    /**
+     * Build the device outer-loop tables ({@link GpuDcOuterLoops}) for the loops that decide from the
+     * solved state. Call after the outer loops' {@code initialize}. Returns false when a loop has no
+     * device model — the engine then runs every loop through OLF.
+     */
+    private boolean prepareLoops(List<DcOuterLoop> outerLoops) {
+        boolean phase = outerLoops.stream().anyMatch(DcIncrementalPhaseControlOuterLoop.class::isInstance);
+        boolean hvdc = outerLoops.stream().anyMatch(DcHvdcAcEmulationLimitsOuterLoop.class::isInstance);
+        if (!phase && !hvdc || Boolean.getBoolean(DISABLE_DEVICE_LOOPS_PROPERTY)) {
+            loops = null;
+            return false;
+        }
+        try {
+            loops = GpuDcOuterLoops.capture(context.getNetwork(), context.getEquationSystem(), solver, assembly);
+            loops.resetPhaseControlDirections();
+            LAST_DEVICE_TAP_CHANGES.set(0);
+            LAST_DEVICE_HVDC_SWITCHES.set(0);
+            return true;
+        } catch (UnsupportedOperationException e) {
+            LOGGER.warn("GPU DC outer loops: {} — the outer loops run on the host", e.getMessage());
+            loops = null;
+            return false;
+        }
+    }
+
+    /** {@code -Dolf.gpu.dc.hostOuterLoops=true} runs OLF's own loop checks (the A/B of the kernels). */
+    public static final String DISABLE_DEVICE_LOOPS_PROPERTY = "olf.gpu.dc.hostOuterLoops";
+
+    /**
+     * The device check of a loop that decides from the state, or {@code null} when this loop has no
+     * device model and OLF's own {@code check} must run ({@code DcAreaInterchangeControl}, and every
+     * loop when the device tables could not be built).
+     */
+    private OuterLoopResult deviceCheck(DcOuterLoop outerLoop, ReportNode reportNode) {
+        if (!deviceLoops || loops == null) {
+            return null;
+        }
+        if (outerLoop instanceof DcIncrementalPhaseControlOuterLoop) {
+            return loops.hasPhaseControllers()
+                    ? new OuterLoopResult(outerLoop, loops.checkPhaseControl())
+                    : new OuterLoopResult(outerLoop, OuterLoopStatus.STABLE);
+        }
+        if (outerLoop instanceof DcHvdcAcEmulationLimitsOuterLoop) {
+            return loops.hasHvdcs()
+                    ? new OuterLoopResult(outerLoop, loops.checkHvdc(reportNode))
+                    : new OuterLoopResult(outerLoop, OuterLoopStatus.STABLE);
+        }
+        return null;
     }
 
     /** The device generator targets back into the network (setTargetP fires the listeners only on a change). */
@@ -263,7 +333,8 @@ public final class GpuDcLoadFlowEngine implements AutoCloseable {
             outerLoopContext.setIteration(outerLoopIteration);
             outerLoopContext.setLoadFlowContext(context);
             outerLoopContext.setOuterLoopTotalIterations(runningContext.outerLoopTotalIterations);
-            outerLoopResult = outerLoop.check(outerLoopContext, olReportNode);
+            OuterLoopResult deviceResult = deviceCheck(outerLoop, olReportNode);
+            outerLoopResult = deviceResult != null ? deviceResult : outerLoop.check(outerLoopContext, olReportNode);
             runningContext.lastOuterLoopResult = outerLoopResult;
 
             if (outerLoopResult.status() == OuterLoopStatus.UNSTABLE) {
@@ -311,6 +382,7 @@ public final class GpuDcLoadFlowEngine implements AutoCloseable {
 
         DcLoadFlowEngine.initStateVector(network, equationSystem, new UniformValueVoltageInitializer());
         prepare();
+        deviceLoops = prepareLoops(outerLoops);
 
         double initialSlackBusActivePowerMismatch = activePowerMismatch();
         double distributedActivePower = 0.0;

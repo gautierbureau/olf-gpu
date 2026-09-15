@@ -115,7 +115,15 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
     public void setDriverEngineActive(boolean active) {
         this.driverEngineActive = active;
+        this.driverFallbackForRun = false;                   // a new engine run: the driver is back on
     }
+
+    /** A solve of the CURRENT engine run fell back to the CPU Newton-Raphson (a rejected shape): the
+     *  driver made no decision there and OLF's real loops took over — they hold the loop state for
+     *  the rest of the run, so the device must NOT drive the loops of the run's later solves (its
+     *  machines would restart from INITIAL against OLF's contexts sitting at CONTROL/COMPLETE — the
+     *  AFTER_GENERATOR carrier-clamp base measured 2.2e-3 kV that way). Pure-NR device solves only. */
+    private boolean driverFallbackForRun;
 
     // Diagnostics for the invalidation taxonomy: how the cached native context is reconciled across
     // solves — STRUCTURE rebuilds (pattern + cuDSS re-analysis) vs cheap VALUES re-uploads (a transformer
@@ -216,6 +224,14 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         }
         if (cphOwned && cphCtls != null) {
             GpuBatchContinuousPhase.writeBack(network, cphCtls, GpuAcNewtonSolver.readBatchContinuousPhaseTaps(handle));
+        }
+        if (tvdOwned && tvdCtls != null) {
+            com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.writeBack(network, tvdCtls,
+                    GpuAcNewtonSolver.readBatchDiscreteTvcState(handle));
+        }
+        if (svdOwned && svdGroups != null) {
+            com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSimpleShuntVc.writeBack(network, svdGroups,
+                    GpuAcNewtonSolver.readBatchDiscreteShuntState(handle), GpuAcNewtonSolver.readBatchDiscreteShuntPositions(handle));
         }
     }
 
@@ -416,6 +432,12 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private boolean flowOwned;
     private List<GpuBatchContinuousPhase.Ctl> cphCtls;
     private boolean cphOwned;
+    private List<com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.TransformerController> tvdCtls;
+    private boolean tvdOwned;
+    private List<com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSimpleShuntVc.Group> svdGroups;
+    private boolean svdOwned;
+    /** The host-loop bits the CURRENT solve actually pauses for (in-kernel phases clear theirs). */
+    private int activeHostMask;
 
     /** The host-paused loops' (loop, context) pairs of the CURRENT engine run: OLF keeps one context
      *  per loop for the whole run (iteration counters, per-loop data), so they must survive a restart
@@ -554,7 +576,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
     @Override
     public AcSolverResult run(VoltageInitializer voltageInitializer, ReportNode reportNode) {
-        driverOuterLoops = driverOuterLoopsRequested && driverEngineActive;
+        driverOuterLoops = driverOuterLoopsRequested && driverEngineActive && !driverFallbackForRun;
         hostLoopPairs = null;
         rlCarry = null;
         try {
@@ -739,6 +761,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             flowOwned = false;
             cphCtls = null;
             cphOwned = false;
+            tvdCtls = null;
+            tvdOwned = false;
+            svdGroups = null;
+            svdOwned = false;
             if (driverOuterLoops) {
                 long handle = context.handle.get();
                 int nElements = cachedData.getTotalElementCount();
@@ -841,8 +867,52 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 } else {
                     GpuBatchContinuousPhase.uploadToDevice(handle, null);
                 }
+                // DISCRETE TransformerVoltageControl (OLF order 8) IN-KERNEL: AFTER_GENERATOR starts with every
+                // control off (OLF's initialize, run by the engine proxy) and the driver's INITIAL/CONTROL/
+                // COMPLETE machine enables, clamps and rounds; WITH_GENERATOR (Simple) starts with the controls
+                // ON (initialize enabled them — the activation carries it, entryOn) and the first check rounds.
+                // The builders probe the controls with VC toggles that fire network events — keep our flags.
+                var tvcAfterGen = driverLoop("TransformerVoltageControl");
+                var tvcSimple = driverLoop("SimpleTransformerVoltageControl");
+                if ((tvcAfterGen != null || tvcSimple != null) && !tvcOwned) {
+                    boolean sd = invalidation.structureDirty;
+                    boolean ad = invalidation.activationDirty;
+                    boolean useInitial = tvcAfterGen instanceof com.powsybl.openloadflow.ac.outerloop.TransformerVoltageControlOuterLoop t
+                            && t.isUseInitialTapPosition();
+                    tvdCtls = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.buildTransformerControllers(
+                            network, equationSystem, targetVector, activation, target,
+                            new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper(network), useInitial);
+                    invalidation.structureDirty = sd;
+                    invalidation.activationDirty = ad;
+                    tvdOwned = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.uploadToDevice(
+                            handle, tvdCtls, tvcSimple != null ? 1 : 0, tvcSimple != null);
+                    if (tvdOwned) {
+                        hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_TVC - GpuAcNewtonSolver.HOST_LOOP_SVC));
+                    }
+                } else {
+                    com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.uploadToDevice(handle, null, 0, false);
+                }
+                // WITH_GENERATOR ShuntVoltageControl (OLF order 10) IN-KERNEL: the controls are ON at entry
+                // (initialize), the first check dispatches every continuous b to its sections.
+                if (driverLoop("ShuntVoltageControl") != null && !shuntOwned) {
+                    boolean sd = invalidation.structureDirty;
+                    boolean ad = invalidation.activationDirty;
+                    var mapper = new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper(network);
+                    svdGroups = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSimpleShuntVc.buildGroups(
+                            network, equationSystem, targetVector, activation, target, mapper,
+                            mapper.getClosedBranchCount() + mapper.getOpenBranchCount());
+                    invalidation.structureDirty = sd;
+                    invalidation.activationDirty = ad;
+                    svdOwned = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSimpleShuntVc.uploadToDevice(handle, svdGroups, true);
+                    if (svdOwned) {
+                        hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_SHUNT - GpuAcNewtonSolver.HOST_LOOP_SVC));
+                    }
+                } else {
+                    com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSimpleShuntVc.uploadToDevice(handle, null, false);
+                }
                 // Host-owned outer-loop slots: the driver pauses at their OLF positions and the
                 // pause/resume cycle after solveBatchContext runs OLF's loop there. 0 clears a cached mask.
+                activeHostMask = hostMask;
                 GpuAcNewtonSolver.setBatchHostLoop(handle, hostMask);
                 if (restart && restartLoopKind > 0) {        // re-check the loop that went UNSTABLE first
                     GpuAcNewtonSolver.setBatchDriverStartLoop(handle, restartLoopKind);
@@ -990,7 +1060,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 }
             }
             status = result.isStop() ? AcSolverStatus.CONVERGED : AcSolverStatus.MAX_ITERATION_REACHED;
-            lastRunOnDevice = true;
+            lastRunOnDevice = driverOuterLoops;              // "the DRIVER decided the loops of this solve"
+
             // DEVICE-BROKEN result safety net: a non-finite or absurd residual is a device-side
             // numerical failure (e.g. the open zi-with-loaded-far-bus-behind-a-remote-member shape,
             // where the sequential solve returns phi ~1e22 while the SAME system solves on the CPU
@@ -1030,6 +1101,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         } catch (RuntimeException e) {
             CPU_FALLBACK_COUNT.incrementAndGet();
             lastRunOnDevice = false;
+            driverFallbackForRun = true;
             // the native context may be mid-iteration inconsistent — rebuild next run
             GpuAcNewtonSolver.destroyBatchContext(context.handle.getAndSet(0));
             cachedData = null;
@@ -1106,7 +1178,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 var pairs = com.powsybl.openloadflow.ac.AcloadFlowEngine.createOuterLoopsAndContexts(engineContext, false);
                 for (var pair : pairs) {
                     int kind = loopKindFor(pair.getLeft().getName());
-                    if (kind >= GpuAcNewtonSolver.HOST_LOOP_SVC && loopMap.containsKey(kind)) {
+                    if (kind >= GpuAcNewtonSolver.HOST_LOOP_SVC && loopMap.containsKey(kind)
+                            && (activeHostMask & (1 << (kind - GpuAcNewtonSolver.HOST_LOOP_SVC))) != 0) {
                         hostLoopPairs.put(kind, pair);
                         pair.getLeft().initialize(pair.getRight());
                     }

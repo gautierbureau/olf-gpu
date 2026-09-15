@@ -1128,14 +1128,15 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 "the FREE-member outage must batch on-device (plan A6)");
     }
 
-    /** A6-REMAINING contract: clamping the CURRENT CARRIER mid-flight (T2wT capped at rho 1.0
-     *  clamps under the T2wT2 outage) re-picks the pilot-Q role in a state that sits on the CPU's
-     *  1-MW DS-threshold knife edge — the machine routes the SCENARIO to the CPU
-     *  (STATUS_REJECTED) and the results must still equal the stock CPU SA exactly. (The GPU
-     *  sequential BASE loadflow also degrades on this base-clamping network — a separate
-     *  sequential-path gap — so the base runs on the CPU here.) */
+    /** Clamping the CURRENT CARRIER mid-flight (T2wT capped at rho 1.0 clamps under the T2wT2
+     *  outage) re-picks the pilot-Q role. The host machine routed the scenario to the CPU (its
+     *  re-solve trajectory sat 1.7e-9 off the CPU's, on a 1-MW DS knife edge — plan A6); the
+     *  in-kernel TransformerVoltageControl phase (2026-09-15) runs OLF's exact check/re-solve
+     *  sequence, the fills' mode scan re-picks the carrier, and the scenario BATCHES at 1e-12 —
+     *  the base itself clamps, so the base runs on the driver too. {@code
+     *  OLF_GPU_TVD_REJECT_CARRIER_CLAMP} restores the CPU route for diagnosis. */
     @org.junit.jupiter.api.Test
-    void deviceSharedCarrierClampRoutesToCpuAndMatches() {
+    void deviceSharedCarrierClampBatchesAndMatches() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         Network network = sharedThreeMemberTvcNetwork();
@@ -1158,9 +1159,9 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
                 .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
-        assertGpuMatchesCpuNoEngage(network, ctgs, 1e-12, lfp);   // GPU base self-heals (safety net)
-        assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() <= 0,
-                "the carrier-clamp scenario must be routed to the CPU (A6-remaining)");
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the carrier-clamp scenario batches in-kernel (the mode scan re-picks the carrier)");
     }
 
     /** useInitialTapPosition SHARED-ratio semantics (OLF TransformerRatioManager, ported to the

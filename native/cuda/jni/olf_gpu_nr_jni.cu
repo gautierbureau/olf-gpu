@@ -80,7 +80,9 @@ enum DeviceLoopKind {
     LOOP_TVC_KERNEL = 10,    // IncrementalTransformerVoltageControl — IN-KERNEL (OLF order 8)
     LOOP_SHUNT_KERNEL = 11,  // IncrementalShuntVoltageControl — IN-KERNEL (OLF order 10)
     LOOP_PHASE_KERNEL = 12,  // IncrementalPhaseControl (CONTROLLER + LIMITER) — IN-KERNEL (OLF order 7)
-    LOOP_TRPC_KERNEL = 13    // IncrementalTransformerReactivePowerControl — IN-KERNEL (OLF order 9)
+    LOOP_TRPC_KERNEL = 13,   // IncrementalTransformerReactivePowerControl — IN-KERNEL (OLF order 9)
+    LOOP_TVD_KERNEL = 14,    // TransformerVoltageControl AFTER_GENERATOR / Simple (WITH_GENERATOR) — IN-KERNEL (OLF order 8)
+    LOOP_SVD_KERNEL = 15     // ShuntVoltageControl WITH_GENERATOR — IN-KERNEL (OLF order 10)
 };
 // GpuBatchHvdcAcEmulation's status codes, shared with the host.
 constexpr int HV_LINEAR = 0;
@@ -4381,6 +4383,25 @@ struct BatchSolverContext {
     std::vector<double> hCphTapData;
     std::vector<int> hShOvBaseSlotElem;                      // the caller's shunt overrides at solve entry
     std::vector<double> hShOvBaseGb;
+    // DISCRETE (non-incremental) TRANSFORMER VOLTAGE CONTROL — LOOP_TVD_KERNEL (OLF order 8): OLF's
+    // TransformerVoltageControlOuterLoop (tvdMode 0, AFTER_GENERATOR: INITIAL/CONTROL/COMPLETE) or
+    // SimpleTransformerVoltageControlOuterLoop (tvdMode 1, WITH_GENERATOR). One group per controlled bus
+    // (CSR over members); the group's ON/OFF activations are the toggle-diffed row deltas (CSR).
+    int nTvd = 0, nTvdGroups = 0, nTvdDelta = 0, tvdMode = 0, tvdEntryOn = 0;
+    DeviceBuf dTvdGrpPtr, dTvdGrpVRow, dTvdGrpTargetV, dTvdGrpHalfDb, dTvdGrpUseInit;
+    DeviceBuf dTvdDeltaPtr, dTvdDeltaRow, dTvdDeltaModeOn, dTvdDeltaModeOff, dTvdDeltaTargetOn, dTvdDeltaTargetOff;
+    DeviceBuf dTvdMemRhoRow, dTvdMemElem, dTvdMemBaseTap, dTvdMemTapPtr, dTvdMemMin, dTvdMemMax, dTvdMemInit, dTvdTapData;
+    DeviceBuf dTvdScnStep, dTvdGrpStep, dTvdGrpShMin, dTvdGrpShMax, dTvdGrpShInit;   // per scenario / per (scenario, group)
+    DeviceBuf dTvdMemState, dTvdMemTap, dTvdMemRoundFrom;                          // per (scenario, member)
+    DeviceBuf dTvdSaved, dTvdReject;                                               // per (scenario, delta row) / per scenario
+    std::vector<int> hTvdMemElem, hTvdMemBaseTap, hTvdMemTapPtr;
+    std::vector<double> hTvdTapData;
+    // DISCRETE SHUNT VOLTAGE CONTROL — LOOP_SVD_KERNEL (OLF order 10): ShuntVoltageControlOuterLoop
+    // (WITH_GENERATOR): control ON for the first solve, LfShuntImpl.dispatchB at the first check.
+    int nSvd = 0, nSvdGroups = 0, nSvdDelta = 0, nSvdSubs = 0, svdEntryOn = 0;
+    DeviceBuf dSvdGrpPtr, dSvdDeltaPtr, dSvdDeltaRow, dSvdDeltaModeOn, dSvdDeltaModeOff, dSvdDeltaTargetOn, dSvdDeltaTargetOff;
+    DeviceBuf dSvdMemBRow, dSvdMemElem, dSvdMemSubPtr, dSvdSecPtr, dSvdSecB, dSvdSubMin, dSvdSubBase;
+    DeviceBuf dSvdGrpStep, dSvdMemState, dSvdMemContB, dSvdSubPos, dSvdSaved;
 
     DeviceBuf dGenCum, dGenRemoved;
     // The WORKING factors, normalized IN PLACE each iteration exactly as OLF's
@@ -4784,7 +4805,7 @@ static void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double max
     if (nR1Ov > 0 || ctx->nTvc > 0 || ctx->nFlc > 0 || ctx->nCph > 0) {
         // Room for the in-kernel TVC loop to merge one moved tap per (scenario, controller) in
         // front of the caller's list without reallocating mid-solve.
-        size_t capEntries = static_cast<size_t>(nR1Ov) + static_cast<size_t>(nS) * (ctx->nTvc + ctx->nFlc + ctx->nCph);
+        size_t capEntries = static_cast<size_t>(nR1Ov) + static_cast<size_t>(nS) * (ctx->nTvc + ctx->nFlc + ctx->nCph + ctx->nTvd);
         capEntries = std::max<size_t>(capEntries, 1);
         ctx->dR1OvSlotElem.ensure(capEntries * 2 * sizeof(int));
         ctx->dR1OvVal.ensure(capEntries * 8 * sizeof(double));
@@ -4999,6 +5020,21 @@ static void tvcRebuildOverrides(BatchSolverContext* ctx) {
                 slot.push_back(s);
                 slot.push_back(ctx->hFlcElem[c]);
                 const double* row = &ctx->hFlcTapData[static_cast<size_t>(ctx->hFlcTapPtr[c] + t) * 8];
+                val.insert(val.end(), row, row + 8);
+            }
+        }
+    }
+    if (ctx->nTvd > 0) {                                     // the discrete TVC loop's fixed (rounded/clamped) taps
+        std::vector<int> st(static_cast<size_t>(nS) * ctx->nTvd), cur(static_cast<size_t>(nS) * ctx->nTvd);
+        CUDA_CHECK(cudaMemcpy(st.data(), ctx->dTvdMemState.p, st.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dTvdMemTap.p, cur.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        for (int s = 0; s < nS; s++) {
+            for (int m = 0; m < ctx->nTvd; m++) {
+                size_t sm = static_cast<size_t>(s) * ctx->nTvd + m;
+                if (st[sm] != 2 || cur[sm] == ctx->hTvdMemBaseTap[m]) continue;
+                slot.push_back(s);
+                slot.push_back(ctx->hTvdMemElem[m]);
+                const double* row = &ctx->hTvdTapData[static_cast<size_t>(ctx->hTvdMemTapPtr[m] + cur[sm]) * 8];
                 val.insert(val.end(), row, row + 8);
             }
         }
@@ -5437,6 +5473,414 @@ static void shcRebuildOverrides(BatchSolverContext* ctx) {
     ctx->nShOv = nOv;
 }
 // ======================== END INCREMENTAL TVC KERNELS ========================
+// ======================== DISCRETE TRANSFORMER / SHUNT VOLTAGE CONTROL KERNELS ========================
+// OLF's non-incremental voltage-control loops as driver phases:
+//  - TransformerVoltageControlOuterLoop (AFTER_GENERATOR, tvdMode 0): INITIAL (enable the out-of-deadband
+//    controls, TransformerRatioManager bounds) -> CONTROL (clamp continuous ratios outside their range to
+//    the extreme, round, disable; else updateContinuousRatio + roundVoltageRatios -> COMPLETE; UNSTABLE in
+//    any case) -> COMPLETE (STABLE);
+//  - SimpleTransformerVoltageControlOuterLoop (WITH_GENERATOR, tvdMode 1): control ON for the first solve,
+//    every controller rounded to its closest tap and switched off at the first check (UNSTABLE);
+//  - ShuntVoltageControlOuterLoop (WITH_GENERATOR): control ON for the first solve, LfShuntImpl.dispatchB
+//    per controller shunt and switched off at the first check (UNSTABLE).
+// A group's ON/OFF activations are the toggle-diffed row deltas the Java side captured; member rows are
+// laid out by ROLE per scenario — the first alive continuous member hosts the relocated pilot Q (the
+// fills' mode scan picks the same row), the others host DISTR_RHO (target 0), fixed/outaged members are
+// identity pins — so a member outage or a clamp re-forms the group exactly as OLF's "first enabled" rule.
+struct TvdTables {
+    int nG, nM, nDelta, mode, rejectCarrierClamp;
+    const int* grpPtr; const int* grpVRow; const double* grpTargetV; const double* grpHalfDb; const int* grpUseInit;
+    const int* deltaPtr; const int* deltaRow; const int* deltaModeOn; const int* deltaModeOff;
+    const double* deltaTargetOn; const double* deltaTargetOff;
+    const int* memRhoRow; const int* memElem; const int* memBaseTap; const int* memTapPtr;
+    const double* memMin; const double* memMax; const double* memInit; const double* tapData;
+    int* scnStep; int* grpStep; double* grpShMin; double* grpShMax; double* grpShInit;
+    int* memState; int* memTap; double* memRoundFrom; double* saved; char* reject;
+};
+
+// OLF PiModelArray.roundR1ToClosestTap: ClosestTapPositionFinder starts at the CURRENT (base) tap and
+// takes a strictly closer one only.
+__device__ inline double tvdRoundToTap(const TvdTables& T, int m, double r1, int* tapOut) {
+    int base = T.memTapPtr[m];
+    int nTaps = T.memTapPtr[m + 1] - base;
+    int best = T.memBaseTap[m];
+    for (int t = 0; t < nTaps; t++) {
+        if (fabs(T.tapData[(size_t) (base + t) * 8 + 6] - r1) < fabs(T.tapData[(size_t) (base + best) * 8 + 6] - r1)) best = t;
+    }
+    *tapOut = best;
+    return T.tapData[(size_t) (base + best) * 8 + 6];
+}
+
+// Lay out one group's rows for one scenario from its members' states: ON (any alive continuous member)
+// or OFF (none). Non-member delta rows (the pilot's V identity) apply as captured — the scenario's OFF
+// target is saved on the way ON (a per-scenario override on the pilot's Q row must come back); member
+// rows by role.
+__device__ inline void tvdLayoutGroup(const TvdTables& T, int s, int n, int nElements, int g,
+                                      const char* disabled, int* mode, double* target, double* x) {
+    size_t sn = (size_t) s * n;
+    bool anyCont = false;
+    for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
+        if (!disabled[(size_t) s * nElements + T.memElem[m]] && T.memState[(size_t) s * T.nM + m] == 1) anyCont = true;
+    }
+    int m0 = T.grpPtr[g];
+    double pilotQ = 0.0;
+    for (int k = T.deltaPtr[g]; k < T.deltaPtr[g + 1]; k++) {
+        if (T.deltaRow[k] == T.memRhoRow[m0]) pilotQ = T.deltaTargetOn[k];   // the BASE carrier's captured pilot-Q target
+    }
+    for (int k = T.deltaPtr[g]; k < T.deltaPtr[g + 1]; k++) {
+        int r = T.deltaRow[k];
+        bool memberRow = false;
+        for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) if (T.memRhoRow[m] == r) memberRow = true;
+        if (memberRow) continue;                             // member rows are built by ROLE below
+        size_t sk = (size_t) s * T.nDelta + k;
+        if (anyCont) {
+            if (isnan(T.saved[sk])) T.saved[sk] = target[sn + r];
+            mode[sn + r] = T.deltaModeOn[k];
+            target[sn + r] = T.deltaTargetOn[k];
+        } else {
+            mode[sn + r] = T.deltaModeOff[k];
+            target[sn + r] = isnan(T.saved[sk]) ? T.deltaTargetOff[k] : T.saved[sk];
+            T.saved[sk] = nan("");
+        }
+    }
+    bool carrier = false;
+    for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
+        if (disabled[(size_t) s * nElements + T.memElem[m]]) continue;   // outaged: base identity as uploaded
+        size_t mr = sn + T.memRhoRow[m];
+        int st = T.memState[(size_t) s * T.nM + m];
+        if (anyCont && st == 1) {                            // ALIVE continuous: carrier (pilot Q) or DISTR_RHO (0)
+            mode[mr] = 1;
+            target[mr] = carrier ? 0.0 : pilotQ;
+            carrier = true;
+        } else if (st == 2) {                                // FIXED: identity pin at the rounded tap's r1
+            int tap = T.memTap[(size_t) s * T.nM + m];
+            double r1 = T.tapData[(size_t) (T.memTapPtr[m] + tap) * 8 + 6];
+            mode[mr] = 0;
+            target[mr] = r1;
+            x[mr] = r1;
+        }
+    }
+}
+
+// Solve entry (OLF initialize): WITH_GENERATOR enables every connected controller before the first solve —
+// applied here for a chunk (entryOn = 0), or read off the uploaded activation for a base load flow whose
+// network OLF's own initialize already switched on (entryOn = 1). AFTER_GENERATOR starts with every
+// control off.
+__global__ void tvdEntryBatch(TvdTables T, int nScenarios, int n, int nElements, int entryOn,
+                              const char* disabled, int* mode, double* target, double* x) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nScenarios) return;
+    size_t sn = (size_t) s * n;
+    for (int g = 0; g < T.nG; g++) {
+        bool any = false;
+        for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
+            if (disabled[(size_t) s * nElements + T.memElem[m]]) continue;
+            size_t sm = (size_t) s * T.nM + m;
+            if (entryOn) {
+                T.memState[sm] = mode[sn + T.memRhoRow[m]] == 1 ? 1 : 0;
+            } else if (T.mode == 1) {
+                T.memState[sm] = 1;
+                any = true;
+            }
+        }
+        if (any) tvdLayoutGroup(T, s, n, nElements, g, disabled, mode, target, x);
+    }
+}
+
+// One thread per scenario (OLF keeps ONE step for all controls of a run).
+__global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements, const char* disabled, const char* rlActive,
+                              int* mode, double* target, double* x, char* switched) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nScenarios || !rlActive[s]) return;
+    size_t sn = (size_t) s * n;
+    if (T.mode == 1) {                                       // SimpleTransformerVoltageControl: iteration 0 rounds all
+        bool anyCtl = false;
+        for (int g = 0; g < T.nG; g++) {
+            size_t sg = (size_t) s * T.nG + g;
+            if (T.grpStep[sg] != 0) continue;
+            bool touched = false;
+            for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
+                if (disabled[(size_t) s * nElements + T.memElem[m]]) continue;
+                anyCtl = true;
+                size_t sm = (size_t) s * T.nM + m;
+                if (T.memState[sm] != 1) continue;
+                T.memRoundFrom[sm] = x[sn + T.memRhoRow[m]];
+                int tap;
+                tvdRoundToTap(T, m, T.memRoundFrom[sm], &tap);
+                T.memTap[sm] = tap;
+                T.memState[sm] = 2;
+                touched = true;
+            }
+            T.grpStep[sg] = 2;
+            if (touched) tvdLayoutGroup(T, s, n, nElements, g, disabled, mode, target, x);
+        }
+        if (anyCtl) switched[s] = 1;                         // OLF: UNSTABLE whenever a live controller exists
+        return;
+    }
+    int step = T.scnStep[s];
+    if (step == 2) return;                                   // COMPLETE: STABLE
+    if (step == 0) {                                         // INITIAL
+        bool needRun = false;
+        for (int g = 0; g < T.nG; g++) {
+            int alive = 0;
+            for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) if (!disabled[(size_t) s * nElements + T.memElem[m]]) alive++;
+            if (alive == 0) continue;
+            if (!(fabs(T.grpTargetV[g] - x[sn + T.grpVRow[g]]) > T.grpHalfDb[g])) continue;
+            // TransformerRatioManager over the just-enabled members: group-averaged bounds and the
+            // normalized-headroom initial (the exact identity for a single member)
+            double sumMin = 0.0, sumMax = 0.0, a = 0.0, b = 0.0;
+            for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
+                if (disabled[(size_t) s * nElements + T.memElem[m]]) continue;
+                T.memState[(size_t) s * T.nM + m] = 1;
+                sumMin += T.memMin[m];
+                sumMax += T.memMax[m];
+                if (T.memMax[m] != T.memMin[m]) {
+                    a += (T.memMax[m] - T.memInit[m]) / (T.memMax[m] - T.memMin[m]);
+                    b += (T.memInit[m] - T.memMin[m]) / (T.memMax[m] - T.memMin[m]);
+                } else {
+                    a += 1.0;
+                    b += 1.0;
+                }
+            }
+            size_t sg = (size_t) s * T.nG + g;
+            T.grpShMin[sg] = sumMin / alive;
+            T.grpShMax[sg] = sumMax / alive;
+            T.grpShInit[sg] = (T.grpShMin[sg] * a + T.grpShMax[sg] * b) / alive;
+            tvdLayoutGroup(T, s, n, nElements, g, disabled, mode, target, x);
+            needRun = true;
+        }
+        if (!needRun) {
+            T.scnStep[s] = 2;                                // every control in band: COMPLETE, STABLE
+            return;
+        }
+        T.scnStep[s] = 1;
+        switched[s] = 1;
+        return;
+    }
+    // CONTROL: roundR1ToExtremeTapPosition on every enabled controller
+    bool outOfBound = false;
+    for (int g = 0; g < T.nG; g++) {
+        size_t sg = (size_t) s * T.nG + g;
+        bool useInit = T.grpUseInit[g] != 0;
+        bool touched = false;
+        for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
+            if (disabled[(size_t) s * nElements + T.memElem[m]]) continue;
+            size_t sm = (size_t) s * T.nM + m;
+            if (T.memState[sm] != 1) continue;
+            double r1 = x[sn + T.memRhoRow[m]];
+            double lo = useInit ? T.grpShMin[sg] : T.memMin[m];
+            double hi = useInit ? T.grpShMax[sg] : T.memMax[m];
+            if (!(r1 < lo || r1 > hi)) continue;
+            if (!useInit) {
+                // plan-A6 remaining: clamping the current CARRIER while another member stays continuous
+                // re-picks the pilot-Q role mid-flight — the CPU's 1-MW DS knife edge; route the scenario
+                bool isCarrier = true, otherAlive = false;
+                for (int mm = T.grpPtr[g]; mm < T.grpPtr[g + 1]; mm++) {
+                    if (mm == m || disabled[(size_t) s * nElements + T.memElem[mm]]
+                            || T.memState[(size_t) s * T.nM + mm] != 1) continue;
+                    if (mm < m) isCarrier = false;
+                    otherAlive = true;
+                }
+                if (isCarrier && otherAlive && T.rejectCarrierClamp) {
+                    T.reject[s] = 1;
+                    return;
+                }
+            }
+            double v = r1 > hi ? hi : lo;
+            T.memRoundFrom[sm] = v;
+            int tap;
+            tvdRoundToTap(T, m, v, &tap);
+            T.memTap[sm] = tap;
+            T.memState[sm] = 2;
+            touched = true;
+        }
+        if (touched) {
+            tvdLayoutGroup(T, s, n, nElements, g, disabled, mode, target, x);
+            outOfBound = true;
+        }
+    }
+    if (outOfBound) {
+        switched[s] = 1;                                     // stays CONTROL; OLF: UNSTABLE
+        return;
+    }
+    // none out of range: updateContinuousRatio (useInitialTapPosition remap) + roundVoltageRatios -> COMPLETE
+    for (int g = 0; g < T.nG; g++) {
+        size_t sg = (size_t) s * T.nG + g;
+        bool useInit = T.grpUseInit[g] != 0;
+        bool touched = false;
+        for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
+            if (disabled[(size_t) s * nElements + T.memElem[m]]) continue;
+            size_t sm = (size_t) s * T.nM + m;
+            if (T.memState[sm] != 1) continue;
+            double v = x[sn + T.memRhoRow[m]];
+            if (useInit) {
+                double init = T.grpShInit[sg];
+                v = v >= init
+                        ? T.memInit[m] + (v - init) * (T.memMax[m] - T.memInit[m]) / (T.grpShMax[sg] - init)
+                        : T.memInit[m] - (init - v) * (T.memInit[m] - T.memMin[m]) / (init - T.grpShMin[sg]);
+            }
+            T.memRoundFrom[sm] = v;
+            int tap;
+            tvdRoundToTap(T, m, v, &tap);
+            T.memTap[sm] = tap;
+            T.memState[sm] = 2;
+            touched = true;
+        }
+        if (touched) tvdLayoutGroup(T, s, n, nElements, g, disabled, mode, target, x);
+    }
+    T.scnStep[s] = 2;
+    switched[s] = 1;                                         // OLF controlStep: UNSTABLE in any case (the COMPLETE solve)
+}
+
+struct SvdTables {
+    int nG, nM, nDelta, nSubs;
+    const int* grpPtr;
+    const int* deltaPtr; const int* deltaRow; const int* deltaModeOn; const int* deltaModeOff;
+    const double* deltaTargetOn; const double* deltaTargetOff;
+    const int* memBRow; const int* memElem; const int* memSubPtr;
+    const int* secPtr; const double* secB; const int* subMin; const int* subBase;
+    int* grpStep; int* memState; double* memContB; int* subPos; double* saved;
+};
+
+// A shunt group is live when none of its (packed) member shunts is outaged — such contingencies are
+// CPU-routed at qualification anyway (a voltage-controlling shunt outage never qualifies).
+__device__ inline bool svdGroupLive(const SvdTables& T, int s, int nElements, int g, const char* disabled) {
+    for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
+        if (T.memElem[m] >= 0 && disabled[(size_t) s * nElements + T.memElem[m]]) return false;
+    }
+    return true;
+}
+
+// ON: every captured delta (the pilot's V identity, the member SHUNT_B power rows — pilot Q relocation and
+// DISTR_SHUNT_B — as the toggled equation system produced them); OFF: the pilot back to its saved/OFF
+// target, every member's SHUNT_B identity pinned at its dispatched section total.
+__device__ inline void svdLayoutGroup(const SvdTables& T, int s, int n, int g, bool on,
+                                      int* mode, double* target, double* x) {
+    size_t sn = (size_t) s * n;
+    for (int k = T.deltaPtr[g]; k < T.deltaPtr[g + 1]; k++) {
+        int r = T.deltaRow[k];
+        int member = -1;
+        for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) if (T.memBRow[m] == r) member = m;
+        size_t sk = (size_t) s * T.nDelta + k;
+        if (on) {
+            if (member < 0 && isnan(T.saved[sk])) T.saved[sk] = target[sn + r];
+            mode[sn + r] = T.deltaModeOn[k];
+            target[sn + r] = T.deltaTargetOn[k];
+        } else if (member < 0) {
+            mode[sn + r] = T.deltaModeOff[k];
+            target[sn + r] = isnan(T.saved[sk]) ? T.deltaTargetOff[k] : T.saved[sk];
+            T.saved[sk] = nan("");
+        }
+    }
+    if (!on) {
+        for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
+            if (T.memState[(size_t) s * T.nM + m] != 2) continue;
+            double bSum = 0.0;
+            for (int u = T.memSubPtr[m]; u < T.memSubPtr[m + 1]; u++) bSum += T.secB[T.secPtr[u] + T.subPos[(size_t) s * T.nSubs + u]];
+            size_t br = sn + T.memBRow[m];
+            mode[br] = 0;
+            target[br] = bSum;
+            x[br] = bSum;
+        }
+    }
+}
+
+__global__ void svdEntryBatch(SvdTables T, int nScenarios, int n, int nElements, int entryOn,
+                              const char* disabled, int* mode, double* target, double* x) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nScenarios) return;
+    size_t sn = (size_t) s * n;
+    for (int g = 0; g < T.nG; g++) {
+        if (!svdGroupLive(T, s, nElements, g, disabled)) continue;
+        for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
+            T.memState[(size_t) s * T.nM + m] = entryOn ? (mode[sn + T.memBRow[m]] == 1 ? 1 : 0) : 1;
+        }
+        if (!entryOn) svdLayoutGroup(T, s, n, g, true, mode, target, x);
+    }
+}
+
+// The loop's first check: OLF disables every controller shunt and dispatches its continuous b to the
+// closest sections (LfShuntImpl.dispatchB: per sub-controller, residue / remaining to the closest section
+// from the CURRENT position over [minPosition, size), strictly closer only), UNSTABLE.
+__global__ void svdCheckBatch(SvdTables T, int nScenarios, int n, int nElements, const char* disabled, const char* rlActive,
+                              int* mode, double* target, double* x, char* switched) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nScenarios || !rlActive[s]) return;
+    size_t sn = (size_t) s * n;
+    bool anyCtl = false;
+    for (int g = 0; g < T.nG; g++) {
+        size_t sg = (size_t) s * T.nG + g;
+        if (T.grpStep[sg] != 0) continue;
+        T.grpStep[sg] = 2;
+        for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
+            if (T.memElem[m] < 0 || !disabled[(size_t) s * nElements + T.memElem[m]]) anyCtl = true;
+        }
+        if (!svdGroupLive(T, s, nElements, g, disabled)) continue;
+        bool touched = false;
+        for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
+            size_t sm = (size_t) s * T.nM + m;
+            if (T.memState[sm] != 1) continue;
+            double residue = x[sn + T.memBRow[m]];
+            T.memContB[sm] = residue;
+            int remaining = T.memSubPtr[m + 1] - T.memSubPtr[m];
+            for (int u = T.memSubPtr[m]; u < T.memSubPtr[m + 1]; u++) {
+                double toDispatch = residue / remaining--;
+                int p0 = T.secPtr[u];
+                int nSec = T.secPtr[u + 1] - p0;
+                int best = T.subBase[u];
+                double smallest = fabs(toDispatch - T.secB[p0 + best]);
+                for (int p = T.subMin[u]; p < nSec; p++) {
+                    double dist = fabs(toDispatch - T.secB[p0 + p]);
+                    if (dist < smallest) {
+                        best = p;
+                        smallest = dist;
+                    }
+                }
+                T.subPos[(size_t) s * T.nSubs + u] = best;
+                residue -= T.secB[p0 + best];
+            }
+            T.memState[sm] = 2;
+            touched = true;
+        }
+        if (touched) svdLayoutGroup(T, s, n, g, false, mode, target, x);
+    }
+    if (anyCtl) switched[s] = 1;                             // OLF: UNSTABLE whenever a live controller shunt exists
+}
+
+static TvdTables tvdTables(BatchSolverContext* ctx) {
+    TvdTables T;
+    T.nG = ctx->nTvdGroups; T.nM = ctx->nTvd; T.nDelta = ctx->nTvdDelta; T.mode = ctx->tvdMode;
+    T.rejectCarrierClamp = std::getenv("OLF_GPU_TVD_REJECT_CARRIER_CLAMP") != nullptr ? 1 : 0;
+    T.grpPtr = ctx->dTvdGrpPtr.as<int>(); T.grpVRow = ctx->dTvdGrpVRow.as<int>();
+    T.grpTargetV = ctx->dTvdGrpTargetV.as<double>(); T.grpHalfDb = ctx->dTvdGrpHalfDb.as<double>(); T.grpUseInit = ctx->dTvdGrpUseInit.as<int>();
+    T.deltaPtr = ctx->dTvdDeltaPtr.as<int>(); T.deltaRow = ctx->dTvdDeltaRow.as<int>();
+    T.deltaModeOn = ctx->dTvdDeltaModeOn.as<int>(); T.deltaModeOff = ctx->dTvdDeltaModeOff.as<int>();
+    T.deltaTargetOn = ctx->dTvdDeltaTargetOn.as<double>(); T.deltaTargetOff = ctx->dTvdDeltaTargetOff.as<double>();
+    T.memRhoRow = ctx->dTvdMemRhoRow.as<int>(); T.memElem = ctx->dTvdMemElem.as<int>();
+    T.memBaseTap = ctx->dTvdMemBaseTap.as<int>(); T.memTapPtr = ctx->dTvdMemTapPtr.as<int>();
+    T.memMin = ctx->dTvdMemMin.as<double>(); T.memMax = ctx->dTvdMemMax.as<double>(); T.memInit = ctx->dTvdMemInit.as<double>();
+    T.tapData = ctx->dTvdTapData.as<double>();
+    T.scnStep = ctx->dTvdScnStep.as<int>(); T.grpStep = ctx->dTvdGrpStep.as<int>();
+    T.grpShMin = ctx->dTvdGrpShMin.as<double>(); T.grpShMax = ctx->dTvdGrpShMax.as<double>(); T.grpShInit = ctx->dTvdGrpShInit.as<double>();
+    T.memState = ctx->dTvdMemState.as<int>(); T.memTap = ctx->dTvdMemTap.as<int>(); T.memRoundFrom = ctx->dTvdMemRoundFrom.as<double>();
+    T.saved = ctx->dTvdSaved.as<double>(); T.reject = ctx->dTvdReject.as<char>();
+    return T;
+}
+
+static SvdTables svdTables(BatchSolverContext* ctx) {
+    SvdTables T;
+    T.nG = ctx->nSvdGroups; T.nM = ctx->nSvd; T.nDelta = ctx->nSvdDelta; T.nSubs = ctx->nSvdSubs;
+    T.grpPtr = ctx->dSvdGrpPtr.as<int>();
+    T.deltaPtr = ctx->dSvdDeltaPtr.as<int>(); T.deltaRow = ctx->dSvdDeltaRow.as<int>();
+    T.deltaModeOn = ctx->dSvdDeltaModeOn.as<int>(); T.deltaModeOff = ctx->dSvdDeltaModeOff.as<int>();
+    T.deltaTargetOn = ctx->dSvdDeltaTargetOn.as<double>(); T.deltaTargetOff = ctx->dSvdDeltaTargetOff.as<double>();
+    T.memBRow = ctx->dSvdMemBRow.as<int>(); T.memElem = ctx->dSvdMemElem.as<int>(); T.memSubPtr = ctx->dSvdMemSubPtr.as<int>();
+    T.secPtr = ctx->dSvdSecPtr.as<int>(); T.secB = ctx->dSvdSecB.as<double>(); T.subMin = ctx->dSvdSubMin.as<int>(); T.subBase = ctx->dSvdSubBase.as<int>();
+    T.grpStep = ctx->dSvdGrpStep.as<int>(); T.memState = ctx->dSvdMemState.as<int>(); T.memContB = ctx->dSvdMemContB.as<double>();
+    T.subPos = ctx->dSvdSubPos.as<int>(); T.saved = ctx->dSvdSaved.as<double>();
+    return T;
+}
+// ======================== END DISCRETE VOLTAGE CONTROL KERNELS ========================
 
 BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const double* target,
                               const int* rowMode, const int* baseRowMode, const char* disabled,
@@ -5498,7 +5942,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     const bool resume = ctx->driverResume != 0;
     ctx->driverResume = 0;
     ctx->driverPaused = 0;
-    if (resume && (ctx->nTvc > 0 || ctx->nFlc > 0 || ctx->nCph > 0)) {
+    if (resume && (ctx->nTvc > 0 || ctx->nFlc > 0 || ctx->nCph > 0 || ctx->nTvd > 0)) {
         tvcRebuildOverrides(ctx);                            // uploadBatchOverrides just erased the moves
     }
     if (resume && ctx->nShc > 0) {
@@ -5569,7 +6013,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // repeat until a pass switches nothing. Fixed-iter mode (tol <= 0, the throughput benchmark) and
     // family-free networks with no controllers do ONE pass (no outer loop) — byte-identical to before.
     bool fullLoadflow = !deviceFixedIter && (ctx->nrl > 0 || ctx->nds > 0 || ctx->dsSlackOnly
-                                             || ctx->nmon > 0 || ctx->nTvc > 0 || ctx->nShc > 0 || ctx->nFlc > 0 || ctx->nCph > 0);
+                                             || ctx->nmon > 0 || ctx->nTvc > 0 || ctx->nShc > 0 || ctx->nFlc > 0 || ctx->nCph > 0
+                                             || ctx->nTvd > 0 || ctx->nSvd > 0);
     const int RL_MAX_OUTER = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
     const int RL_MAX_SWITCH = rlMaxSwitch > 0 ? rlMaxSwitch : 3;   // per-bus PV→PQ count cap (OLF maxPqPvSwitch)
     // Outer-loop convergence tolerances (pu) — passed in so the device uses the SAME criteria as the CPU
@@ -5710,6 +6155,46 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             CUDA_CHECK(cudaMemcpy(ctx->dCphPrevTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemset(ctx->dCphIter.p, 0, nS * sizeof(int)));
         }
+        if (ctx->nTvd > 0) {                                 // per-SOLVE state: every control at its entry state
+            size_t nsm = static_cast<size_t>(nS) * ctx->nTvd;
+            size_t nsg = static_cast<size_t>(nS) * ctx->nTvdGroups;
+            size_t nsd = static_cast<size_t>(nS) * std::max(ctx->nTvdDelta, 1);
+            std::vector<int> tap(nsm);
+            for (int s2 = 0; s2 < nS; s2++) for (int m = 0; m < ctx->nTvd; m++) tap[static_cast<size_t>(s2) * ctx->nTvd + m] = ctx->hTvdMemBaseTap[m];
+            std::vector<double> nanv(std::max(nsm, nsd), std::nan(""));
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            CUDA_CHECK(cudaMemcpy(ctx->dTvdMemTap.p, tap.data(), nsm * sizeof(int), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemset(ctx->dTvdMemState.p, 0, nsm * sizeof(int)));
+            CUDA_CHECK(cudaMemcpy(ctx->dTvdMemRoundFrom.p, nanv.data(), nsm * sizeof(double), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(ctx->dTvdSaved.p, nanv.data(), nsd * sizeof(double), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemset(ctx->dTvdScnStep.p, 0, nS * sizeof(int)));
+            CUDA_CHECK(cudaMemset(ctx->dTvdGrpStep.p, 0, nsg * sizeof(int)));
+            CUDA_CHECK(cudaMemset(ctx->dTvdGrpShMin.p, 0, nsg * sizeof(double)));
+            CUDA_CHECK(cudaMemset(ctx->dTvdGrpShMax.p, 0, nsg * sizeof(double)));
+            CUDA_CHECK(cudaMemset(ctx->dTvdGrpShInit.p, 0, nsg * sizeof(double)));
+            CUDA_CHECK(cudaMemset(ctx->dTvdReject.p, 0, nS * sizeof(char)));
+            tvdEntryBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(tvdTables(ctx), nS, n, ctx->nElements, ctx->tvdEntryOn,
+                    ctx->dDisabled.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        }
+        if (ctx->nSvd > 0) {                                 // per-SOLVE state, same shape
+            size_t nsm = static_cast<size_t>(nS) * ctx->nSvd;
+            size_t nsg = static_cast<size_t>(nS) * ctx->nSvdGroups;
+            size_t nsd = static_cast<size_t>(nS) * std::max(ctx->nSvdDelta, 1);
+            size_t nsu = static_cast<size_t>(nS) * std::max(ctx->nSvdSubs, 1);
+            std::vector<int> pos(nsu);
+            for (int s2 = 0; s2 < nS; s2++) for (int u = 0; u < ctx->nSvdSubs; u++) pos[static_cast<size_t>(s2) * ctx->nSvdSubs + u] = 0;
+            std::vector<double> nanv(std::max(nsm, nsd), std::nan(""));
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            CUDA_CHECK(cudaMemcpy(ctx->dSvdSubPos.p, pos.data(), nsu * sizeof(int), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemset(ctx->dSvdMemState.p, 0, nsm * sizeof(int)));
+            CUDA_CHECK(cudaMemcpy(ctx->dSvdMemContB.p, nanv.data(), nsm * sizeof(double), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(ctx->dSvdSaved.p, nanv.data(), nsd * sizeof(double), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemset(ctx->dSvdGrpStep.p, 0, nsg * sizeof(int)));
+            svdEntryBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(svdTables(ctx), nS, n, ctx->nElements, ctx->svdEntryOn,
+                    ctx->dDisabled.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        }
         if (ctx->nFlc > 0) {                                 // per-SOLVE state: base taps, fresh ratchets
             size_t nst = static_cast<size_t>(nS) * ctx->nFlc;
             std::vector<int> cur(nst);
@@ -5802,6 +6287,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     if (ctx->nTvc > 0) {
         loopOrder[nLoops++] = LOOP_TVC_KERNEL;               // OLF order 8: TransformerVoltageControl, IN-KERNEL
+    } else if (ctx->nTvd > 0) {
+        loopOrder[nLoops++] = LOOP_TVD_KERNEL;               // OLF order 8: AFTER_GENERATOR / Simple TVC, IN-KERNEL
     } else if (ctx->hostLoopMask & (1 << 2)) {
         loopOrder[nLoops++] = LOOP_HOST_TVC;                 // OLF order 8: TransformerVoltageControl, host pause
     }
@@ -5812,6 +6299,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     if (ctx->nShc > 0) {
         loopOrder[nLoops++] = LOOP_SHUNT_KERNEL;             // OLF order 10: ShuntVoltageControl, IN-KERNEL
+    } else if (ctx->nSvd > 0) {
+        loopOrder[nLoops++] = LOOP_SVD_KERNEL;               // OLF order 10: WITH_GENERATOR shunt VC, IN-KERNEL
     } else if (ctx->hostLoopMask & (1 << 4)) {
         loopOrder[nLoops++] = LOOP_HOST_SHUNT;               // OLF order 10: ShuntVoltageControl
     }
@@ -5948,6 +6437,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     //      solveBatchSensitivities — one host round trip per round — done here against the factors the
     //      driver already holds, with no host copy of the states. Single controller per controlled bus
     //      (the JNI upload refuses shared buses, which stay on the host orchestrator). ----
+    std::vector<char> loopRejected(nS, 0);                   // a device loop routed the scenario to the CPU this pass
     auto tvcStep = [&]() {
         int nTvc = ctx->nTvc;
         if (nTvc <= 0) return;
@@ -6208,6 +6698,44 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             int nMoved = 0;
             for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nC; c++) if (cur[static_cast<size_t>(s2) * nC + c] != ctx->hCphBaseTap[c]) nMoved++;
             std::fprintf(stderr, "CPHASE_KERNEL nS=%d nCtrl=%d pairsOffBaseTap=%d nR1Ov=%d\n", nS, nC, nMoved, ctx->nR1Ov);
+        }
+    };
+    // ---- the DISCRETE voltage-control loops as DRIVER PHASES: TransformerVoltageControl (AFTER_GENERATOR /
+    //      WITH_GENERATOR, OLF order 8) and ShuntVoltageControl (WITH_GENERATOR, OLF order 10). No sensitivities:
+    //      OLF's decisions read the converged state only (deadband, clamp bounds, closest tap / section). ----
+    auto tvdStep = [&]() {
+        if (ctx->nTvd <= 0) return;
+        tvdCheckBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(tvdTables(ctx), nS, n, ctx->nElements, ctx->dDisabled.as<char>(),
+                ctx->dRlActive.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dRlSwitched.as<char>());
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        std::vector<char> rej(nS);
+        CUDA_CHECK(cudaMemcpy(rej.data(), ctx->dTvdReject.p, nS, cudaMemcpyDeviceToHost));
+        for (int s2 = 0; s2 < nS; s2++) if (rej[s2]) loopRejected[s2] = 1;
+        tvcRebuildOverrides(ctx);
+        if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+            size_t nsm = static_cast<size_t>(nS) * ctx->nTvd;
+            std::vector<int> st(nsm), step(nS);
+            CUDA_CHECK(cudaMemcpy(st.data(), ctx->dTvdMemState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(step.data(), ctx->dTvdScnStep.p, nS * sizeof(int), cudaMemcpyDeviceToHost));
+            int nCont = 0, nFixed = 0, nRej = 0;
+            for (size_t k = 0; k < nsm; k++) { nCont += st[k] == 1; nFixed += st[k] == 2; }
+            for (int s2 = 0; s2 < nS; s2++) nRej += rej[s2] ? 1 : 0;
+            std::fprintf(stderr, "TVD_KERNEL mode=%d nS=%d nMembers=%d continuous=%d fixed=%d rejected=%d step0=%d nR1Ov=%d\n",
+                         ctx->tvdMode, nS, ctx->nTvd, nCont, nFixed, nRej, step[0], ctx->nR1Ov);
+        }
+    };
+    auto svdStep = [&]() {
+        if (ctx->nSvd <= 0) return;
+        svdCheckBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(svdTables(ctx), nS, n, ctx->nElements, ctx->dDisabled.as<char>(),
+                ctx->dRlActive.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dRlSwitched.as<char>());
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+            size_t nsm = static_cast<size_t>(nS) * ctx->nSvd;
+            std::vector<int> st(nsm);
+            CUDA_CHECK(cudaMemcpy(st.data(), ctx->dSvdMemState.p, nsm * sizeof(int), cudaMemcpyDeviceToHost));
+            int nCont = 0, nFixed = 0;
+            for (size_t k = 0; k < nsm; k++) { nCont += st[k] == 1; nFixed += st[k] == 2; }
+            std::fprintf(stderr, "SVD_KERNEL nS=%d nMembers=%d continuous=%d dispatched=%d\n", nS, ctx->nSvd, nCont, nFixed);
         }
     };
     if (solvePass) {
@@ -6630,6 +7158,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             case LOOP_SHUNT_KERNEL: kindName = "ShuntVoltageControl"; break;
             case LOOP_PHASE_KERNEL: kindName = ctx->nCph > 0 ? "PhaseControl" : "IncrementalPhaseControl"; break;
             case LOOP_TRPC_KERNEL:  kindName = "TransformerReactivePowerControl"; break;
+            case LOOP_TVD_KERNEL:   kindName = ctx->tvdMode == 1 ? "SimpleTransformerVoltageControl" : "TransformerVoltageControl"; break;
+            case LOOP_SVD_KERNEL:   kindName = "ShuntVoltageControl"; break;
         }
         int nSw = 0;
         {
@@ -6692,6 +7222,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (ctx->nCph > 0) cphStep(); else flcStep(6);       // continuous, or incremental kinds 1 + 2
     } else if (loopKind == LOOP_TRPC_KERNEL) {
         flcStep(1);                                          // kind 0 (RPC)
+    } else if (loopKind == LOOP_TVD_KERNEL) {
+        tvdStep();
+    } else if (loopKind == LOOP_SVD_KERNEL) {
+        svdStep();
     } else if (loopKind == LOOP_MONITORING) {
         monitoringLoopBatch<<<grid(ctx->nmon * nS), BLOCK, 0, ctx->stream>>>(
                 ctx->nmon, nS, n, ctx->dMonVRow.as<int>(), ctx->dMonBand.as<double>(),
@@ -6820,6 +7354,15 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     CUDA_CHECK(cudaMemcpy(rlSwitched.data(), ctx->dRlSwitched.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
+    for (int s = 0; s < nS; s++) {
+        if (loopRejected[s]) {                              // a device loop routed the scenario to the CPU fallback
+            res.status[s] = -2;
+            live[s] = 0;
+            active[s] = 0;
+            rlSwitched[s] = 0;
+            loopRejected[s] = 0;
+        }
+    }
     // FORCED-PV detector: OLF's switchPvPq NEVER lets the network reach zero PV buses ("all PV
     // buses should switch PQ, strongest one will stay PV" — a network-wide election the device
     // does not run). The moment a scenario's RL state has EVERY non-monitored entry pinned, its
@@ -8756,6 +9299,243 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
         ctx->hNActive.resize(len);
         env->GetIntArrayRegion(jNActive, 0, len, ctx->hNActive.data());
     }
+}
+
+
+/** Install the DISCRETE transformer voltage-control tables (OLF order 8): mode 0 = AFTER_GENERATOR
+ *  (TransformerVoltageControlOuterLoop), 1 = WITH_GENERATOR (SimpleTransformerVoltageControlOuterLoop);
+ *  entryOn = the uploaded activation already carries the control ON (a base load flow whose network
+ *  OLF's initialize switched on). Groups = controlled buses (CSR over members), each with its toggle-
+ *  diffed ON/OFF row deltas (CSR); members with rho row, element, base tap, tap table, r1 range and
+ *  initial r1. Returns 1 when the kernel loop owns them. */
+extern "C" JNIEXPORT jint JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDiscreteTvc(
+        JNIEnv* env, jclass, jlong handle, jint mode, jint entryOn,
+        jintArray jGrpPtr, jintArray jGrpVRow, jdoubleArray jGrpTargetV, jdoubleArray jGrpHalfDb, jintArray jGrpUseInit,
+        jintArray jDeltaPtr, jintArray jDeltaRow, jintArray jDeltaModeOn, jintArray jDeltaModeOff,
+        jdoubleArray jDeltaTargetOn, jdoubleArray jDeltaTargetOff,
+        jintArray jMemRhoRow, jintArray jMemElem, jintArray jMemBaseTap, jintArray jMemTapPtr,
+        jdoubleArray jMemMin, jdoubleArray jMemMax, jdoubleArray jMemInit, jdoubleArray jTapData) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return 0;
+    }
+    ctx->nTvd = 0;
+    if (jMemRhoRow == nullptr || env->GetArrayLength(jMemRhoRow) == 0) {
+        return 0;
+    }
+    auto readI = [&](jintArray a, std::vector<int>& v) {
+        v.resize(env->GetArrayLength(a));
+        env->GetIntArrayRegion(a, 0, static_cast<jsize>(v.size()), v.data());
+    };
+    auto readD = [&](jdoubleArray a, std::vector<double>& v) {
+        v.resize(env->GetArrayLength(a));
+        env->GetDoubleArrayRegion(a, 0, static_cast<jsize>(v.size()), v.data());
+    };
+    std::vector<int> grpPtr, grpVRow, grpUseInit, deltaPtr, deltaRow, deltaModeOn, deltaModeOff, memRhoRow;
+    std::vector<double> grpTargetV, grpHalfDb, deltaTargetOn, deltaTargetOff, memMin, memMax, memInit;
+    readI(jGrpPtr, grpPtr);
+    readI(jGrpVRow, grpVRow);
+    readD(jGrpTargetV, grpTargetV);
+    readD(jGrpHalfDb, grpHalfDb);
+    readI(jGrpUseInit, grpUseInit);
+    readI(jDeltaPtr, deltaPtr);
+    readI(jDeltaRow, deltaRow);
+    readI(jDeltaModeOn, deltaModeOn);
+    readI(jDeltaModeOff, deltaModeOff);
+    readD(jDeltaTargetOn, deltaTargetOn);
+    readD(jDeltaTargetOff, deltaTargetOff);
+    readI(jMemRhoRow, memRhoRow);
+    readI(jMemElem, ctx->hTvdMemElem);
+    readI(jMemBaseTap, ctx->hTvdMemBaseTap);
+    readI(jMemTapPtr, ctx->hTvdMemTapPtr);
+    readD(jMemMin, memMin);
+    readD(jMemMax, memMax);
+    readD(jMemInit, memInit);
+    readD(jTapData, ctx->hTvdTapData);
+    int nM = static_cast<int>(memRhoRow.size());
+    int nG = static_cast<int>(grpPtr.size()) - 1;
+    int nD = static_cast<int>(deltaRow.size());
+    for (int m = 0; m < nM; m++) {
+        if (ctx->hTvdMemTapPtr[m + 1] - ctx->hTvdMemTapPtr[m] <= 0) {
+            return 0;                                        // no tap table: the host orchestrator keeps the control
+        }
+    }
+    ctx->dTvdGrpPtr.upload(grpPtr.data(), grpPtr.size() * sizeof(int));
+    ctx->dTvdGrpVRow.upload(grpVRow.data(), nG * sizeof(int));
+    ctx->dTvdGrpTargetV.upload(grpTargetV.data(), nG * sizeof(double));
+    ctx->dTvdGrpHalfDb.upload(grpHalfDb.data(), nG * sizeof(double));
+    ctx->dTvdGrpUseInit.upload(grpUseInit.data(), nG * sizeof(int));
+    ctx->dTvdDeltaPtr.upload(deltaPtr.data(), deltaPtr.size() * sizeof(int));
+    ctx->dTvdDeltaRow.upload(deltaRow.data(), std::max(nD, 1) * sizeof(int));
+    ctx->dTvdDeltaModeOn.upload(deltaModeOn.data(), std::max(nD, 1) * sizeof(int));
+    ctx->dTvdDeltaModeOff.upload(deltaModeOff.data(), std::max(nD, 1) * sizeof(int));
+    ctx->dTvdDeltaTargetOn.upload(deltaTargetOn.data(), std::max(nD, 1) * sizeof(double));
+    ctx->dTvdDeltaTargetOff.upload(deltaTargetOff.data(), std::max(nD, 1) * sizeof(double));
+    ctx->dTvdMemRhoRow.upload(memRhoRow.data(), nM * sizeof(int));
+    ctx->dTvdMemElem.upload(ctx->hTvdMemElem.data(), nM * sizeof(int));
+    ctx->dTvdMemBaseTap.upload(ctx->hTvdMemBaseTap.data(), nM * sizeof(int));
+    ctx->dTvdMemTapPtr.upload(ctx->hTvdMemTapPtr.data(), ctx->hTvdMemTapPtr.size() * sizeof(int));
+    ctx->dTvdMemMin.upload(memMin.data(), nM * sizeof(double));
+    ctx->dTvdMemMax.upload(memMax.data(), nM * sizeof(double));
+    ctx->dTvdMemInit.upload(memInit.data(), nM * sizeof(double));
+    ctx->dTvdTapData.upload(ctx->hTvdTapData.data(), ctx->hTvdTapData.size() * sizeof(double));
+    size_t nS = ctx->nScenarios;
+    ctx->dTvdScnStep.ensure(nS * sizeof(int));
+    ctx->dTvdGrpStep.ensure(nS * nG * sizeof(int));
+    ctx->dTvdGrpShMin.ensure(nS * nG * sizeof(double));
+    ctx->dTvdGrpShMax.ensure(nS * nG * sizeof(double));
+    ctx->dTvdGrpShInit.ensure(nS * nG * sizeof(double));
+    ctx->dTvdMemState.ensure(nS * nM * sizeof(int));
+    ctx->dTvdMemTap.ensure(nS * nM * sizeof(int));
+    ctx->dTvdMemRoundFrom.ensure(nS * nM * sizeof(double));
+    ctx->dTvdSaved.ensure(nS * std::max(nD, 1) * sizeof(double));
+    ctx->dTvdReject.ensure(nS * sizeof(char));
+    ctx->nTvdGroups = nG;
+    ctx->nTvdDelta = nD;
+    ctx->tvdMode = mode;
+    ctx->tvdEntryOn = entryOn;
+    ctx->nTvd = nM;
+    return 1;
+}
+
+/** Per (scenario, member): {state (0 off, 1 continuous, 2 fixed), tap index, the r1 fed to the
+ *  rounding} — layout {@code (s * nM + m) * 3}; null without the table. */
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchDiscreteTvcState(
+        JNIEnv* env, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || ctx->nTvd <= 0 || !ctx->dTvdMemState.p) {
+        return nullptr;
+    }
+    size_t cnt = static_cast<size_t>(ctx->nTvd) * ctx->nScenarios;
+    std::vector<int> st(cnt), tap(cnt);
+    std::vector<double> rf(cnt), out(cnt * 3);
+    cudaMemcpy(st.data(), ctx->dTvdMemState.p, cnt * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(tap.data(), ctx->dTvdMemTap.p, cnt * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(rf.data(), ctx->dTvdMemRoundFrom.p, cnt * sizeof(double), cudaMemcpyDeviceToHost);
+    for (size_t i = 0; i < cnt; i++) {
+        out[i * 3] = st[i];
+        out[i * 3 + 1] = tap[i];
+        out[i * 3 + 2] = rf[i];
+    }
+    jdoubleArray res = env->NewDoubleArray(static_cast<jsize>(out.size()));
+    env->SetDoubleArrayRegion(res, 0, static_cast<jsize>(out.size()), out.data());
+    return res;
+}
+
+/** Install the DISCRETE (WITH_GENERATOR) shunt voltage-control tables (OLF order 10): groups =
+ *  controlled buses (CSR over member shunts) with their toggle-diffed ON/OFF row deltas; members with
+ *  SHUNT_B row, element (-1 = unpacked, never outaged) and sub-controllers (CSR) whose section-B tables,
+ *  min and base positions drive LfShuntImpl.dispatchB. Returns 1 when the kernel loop owns them. */
+extern "C" JNIEXPORT jint JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDiscreteShunt(
+        JNIEnv* env, jclass, jlong handle, jint entryOn,
+        jintArray jGrpPtr, jintArray jDeltaPtr, jintArray jDeltaRow, jintArray jDeltaModeOn, jintArray jDeltaModeOff,
+        jdoubleArray jDeltaTargetOn, jdoubleArray jDeltaTargetOff,
+        jintArray jMemBRow, jintArray jMemElem, jintArray jMemSubPtr,
+        jintArray jSecPtr, jdoubleArray jSecB, jintArray jSubMin, jintArray jSubBase) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return 0;
+    }
+    ctx->nSvd = 0;
+    if (jMemBRow == nullptr || env->GetArrayLength(jMemBRow) == 0) {
+        return 0;
+    }
+    auto readI = [&](jintArray a, std::vector<int>& v) {
+        v.resize(env->GetArrayLength(a));
+        env->GetIntArrayRegion(a, 0, static_cast<jsize>(v.size()), v.data());
+    };
+    auto readD = [&](jdoubleArray a, std::vector<double>& v) {
+        v.resize(env->GetArrayLength(a));
+        env->GetDoubleArrayRegion(a, 0, static_cast<jsize>(v.size()), v.data());
+    };
+    std::vector<int> grpPtr, deltaPtr, deltaRow, deltaModeOn, deltaModeOff, memBRow, memElem, memSubPtr, secPtr, subMin, subBase;
+    std::vector<double> deltaTargetOn, deltaTargetOff, secB;
+    readI(jGrpPtr, grpPtr);
+    readI(jDeltaPtr, deltaPtr);
+    readI(jDeltaRow, deltaRow);
+    readI(jDeltaModeOn, deltaModeOn);
+    readI(jDeltaModeOff, deltaModeOff);
+    readD(jDeltaTargetOn, deltaTargetOn);
+    readD(jDeltaTargetOff, deltaTargetOff);
+    readI(jMemBRow, memBRow);
+    readI(jMemElem, memElem);
+    readI(jMemSubPtr, memSubPtr);
+    readI(jSecPtr, secPtr);
+    readD(jSecB, secB);
+    readI(jSubMin, subMin);
+    readI(jSubBase, subBase);
+    int nM = static_cast<int>(memBRow.size());
+    int nG = static_cast<int>(grpPtr.size()) - 1;
+    int nD = static_cast<int>(deltaRow.size());
+    int nSubs = static_cast<int>(subBase.size());
+    ctx->dSvdGrpPtr.upload(grpPtr.data(), grpPtr.size() * sizeof(int));
+    ctx->dSvdDeltaPtr.upload(deltaPtr.data(), deltaPtr.size() * sizeof(int));
+    ctx->dSvdDeltaRow.upload(deltaRow.data(), std::max(nD, 1) * sizeof(int));
+    ctx->dSvdDeltaModeOn.upload(deltaModeOn.data(), std::max(nD, 1) * sizeof(int));
+    ctx->dSvdDeltaModeOff.upload(deltaModeOff.data(), std::max(nD, 1) * sizeof(int));
+    ctx->dSvdDeltaTargetOn.upload(deltaTargetOn.data(), std::max(nD, 1) * sizeof(double));
+    ctx->dSvdDeltaTargetOff.upload(deltaTargetOff.data(), std::max(nD, 1) * sizeof(double));
+    ctx->dSvdMemBRow.upload(memBRow.data(), nM * sizeof(int));
+    ctx->dSvdMemElem.upload(memElem.data(), nM * sizeof(int));
+    ctx->dSvdMemSubPtr.upload(memSubPtr.data(), memSubPtr.size() * sizeof(int));
+    ctx->dSvdSecPtr.upload(secPtr.data(), secPtr.size() * sizeof(int));
+    ctx->dSvdSecB.upload(secB.data(), std::max<size_t>(secB.size(), 1) * sizeof(double));
+    ctx->dSvdSubMin.upload(subMin.data(), std::max(nSubs, 1) * sizeof(int));
+    ctx->dSvdSubBase.upload(subBase.data(), std::max(nSubs, 1) * sizeof(int));
+    size_t nS = ctx->nScenarios;
+    ctx->dSvdGrpStep.ensure(nS * nG * sizeof(int));
+    ctx->dSvdMemState.ensure(nS * nM * sizeof(int));
+    ctx->dSvdMemContB.ensure(nS * nM * sizeof(double));
+    ctx->dSvdSubPos.ensure(nS * std::max(nSubs, 1) * sizeof(int));
+    ctx->dSvdSaved.ensure(nS * std::max(nD, 1) * sizeof(double));
+    ctx->nSvdGroups = nG;
+    ctx->nSvdDelta = nD;
+    ctx->nSvdSubs = nSubs;
+    ctx->svdEntryOn = entryOn;
+    ctx->nSvd = nM;
+    return 1;
+}
+
+/** Per (scenario, member shunt): {state (0 off, 1 continuous, 2 dispatched), the continuous b the
+ *  dispatch started from} — layout {@code (s * nM + m) * 2}; null without the table. */
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchDiscreteShuntState(
+        JNIEnv* env, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || ctx->nSvd <= 0 || !ctx->dSvdMemState.p) {
+        return nullptr;
+    }
+    size_t cnt = static_cast<size_t>(ctx->nSvd) * ctx->nScenarios;
+    std::vector<int> st(cnt);
+    std::vector<double> cb(cnt), out(cnt * 2);
+    cudaMemcpy(st.data(), ctx->dSvdMemState.p, cnt * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(cb.data(), ctx->dSvdMemContB.p, cnt * sizeof(double), cudaMemcpyDeviceToHost);
+    for (size_t i = 0; i < cnt; i++) {
+        out[i * 2] = st[i];
+        out[i * 2 + 1] = cb[i];
+    }
+    jdoubleArray res = env->NewDoubleArray(static_cast<jsize>(out.size()));
+    env->SetDoubleArrayRegion(res, 0, static_cast<jsize>(out.size()), out.data());
+    return res;
+}
+
+/** Per (scenario, sub-controller): the dispatched section — layout {@code s * nSubs + u}. */
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchDiscreteShuntPositions(
+        JNIEnv* env, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || ctx->nSvd <= 0 || ctx->nSvdSubs <= 0 || !ctx->dSvdSubPos.p) {
+        return nullptr;
+    }
+    size_t cnt = static_cast<size_t>(ctx->nSvdSubs) * ctx->nScenarios;
+    std::vector<int> host(cnt);
+    cudaMemcpy(host.data(), ctx->dSvdSubPos.p, cnt * sizeof(int), cudaMemcpyDeviceToHost);
+    jintArray out = env->NewIntArray(static_cast<jsize>(cnt));
+    env->SetIntArrayRegion(out, 0, static_cast<jsize>(cnt), host.data());
+    return out;
 }
 
 extern "C" JNIEXPORT void JNICALL

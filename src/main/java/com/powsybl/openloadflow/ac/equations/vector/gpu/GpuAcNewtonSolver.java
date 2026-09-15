@@ -490,6 +490,38 @@ public final class GpuAcNewtonSolver {
     /** Per (scenario, continuous phase controller): the tap the driver left — null without the table. */
     public static native int[] readBatchContinuousPhaseTaps(long handle);
 
+    /** Install the DISCRETE transformer voltage-control tables for the in-kernel TransformerVoltageControl
+     *  phase (OLF order 8): {@code mode} 0 = AFTER_GENERATOR (TransformerVoltageControlOuterLoop), 1 =
+     *  WITH_GENERATOR (SimpleTransformerVoltageControlOuterLoop); {@code entryOn} = the uploaded activation
+     *  already carries the control ON (a base load flow whose network OLF's initialize switched on). Groups
+     *  are controlled buses (CSR over members) with their toggle-diffed ON/OFF row deltas (CSR); see
+     *  GpuBatchTransformerControl.uploadToDevice. Returns 1 when the kernel loop owns them. */
+    @SuppressWarnings("java:S107")
+    public static native int setBatchDiscreteTvc(long handle, int mode, int entryOn,
+            int[] grpPtr, int[] grpVRow, double[] grpTargetV, double[] grpHalfDb, int[] grpUseInit,
+            int[] deltaPtr, int[] deltaRow, int[] deltaModeOn, int[] deltaModeOff, double[] deltaTargetOn, double[] deltaTargetOff,
+            int[] memRhoRow, int[] memElem, int[] memBaseTap, int[] memTapPtr, double[] memMin, double[] memMax, double[] memInit,
+            double[] tapData);
+
+    /** Per (scenario, member): {state (0 off, 1 continuous, 2 fixed), tap index, the r1 fed to the rounding},
+     *  layout {@code (s * nMembers + m) * 3} — null without the table. */
+    public static native double[] readBatchDiscreteTvcState(long handle);
+
+    /** Install the WITH_GENERATOR shunt voltage-control tables for the in-kernel ShuntVoltageControl phase
+     *  (OLF order 10); see GpuBatchSimpleShuntVc.uploadToDevice. Returns 1 when the kernel loop owns them. */
+    @SuppressWarnings("java:S107")
+    public static native int setBatchDiscreteShunt(long handle, int entryOn,
+            int[] grpPtr, int[] deltaPtr, int[] deltaRow, int[] deltaModeOn, int[] deltaModeOff,
+            double[] deltaTargetOn, double[] deltaTargetOff,
+            int[] memBRow, int[] memElem, int[] memSubPtr, int[] secPtr, double[] secB, int[] subMin, int[] subBase);
+
+    /** Per (scenario, member shunt): {state (0 off, 1 continuous, 2 dispatched), the continuous b the
+     *  dispatch started from}, layout {@code (s * nMembers + m) * 2} — null without the table. */
+    public static native double[] readBatchDiscreteShuntState(long handle);
+
+    /** Per (scenario, sub-controller): the dispatched section, layout {@code s * nSubs + u}. */
+    public static native int[] readBatchDiscreteShuntPositions(long handle);
+
     /**
      * Install the PER-GENERATOR distributed-slack participants: the factors and limits OLF's
      * water-fill actually saturates on, grouped by bus ({@code busGenStart}/{@code busGenEnd} slice

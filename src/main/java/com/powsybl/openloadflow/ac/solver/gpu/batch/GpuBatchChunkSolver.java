@@ -211,6 +211,24 @@ final class GpuBatchChunkSolver {
             shuntInKernel = GpuBatchIncrementalShuntVc.uploadToDevice(handle, incrementalShuntControllers,
                     config.incShuntMaxSectionShift());
         }
+        // The DISCRETE TransformerVoltageControl (AFTER_GENERATOR / WITH_GENERATOR, OLF order 8) and the
+        // WITH_GENERATOR ShuntVoltageControl (order 10) as DRIVER PHASES: the control-ON entry (OLF's
+        // initialize) and the rounding/dispatch checks run in-kernel; the host machines stay for a
+        // control the upload refuses (a member without a tap table).
+        boolean tvdInKernel = false;
+        if ((config.transformerControl() || config.simpleTransformerControl())
+                && transformerControllers != null && !transformerControllers.isEmpty()) {
+            tvdInKernel = GpuBatchTransformerControl.uploadToDevice(handle, transformerControllers,
+                    config.simpleTransformerControl() ? 1 : 0, false);
+        } else {
+            GpuBatchTransformerControl.uploadToDevice(handle, null, 0, false);   // clears a cached context's table
+        }
+        boolean svdInKernel = false;
+        if (config.simpleShuntControl() && simpleShuntGroups != null && !simpleShuntGroups.isEmpty()) {
+            svdInKernel = GpuBatchSimpleShuntVc.uploadToDevice(handle, simpleShuntGroups, false);
+        } else {
+            GpuBatchSimpleShuntVc.uploadToDevice(handle, null, false);
+        }
 
         // The base state / targets are IDENTICAL for every scenario (a single-branch N-1 starts from the
         // same converged base operating point): passed as single length-n rows and tiled on-device. The
@@ -653,7 +671,7 @@ final class GpuBatchChunkSolver {
                     }
                     List<Integer> preShuntOvIdx = null;
                     List<Double> preShuntOvVal = null;
-                    if (config.simpleShuntControl() && simpleShuntGroups != null && !simpleShuntGroups.isEmpty()) {
+                    if (config.simpleShuntControl() && simpleShuntGroups != null && !simpleShuntGroups.isEmpty() && !svdInKernel) {
                         preShuntOvIdx = new ArrayList<>(overrides.indexList());
                         preShuntOvVal = new ArrayList<>(overrides.valueList());
                         GpuBatchSimpleShuntVc.applyVcOn(realCount, n, simpleShuntGroups,
@@ -661,7 +679,7 @@ final class GpuBatchChunkSolver {
                     }
                     List<Integer> preTvcOvIdx = null;
                     List<Double> preTvcOvVal = null;
-                    if (config.simpleTransformerControl() && transformerControllers != null && !transformerControllers.isEmpty()) {
+                    if (config.simpleTransformerControl() && transformerControllers != null && !transformerControllers.isEmpty() && !tvdInKernel) {
                         preTvcOvIdx = new ArrayList<>(overrides.indexList());
                         preTvcOvVal = new ArrayList<>(overrides.valueList());
                         GpuBatchSimpleTvc.applyVcOn(realCount, n, transformerControllers,
@@ -1139,7 +1157,7 @@ final class GpuBatchChunkSolver {
                                 config.lsMode() == 2 ? varType : null, config);
                         orchNs.merge("IncrementalTvc.orchestrate", System.nanoTime() - t00, Long::sum);
                     }
-                    if (config.simpleTransformerControl() && transformerControllers != null && !transformerControllers.isEmpty()) {
+                    if (config.simpleTransformerControl() && transformerControllers != null && !transformerControllers.isEmpty() && !tvdInKernel) {
                         long tOr7 = System.nanoTime();
                         chunkResults = GpuBatchSimpleTvc.roundAndResolve(handle, chunkSize, realCount, n,
                                 chunkResults, transformerControllers, rowModePerScenario, baseRowMode, disabledMask,
@@ -1157,7 +1175,7 @@ final class GpuBatchChunkSolver {
                                 config.lsMode() == 2 ? varType : null, config);
                         orchNs.merge("SimpleTvc.roundAndResolve", System.nanoTime() - tOr7, Long::sum);
                     }
-                    if (config.transformerControl() && transformerControllers != null && !transformerControllers.isEmpty()) {
+                    if (config.transformerControl() && transformerControllers != null && !transformerControllers.isEmpty() && !tvdInKernel) {
                         long tOr10 = System.nanoTime();
                         chunkResults = GpuBatchTransformerControl.orchestrateTransformerControl(handle, chunkSize, realCount, n,
                                 chunkResults, transformerControllers, rowModePerScenario, baseRowMode, disabledMask,
@@ -1207,7 +1225,7 @@ final class GpuBatchChunkSolver {
                                 config.lsMode() == 2 ? varType : null, config);
                         orchNs.merge("IncrementalShuntVc.orchestrate", System.nanoTime() - tOr9, Long::sum);
                     }
-                    if (config.simpleShuntControl() && simpleShuntGroups != null && !simpleShuntGroups.isEmpty()) {
+                    if (config.simpleShuntControl() && simpleShuntGroups != null && !simpleShuntGroups.isEmpty() && !svdInKernel) {
                         long tOr6 = System.nanoTime();
                         chunkResults = GpuBatchSimpleShuntVc.roundAndResolve(handle, chunkSize, realCount, n,
                                 chunkResults, simpleShuntGroups, rowModePerScenario, baseRowMode, disabledMask,

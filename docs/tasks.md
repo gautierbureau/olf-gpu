@@ -699,8 +699,46 @@ shared with the TVC phase (`tvcRebuildOverrides` now merges both tables' moved t
 `getMaxTapShift()` (OLF getter) for RPC, `readBatchFlowTaps` → `PiModel.setTapPosition`. The host
 orchestrator (`GpuBatchIncrementalFlowControl.orchestrate`) stays for a controlled branch that is
 not a closed branch. With this every sensitivity-dependent incremental loop runs in-kernel; the
-chunk path's host orchestrators left: SecondaryVoltageControl (transposed solve, task #40) and
-the non-incremental TVC / shunt VC rounding flows (#47).
+chunk path's host orchestrators left: SecondaryVoltageControl (transposed solve, task #40); the
+non-incremental TVC / shunt VC flows followed the same day (#47).
+
+### #47 — Discrete TransformerVoltageControl and WITH_GENERATOR shunt VC in-kernel (landed 2026-09-15)
+
+`LOOP_TVD_KERNEL` (OLF order 8) runs OLF's non-incremental transformer loops per scenario, one thread
+per scenario (OLF keeps ONE step for all controls): AFTER_GENERATOR (`tvdMode 0`) — INITIAL enables
+every group whose pilot is out of its deadband (TransformerRatioManager bounds computed over the
+alive members), CONTROL clamps each continuous ratio outside its (group-averaged when
+useInitialTapPosition) range to the extreme, rounds it (`tvdRoundToTap`: from the CURRENT tap, strictly
+closer only — `ClosestTapPositionFinder`) and fixes it, else remaps (`updateContinuousRatio`) + rounds
+everything and goes COMPLETE, UNSTABLE in any case (the COMPLETE polish solve); WITH_GENERATOR
+(`tvdMode 1`, SimpleTransformerVoltageControl) — the control is ON at entry (`tvdEntryBatch` applies the
+ON deltas for a chunk, or reads them off the base activation OLF's initialize produced, `entryOn`),
+the first check rounds and fixes every live member. Rows are laid out by ROLE (`tvdLayoutGroup`): the
+pilot's V identity and the other non-member deltas as captured (the scenario's OFF target is SAVED on
+the way on — a per-scenario override on the pilot's Q row comes back), the first alive continuous member
+hosts the relocated pilot Q (the fills' mode scan — `relocChoose` / the DISTR_RHO carrier skip — picks
+the same row), the others DISTR_RHO (0), fixed/outaged members identity pins; a group with no continuous
+member left is OFF. Fixed taps ride the shared r1 override rebuild. The plan-A6 carrier-clamp rejection
+is OFF by default: the in-kernel sequence IS OLF's, and `deviceSharedCarrierClampBatchesAndMatches`
+now batches the clamp scenario (and drives the clamping base) at 1e-12 — `OLF_GPU_TVD_REJECT_CARRIER_CLAMP`
+restores the CPU route for diagnosis. Base path: `readBatchDiscreteTvcState` → `setR1(roundFrom);
+roundR1ToClosestTap(); setVoltageControlEnabled(false)` per fixed member (OLF's own calls).
+
+`LOOP_SVD_KERNEL` (OLF order 10) is the shunt twin (`svdEntryBatch` / `svdCheckBatch`): ON at entry,
+the first check runs `LfShuntImpl.dispatchB` verbatim per controller shunt (residue / remaining to the
+closest section from the CURRENT position over [minPosition, size), strictly closer only), pins the
+SHUNT_B identity at the section total and restores the pilot; OLF's dispatchB leaves the shunt's g
+alone, so no (dG, dB) override is emitted (the host machine's dg was an OLF deviation, harmless on
+constant-G sections). Base path: `readBatchDiscreteShuntState/Positions` → `setB(contB); dispatchB()`.
+
+A solve that FALLS BACK to the CPU Newton-Raphson (a rejected shape) now turns the driver off for the
+REST of that engine run (`driverFallbackForRun`): OLF's real loops took over there and hold the loop
+state, so the device must not restart its machines from INITIAL against contexts sitting at
+CONTROL/COMPLETE (measured 2.2e-3 kV on the carrier-clamp base before the rejection was dropped).
+The host machines (`GpuBatchTransformerControl.orchestrate…`, `GpuBatchSimpleTvc`,
+`GpuBatchSimpleShuntVc.roundAndResolve`) stay for a control the upload refuses (a member without a tap
+table). Scope unchanged: no generator voltage control under the transformer-controlled level
+(`transformerControlSupported` — the GeneratorVoltageControlManager freeze is still not ported).
 
 ### #46 — Continuous PhaseControl in the phase phase (landed 2026-09-15)
 

@@ -47,9 +47,10 @@ public final class GpuBatchTransformerControl {
      *  coefficients do NOT renormalize — the DISTR_RHO cross terms to a control-disabled member
      *  stay). {@code clampNeedsCpu}: clamping this member re-picks the group's FREE role (its
      *  off-delta touches other members' rows) — per-scenario CPU route, out of stage-1 scope. */
-    record Member(int rhoRow, double minR1, double maxR1, double initialR1,
+    public record Member(int rhoRow, double minR1, double maxR1, double initialR1,
                   double[] taps, double[][] tapRows, int elemIndex,
-                  int[] offDeltaRows, int[] offDeltaModes, double[] offDeltaTargets, boolean clampNeedsCpu) {
+                  int[] offDeltaRows, int[] offDeltaModes, double[] offDeltaTargets, boolean clampNeedsCpu,
+                  int branchNum, int baseTapIdx) {
         double closestTap(double r1) {
             if (taps.length == 0) {
                 return r1;                                   // no tap table: keep the continuous ratio
@@ -85,9 +86,10 @@ public final class GpuBatchTransformerControl {
      *  controlled-bus V col, target/deadband, the row-mode/target DELTAS between control-off (base)
      *  and ALL-members-on activations (plan-group-member-dynamics A3 — captured by toggling the
      *  WHOLE group, never one member alone), and the members. */
-    record TransformerController(int vCol, double targetV, double halfDeadband,
+    public record TransformerController(int vCol, double targetV, double halfDeadband,
                                  int[] deltaRows, int[] deltaModesOn, double[] deltaTargetsOn,
-                                 Member[] members, boolean useInitialTapPosition) {
+                                 Member[] members, boolean useInitialTapPosition,
+                                 int[] deltaModesOff, double[] deltaTargetsOff) {
     }
 
     /** OLF's {@code TransformerRatioManager} SHARED behavior ({@code useInitialTapPosition=true}),
@@ -167,7 +169,7 @@ public final class GpuBatchTransformerControl {
     /** Build the orchestrator's controller pack by TOGGLING each control on the shared equation
      *  system and diffing the activation — the ON recipe is exactly what the engine itself would
      *  produce, no hand-crafted modes. The network is restored before returning. */
-    static List<TransformerController> buildTransformerControllers(
+    public static List<TransformerController> buildTransformerControllers(
             LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
             TargetVector<AcVariableType, AcEquationType> targetVector,
             GpuAcActivation baseActivation, double[] baseTargets, GpuBatchElementMapper elementMapper,
@@ -206,22 +208,34 @@ public final class GpuBatchTransformerControl {
             boolean[] wasEnabled = new boolean[memberBranches.size()];
             for (int m = 0; m < memberBranches.size(); m++) {
                 wasEnabled[m] = memberBranches.get(m).isVoltageControlEnabled();
+                memberBranches.get(m).setVoltageControlEnabled(false);   // the WHOLE group OFF: the control-off activation
+            }
+            GpuAcActivation offAct = GpuAcActivation.fromEquationSystem(network, es);
+            double[] offTargets = offAct.applyTargets(targetVector.getArray());
+            for (int m = 0; m < memberBranches.size(); m++) {
                 memberBranches.get(m).setVoltageControlEnabled(true);    // the WHOLE group ON (A3)
             }
             GpuAcActivation onAct = GpuAcActivation.fromEquationSystem(network, es);
             double[] onTargets = onAct.applyTargets(targetVector.getArray());
+            // the ON/OFF deltas are diffed against each other, not against the caller's base: a base
+            // extracted with the control already ON (the WITH_GENERATOR base load flow, whose network
+            // OLF's initialize switched on) yields the same rows as a control-off base
             List<Integer> dRows = new ArrayList<>();
             for (int r = 0; r < baseTargets.length; r++) {
-                if (onAct.rowMode()[r] != baseActivation.rowMode()[r] || onTargets[r] != baseTargets[r]) {
+                if (onAct.rowMode()[r] != offAct.rowMode()[r] || onTargets[r] != offTargets[r]) {
                     dRows.add(r);
                 }
             }
             int[] deltaRows = dRows.stream().mapToInt(Integer::intValue).toArray();
             int[] deltaModesOn = new int[deltaRows.length];
             double[] deltaTargetsOn = new double[deltaRows.length];
+            int[] deltaModesOff = new int[deltaRows.length];
+            double[] deltaTargetsOff = new double[deltaRows.length];
             for (int k = 0; k < deltaRows.length; k++) {
                 deltaModesOn[k] = onAct.rowMode()[deltaRows[k]];
                 deltaTargetsOn[k] = onTargets[deltaRows[k]];
+                deltaModesOff[k] = offAct.rowMode()[deltaRows[k]];
+                deltaTargetsOff[k] = offTargets[deltaRows[k]];
             }
             Member[] members = new Member[memberBranches.size()];
             for (int m = 0; m < memberBranches.size(); m++) {
@@ -251,19 +265,150 @@ public final class GpuBatchTransformerControl {
                     offDeltaModes[k] = mOff.rowMode()[offDeltaRows[k]];
                     offDeltaTargets[k] = mOffTargets[offDeltaRows[k]];
                 }
+                double[][] tapRows = tapModels(branch.getPiModel());
+                int baseTap = 0;
+                for (int t = 1; t < tapRows.length; t++) {   // the CURRENT tap: OLF's rounding starts there
+                    if (Math.abs(tapRows[t][6] - branch.getPiModel().getR1()) < Math.abs(tapRows[baseTap][6] - branch.getPiModel().getR1())) {
+                        baseTap = t;
+                    }
+                }
                 members[m] = new Member(rhoRow, branch.getPiModel().getMinR1(), branch.getPiModel().getMaxR1(),
                         branch.getPiModel().getR1(),             // individual initial (base) ratio
-                        tapR1Values(branch.getPiModel()), tapModels(branch.getPiModel()),
+                        tapR1Values(branch.getPiModel()), tapRows,
                         elementMapper.getElementIndex(branch),
-                        offDeltaRows, offDeltaModes, offDeltaTargets, cpuOnly);
+                        offDeltaRows, offDeltaModes, offDeltaTargets, cpuOnly, branch.getNum(), baseTap);
             }
             for (int m = 0; m < memberBranches.size(); m++) {
                 memberBranches.get(m).setVoltageControlEnabled(wasEnabled[m]);
             }
             out.add(new TransformerController(vCol, vc.getTargetValue(), halfDeadband,
-                    deltaRows, deltaModesOn, deltaTargetsOn, members, useInitialTapPosition));
+                    deltaRows, deltaModesOn, deltaTargetsOn, members, useInitialTapPosition,
+                    deltaModesOff, deltaTargetsOff));
         }
         return out;
+    }
+
+    /** Install the controls for the in-kernel DISCRETE TransformerVoltageControl phase (OLF order 8):
+     *  {@code mode} 0 = AFTER_GENERATOR (TransformerVoltageControlOuterLoop), 1 = WITH_GENERATOR
+     *  (SimpleTransformerVoltageControlOuterLoop); {@code entryOn} = the activation the solve starts from
+     *  already carries the control ON (the WITH_GENERATOR base load flow — OLF's initialize ran on the
+     *  network). Returns true when the kernel loop owns them (every member has a tap table). */
+    public static boolean uploadToDevice(long handle, List<TransformerController> tcs, int mode, boolean entryOn) {
+        if (tcs == null || tcs.isEmpty()) {
+            GpuAcNewtonSolver.setBatchDiscreteTvc(handle, 0, 0, null, null, null, null, null, null, null, null, null,
+                    null, null, null, null, null, null, null, null, null, null);
+            return false;
+        }
+        int nG = tcs.size();
+        int[] grpPtr = new int[nG + 1];
+        int[] grpVRow = new int[nG];
+        double[] grpTargetV = new double[nG];
+        double[] grpHalfDb = new double[nG];
+        int[] grpUseInit = new int[nG];
+        int[] deltaPtr = new int[nG + 1];
+        List<Integer> dRow = new ArrayList<>();
+        List<Integer> dModeOn = new ArrayList<>();
+        List<Integer> dModeOff = new ArrayList<>();
+        List<Double> dTgtOn = new ArrayList<>();
+        List<Double> dTgtOff = new ArrayList<>();
+        List<Integer> memRhoRow = new ArrayList<>();
+        List<Integer> memElem = new ArrayList<>();
+        List<Integer> memBaseTap = new ArrayList<>();
+        List<Integer> memTapPtr = new ArrayList<>();
+        List<Double> memMin = new ArrayList<>();
+        List<Double> memMax = new ArrayList<>();
+        List<Double> memInit = new ArrayList<>();
+        List<Double> tapData = new ArrayList<>();
+        boolean tables = true;
+        for (int g = 0; g < nG; g++) {
+            TransformerController tc = tcs.get(g);
+            grpPtr[g] = memRhoRow.size();
+            grpVRow[g] = tc.vCol();
+            grpTargetV[g] = tc.targetV();
+            grpHalfDb[g] = tc.halfDeadband();
+            grpUseInit[g] = tc.useInitialTapPosition() ? 1 : 0;
+            deltaPtr[g] = dRow.size();
+            for (int k = 0; k < tc.deltaRows().length; k++) {
+                dRow.add(tc.deltaRows()[k]);
+                dModeOn.add(tc.deltaModesOn()[k]);
+                dModeOff.add(tc.deltaModesOff()[k]);
+                dTgtOn.add(tc.deltaTargetsOn()[k]);
+                dTgtOff.add(tc.deltaTargetsOff()[k]);
+            }
+            for (Member m : tc.members()) {
+                memRhoRow.add(m.rhoRow());
+                memElem.add(m.elemIndex());
+                memBaseTap.add(m.baseTapIdx());
+                memTapPtr.add(tapData.size() / 8);
+                memMin.add(m.minR1());
+                memMax.add(m.maxR1());
+                memInit.add(m.initialR1());
+                tables &= m.tapRows().length > 0;
+                for (double[] row : m.tapRows()) {
+                    for (double d : row) {
+                        tapData.add(d);
+                    }
+                }
+            }
+        }
+        grpPtr[nG] = memRhoRow.size();
+        deltaPtr[nG] = dRow.size();
+        memTapPtr.add(tapData.size() / 8);
+        boolean owned = tables && GpuAcNewtonSolver.setBatchDiscreteTvc(handle, mode, entryOn ? 1 : 0,
+                grpPtr, grpVRow, grpTargetV, grpHalfDb, grpUseInit,
+                deltaPtr, dRow.stream().mapToInt(Integer::intValue).toArray(),
+                dModeOn.stream().mapToInt(Integer::intValue).toArray(), dModeOff.stream().mapToInt(Integer::intValue).toArray(),
+                dTgtOn.stream().mapToDouble(Double::doubleValue).toArray(), dTgtOff.stream().mapToDouble(Double::doubleValue).toArray(),
+                memRhoRow.stream().mapToInt(Integer::intValue).toArray(), memElem.stream().mapToInt(Integer::intValue).toArray(),
+                memBaseTap.stream().mapToInt(Integer::intValue).toArray(), memTapPtr.stream().mapToInt(Integer::intValue).toArray(),
+                memMin.stream().mapToDouble(Double::doubleValue).toArray(), memMax.stream().mapToDouble(Double::doubleValue).toArray(),
+                memInit.stream().mapToDouble(Double::doubleValue).toArray(),
+                tapData.stream().mapToDouble(Double::doubleValue).toArray()) != 0;
+        if (!owned) {
+            GpuAcNewtonSolver.setBatchDiscreteTvc(handle, 0, 0, null, null, null, null, null, null, null, null, null,
+                    null, null, null, null, null, null, null, null, null, null);
+        }
+        LOGGER.info("Uploaded {} discrete transformer voltage controls ({} members, mode {}) to device: {}",
+                nG, memRhoRow.size(), mode == 1 ? "WITH_GENERATOR" : "AFTER_GENERATOR", owned ? "in-kernel loop" : "host orchestrator");
+        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            System.err.printf("TVD_UPLOAD mode=%d entryOn=%b nGroups=%d nMembers=%d kernel=%b%n", mode, entryOn, nG, memRhoRow.size(), owned);
+        }
+        return owned;
+    }
+
+    /** Give the in-kernel phase's decisions back to the network (batch-of-one base load flow), exactly as
+     *  OLF's own loop leaves it: a FIXED member had {@code setR1(roundFrom); roundR1ToClosestTap()} and
+     *  its control disabled ({@code roundR1ToExtremeTapPosition} / {@code roundVoltageRatios}); a member
+     *  never enabled keeps its base tap. {@code state} is readBatchDiscreteTvcState's layout. */
+    public static void writeBack(LfNetwork network, List<TransformerController> tcs, double[] state) {
+        if (tcs == null || tcs.isEmpty() || state == null) {
+            return;
+        }
+        int m = 0;
+        for (TransformerController tc : tcs) {
+            for (Member mem : tc.members()) {
+                int k = m++ * 3;
+                if (k + 2 >= state.length) {
+                    return;
+                }
+                LfBranch branch = network.getBranch(mem.branchNum());
+                if (branch == null || (int) state[k] != 2) {
+                    continue;
+                }
+                var pm = branch.getPiModel();
+                int pos = pm.getTapPositionRange().getMinimum() + (int) state[k + 1];
+                if (pm.getTapPosition() != pos) {
+                    pm.setR1(state[k + 2]);
+                    pm.roundR1ToClosestTap();
+                    if (pm.getTapPosition() != pos) {        // tie on a different start tap: take the device's
+                        pm.setTapPosition(pos);
+                    }
+                }
+                if (branch.isVoltageControlEnabled()) {
+                    branch.setVoltageControlEnabled(false);
+                }
+            }
+        }
     }
 
     /** Discrete tap r1 values, snapshotted read-only (reflection on PiModelArray.models; an

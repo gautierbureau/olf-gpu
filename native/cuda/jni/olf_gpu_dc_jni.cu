@@ -112,6 +112,10 @@ struct DcContext {
     // element states S (n x nElem, column-major) and the elements' rows
     int nElem = 0;
     Buf s, elemRowPlus, elemRowMinus, elemBranch;
+    // WoodburyEngine's per-element terms: the diagonal 1/(oldPower - newPower) (1/power for an outage,
+    // -1/power for a branch enabled by an action, 1/(p_old - p_new) for a tap change) and the new
+    // phase shift a tap action imposes (0 otherwise) — getAlphaMatrixValue / getAlphaRhsValue
+    Buf elemDiag, elemNewAlpha;
     // branches
     int nBranches = 0;
     Buf ph1Row, ph2Row, a1Row, a1Const, power;
@@ -201,7 +205,7 @@ __device__ inline double phaseSensi(const double* s, int n, int col, int ph1, in
  *  pivoting (OLF: DenseMatrix.decomposeLU). k == 1 is the plain division OLF also takes. */
 __global__ void woodburyAlphas(int nCtg, int n, const int* ctgPtr, const int* ctgElem, const int* ctgBase,
                                const int* elemBranch, const int* ph1Row, const int* ph2Row,
-                               const double* power, const double* s, const double* x0, const double* bases,
+                               const double* elemDiag, const double* elemNewAlpha, const double* s, const double* x0, const double* bases,
                                double* alpha, int* bad) {
     int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= nCtg) {
@@ -221,13 +225,14 @@ __global__ void woodburyAlphas(int nCtg, int n, const int* ctgPtr, const int* ct
     double a[MAX_K][MAX_K];
     double rhs[MAX_K];
     for (int i = 0; i < k; i++) {
-        int bi = elemBranch[ctgElem[start + i]];
+        int ei = ctgElem[start + i];
+        int bi = elemBranch[ei];
         int p1 = ph1Row[bi];
         int p2 = ph2Row[bi];
-        rhs[i] = x[p1] - x[p2];                              // getAlphaRhsValue: ph1 - ph2 (+ 0, no tap action)
+        rhs[i] = x[p1] - x[p2] + elemNewAlpha[ei];           // getAlphaRhsValue: ph1 - ph2 + the tap action's new alpha
         for (int j = 0; j < k; j++) {
             int ej = ctgElem[start + j];
-            double deltaX = i == j ? 1.0 / power[bi] : 0.0;
+            double deltaX = i == j ? elemDiag[ei] : 0.0;     // getAlphaMatrixValue: 1/(oldPower - newPower) on the diagonal
             a[i][j] = deltaX - phaseSensi(s, n, ej, p1, p2, -1);
         }
     }
@@ -549,6 +554,23 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_setElements(JNIEnv* env, jclass
     }
 }
 
+/** Per-element Woodbury terms (see DcContext.elemDiag / elemNewAlpha), one entry per S column. */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_setElementAttributes(JNIEnv* env, jclass, jlong handle, jdoubleArray jDiag, jdoubleArray jNewAlpha) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        DoubleArray diag(env, jDiag);
+        DoubleArray newAlpha(env, jNewAlpha);
+        if (diag.len != ctx->nElem || newAlpha.len != ctx->nElem) {
+            throw std::runtime_error("element attribute arrays must have one entry per element");
+        }
+        ctx->elemDiag.upload(diag.p, (size_t) ctx->nElem * sizeof(double));
+        ctx->elemNewAlpha.upload(newAlpha.p, (size_t) ctx->nElem * sizeof(double));
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.setElementAttributes: ") + e.what());
+    }
+}
+
 /** One S column back to the host (tests: the LODF/PTDF oracle). */
 JNIEXPORT jdoubleArray JNICALL
 Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_readElementStates(JNIEnv* env, jclass, jlong handle, jint elem) {
@@ -753,9 +775,14 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_woodburyChunk(JNIEnv* env, jcla
 
         const double* bases = ctx->nBases > 0 ? ctx->bases.as<double>() : ctx->x0.as<double>();
         const double* sPtr = ctx->nElem > 0 ? ctx->s.as<double>() : ctx->x0.as<double>();       // never read when nElem == 0
+        if (ctx->nElem > 0 && ctx->elemDiag.p == nullptr) {
+            throw std::runtime_error("element attributes not set (setElementAttributes)");
+        }
+        const double* diagPtr = ctx->nElem > 0 ? ctx->elemDiag.as<double>() : ctx->x0.as<double>();
+        const double* newAlphaPtr = ctx->nElem > 0 ? ctx->elemNewAlpha.as<double>() : ctx->x0.as<double>();
         woodburyAlphas<<<grid(nCtg), BLOCK, 0, ctx->stream>>>(nCtg, n, ctx->ctgPtr.as<int>(), ctx->ctgElem.as<int>(), ctx->ctgBase.as<int>(),
                 ctx->elemBranch.as<int>(), ctx->ph1Row.as<int>(), ctx->ph2Row.as<int>(),
-                ctx->power.as<double>(), sPtr, ctx->x0.as<double>(), bases, ctx->alpha.as<double>(), bad.as<int>());
+                diagPtr, newAlphaPtr, sPtr, ctx->x0.as<double>(), bases, ctx->alpha.as<double>(), bad.as<int>());
         DC_CUDA_CHECK(cudaGetLastError());
         woodburyStates<<<grid((long) n * nCtg), BLOCK, 0, ctx->stream>>>(nCtg, n, ctx->ctgPtr.as<int>(), ctx->ctgElem.as<int>(), ctx->ctgBase.as<int>(),
                 ctx->alpha.as<double>(), sPtr, ctx->x0.as<double>(), bases, ctx->states.as<double>());

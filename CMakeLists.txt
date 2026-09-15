@@ -194,6 +194,7 @@ add_library(olfgpu SHARED
     native/cuda/sa/olf_gpu_violations.cu
     native/cuda/lu/amd_order.cu
     ${SUITESPARSE_AMD_SOURCES}
+    native/cuda/jni/olf_gpu_dc_jni.cu
 )
 target_include_directories(olfgpu
     PRIVATE

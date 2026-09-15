@@ -142,3 +142,19 @@ included on the GPU arm); warm = second run.
 | date | commit | CPU cold (ms) | GPU cold (ms) | CPU warm (ms) | GPU warm (ms) | parity | note |
 |---|---|---|---|---|---|---|---|
 | 2026-09-15 | full LF on device | 664 | 2529 | 154 | 225 | flows 1.7e-10 MW, angles 1e-11°, dispatch bit-identical | a single DC solve does not pay on the device (cuDSS analysis > KLU's whole run); the assembled context pays when reused (SA, time series) |
+
+### DC — contingency chunk size (the AC batch-size question, asked 2026-09-15)
+
+The DC Woodbury path chunks contingencies like the AC path (`DEVICE_CHUNK`, default 256,
+`-Dolf.gpu.dc.chunk`), but the chunk is NOT decisive here: there is no cuDSS batch in it. The
+matrix is factorized once and a chunk only sizes the Woodbury/flow/screen kernel launches and the
+state download; the modified-target columns are solved in fixed 1024-column blocks regardless.
+rte6515 × 9042, GPU 1-thread, 0 monitored:
+
+| chunk | wall (s) | ms/ctg |
+|---|---|---|
+| 64 | 5.27 | 0.58 |
+| 256 (default) | 5.80 | 0.64 |
+| 1024 | 5.45 | 0.60 |
+
+The spread is run-to-run noise (the same knob on the AC batch path swings ×2 on cuDSS 0.8).

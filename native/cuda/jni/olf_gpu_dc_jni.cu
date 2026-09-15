@@ -147,6 +147,16 @@ struct DcContext {
     Buf genInit, genTarget, genMinT, genMaxT, genMinP, genMaxP, genDroop, genPf, genPart;
     Buf dsElem, dsFactor, dsOut;                                   // distribution scratch and its 2 outputs
     Buf scalarOut;
+    Buf lfState;                                                   // the last solveTarget solution (n), read by the loop kernels
+    // --- DC outer loops on the device (GpuDcLoadFlowEngine)
+    // incremental phase control: the controllers, their controlled branch/side/target, the tap a1 tables,
+    // and the per-BRANCH direction state of IncrementalContextData.ControllerContext
+    int nCtrl = 0;
+    Buf pcBranch, pcAlphaCol, pcControlled, pcSide, pcTarget, pcHalfDb, pcTapIdx, pcTapPtr, pcTapA1, pcNewTap;
+    Buf pcAllowed, pcDirCount, pcCurDir, pcSens;
+    // HVDC AC emulation limits
+    int nHvdc = 0;
+    Buf hvPh1, hvPh2, hvK, hvP0, hvPmax12, hvPmax21, hvStatus, hvActive, hvNew;
 
     ~DcContext() {
         if (matB) { cudssMatrixDestroy(matB); }
@@ -720,6 +730,171 @@ __global__ void distributeSlack(int nBuses, const int* busFlags, const int* excl
     }
     out[0] = remaining;
     out[1] = (double) iteration;
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// DC outer loops on the device: the decisions of DcIncrementalPhaseControlOuterLoop and
+// DcHvdcAcEmulationLimitsOuterLoop, read on the device state; the host applies them to the
+// network with OLF's own mutators (setTapPosition, switchToSaturation.../switchToLinearMode)
+// ---------------------------------------------------------------------------------------------
+
+constexpr double DEGREES_TO_RADIANS = 0.017453292519943295;   // Math.toRadians(x) = x * DEGREES_TO_RADIANS
+constexpr double SENSI_EPS = 1e-6;                            // AbstractIncrementalPhaseControlOuterLoop.SENSI_EPS
+constexpr int MAX_DIRECTION_CHANGE = 3;                       // AbstractIncrementalPhaseControlOuterLoop.MAX_DIRECTION_CHANGE
+constexpr int DIR_NONE = -1;
+constexpr int DIR_INCREASE = 0;                               // Direction.INCREASE
+constexpr int DIR_DECREASE = 1;                               // Direction.DECREASE
+constexpr int ALLOWED_INCREASE = 0;                           // AllowedDirection.INCREASE
+constexpr int ALLOWED_DECREASE = 1;
+constexpr int ALLOWED_BOTH = 2;
+constexpr int HVDC_LINEAR = 0;                                // AcEmulationStatus.LINEAR_MODE
+constexpr int HVDC_SAT_12 = 1;                                // SATURATION_MODE_FROM_CS1_TO_CS2
+constexpr int HVDC_SAT_21 = 2;                                // SATURATION_MODE_FROM_CS2_TO_CS1
+constexpr int HVDC_FROZEN = 3;
+
+/** DcSensitivityContext.calculateSensitivityValues' right-hand sides: toRadians(1) at the
+ *  controller's BRANCH_TARGET_ALPHA1 column, one column per controller (zero elsewhere). */
+__global__ void phaseRhs(int n, int nCtrl, const int* alphaCol, double* b) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= nCtrl) {
+        return;
+    }
+    if (alphaCol[c] >= 0) {
+        b[alphaCol[c] + (size_t) c * n] = DEGREES_TO_RADIANS;
+    }
+}
+
+/** DcNetworkVector.updateClosedBranches' p1 / p2 of a branch on a state. */
+__device__ inline double branchFlow(const double* x, int b, int side, const int* ph1Row, const int* ph2Row, const int* a1Row,
+                                    const double* a1Const, const double* power) {
+    if (ph1Row[b] < 0 || ph2Row[b] < 0) {
+        return 0.0;
+    }
+    double a1 = a1Row[b] >= 0 ? x[a1Row[b]] : a1Const[b];
+    double deltaPhase = __dadd_rn(__dadd_rn(__dadd_rn(x[ph2Row[b]], -x[ph1Row[b]]), A2), -a1);
+    return side == 1 ? __dmul_rn(-power[b], deltaPhase) : __dmul_rn(power[b], deltaPhase);
+}
+
+/**
+ * AbstractIncrementalPhaseControlOuterLoop.checkActivePowerControlPhaseControls, one thread per
+ * controller: the controlled flow on the state, the deadband, the sensitivity from the solved
+ * column (AbstractClosedBranchDcFlowEquationTermArrayEvaluator.calculateSensi: dp/dph1·S[ph1] +
+ * dp/dph2·S[ph2] + dp/da1·S[a1]), da = toRadians(dp / a2p), then
+ * PiModelArray.updateTapPositionToReachNewA1 with the ClosestTapPositionFinder over the allowed
+ * range (MAX_TAP_SHIFT infinite), and ControllerContext.updateAllowedDirection. Writes the new tap
+ * index, or -1 when the tap does not move; the direction state is per branch and persists.
+ */
+__global__ void phaseDecision(int n, int nCtrl, const double* x, const double* sens, const int* pcBranch, const int* pcControlled,
+                              const int* pcSide, const double* pcTarget, const double* pcHalfDb, int* pcTapIdx,
+                              const int* pcTapPtr, const double* pcTapA1, int* allowed, int* dirCount, int* curDir,
+                              const int* ph1Row, const int* ph2Row, const int* a1Row, const double* a1Const, const double* power,
+                              int* newTap) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= nCtrl) {
+        return;
+    }
+    newTap[c] = -1;
+    int controller = pcBranch[c];
+    int controlled = pcControlled[c];
+    int side = pcSide[c];
+    double pValue = branchFlow(x, controlled, side, ph1Row, ph2Row, a1Row, a1Const, power);
+    if (!(fabs(__dadd_rn(pValue, -pcTarget[c])) > pcHalfDb[c])) {
+        return;
+    }
+    double dp = __dadd_rn(pcTarget[c], -pValue);
+    const double* s = sens + (size_t) c * n;
+    double dph1 = s[ph1Row[controlled]];
+    double dph2 = s[ph2Row[controlled]];
+    double da1 = a1Row[controlled] >= 0 ? s[a1Row[controlled]] : 0.0;
+    double p = power[controlled];
+    // side 1: [p, -p, p]; side 2: [-p, p, -p] — ((d1*dph1) + (d2*dph2)) + (d3*da1)
+    double a2p = side == 1
+        ? __dadd_rn(__dadd_rn(__dmul_rn(p, dph1), __dmul_rn(-p, dph2)), __dmul_rn(p, da1))
+        : __dadd_rn(__dadd_rn(__dmul_rn(-p, dph1), __dmul_rn(p, dph2)), __dmul_rn(-p, da1));
+    if (!(fabs(a2p) > SENSI_EPS)) {
+        return;
+    }
+    double da = __dmul_rn(__ddiv_rn(dp, a2p), DEGREES_TO_RADIANS);
+    // PiModelArray.getA1(): the continuous a1 the network holds after updateNetwork = the solved alpha
+    double currentA1 = a1Row[controller] >= 0 ? x[a1Row[controller]] : a1Const[controller];
+    double newA1 = __dadd_rn(currentA1, da);
+    int tapStart = pcTapPtr[c];
+    int tapCount = pcTapPtr[c + 1] - tapStart;
+    int idx = pcTapIdx[c];
+    int lo = 0;
+    int hi = tapCount - 1;
+    switch (allowed[controller]) {
+        case ALLOWED_INCREASE: lo = idx; break;
+        case ALLOWED_DECREASE: hi = idx; break;
+        default: break;
+    }
+    int closest = idx;
+    double smallest = fabs(__dadd_rn(newA1, -pcTapA1[tapStart + idx]));
+    for (int i = lo; i <= hi; i++) {
+        double distance = fabs(__dadd_rn(newA1, -pcTapA1[tapStart + i]));
+        if (distance < smallest) {
+            closest = i;
+            smallest = distance;
+        }
+    }
+    if (closest == idx) {
+        return;
+    }
+    int direction = closest - idx > 0 ? DIR_INCREASE : DIR_DECREASE;
+    // ControllerContext.updateAllowedDirection
+    if (dirCount[controller] < MAX_DIRECTION_CHANGE) {
+        if (curDir[controller] != DIR_NONE && curDir[controller] != direction) {
+            dirCount[controller]++;
+        }
+        curDir[controller] = direction;
+    } else {
+        allowed[controller] = direction == DIR_INCREASE ? ALLOWED_INCREASE : ALLOWED_DECREASE;
+    }
+    pcTapIdx[c] = closest;
+    newTap[c] = closest;
+}
+
+/**
+ * AbstractHvdcAcEmulationLimitsOuterLoop.checkAcEmulationMode, one thread per HVDC, on the
+ * emulation flows of the state (HvdcAcEmulationSide1/2DCFlowEquationTerm.eval: k (ph1 - ph2) + p0
+ * and k (ph2 - ph1) - p0). Writes the new status, or -1 when the status stays.
+ */
+__global__ void hvdcDecision(int nHvdc, const double* x, const int* ph1, const int* ph2, const double* k, const double* p0,
+                             const double* pmax12, const double* pmax21, const int* status, const int* active, int* out) {
+    int h = blockIdx.x * blockDim.x + threadIdx.x;
+    if (h >= nHvdc) {
+        return;
+    }
+    out[h] = -1;
+    if (!active[h]) {
+        return;
+    }
+    double p1 = __dadd_rn(__dmul_rn(k[h], __dadd_rn(x[ph1[h]], -x[ph2[h]])), p0[h]);
+    double p2 = __dadd_rn(__dmul_rn(k[h], __dadd_rn(x[ph2[h]], -x[ph1[h]])), -p0[h]);
+    switch (status[h]) {
+        case HVDC_LINEAR:
+            if (p1 >= 0) {
+                if (p1 > pmax12[h]) {
+                    out[h] = HVDC_SAT_12;
+                }
+            } else if (p2 > pmax21[h]) {
+                out[h] = HVDC_SAT_21;
+            }
+            break;
+        case HVDC_SAT_12:
+        case HVDC_SAT_21:
+            if (p1 > 0 && p1 < pmax12[h] || p2 > 0 && p2 < pmax21[h]) {
+                out[h] = HVDC_LINEAR;
+            } else if (p1 < 0 && status[h] == HVDC_SAT_12) {
+                out[h] = HVDC_SAT_21;
+            } else if (p2 < 0 && status[h] == HVDC_SAT_21) {
+                out[h] = HVDC_SAT_12;
+            }
+            break;
+        default:
+            break;
+    }
 }
 
 DcContext* ctxOf(jlong h) {
@@ -1545,6 +1720,8 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_solveTarget(JNIEnv* env, jclass
         ctx->ensureRhs(1);
         DC_CUDA_CHECK(cudaMemcpy(ctx->b.p, ctx->t.p, (size_t) ctx->n * sizeof(double), cudaMemcpyDeviceToDevice));
         ctx->solveDense(1);
+        ctx->lfState.ensure((size_t) ctx->n * sizeof(double));
+        DC_CUDA_CHECK(cudaMemcpy(ctx->lfState.p, ctx->x.p, (size_t) ctx->n * sizeof(double), cudaMemcpyDeviceToDevice));
         jdoubleArray out = env->NewDoubleArray(ctx->n);
         std::vector<double> host(ctx->n);
         DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->x.p, (size_t) ctx->n * sizeof(double), cudaMemcpyDeviceToHost));
@@ -1552,6 +1729,230 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_solveTarget(JNIEnv* env, jclass
         return out;
     } catch (const std::exception& e) {
         throwJava(env, std::string("GpuDcSolver.solveTarget: ") + e.what());
+        return nullptr;
+    }
+}
+
+
+/** The value and rhs contribution lists refreshed on the SAME pattern (a term switched on or off:
+ *  an HVDC saturation) — no new analysis; fillValues refactorizes afterwards. */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_setContributions(JNIEnv* env, jclass, jlong handle, jintArray jContribPtr, jintArray jContribKind,
+                                                                  jintArray jContribElem, jdoubleArray jContribCoef, jintArray jTargetKind,
+                                                                  jintArray jTargetElem, jintArray jRhsPtr, jintArray jRhsKind, jintArray jRhsElem,
+                                                                  jdoubleArray jRhsCoef) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        IntArray contribPtr(env, jContribPtr);
+        IntArray contribKind(env, jContribKind);
+        IntArray contribElem(env, jContribElem);
+        DoubleArray contribCoef(env, jContribCoef);
+        IntArray targetKind(env, jTargetKind);
+        IntArray targetElem(env, jTargetElem);
+        IntArray rhsPtr(env, jRhsPtr);
+        IntArray rhsKind(env, jRhsKind);
+        IntArray rhsElem(env, jRhsElem);
+        DoubleArray rhsCoef(env, jRhsCoef);
+        int n = ctx->n;
+        if (!ctx->assembled || contribPtr.len != ctx->nnz + 1 || targetKind.len != n || targetElem.len != n || rhsPtr.len != n + 1) {
+            throw std::runtime_error("arrays inconsistent with the context");
+        }
+        int nContrib = contribPtr.p[ctx->nnz];
+        int nRhs = rhsPtr.p[n];
+        if (contribKind.len != nContrib || contribElem.len != nContrib || contribCoef.len != nContrib
+                || rhsKind.len != nRhs || rhsElem.len != nRhs || rhsCoef.len != nRhs) {
+            throw std::runtime_error("contribution arrays inconsistent with their pointers");
+        }
+        ctx->contribPtr.upload(contribPtr.p, (size_t) (ctx->nnz + 1) * sizeof(int));
+        ctx->contribKind.upload(contribKind.p, (size_t) std::max(nContrib, 1) * sizeof(int));
+        ctx->contribElem.upload(contribElem.p, (size_t) std::max(nContrib, 1) * sizeof(int));
+        ctx->contribCoef.upload(contribCoef.p, (size_t) std::max(nContrib, 1) * sizeof(double));
+        ctx->targetKind.upload(targetKind.p, (size_t) n * sizeof(int));
+        ctx->targetElem.upload(targetElem.p, (size_t) n * sizeof(int));
+        ctx->rhsPtr.upload(rhsPtr.p, (size_t) (n + 1) * sizeof(int));
+        ctx->rhsKind.upload(rhsKind.p, (size_t) std::max(nRhs, 1) * sizeof(int));
+        ctx->rhsElem.upload(rhsElem.p, (size_t) std::max(nRhs, 1) * sizeof(int));
+        ctx->rhsCoef.upload(rhsCoef.p, (size_t) std::max(nRhs, 1) * sizeof(double));
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.setContributions: ") + e.what());
+    }
+}
+
+/** The phase controllers (active power control): controller branch, its BRANCH_TARGET_ALPHA1 column
+ *  (-1 = none), controlled branch and side, target and half deadband, current tap index and the
+ *  tap tables' a1 values (CSR). */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_setPhaseControllers(JNIEnv* env, jclass, jlong handle, jintArray jBranch, jintArray jAlphaCol,
+                                                                     jintArray jControlled, jintArray jSide, jdoubleArray jTarget, jdoubleArray jHalfDb,
+                                                                     jintArray jTapIdx, jintArray jTapPtr, jdoubleArray jTapA1) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        IntArray branch(env, jBranch);
+        IntArray alphaCol(env, jAlphaCol);
+        IntArray controlled(env, jControlled);
+        IntArray side(env, jSide);
+        DoubleArray target(env, jTarget);
+        DoubleArray halfDb(env, jHalfDb);
+        IntArray tapIdx(env, jTapIdx);
+        IntArray tapPtr(env, jTapPtr);
+        DoubleArray tapA1(env, jTapA1);
+        int m = branch.len;
+        if (alphaCol.len != m || controlled.len != m || side.len != m || target.len != m || halfDb.len != m || tapIdx.len != m || tapPtr.len != m + 1) {
+            throw std::runtime_error("controller arrays must have the same length");
+        }
+        if (ctx->nBranches == 0) {
+            throw std::runtime_error("branches not set (setBranches)");
+        }
+        ctx->nCtrl = m;
+        size_t ints = (size_t) std::max(m, 1) * sizeof(int);
+        size_t dbls = (size_t) std::max(m, 1) * sizeof(double);
+        ctx->pcBranch.upload(branch.p, ints);
+        ctx->pcAlphaCol.upload(alphaCol.p, ints);
+        ctx->pcControlled.upload(controlled.p, ints);
+        ctx->pcSide.upload(side.p, ints);
+        ctx->pcTarget.upload(target.p, dbls);
+        ctx->pcHalfDb.upload(halfDb.p, dbls);
+        ctx->pcTapIdx.upload(tapIdx.p, ints);
+        ctx->pcTapPtr.upload(tapPtr.p, (size_t) (m + 1) * sizeof(int));
+        ctx->pcTapA1.upload(tapA1.p, (size_t) std::max<jsize>(tapA1.len, 1) * sizeof(double));
+        ctx->pcNewTap.ensure(ints);
+        if (ctx->pcAllowed.p == nullptr) {
+            // the direction state is per branch and lives across prepare() calls; reset by resetPhaseControlDirections
+            std::vector<int> both(ctx->nBranches, ALLOWED_BOTH);
+            std::vector<int> zero(ctx->nBranches, 0);
+            std::vector<int> none(ctx->nBranches, DIR_NONE);
+            ctx->pcAllowed.upload(both.data(), (size_t) ctx->nBranches * sizeof(int));
+            ctx->pcDirCount.upload(zero.data(), (size_t) ctx->nBranches * sizeof(int));
+            ctx->pcCurDir.upload(none.data(), (size_t) ctx->nBranches * sizeof(int));
+        }
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.setPhaseControllers: ") + e.what());
+    }
+}
+
+/** IncrementalContextData rebuilt: every controller back to BOTH directions, no change counted. */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_resetPhaseControlDirections(JNIEnv* env, jclass, jlong handle) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        if (ctx->nBranches == 0) {
+            return;
+        }
+        std::vector<int> both(ctx->nBranches, ALLOWED_BOTH);
+        std::vector<int> zero(ctx->nBranches, 0);
+        std::vector<int> none(ctx->nBranches, DIR_NONE);
+        ctx->pcAllowed.upload(both.data(), (size_t) ctx->nBranches * sizeof(int));
+        ctx->pcDirCount.upload(zero.data(), (size_t) ctx->nBranches * sizeof(int));
+        ctx->pcCurDir.upload(none.data(), (size_t) ctx->nBranches * sizeof(int));
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.resetPhaseControlDirections: ") + e.what());
+    }
+}
+
+/** DcIncrementalPhaseControlOuterLoop.check on the device state: the sensitivities (one solve,
+ *  one column per controller, on the current factorization) and the tap decisions. Returns the
+ *  new tap INDEX per controller, -1 where the tap does not move. */
+JNIEXPORT jintArray JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_phaseControlCheck(JNIEnv* env, jclass, jlong handle) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        int m = ctx->nCtrl;
+        jintArray result = env->NewIntArray(m);
+        if (m == 0) {
+            return result;
+        }
+        if (ctx->lfState.p == nullptr || !ctx->analyzed) {
+            throw std::runtime_error("no solved state (solveTarget)");
+        }
+        int n = ctx->n;
+        ctx->pcSens.ensure((size_t) n * m * sizeof(double));
+        for (int col0 = 0; col0 < m; col0 += S_SOLVE_COLS) {
+            int cols = std::min(S_SOLVE_COLS, m - col0);
+            ctx->ensureRhs(cols);
+            DC_CUDA_CHECK(cudaMemsetAsync(ctx->b.p, 0, (size_t) n * cols * sizeof(double), ctx->stream));
+            phaseRhs<<<grid(cols), BLOCK, 0, ctx->stream>>>(n, cols, ctx->pcAlphaCol.as<int>() + col0, ctx->b.as<double>());
+            DC_CUDA_CHECK(cudaGetLastError());
+            ctx->solveDense(cols);
+            DC_CUDA_CHECK(cudaMemcpy(ctx->pcSens.as<double>() + (size_t) col0 * n, ctx->x.p, (size_t) n * cols * sizeof(double), cudaMemcpyDeviceToDevice));
+        }
+        phaseDecision<<<grid(m), BLOCK, 0, ctx->stream>>>(n, m, ctx->lfState.as<double>(), ctx->pcSens.as<double>(), ctx->pcBranch.as<int>(),
+                ctx->pcControlled.as<int>(), ctx->pcSide.as<int>(), ctx->pcTarget.as<double>(), ctx->pcHalfDb.as<double>(), ctx->pcTapIdx.as<int>(),
+                ctx->pcTapPtr.as<int>(), ctx->pcTapA1.as<double>(), ctx->pcAllowed.as<int>(), ctx->pcDirCount.as<int>(), ctx->pcCurDir.as<int>(),
+                ctx->ph1Row.as<int>(), ctx->ph2Row.as<int>(), ctx->a1Row.as<int>(), ctx->a1Const.as<double>(), ctx->power.as<double>(),
+                ctx->pcNewTap.as<int>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        std::vector<int> host(m);
+        DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->pcNewTap.p, (size_t) m * sizeof(int), cudaMemcpyDeviceToHost));
+        env->SetIntArrayRegion(result, 0, m, host.data());
+        return result;
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.phaseControlCheck: ") + e.what());
+        return nullptr;
+    }
+}
+
+/** The HVDC links in AC emulation: angle rows of both ends, droop k (per unit per radian), p0,
+ *  the two Pmax, the status (0 linear, 1 saturated CS1->CS2, 2 saturated CS2->CS1, 3 frozen) and
+ *  whether the loop looks at it (emulation on, both buses and the link enabled). */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_setHvdcs(JNIEnv* env, jclass, jlong handle, jintArray jPh1, jintArray jPh2, jdoubleArray jK,
+                                                          jdoubleArray jP0, jdoubleArray jPmax12, jdoubleArray jPmax21, jintArray jStatus, jintArray jActive) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        IntArray ph1(env, jPh1);
+        IntArray ph2(env, jPh2);
+        DoubleArray k(env, jK);
+        DoubleArray p0(env, jP0);
+        DoubleArray pmax12(env, jPmax12);
+        DoubleArray pmax21(env, jPmax21);
+        IntArray status(env, jStatus);
+        IntArray active(env, jActive);
+        int m = ph1.len;
+        if (ph2.len != m || k.len != m || p0.len != m || pmax12.len != m || pmax21.len != m || status.len != m || active.len != m) {
+            throw std::runtime_error("hvdc arrays must have the same length");
+        }
+        ctx->nHvdc = m;
+        size_t ints = (size_t) std::max(m, 1) * sizeof(int);
+        size_t dbls = (size_t) std::max(m, 1) * sizeof(double);
+        ctx->hvPh1.upload(ph1.p, ints);
+        ctx->hvPh2.upload(ph2.p, ints);
+        ctx->hvK.upload(k.p, dbls);
+        ctx->hvP0.upload(p0.p, dbls);
+        ctx->hvPmax12.upload(pmax12.p, dbls);
+        ctx->hvPmax21.upload(pmax21.p, dbls);
+        ctx->hvStatus.upload(status.p, ints);
+        ctx->hvActive.upload(active.p, ints);
+        ctx->hvNew.ensure(ints);
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.setHvdcs: ") + e.what());
+    }
+}
+
+/** DcHvdcAcEmulationLimitsOuterLoop.check on the device state: the new status per HVDC, -1 where it stays. */
+JNIEXPORT jintArray JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_hvdcCheck(JNIEnv* env, jclass, jlong handle) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        int m = ctx->nHvdc;
+        jintArray result = env->NewIntArray(m);
+        if (m == 0) {
+            return result;
+        }
+        if (ctx->lfState.p == nullptr) {
+            throw std::runtime_error("no solved state (solveTarget)");
+        }
+        hvdcDecision<<<grid(m), BLOCK, 0, ctx->stream>>>(m, ctx->lfState.as<double>(), ctx->hvPh1.as<int>(), ctx->hvPh2.as<int>(),
+                ctx->hvK.as<double>(), ctx->hvP0.as<double>(), ctx->hvPmax12.as<double>(), ctx->hvPmax21.as<double>(),
+                ctx->hvStatus.as<int>(), ctx->hvActive.as<int>(), ctx->hvNew.as<int>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        std::vector<int> host(m);
+        DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->hvNew.p, (size_t) m * sizeof(int), cudaMemcpyDeviceToHost));
+        env->SetIntArrayRegion(result, 0, m, host.data());
+        return result;
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.hvdcCheck: ") + e.what());
         return nullptr;
     }
 }

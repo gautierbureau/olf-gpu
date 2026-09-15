@@ -83,9 +83,10 @@ what OLF must expose), `adjoint_block_and_vjp_math.md`, `energnn_vjp_training_in
 The reverse-mode derivation — specifically *why* each transpose is forced rather than a
 layout convention — is in `~/Projects/powsybl/powerflow/pyloadflow/docs/reverse_mode_vjp_explained.md`.
 
-**Consumer 2 — SecondaryVoltageControl, batched.** Its sensitivity RHS is built on existing
-`BUS_TARGET_V` rows and solved with `j.solveTransposed` (validated on plain LF 2026-07-21,
-`87f61f1`; batched port still ⏩).
+**Consumer 2 — SecondaryVoltageControl, batched.** ~~Its sensitivity RHS is built on existing
+`BUS_TARGET_V` rows and solved with `j.solveTransposed`~~ — NOT a consumer (corrected
+2026-09-15): OLF's `solveTransposed` is the Newton direction, and the batched port already
+solves it forward on the driver's factors (see the loop table below).
 
 **Consumer 3 — IncrementalPhaseControl, batched.** Same primitive: a transposed solve with
 `toRadians(1)` injected at the `BRANCH_TARGET_ALPHA1` row, one column per controller.
@@ -530,7 +531,7 @@ IncrementalTvc and IncrementalShuntVc are NOT blocked on task #40.
 | IncrementalTvc | Forward ✓ | variable column | Upload tap tables | **LANDED 2026-09-14/15** (`LOOP_TVC_KERNEL`; shared groups too since 2026-09-15 — `tvcGroupDecisionBatch`, OLF's adjustWithSeveralControllers per (scenario, group)) |
 | IncrementalShuntVc | Forward ✓ | variable column | Upload section tables | **LANDED 2026-09-15** (`LOOP_SHUNT_KERNEL`, OLF adjustB round-robin per controlled-bus group in-kernel — several controller shunts and sub-controllers per group) |
 | IncrementalFlowControl | Forward ✓ | J-row · dx on device | — | **LANDED 2026-09-15** (`LOOP_PHASE_KERNEL` order 7 / `LOOP_TRPC_KERNEL` order 9: the controlled branch's P/Q gradient from `evalClosedBranch`, I from OLF's reI/imI decomposition incl. the I = 0 one-sided rule, dotted with the unit-RHS solution at the branch's six variable columns) |
-| SecondaryVc | Needs transposed ❌ | OLF Q-terms (CPU) | Task #40 + Java eval | **Blocked** |
+| SecondaryVc | Forward ✓ (**corrected 2026-09-15**: OLF's `j.solveTransposed` IS the Newton direction — NewtonRaphson.java:62 takes its step with the same call; `GpuBatchSecondaryVc` already solves it with `solveBatchSensitivities`) | branch Q + shunt Q gradients · dx, pilot dx (all on device since the flow-observed port) | none — the observables were kept on OLF's EquationTerms by CHOICE (device-target-writers risk), not by necessity | **Not blocked; deferred** (host-paused slot; SVC off by default, 0 occurrences on rte6515) |
 
 To port IncrementalTvc to kernel: upload per-branch tap model tables (y,g1,g2,b1,b2,ksi,r1,a1
 per tap position) + implement deadband/closest-tap/ratchet as a CUDA kernel + the forward
@@ -547,16 +548,30 @@ on device as a gather-and-dot from J at the flow term's variable columns. Needs:
 each flow term to its J column positions (the scatter table already has this), (b) a kernel that
 reads J[term_cols] · dx[term_cols] → flow sensitivity. Medium effort, NOT blocked.
 
-### SecondaryVoltageControl — full in-kernel scoping
+### SecondaryVoltageControl — full in-kernel scoping (corrected 2026-09-15)
 
-A full SVC kernel port is **blocked on task #40** (batched transposed solve). The five
-stages: (1) trigger check — easy, needs device-side Q per bus; (2) re-enable — easy,
-reads/writes RL state on device; (3) sensitivity — BLOCKED, needs `J^T λ = e_i` which
-cuDSS 0.8.0 cannot do; (4) zone system — small dense LU, better on host; (5) apply —
-already device-native.
+The earlier "blocked on task #40" verdict was WRONG. OLF's `SecondaryVoltageControlOuterLoop`
+builds its sensitivities with `j.solveTransposed(rhs)` — the very call `NewtonRaphson.run`
+uses for the Newton step (OLF stores the Jacobian variable-major, so "transposed" is the
+forward system in our layout). `GpuBatchSecondaryVc` has solved it on the driver's own
+factors since 2026-08 (`solveBatchSensitivities`: unit RHS at the controlled buses'
+BUS_TARGET_V rows, gather dx). Task #40 is needed by the GNN adjoint (reverse mode) only.
 
-Phased approach: Phase 1 = `LOOP_HOST_SVC` pause/resume (now); Phase 2 = stages 1-2 as
-kernels + device transposed solve (after task #40); Phase 3 = optional batch small systems.
+What actually still runs on the host, and what a phase needs for each stage: (1) trigger —
+K per controller from `qBuf + loadQ` at the RL entry's live limits (curve/SVC limits are
+already per entry), pilot dv from x; (2) re-enable — the some-but-not-all-pinned rule on
+`dRlLimitType` per zone; (3) sensitivity — the tvcStep skeleton (fill, one unit-RHS solve
+per controlled bus); (4) observables — `calculateSensiQ` = Σ over the controller bus's CLOSED
+branches of the Q-side gradient · dx (`flcFlowAndGrad` kind 0 already returns it) + the
+shunt terms (q = −b·v²: ∂/∂v = −2bv, ∂/∂b = −v² — to be checked against OLF's term), pilot
+`calculatedV` = the BUS_V variable → dx at the pilot row; (5) zone system — A, K0, Jk, Jvpp,
+the pilot-row replacement on the zone's LAST controlled bus, one dense LU of
+nControllers × nControllers per scenario (a per-thread Gaussian elimination is fine at
+these sizes); (6) apply — new V targets on the controlled rows, the RL switch-back
+comparison target per (scenario, entry) (today's `rlVtOv` channel), the plausibility check
+(OLF returns FAILED → the run fails; the kernel would reject the scenario to the CPU).
+Estimated at the TVD port's size. Knife edge to expect: the pilot-point 1e-11 already
+accepted on the host port.
 
 ### #42 — Base load flow on the FULL device driver + in-kernel incremental TVC (landed 2026-09-14)
 

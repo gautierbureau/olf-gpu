@@ -893,12 +893,57 @@ The device does restore, set points AND solve in less time than the CPU takes to
 set points alone. End to end the run is halved, and what stops it there is the row emission, which
 is the same host work on both arms.
 
-Left for later, in order of value: the emission is 3.2 ms/step of the GPU's 3.16 — running it on
+### The AC-emulation limits outer loop, driven over the chunk (2026-09-15)
+
+A network needing a DC outer loop used to send the whole run to the stock engine — which is what
+rte6515 does, since it carries AC-emulation HVDC links. That loop now runs over the chunk, so
+rte6515 stays on the device with its own configuration.
+
+The obstacle was that a step whose loop fires needs a DIFFERENT MATRIX (saturating a link removes
+its droop coupling from the bus equations), and the steps of a chunk only batch because they share
+one factorization. The measurement that settled the mechanism: on rte6515 a value refill plus a
+cuDSS refactorization costs **11.6 ms**, against **583 ms** for the initial analysis and
+factorization and 4.4 ms for a single solve. So configurations are cheap to switch between, and
+grouping beats a per-step Woodbury correction, which would have meant per-step element sets and
+alpha systems for a gain that 11.6 ms does not justify.
+
+Per chunk, then: the device evaluates `DcHvdcAcEmulationLimitsOuterLoop.check` for every step at
+once — one thread per (step, link), on that step's own state, its own status and its own scheduled
+offset — the steps that changed are regrouped by the configuration they now ask for, each
+configuration is applied to the network with OLF's own mutators, the device matrix is refilled and
+refactorized for it, and that group's steps are re-solved together against it. Repeats until no step
+changes, within OLF's outer-loop budget. With one loop in the list, OLF's nested sweep reduces to
+exactly that: run the loop to stability.
+
+Found on the way, and this one was silent: a plan series can schedule an AC-emulation OFFSET, and
+the offset enters the target vector as the right-hand side of the emulation terms. The assembly had
+captured it as a run constant, so a planned offset moved nothing. It is now a table lookup
+(`RHS_HVDC`), per step in the time-series kernels and per run everywhere else — the assembly test's
+bit-identical target catches any mis-mapping.
+
+Gate: two more cases in `GpuTimeSeriesDcEngineTest` — a link driven past its limit by the generator
+plan, and a plan that sweeps a link's offset across both saturation sides — compared row for row
+against the stock engine like the rest.
+
+**Numbers with the loop running** (rte6515, 1000 steps, 200 planned generators, all rows):
+
+| | CPU | GPU | ratio |
+|---|---|---|---|
+| restore + set points + solve | 3.37 ms/step | 0.71 ms/step | **x4.73** |
+| the whole run, all rows streamed | 6.87 ms/step | 3.36 ms/step | **x2.04** |
+
+1000/1000 steps on the device. Stated honestly: on this plan no link ever saturates — the run
+applies **zero** configuration changes — so the loop costs one check kernel per chunk, and the
+ratio comes from the chunked solve and the cheap restore, not from loop work. What the loop bought
+is that rte6515 runs on the device at all; the regrouping path is exercised by the two unit cases,
+not by this plan.
+
+Left for later, in order of value: the emission is 3.3 ms/step of the GPU's 3.36 — running it on
 several host threads while the device solves the next chunk is the obvious next multiplier (OLF
 already partitions by step range, but each partition would build its own device context today). And
-a network needing a DC outer loop — rte6515 has AC-emulation HVDC links, so the probe switches that
-loop off the way the other DC probes do — takes the stock engine step by step; the loop kernels of
-§4g exist and could drive a chunk, re-solving only the steps whose decision changed.
+the incremental phase control loop still sends a run to the stock engine: its decision carries the
+per-controller direction ratchet of `IncrementalContextData`, which would have to become per-step
+state on the device.
 
 ## 5. Validation and benches
 

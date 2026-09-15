@@ -18,6 +18,7 @@ import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
+import com.powsybl.openloadflow.network.LfHvdc;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfNetworkParameters;
 import com.powsybl.openloadflow.network.LoadFlowModel;
@@ -66,9 +67,12 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
     /** The last run's steps solved on the device (-1 when the device never engaged). */
     public static final AtomicInteger LAST_DEVICE_STEP_COUNT = new AtomicInteger(-1);
 
+    /** The last run's AC-emulation configurations applied and re-solved (0 = no link ever switched). */
+    public static final AtomicInteger LAST_DEVICE_LOOP_REGROUPINGS = new AtomicInteger(0);
+
     private final DcLoadFlowContext context;
     private final LfNetwork network;
-    private final GpuDcAssembly assembly;
+    private GpuDcAssembly assembly;
     private final GpuDcSolver solver;
     private final int chunk;
     private final int participationType;
@@ -97,6 +101,16 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
     private double[] chunkDistributed;
     private double[] chunkMismatch;
     private int chunkCount;
+
+    // the AC-emulation limits outer loop, driven over the whole chunk
+    private final List<LfHvdc> hvdcs;
+    private final int[] hvdcStation1Generator;
+    private final int[] hvdcStation2Generator;
+    private final int[] baseHvdcStatus;
+    private final int[] chunkHvdcStatus;
+    private final double[] chunkHvdcP0;
+    private final int maxOuterLoopIterations;
+    private int[] currentConfiguration;
 
     private GpuTimeSeriesDcEngine(DcLoadFlowContext context, GpuDcAssembly assembly, GpuDcSolver solver, int chunk) {
         this.context = context;
@@ -131,6 +145,65 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
         this.chunkGeneratorMaxP = new double[genSlots];
         this.chunkGeneratorDroop = new double[genSlots];
         this.chunkGeneratorParticipationFactor = new double[genSlots];
+        this.maxOuterLoopIterations = parameters.getMaxOuterLoopIterations();
+
+        // the AC-emulation links the loop looks at, and where their converter stations sit in the
+        // generator tables: a saturation retargets them, which moves the injections of that step
+        this.hvdcs = network.getHvdcs().stream()
+                .filter(hvdc -> hvdc.isAcEmulation() && !hvdc.isDisabled()
+                        && hvdc.getBus1() != null && hvdc.getBus2() != null
+                        && !hvdc.getBus1().isDisabled() && !hvdc.getBus2().isDisabled())
+                .toList();
+        this.hvdcStation1Generator = new int[hvdcs.size()];
+        this.hvdcStation2Generator = new int[hvdcs.size()];
+        this.baseHvdcStatus = new int[hvdcs.size()];
+        for (int h = 0; h < hvdcs.size(); h++) {
+            LfHvdc hvdc = hvdcs.get(h);
+            hvdcStation1Generator[h] = generators.indexOf(hvdc.getConverterStation1());
+            hvdcStation2Generator[h] = generators.indexOf(hvdc.getConverterStation2());
+            baseHvdcStatus[h] = statusCode(hvdc.getAcEmulationControl().getAcEmulationStatus());
+        }
+        this.chunkHvdcStatus = new int[chunk * Math.max(hvdcs.size(), 1)];
+        this.chunkHvdcP0 = new double[chunk * Math.max(hvdcs.size(), 1)];
+        this.currentConfiguration = baseHvdcStatus.clone();
+        if (!hvdcs.isEmpty()) {
+            uploadHvdcTables();
+        }
+    }
+
+    private static int statusCode(LfHvdc.AcEmulationControl.AcEmulationStatus status) {
+        return switch (status) {
+            case LINEAR_MODE -> 0;
+            case SATURATION_MODE_FROM_CS1_TO_CS2 -> 1;
+            case SATURATION_MODE_FROM_CS2_TO_CS1 -> 2;
+            default -> 3;
+        };
+    }
+
+    /** The constant part of the link tables; the status and the offset are per step. */
+    private void uploadHvdcTables() {
+        int m = hvdcs.size();
+        int[] ph1 = new int[m];
+        int[] ph2 = new int[m];
+        double[] k = new double[m];
+        double[] p0 = new double[m];
+        double[] pMax12 = new double[m];
+        double[] pMax21 = new double[m];
+        int[] status = new int[m];
+        int[] active = new int[m];
+        for (int h = 0; h < m; h++) {
+            LfHvdc hvdc = hvdcs.get(h);
+            var control = hvdc.getAcEmulationControl();
+            ph1[h] = assembly.busPhRow[hvdc.getBus1().getNum()];
+            ph2[h] = assembly.busPhRow[hvdc.getBus2().getNum()];
+            k[h] = control.getDroop() * 180 / Math.PI;
+            p0[h] = control.getP0();
+            pMax12[h] = control.getPMaxFromCS1toCS2();
+            pMax21[h] = control.getPMaxFromCS2toCS1();
+            status[h] = baseHvdcStatus[h];
+            active[h] = ph1[h] >= 0 && ph2[h] >= 0 ? 1 : 0;
+        }
+        solver.setHvdcs(ph1, ph2, k, p0, pMax12, pMax21, status, active);
     }
 
     /**
@@ -182,9 +255,14 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
                     // the outer loops OLF would actually run on this network: the configured list is
                     // filtered by isNeeded, and the default list carries the HVDC AC-emulation loop
                     // whether or not the network has an AC-emulation link
-                    List<?> needed = dcParameters.getOuterLoops().stream().filter(o -> o.isNeeded(context)).toList();
+                    // the AC-emulation limits loop is driven over the chunk (below); any other loop
+                    // still sends the run to the stock engine
+                    List<?> needed = dcParameters.getOuterLoops().stream()
+                            .filter(o -> o.isNeeded(context))
+                            .filter(o -> !(o instanceof com.powsybl.openloadflow.dc.DcHvdcAcEmulationLimitsOuterLoop))
+                            .toList();
                     if (!needed.isEmpty()) {
-                        LOGGER.info("GPU time-series DC: {} outer loop(s) needed on this network, stock engine", needed.size());
+                        LOGGER.info("GPU time-series DC: {} outer loop(s) with no device model on this network, stock engine", needed.size());
                         context.close();
                         LAST_DEVICE_STEP_COUNT.set(-1);
                         return fallback.createEngine(lfNetwork);
@@ -223,6 +301,7 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
         for (int i = 0; i < baseAlpha.length; i++) {
             alphaBranches.get(i).getPiModel().setA1(baseAlpha[i]);
         }
+        applyConfiguration(baseHvdcStatus);
     }
 
     /** Capture the step's injections: the generator targets and the buses' load target P. */
@@ -246,6 +325,13 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
         for (int b = 0; b < buses.size(); b++) {
             chunkLoadTargets[slot * buses.size() + b] = buses.get(b).getLoadTargetP();
         }
+        int hvdcCount = hvdcs.size();
+        for (int h = 0; h < hvdcCount; h++) {
+            // a plan series can schedule the AC-emulation offset, so it is captured per step; the
+            // status every step starts from is the one the network was loaded with
+            chunkHvdcP0[slot * hvdcCount + h] = hvdcs.get(h).getAcEmulationControl().getP0();
+            chunkHvdcStatus[slot * hvdcCount + h] = baseHvdcStatus[h];
+        }
     }
 
     /**
@@ -264,10 +350,115 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
         }
         solver.timeSeriesChunk(count, chunkGeneratorTargets, generatorCount, chunkLoadTargets, busCount,
                 chunkGeneratorInitial, chunkGeneratorParticipating, chunkGeneratorMinTargetP, chunkGeneratorMaxTargetP,
-                chunkGeneratorMinP, chunkGeneratorMaxP, chunkGeneratorDroop, chunkGeneratorParticipationFactor,
+                chunkGeneratorMinP, chunkGeneratorMaxP, chunkGeneratorDroop, chunkGeneratorParticipationFactor, chunkHvdcP0,
                 distributedSlack ? participationType : -1, useActiveLimits, assembly.referenceGenerator,
                 chunkStates, chunkGeneratorTargets, chunkDistributed, chunkMismatch);
+        runHvdcLoop(count);
         LAST_DEVICE_STEP_COUNT.addAndGet(count);
+    }
+
+    /**
+     * {@code DcHvdcAcEmulationLimitsOuterLoop} over the whole chunk: every step's decision is taken
+     * on its own state by a kernel, and the steps that changed are regrouped by the configuration
+     * they now ask for. A configuration is applied to the network with OLF's own mutators, the
+     * device matrix is refilled and refactorized for it — 12 ms on rte6515, against 580 for the
+     * analysis, which is why grouping beats a per-step Woodbury correction here — and that group's
+     * steps are re-solved together. Repeats until no step changes, within OLF's outer-loop budget.
+     */
+    private void runHvdcLoop(int count) {
+        int hvdcCount = hvdcs.size();
+        if (hvdcCount == 0) {
+            return;
+        }
+        int[] status = java.util.Arrays.copyOf(chunkHvdcStatus, count * hvdcCount);
+        double[] offsets = java.util.Arrays.copyOf(chunkHvdcP0, count * hvdcCount);
+        for (int round = 0; round < maxOuterLoopIterations; round++) {
+            int[] decisions = solver.timeSeriesHvdcCheck(count, status, offsets);
+            java.util.Map<String, List<Integer>> groups = new java.util.LinkedHashMap<>();
+            for (int step = 0; step < count; step++) {
+                boolean changed = false;
+                for (int h = 0; h < hvdcCount; h++) {
+                    int decision = decisions[step * hvdcCount + h];
+                    if (decision >= 0) {
+                        status[step * hvdcCount + h] = decision;
+                        changed = true;
+                    }
+                }
+                if (changed) {
+                    StringBuilder key = new StringBuilder();
+                    for (int h = 0; h < hvdcCount; h++) {
+                        key.append(status[step * hvdcCount + h]).append(',');
+                    }
+                    groups.computeIfAbsent(key.toString(), k -> new java.util.ArrayList<>()).add(step);
+                }
+            }
+            if (groups.isEmpty()) {
+                break;
+            }
+            LAST_DEVICE_LOOP_REGROUPINGS.addAndGet(groups.size());
+            for (List<Integer> group : groups.values()) {
+                int[] configuration = new int[hvdcCount];
+                int first = group.get(0);
+                System.arraycopy(status, first * hvdcCount, configuration, 0, hvdcCount);
+                applyConfiguration(configuration);
+                refreshDeviceMatrix();
+                // the converter stations of a saturating link are retargeted: that is an injection
+                // change, and it belongs to the steps of this group only
+                int generatorCount = generators.size();
+                for (int step : group) {
+                    for (int h = 0; h < hvdcCount; h++) {
+                        if (hvdcStation1Generator[h] >= 0) {
+                            chunkGeneratorTargets[step * generatorCount + hvdcStation1Generator[h]] =
+                                    hvdcs.get(h).getConverterStation1().getTargetP();
+                        }
+                        if (hvdcStation2Generator[h] >= 0) {
+                            chunkGeneratorTargets[step * generatorCount + hvdcStation2Generator[h]] =
+                                    hvdcs.get(h).getConverterStation2().getTargetP();
+                        }
+                    }
+                }
+                int[] steps = group.stream().mapToInt(Integer::intValue).toArray();
+                solver.timeSeriesResolve(steps, chunkGeneratorTargets, generatorCount, chunkLoadTargets,
+                        network.getBuses().size(), chunkStates);
+            }
+        }
+        System.arraycopy(status, 0, chunkHvdcStatus, 0, count * hvdcCount);
+        // the reported mismatch is the one the network ends on, and the loop moved injections
+        solver.timeSeriesMismatch(count, chunkMismatch);
+    }
+
+    /** Put the links in the given AC-emulation configuration, with OLF's own mutators. */
+    private void applyConfiguration(int[] configuration) {
+        if (hvdcs.isEmpty() || java.util.Arrays.equals(configuration, currentConfiguration)) {
+            return;
+        }
+        for (int h = 0; h < hvdcs.size(); h++) {
+            if (configuration[h] == currentConfiguration[h]) {
+                continue;
+            }
+            var control = hvdcs.get(h).getAcEmulationControl();
+            switch (configuration[h]) {
+                case 0 -> control.switchToLinearMode();
+                case 1 -> control.switchToSaturationFromCS1toCS2(false);
+                case 2 -> control.switchToSaturationFromCS2toCS1(false);
+                default -> throw new IllegalStateException("unexpected AC emulation status " + configuration[h]);
+            }
+        }
+        currentConfiguration = configuration.clone();
+    }
+
+    /** Refill the device matrix for the configuration the network now carries, and refactorize. */
+    private void refreshDeviceMatrix() {
+        GpuDcAssembly refreshed = GpuDcAssembly.capture(network, context.getEquationSystem(),
+                context.getParameters().getEquationSystemCreationParameters());
+        if (!assembly.samePattern(refreshed)) {
+            throw new IllegalStateException("the AC emulation switch changed the matrix pattern");
+        }
+        if (!assembly.sameStructure(refreshed)) {
+            solver.setContributions(refreshed);
+        }
+        solver.refreshBranches(refreshed);
+        assembly = refreshed;
     }
 
     /**

@@ -113,6 +113,7 @@ public final class GpuDcSolver implements AutoCloseable {
         try {
             solver.setBranches(a.ph1Row, a.ph2Row, a.a1Row, a.a1, a.power);
             solver.setBuses(a);
+            solver.setHvdcOffsets(a.hvdcP0);
             solver.setGenerators(a);
             solver.fillValues();
         } catch (RuntimeException e) {
@@ -125,6 +126,7 @@ public final class GpuDcSolver implements AutoCloseable {
     /** Re-upload the branch model (powers, fixed shifts) after a tap change, then refill and refactorize. */
     public void refreshBranches(GpuDcAssembly a) {
         setBranches(a.ph1Row, a.ph2Row, a.a1Row, a.a1, a.power);
+        setHvdcOffsets(a.hvdcP0);
         fillValues();
     }
 
@@ -135,6 +137,11 @@ public final class GpuDcSolver implements AutoCloseable {
     private void setGenerators(GpuDcAssembly a) {
         setGenerators(handle(), a.genInitialTargetP, a.genTargetP, a.genMinTargetP, a.genMaxTargetP, a.genMinP, a.genMaxP,
                 a.genDroop, a.genParticipationFactor, a.genParticipating);
+    }
+
+    /** The AC-emulation offsets the target right-hand side reads (LfNetwork.getHvdcs() order). */
+    public void setHvdcOffsets(double[] p0) {
+        setHvdcOffsets(handle(), p0);
     }
 
     /** The loads' target P per bus (LfNetwork.getBuses() order). */
@@ -201,7 +208,7 @@ public final class GpuDcSolver implements AutoCloseable {
     }
 
     /** The value and rhs contribution lists refreshed on the SAME pattern (a term switched on or off). */
-    void setContributions(GpuDcAssembly a) {
+    public void setContributions(GpuDcAssembly a) {
         setContributions(handle(), a.contribPtr, a.contribKind, a.contribElem, a.contribCoef,
                 a.targetKind, a.targetElem, a.rhsPtr, a.rhsKind, a.rhsElem, a.rhsCoef);
     }
@@ -222,7 +229,7 @@ public final class GpuDcSolver implements AutoCloseable {
     }
 
     /** The HVDC links in AC emulation the device outer loop decides for. */
-    void setHvdcs(int[] ph1Row, int[] ph2Row, double[] k, double[] p0, double[] pMax12, double[] pMax21, int[] status, int[] active) {
+    public void setHvdcs(int[] ph1Row, int[] ph2Row, double[] k, double[] p0, double[] pMax12, double[] pMax21, int[] status, int[] active) {
         setHvdcs(handle(), ph1Row, ph2Row, k, p0, pMax12, pMax21, status, active);
     }
 
@@ -287,13 +294,29 @@ public final class GpuDcSolver implements AutoCloseable {
     public void timeSeriesChunk(int steps, double[] generatorTargets, int generatorCount, double[] loadTargetP, int busCount,
                                 double[] generatorInitialTargets, int[] generatorParticipating, double[] generatorMinTargetP,
                                 double[] generatorMaxTargetP, double[] generatorMinP, double[] generatorMaxP,
-                                double[] generatorDroop, double[] generatorParticipationFactor,
+                                double[] generatorDroop, double[] generatorParticipationFactor, double[] hvdcP0PerStep,
                                 int participationType, boolean useActiveLimits, int referenceGenerator, double[] outStates,
                                 double[] outGeneratorTargets, double[] outDistributed, double[] outMismatch) {
         timeSeriesChunk(handle(), steps, generatorTargets, generatorCount, loadTargetP, busCount, generatorInitialTargets,
                 generatorParticipating, generatorMinTargetP, generatorMaxTargetP, generatorMinP, generatorMaxP, generatorDroop,
-                generatorParticipationFactor, participationType, useActiveLimits, referenceGenerator, outStates,
+                generatorParticipationFactor, hvdcP0PerStep, participationType, useActiveLimits, referenceGenerator, outStates,
                 outGeneratorTargets, outDistributed, outMismatch);
+    }
+
+    /** The AC-emulation limits decision of every step of a chunk, on its own state and status. */
+    public int[] timeSeriesHvdcCheck(int steps, int[] statusPerStep, double[] p0PerStep) {
+        return timeSeriesHvdcCheck(handle(), steps, statusPerStep, p0PerStep);
+    }
+
+    /** Re-solve a subset of the chunk's steps against the current factorization. */
+    public void timeSeriesResolve(int[] stepIndices, double[] generatorTargets, int generatorCount, double[] loadTargetP,
+                                  int busCount, double[] outStates) {
+        timeSeriesResolve(handle(), stepIndices, generatorTargets, generatorCount, loadTargetP, busCount, outStates);
+    }
+
+    /** The slack mismatch of every step, from the injections as they now stand. */
+    public void timeSeriesMismatch(int steps, double[] outMismatch) {
+        timeSeriesMismatch(handle(), steps, outMismatch);
     }
 
     /** One contingency in one call: its elements, the Woodbury update and the factor evaluations. */
@@ -440,6 +463,8 @@ public final class GpuDcSolver implements AutoCloseable {
     private static native void setBuses(long handle, int[] pColumn, int[] phRow, double[] loadP, int[] flags, int[] sc, int[] genStart,
                                         int[] scBusPtr, int[] scBusList, int[] scSlackCount);
 
+    private static native void setHvdcOffsets(long handle, double[] p0);
+
     private static native void setBusLoads(long handle, double[] loadP);
 
     private static native void setExcludedBuses(long handle, int[] buses);
@@ -501,9 +526,17 @@ public final class GpuDcSolver implements AutoCloseable {
                                                double[] loadTargetP, int busCount, double[] generatorInitialTargets,
                                                int[] generatorParticipating, double[] generatorMinTargetP, double[] generatorMaxTargetP,
                                                double[] generatorMinP, double[] generatorMaxP, double[] generatorDroop,
-                                               double[] generatorParticipationFactor, int participationType, boolean useActiveLimits,
+                                               double[] generatorParticipationFactor, double[] hvdcP0PerStep, int participationType,
+                                               boolean useActiveLimits,
                                                int referenceGenerator, double[] outStates, double[] outGeneratorTargets,
                                                double[] outDistributed, double[] outMismatch);
+
+    private static native int[] timeSeriesHvdcCheck(long handle, int steps, int[] statusPerStep, double[] p0PerStep);
+
+    private static native void timeSeriesResolve(long handle, int[] stepIndices, double[] generatorTargets, int generatorCount,
+                                                 double[] loadTargetP, int busCount, double[] outStates);
+
+    private static native void timeSeriesMismatch(long handle, int steps, double[] outMismatch);
 
     private static native void sensiContingency(long handle, int[] ph1Row, int[] ph2Row, int[] stateColumn, int[] kind,
                                                 double[] diag, double[] newAlpha, int factorSource, int flowSource,

@@ -211,3 +211,15 @@ run it), 200 planned generators, one thread, all three datasets streamed into a 
 CPU per-step split (1000 steps): restore and set points 1.21, solve 1.74, branch rows 2.42, bus and
 generator rows 0.75. The device takes the first two; the row emission is host work on both arms and
 is what caps the end-to-end ratio at about two.
+
+With the AC-emulation limits outer loop left ON (rte6515's own configuration), driven over the
+chunk instead of sending the run to the stock engine:
+
+| date | steps | phase | CPU | GPU | ratio |
+|---|---|---|---|---|---|
+| 2026-09-15 | 1000 | restore + set points + solve | 3.37 ms/step | 0.71 ms/step | x4.73 |
+| 2026-09-15 | 1000 | whole run, all rows | 6.87 ms/step | 3.36 ms/step | x2.04 |
+
+1000/1000 steps on the device, and zero AC-emulation configuration changes on this plan: the loop
+costs one check kernel per chunk here. A refill plus refactorization, the price of one configuration
+change, is 11.6 ms on rte6515 against 583 ms for the initial analysis and factorization.

@@ -94,9 +94,14 @@ public final class GpuDcAssembly {
     public static final int TARGET_ALPHA1 = 2;
     public static final int TARGET_ZERO_PHI = 3;
 
-    /** Rhs contribution kinds: a constant, or {@code coef * power[elem] * (A2 - a1fixed[elem])}. */
+    /**
+     * Rhs contribution kinds: a constant, {@code coef * power[elem] * (A2 - a1fixed[elem])}, or
+     * {@code coef * p0[elem]} for an HVDC AC-emulation term — whose offset a time-series plan can
+     * schedule, which is why it is a table lookup and not a captured constant.
+     */
     public static final int RHS_CONST = 0;
     public static final int RHS_BRANCH = 1;
+    public static final int RHS_HVDC = 2;
 
     // --- the pattern and the value contributions
     final int n;
@@ -129,6 +134,9 @@ public final class GpuDcAssembly {
     final int[] busFlags;               // bit 0 disabled, bit 1 participating, bit 2 fictitious, bit 3 slack
     final int[] busSc;                  // synchronous component index
     final int[] busGenStart;            // buses + 1: the bus's generators in the generator tables
+
+    // --- HVDC links (LfNetwork.getHvdcs() order): the AC-emulation offset the rhs terms carry
+    final double[] hvdcP0;
 
     // --- synchronous components: their buses (in LfSynchronousNetwork.getBuses() order) and slack count
     final int[] scBusPtr;
@@ -178,6 +186,7 @@ public final class GpuDcAssembly {
         busFlags = b.busFlags;
         busSc = b.busSc;
         busGenStart = b.busGenStart;
+        hvdcP0 = b.hvdcP0;
         scBusPtr = b.scBusPtr;
         scBusList = b.scBusList;
         scSlackCount = b.scSlackCount;
@@ -315,6 +324,8 @@ public final class GpuDcAssembly {
                     int b = rhsElem[r];
                     double a1Fixed = a1Row[b] >= 0 ? 0.0 : a1[b];
                     rhs += rhsCoef[r] * power[b] * (A2 - a1Fixed);
+                } else if (rhsKind[r] == RHS_HVDC) {
+                    rhs += rhsCoef[r] * hvdcP0[rhsElem[r]];
                 } else {
                     rhs += rhsCoef[r];
                 }
@@ -362,6 +373,7 @@ public final class GpuDcAssembly {
         int[] busFlags;
         int[] busSc;
         int[] busGenStart;
+        double[] hvdcP0;
         int[] scBusPtr;
         int[] scBusList;
         int[] scSlackCount;
@@ -395,6 +407,7 @@ public final class GpuDcAssembly {
             }
             variables();
             branches();
+            hvdcs();
             buses();
             equations();
             return new GpuDcAssembly(this);
@@ -437,6 +450,19 @@ public final class GpuDcAssembly {
                 // AbstractClosedBranchDcFlowEquationTerm.getPower / DcBranchVector.updateBranchModel
                 power[b] = flowing ? AbstractClosedBranchDcFlowEquationTerm.computePower(creationParameters.isUseTransformerRatio(),
                         creationParameters.getDcApproximationType(), branch.getPiModel()) : 0;
+            }
+        }
+
+        private void hvdcs() {
+            var links = network.getHvdcs();
+            hvdcP0 = new double[Math.max(links.size(), 1)];
+            for (int h = 0; h < links.size(); h++) {
+                if (links.get(h).getNum() != h) {
+                    throw new IllegalStateException("hvdc numbering is not positional");
+                }
+                // a link without AC emulation has no control, and contributes no rhs term
+                var control = links.get(h).getAcEmulationControl();
+                hvdcP0[h] = control != null ? control.getP0() : 0;
             }
         }
 
@@ -798,9 +824,7 @@ public final class GpuDcAssembly {
             if (term instanceof ClosedBranchSide1DcFlowEquationTerm || term instanceof ClosedBranchSide2DcFlowEquationTerm) {
                 branchRhs(term.getElementNum(), term instanceof ClosedBranchSide1DcFlowEquationTerm, term.rhs());
             } else if (term instanceof HvdcAcEmulationSide1DCFlowEquationTerm || term instanceof HvdcAcEmulationSide2DCFlowEquationTerm) {
-                rhsKind.add(RHS_CONST);
-                rhsElem.add(-1);
-                rhsCoef.add(term.rhs());                     // ±p0 of the AC emulation
+                hvdcRhs(term.getElementNum(), term instanceof HvdcAcEmulationSide1DCFlowEquationTerm, term.rhs());
             } else {
                 throw new UnsupportedOperationException("equation term with rhs not supported on the device: " + term.getClass().getName());
             }
@@ -817,6 +841,18 @@ public final class GpuDcAssembly {
                 throw new UnsupportedOperationException("equation term array evaluator not supported on the device: " + evaluator.getClass().getName());
             }
             branchRhs(branch, side1, evaluator.rhs(branch));
+        }
+
+        /** The AC-emulation offset: {@code +p0} on side 1, {@code -p0} on side 2. */
+        private void hvdcRhs(int hvdc, boolean side1, double olfValue) {
+            double coef = side1 ? 1.0 : -1.0;
+            if (Double.compare(olfValue, coef * hvdcP0[hvdc]) != 0) {
+                throw new IllegalStateException("hvdc " + network.getHvdcs().get(hvdc).getId() + ": rhs " + olfValue
+                        + " is not " + coef + " x p0 " + hvdcP0[hvdc]);
+            }
+            rhsKind.add(RHS_HVDC);
+            rhsElem.add(hvdc);
+            rhsCoef.add(coef);
         }
 
         /** rhs1 = -p * (A2 - a1fixed), rhs2 = p * (A2 - a1fixed); a1fixed = 0 when a1 is a variable. */

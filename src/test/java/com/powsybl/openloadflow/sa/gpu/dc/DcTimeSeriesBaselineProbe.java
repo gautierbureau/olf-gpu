@@ -83,10 +83,10 @@ class DcTimeSeriesBaselineProbe {
         int threads = Integer.parseInt(System.getenv().getOrDefault("OLF_TS_THREADS", "1"));
 
         Network network = Network.read(CASE_FILE);
-        // rte6515 carries AC-emulation HVDC links, which make OLF configure the DC AC-emulation
-        // limits outer loop; the DC study configuration the other probes use switches it off, and
-        // the device time-series engine takes the chunked path only when no outer loop is needed
-        LoadFlowParameters lfParameters = JsonLoadFlowParameters.read(PARAMS_FILE).setDc(true).setHvdcAcEmulation(false);
+        // rte6515 carries AC-emulation HVDC links. OLF_TS_HVDC=1 leaves them on, so the AC-emulation
+        // limits outer loop runs — driven over the chunk on the device arm.
+        boolean hvdcAcEmulation = "1".equals(System.getenv("OLF_TS_HVDC"));
+        LoadFlowParameters lfParameters = JsonLoadFlowParameters.read(PARAMS_FILE).setDc(true).setHvdcAcEmulation(hvdcAcEmulation);
         RegularTimeSeriesIndex index = RegularTimeSeriesIndex.create(Instant.parse("2025-01-01T00:00:00Z"),
                 Instant.parse("2025-01-01T00:00:00Z").plus(Duration.ofHours(steps - 1L)), Duration.ofHours(1));
 
@@ -102,7 +102,8 @@ class DcTimeSeriesBaselineProbe {
             }
             plan.add(TimeSeries.createDouble(generator.getId(), index, values));
         }
-        System.out.printf("DC-TS rte6515_full | %d steps x %d planned generators | %d thread(s)%n", steps, plan.size(), threads);
+        System.out.printf("DC-TS rte6515_full | %d steps x %d planned generators | %d thread(s) | hvdc ac emulation %s%n",
+                steps, plan.size(), threads, hvdcAcEmulation ? "ON (outer loop runs)" : "off");
 
         // warm up the JIT and the network caches with a couple of steps
         run(network, plan.subList(0, Math.min(plan.size(), 5)), lfParameters, threads, false, false, false, null);
@@ -129,6 +130,7 @@ class DcTimeSeriesBaselineProbe {
             var provider = com.powsybl.openloadflow.dc.gpu.GpuTimeSeriesDcEngine.planProvider();
             run(network, plan.subList(0, Math.min(plan.size(), 5)), lfParameters, threads, false, false, false, null, provider);
             com.powsybl.openloadflow.dc.gpu.GpuTimeSeriesDcEngine.LAST_DEVICE_STEP_COUNT.set(-1);
+            com.powsybl.openloadflow.dc.gpu.GpuTimeSeriesDcEngine.LAST_DEVICE_LOOP_REGROUPINGS.set(0);
             double gpuSolveOnly = run(network, plan, lfParameters, threads, false, false, false, null, provider);
             CountingWriter gpuCounter = new CountingWriter();
             double gpuAll = run(network, plan, lfParameters, threads, true, true, true, gpuCounter, provider);
@@ -137,6 +139,8 @@ class DcTimeSeriesBaselineProbe {
             System.out.printf("DC-TS GPU with all rows            %8.1f ms total | %7.2f ms/step | x%.2f | %,d rows | %d steps on the device%n",
                     gpuAll, gpuAll / steps, withAll / gpuAll, gpuCounter.rows.sum(),
                     com.powsybl.openloadflow.dc.gpu.GpuTimeSeriesDcEngine.LAST_DEVICE_STEP_COUNT.get());
+            System.out.printf("DC-TS outer loop: %d AC-emulation configuration(s) applied and re-solved over the run%n",
+                    com.powsybl.openloadflow.dc.gpu.GpuTimeSeriesDcEngine.LAST_DEVICE_LOOP_REGROUPINGS.get());
         }
     }
 

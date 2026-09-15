@@ -144,6 +144,31 @@ class GpuTimeSeriesDcEngineTest {
         cases.add(new Case("ieee118 generators, more steps than a chunk", IeeeCdfNetworkFactory::create118,
                 () -> generatorPlan(IeeeCdfNetworkFactory.create118(), 300, 5),
                 () -> dc().setDistributedSlack(true).setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P_MAX)));
+        // the AC-emulation limits loop, driven over the chunk: the plan walks the link's offset
+        // across its limit so that steps of one chunk end in different saturation states
+        cases.add(new Case("hvdc ac emulation saturating across steps", () -> {
+            Network n = com.powsybl.openloadflow.network.HvdcNetworkFactory.createHvdcLinkedByTwoLinesAndSwitch(
+                    com.powsybl.iidm.network.HvdcConverterStation.HvdcType.VSC);
+            n.getHvdcLine("hvdc23").setMaxP(170);
+            return n;
+        }, () -> {
+            Network n = com.powsybl.openloadflow.network.HvdcNetworkFactory.createHvdcLinkedByTwoLinesAndSwitch(
+                    com.powsybl.iidm.network.HvdcConverterStation.HvdcType.VSC);
+            return generatorPlan(n, 12, 2);
+        }, () -> dc().setHvdcAcEmulation(true)));
+        cases.add(new Case("hvdc ac emulation, planned offset", () -> {
+            Network n = com.powsybl.openloadflow.network.HvdcNetworkFactory.createHvdcInAcEmulationAndPSTInSymetricNetwork();
+            n.getHvdcLine("hvdc12").setMaxP(20);
+            return n;
+        }, () -> {
+            int steps = 10;
+            RegularTimeSeriesIndex index = index(steps);
+            double[] values = new double[steps];
+            for (int s = 0; s < steps; s++) {
+                values[s] = -40 + 80.0 * s / (steps - 1);       // sweeps both saturation sides
+            }
+            return List.of(TimeSeries.createDouble("hvdc12", index, values));
+        }, () -> dc().setHvdcAcEmulation(true)));
         cases.add(new Case("ieee300 generators", IeeeCdfNetworkFactory::create300,
                 () -> generatorPlan(IeeeCdfNetworkFactory.create300(), 13, 8),
                 () -> dc().setDistributedSlack(true).setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P_MAX)));

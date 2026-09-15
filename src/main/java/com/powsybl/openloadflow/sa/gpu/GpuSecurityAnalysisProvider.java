@@ -151,7 +151,20 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
 
         LoadFlowParameters loadFlowParameters = runParameters.getSecurityAnalysisParameters().getLoadFlowParameters();
         if (loadFlowParameters.isDc()) {
-            // DC has no GPU path: the standard OpenLoadFlow security analysis handles it.
+            // DC: the fast (Woodbury) mode runs on the device — S resident, in-kernel Woodbury, flows and
+            // limit screen — and degrades to the stock WoodburyDcSecurityAnalysis without a GPU. The
+            // plain DC security analysis has no device path.
+            if (OpenSecurityAnalysisParameters.getOrDefault(runParameters.getSecurityAnalysisParameters()).isDcFastMode()
+                    && com.powsybl.openloadflow.dc.gpu.GpuDcSolver.isAvailable()) {
+                LOGGER.info("Version: {} (GPU Woodbury DC security analysis)", new PowsyblOpenLoadFlowVersion());
+                GraphConnectivityFactory<LfBus, LfBranch> dcConnectivityFactory = runParameters.getOperatorStrategies().isEmpty()
+                        ? connectivityFactory : new NaiveGraphConnectivityFactory<>(LfBus::getNum);
+                GpuWoodburyDcSecurityAnalysis dcAnalysis = new GpuWoodburyDcSecurityAnalysis(network, matrixFactory,
+                        dcConnectivityFactory, runParameters.getMonitors(), runParameters.getReportNode());
+                return dcAnalysis.run(workingVariantId, runParameters.getSecurityAnalysisParameters(), contingenciesProvider,
+                        runParameters.getComputationManager(), runParameters.getOperatorStrategies(), runParameters.getActions(),
+                        runParameters.getLimitReductions());
+            }
             return super.run(network, workingVariantId, contingenciesProvider, runParameters);
         }
 

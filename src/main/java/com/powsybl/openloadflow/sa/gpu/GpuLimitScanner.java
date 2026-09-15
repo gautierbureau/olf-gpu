@@ -260,6 +260,52 @@ final class GpuLimitScanner {
         }
     }
 
+    /**
+     * The DC path's consumer: branch candidates only (DC has no bus voltage), the outaged branches
+     * given by the contingency's own predicate — the stock Woodbury detection never disables them on
+     * the network, it filters them the same way — and the voltage-angle limits handed back to the
+     * manager as usual.
+     */
+    void detectFromCandidates(LfNetwork network, LimitViolationManager manager, int[] candidates,
+                              java.util.function.Predicate<LfBranch> isBranchDisabled) {
+        this.view = null;                                    // the values are the network's, the topology the predicate's
+        this.state = null;
+        this.topology = GpuContingencyTopology.NETWORK;
+        confirmBranchCandidates(manager, candidates, isBranchDisabled);
+        manager.detectVoltageAngleViolations(network);
+    }
+
+    /** Confirm the branch-limit candidates (table order, most severe first per group) and return
+     *  the index of the first non-branch record. */
+    private int confirmBranchCandidates(LimitViolationManager manager, int[] candidates,
+                                        java.util.function.Predicate<LfBranch> isBranchDisabled) {
+        LfBranch[] branches = table.branches();
+        int reportedGroup = -1;
+        int currentBranch = -1;
+        int i = 0;
+        int busBase = table.limitCount();
+        for (; i < candidates.length && candidates[i] < busBase; i++) {
+            int limit = candidates[i];
+            int group = table.limitGroup(limit);
+            if (group == reportedGroup) {
+                continue;                                    // this group already reported its most serious limit
+            }
+            int b = table.groupBranch(group);
+            LfBranch branch = branches[b];
+            if (isBranchDisabled.test(branch)) {
+                continue;                                    // the contingency took it out
+            }
+            if (b != currentBranch) {
+                java.util.Arrays.fill(quantityCached, false);
+                currentBranch = b;
+            }
+            if (confirm(branch, group, limit, manager)) {
+                reportedGroup = group;
+            }
+        }
+        return i;
+    }
+
     /** Re-test one candidate exactly and report it if it holds. */
     private boolean confirm(LfBranch branch, int group, int limit, LimitViolationManager manager) {
         byte side = table.side(group);

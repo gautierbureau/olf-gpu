@@ -530,6 +530,37 @@ work (profile below), the setup (device connectivity criterion instead of the ho
 limit table and the model are already once-per-run), the column build (mismatch by a plain
 loop instead of a bus-set copy; the distribution model's boxed lists).
 
+## 4d. Phase 2c log (2026-09-15) — the remaining classes
+
+Every contingency class the stock Woodbury handles now goes to the device except operator
+strategies (phase 5) and two shapes the stock does not handle either or the kernel does not
+size for (a lost SLACK bus; more than 32 Woodbury elements). Mechanism: the stock's lost-power
+branch reproduced on the host as an exact replay (bus DC states saved, `processLostPowerChanges`,
+`distributeSlack` on the remaining buses, the target vector re-read from the mutated network,
+islanded P and disabled α rows zeroed, everything restored) for the classes the array model does
+not cover — lost generation/load/HVDC, HVDC without power (stations added to the lost generators
+FIRST, as the stock does, and the reported `LfContingency` built BEFORE that addition), load-based
+balance types, multi-slack — while plain islanding keeps the array replay. Bus losses are OLF's own
+cleanup (incident branches opened) plus the islanded bus; shunt shifts have no DC effect. A
+contingency without any branch element is a modified target alone (k = 0), and a component
+without any element (the far side of an HVDC link) works. Parity 1e-10 pu vs stock on nine cases
+(`GpuWoodburyDcSecurityAnalysisTest`). The device count accumulates over connected components.
+
+## 4e. Phase 5 log (2026-09-15) — operator strategies
+
+Landed (`dc`, the phase-5 commit): strategies run on the device as a second pass. What stays on
+the stock path per contingency is now only a lost SLACK bus (unsupported in DC by the stock too)
+and a scenario with more than 32 Woodbury elements. Mechanism: action elements' ±1 columns appended
+to S with `WoodburyEngine`'s per-element diagonal and new alpha shipped to the kernel; per scenario
+the condition on the post-contingency violations, the connectivity re-check (device criterion,
+OLF graph confirmation), the exact replay of the modified target with the actions, Woodbury over
+contingency + action elements, the stock result with contingency and actions applied on the
+network then restored (`NetworkState`, one per scenario — strategies are few). OLF fix found on the
+way: the stock Woodbury NPE'd on generator/load actions (`olf-local-patches-dc` 02cdae225,
+upstream-worthy). Parity 1e-10 pu on OLF's own tap scenarios, two taps, switch open/close on every
+outage of the node-breaker network, generator + load set points (13 tests in
+`GpuWoodburyDcSecurityAnalysisTest`).
+
 ## 5. Validation and benches
 
 - Parity oracle = stock OLF Woodbury on the same `LfNetwork` (same slack, same

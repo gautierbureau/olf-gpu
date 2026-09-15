@@ -223,6 +223,20 @@ public final class GpuDcAssembly {
         return busPColumn[bus];
     }
 
+    /**
+     * Same non-zero PATTERN and same element identity: the device context can be kept and refilled,
+     * the contribution lists re-uploaded ({@link GpuDcSolver#setContributions}). A term switched on
+     * or off — an HVDC leaving AC emulation for saturation — keeps the pattern (OLF emits a matrix
+     * element for every variable of every term, active or not) and only changes the contributions.
+     */
+    public boolean samePattern(GpuDcAssembly other) {
+        return n == other.n && Arrays.equals(rowPtr, other.rowPtr) && Arrays.equals(colIdx, other.colIdx)
+                && Arrays.equals(targetKind, other.targetKind) && Arrays.equals(targetElem, other.targetElem)
+                && Arrays.equals(ph1Row, other.ph1Row) && Arrays.equals(ph2Row, other.ph2Row) && Arrays.equals(a1Row, other.a1Row)
+                && Arrays.equals(busPColumn, other.busPColumn) && Arrays.equals(busPhRow, other.busPhRow)
+                && Arrays.equals(busGenStart, other.busGenStart) && generators.equals(other.generators);
+    }
+
     /** Same equation structure (pattern, contributions, target kinds and rhs lists): values may be refilled in place. */
     public boolean sameStructure(GpuDcAssembly other) {
         return n == other.n && Arrays.equals(rowPtr, other.rowPtr) && Arrays.equals(colIdx, other.colIdx)

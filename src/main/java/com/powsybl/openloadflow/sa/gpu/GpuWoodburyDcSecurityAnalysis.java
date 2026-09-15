@@ -26,7 +26,6 @@ import com.powsybl.openloadflow.dc.fastdc.ComputedElement;
 import com.powsybl.openloadflow.dc.fastdc.ComputedSwitchBranchElement;
 import com.powsybl.openloadflow.dc.fastdc.ComputedTapPositionChangeElement;
 import com.powsybl.openloadflow.dc.fastdc.ConnectivityBreakAnalysis;
-import com.powsybl.openloadflow.dc.fastdc.WoodburyEngine;
 import com.powsybl.openloadflow.dc.gpu.GpuDcSolver;
 import com.powsybl.openloadflow.equations.Equation;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -141,9 +140,23 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             cleanContingencies(lfNetwork, propagatedContingencies);
 
             long tPre0 = System.nanoTime();
-            // pre-contingency state: OLF's own solve (the context's KLU), exactly the stock result
-            double[] preContingencyStates = WoodburyEngine.runDcLoadFlowWithModifiedTargetVector(context, new DisabledNetwork(), reportNode);
             EquationSystem<DcVariableType, DcEquationType> equationSystem = context.getEquationSystem();
+            // the device: factorization first — the base solve runs on it too, so KLU never factorizes here
+            SparseMatrix matrix = (SparseMatrix) context.getJacobianMatrix().getMatrix();
+            GpuDcSolver solver = GpuDcSolver.create(matrix);
+            // pre-contingency state: WoodburyEngine.runDcLoadFlowWithModifiedTargetVector with an empty disabled
+            // network, minus its KLU solve — the base slack distribution on the network, then the target vector
+            double[] preContingencyStates;
+            try {
+                if (dcParameters.isDistributedSlack()) {
+                    com.powsybl.openloadflow.dc.DcLoadFlowEngine.distributeSlack(lfNetwork, lfNetwork.getBuses(), dcParameters.getBalanceType(),
+                            dcParameters.getNetworkParameters().isUseActiveLimits());
+                }
+                preContingencyStates = solver.solve(context.getTargetVector().getArray().clone());
+            } catch (RuntimeException e) {
+                solver.close();
+                throw e;
+            }
             equationSystem.getStateVector().set(preContingencyStates);
             updateNetwork(lfNetwork, equationSystem, preContingencyStates);
             if (context.getParameters().isSetVToNan()) {
@@ -177,9 +190,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             List<ComputedElement> actionElements = actionElementsByLfAction.values().stream().flatMap(Collection::stream).toList();
             StrategySetup strategySetup = new StrategySetup(operatorStrategiesByContingencyId, lfActionById, actionElementsByLfAction);
 
-            // the device: factorization, branch model, S — before anything else needs S
-            SparseMatrix matrix = (SparseMatrix) context.getJacobianMatrix().getMatrix();
-            GpuDcSolver solver = GpuDcSolver.create(matrix);
+            // the device: branch model, S — before anything else needs S
             long tFactor = System.nanoTime();
             int elementCount;
             try {
@@ -204,7 +215,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                     connectivityAnalysis(solver, lfNetwork, propagatedContingencies, elementByBranch);
             long tConn = System.nanoTime();
             if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
-                System.err.printf("DC_WOODBURY_PRE preContingency=%.0f ms factor=%.0f ms S=%.0f ms connectivity=%.0f ms (%d potentially breaking -> graph)%n",
+                System.err.printf("DC_WOODBURY_PRE factor+preContingency(device)=%.0f ms strategies+elements=%.0f ms S=%.0f ms connectivity=%.0f ms (%d potentially breaking -> graph)%n",
                         (tPre1 - tPre0) / 1e6, (tFactor - tPre1) / 1e6, (tS - tFactor) / 1e6, (tConn - tS) / 1e6, lastPotentiallyBreaking);
             }
 

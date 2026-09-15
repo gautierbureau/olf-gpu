@@ -195,33 +195,35 @@ final class DcSlackDistributionModel {
         }
 
         // getParticipatingElements, with factors evaluated on the RESET targets
-        List<Integer> elements = new ArrayList<>();
-        List<Double> factors = new ArrayList<>();
+        int[] elements = new int[m];
+        double[] factors = new double[m];
+        int count = 0;
         for (int i = 0; i < m; i++) {
             if (excludedBuses.contains(genBus[i]) || !stepParticipating(i)) {
                 continue;
             }
             double f = factor(i, target[i], remaining);
             if (f != 0) {
-                elements.add(i);
-                factors.add(f);
+                elements[count] = i;
+                factors[count] = f;
+                count++;
             }
         }
 
         // the water-filling loop
         int iteration = 0;
-        while (!elements.isEmpty() && Math.abs(remaining) > ActivePowerDistribution.P_RESIDUE_EPS) {
+        while (count > 0 && Math.abs(remaining) > ActivePowerDistribution.P_RESIDUE_EPS) {
             double norm = 0;
-            for (double f : factors) {
-                norm += f;
+            for (int k = 0; k < count; k++) {
+                norm += factors[k];
             }
             if (!(norm > 0.0)) {
                 break;
             }
             double done = 0;
-            for (int k = 0; k < elements.size(); ) {
-                int i = elements.get(k);
-                double f = factors.get(k) / norm;             // normalizeParticipationFactors
+            for (int k = 0; k < count; ) {
+                int i = elements[k];
+                double f = factors[k] / norm;                 // normalizeParticipationFactors
                 double minTargetP = useActiveLimits ? genMinTargetP[i] : -Double.MAX_VALUE;
                 double maxTargetP = useActiveLimits ? genMaxTargetP[i] : Double.MAX_VALUE;
                 double targetP = target[i];
@@ -244,8 +246,10 @@ final class DcSlackDistributionModel {
                     done += newTargetP - targetP;
                 }
                 if (drop) {
-                    elements.remove(k);
-                    factors.remove(k);
+                    // OLF's iterator remove: the list keeps its order
+                    System.arraycopy(elements, k + 1, elements, k, count - k - 1);
+                    System.arraycopy(factors, k + 1, factors, k, count - k - 1);
+                    count--;
                 } else {
                     k++;
                 }

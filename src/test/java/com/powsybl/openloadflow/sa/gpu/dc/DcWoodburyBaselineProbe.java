@@ -88,6 +88,14 @@ class DcWoodburyBaselineProbe {
         System.out.printf("DC-BASELINE rte6515_full | %d N-1 contingencies | %d monitored branches | CPU threadCount %d, GPU 1%n",
                 contingencies.size(), monitoredBranches.size(), threads);
 
+        if ("1".equals(System.getenv("OLF_DC_SKIP_KLU")) && "1".equals(System.getenv("OLF_DC_GPU"))) {
+            // profiling run: the GPU arm alone
+            assumeTrue(com.powsybl.openloadflow.dc.gpu.GpuDcSolver.isAvailable(), "GPU native library not available");
+            Arm gpu = run("GPU", new SparseMatrixFactory(), network, contingencies, monitoredBranches, 1, true);
+            System.out.printf("DC-BASELINE %-5s wall %6d ms | %.3f ms/ctg | statuses %s | violations %d (GPU-only run)%n",
+                    gpu.name(), gpu.wallMs(), gpu.wallMs() / (double) contingencies.size(), statusCounts(gpu.result()), violationCount(gpu.result()));
+            return;
+        }
         if ("1".equals(System.getenv("OLF_DC_SKIP_KLU"))) {
             // isolation run: the cuDSS arm alone, in a JVM that never loaded KLU
             assumeTrue(CuDssMatrixFactory.isAvailable(), "cuDSS matrix factory not available");

@@ -159,6 +159,16 @@ public final class GpuDcSolver implements AutoCloseable {
     }
 
     /**
+     * {@code ConnectivityBreakAnalysis}'s sensitivity criterion for every contingency (CSR over
+     * element indices) evaluated on the device S: the max over a contingency's elements of the
+     * summed |sensitivities| on its own branches. Above {@code 1 - 1e-6} the contingency
+     * potentially breaks connectivity and the graph confirmation decides.
+     */
+    public double[] connectivityCriterion(int[] ctgPtr, int[] ctgElem) {
+        return connectivityCriterion(handle(), ctgPtr, ctgElem);
+    }
+
+    /**
      * The modified target columns of the coming chunk ({@code n x count}, column-major), solved
      * against the factorization and kept as the base states {@code ctgBase} refers to — the
      * batched form of {@code WoodburyEngine.runDcLoadFlowWithModifiedTargetVector}.
@@ -192,4 +202,6 @@ public final class GpuDcSolver implements AutoCloseable {
     private static native int[] woodburyChunk(long handle, int[] ctgPtr, int[] ctgElem, int[] ctgBase, double band, int capacity, double[] outStates);
 
     private static native void setChunkTargets(long handle, double[] targets, int count);
+
+    private static native double[] connectivityCriterion(long handle, int[] ctgPtr, int[] ctgElem);
 }

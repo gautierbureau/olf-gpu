@@ -130,6 +130,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             // same preparation as the stock path: contingencies on one-side-connected branches are dropped
             cleanContingencies(lfNetwork, propagatedContingencies);
 
+            long tPre0 = System.nanoTime();
             // pre-contingency state: OLF's own solve (the context's KLU), exactly the stock result
             double[] preContingencyStates = WoodburyEngine.runDcLoadFlowWithModifiedTargetVector(context, new DisabledNetwork(), reportNode);
             EquationSystem<DcVariableType, DcEquationType> equationSystem = context.getEquationSystem();
@@ -149,9 +150,41 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             var preContingencyLimitViolationManager = new LimitViolationManager(limitReductions);
             preContingencyLimitViolationManager.detectViolations(lfNetwork);
 
-            // connectivity analysis: OLF's own (its S on the host decides breaking / non-breaking exactly)
-            ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults connectivity = ConnectivityBreakAnalysis.run(context, propagatedContingencies);
-            Map<String, ComputedContingencyElement> elementByBranch = connectivity.contingencyElementByBranch();
+            long tPre1 = System.nanoTime();
+            // contingency elements: OLF's own index (one S column per distinct branch, its computedElementIndex)
+            Map<String, ComputedContingencyElement> elementByBranch =
+                    ConnectivityBreakAnalysis.createContingencyElementsIndexByBranchId(propagatedContingencies, lfNetwork, equationSystem, creationParameters);
+
+            // the device: factorization, branch model, S — before anything else needs S
+            SparseMatrix matrix = (SparseMatrix) context.getJacobianMatrix().getMatrix();
+            GpuDcSolver solver = GpuDcSolver.create(matrix);
+            long tFactor = System.nanoTime();
+            int elementCount;
+            try {
+                prepareBranches(solver, lfNetwork, equationSystem, creationParameters);
+                elementCount = prepareElements(solver, equationSystem, elementByBranch.values());
+            } catch (RuntimeException e) {
+                solver.close();
+                throw e;
+            }
+            if (elementCount < 0) {
+                solver.close();
+                LOGGER.warn("GPU Woodbury: the device cannot hold the element states, whole run on the stock path");
+                LAST_GPU_PRECOMPUTED_COUNT.set(-1);
+                return super.runSimulations(lfNetwork, propagatedContingencies, dcParameters, securityAnalysisParameters,
+                        operatorStrategies, actions, limitReductions, contingencyActivePowerLossDistribution);
+            }
+            long tS = System.nanoTime();
+
+            // connectivity analysis: OLF's sensitivity criterion evaluated on the device S, then OLF's own graph
+            // confirmation for the potentially breaking ones — the same two phases, the same lists, the same order
+            ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults connectivity =
+                    connectivityAnalysis(solver, lfNetwork, propagatedContingencies, elementByBranch);
+            long tConn = System.nanoTime();
+            if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
+                System.err.printf("DC_WOODBURY_PRE preContingency=%.0f ms factor=%.0f ms S=%.0f ms connectivity=%.0f ms (%d potentially breaking -> graph)%n",
+                        (tPre1 - tPre0) / 1e6, (tFactor - tPre1) / 1e6, (tS - tFactor) / 1e6, (tConn - tS) / 1e6, lastPotentiallyBreaking);
+            }
 
             // qualification: a contingency that keeps the base target vector, or one whose modified target
             // (islanded buses, lost PST) the host can build without touching the network
@@ -183,14 +216,11 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             Map<String, PostContingencyResult> resultById = new HashMap<>();
             int onDevice = 0;
 
-            if (!device.isEmpty()) {
-                onDevice = runOnDevice(lfNetwork, context, connectivity, device, preContingencyStates, preContingencyNetworkResult,
-                        preContingencyLimitViolationManager, monitorIndexes, createResultExtension, securityAnalysisParameters,
-                        limitReductions, dcPowerFactor, resultById);
-                if (onDevice < 0) {
-                    // the device could not hold the run (memory) — everything on the stock path
-                    cpu = new ArrayList<>(propagatedContingencies);
-                    onDevice = 0;
+            try (solver) {
+                if (!device.isEmpty()) {
+                    onDevice = runOnDevice(solver, elementCount, lfNetwork, context, device, preContingencyStates, preContingencyNetworkResult,
+                            preContingencyLimitViolationManager, monitorIndexes, createResultExtension, securityAnalysisParameters,
+                            limitReductions, dcPowerFactor, resultById);
                 }
             }
             lfNetwork.setReportNode(networkReportNode);
@@ -274,93 +304,21 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
         return null;
     }
 
-    /**
-     * The device pass over the qualified contingencies.
-     *
-     * @return the number solved on the device, or -1 when the device refused the run (S too large)
-     */
-    private int runOnDevice(LfNetwork lfNetwork, DcLoadFlowContext context,
-                            ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults connectivity, List<DeviceCandidate> device,
+    /** The device pass over the qualified contingencies; returns the number solved on the device. */
+    private int runOnDevice(GpuDcSolver solver, int elementCount, LfNetwork lfNetwork, DcLoadFlowContext context, List<DeviceCandidate> device,
                             double[] preContingencyStates, PreContingencyNetworkResult preContingencyNetworkResult,
                             LimitViolationManager preContingencyLimitViolationManager, AbstractNetworkResult.StateMonitorIndexes monitorIndexes,
                             boolean createResultExtension, SecurityAnalysisParameters securityAnalysisParameters,
                             List<LimitReduction> limitReductions, double dcPowerFactor, Map<String, PostContingencyResult> resultById) {
         EquationSystem<DcVariableType, DcEquationType> equationSystem = context.getEquationSystem();
-        DcEquationSystemCreationParameters creationParameters = context.getParameters().getEquationSystemCreationParameters();
-        SparseMatrix matrix = (SparseMatrix) context.getJacobianMatrix().getMatrix();
         int n = equationSystem.getIndex().getColumnCount();
-
+        int branchCount = lfNetwork.getBranches().size();
         long t0 = System.nanoTime();
-        try (GpuDcSolver solver = GpuDcSolver.create(matrix)) {
-            // --- variable rows (DcNetworkVector.updateVariables)
-            int busCount = lfNetwork.getBuses().size();
-            int branchCount = lfNetwork.getBranches().size();
-            int[] busPhRow = new int[busCount];
-            int[] branchA1Row = new int[branchCount];
-            Arrays.fill(busPhRow, -1);
-            Arrays.fill(branchA1Row, -1);
-            for (Variable<DcVariableType> v : equationSystem.getIndex().getSortedVariablesToFind()) {
-                switch (v.getType()) {
-                    case BUS_PHI -> busPhRow[v.getElementNum()] = v.getRow();
-                    case BRANCH_ALPHA1 -> branchA1Row[v.getElementNum()] = v.getRow();
-                    default -> { }
-                }
-            }
-            // --- branches, in LfNetwork order (== GpuLimitTable order == branch num)
-            int[] ph1Row = new int[branchCount];
-            int[] ph2Row = new int[branchCount];
-            int[] a1Row = new int[branchCount];
-            double[] a1Const = new double[branchCount];
-            double[] power = new double[branchCount];
-            for (int b = 0; b < branchCount; b++) {
-                LfBranch branch = lfNetwork.getBranches().get(b);
-                if (branch.getNum() != b) {
-                    throw new IllegalStateException("branch numbering is not positional");
-                }
-                LfBus bus1 = branch.getBus1();
-                LfBus bus2 = branch.getBus2();
-                boolean flowing = bus1 != null && bus2 != null && !branch.isZeroImpedance(LoadFlowModel.DC);
-                ph1Row[b] = flowing ? busPhRow[bus1.getNum()] : -1;
-                ph2Row[b] = flowing ? busPhRow[bus2.getNum()] : -1;
-                a1Row[b] = flowing ? branchA1Row[b] : -1;
-                a1Const[b] = branch.getPiModel().getA1();
-                power[b] = flowing ? AbstractClosedBranchDcFlowEquationTerm.computePower(creationParameters.isUseTransformerRatio(),
-                        creationParameters.getDcApproximationType(), branch.getPiModel()) : 0;
-            }
-            solver.setBranches(ph1Row, ph2Row, a1Row, a1Const, power);
+        {
             solver.setBase(preContingencyStates);
-
-            // --- elements: the connectivity analysis's column indices, the +1/-1 rows of ComputedElement.fillRhs
-            Collection<ComputedContingencyElement> elements = connectivity.contingencyElementByBranch().values();
-            int elementCount = elements.stream().mapToInt(ComputedContingencyElement::getComputedElementIndex).max().orElse(-1) + 1;
-            int[] rowPlus = new int[elementCount];
-            int[] rowMinus = new int[elementCount];
-            int[] elemBranch = new int[elementCount];
-            Arrays.fill(rowPlus, -1);
-            Arrays.fill(rowMinus, -1);
-            Arrays.fill(elemBranch, -1);
-            for (ComputedContingencyElement element : elements) {
-                LfBranch branch = element.getLfBranch();
-                int e = element.getComputedElementIndex();
-                elemBranch[e] = branch.getNum();
-                if (branch.getBus1() == null || branch.getBus2() == null) {
-                    continue;
-                }
-                LfBus bus1 = branch.getBus1();
-                LfBus bus2 = branch.getBus2();
-                if (bus1.isSlack()) {
-                    rowMinus[e] = pColumn(equationSystem, bus2);
-                } else if (bus2.isSlack()) {
-                    rowPlus[e] = pColumn(equationSystem, bus1);
-                } else {
-                    rowPlus[e] = pColumn(equationSystem, bus1);
-                    rowMinus[e] = pColumn(equationSystem, bus2);
-                }
-            }
-            if (!solver.setElements(rowPlus, rowMinus, elemBranch)) {
-                LOGGER.warn("GPU Woodbury: the device cannot hold the {} x {} element states, run on the stock path", n, elementCount);
-                return -1;
-            }
+            long tFactor = t0;
+            long tBranches = t0;
+            long tS = t0;
 
             // --- limit table
             LimitReductionManager limitReductionManager = LimitReductionManager.create(limitReductions);
@@ -386,6 +344,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             }
             solver.setLimitTable(branchGroupStart, branchGroupEnd, groupQuantity, groupLimitStart, groupLimitEnd, limitThreshold, dcPowerFactor);
             GpuLimitScanner scanner = new GpuLimitScanner(table);
+            long tTable = System.nanoTime();
             boolean needAngles = !monitorIndex.getAllStateMonitor().getVoltageLevelIds().isEmpty()
                     || monitorIndex.getSpecificStateMonitors().values().stream().anyMatch(m -> !m.getVoltageLevelIds().isEmpty())
                     || !lfNetwork.getVoltageAngleLimits().isEmpty();
@@ -395,6 +354,13 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             // the base dispatch, not from the original network's. Do the same before modelling it.
             NetworkState.save(lfNetwork);
             double[] baseTargets = context.getTargetVector().getArray().clone();
+            // per-bus net injection at base, in bus order: getActivePowerMismatch over the remaining buses is
+            // -sum over them, and summing in bus order while skipping the islanded ones is the same sum in the
+            // same order as the stock's LinkedHashSet walk (bit-identical, no per-contingency getter walk)
+            double[] busNetInjection = new double[lfNetwork.getBuses().size()];
+            for (LfBus bus : lfNetwork.getBuses()) {
+                busNetInjection[bus.getNum()] = bus.isDisabled() ? Double.NaN : bus.getGenerationTargetP() - bus.getLoadTargetP();
+            }
             boolean distributedSlack = context.getParameters().isDistributedSlack();
             DcSlackDistributionModel distribution = distributedSlack
                     ? DcSlackDistributionModel.build(lfNetwork, context.getParameters().getBalanceType(),
@@ -429,7 +395,7 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                     ctgPtr[i + 1] = elemList.size();
                     ctgBase[i] = -1;
                     if (needsModifiedTarget(candidate)) {
-                        buildModifiedTarget(candidate, lfNetwork, equationSystem, baseTargets, distribution, targets, nBases * n);
+                        buildModifiedTarget(candidate, lfNetwork, equationSystem, baseTargets, busNetInjection, distribution, targets, nBases * n);
                         ctgBase[i] = nBases++;
                         modifiedTargets++;
                     }
@@ -509,12 +475,133 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
             equationSystem.getStateVector().set(preContingencyStates);
             updateNetwork(lfNetwork, equationSystem, preContingencyStates);
             if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
-                System.err.printf("DC_WOODBURY_PHASE n=%d elements=%d device=%d modifiedTargets=%d setup=%.0f ms columns=%.0f ms device=%.0f ms host=%.0f ms hostScreened=%d%n",
-                        n, elementCount, device.size(), modifiedTargets, (tSetup - t0) / 1e6, tColumns / 1e6, tDevice / 1e6, tHost / 1e6, hostScreened);
+                System.err.printf("DC_WOODBURY_PHASE n=%d elements=%d device=%d modifiedTargets=%d setup=%.0f ms [factor=%.0f branches=%.0f S=%.0f table=%.0f model=%.0f] columns=%.0f ms device=%.0f ms host=%.0f ms hostScreened=%d%n",
+                        n, elementCount, device.size(), modifiedTargets, (tSetup - t0) / 1e6, (tFactor - t0) / 1e6, (tBranches - tFactor) / 1e6,
+                        (tS - tBranches) / 1e6, (tTable - tS) / 1e6, (tSetup - tTable) / 1e6, tColumns / 1e6, tDevice / 1e6, tHost / 1e6, hostScreened);
             }
             return device.size();
         }
     }
+
+    /** The branch model, in LfNetwork order (== GpuLimitTable order == branch num). */
+    private static void prepareBranches(GpuDcSolver solver, LfNetwork lfNetwork, EquationSystem<DcVariableType, DcEquationType> equationSystem,
+                                        DcEquationSystemCreationParameters creationParameters) {
+        int busCount = lfNetwork.getBuses().size();
+        int branchCount = lfNetwork.getBranches().size();
+        int[] busPhRow = new int[busCount];
+        int[] branchA1Row = new int[branchCount];
+        Arrays.fill(busPhRow, -1);
+        Arrays.fill(branchA1Row, -1);
+        for (Variable<DcVariableType> v : equationSystem.getIndex().getSortedVariablesToFind()) {
+            switch (v.getType()) {
+                case BUS_PHI -> busPhRow[v.getElementNum()] = v.getRow();
+                case BRANCH_ALPHA1 -> branchA1Row[v.getElementNum()] = v.getRow();
+                default -> { }
+            }
+        }
+        int[] ph1Row = new int[branchCount];
+        int[] ph2Row = new int[branchCount];
+        int[] a1Row = new int[branchCount];
+        double[] a1Const = new double[branchCount];
+        double[] power = new double[branchCount];
+        for (int b = 0; b < branchCount; b++) {
+            LfBranch branch = lfNetwork.getBranches().get(b);
+            if (branch.getNum() != b) {
+                throw new IllegalStateException("branch numbering is not positional");
+            }
+            LfBus bus1 = branch.getBus1();
+            LfBus bus2 = branch.getBus2();
+            boolean flowing = bus1 != null && bus2 != null && !branch.isZeroImpedance(LoadFlowModel.DC);
+            ph1Row[b] = flowing ? busPhRow[bus1.getNum()] : -1;
+            ph2Row[b] = flowing ? busPhRow[bus2.getNum()] : -1;
+            a1Row[b] = flowing ? branchA1Row[b] : -1;
+            a1Const[b] = branch.getPiModel().getA1();
+            power[b] = flowing ? AbstractClosedBranchDcFlowEquationTerm.computePower(creationParameters.isUseTransformerRatio(),
+                    creationParameters.getDcApproximationType(), branch.getPiModel()) : 0;
+        }
+        solver.setBranches(ph1Row, ph2Row, a1Row, a1Const, power);
+    }
+
+    /** The elements' +1/-1 rows (ComputedElement.fillRhs) at OLF's column indices; -1 when the device refuses S. */
+    private static int prepareElements(GpuDcSolver solver, EquationSystem<DcVariableType, DcEquationType> equationSystem,
+                                       Collection<ComputedContingencyElement> elements) {
+        int elementCount = elements.stream().mapToInt(ComputedContingencyElement::getComputedElementIndex).max().orElse(-1) + 1;
+        int[] rowPlus = new int[elementCount];
+        int[] rowMinus = new int[elementCount];
+        int[] elemBranch = new int[elementCount];
+        Arrays.fill(rowPlus, -1);
+        Arrays.fill(rowMinus, -1);
+        Arrays.fill(elemBranch, -1);
+        for (ComputedContingencyElement element : elements) {
+            LfBranch branch = element.getLfBranch();
+            int e = element.getComputedElementIndex();
+            elemBranch[e] = branch.getNum();
+            if (branch.getBus1() == null || branch.getBus2() == null) {
+                continue;
+            }
+            LfBus bus1 = branch.getBus1();
+            LfBus bus2 = branch.getBus2();
+            if (bus1.isSlack()) {
+                rowMinus[e] = pColumn(equationSystem, bus2);
+            } else if (bus2.isSlack()) {
+                rowPlus[e] = pColumn(equationSystem, bus1);
+            } else {
+                rowPlus[e] = pColumn(equationSystem, bus1);
+                rowMinus[e] = pColumn(equationSystem, bus2);
+            }
+        }
+        return solver.setElements(rowPlus, rowMinus, elemBranch) ? elementCount : -1;
+    }
+
+    private int lastPotentiallyBreaking;
+
+    /**
+     * ConnectivityBreakAnalysis.run with the sensitivity criterion on the device S: the non-breaking
+     * list is the criterion's non-breaking contingencies in order, then the graph-confirmed ones in
+     * order; the breaking list is the graph's, in order — the stock lists, the stock order.
+     */
+    private ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults connectivityAnalysis(GpuDcSolver solver, LfNetwork lfNetwork,
+                                                                                            List<PropagatedContingency> contingencies,
+                                                                                            Map<String, ComputedContingencyElement> elementByBranch) {
+        int count = contingencies.size();
+        int[] ctgPtr = new int[count + 1];
+        List<Integer> elemList = new ArrayList<>();
+        boolean[] incomplete = new boolean[count];
+        for (int c = 0; c < count; c++) {
+            for (String id : contingencies.get(c).getBranchIdsToOpen().keySet()) {
+                ComputedContingencyElement element = elementByBranch.get(id);
+                if (element == null) {
+                    incomplete[c] = true;                    // no DC flow equation: the stock path handles it
+                } else {
+                    elemList.add(element.getComputedElementIndex());
+                }
+            }
+            ctgPtr[c + 1] = elemList.size();
+        }
+        double[] maxSum = solver.connectivityCriterion(ctgPtr, elemList.stream().mapToInt(Integer::intValue).toArray());
+
+        List<ConnectivityBreakAnalysis.ConnectivityAnalysisResult> nonBreaking = new ArrayList<>();
+        List<ConnectivityBreakAnalysis.ConnectivityAnalysisResult> breaking = new ArrayList<>();
+        List<PropagatedContingency> potentiallyBreaking = new ArrayList<>();
+        for (int c = 0; c < count; c++) {
+            PropagatedContingency contingency = contingencies.get(c);
+            if (incomplete[c] || maxSum[c] > 1d - CONNECTIVITY_LOSS_THRESHOLD) {
+                potentiallyBreaking.add(contingency);
+            } else {
+                nonBreaking.add(ConnectivityBreakAnalysis.ConnectivityAnalysisResult.createNonBreakingConnectivityAnalysisResult(contingency, null, lfNetwork));
+            }
+        }
+        lastPotentiallyBreaking = potentiallyBreaking.size();
+        for (PropagatedContingency contingency : potentiallyBreaking) {
+            ConnectivityBreakAnalysis.computeConnectivityAnalysisResult(lfNetwork, contingency, elementByBranch, null, Collections.emptyMap())
+                    .ifPresentOrElse(breaking::add,
+                        () -> nonBreaking.add(ConnectivityBreakAnalysis.ConnectivityAnalysisResult.createNonBreakingConnectivityAnalysisResult(contingency, null, lfNetwork)));
+        }
+        return new ConnectivityBreakAnalysis.ConnectivityBreakAnalysisResults(nonBreaking, breaking, com.powsybl.math.matrix.DenseMatrix.EMPTY, elementByBranch);
+    }
+
+    /** ConnectivityBreakAnalysis.CONNECTIVITY_LOSS_THRESHOLD (private there): 10e-7. */
+    private static final double CONNECTIVITY_LOSS_THRESHOLD = 10e-7;
 
     /** The stock rule: a modified target when buses are islanded or a NON-reconnecting phase shifter is lost. */
     private static boolean needsModifiedTarget(DeviceCandidate candidate) {
@@ -537,15 +624,22 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
      */
     private static void buildModifiedTarget(DeviceCandidate candidate, LfNetwork lfNetwork,
                                             EquationSystem<DcVariableType, DcEquationType> equationSystem, double[] baseTargets,
-                                            DcSlackDistributionModel distribution, double[] out, int offset) {
+                                            double[] busNetInjection, DcSlackDistributionModel distribution, double[] out, int offset) {
         int n = baseTargets.length;
         System.arraycopy(baseTargets, 0, out, offset, n);
         Set<LfBus> disabledBuses = candidate.connectivity().getDisabledBuses();
         if (distribution != null) {
-            Collection<LfBus> remaining = disabledBuses.isEmpty() ? lfNetwork.getBuses() : remainingBuses(lfNetwork, disabledBuses);
-            double mismatch = com.powsybl.openloadflow.dc.DcLoadFlowEngine.getActivePowerMismatch(remaining);
             Set<Integer> excluded = new HashSet<>();
             disabledBuses.forEach(b -> excluded.add(b.getNum()));
+            // DcLoadFlowEngine.getActivePowerMismatch(remainingBuses): -sum of (generation - load) over the
+            // non-disabled remaining buses, in bus order
+            double sum = 0;
+            for (int b = 0; b < busNetInjection.length; b++) {
+                if (!excluded.contains(b) && !Double.isNaN(busNetInjection[b])) {
+                    sum += busNetInjection[b];
+                }
+            }
+            double mismatch = -sum;
             for (Map.Entry<Integer, Double> e : distribution.distribute(excluded, mismatch).entrySet()) {
                 int column = pColumnOrMinusOne(equationSystem, lfNetwork.getBus(e.getKey()));
                 if (column >= 0) {
@@ -569,12 +663,6 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
                     .filter(Equation::isActive)
                     .ifPresent(eq -> out[offset + eq.getColumn()] = 0);
         }
-    }
-
-    private static Collection<LfBus> remainingBuses(LfNetwork lfNetwork, Set<LfBus> disabledBuses) {
-        Collection<LfBus> remaining = new LinkedHashSet<>(lfNetwork.getBuses());
-        remaining.removeAll(disabledBuses);
-        return remaining;
     }
 
     private static int pColumnOrMinusOne(EquationSystem<DcVariableType, DcEquationType> equationSystem, LfBus bus) {

@@ -1375,6 +1375,15 @@ final class GpuBatchChunkSolver {
                     }
                     for (int s = 0; s < realCount; s++) {
                         resultsByIndex[group.get(chunkStart + s)] = chunkResults[s];
+                        // OLF_GPU_CPU_ROUTED=1: name every scenario the device hands back to the CPU, with
+                        // the status that decided it (-2 rejected, -1 diverged, 1 max-iter). The aggregate
+                        // "precomputed on device: N / M" says how many, never which.
+                        if (System.getenv("OLF_GPU_CPU_ROUTED") != null && chunkResults[s] != null
+                                && (int) chunkResults[s][n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
+                            System.err.printf("GPU_CPU_ROUTED ctg=%s status=%d%n",
+                                    contingencies.get(group.get(chunkStart + s)).contingencyId(),
+                                    (int) chunkResults[s][n + 2]);
+                        }
                     }
                 }
             }

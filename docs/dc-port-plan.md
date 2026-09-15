@@ -319,7 +319,7 @@ solves nS scenarios with per-scenario target deltas (`setBatchTargetDeltas`) and
 DS/RL loops — an AC step is a scenario with no topology mask. Hand that to the AC session as a
 consumer of the same ts API; not part of this DC plan.
 
-### 3.5 DC outer loops on the device (user, 2026-09-15: "plan to port them in kernels like for AC")
+### 3.5 DC outer loops on the device (user, 2026-09-15: "plan to port them in kernels like for AC") — LANDED, see §4g
 
 Where they matter: **Woodbury SA runs NO outer loop** (linear one-shot; it forces phase control
 off and AC emulation off), so objective 1 needs none. They matter for the **time-series engine**
@@ -329,30 +329,24 @@ re-solve per contingency). OLF's DC loop list, innermost first (`DefaultDcOuterL
 engine nests them exactly like the AC engine (re-run a loop to stability, sweep the list until
 `lastUnstableOuterLoop` fixpoint, `maxOuterLoopIterations` budget). Slack distribution is NOT a
 DC outer loop: `DcLoadFlowEngine.run` distributes ONCE, pre-solve, from the targets
-(`P_RESIDUE_EPS` 1e-3 MW, failure behaviors), then solves.
+(`P_RESIDUE_EPS` 1e-3 MW, failure behaviors) — that one is a device kernel since §4f.
 
-The AC session's device driver already implements OLF's nested-loop ORDER over a batch of
-scenarios (loop list, per-scenario stability flags, `maxOuterLoopIterations`, host-owned loop
-slots via pause/resume, DS-carry rules). The DC port reuses that driver shape over the
-time-series chunk (a column = a step) with DC loop kernels. What each DC loop needs, and what
-the matrix does:
+What each DC loop needs, and what the matrix does:
 
 | loop | what the CPU does | matrix impact in DC | device port |
 |---|---|---|---|
-| pre-solve slack distribution | `getActivePowerMismatch` from targets, one `ActivePowerDistribution.run` over participating gens/loads with limits, failure behavior | RHS only | kernel per column (`dsBatch`): mismatch = Σ target column, single-pass distribution with the AC DS kernel's factor types/limits/failure modes (`GpuDsParams` exists), writes the distributed targets into the column + the per-generator `p` for the generators dataset. Host fallback first (it is cheap); kernel when the per-step host walk shows in the 3.0 profile |
-| `DcIncrementalPhaseControl` | sensitivities dP/dα: one RHS per controller with `toRadians(1)` at its `BRANCH_TARGET_ALPHA1` row, `solveTransposed`; then OLF's incremental decisions (deadband, MAX_DIRECTION_CHANGE, min sensi, tap steps) → new α target | RHS only (α is a variable pinned by an identity row) | sensitivities = `solveMany` ONCE per topology (the matrix is constant — unlike AC they never go stale); decision kernel = the AC `GpuBatchIncrementalFlowControl` logic per column reading the controlled flows from `flows`; writes the α target column; re-solve only the unstable columns (active mask) |
-| `DcHvdcAcEmulationLimits` | `checkAcEmulationMode`: linear ↔ saturated (CS1→CS2 / CS2→CS1) when \|p\| crosses Pmax; saturated = fixed injection ±Pmax | **matrix values change**: the droop `k` couples θ1−θ2 in J; saturating removes it | two options, pick by measurement: (a) Woodbury on the shared LU — a saturation is the "outage" of a pseudo-branch of power `k` between the two converter buses (element states ±1 like a branch, k×k α) plus an RHS shift of ±Pmax; reuses phase-1 kernels, no refactor; (b) per-column matrix values on the fixed pattern with cuDSS UBATCH (the AC session's context kind) — heavier, general. Mirror OLF's transition table verbatim (incl. the opposite-Pmax flip) |
-| `DcAreaInterchangeControl` | area interchange balancing = distributions over area bus sets, then remaining slack | RHS only | host-owned loop slot via pause/resume first (AC marks AIC low priority, user 2026-09-07); kernel = the DS kernel with area grouping if a plan needs it |
+| pre-solve slack distribution | `getActivePowerMismatch` from targets, one `ActivePowerDistribution.run` over participating gens with limits, failure behavior | RHS only | **DONE (§4f)**: `distributeSlack` kernel on the device generator tables, bit-identical to `ActivePowerDistribution` |
+| `DcIncrementalPhaseControl` | sensitivities dP/dα: one RHS per controller with `toRadians(1)` at its `BRANCH_TARGET_ALPHA1` row, `solveTransposed`; then OLF's incremental decisions (deadband, MAX_DIRECTION_CHANGE, min sensi, closest tap) → new tap | RHS only (α is a variable pinned by an identity row) | **DONE (§4g)**: `phaseRhs` + one multi-column solve on the load flow's own factorization, then `phaseDecision` — one thread per controller, the deadband, `calculateSensi`, `da = toRadians(dp/a2p)`, the closest-tap search over the allowed range and the direction ratchet, all in-kernel; the host applies `setTapPosition` |
+| `DcHvdcAcEmulationLimits` | `checkAcEmulationMode`: linear ↔ saturated (CS1→CS2 / CS2→CS1) when \|p\| crosses Pmax; saturated = fixed injection ±Pmax | **matrix values change**: the droop `k` couples θ1−θ2 in J; saturating removes it | **DONE (§4g)**: `hvdcDecision` kernel = OLF's transition table on the emulation flows read from the state; the host calls `AcEmulationControl.switchTo…`. The matrix follows through the CONTRIBUTION refresh (`setContributions`), not a Woodbury pseudo-branch and not UBATCH: OLF emits a matrix element for every variable of every term whether active or not, so **the non-zero pattern is invariant** and a saturation is a value refill on the same analysis |
+| `DcAreaInterchangeControl` | area interchange balancing = distributions over area bus sets, then remaining slack | RHS only | **host-owned loop slot** (landed as such): it is not a criterion on the state but a distribution loop with its own iteration, per-area factors and reporting. The engine runs OLF's own check, interleaved with the device loops. A kernel would be the DS kernel with area grouping, if a plan ever needs it |
 
-Sequencing per chunk: `ds → solve → flows → hvdcCheck → (re-solve) → phaseCheck → (re-solve) →
-aic` with per-column stability flags and OLF's sweep-until-fixpoint, all columns of the chunk
-advancing together, converged columns masked. Statuses (`MAX_OUTER_LOOP_ITERATIONS`, DS failure)
-tagged per column exactly as `DcLoadFlowResult` would.
+Sequencing: OLF's own, unchanged — the device only replaces the `check` of the two loops that
+read the state. For the time-series engine the same kernels apply per column with per-column
+stability flags (phase 3).
 
-Gate for every loop: `TimeSeriesLoadFlowTest`-style goldens vs an independent `LoadFlow.run`
-per step at 1e-12, one test per loop that FAILS when the kernel is disabled (the AC lesson: a
-hollow test passed for a whole session), and the OL_TRACE-style sequence diff against the CPU
-engine (diff the loop CALL SEQUENCE, not the quantities).
+Gate for every loop: a scenario where the loop MUST fire, compared to the stock provider, plus a
+device-decision counter so a kernel that decided nothing fails (the AC lesson: a hollow test
+passed for a whole session), plus the A/B against `-Dolf.gpu.dc.hostOuterLoops=true`.
 
 This would also make the **non-fast `DcSecurityAnalysis`** batchable later (NOT in the first
 features wanted — user, 2026-09-15; recorded only as a consequence): a contingency is a
@@ -634,6 +628,59 @@ come from the host (array model / exact replay) — the device `setExcludedBuses
 `processLostPowerChanges` on the tables); OLF's own target vector goes stale by one ulp after
 `updateNetwork` writes the solved alpha back (nothing invalidates it on `setA1`) — the device
 engine re-captures the current alpha instead, a 1e-17 difference the gate cannot see.
+
+## 4g. DC outer loops as kernels (2026-09-15, user: "Do the DC outer loops as kernels")
+
+Landed on `dc`. The split is the AC driver's: **the kernel READS the state and produces the loop's
+DECISION, the host APPLIES it with OLF's own mutators**, so the equation updater, the listeners,
+the reports and the network result stay OLF's.
+
+- **Incremental phase control** (`phaseRhs` + `phaseDecision`, `GpuDcOuterLoops.checkPhaseControl`).
+  The sensitivities are `DcSensitivityContext.calculateSensitivityValues` on the device: one
+  right-hand side per controller with `toRadians(1)` at its `BRANCH_TARGET_ALPHA1` column, solved
+  against the load flow's own factorization (chunks of 1024 columns), recomputed per check exactly
+  as OLF rebuilds its context per check. The decision kernel is one thread per controller and
+  reproduces `checkActivePowerControlPhaseControls` step for step: the controlled flow from the
+  state (`DcNetworkVector.updateClosedBranches`'s formula, same operation order), the half
+  deadband (`max(targetDeadband, 1 MW)/2`), `calculateSensi` read off the solved column
+  (side 1 `[p, -p, p]`, side 2 opposite), `da = toRadians(dp / a2p)` guarded by `SENSI_EPS`, then
+  `PiModelArray.updateTapPositionToReachNewA1`'s `ClosestTapPositionFinder` over the range the
+  allowed direction permits. `IncrementalContextData.ControllerContext`'s ratchet
+  (`MAX_DIRECTION_CHANGE`, current direction, allowed direction) lives on the device, per branch,
+  across checks. The host then calls `PiModel.setTapPosition`.
+- **HVDC AC-emulation limits** (`hvdcDecision`, `GpuDcOuterLoops.checkHvdc`). The kernel evaluates
+  the two emulation flows on the state (`k (ph1 - ph2) + p0` / `k (ph2 - ph1) - p0`, `k = droop·180/π`)
+  and applies `checkAcEmulationMode`'s transition table verbatim, including the
+  opposite-Pmax flip; the host calls `switchToSaturationFromCS1toCS2` / `…CS2toCS1` /
+  `switchToLinearMode` (so the VSC target P and the equation deactivation are OLF's) and emits
+  OLF's three reports.
+- **The matrix follows a saturation with no new analysis.** A saturating link deactivates its two
+  emulation terms, and OLF emits a matrix element for every variable of every term *whether active
+  or not* (`SingleEquation.der`'s comment: "create a derivative even if all terms are not active");
+  so the non-zero PATTERN is invariant and only the contribution lists change. `prepare()` now
+  splits `sameStructure` into `samePattern` + a `setContributions` upload, then refills and
+  refactorizes. Rebuilding the context (a new cuDSS analysis) is left for a genuine structure change.
+- **Area interchange control stays on the host**, deliberately: it is a distribution loop, not a
+  criterion on the state (per-area factors, its own iteration, its own reports). The engine runs
+  OLF's check for it, interleaved with the device loops. Its dispatch is the one quantity that is
+  NOT bit-identical between the arms — it distributes *from the solved state*, so it inherits the
+  two solvers' roundoff (1e-13 MW measured); the pre-solve distribution stays bit-identical.
+- `-Dolf.gpu.dc.hostOuterLoops=true` routes both checks back to OLF (the A/B).
+
+Gates (all green 2026-09-15), `GpuDcOuterLoopTest`, 8 cases on OLF's own scenarios: the phase
+shifter that must move taps (`DcLoadFlowTest.outerLoopPhaseShifterTest`, tap 1 → 2) and one with an
+unreachable target (the ratchet), the HVDC that must saturate either way
+(`AcLoadFlowVscTest.testAcEmuAndPMax`, DC arm), the saturation side flip
+(`testAcEmulationSaturationToOppositeChange`), both loops interleaved, area interchange + phase
+control (`DcLoadFlowTest.multipleOuterLoopsTest`'s network), and the host/device A/B. Each asserts
+the stock result AND a device-decision counter (`GpuDcLoadFlowEngine.LAST_DEVICE_TAP_CHANGES` /
+`LAST_DEVICE_HVDC_SWITCHES`), so a kernel that decided nothing fails twice.
+Regression: `GpuDcAssemblyTest` 14, `GpuDcLoadFlowProviderTest` 23, `GpuWoodburyDcSecurityAnalysisTest`
+13; rte6515 × 9042 SA 4.8 s GPU 1-thread vs 15.6 s CPU 8 threads, 0 differing lines.
+
+Note on the OLF scenario transposed to DC: `AcLoadFlowVscTest` saturates `hvdc12` at Pmax 51 MW,
+but in DC that link carries 49.7 MW and never reaches it — the DC tests use 20 MW, which makes
+both loops fire on the same network.
 
 ## 5. Validation and benches
 

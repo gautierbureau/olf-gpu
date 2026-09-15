@@ -195,9 +195,40 @@ public final class GpuDcSolver implements AutoCloseable {
         return readTarget(handle());
     }
 
-    /** Solve against the device target vector; returns the state. */
+    /** Solve against the device target vector; returns the state (kept on the device for the loop kernels). */
     public double[] solveTarget() {
         return solveTarget(handle());
+    }
+
+    /** The value and rhs contribution lists refreshed on the SAME pattern (a term switched on or off). */
+    void setContributions(GpuDcAssembly a) {
+        setContributions(handle(), a.contribPtr, a.contribKind, a.contribElem, a.contribCoef,
+                a.targetKind, a.targetElem, a.rhsPtr, a.rhsKind, a.rhsElem, a.rhsCoef);
+    }
+
+    /** The phase controllers the device outer loop decides for ({@link GpuDcOuterLoops}). */
+    void setPhaseControllers(int[] branch, int[] alphaColumn, int[] controlled, int[] side, double[] target,
+                             double[] halfDeadband, int[] tapIndex, int[] tapPtr, double[] tapA1) {
+        setPhaseControllers(handle(), branch, alphaColumn, controlled, side, target, halfDeadband, tapIndex, tapPtr, tapA1);
+    }
+
+    void resetPhaseControlDirections() {
+        resetPhaseControlDirections(handle());
+    }
+
+    /** The incremental phase control decision per controller: the new tap index, or -1. */
+    int[] phaseControlCheck() {
+        return phaseControlCheck(handle());
+    }
+
+    /** The HVDC links in AC emulation the device outer loop decides for. */
+    void setHvdcs(int[] ph1Row, int[] ph2Row, double[] k, double[] p0, double[] pMax12, double[] pMax21, int[] status, int[] active) {
+        setHvdcs(handle(), ph1Row, ph2Row, k, p0, pMax12, pMax21, status, active);
+    }
+
+    /** The AC-emulation limits decision per HVDC: the new status, or -1. */
+    int[] hvdcCheck() {
+        return hvdcCheck(handle());
     }
 
     public int size() {
@@ -354,4 +385,19 @@ public final class GpuDcSolver implements AutoCloseable {
     private static native double[] readTarget(long handle);
 
     private static native double[] solveTarget(long handle);
+
+    private static native void setContributions(long handle, int[] contribPtr, int[] contribKind, int[] contribElem, double[] contribCoef,
+                                                int[] targetKind, int[] targetElem, int[] rhsPtr, int[] rhsKind, int[] rhsElem, double[] rhsCoef);
+
+    private static native void setPhaseControllers(long handle, int[] branch, int[] alphaColumn, int[] controlled, int[] side,
+                                                   double[] target, double[] halfDeadband, int[] tapIndex, int[] tapPtr, double[] tapA1);
+
+    private static native void resetPhaseControlDirections(long handle);
+
+    private static native int[] phaseControlCheck(long handle);
+
+    private static native void setHvdcs(long handle, int[] ph1Row, int[] ph2Row, double[] k, double[] p0, double[] pMax12,
+                                        double[] pMax21, int[] status, int[] active);
+
+    private static native int[] hvdcCheck(long handle);
 }

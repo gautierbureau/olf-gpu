@@ -133,6 +133,21 @@ struct DcContext {
     Buf bases;
     int nBases = 0;
 
+    // --- device assembly (createAssembled, GpuDcAssembly): the structure the device fills itself
+    bool assembled = false;
+    bool analyzed = false;
+    Buf contribPtr, contribKind, contribElem, contribCoef;         // matrix values from the branch powers
+    Buf targetKind, targetElem, rhsPtr, rhsKind, rhsElem, rhsCoef; // the target vector formula
+    Buf t;                                                         // the device target vector (n)
+    int nBuses = 0;
+    Buf busPColumn, busPhRow, busLoadP, busFlags, busSc, busGenStart, busGenP, busExcluded;
+    int nSc = 0;
+    Buf scBusPtr, scBusList, scSlackCount, scMismatch;
+    int nGen = 0;
+    Buf genInit, genTarget, genMinT, genMaxT, genMinP, genMaxP, genDroop, genPf, genPart;
+    Buf dsElem, dsFactor, dsOut;                                   // distribution scratch and its 2 outputs
+    Buf scalarOut;
+
     ~DcContext() {
         if (matB) { cudssMatrixDestroy(matB); }
         if (matX) { cudssMatrixDestroy(matX); }
@@ -396,6 +411,317 @@ __global__ void dcScreen(int nCtg, int nBranches, const int* ctgPtr, const int* 
 // JNI helpers
 // ---------------------------------------------------------------------------------------------
 
+
+// ---------------------------------------------------------------------------------------------
+// device assembly: the DC system built on the device from GpuDcAssembly's structure
+// ---------------------------------------------------------------------------------------------
+
+constexpr int CONTRIB_CONST = 0;
+constexpr int CONTRIB_BRANCH = 1;
+constexpr int TARGET_ZERO = 0;
+constexpr int TARGET_BUS_P = 1;
+constexpr int TARGET_ALPHA1 = 2;
+constexpr int TARGET_ZERO_PHI = 3;
+constexpr int RHS_CONST = 0;
+constexpr int RHS_BRANCH = 1;
+constexpr int BUS_DISABLED = 1;
+constexpr int BUS_PARTICIPATING = 2;
+constexpr int BUS_FICTITIOUS = 4;
+constexpr int BUS_SLACK = 8;
+constexpr double P_RESIDUE_EPS = 1e-5;       // ActivePowerDistribution.P_RESIDUE_EPS = 10^-5
+
+/** JacobianMatrix.initDer's element values: the sequential sum of the active terms' derivatives,
+ *  each ±power[b] (closed-branch flow terms) or a constant (±1 variable terms, ±k HVDC emulation),
+ *  in OLF's callback order — `value = 0; value += term.der(v)`. One thread per non-zero. */
+__global__ void fillValues(int nnz, const int* contribPtr, const int* kind, const int* elem, const double* coef,
+                           const double* power, double* val) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nnz) {
+        return;
+    }
+    double v = 0.0;
+    for (int c = contribPtr[i]; c < contribPtr[i + 1]; c++) {
+        // coef is ±1 for a branch term: the product is exact, no contraction concern
+        v = __dadd_rn(v, kind[c] == CONTRIB_BRANCH ? __dmul_rn(coef[c], power[elem[c]]) : coef[c]);
+    }
+    val[i] = v;
+}
+
+/** AbstractLfBus.getGenerationTargetP: the bus's generators' targetP summed in their order (from 0.0). */
+__global__ void busGeneration(int nBuses, const int* genStart, const double* genTarget, double* genP) {
+    int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= nBuses) {
+        return;
+    }
+    double s = 0.0;
+    for (int g = genStart[b]; g < genStart[b + 1]; g++) {
+        s = __dadd_rn(s, genTarget[g]);
+    }
+    genP[b] = s;
+}
+
+/** DcLoadFlowEngine.getActivePowerMismatch over a synchronous component's buses (multi-slack share). */
+__global__ void scMismatches(int nSc, const int* scBusPtr, const int* scBusList, const int* busFlags,
+                             const double* genP, const double* loadP, double* out) {
+    int sc = blockIdx.x * blockDim.x + threadIdx.x;
+    if (sc >= nSc) {
+        return;
+    }
+    double sum = 0.0;
+    for (int i = scBusPtr[sc]; i < scBusPtr[sc + 1]; i++) {
+        int b = scBusList[i];
+        if ((busFlags[b] & BUS_DISABLED) == 0) {
+            sum = __dadd_rn(sum, __dadd_rn(genP[b], -loadP[b]));
+        }
+    }
+    out[sc] = -sum;
+}
+
+/** DcTargetVector.init, one thread per equation column: the base by kind (bus targetP with the
+ *  multi-slack share, the phase shifter's a1, A2 - a1, or 0) minus the sequential sum of the active
+ *  terms' rhs (-p (A2 - a1fixed) / +p (A2 - a1fixed) for the branch terms, ±p0 for HVDC). */
+__global__ void fillTarget(int n, const int* tKind, const int* tElem, const int* rhsPtr, const int* rhsKind, const int* rhsElem,
+                           const double* rhsCoef, const double* genP, const double* loadP, const int* busFlags, const int* busSc,
+                           const int* scSlackCount, const double* scMismatch, const double* a1Const, const int* a1Row,
+                           const double* power, double* t) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= n) {
+        return;
+    }
+    double base;
+    switch (tKind[c]) {
+        case TARGET_BUS_P: {
+            int b = tElem[c];
+            base = __dadd_rn(genP[b], -loadP[b]);
+            if (busFlags[b] & BUS_SLACK) {
+                base = __dadd_rn(base, __ddiv_rn(scMismatch[busSc[b]], (double) scSlackCount[busSc[b]]));
+            }
+            break;
+        }
+        case TARGET_ALPHA1:
+            base = a1Const[tElem[c]];
+            break;
+        case TARGET_ZERO_PHI:
+            base = __dadd_rn(A2, -a1Const[tElem[c]]);
+            break;
+        default:
+            base = 0.0;
+    }
+    double rhs = 0.0;
+    for (int r = rhsPtr[c]; r < rhsPtr[c + 1]; r++) {
+        if (rhsKind[r] == RHS_BRANCH) {
+            int b = rhsElem[r];
+            double a1Fixed = a1Row[b] >= 0 ? 0.0 : a1Const[b];
+            // (coef * power) * (A2 - a1) as the Java: -getPower() * (A2 - a1()) / getPower() * (A2 - a1())
+            rhs = __dadd_rn(rhs, __dmul_rn(__dmul_rn(rhsCoef[r], power[b]), __dadd_rn(A2, -a1Fixed)));
+        } else {
+            rhs = __dadd_rn(rhs, rhsCoef[r]);
+        }
+    }
+    t[c] = __dadd_rn(base, -rhs);
+}
+
+/** DcLoadFlowEngine.getActivePowerMismatch(buses): -sum over the enabled, non-excluded buses in
+ *  bus order of (generation - load). One thread, sequential like the CPU. */
+__global__ void activePowerMismatch(int nBuses, const int* busFlags, const int* excluded, const double* genP, const double* loadP, double* out) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) {
+        return;
+    }
+    double mismatch = 0.0;
+    for (int b = 0; b < nBuses; b++) {
+        if ((busFlags[b] & BUS_DISABLED) == 0 && !(excluded != nullptr && excluded[b])) {
+            mismatch = __dadd_rn(mismatch, __dadd_rn(genP[b], -loadP[b]));
+        }
+    }
+    out[0] = -mismatch;
+}
+
+/** Java's Math.max / Math.min on doubles (NaN wins, -0.0 < 0.0), not IEEE maxNum. */
+__device__ inline double javaMax(double a, double b) {
+    if (a != a) { return a; }
+    if (b != b) { return b; }
+    if (a == 0.0 && b == 0.0) { return signbit(a) ? b : a; }
+    return a >= b ? a : b;
+}
+
+__device__ inline double javaMin(double a, double b) {
+    if (a != a) { return a; }
+    if (b != b) { return b; }
+    if (a == 0.0 && b == 0.0) { return signbit(a) ? a : b; }
+    return a <= b ? a : b;
+}
+
+/** DoubleStream.sum() as the JDK (17+) computes it: Kahan compensation, sequential, with the
+ *  simple-sum fallback for an infinite total — ParticipatingElement.participationFactorNorm. */
+__device__ inline double javaStreamSum(const double* v, int count) {
+    double sum = 0.0;
+    double comp = 0.0;
+    double simple = 0.0;
+    for (int k = 0; k < count; k++) {
+        double tmp = __dadd_rn(v[k], -comp);
+        double velvel = __dadd_rn(sum, tmp);
+        comp = __dadd_rn(__dadd_rn(velvel, -sum), -tmp);
+        sum = velvel;
+        simple = __dadd_rn(simple, v[k]);
+    }
+    double tmp = __dadd_rn(sum, -comp);
+    if (tmp != tmp && isinf(simple)) {
+        return simple;
+    }
+    return tmp;
+}
+
+constexpr int PT_MAX = 0;                    // PROPORTIONAL_TO_GENERATION_P_MAX
+constexpr int PT_TARGET = 1;                 // PROPORTIONAL_TO_GENERATION_P
+constexpr int PT_PARTICIPATION_FACTOR = 2;   // PROPORTIONAL_TO_GENERATION_PARTICIPATION_FACTOR
+constexpr int PT_REMAINING_MARGIN = 3;       // PROPORTIONAL_TO_GENERATION_REMAINING_MARGIN
+
+/** GenerationActivePowerDistributionStep.getParticipationFactor. */
+__device__ inline double participationFactor(int type, double targetP, double maxP, double minP, double droop, double pf, double mismatch) {
+    switch (type) {
+        case PT_MAX:
+            return __ddiv_rn(maxP, droop);
+        case PT_TARGET:
+            return fabs(targetP);
+        case PT_PARTICIPATION_FACTOR:
+            return pf;
+        default: {
+            if (targetP < 0) {
+                maxP = javaMin(maxP, 0.0);
+            } else {
+                minP = javaMax(minP, 0.0);
+            }
+            return mismatch > 0. ? javaMax(0.0, __dadd_rn(maxP, -targetP)) : javaMax(0.0, __dadd_rn(targetP, -minP));
+        }
+    }
+}
+
+/** GenerationActivePowerDistributionStep.isParticipating. */
+__device__ inline bool stepParticipating(int type, int participating, double droop, double pf) {
+    if (!participating) {
+        return false;
+    }
+    switch (type) {
+        case PT_MAX:
+            return droop != 0;
+        case PT_PARTICIPATION_FACTOR:
+            return pf > 0;
+        default:
+            return true;
+    }
+}
+
+/**
+ * ActivePowerDistribution.run with GenerationActivePowerDistributionStep, on the device generator
+ * tables, one thread, sequential like the CPU (a few thousand generators, a handful of iterations):
+ * the participating buses (participating, enabled, not fictitious, not excluded), the reset of the
+ * reference generator then of every participating generator to its INITIAL target P (the undone
+ * amount re-added to the mismatch), the participating elements with their factors, then the
+ * water-filling loop with the JDK's compensated norm, normalized factors, sign-preserving limits and
+ * iterator removal. Writes out[0] = remaining mismatch, out[1] = iterations.
+ */
+__global__ void distributeSlack(int nBuses, const int* busFlags, const int* excluded, const int* busGenStart,
+                                const double* genInit, double* genTarget, const double* genMinT, const double* genMaxT,
+                                const double* genMinP, const double* genMaxP, const double* genDroop, const double* genPf,
+                                const int* genPart, int refGen, int type, int useActiveLimits, double mismatch,
+                                int* elements, double* factors, double* out) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) {
+        return;
+    }
+    // Step.resetToInitialState: the reference generator first (the interface default), then the
+    // generation step's own loop over every participating generator of a participating bus, in bus
+    // order — two separately accumulated amounts, added at the end, then added to the mismatch
+    // (ActivePowerDistribution.run: remainingMismatch = activePowerMismatch + previousMismatch)
+    double refPrevious = 0.0;
+    if (refGen >= 0) {
+        refPrevious = __dadd_rn(refPrevious, -__dadd_rn(genInit[refGen], -genTarget[refGen]));
+        genTarget[refGen] = genInit[refGen];
+    }
+    double stepPrevious = 0.0;
+    for (int b = 0; b < nBuses; b++) {
+        bool busOk = (busFlags[b] & BUS_PARTICIPATING) && !(busFlags[b] & BUS_DISABLED) && !(busFlags[b] & BUS_FICTITIOUS)
+                     && !(excluded != nullptr && excluded[b]);
+        if (!busOk) {
+            continue;
+        }
+        for (int g = busGenStart[b]; g < busGenStart[b + 1]; g++) {
+            if (genPart[g]) {
+                stepPrevious = __dadd_rn(stepPrevious, -__dadd_rn(genInit[g], -genTarget[g]));
+                genTarget[g] = genInit[g];
+            }
+        }
+    }
+    double remaining = __dadd_rn(mismatch, __dadd_rn(stepPrevious, refPrevious));
+    // getParticipatingElements, factors on the reset targets and the effective mismatch
+    int count = 0;
+    for (int b = 0; b < nBuses; b++) {
+        bool busOk = (busFlags[b] & BUS_PARTICIPATING) && !(busFlags[b] & BUS_DISABLED) && !(busFlags[b] & BUS_FICTITIOUS)
+                     && !(excluded != nullptr && excluded[b]);
+        if (!busOk) {
+            continue;
+        }
+        for (int g = busGenStart[b]; g < busGenStart[b + 1]; g++) {
+            double f = participationFactor(type, genTarget[g], genMaxP[g], genMinP[g], genDroop[g], genPf[g], remaining);
+            if (stepParticipating(type, genPart[g], genDroop[g], genPf[g]) && f != 0) {
+                elements[count] = g;
+                factors[count] = f;
+                count++;
+            }
+        }
+    }
+    int iteration = 0;
+    while (count > 0 && fabs(remaining) > P_RESIDUE_EPS) {
+        double norm = javaStreamSum(factors, count);
+        if (!(norm > 0.0)) {
+            break;
+        }
+        // normalizeParticipationFactors
+        for (int k = 0; k < count; k++) {
+            factors[k] = __ddiv_rn(factors[k], norm);
+        }
+        double done = 0.0;
+        int k = 0;
+        while (k < count) {
+            int g = elements[k];
+            double factor = factors[k];
+            double minTargetP = useActiveLimits ? genMinT[g] : -1.7976931348623157e308;
+            double maxTargetP = useActiveLimits ? genMaxT[g] : 1.7976931348623157e308;
+            double targetP = genTarget[g];
+            if (targetP < 0) {
+                maxTargetP = javaMin(maxTargetP, 0.0);
+            } else {
+                minTargetP = javaMax(minTargetP, 0.0);
+            }
+            double newTargetP = __dadd_rn(targetP, __dmul_rn(remaining, factor));
+            bool drop = false;
+            if (remaining > 0 && newTargetP > maxTargetP) {
+                newTargetP = maxTargetP;
+                drop = true;
+            } else if (remaining < 0 && newTargetP < minTargetP) {
+                newTargetP = minTargetP;
+                drop = true;
+            }
+            if (newTargetP != targetP) {
+                genTarget[g] = newTargetP;
+                done = __dadd_rn(done, __dadd_rn(newTargetP, -targetP));
+            }
+            if (drop) {
+                for (int j = k + 1; j < count; j++) {
+                    elements[j - 1] = elements[j];
+                    factors[j - 1] = factors[j];
+                }
+                count--;
+            } else {
+                k++;
+            }
+        }
+        remaining = __dadd_rn(remaining, -done);
+        iteration++;
+    }
+    out[0] = remaining;
+    out[1] = (double) iteration;
+}
+
 DcContext* ctxOf(jlong h) {
     return reinterpret_cast<DcContext*>(h);
 }
@@ -425,6 +751,42 @@ void throwJava(JNIEnv* env, const std::string& msg) {
     }
 }
 
+/** The cuDSS handle, stream and configuration shared by both context creations. */
+void initCudss(DcContext* ctx) {
+    DC_CUDA_CHECK(cudaStreamCreate(&ctx->stream));
+    DC_CUDSS_CHECK(cudssCreate(&ctx->handle));
+    DC_CUDSS_CHECK(cudssSetStream(ctx->handle, ctx->stream));
+    DC_CUDSS_CHECK(cudssConfigCreate(&ctx->config));
+    // Iterative refinement: OFF by default. KLU (the reference) refines nothing, the LU is backward
+    // stable, and each refinement step costs a solve + a SpMV on every column — measured 2.1 s for
+    // the 9042-column S with 2 steps. OLF_GPU_DC_IR=<n> overrides (A/B against the parity gate).
+    int ir = 0;
+    if (const char* e = std::getenv("OLF_GPU_DC_IR"); e != nullptr && *e != '\0') {
+        ir = std::atoi(e);
+    }
+    DC_CUDSS_CHECK(cudssConfigSet(ctx->config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
+#if CUDSS_VERSION >= 800
+    cudssMatchingAlg_t matching = CUDSS_MATCHING_ALG_AUTO;   // empty structural diagonal, see header
+    DC_CUDSS_CHECK(cudssConfigSet(ctx->config, CUDSS_CONFIG_MATCHING_ALG, &matching, sizeof(matching)));
+    cudssReorderingAlg_t amd = CUDSS_REORDERING_ALG_AMD;       // the AC sweep winner
+    DC_CUDSS_CHECK(cudssConfigSet(ctx->config, CUDSS_CONFIG_REORDERING_ALG, &amd, sizeof(amd)));
+#endif
+    DC_CUDSS_CHECK(cudssDataCreate(ctx->handle, &ctx->data));
+}
+
+void requireBusesAndGenerators(DcContext* ctx) {
+    if (!ctx->assembled || ctx->nBuses == 0 || ctx->genTarget.p == nullptr) {
+        throw std::runtime_error("context not set up (assembled, buses, generators)");
+    }
+}
+
+/** The per-bus generation (from the device generator targets), then the components' mismatches. */
+void refreshBusGeneration(DcContext* ctx) {
+    busGeneration<<<grid(ctx->nBuses), BLOCK, 0, ctx->stream>>>(ctx->nBuses, ctx->busGenStart.as<int>(), ctx->genTarget.as<double>(),
+            ctx->busGenP.as<double>());
+    DC_CUDA_CHECK(cudaGetLastError());
+}
+
 }  // namespace
 
 extern "C" {
@@ -445,25 +807,7 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_createContext(JNIEnv* env, jcla
         if (val.len != ctx->nnz || colIdx.len < ctx->nnz) {
             throw std::runtime_error("CSR arrays inconsistent with rowPtr[n]");
         }
-        DC_CUDA_CHECK(cudaStreamCreate(&ctx->stream));
-        DC_CUDSS_CHECK(cudssCreate(&ctx->handle));
-        DC_CUDSS_CHECK(cudssSetStream(ctx->handle, ctx->stream));
-        DC_CUDSS_CHECK(cudssConfigCreate(&ctx->config));
-        // Iterative refinement: OFF by default. KLU (the reference) refines nothing, the LU is backward
-        // stable, and each refinement step costs a solve + a SpMV on every column — measured 2.1 s for
-        // the 9042-column S with 2 steps. OLF_GPU_DC_IR=<n> overrides (A/B against the parity gate).
-        int ir = 0;
-        if (const char* e = std::getenv("OLF_GPU_DC_IR"); e != nullptr && *e != '\0') {
-            ir = std::atoi(e);
-        }
-        DC_CUDSS_CHECK(cudssConfigSet(ctx->config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
-#if CUDSS_VERSION >= 800
-        cudssMatchingAlg_t matching = CUDSS_MATCHING_ALG_AUTO;   // empty structural diagonal, see header
-        DC_CUDSS_CHECK(cudssConfigSet(ctx->config, CUDSS_CONFIG_MATCHING_ALG, &matching, sizeof(matching)));
-        cudssReorderingAlg_t amd = CUDSS_REORDERING_ALG_AMD;       // the AC sweep winner
-        DC_CUDSS_CHECK(cudssConfigSet(ctx->config, CUDSS_CONFIG_REORDERING_ALG, &amd, sizeof(amd)));
-#endif
-        DC_CUDSS_CHECK(cudssDataCreate(ctx->handle, &ctx->data));
+        initCudss(ctx);
         ctx->rowPtr.upload(rowPtr.p, (size_t) (n + 1) * sizeof(int));
         ctx->colIdx.upload(colIdx.p, (size_t) ctx->nnz * sizeof(int));
         ctx->val.upload(val.p, (size_t) ctx->nnz * sizeof(double));
@@ -824,6 +1168,390 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_woodburyChunk(JNIEnv* env, jcla
         return result;
     } catch (const std::exception& e) {
         throwJava(env, std::string("GpuDcSolver.woodburyChunk: ") + e.what());
+        return nullptr;
+    }
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// device assembly entry points (GpuDcAssembly)
+// ---------------------------------------------------------------------------------------------
+
+/** A context on the STRUCTURE only: pattern, value and target contribution lists. No value, no
+ *  factorization yet — setBranches / setBuses / setGenerators, then fillValues. */
+JNIEXPORT jlong JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_createAssembled(JNIEnv* env, jclass, jint n, jintArray jRowPtr, jintArray jColIdx,
+                                                                 jintArray jContribPtr, jintArray jContribKind, jintArray jContribElem,
+                                                                 jdoubleArray jContribCoef, jintArray jTargetKind, jintArray jTargetElem,
+                                                                 jintArray jRhsPtr, jintArray jRhsKind, jintArray jRhsElem, jdoubleArray jRhsCoef) {
+    DcContext* ctx = new DcContext();
+    try {
+        IntArray rowPtr(env, jRowPtr);
+        IntArray colIdx(env, jColIdx);
+        IntArray contribPtr(env, jContribPtr);
+        IntArray contribKind(env, jContribKind);
+        IntArray contribElem(env, jContribElem);
+        DoubleArray contribCoef(env, jContribCoef);
+        IntArray targetKind(env, jTargetKind);
+        IntArray targetElem(env, jTargetElem);
+        IntArray rhsPtr(env, jRhsPtr);
+        IntArray rhsKind(env, jRhsKind);
+        IntArray rhsElem(env, jRhsElem);
+        DoubleArray rhsCoef(env, jRhsCoef);
+        if (rowPtr.len != n + 1 || targetKind.len != n || targetElem.len != n || rhsPtr.len != n + 1) {
+            throw std::runtime_error("per-column arrays must have length n (+1 for the pointers)");
+        }
+        ctx->n = n;
+        ctx->nnz = rowPtr.p[n];
+        if (colIdx.len < ctx->nnz || contribPtr.len != ctx->nnz + 1) {
+            throw std::runtime_error("CSR arrays inconsistent with rowPtr[n]");
+        }
+        int nContrib = contribPtr.p[ctx->nnz];
+        if (contribKind.len != nContrib || contribElem.len != nContrib || contribCoef.len != nContrib) {
+            throw std::runtime_error("contribution arrays inconsistent with contribPtr");
+        }
+        int nRhs = rhsPtr.p[n];
+        if (rhsKind.len != nRhs || rhsElem.len != nRhs || rhsCoef.len != nRhs) {
+            throw std::runtime_error("rhs arrays inconsistent with rhsPtr");
+        }
+        initCudss(ctx);
+        ctx->rowPtr.upload(rowPtr.p, (size_t) (n + 1) * sizeof(int));
+        ctx->colIdx.upload(colIdx.p, (size_t) ctx->nnz * sizeof(int));
+        ctx->val.alloc((size_t) ctx->nnz * sizeof(double));
+        DC_CUDA_CHECK(cudaMemset(ctx->val.p, 0, (size_t) ctx->nnz * sizeof(double)));
+        ctx->contribPtr.upload(contribPtr.p, (size_t) (ctx->nnz + 1) * sizeof(int));
+        ctx->contribKind.upload(contribKind.p, (size_t) std::max(nContrib, 1) * sizeof(int));
+        ctx->contribElem.upload(contribElem.p, (size_t) std::max(nContrib, 1) * sizeof(int));
+        ctx->contribCoef.upload(contribCoef.p, (size_t) std::max(nContrib, 1) * sizeof(double));
+        ctx->targetKind.upload(targetKind.p, (size_t) n * sizeof(int));
+        ctx->targetElem.upload(targetElem.p, (size_t) n * sizeof(int));
+        ctx->rhsPtr.upload(rhsPtr.p, (size_t) (n + 1) * sizeof(int));
+        ctx->rhsKind.upload(rhsKind.p, (size_t) std::max(nRhs, 1) * sizeof(int));
+        ctx->rhsElem.upload(rhsElem.p, (size_t) std::max(nRhs, 1) * sizeof(int));
+        ctx->rhsCoef.upload(rhsCoef.p, (size_t) std::max(nRhs, 1) * sizeof(double));
+        ctx->t.alloc((size_t) n * sizeof(double));
+        ctx->scalarOut.alloc(sizeof(double));
+        ctx->dsOut.alloc(2 * sizeof(double));
+        DC_CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->matA, n, n, ctx->nnz, ctx->rowPtr.p, nullptr, ctx->colIdx.p, ctx->val.p,
+                                            DC_CUDSS_CSR_TYPES, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
+        ctx->ensureRhs(1);
+        ctx->assembled = true;
+        return reinterpret_cast<jlong>(ctx);
+    } catch (const std::exception& e) {
+        delete ctx;
+        throwJava(env, std::string("GpuDcSolver.createAssembled: ") + e.what());
+        return 0;
+    }
+}
+
+/** The bus tables: the active P column, the angle row, the load target P, the flags, the
+ *  synchronous component and the generator range of every bus; the components' bus lists and
+ *  slack counts. */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_setBuses(JNIEnv* env, jclass, jlong handle, jintArray jPColumn, jintArray jPhRow,
+                                                          jdoubleArray jLoadP, jintArray jFlags, jintArray jSc, jintArray jGenStart,
+                                                          jintArray jScBusPtr, jintArray jScBusList, jintArray jScSlackCount) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        IntArray pColumn(env, jPColumn);
+        IntArray phRow(env, jPhRow);
+        DoubleArray loadP(env, jLoadP);
+        IntArray flags(env, jFlags);
+        IntArray sc(env, jSc);
+        IntArray genStart(env, jGenStart);
+        IntArray scBusPtr(env, jScBusPtr);
+        IntArray scBusList(env, jScBusList);
+        IntArray scSlackCount(env, jScSlackCount);
+        int nb = pColumn.len;
+        if (phRow.len != nb || loadP.len != nb || flags.len != nb || sc.len != nb || genStart.len != nb + 1) {
+            throw std::runtime_error("bus arrays must have the same length");
+        }
+        int nSc = scBusPtr.len - 1;
+        if (nSc < 0 || scSlackCount.len != nSc || scBusList.len < scBusPtr.p[nSc]) {
+            throw std::runtime_error("synchronous component arrays inconsistent");
+        }
+        ctx->nBuses = nb;
+        ctx->nSc = nSc;
+        ctx->busPColumn.upload(pColumn.p, (size_t) nb * sizeof(int));
+        ctx->busPhRow.upload(phRow.p, (size_t) nb * sizeof(int));
+        ctx->busLoadP.upload(loadP.p, (size_t) nb * sizeof(double));
+        ctx->busFlags.upload(flags.p, (size_t) nb * sizeof(int));
+        ctx->busSc.upload(sc.p, (size_t) nb * sizeof(int));
+        ctx->busGenStart.upload(genStart.p, (size_t) (nb + 1) * sizeof(int));
+        ctx->busGenP.alloc((size_t) nb * sizeof(double));
+        ctx->busExcluded.alloc((size_t) nb * sizeof(int));
+        DC_CUDA_CHECK(cudaMemset(ctx->busExcluded.p, 0, (size_t) nb * sizeof(int)));
+        ctx->scBusPtr.upload(scBusPtr.p, (size_t) (nSc + 1) * sizeof(int));
+        ctx->scBusList.upload(scBusList.p, (size_t) std::max<jsize>(scBusList.len, 1) * sizeof(int));
+        ctx->scSlackCount.upload(scSlackCount.p, (size_t) std::max(nSc, 1) * sizeof(int));
+        ctx->scMismatch.alloc((size_t) std::max(nSc, 1) * sizeof(double));
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.setBuses: ") + e.what());
+    }
+}
+
+/** The loads' target P per bus (a time-series step, a refreshed network). */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_setBusLoads(JNIEnv* env, jclass, jlong handle, jdoubleArray jLoadP) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        DoubleArray loadP(env, jLoadP);
+        if (loadP.len != ctx->nBuses) {
+            throw std::runtime_error("loadP length must be the bus count");
+        }
+        DC_CUDA_CHECK(cudaMemcpy(ctx->busLoadP.p, loadP.p, (size_t) ctx->nBuses * sizeof(double), cudaMemcpyHostToDevice));
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.setBusLoads: ") + e.what());
+    }
+}
+
+/** The buses excluded from the mismatch and the distribution (islanded by a contingency); null = none. */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_setExcludedBuses(JNIEnv* env, jclass, jlong handle, jintArray jBuses) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        std::vector<int> mask(ctx->nBuses, 0);
+        if (jBuses != nullptr) {
+            IntArray buses(env, jBuses);
+            for (jsize i = 0; i < buses.len; i++) {
+                if (buses.p[i] < 0 || buses.p[i] >= ctx->nBuses) {
+                    throw std::runtime_error("excluded bus out of range");
+                }
+                mask[buses.p[i]] = 1;
+            }
+        }
+        DC_CUDA_CHECK(cudaMemcpy(ctx->busExcluded.p, mask.data(), (size_t) ctx->nBuses * sizeof(int), cudaMemcpyHostToDevice));
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.setExcludedBuses: ") + e.what());
+    }
+}
+
+/** The generator tables (GenerationActivePowerDistributionStep's inputs), in bus-then-generator order. */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_setGenerators(JNIEnv* env, jclass, jlong handle, jdoubleArray jInit, jdoubleArray jTarget,
+                                                               jdoubleArray jMinT, jdoubleArray jMaxT, jdoubleArray jMinP, jdoubleArray jMaxP,
+                                                               jdoubleArray jDroop, jdoubleArray jPf, jintArray jPart) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        DoubleArray init(env, jInit);
+        DoubleArray target(env, jTarget);
+        DoubleArray minT(env, jMinT);
+        DoubleArray maxT(env, jMaxT);
+        DoubleArray minP(env, jMinP);
+        DoubleArray maxP(env, jMaxP);
+        DoubleArray droop(env, jDroop);
+        DoubleArray pf(env, jPf);
+        IntArray part(env, jPart);
+        int m = init.len;
+        if (target.len != m || minT.len != m || maxT.len != m || minP.len != m || maxP.len != m || droop.len != m || pf.len != m || part.len != m) {
+            throw std::runtime_error("generator arrays must have the same length");
+        }
+        ctx->nGen = m;
+        size_t bytes = (size_t) std::max(m, 1) * sizeof(double);
+        ctx->genInit.upload(init.p, bytes);
+        ctx->genTarget.upload(target.p, bytes);
+        ctx->genMinT.upload(minT.p, bytes);
+        ctx->genMaxT.upload(maxT.p, bytes);
+        ctx->genMinP.upload(minP.p, bytes);
+        ctx->genMaxP.upload(maxP.p, bytes);
+        ctx->genDroop.upload(droop.p, bytes);
+        ctx->genPf.upload(pf.p, bytes);
+        ctx->genPart.upload(part.p, (size_t) std::max(m, 1) * sizeof(int));
+        ctx->dsElem.alloc((size_t) std::max(m, 1) * sizeof(int));
+        ctx->dsFactor.alloc(bytes);
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.setGenerators: ") + e.what());
+    }
+}
+
+/** The generators' current target P, overwritten (the host distributed, or restored, the network). */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_setGeneratorTargets(JNIEnv* env, jclass, jlong handle, jdoubleArray jTarget) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        DoubleArray target(env, jTarget);
+        if (target.len != ctx->nGen) {
+            throw std::runtime_error("target length must be the generator count");
+        }
+        if (ctx->nGen > 0) {
+            DC_CUDA_CHECK(cudaMemcpy(ctx->genTarget.p, target.p, (size_t) ctx->nGen * sizeof(double), cudaMemcpyHostToDevice));
+        }
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.setGeneratorTargets: ") + e.what());
+    }
+}
+
+JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_readGeneratorTargets(JNIEnv* env, jclass, jlong handle) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        std::vector<double> host((size_t) ctx->nGen);
+        if (ctx->nGen > 0) {
+            DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->genTarget.p, (size_t) ctx->nGen * sizeof(double), cudaMemcpyDeviceToHost));
+        }
+        jdoubleArray out = env->NewDoubleArray(ctx->nGen);
+        env->SetDoubleArrayRegion(out, 0, ctx->nGen, host.data());
+        return out;
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.readGeneratorTargets: ") + e.what());
+        return nullptr;
+    }
+}
+
+/** The matrix values from the branch powers (setBranches), then the factorization — the analysis
+ *  once, on the first fill. */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_fillValues(JNIEnv* env, jclass, jlong handle) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        if (!ctx->assembled) {
+            throw std::runtime_error("not an assembled context");
+        }
+        if (ctx->power.p == nullptr) {
+            throw std::runtime_error("branches not set (setBranches)");
+        }
+        fillValues<<<grid(ctx->nnz), BLOCK, 0, ctx->stream>>>(ctx->nnz, ctx->contribPtr.as<int>(), ctx->contribKind.as<int>(),
+                ctx->contribElem.as<int>(), ctx->contribCoef.as<double>(), ctx->power.as<double>(), ctx->val.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        ctx->ensureRhs(1);
+        if (!ctx->analyzed) {
+            DC_CUDSS_CHECK(cudssExecute(ctx->handle, CUDSS_PHASE_ANALYSIS, ctx->config, ctx->data, ctx->matA, ctx->matX, ctx->matB));
+            ctx->analyzed = true;
+        }
+        DC_CUDSS_CHECK(cudssExecute(ctx->handle, CUDSS_PHASE_FACTORIZATION, ctx->config, ctx->data, ctx->matA, ctx->matX, ctx->matB));
+        DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.fillValues: ") + e.what());
+    }
+}
+
+JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_readValues(JNIEnv* env, jclass, jlong handle) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        std::vector<double> host((size_t) ctx->nnz);
+        DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->val.p, (size_t) ctx->nnz * sizeof(double), cudaMemcpyDeviceToHost));
+        jdoubleArray out = env->NewDoubleArray(ctx->nnz);
+        env->SetDoubleArrayRegion(out, 0, ctx->nnz, host.data());
+        return out;
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.readValues: ") + e.what());
+        return nullptr;
+    }
+}
+
+
+/** DcLoadFlowEngine.getActivePowerMismatch over the enabled, non-excluded buses. */
+JNIEXPORT jdouble JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_activePowerMismatch(JNIEnv* env, jclass, jlong handle, jboolean withExcluded) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        requireBusesAndGenerators(ctx);
+        refreshBusGeneration(ctx);
+        activePowerMismatch<<<1, 32, 0, ctx->stream>>>(ctx->nBuses, ctx->busFlags.as<int>(), withExcluded ? ctx->busExcluded.as<int>() : nullptr,
+                ctx->busGenP.as<double>(), ctx->busLoadP.as<double>(), ctx->scalarOut.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        double out = 0;
+        DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        DC_CUDA_CHECK(cudaMemcpy(&out, ctx->scalarOut.p, sizeof(double), cudaMemcpyDeviceToHost));
+        return out;
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.activePowerMismatch: ") + e.what());
+        return 0;
+    }
+}
+
+/** ActivePowerDistribution.run on the device generator targets; returns [remaining, iterations]. */
+JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_distributeSlack(JNIEnv* env, jclass, jlong handle, jint participationType,
+                                                                 jboolean useActiveLimits, jint referenceGenerator, jboolean withExcluded,
+                                                                 jdouble mismatch) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        requireBusesAndGenerators(ctx);
+        if (referenceGenerator >= ctx->nGen) {
+            throw std::runtime_error("reference generator out of range");
+        }
+        distributeSlack<<<1, 32, 0, ctx->stream>>>(ctx->nBuses, ctx->busFlags.as<int>(), withExcluded ? ctx->busExcluded.as<int>() : nullptr,
+                ctx->busGenStart.as<int>(), ctx->genInit.as<double>(), ctx->genTarget.as<double>(), ctx->genMinT.as<double>(),
+                ctx->genMaxT.as<double>(), ctx->genMinP.as<double>(), ctx->genMaxP.as<double>(), ctx->genDroop.as<double>(),
+                ctx->genPf.as<double>(), ctx->genPart.as<int>(), referenceGenerator, participationType, useActiveLimits ? 1 : 0, mismatch,
+                ctx->dsElem.as<int>(), ctx->dsFactor.as<double>(), ctx->dsOut.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        double out[2];
+        DC_CUDA_CHECK(cudaMemcpy(out, ctx->dsOut.p, 2 * sizeof(double), cudaMemcpyDeviceToHost));
+        jdoubleArray result = env->NewDoubleArray(2);
+        env->SetDoubleArrayRegion(result, 0, 2, out);
+        return result;
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.distributeSlack: ") + e.what());
+        return nullptr;
+    }
+}
+
+/** DcTargetVector on the device from the current generator targets, loads and branch model. */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_fillTarget(JNIEnv* env, jclass, jlong handle) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        requireBusesAndGenerators(ctx);
+        if (ctx->power.p == nullptr) {
+            throw std::runtime_error("branches not set (setBranches)");
+        }
+        refreshBusGeneration(ctx);
+        if (ctx->nSc > 0) {
+            scMismatches<<<grid(ctx->nSc), BLOCK, 0, ctx->stream>>>(ctx->nSc, ctx->scBusPtr.as<int>(), ctx->scBusList.as<int>(),
+                    ctx->busFlags.as<int>(), ctx->busGenP.as<double>(), ctx->busLoadP.as<double>(), ctx->scMismatch.as<double>());
+            DC_CUDA_CHECK(cudaGetLastError());
+        }
+        fillTarget<<<grid(ctx->n), BLOCK, 0, ctx->stream>>>(ctx->n, ctx->targetKind.as<int>(), ctx->targetElem.as<int>(), ctx->rhsPtr.as<int>(),
+                ctx->rhsKind.as<int>(), ctx->rhsElem.as<int>(), ctx->rhsCoef.as<double>(), ctx->busGenP.as<double>(), ctx->busLoadP.as<double>(),
+                ctx->busFlags.as<int>(), ctx->busSc.as<int>(), ctx->scSlackCount.as<int>(), ctx->scMismatch.as<double>(),
+                ctx->a1Const.as<double>(), ctx->a1Row.as<int>(), ctx->power.as<double>(), ctx->t.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.fillTarget: ") + e.what());
+    }
+}
+
+JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_readTarget(JNIEnv* env, jclass, jlong handle) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        if (ctx->t.p == nullptr) {
+            throw std::runtime_error("not an assembled context");
+        }
+        std::vector<double> host((size_t) ctx->n);
+        DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->t.p, (size_t) ctx->n * sizeof(double), cudaMemcpyDeviceToHost));
+        jdoubleArray out = env->NewDoubleArray(ctx->n);
+        env->SetDoubleArrayRegion(out, 0, ctx->n, host.data());
+        return out;
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.readTarget: ") + e.what());
+        return nullptr;
+    }
+}
+
+/** Solve J x = t for the device target vector (fillTarget); returns x. */
+JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_solveTarget(JNIEnv* env, jclass, jlong handle) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        if (!ctx->assembled || !ctx->analyzed) {
+            throw std::runtime_error("not an assembled and factorized context (fillValues)");
+        }
+        ctx->ensureRhs(1);
+        DC_CUDA_CHECK(cudaMemcpy(ctx->b.p, ctx->t.p, (size_t) ctx->n * sizeof(double), cudaMemcpyDeviceToDevice));
+        ctx->solveDense(1);
+        jdoubleArray out = env->NewDoubleArray(ctx->n);
+        std::vector<double> host(ctx->n);
+        DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->x.p, (size_t) ctx->n * sizeof(double), cudaMemcpyDeviceToHost));
+        env->SetDoubleArrayRegion(out, 0, ctx->n, host.data());
+        return out;
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.solveTarget: ") + e.what());
         return nullptr;
     }
 }

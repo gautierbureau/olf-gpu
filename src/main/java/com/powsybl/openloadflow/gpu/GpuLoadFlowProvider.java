@@ -13,6 +13,7 @@ import com.powsybl.commons.config.PlatformConfig;
 import com.powsybl.commons.extensions.Extension;
 import com.powsybl.commons.extensions.ExtensionJsonSerializer;
 import com.powsybl.commons.parameters.Parameter;
+import com.powsybl.commons.report.ReportNode;
 import com.powsybl.iidm.network.Network;
 import com.powsybl.loadflow.LoadFlowParameters;
 import com.powsybl.loadflow.LoadFlowProvider;
@@ -25,10 +26,20 @@ import com.powsybl.openloadflow.OpenLoadFlowProvider;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameterJsonSerializer;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuLoadFlowParameters;
 import com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphsonFactory;
+import com.powsybl.openloadflow.dc.DcLoadFlowContext;
+import com.powsybl.openloadflow.dc.DcLoadFlowEngine;
+import com.powsybl.openloadflow.dc.DcLoadFlowParameters;
+import com.powsybl.openloadflow.dc.DcLoadFlowResult;
+import com.powsybl.openloadflow.dc.gpu.GpuDcLoadFlowEngine;
+import com.powsybl.openloadflow.dc.gpu.GpuDcSolver;
 import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFactory;
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.impl.LfNetworkLoaderImpl;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -39,6 +50,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 /**
@@ -49,15 +61,23 @@ import java.util.stream.Collectors;
  * configuration module and its defaults. This provider's specific parameters are only the GPU solver's,
  * {@link GpuLoadFlowParameters}, so one parameters file carries both extensions. By name and value (pypowsybl's
  * {@code provider_parameters}) this provider also takes OLF's parameters: the provider SPI gives a provider a single
- * specific-parameters extension, so the GPU one carries them and the run applies them over its OLF parameters. A DC
- * load flow has no GPU path and runs as in OLF.
+ * specific-parameters extension, so the GPU one carries them and the run applies them over its OLF parameters.
+ *
+ * <p>The DC load flow is assembled, distributed and solved on the device ({@link GpuDcLoadFlowEngine}). Without a
+ * device, or for a component whose DC equations have no device model, the stock DC engine runs.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 @AutoService(LoadFlowProvider.class)
 public class GpuLoadFlowProvider extends OpenLoadFlowProvider {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(GpuLoadFlowProvider.class);
+
     public static final String NAME = "OpenLoadFlowGpu";
+
+    /** The last run's DC components solved on the device (test/validation probe; the provider runs on a
+     *  pool thread, hence not thread-local), -1 when the whole run took the stock engine. */
+    public static final AtomicInteger LAST_GPU_COMPONENT_COUNT = new AtomicInteger(-1);
 
     private static final Set<String> OPEN_LOAD_FLOW_PARAMETER_NAMES = OpenLoadFlowParameters.SPECIFIC_PARAMETERS.stream()
             .map(Parameter::getName)
@@ -128,6 +148,40 @@ public class GpuLoadFlowProvider extends OpenLoadFlowProvider {
             parametersExt.setAcSolverType(GpuNewtonRaphsonFactory.NAME);
         }
         return copy;
+    }
+
+    @Override
+    protected List<DcLoadFlowResult> runDcEngine(Network network, DcLoadFlowParameters dcParameters, ReportNode reportNode) {
+        if (!GpuDcSolver.isAvailable()) {
+            LOGGER.info("GPU DC load flow: no device, stock engine");
+            LAST_GPU_COMPONENT_COUNT.set(-1);
+            return super.runDcEngine(network, dcParameters, reportNode);
+        }
+        int onDevice = 0;
+        List<DcLoadFlowResult> results = new ArrayList<>();
+        for (LfNetwork lfNetwork : LfNetwork.load(network, new LfNetworkLoaderImpl(), dcParameters.getNetworkParameters(), reportNode)) {
+            if (lfNetwork.getValidity() != LfNetwork.Validity.VALID) {
+                results.add(DcLoadFlowResult.createNoCalculationResult(lfNetwork));
+                continue;
+            }
+            try (DcLoadFlowContext context = new DcLoadFlowContext(lfNetwork, dcParameters)) {
+                boolean device = true;
+                try (GpuDcLoadFlowEngine engine = new GpuDcLoadFlowEngine(context)) {
+                    engine.prepare();
+                    results.add(engine.run());
+                } catch (UnsupportedOperationException e) {
+                    LOGGER.warn("GPU DC load flow: {} — component {} on the stock engine", e.getMessage(), lfNetwork.getNumCC());
+                    device = false;
+                }
+                if (!device) {
+                    results.add(new DcLoadFlowEngine(context).run());
+                } else {
+                    onDevice++;
+                }
+            }
+        }
+        LAST_GPU_COMPONENT_COUNT.set(onDevice);
+        return results;
     }
 
     @Override

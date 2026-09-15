@@ -472,6 +472,24 @@ public final class GpuAcNewtonSolver {
      *  null without the table. Layout {@code s * nSubs + u}, subs in upload order. */
     public static native int[] readBatchShuntPositions(long handle);
 
+    /** Install the FLOW-OBSERVED incremental controllers (RPC / incremental phase) for the in-kernel
+     *  loops (OLF orders 7 and 9); see GpuBatchIncrementalFlowControl.uploadToDevice. Returns 1 when
+     *  the kernel loops own them. */
+    public static native int setBatchFlowControllers(long handle, int[] kind, int[] pinRow, int[] pinCol, int[] side,
+            double[] targetValue, double[] halfDb, int[] elem, int[] ctlElem, int[] tapPtr, double[] tapData,
+            int[] baseTap, int[] maxShift);
+
+    /** Per (scenario, flow controller): the tap the driver left — null without the table. */
+    public static native int[] readBatchFlowTaps(long handle);
+
+    /** Install the CONTINUOUS phase controllers for the in-kernel PhaseControl phase (OLF order 7);
+     *  see GpuBatchContinuousPhase.uploadToDevice. Returns 1 when the kernel loop owns them. */
+    public static native int setBatchContinuousPhase(long handle, int[] kind, int[] a1Row, int[] side, double[] limit,
+            int[] elem, int[] tapPtr, double[] tapData, int[] baseTap);
+
+    /** Per (scenario, continuous phase controller): the tap the driver left — null without the table. */
+    public static native int[] readBatchContinuousPhaseTaps(long handle);
+
     /**
      * Install the PER-GENERATOR distributed-slack participants: the factors and limits OLF's
      * water-fill actually saturates on, grouped by bus ({@code busGenStart}/{@code busGenEnd} slice

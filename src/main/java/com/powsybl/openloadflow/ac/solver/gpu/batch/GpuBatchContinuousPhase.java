@@ -49,7 +49,7 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-final class GpuBatchContinuousPhase {
+public final class GpuBatchContinuousPhase {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchContinuousPhase.class);
 
@@ -57,13 +57,13 @@ final class GpuBatchContinuousPhase {
     }
 
     /** kind 0 = CONTROLLER (continuous then discretized), 1 = LIMITER (one-tap current capping). */
-    record Ctl(int kind, int a1Row, EquationTerm<AcVariableType, AcEquationType> iTerm, double iLimit,
+    public record Ctl(int kind, int a1Row, EquationTerm<AcVariableType, AcEquationType> iTerm, double iLimit,
                double[][] tapRows, int baseTapIdx, int elemIndex,
-               int[] deltaRows, int[] deltaModesOn, double[] deltaTargetsOn) {
+               int[] deltaRows, int[] deltaModesOn, double[] deltaTargetsOn, int controlledSide, int branchNum) {
     }
 
     @SuppressWarnings("unchecked")
-    static List<Ctl> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    public static List<Ctl> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                       TargetVector<AcVariableType, AcEquationType> targetVector,
                                       GpuAcActivation baseActivation, double[] baseTargets,
                                       GpuBatchElementMapper elementMapper) {
@@ -120,12 +120,12 @@ final class GpuBatchContinuousPhase {
                     deltaTargetsOn[k] = onTargets[deltaRows[k]];
                 }
                 out.add(new Ctl(0, a1Row, null, 0, tapRows, baseTap, elemIndex,
-                        deltaRows, deltaModesOn, deltaTargetsOn));
+                        deltaRows, deltaModesOn, deltaTargetsOn, pc.getControlledSide() == TwoSides.ONE ? 1 : 2, branch.getNum()));
             } else if (pc.getMode() == TransformerPhaseControl.Mode.LIMITER) {
                 var iTerm = (EquationTerm<AcVariableType, AcEquationType>) (pc.getControlledSide() == TwoSides.ONE
                         ? branch.getI1() : branch.getI2());
                 out.add(new Ctl(1, a1Row, iTerm, pc.getTargetValue(), tapRows, baseTap, elemIndex,
-                        new int[0], new int[0], new double[0]));
+                        new int[0], new int[0], new double[0], pc.getControlledSide() == TwoSides.ONE ? 1 : 2, branch.getNum()));
             }
         }
         return out;
@@ -149,6 +149,71 @@ final class GpuBatchContinuousPhase {
                     ovValueList.add(c.deltaTargetsOn()[k]);
                 }
                 rowModePerScenario[slot] = row;
+            }
+        }
+    }
+
+    /** Install the controllers for the in-kernel PhaseControl phase (OLF order 7). Returns true when the
+     *  kernel loop OWNS them (the host orchestrator must then stay off). */
+    public static boolean uploadToDevice(long handle, List<Ctl> ctls) {
+        if (ctls == null || ctls.isEmpty()) {
+            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchContinuousPhase(handle,
+                    null, null, null, null, null, null, null, null);
+            return false;
+        }
+        int nc = ctls.size();
+        int[] kind = new int[nc];
+        int[] a1Row = new int[nc];
+        int[] side = new int[nc];
+        double[] limit = new double[nc];
+        int[] elem = new int[nc];
+        int[] tapPtr = new int[nc + 1];
+        int[] baseTap = new int[nc];
+        List<Double> tapData = new ArrayList<>();
+        for (int c = 0; c < nc; c++) {
+            Ctl ctl = ctls.get(c);
+            kind[c] = ctl.kind();
+            a1Row[c] = ctl.a1Row();
+            side[c] = ctl.controlledSide();
+            limit[c] = ctl.iLimit();
+            elem[c] = ctl.elemIndex();
+            tapPtr[c] = tapData.size() / 8;
+            for (double[] row : ctl.tapRows()) {
+                for (double d : row) {
+                    tapData.add(d);
+                }
+            }
+            baseTap[c] = ctl.baseTapIdx();
+        }
+        tapPtr[nc] = tapData.size() / 8;
+        boolean owned = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchContinuousPhase(handle,
+                kind, a1Row, side, limit, elem, tapPtr, tapData.stream().mapToDouble(Double::doubleValue).toArray(), baseTap) != 0;
+        LOGGER.info("Uploaded {} continuous phase controllers to device: {}", nc, owned ? "in-kernel loop" : "host orchestrator");
+        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            System.err.printf("CPHASE_UPLOAD nCtrl=%d kernel=%b%n", nc, owned);
+        }
+        return owned;
+    }
+
+    /** Give the driver's decisions (scenario 0) back to the network the way OLF's loop leaves it: every
+     *  CONTROLLER-mode control switched off, every tap at the rounded / shifted position. */
+    public static void writeBack(LfNetwork network, List<Ctl> ctls, int[] taps) {
+        if (ctls == null || ctls.isEmpty() || taps == null) {
+            return;
+        }
+        for (int c = 0; c < ctls.size() && c < taps.length; c++) {
+            Ctl ctl = ctls.get(c);
+            LfBranch branch = network.getBranch(ctl.branchNum());
+            if (branch == null) {
+                continue;
+            }
+            if (ctl.kind() == 0 && branch.isPhaseControlEnabled()) {
+                branch.setPhaseControlEnabled(false);
+            }
+            var pm = branch.getPiModel();
+            int pos = pm.getTapPositionRange().getMinimum() + taps[c];
+            if (pm.getTapPosition() != pos) {
+                pm.setTapPosition(pos);
             }
         }
     }

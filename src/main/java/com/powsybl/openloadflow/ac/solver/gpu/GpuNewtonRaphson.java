@@ -16,6 +16,8 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivationExtractor
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchHvdcAcEmulation;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContinuousPhase;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchIncrementalFlowControl;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchIncrementalShuntVc;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchIncrementalTvc;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOuterLoopTables;
@@ -208,6 +210,12 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         }
         if (shuntOwned && shuntCtls != null) {
             GpuBatchIncrementalShuntVc.writeBackPositions(network, shuntCtls, GpuAcNewtonSolver.readBatchShuntPositions(handle));
+        }
+        if (flowOwned && flowCtls != null) {
+            GpuBatchIncrementalFlowControl.writeBackTaps(network, flowCtls, GpuAcNewtonSolver.readBatchFlowTaps(handle));
+        }
+        if (cphOwned && cphCtls != null) {
+            GpuBatchContinuousPhase.writeBack(network, cphCtls, GpuAcNewtonSolver.readBatchContinuousPhaseTaps(handle));
         }
     }
 
@@ -404,6 +412,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private boolean tvcOwned;
     private List<GpuBatchIncrementalShuntVc.Controller> shuntCtls;
     private boolean shuntOwned;
+    private List<GpuBatchIncrementalFlowControl.Controller> flowCtls;
+    private boolean flowOwned;
+    private List<GpuBatchContinuousPhase.Ctl> cphCtls;
+    private boolean cphOwned;
 
     /** The host-paused loops' (loop, context) pairs of the CURRENT engine run: OLF keeps one context
      *  per loop for the whole run (iteration counters, per-loop data), so they must survive a restart
@@ -723,6 +735,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             tvcOwned = false;
             shuntCtls = null;
             shuntOwned = false;
+            flowCtls = null;
+            flowOwned = false;
+            cphCtls = null;
+            cphOwned = false;
             if (driverOuterLoops) {
                 long handle = context.handle.get();
                 int nElements = cachedData.getTotalElementCount();
@@ -765,8 +781,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     invalidation.activationDirty = ad;
                 }
                 GpuBatchVoltageMonitoring.installDriverLoop(handle, monCtls);
-                // IncrementalTransformerVoltageControl (OLF order 8) IN-KERNEL when every controlled bus
-                // has a single controller; otherwise the driver pauses at the slot for OLF's own loop.
+                // IncrementalTransformerVoltageControl (OLF order 8) IN-KERNEL, shared groups included.
                 int hostMask = buildHostLoopMask();
                 if (driverLoop("IncrementalTransformerVoltageControl")
                         instanceof com.powsybl.openloadflow.ac.outerloop.IncrementalTransformerVoltageControlOuterLoop itvc) {
@@ -791,6 +806,40 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     }
                 } else {
                     GpuBatchIncrementalShuntVc.uploadToDevice(handle, null, 3);
+                }
+                // The flow-observed incremental loops: RPC (OLF order 9) and incremental phase (order 7).
+                var rpcLoop = driverLoop("IncrementalTransformerReactivePowerControl");
+                boolean incPhase = driverLoop("IncrementalPhaseControl") != null;
+                if (rpcLoop != null || incPhase) {
+                    var mapper = new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper(network);
+                    int rpcShift = rpcLoop instanceof com.powsybl.openloadflow.ac.outerloop.IncrementalTransformerReactivePowerControlOuterLoop r
+                            ? r.getMaxTapShift() : 1;
+                    flowCtls = GpuBatchIncrementalFlowControl.buildControllers(network, equationSystem, mapper, rpcShift,
+                            rpcLoop != null, incPhase);
+                    flowOwned = GpuBatchIncrementalFlowControl.uploadToDevice(handle, flowCtls);
+                    if (flowOwned) {
+                        if (rpcLoop != null) {
+                            hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_TRPC - GpuAcNewtonSolver.HOST_LOOP_SVC));
+                        }
+                        if (incPhase) {
+                            hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_PHASE - GpuAcNewtonSolver.HOST_LOOP_SVC));
+                        }
+                    }
+                } else {
+                    GpuBatchIncrementalFlowControl.uploadToDevice(handle, null);
+                }
+                // CONTINUOUS PhaseControl (OLF order 7): OLF's initialize enabled the controls on the network
+                // (the engine proxy ran it), so the activation carries the row-mode-3 rows; the driver's
+                // first check switches them off and rounds, later checks run the LIMITER.
+                if (driverLoop("PhaseControl") != null && !incPhase) {
+                    var mapper = new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper(network);
+                    cphCtls = GpuBatchContinuousPhase.buildControllers(network, equationSystem, targetVector, activation, target, mapper);
+                    cphOwned = GpuBatchContinuousPhase.uploadToDevice(handle, cphCtls);
+                    if (cphOwned) {
+                        hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_PHASE - GpuAcNewtonSolver.HOST_LOOP_SVC));
+                    }
+                } else {
+                    GpuBatchContinuousPhase.uploadToDevice(handle, null);
                 }
                 // Host-owned outer-loop slots: the driver pauses at their OLF positions and the
                 // pause/resume cycle after solveBatchContext runs OLF's loop there. 0 clears a cached mask.

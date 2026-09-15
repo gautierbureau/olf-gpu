@@ -144,9 +144,8 @@ public final class GpuBatchIncrementalTvc {
     /** Upload the controller data to the native batch context for an in-kernel TVC loop.
      *  Flattens the Controller list into the CSR-packed arrays that
      *  {@link GpuAcNewtonSolver#setBatchTvcControllers} expects. */
-    /** Install the controllers for the in-kernel loop. Returns true when the kernel loop OWNS
-     *  them (every controlled bus has a single controller), false when they stay on the host
-     *  orchestrator. */
+    /** Install the controllers for the in-kernel loop. Returns true when the kernel loop OWNS them
+     *  (shared controlled buses included), false when there are none. */
     public static boolean uploadToDevice(long handle, List<Controller> ctrls, int maxTapShift) {
         if (ctrls == null || ctrls.isEmpty()) {
             com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchTvcControllers(
@@ -206,7 +205,7 @@ public final class GpuBatchIncrementalTvc {
                 handle, rhoRow, vRow, targetV, halfDb, elemIndex, tapPtr, tapData, baseTap,
                 groupPtr, groupCtrl, maxTapShift) != 0;
         LOGGER.info("Uploaded {} incremental TVC controllers to device ({} taps, {} groups): {}",
-                nc, totalTaps, nGroups, owned ? "in-kernel loop" : "host orchestrator (shared controlled bus)");
+                nc, totalTaps, nGroups, owned ? "in-kernel loop" : "host orchestrator");
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
             System.err.printf("TVC_UPLOAD nCtrl=%d totalTaps=%d nGroups=%d kernel=%b%n", nc, totalTaps, nGroups, owned);
         }

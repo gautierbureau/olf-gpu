@@ -78,7 +78,9 @@ enum DeviceLoopKind {
     LOOP_HOST_TRPC = 8,      // TransformerReactivePowerControl — host   (OLF order 9, post-RL)
     LOOP_HOST_SHUNT = 9,     // ShuntVoltageControl — host pause         (OLF order 10, post-RL)
     LOOP_TVC_KERNEL = 10,    // IncrementalTransformerVoltageControl — IN-KERNEL (OLF order 8)
-    LOOP_SHUNT_KERNEL = 11   // IncrementalShuntVoltageControl — IN-KERNEL (OLF order 10)
+    LOOP_SHUNT_KERNEL = 11,  // IncrementalShuntVoltageControl — IN-KERNEL (OLF order 10)
+    LOOP_PHASE_KERNEL = 12,  // IncrementalPhaseControl (CONTROLLER + LIMITER) — IN-KERNEL (OLF order 7)
+    LOOP_TRPC_KERNEL = 13    // IncrementalTransformerReactivePowerControl — IN-KERNEL (OLF order 9)
 };
 // GpuBatchHvdcAcEmulation's status codes, shared with the host.
 constexpr int HV_LINEAR = 0;
@@ -4359,6 +4361,24 @@ struct BatchSolverContext {
     DeviceBuf dShcOutOfDb, dShcDiffV;                        // per (scenario, group)
     std::vector<int> hShcBRow, hShcShOvElem, hShcSubPtr, hShcSecPtr, hShcSubBase;
     std::vector<double> hShcSecB, hShcSecG;
+    // FLOW-OBSERVED incremental loops (LOOP_PHASE_KERNEL / LOOP_TRPC_KERNEL): a rho (RPC) or a1 (phase)
+    // tap driving a CONTROLLED branch's Q, P or I. kind 0 = RPC (rho -> Q, closest-r1), 1 = phase
+    // CONTROLLER (a1 -> P, closest-a1), 2 = phase LIMITER (a1 -> I, first-above-a1, one-sided).
+    int nFlc = 0, nFlcPhase = 0, nFlcRpc = 0;
+    DeviceBuf dFlcKind, dFlcPinRow, dFlcPinCol, dFlcSide, dFlcTargetValue, dFlcHalfDb, dFlcElem, dFlcCtlPack,
+              dFlcTapPtr, dFlcTapData, dFlcBaseTap, dFlcMaxShift;
+    DeviceBuf dFlcCurTap, dFlcPrevTap, dFlcRatDir, dFlcRatCount, dFlcRatAllowed, dFlcSensi, dFlcDiff, dFlcOutOfDb;
+    std::vector<int> hFlcKind, hFlcPinRow, hFlcElem, hFlcTapPtr, hFlcBaseTap;
+    std::vector<double> hFlcTapData;
+    // CONTINUOUS phase control (OLF PhaseControlOuterLoop, CONTINUOUS_WITH_DISCRETISATION), sharing the
+    // phase slot: kind 0 = CONTROLLER (a1 solved free under row mode 3 for the first solve, then switched
+    // off and rounded to the closest tap at the loop's first check), kind 1 = LIMITER (from the second
+    // check on, one tap per check against the sign of dI/da1 while I exceeds the limit — local only).
+    int nCph = 0;
+    DeviceBuf dCphKind, dCphA1Row, dCphSide, dCphLimit, dCphElem, dCphTapPtr, dCphTapData, dCphBaseTap;
+    DeviceBuf dCphTap, dCphPrevTap, dCphIter;                // per (scenario, controller) tap; per scenario check count
+    std::vector<int> hCphElem, hCphTapPtr, hCphBaseTap;
+    std::vector<double> hCphTapData;
     std::vector<int> hShOvBaseSlotElem;                      // the caller's shunt overrides at solve entry
     std::vector<double> hShOvBaseGb;
 
@@ -4761,10 +4781,10 @@ static void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double max
     ctx->nR1Ov = nR1Ov;
     ctx->hR1OvBaseSlotElem.assign(r1OvSlotElem, r1OvSlotElem + (size_t) nR1Ov * 2);
     ctx->hR1OvBaseVal.assign(r1OvVal, r1OvVal + (size_t) nR1Ov * 8);
-    if (nR1Ov > 0 || ctx->nTvc > 0) {
+    if (nR1Ov > 0 || ctx->nTvc > 0 || ctx->nFlc > 0 || ctx->nCph > 0) {
         // Room for the in-kernel TVC loop to merge one moved tap per (scenario, controller) in
         // front of the caller's list without reallocating mid-solve.
-        size_t capEntries = static_cast<size_t>(nR1Ov) + (ctx->nTvc > 0 ? static_cast<size_t>(nS) * ctx->nTvc : 0);
+        size_t capEntries = static_cast<size_t>(nR1Ov) + static_cast<size_t>(nS) * (ctx->nTvc + ctx->nFlc + ctx->nCph);
         capEntries = std::max<size_t>(capEntries, 1);
         ctx->dR1OvSlotElem.ensure(capEntries * 2 * sizeof(int));
         ctx->dR1OvVal.ensure(capEntries * 8 * sizeof(double));
@@ -4815,53 +4835,93 @@ __global__ void tvcDeadbandCheckBatch(int nTvc, int nScenarios, int n, int nElem
 // Updates curTap, writes the new r1 to newR1, and sets moved[s] = 1 if any scenario moved.
 // Single-controller-per-bus simplification for now; the multi-controller round-robin needs the
 // group structure and is a follow-up.
-__global__ void tvcTapDecisionBatch(int nTvc, int nScenarios,
-        const char* outOfDb, const double* diffV, const double* sensi,
-        const int* tapPtr, const double* tapData,
-        int* curTap, int* ratchetDir, int* ratchetCount, int* ratchetAllowed,
-        int maxTapShift, double minSensiFilter,
-        double* newR1, char* moved) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= nTvc * nScenarios) return;
-    int c = tid % nTvc;
-    int s = tid / nTvc;
-    if (!outOfDb[tid]) return;
-    double sv = sensi[tid];
-    if (fabs(sv) < minSensiFilter) return;              // insensitive — no control (OLF filter)
-    double deltaR1 = diffV[tid] / sv;
-    int cur = curTap[tid];
+// OLF checkAndAdjustControlledBus, one thread per (scenario, controlled-bus group). One controller:
+// adjustWithOneController (full diffV, maxTapShift). Several: adjustWithSeveralControllers — the
+// one-tap-at-a-time round-robin in merged order, remainingDiffV tracked through each controller's
+// sensitivity, until a pass moves nothing. Both apply MIN_SENSI_FILTER and the ratchet
+// (ControllerContext.updateAllowedDirection, MAX_DIRECTION_CHANGE 3); updateTapPositionToReachNewR1
+// = the closest r1 within the shift bound and the allowed range, strictly closer than the current one.
+__device__ inline int tvcMoveTap(const int* tapPtr, const double* tapData, size_t st, int c, double deltaR1, int maxShift,
+                                 int* curTap, int* ratchetDir, int* ratchetCount, int* ratchetAllowed) {
+    int cur = curTap[st];
     int nTaps = tapPtr[c + 1] - tapPtr[c];
     int base = tapPtr[c];
-    double curR1 = tapData[(base + cur) * 8 + 6];       // r1 is at offset 6 in [y,g1,g2,b1,b2,ksi,r1,a1]
+    double curR1 = tapData[(size_t) (base + cur) * 8 + 6];
     double targetR1 = curR1 + deltaR1;
-    // Ratchet: allowed direction
-    int lo = ratchetAllowed[tid] > 0 ? cur : 0;
-    int hi = ratchetAllowed[tid] < 0 ? cur : nTaps - 1;
+    int lo = ratchetAllowed[st] > 0 ? cur : 0;
+    int hi = ratchetAllowed[st] < 0 ? cur : nTaps - 1;
     int best = cur;
     double bestDist = fabs(targetR1 - curR1);
     for (int i = lo; i <= hi; i++) {
-        if (abs(i - cur) > maxTapShift) continue;
-        double r1i = tapData[(base + i) * 8 + 6];
-        double dist = fabs(targetR1 - r1i);
-        if (dist < bestDist) {
-            best = i;
-            bestDist = dist;
-        }
+        if (abs(i - cur) > maxShift) continue;
+        double dist = fabs(targetR1 - tapData[(size_t) (base + i) * 8 + 6]);
+        if (dist < bestDist) { best = i; bestDist = dist; }
     }
-    if (best == cur) return;
-    // Update tap + ratchet state
-    curTap[tid] = best;
+    if (best == cur) return 0;
+    curTap[st] = best;
     int direction = best > cur ? 1 : -1;
-    if (ratchetCount[tid] < 3) {                         // MAX_DIRECTION_CHANGE = 3
-        if (ratchetDir[tid] != 0 && ratchetDir[tid] != direction) {
-            ratchetCount[tid]++;
-        }
-        ratchetDir[tid] = direction;
+    if (ratchetCount[st] < 3) {
+        if (ratchetDir[st] != 0 && ratchetDir[st] != direction) ratchetCount[st]++;
+        ratchetDir[st] = direction;
     } else {
-        ratchetAllowed[tid] = direction;
+        ratchetAllowed[st] = direction;
     }
-    newR1[tid] = tapData[(base + best) * 8 + 6];
-    moved[s] = 1;
+    return direction;
+}
+
+__global__ void tvcGroupDecisionBatch(int nGroups, int nScenarios, int nTvc,
+        const int* groupPtr, const int* groupCtrl,
+        const char* outOfDb, const double* diffV, const double* sensi, const double* halfDb,
+        const int* tapPtr, const double* tapData,
+        int* curTap, int* ratchetDir, int* ratchetCount, int* ratchetAllowed,
+        int maxTapShift, double minSensiFilter, char* moved) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nGroups * nScenarios) return;
+    int g = tid % nGroups;
+    int s = tid / nGroups;
+    int k0 = groupPtr[g];
+    int k1 = groupPtr[g + 1];
+    // the group's live controllers (outOfDb is per controller: 0 when outaged or inside the band)
+    int nLive = 0;
+    int lastLive = -1;
+    for (int k = k0; k < k1; k++) {
+        int c = groupCtrl[k];
+        if (outOfDb[(size_t) s * nTvc + c]) { nLive++; lastLive = c; }
+    }
+    if (nLive == 0) return;
+    if (nLive == 1 && k1 - k0 == 1) {                        // adjustWithOneController
+        size_t st = (size_t) s * nTvc + lastLive;
+        double sv = sensi[st];
+        if (fabs(sv) < minSensiFilter) return;
+        if (tvcMoveTap(tapPtr, tapData, st, lastLive, diffV[st] / sv, maxTapShift,
+                       curTap, ratchetDir, ratchetCount, ratchetAllowed) != 0) moved[s] = 1;
+        return;
+    }
+    // adjustWithSeveralControllers: one tap per controller per pass, in merged order
+    size_t st0 = (size_t) s * nTvc + groupCtrl[k0];
+    double remaining = diffV[st0];
+    double hdb = halfDb[groupCtrl[k0]];
+    bool changed = true;
+    bool any = false;
+    while (changed) {
+        changed = false;
+        for (int k = k0; k < k1; k++) {
+            int c = groupCtrl[k];
+            size_t st = (size_t) s * nTvc + c;
+            if (!outOfDb[st]) continue;                      // outaged member
+            if (fabs(remaining) <= hdb) continue;
+            double sv = sensi[st];
+            if (fabs(sv) < minSensiFilter) continue;
+            double prevR1 = tapData[(size_t) (tapPtr[c] + curTap[st]) * 8 + 6];
+            if (tvcMoveTap(tapPtr, tapData, st, c, remaining / sv, 1,
+                           curTap, ratchetDir, ratchetCount, ratchetAllowed) != 0) {
+                remaining -= (tapData[(size_t) (tapPtr[c] + curTap[st]) * 8 + 6] - prevR1) * sv;
+                changed = true;
+                any = true;
+            }
+        }
+    }
+    if (any) moved[s] = 1;
 }
 
 // Per scenario: read the controlled bus's dV out of the unit-RHS solution for controller c.
@@ -4899,18 +4959,48 @@ __global__ void tvcApplyRhoBatch(int nTvc, int nScenarios, int n,
 static void tvcRebuildOverrides(BatchSolverContext* ctx) {
     int nS = ctx->nScenarios;
     int nTvc = ctx->nTvc;
-    std::vector<int> cur(static_cast<size_t>(nS) * nTvc);
-    CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dTvcCurTap.p, cur.size() * sizeof(int), cudaMemcpyDeviceToHost));
     std::vector<int> slot;
     std::vector<double> val;
-    for (int s = 0; s < nS; s++) {
-        for (int c = 0; c < nTvc; c++) {
-            int t = cur[static_cast<size_t>(s) * nTvc + c];
-            if (t == ctx->hTvcBaseTap[c]) continue;
-            slot.push_back(s);
-            slot.push_back(ctx->hTvcElemIndex[c]);
-            const double* row = &ctx->hTvcTapData[static_cast<size_t>(ctx->hTvcTapPtr[c] + t) * 8];
-            val.insert(val.end(), row, row + 8);
+    if (nTvc > 0) {
+        std::vector<int> cur(static_cast<size_t>(nS) * nTvc);
+        CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dTvcCurTap.p, cur.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        for (int s = 0; s < nS; s++) {
+            for (int c = 0; c < nTvc; c++) {
+                int t = cur[static_cast<size_t>(s) * nTvc + c];
+                if (t == ctx->hTvcBaseTap[c]) continue;
+                slot.push_back(s);
+                slot.push_back(ctx->hTvcElemIndex[c]);
+                const double* row = &ctx->hTvcTapData[static_cast<size_t>(ctx->hTvcTapPtr[c] + t) * 8];
+                val.insert(val.end(), row, row + 8);
+            }
+        }
+    }
+    if (ctx->nCph > 0) {                                     // the continuous phase loop's rounded/shifted taps
+        std::vector<int> cur(static_cast<size_t>(nS) * ctx->nCph);
+        CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dCphTap.p, cur.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        for (int s = 0; s < nS; s++) {
+            for (int c = 0; c < ctx->nCph; c++) {
+                int t = cur[static_cast<size_t>(s) * ctx->nCph + c];
+                if (t == ctx->hCphBaseTap[c]) continue;
+                slot.push_back(s);
+                slot.push_back(ctx->hCphElem[c]);
+                const double* row = &ctx->hCphTapData[static_cast<size_t>(ctx->hCphTapPtr[c] + t) * 8];
+                val.insert(val.end(), row, row + 8);
+            }
+        }
+    }
+    if (ctx->nFlc > 0) {                                     // the flow-observed loops' moved taps too
+        std::vector<int> cur(static_cast<size_t>(nS) * ctx->nFlc);
+        CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dFlcCurTap.p, cur.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        for (int s = 0; s < nS; s++) {
+            for (int c = 0; c < ctx->nFlc; c++) {
+                int t = cur[static_cast<size_t>(s) * ctx->nFlc + c];
+                if (t == ctx->hFlcBaseTap[c]) continue;
+                slot.push_back(s);
+                slot.push_back(ctx->hFlcElem[c]);
+                const double* row = &ctx->hFlcTapData[static_cast<size_t>(ctx->hFlcTapPtr[c] + t) * 8];
+                val.insert(val.end(), row, row + 8);
+            }
         }
     }
     slot.insert(slot.end(), ctx->hR1OvBaseSlotElem.begin(), ctx->hR1OvBaseSlotElem.end());
@@ -4923,6 +5013,269 @@ static void tvcRebuildOverrides(BatchSolverContext* ctx) {
         CUDA_CHECK(cudaMemcpy(ctx->dR1OvVal.p, val.data(), val.size() * sizeof(double), cudaMemcpyHostToDevice));
     }
     ctx->nR1Ov = nOv;
+}
+// ======================== FLOW-OBSERVED INCREMENTAL LOOPS (phase / RPC) ========================
+// The controlled branch's flow and its gradient at the current state: P/Q through the codegen'd
+// evalClosedBranch (the very functions the fill scatters), I through OLF's own reI/imI decomposition
+// (ClosedBranchSide{1,2}CurrentMagnitudeEquationTerm, incl. its one-sided rule at I = 0 and its
+// dr1-less sensitivity). g[0..5] = d/d(v1, v2, ph1, ph2, a1, r1).
+__device__ inline double flcFlowAndGrad(int side, int kind, const double* p, const double* xs, const int* q, double* g) {
+    double v1 = xs[q[5]], v2 = xs[q[7]], ph1 = xs[q[4]], ph2 = xs[q[6]];
+    double r1 = q[9] >= 0 ? xs[q[9]] : p[6];
+    double a1 = q[8] >= 0 ? xs[q[8]] : p[7];
+    double y = p[0], g1 = p[1], g2 = p[2], b1 = p[3], b2 = p[4], ksi = p[5];
+    if (kind != 2) {                                         // P or Q: the assembled outputs
+        double o[CB_NOUT];
+        evalClosedBranch(y, g1, g2, b1, b2, v1, r1, v2, ksi, a1, ph1, ph2, 0,
+                         o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
+                         o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
+                         o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
+        int blk = (kind == 0 ? 7 : 0) + (side == 1 ? 0 : 14);   // p1 0, q1 7, p2 14, q2 21: [val dv1 dv2 dph1 dph2 da1 dr1]
+        for (int k = 0; k < 6; k++) g[k] = o[blk + 1 + k];
+        return o[blk];
+    }
+    const double R2 = 1.0;
+    if (side == 1) {
+        double theta = ksi - a1 + ph2;                       // OLF: ksi - a1 + A2 + ph2, A2 = 0
+        double ire = g1 * cos(ph1) - b1 * sin(ph1) + y * sin(ph1 + ksi);
+        double iim = g1 * sin(ph1) + b1 * cos(ph1) - y * cos(ph1 + ksi);
+        double re = r1 * (r1 * v1 * ire - y * R2 * v2 * sin(theta));
+        double im = r1 * (r1 * v1 * iim + y * R2 * v2 * cos(theta));
+        double dre[6] = { r1 * r1 * ire, r1 * (-y * R2 * sin(theta)),
+                          r1 * r1 * v1 * (-g1 * sin(ph1) - b1 * cos(ph1) + y * cos(ph1 + ksi)),
+                          r1 * (-y * R2 * v2 * cos(theta)), 0.0, 0.0 };
+        double dim[6] = { r1 * r1 * iim, r1 * (y * R2 * cos(theta)),
+                          r1 * r1 * v1 * ire, r1 * (-y * R2 * v2 * sin(theta)), 0.0, 0.0 };
+        dre[4] = -dre[3];                                    // a1 enters theta with the opposite sign of ph2
+        dim[4] = -dim[3];
+        double i = hypot(re, im);
+        if (i == 0.0) {                                      // one-sided limit: the gradient's MAGNITUDE — the
+            for (int k = 0; k < 6; k++) g[k] = 0.0;          // dot with dx is done by the caller as hypot(dre·dx, dim·dx)
+            g[0] = 1e300;                                    // flag (see flcGatherSensiBatch)
+            for (int k = 0; k < 6; k++) { g[6 + k] = dre[k]; g[12 + k] = dim[k]; }
+            return 0.0;
+        }
+        for (int k = 0; k < 6; k++) g[k] = (re * dre[k] + im * dim[k]) / i;
+        return i;
+    }
+    double theta = ksi + a1 + ph1;                           // OLF: ksi + a1 - A2 + ph1
+    double ire = g2 * cos(ph2) - b2 * sin(ph2) + y * sin(ph2 + ksi);
+    double iim = g2 * sin(ph2) + b2 * cos(ph2) - y * cos(ph2 + ksi);
+    double re = R2 * (R2 * v2 * ire - y * r1 * v1 * sin(theta));
+    double im = R2 * (R2 * v2 * iim + y * r1 * v1 * cos(theta));
+    double dre[6] = { R2 * (-y * r1 * sin(theta)), R2 * R2 * ire,
+                      R2 * (-y * r1 * v1 * cos(theta)),
+                      R2 * R2 * v2 * (-g2 * sin(ph2) - b2 * cos(ph2) + y * cos(ph2 + ksi)), 0.0, 0.0 };
+    double dim[6] = { R2 * (y * r1 * cos(theta)), R2 * R2 * iim,
+                      R2 * (-y * r1 * v1 * sin(theta)), R2 * R2 * v2 * ire, 0.0, 0.0 };
+    dre[4] = dre[2];                                         // a1 enters theta like ph1
+    dim[4] = dim[2];
+    double i = hypot(re, im);
+    if (i == 0.0) {
+        for (int k = 0; k < 6; k++) g[k] = 0.0;
+        g[0] = 1e300;
+        for (int k = 0; k < 6; k++) { g[6 + k] = dre[k]; g[12 + k] = dim[k]; }
+        return 0.0;
+    }
+    for (int k = 0; k < 6; k++) g[k] = (re * dre[k] + im * dim[k]) / i;
+    return i;
+}
+
+// Per (scenario, controller): OLF's out-of-deadband test on the controlled flow (LIMITER: one-sided).
+__global__ void flcCheckBatch(int nFlc, int nScenarios, int n, int nElements, int cbOffset, int kindMask,
+                              const int* kind, const int* side, const double* targetValue, const double* halfDb,
+                              const int* elem, const int* ctlPack,
+                              const double* cbIn, const int* cbIx, int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                              const char* disabled, const double* x, const char* rlActive,
+                              char* outOfDb, double* diff) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nFlc * nScenarios) return;
+    int c = tid % nFlc;
+    int s = tid / nFlc;
+    outOfDb[tid] = 0;
+    if (!rlActive[s] || !((kindMask >> kind[c]) & 1)) return;
+    int e = ctlPack[c];
+    if (disabled[(size_t) s * nElements + elem[c]] || disabled[(size_t) s * nElements + cbOffset + e]) return;
+    const double* p = cbIn + e * 8;
+    double pOv[8];
+    if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) p = pOv;
+    double g[18];
+    double flow = flcFlowAndGrad(side[c], kind[c], p, x + (size_t) s * n, cbIx + e * 12, g);
+    double d = targetValue[c] - flow;
+    diff[tid] = d;
+    outOfDb[tid] = (kind[c] == 2 ? flow > targetValue[c] : fabs(d) > halfDb[c]) ? 1 : 0;
+}
+
+// Per scenario, for controller c: the controlled flow's gradient dotted with the unit-RHS solution at
+// the controlled branch's variable columns (a non-variable r1/a1 column contributes nothing).
+__global__ void flcGatherSensiBatch(int nScenarios, int n, int c, int nFlc, int cbOffset,
+                                    const int* kind, const int* side, const int* ctlPack,
+                                    const double* cbIn, const int* cbIx, int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                                    const double* x, const double* dx, double* sensi) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nScenarios) return;
+    int e = ctlPack[c];
+    const double* p = cbIn + e * 8;
+    double pOv[8];
+    if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) p = pOv;
+    const int* q = cbIx + e * 12;
+    const double* dxs = dx + (size_t) s * n;
+    double g[18];
+    flcFlowAndGrad(side[c], kind[c], p, x + (size_t) s * n, q, g);
+    double d[6] = { dxs[q[5]], dxs[q[7]], dxs[q[4]], dxs[q[6]], q[8] >= 0 ? dxs[q[8]] : 0.0, q[9] >= 0 ? dxs[q[9]] : 0.0 };
+    double sv;
+    if (kind[c] == 2 && g[0] == 1e300) {                     // I = 0: hypot(dre·dx, dim·dx) (OLF's one-sided rule)
+        double a = 0.0, b = 0.0;
+        for (int k = 0; k < 5; k++) { a += g[6 + k] * d[k]; b += g[12 + k] * d[k]; }
+        sv = hypot(a, b);
+    } else {
+        sv = 0.0;
+        int nk = kind[c] == 2 ? 5 : 6;                       // OLF's current sensitivity has no dr1 term
+        for (int k = 0; k < nk; k++) sv += g[k] * d[k];
+    }
+    sensi[(size_t) s * nFlc + c] = sv;
+}
+
+// OLF's tap decisions per (scenario, controller): RPC — deltaR1 = diffQ / sensi, closest r1 within
+// maxTapShift (no sensitivity gate); phase CONTROLLER — |sensi·toRadians(1)| > SENSI_EPS, da = dp / sensi,
+// closest a1 (MAX_TAP_SHIFT unbounded); phase LIMITER — same gate, da = (target − i) / sensi, then
+// FirstTapPositionAboveFinder: walk tap by tap in the shift's direction while the remaining shift still
+// reaches past the next tap's a1. Ratchet as everywhere (updateAllowedDirection, MAX_DIRECTION_CHANGE 3).
+__global__ void flcDecisionBatch(int nFlc, int nScenarios, int kindMask,
+                                 const int* kind, const int* pinCol, const int* tapPtr, const double* tapData, const int* maxShift,
+                                 const char* outOfDb, const double* diff, const double* sensi,
+                                 int* curTap, int* ratDir, int* ratCount, int* ratAllowed, char* moved) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nFlc * nScenarios) return;
+    int c = tid % nFlc;
+    int s = tid / nFlc;
+    if (!outOfDb[tid] || !((kindMask >> kind[c]) & 1)) return;
+    double sv = sensi[tid];
+    if (kind[c] != 0 && fabs(sv * 0.017453292519943295) <= 1e-6) return;   // SENSI_EPS on the per-degree value
+    if (sv == 0.0) return;
+    double delta = diff[tid] / sv;
+    int cur = curTap[tid];
+    int base = tapPtr[c];
+    int nTaps = tapPtr[c + 1] - base;
+    int col = pinCol[c];
+    int lo = ratAllowed[tid] > 0 ? cur : 0;
+    int hi = ratAllowed[tid] < 0 ? cur : nTaps - 1;
+    int best = cur;
+    if (kind[c] != 2) {                                      // ClosestTapPositionFinder
+        double newV = tapData[(size_t) (base + cur) * 8 + col] + delta;
+        double bestDist = fabs(delta);
+        for (int i = lo; i <= hi; i++) {
+            if (abs(i - cur) > maxShift[c]) continue;
+            double dist = fabs(newV - tapData[(size_t) (base + i) * 8 + col]);
+            if (dist < bestDist) { best = i; bestDist = dist; }
+        }
+    } else {                                                 // FirstTapPositionAboveFinder
+        double remaining = delta;
+        int last = nTaps - 1;
+        while (true) {
+            int next = -1;                                   // OLF nextTapPositionIndex
+            if (remaining != 0.0) {
+                double vc = tapData[(size_t) (base + best) * 8 + col];
+                auto descending = [&](int n1, int n2) {
+                    double a = tapData[(size_t) (base + n1) * 8 + col], b = tapData[(size_t) (base + n2) * 8 + col];
+                    return remaining > 0 ? a < b : a > b;
+                };
+                (void) vc;
+                if (best == 0 && last >= 1 && descending(1, 0)) next = -1;
+                else if (best > 0 && descending(best, best - 1)) next = best - 1;
+                else if (best < last && descending(best, best + 1)) next = best + 1;
+            }
+            if (next < 0 || next < lo || next > hi) break;
+            double value = tapData[(size_t) (base + best) * 8 + col];
+            double nextValue = tapData[(size_t) (base + next) * 8 + col];
+            best = next;
+            if ((remaining < 0 && value + remaining > nextValue) || (remaining > 0 && value + remaining < nextValue)) break;
+            remaining -= nextValue - value;
+        }
+    }
+    if (best == cur) return;
+    curTap[tid] = best;
+    int direction = best > cur ? 1 : -1;
+    if (ratCount[tid] < 3) {
+        if (ratDir[tid] != 0 && ratDir[tid] != direction) ratCount[tid]++;
+        ratDir[tid] = direction;
+    } else {
+        ratAllowed[tid] = direction;
+    }
+    moved[s] = 1;
+}
+
+// Per (scenario, controller) whose tap moved: pin the identity row (rho or a1) at the tap's value.
+__global__ void flcApplyBatch(int nFlc, int nScenarios, int n, const int* pinRow, const int* pinCol,
+                              const int* tapPtr, const double* tapData, const int* curTap, int* prevTap,
+                              double* target, double* x) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nFlc * nScenarios) return;
+    int c = tid % nFlc;
+    int s = tid / nFlc;
+    int t = curTap[tid];
+    if (t == prevTap[tid]) return;
+    double v = tapData[(size_t) (tapPtr[c] + t) * 8 + pinCol[c]];
+    target[(size_t) s * n + pinRow[c]] = v;
+    x[(size_t) s * n + pinRow[c]] = v;
+    prevTap[tid] = t;
+}
+// ======================== CONTINUOUS PHASE CONTROL (OLF PhaseControlOuterLoop) ========================
+// One thread per (scenario, controller). iter[s] = the loop's check count in this solve. First check:
+// every live CONTROLLER-mode control is switched OFF (row mode 3 -> 0, the identity pinned at the tap
+// closest to the solved a1) and the scenario is UNSTABLE when it has any live controller (OLF returns
+// UNSTABLE on a non-empty controller list, LIMITER-only included — a no-change re-solve). Later checks:
+// a live LIMITER whose current exceeds the limit shifts one tap against the sign of dI/da1
+// (shiftOneTapPositionToChangeA1). The tap's pi row follows through the shared r1 override rebuild.
+__global__ void cphCheckBatch(int nCph, int nScenarios, int n, int nElements, int cbOffset,
+                              const int* kind, const int* a1Row, const int* side, const double* limit, const int* elem,
+                              const int* tapPtr, const double* tapData,
+                              const double* cbIn, const int* cbIx, int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                              const char* disabled, const char* rlActive, const int* iter,
+                              int* tap, int* mode, double* target, double* x, char* switched) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nCph * nScenarios) return;
+    int c = tid % nCph;
+    int s = tid / nCph;
+    if (!rlActive[s] || disabled[(size_t) s * nElements + elem[c]]) return;
+    size_t ar = (size_t) s * n + a1Row[c];
+    int base = tapPtr[c];
+    int nTaps = tapPtr[c + 1] - base;
+    if (iter[s] == 0) {
+        if (kind[c] == 0) {                                  // switch off + round a1 to the closest tap
+            double a1 = x[ar];
+            int best = tap[tid];
+            for (int t = 0; t < nTaps; t++) {
+                if (fabs(tapData[(size_t) (base + t) * 8 + 7] - a1) < fabs(tapData[(size_t) (base + best) * 8 + 7] - a1)) best = t;
+            }
+            tap[tid] = best;
+            mode[ar] = 0;
+            target[ar] = tapData[(size_t) (base + best) * 8 + 7];
+            x[ar] = target[ar];
+        }
+        switched[s] = 1;                                     // OLF: UNSTABLE whenever a controller exists
+        return;
+    }
+    if (kind[c] != 1) return;
+    int e = elem[c] - cbOffset;                              // LIMITER is local: the controlled branch is itself
+    const double* p = cbIn + e * 8;
+    double pOv[8];
+    if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) p = pOv;
+    double g[18];
+    double i = flcFlowAndGrad(side[c], 2, p, x + (size_t) s * n, cbIx + e * 12, g);
+    if (!(i > limit[c])) return;
+    double dida1 = g[0] == 1e300 ? 0.0 : g[4];
+    int dir = dida1 > 0 ? -1 : 1;                            // reduce I: move a1 against the slope
+    int cur = tap[tid];
+    double a1 = tapData[(size_t) (base + cur) * 8 + 7];
+    int next = cur;
+    if (cur + 1 < nTaps && ((dir > 0) == (tapData[(size_t) (base + cur + 1) * 8 + 7] > a1))) next = cur + 1;
+    else if (cur - 1 >= 0 && ((dir > 0) == (tapData[(size_t) (base + cur - 1) * 8 + 7] > a1))) next = cur - 1;
+    if (next == cur) return;
+    tap[tid] = next;
+    target[ar] = tapData[(size_t) (base + next) * 8 + 7];
+    x[ar] = target[ar];
+    switched[s] = 1;
 }
 // ======================== INCREMENTAL SHUNT VC KERNELS ========================
 // Per (scenario, controlled-bus group): OLF isOutOfDeadband on the group's controlled bus, with at
@@ -5145,7 +5498,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     const bool resume = ctx->driverResume != 0;
     ctx->driverResume = 0;
     ctx->driverPaused = 0;
-    if (resume && ctx->nTvc > 0) {
+    if (resume && (ctx->nTvc > 0 || ctx->nFlc > 0 || ctx->nCph > 0)) {
         tvcRebuildOverrides(ctx);                            // uploadBatchOverrides just erased the moves
     }
     if (resume && ctx->nShc > 0) {
@@ -5216,7 +5569,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // repeat until a pass switches nothing. Fixed-iter mode (tol <= 0, the throughput benchmark) and
     // family-free networks with no controllers do ONE pass (no outer loop) — byte-identical to before.
     bool fullLoadflow = !deviceFixedIter && (ctx->nrl > 0 || ctx->nds > 0 || ctx->dsSlackOnly
-                                             || ctx->nmon > 0 || ctx->nTvc > 0 || ctx->nShc > 0);
+                                             || ctx->nmon > 0 || ctx->nTvc > 0 || ctx->nShc > 0 || ctx->nFlc > 0 || ctx->nCph > 0);
     const int RL_MAX_OUTER = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
     const int RL_MAX_SWITCH = rlMaxSwitch > 0 ? rlMaxSwitch : 3;   // per-bus PV→PQ count cap (OLF maxPqPvSwitch)
     // Outer-loop convergence tolerances (pu) — passed in so the device uses the SAME criteria as the CPU
@@ -5349,6 +5702,24 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             ctx->dTvcDiffV.ensure(nst * sizeof(double));
             ctx->dTvcSensi.ensure(nst * sizeof(double));
         }
+        if (ctx->nCph > 0) {                                 // per-SOLVE state: base taps, check count 0
+            size_t nst = static_cast<size_t>(nS) * ctx->nCph;
+            std::vector<int> cur(nst);
+            for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < ctx->nCph; c++) cur[static_cast<size_t>(s2) * ctx->nCph + c] = ctx->hCphBaseTap[c];
+            CUDA_CHECK(cudaMemcpy(ctx->dCphTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(ctx->dCphPrevTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemset(ctx->dCphIter.p, 0, nS * sizeof(int)));
+        }
+        if (ctx->nFlc > 0) {                                 // per-SOLVE state: base taps, fresh ratchets
+            size_t nst = static_cast<size_t>(nS) * ctx->nFlc;
+            std::vector<int> cur(nst);
+            for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < ctx->nFlc; c++) cur[static_cast<size_t>(s2) * ctx->nFlc + c] = ctx->hFlcBaseTap[c];
+            CUDA_CHECK(cudaMemcpy(ctx->dFlcCurTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(ctx->dFlcPrevTap.p, cur.data(), nst * sizeof(int), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemset(ctx->dFlcRatDir.p, 0, nst * sizeof(int)));
+            CUDA_CHECK(cudaMemset(ctx->dFlcRatCount.p, 0, nst * sizeof(int)));
+            CUDA_CHECK(cudaMemset(ctx->dFlcRatAllowed.p, 0, nst * sizeof(int)));
+        }
         if (ctx->nShc > 0) {                                 // per-SOLVE state: base sections, fresh ratchets,
             size_t nsu = static_cast<size_t>(nS) * ctx->nShcSubs;   // the identity row's target as the base b
             std::vector<int> pos(nsu);
@@ -5424,7 +5795,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     if (ctx->nrl > 0) {
         loopOrder[nLoops++] = LOOP_RL;                       // OLF order 6: ReactiveLimits
     }
-    if (ctx->hostLoopMask & (1 << 1)) {
+    if (ctx->nFlcPhase > 0 || ctx->nCph > 0) {
+        loopOrder[nLoops++] = LOOP_PHASE_KERNEL;             // OLF order 7: (Incremental)PhaseControl, IN-KERNEL
+    } else if (ctx->hostLoopMask & (1 << 1)) {
         loopOrder[nLoops++] = LOOP_HOST_PHASE;               // OLF order 7: PhaseControl
     }
     if (ctx->nTvc > 0) {
@@ -5432,7 +5805,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     } else if (ctx->hostLoopMask & (1 << 2)) {
         loopOrder[nLoops++] = LOOP_HOST_TVC;                 // OLF order 8: TransformerVoltageControl, host pause
     }
-    if (ctx->hostLoopMask & (1 << 3)) {
+    if (ctx->nFlcRpc > 0) {
+        loopOrder[nLoops++] = LOOP_TRPC_KERNEL;              // OLF order 9: TransformerReactivePowerControl, IN-KERNEL
+    } else if (ctx->hostLoopMask & (1 << 3)) {
         loopOrder[nLoops++] = LOOP_HOST_TRPC;                // OLF order 9: TransformerReactivePowerControl
     }
     if (ctx->nShc > 0) {
@@ -5622,13 +5997,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         ctx->factored = true;
         CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));   // as it was
         // Tap decision; a moved scenario is an UNSTABLE verdict (dRlSwitched), like every device loop.
-        tvcTapDecisionBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nTvc, nS,
-                ctx->dTvcOutOfDb.as<char>(), ctx->dTvcDiffV.as<double>(), ctx->dTvcSensi.as<double>(),
+        tvcGroupDecisionBatch<<<grid(ctx->nTvcGroups * nS), BLOCK, 0, ctx->stream>>>(ctx->nTvcGroups, nS, nTvc,
+                ctx->dTvcGroupPtr.as<int>(), ctx->dTvcGroupCtrl.as<int>(),
+                ctx->dTvcOutOfDb.as<char>(), ctx->dTvcDiffV.as<double>(), ctx->dTvcSensi.as<double>(), ctx->dTvcHalfDb.as<double>(),
                 ctx->dTvcTapPtr.as<int>(), ctx->dTvcTapData.as<double>(),
                 ctx->dTvcCurTap.as<int>(), ctx->dTvcRatchetDir.as<int>(), ctx->dTvcRatchetCount.as<int>(),
-                ctx->dTvcRatchetAllowed.as<int>(), ctx->tvcMaxTapShift, 0.05,
-                ctx->dTvcDiffV.as<double>(),                 // newR1 scratch (diffV is consumed above)
-                ctx->dRlSwitched.as<char>());
+                ctx->dTvcRatchetAllowed.as<int>(), ctx->tvcMaxTapShift, 0.05, ctx->dRlSwitched.as<char>());
         // Apply: rho target + state seed on the moved pairs, then the pi rows through the tap-override list.
         tvcApplyRhoBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nTvc, nS, n,
                 ctx->dTvcRhoRow.as<int>(), ctx->dTvcTapPtr.as<int>(), ctx->dTvcTapData.as<double>(),
@@ -5654,7 +6028,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             CUDA_CHECK(cudaMemcpy(se.data(), ctx->dTvcSensi.p, nst * sizeof(double), cudaMemcpyDeviceToHost));
             for (size_t k = 0; k < nst; k++) {
                 if (outOfDb[k]) {
-                    std::fprintf(stderr, "TVC_KERNEL_PAIR s=%d c=%d newR1(diffV slot)=%.9e sensi=%.9e tap=%d base=%d rhoRowMapped=%d\n",
+                    std::fprintf(stderr, "TVC_KERNEL_PAIR s=%d c=%d diffV=%.9e sensi=%.9e tap=%d base=%d rhoRowMapped=%d\n",
                                  (int) (k / nTvc), (int) (k % nTvc), dv[k], se[k], cur[k], base[k % nTvc],
                                  ctx->st->rowMap[ctx->hTvcRhoRow[k % nTvc]]);
                 }
@@ -5738,6 +6112,102 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             for (char c : outOfDb) nOut += c ? 1 : 0;
             for (int s2 = 0; s2 < nS; s2++) for (int u = 0; u < ctx->nShcSubs; u++) if (pos[static_cast<size_t>(s2) * ctx->nShcSubs + u] != ctx->hShcSubBase[u]) nMoved++;
             std::fprintf(stderr, "SHUNT_KERNEL nS=%d nCtrl=%d nGroups=%d outOfDeadband=%d subsOffBase=%d nShOv=%d\n", nS, nShc, nG, nOut, nMoved, ctx->nShOv);
+        }
+    };
+    // ---- the FLOW-OBSERVED incremental loops as DRIVER PHASES: kindMask selects the phase controllers
+    //      (OLF order 7: kinds 1+2) or the RPC controllers (OLF order 9: kind 0). Same skeleton as the
+    //      voltage-observed phases; the observable is the controlled branch's flow gradient dotted with
+    //      the unit-RHS solution (OLF's EquationTerm.calculateSensi), evaluated by the codegen'd branch
+    //      functions on the device. ----
+    auto flcStep = [&](int kindMask) {
+        int nF = ctx->nFlc;
+        if (nF <= 0) return;
+        if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5) {
+            static bool warned = false;
+            if (!warned) { std::fprintf(stderr, "in-kernel flow control needs a UBATCH mode (3/4/5); mode %d runs it as stable\n", ctx->mode); warned = true; }
+            return;
+        }
+        size_t nst = static_cast<size_t>(nS) * nF;
+        flcCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->nElements, ctx->cbOffset, kindMask,
+                ctx->dFlcKind.as<int>(), ctx->dFlcSide.as<int>(), ctx->dFlcTargetValue.as<double>(), ctx->dFlcHalfDb.as<double>(),
+                ctx->dFlcElem.as<int>(), ctx->dFlcCtlPack.as<int>(),
+                ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+                ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
+                ctx->dFlcOutOfDb.as<char>(), ctx->dFlcDiff.as<double>());
+        std::vector<char> outOfDb(nst);
+        CUDA_CHECK(cudaMemcpyAsync(outOfDb.data(), ctx->dFlcOutOfDb.p, nst, cudaMemcpyDeviceToHost, ctx->stream));
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        std::vector<char> needC(nF, 0);
+        bool any = false;
+        for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nF; c++) if (outOfDb[static_cast<size_t>(s2) * nF + c]) { needC[c] = 1; any = true; }
+        if (!any) return;
+        std::vector<char> ones(nS, 1);
+        CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
+        fillActiveBatch(false);
+        if (!ctx->analyzed) {
+            CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            ctx->analyzed = true;
+        }
+        CUDA_CHECK(cudaMemsetAsync(ctx->dFlcSensi.p, 0, nst * sizeof(double), ctx->stream));
+        bool first = true;
+        for (int c = 0; c < nF; c++) {
+            if (!needC[c]) continue;
+            int row = ctx->st->rowMap[ctx->hFlcPinRow[c]];
+            if (row < 0) continue;
+            setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
+            int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
+            first = false;
+            CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            flcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nF, ctx->cbOffset,
+                    ctx->dFlcKind.as<int>(), ctx->dFlcSide.as<int>(), ctx->dFlcCtlPack.as<int>(),
+                    ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+                    ctx->dX.as<double>(), ctx->dDx.as<double>(), ctx->dFlcSensi.as<double>());
+        }
+        ctx->factored = true;
+        CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));
+        flcDecisionBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, kindMask,
+                ctx->dFlcKind.as<int>(), ctx->dFlcPinCol.as<int>(), ctx->dFlcTapPtr.as<int>(), ctx->dFlcTapData.as<double>(), ctx->dFlcMaxShift.as<int>(),
+                ctx->dFlcOutOfDb.as<char>(), ctx->dFlcDiff.as<double>(), ctx->dFlcSensi.as<double>(),
+                ctx->dFlcCurTap.as<int>(), ctx->dFlcRatDir.as<int>(), ctx->dFlcRatCount.as<int>(), ctx->dFlcRatAllowed.as<int>(), ctx->dRlSwitched.as<char>());
+        flcApplyBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nF, nS, n, ctx->dFlcPinRow.as<int>(), ctx->dFlcPinCol.as<int>(),
+                ctx->dFlcTapPtr.as<int>(), ctx->dFlcTapData.as<double>(), ctx->dFlcCurTap.as<int>(), ctx->dFlcPrevTap.as<int>(),
+                ctx->dTarget.as<double>(), ctx->dX.as<double>());
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        tvcRebuildOverrides(ctx);
+        if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+            std::vector<int> cur(nst);
+            CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dFlcCurTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
+            int nOut = 0, nMoved = 0;
+            for (char c : outOfDb) nOut += c ? 1 : 0;
+            for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nF; c++) if (cur[static_cast<size_t>(s2) * nF + c] != ctx->hFlcBaseTap[c]) nMoved++;
+            std::fprintf(stderr, "FLOW_KERNEL kindMask=%d nS=%d nCtrl=%d outOfDeadband=%d pairsOffBaseTap=%d nR1Ov=%d\n", kindMask, nS, nF, nOut, nMoved, ctx->nR1Ov);
+        }
+    };
+    // ---- CONTINUOUS PhaseControl as a DRIVER PHASE (OLF order 7), see cphCheckBatch. ----
+    auto cphStep = [&]() {
+        int nC = ctx->nCph;
+        if (nC <= 0) return;
+        size_t nst = static_cast<size_t>(nS) * nC;
+        cphCheckBatch<<<grid(static_cast<int>(nst)), BLOCK, 0, ctx->stream>>>(nC, nS, n, ctx->nElements, ctx->cbOffset,
+                ctx->dCphKind.as<int>(), ctx->dCphA1Row.as<int>(), ctx->dCphSide.as<int>(), ctx->dCphLimit.as<double>(), ctx->dCphElem.as<int>(),
+                ctx->dCphTapPtr.as<int>(), ctx->dCphTapData.as<double>(),
+                ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+                ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->dCphIter.as<int>(),
+                ctx->dCphTap.as<int>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(), ctx->dRlSwitched.as<char>());
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        {                                                    // the loop's check count, per checked scenario
+            std::vector<int> it(nS);
+            CUDA_CHECK(cudaMemcpy(it.data(), ctx->dCphIter.p, nS * sizeof(int), cudaMemcpyDeviceToHost));
+            for (int s2 = 0; s2 < nS; s2++) if (rlActive[s2]) it[s2]++;
+            CUDA_CHECK(cudaMemcpy(ctx->dCphIter.p, it.data(), nS * sizeof(int), cudaMemcpyHostToDevice));
+        }
+        tvcRebuildOverrides(ctx);
+        if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+            std::vector<int> cur(nst);
+            CUDA_CHECK(cudaMemcpy(cur.data(), ctx->dCphTap.p, nst * sizeof(int), cudaMemcpyDeviceToHost));
+            int nMoved = 0;
+            for (int s2 = 0; s2 < nS; s2++) for (int c = 0; c < nC; c++) if (cur[static_cast<size_t>(s2) * nC + c] != ctx->hCphBaseTap[c]) nMoved++;
+            std::fprintf(stderr, "CPHASE_KERNEL nS=%d nCtrl=%d pairsOffBaseTap=%d nR1Ov=%d\n", nS, nC, nMoved, ctx->nR1Ov);
         }
     };
     if (solvePass) {
@@ -6158,6 +6628,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             case LOOP_HOST_SHUNT:   kindName = "HOST:ShuntVoltageControl"; break;
             case LOOP_TVC_KERNEL:   kindName = "TransformerVoltageControl"; break;
             case LOOP_SHUNT_KERNEL: kindName = "ShuntVoltageControl"; break;
+            case LOOP_PHASE_KERNEL: kindName = ctx->nCph > 0 ? "PhaseControl" : "IncrementalPhaseControl"; break;
+            case LOOP_TRPC_KERNEL:  kindName = "TransformerReactivePowerControl"; break;
         }
         int nSw = 0;
         {
@@ -6216,6 +6688,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         tvcStep();
     } else if (loopKind == LOOP_SHUNT_KERNEL) {
         shcStep();
+    } else if (loopKind == LOOP_PHASE_KERNEL) {
+        if (ctx->nCph > 0) cphStep(); else flcStep(6);       // continuous, or incremental kinds 1 + 2
+    } else if (loopKind == LOOP_TRPC_KERNEL) {
+        flcStep(1);                                          // kind 0 (RPC)
     } else if (loopKind == LOOP_MONITORING) {
         monitoringLoopBatch<<<grid(ctx->nmon * nS), BLOCK, 0, ctx->stream>>>(
                 ctx->nmon, nS, n, ctx->dMonVRow.as<int>(), ctx->dMonBand.as<double>(),
@@ -7681,9 +8157,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
  *  tapPtr: [nCtrl+1] int (CSR into tapData); tapData: [totalTaps*8] double;
  *  baseTap: [nCtrl] int; groupPtr: [nGroups+1] int (CSR into groupCtrl);
  *  groupCtrl: [nCtrl] int (controller indices per group); maxTapShift: OLF's per-pass bound.
- *  Returns 1 when the kernel loop OWNS the controllers, 0 when it refused them (a controlled bus
- *  shared by several transformers — OLF's one-tap-at-a-time round robin — stays on the host
- *  orchestrator) or when there are none. */
+ *  Returns 1 when the kernel loop OWNS the controllers (shared controlled buses included — the
+ *  one-tap-at-a-time round robin runs in tvcGroupDecisionBatch), 0 when there are none. */
 extern "C" JNIEXPORT jint JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchTvcControllers(
         JNIEnv* env, jclass, jlong handle,
@@ -7707,12 +8182,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
         env->GetDoubleArrayRegion(a, 0, static_cast<jsize>(v.size()), v.data());
     };
     std::vector<int> groupPtr;
-    readI(jGroupPtr, groupPtr);
-    for (size_t g = 0; g + 1 < groupPtr.size(); g++) {
-        if (groupPtr[g + 1] - groupPtr[g] > 1) {
-            return 0;                                        // shared controlled bus: host orchestrator
-        }
-    }
+    readI(jGroupPtr, groupPtr);                              // shared controlled buses run in-kernel too
     std::vector<int> vRow, groupCtrl;
     std::vector<double> targetV, halfDb;
     readI(jRhoRow, ctx->hTvcRhoRow);
@@ -7866,6 +8336,168 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
     size_t cnt = static_cast<size_t>(ctx->nShcSubs) * ctx->nScenarios;
     std::vector<int> host(cnt);
     cudaMemcpy(host.data(), ctx->dShcPos.p, cnt * sizeof(int), cudaMemcpyDeviceToHost);
+    jintArray out = env->NewIntArray(static_cast<jsize>(cnt));
+    env->SetIntArrayRegion(out, 0, static_cast<jsize>(cnt), host.data());
+    return out;
+}
+
+/** Upload the FLOW-OBSERVED incremental controllers (RPC / incremental phase). Per controller: kind
+ *  (0 RPC, 1 phase CONTROLLER, 2 phase LIMITER), pinRow (the rho/a1 identity row), pinCol (6 r1 / 7 a1),
+ *  side (1/2) of the controlled flow, targetValue, halfDb, elem (controller's global element),
+ *  ctlElem (controlled branch's global element — a closed branch), tapPtr/tapData ([y g1 g2 b1 b2 ksi r1
+ *  a1] per tap), baseTap, maxShift. Returns 1 when the kernel loops own them. */
+extern "C" JNIEXPORT jint JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchFlowControllers(
+        JNIEnv* env, jclass, jlong handle,
+        jintArray jKind, jintArray jPinRow, jintArray jPinCol, jintArray jSide, jdoubleArray jTargetValue, jdoubleArray jHalfDb,
+        jintArray jElem, jintArray jCtlElem, jintArray jTapPtr, jdoubleArray jTapData, jintArray jBaseTap, jintArray jMaxShift) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return 0;
+    }
+    ctx->nFlc = 0;
+    ctx->nFlcPhase = 0;
+    ctx->nFlcRpc = 0;
+    if (jKind == nullptr || env->GetArrayLength(jKind) == 0) {
+        return 0;
+    }
+    auto readI = [&](jintArray a, std::vector<int>& v) {
+        v.resize(env->GetArrayLength(a));
+        env->GetIntArrayRegion(a, 0, static_cast<jsize>(v.size()), v.data());
+    };
+    auto readD = [&](jdoubleArray a, std::vector<double>& v) {
+        v.resize(env->GetArrayLength(a));
+        env->GetDoubleArrayRegion(a, 0, static_cast<jsize>(v.size()), v.data());
+    };
+    std::vector<int> pinCol, side, ctlElem, maxShift;
+    std::vector<double> targetValue, halfDb;
+    readI(jKind, ctx->hFlcKind);
+    readI(jPinRow, ctx->hFlcPinRow);
+    readI(jPinCol, pinCol);
+    readI(jSide, side);
+    readD(jTargetValue, targetValue);
+    readD(jHalfDb, halfDb);
+    readI(jElem, ctx->hFlcElem);
+    readI(jCtlElem, ctlElem);
+    readI(jTapPtr, ctx->hFlcTapPtr);
+    readD(jTapData, ctx->hFlcTapData);
+    readI(jBaseTap, ctx->hFlcBaseTap);
+    readI(jMaxShift, maxShift);
+    int nc = static_cast<int>(ctx->hFlcKind.size());
+    std::vector<int> ctlPack(nc);
+    for (int c = 0; c < nc; c++) {
+        ctlPack[c] = ctlElem[c] - ctx->cbOffset;             // the controlled branch's index in the closed-branch pack
+        if (ctlPack[c] < 0 || ctlPack[c] >= ctx->st->cb.ne) {
+            return 0;                                        // not a closed branch: the host orchestrator keeps it
+        }
+        if (ctx->hFlcKind[c] == 0) ctx->nFlcRpc++; else ctx->nFlcPhase++;
+    }
+    ctx->dFlcKind.upload(ctx->hFlcKind.data(), nc * sizeof(int));
+    ctx->dFlcPinRow.upload(ctx->hFlcPinRow.data(), nc * sizeof(int));
+    ctx->dFlcPinCol.upload(pinCol.data(), nc * sizeof(int));
+    ctx->dFlcSide.upload(side.data(), nc * sizeof(int));
+    ctx->dFlcTargetValue.upload(targetValue.data(), nc * sizeof(double));
+    ctx->dFlcHalfDb.upload(halfDb.data(), nc * sizeof(double));
+    ctx->dFlcElem.upload(ctx->hFlcElem.data(), nc * sizeof(int));
+    ctx->dFlcCtlPack.upload(ctlPack.data(), nc * sizeof(int));
+    ctx->dFlcTapPtr.upload(ctx->hFlcTapPtr.data(), ctx->hFlcTapPtr.size() * sizeof(int));
+    ctx->dFlcTapData.upload(ctx->hFlcTapData.data(), ctx->hFlcTapData.size() * sizeof(double));
+    ctx->dFlcBaseTap.upload(ctx->hFlcBaseTap.data(), nc * sizeof(int));
+    ctx->dFlcMaxShift.upload(maxShift.data(), nc * sizeof(int));
+    size_t nst = static_cast<size_t>(ctx->nScenarios) * nc;
+    ctx->dFlcCurTap.ensure(nst * sizeof(int));
+    ctx->dFlcPrevTap.ensure(nst * sizeof(int));
+    ctx->dFlcRatDir.ensure(nst * sizeof(int));
+    ctx->dFlcRatCount.ensure(nst * sizeof(int));
+    ctx->dFlcRatAllowed.ensure(nst * sizeof(int));
+    ctx->dFlcSensi.ensure(nst * sizeof(double));
+    ctx->dFlcDiff.ensure(nst * sizeof(double));
+    ctx->dFlcOutOfDb.ensure(nst * sizeof(char));
+    ctx->nFlc = nc;
+    return 1;
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchFlowTaps(
+        JNIEnv* env, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || ctx->nFlc <= 0 || !ctx->dFlcCurTap.p) {
+        return nullptr;
+    }
+    size_t cnt = static_cast<size_t>(ctx->nFlc) * ctx->nScenarios;
+    std::vector<int> host(cnt);
+    cudaMemcpy(host.data(), ctx->dFlcCurTap.p, cnt * sizeof(int), cudaMemcpyDeviceToHost);
+    jintArray out = env->NewIntArray(static_cast<jsize>(cnt));
+    env->SetIntArrayRegion(out, 0, static_cast<jsize>(cnt), host.data());
+    return out;
+}
+
+/** Upload the CONTINUOUS phase controllers (kind 0 CONTROLLER / 1 LIMITER, a1 identity row, controlled
+ *  side, current limit, global element, tap rows, base tap). Returns 1 when the kernel loop owns them. */
+extern "C" JNIEXPORT jint JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchContinuousPhase(
+        JNIEnv* env, jclass, jlong handle,
+        jintArray jKind, jintArray jA1Row, jintArray jSide, jdoubleArray jLimit, jintArray jElem,
+        jintArray jTapPtr, jdoubleArray jTapData, jintArray jBaseTap) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return 0;
+    }
+    ctx->nCph = 0;
+    if (jKind == nullptr || env->GetArrayLength(jKind) == 0) {
+        return 0;
+    }
+    auto readI = [&](jintArray a, std::vector<int>& v) {
+        v.resize(env->GetArrayLength(a));
+        env->GetIntArrayRegion(a, 0, static_cast<jsize>(v.size()), v.data());
+    };
+    auto readD = [&](jdoubleArray a, std::vector<double>& v) {
+        v.resize(env->GetArrayLength(a));
+        env->GetDoubleArrayRegion(a, 0, static_cast<jsize>(v.size()), v.data());
+    };
+    std::vector<int> kind, a1Row, side;
+    std::vector<double> limit;
+    readI(jKind, kind);
+    readI(jA1Row, a1Row);
+    readI(jSide, side);
+    readD(jLimit, limit);
+    readI(jElem, ctx->hCphElem);
+    readI(jTapPtr, ctx->hCphTapPtr);
+    readD(jTapData, ctx->hCphTapData);
+    readI(jBaseTap, ctx->hCphBaseTap);
+    int nc = static_cast<int>(kind.size());
+    for (int c = 0; c < nc; c++) {
+        int e = ctx->hCphElem[c] - ctx->cbOffset;
+        if (e < 0 || e >= ctx->st->cb.ne) {
+            return 0;                                        // not a closed branch: the host orchestrator keeps it
+        }
+    }
+    ctx->dCphKind.upload(kind.data(), nc * sizeof(int));
+    ctx->dCphA1Row.upload(a1Row.data(), nc * sizeof(int));
+    ctx->dCphSide.upload(side.data(), nc * sizeof(int));
+    ctx->dCphLimit.upload(limit.data(), nc * sizeof(double));
+    ctx->dCphElem.upload(ctx->hCphElem.data(), nc * sizeof(int));
+    ctx->dCphTapPtr.upload(ctx->hCphTapPtr.data(), ctx->hCphTapPtr.size() * sizeof(int));
+    ctx->dCphTapData.upload(ctx->hCphTapData.data(), ctx->hCphTapData.size() * sizeof(double));
+    ctx->dCphBaseTap.upload(ctx->hCphBaseTap.data(), nc * sizeof(int));
+    size_t nst = static_cast<size_t>(ctx->nScenarios) * nc;
+    ctx->dCphTap.ensure(nst * sizeof(int));
+    ctx->dCphPrevTap.ensure(nst * sizeof(int));
+    ctx->dCphIter.ensure(static_cast<size_t>(ctx->nScenarios) * sizeof(int));
+    ctx->nCph = nc;
+    return 1;
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchContinuousPhaseTaps(
+        JNIEnv* env, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || ctx->nCph <= 0 || !ctx->dCphTap.p) {
+        return nullptr;
+    }
+    size_t cnt = static_cast<size_t>(ctx->nCph) * ctx->nScenarios;
+    std::vector<int> host(cnt);
+    cudaMemcpy(host.data(), ctx->dCphTap.p, cnt * sizeof(int), cudaMemcpyDeviceToHost);
     jintArray out = env->NewIntArray(static_cast<jsize>(cnt));
     env->SetIntArrayRegion(out, 0, static_cast<jsize>(cnt), host.data());
     return out;

@@ -527,9 +527,9 @@ IncrementalTvc and IncrementalShuntVc are NOT blocked on task #40.
 
 | Loop | Solve | Observable | Blocker | Verdict |
 |------|-------|-----------|---------|---------|
-| IncrementalTvc | Forward ✓ | variable column | Upload tap tables | **LANDED 2026-09-14** (`LOOP_TVC_KERNEL`, single controller per controlled bus; shared buses keep the host round-robin) |
+| IncrementalTvc | Forward ✓ | variable column | Upload tap tables | **LANDED 2026-09-14/15** (`LOOP_TVC_KERNEL`; shared groups too since 2026-09-15 — `tvcGroupDecisionBatch`, OLF's adjustWithSeveralControllers per (scenario, group)) |
 | IncrementalShuntVc | Forward ✓ | variable column | Upload section tables | **LANDED 2026-09-15** (`LOOP_SHUNT_KERNEL`, OLF adjustB round-robin per controlled-bus group in-kernel — several controller shunts and sub-controllers per group) |
-| IncrementalFlowControl | Forward ✓ | OLF `calculateSensi` (CPU) | Java term eval | **Blocked** |
+| IncrementalFlowControl | Forward ✓ | J-row · dx on device | — | **LANDED 2026-09-15** (`LOOP_PHASE_KERNEL` order 7 / `LOOP_TRPC_KERNEL` order 9: the controlled branch's P/Q gradient from `evalClosedBranch`, I from OLF's reI/imI decomposition incl. the I = 0 one-sided rule, dotted with the unit-RHS solution at the branch's six variable columns) |
 | SecondaryVc | Needs transposed ❌ | OLF Q-terms (CPU) | Task #40 + Java eval | **Blocked** |
 
 To port IncrementalTvc to kernel: upload per-branch tap model tables (y,g1,g2,b1,b2,ksi,r1,a1
@@ -679,6 +679,58 @@ base), 3 strategy-pair precompute counts, 3 HVDC (freeze/saturation, DS carry), 
 Every remote gen-VC test (24/26) passes; the rte6515 production case passes. Next: take the failing
 shapes one by one with `OLF_GPU_BATCH_TRACE=1` (HOST_LOOP lines show the pause/resume sequence),
 starting with the host-paused loops (order 7–10) on the base.
+
+### #45 — Flow-observed incremental loops in-kernel: RPC + incremental phase (landed 2026-09-15)
+
+`LOOP_PHASE_KERNEL` (OLF order 7, phase CONTROLLER + LIMITER) and `LOOP_TRPC_KERNEL` (order 9, RPC)
+share one controller table and one step (`flcStep(kindMask)`). Per (scenario, controller):
+`flcCheckBatch` evaluates the CONTROLLED branch's flow at the current state — P/Q through the
+codegen'd `evalClosedBranch` (the very functions the fill scatters, with the branch's tap override
+applied), I through OLF's `ClosedBranchSide{1,2}CurrentMagnitudeEquationTerm` decomposition
+(reI/imI and their eight partials) — and OLF's deadband test (LIMITER one-sided). One unit-RHS
+solve per needed controller at its rho/a1 identity row on the driver's own factors;
+`flcGatherSensiBatch` dots the flow gradient with dx at the branch's six variable columns — this IS
+`EquationTerm.calculateSensi`, including its dr1-less current sensitivity and its `hypot(dre·dx,
+dim·dx)` one-sided rule at I = 0. `flcDecisionBatch`: RPC → closest r1 within the run's
+maxTapShift (no gate); CONTROLLER → `|sensi·toRadians(1)| > SENSI_EPS`, closest a1 unbounded;
+LIMITER → `FirstTapPositionAboveFinder` (walk tap by tap while the remaining shift reaches past the
+next a1) — ratchet as everywhere. `flcApplyBatch` pins the identity row; the r1 override rebuild is
+shared with the TVC phase (`tvcRebuildOverrides` now merges both tables' moved taps). Base path:
+`getMaxTapShift()` (OLF getter) for RPC, `readBatchFlowTaps` → `PiModel.setTapPosition`. The host
+orchestrator (`GpuBatchIncrementalFlowControl.orchestrate`) stays for a controlled branch that is
+not a closed branch. With this every sensitivity-dependent incremental loop runs in-kernel; the
+chunk path's host orchestrators left: SecondaryVoltageControl (transposed solve, task #40) and
+the non-incremental TVC / shunt VC rounding flows (#47).
+
+### #46 — Continuous PhaseControl in the phase phase (landed 2026-09-15)
+
+`cphCheckBatch` shares `LOOP_PHASE_KERNEL` with the incremental kinds (`nCph > 0` selects it).
+Per (scenario, controller) at the phase slot's FIRST check (`dCphIter[s] == 0`): a CONTROLLER
+switches off — its a1 row leaves mode 3 (free a1, P block re-emitted) for the identity pinned at
+the closest tap's a1 (`x` seeded there) — and the scenario is UNSTABLE whenever a live controller
+exists (OLF: `status = UNSTABLE` for every controller at iteration 0, even one whose rounding
+changes nothing — that still costs the CPU a Newton pass, so it costs us one too). From the second
+check on, a LIMITER whose controlled I exceeds its limit moves one tap against sign(dI/da1) —
+`flcFlowAndGrad(kind 2)` at the branch's current state, local control only (remote LIMITERs stay
+CPU-routed at extraction). Taps ride the shared r1 override rebuild (`tvcRebuildOverrides` merges
+TVC + phase + flow tables + the caller's list). Base path: `readBatchContinuousPhaseTaps` →
+`PiModel.setTapPosition` + `setPhaseControlEnabled(false)`; the `DeviceDrivenLoop` proxy now
+forwards `initialize()` to the real loop for every driven loop except FreezingHvdcACEmulation
+(PhaseControl's initialize enables CONTROLLER control, which the extraction must see). The host
+orchestrator (`GpuBatchContinuousPhase.orchestrate`) stays only for a chunk whose tables did not
+upload. 10/10 phase tests at 1e-12, driver off and on.
+
+### #44 — Shared-group incremental TVC in the TVC phase (landed 2026-09-15)
+
+`tvcGroupDecisionBatch` replaces the per-controller decision kernel: one thread per (scenario,
+controlled-bus group) runs OLF's `checkAndAdjustControlledBus` — `adjustWithOneController` (full
+diffV, maxTapShift) for a singleton, `adjustWithSeveralControllers` (one tap per controller per pass
+in merged order, remainingDiffV through each sensitivity, MIN_SENSI_FILTER per controller, until a
+pass moves nothing) otherwise, both through `tvcMoveTap` (closest r1 within the shift bound and the
+ratchet's range, strictly closer than the current one). The JNI upload no longer refuses shared
+buses, so the host TVC orchestrator is off for every incremental group; `deviceIncrementalSharedTvc
+MatchesCpu` runs its 3-member group in-kernel (`nCtrl=3 nGroups=1 kernel=true`) at 1e-12, driver
+off and on.
 
 ### #43 — In-kernel IncrementalShuntVoltageControl (landed 2026-09-15)
 

@@ -188,13 +188,22 @@ final class GpuBatchChunkSolver {
         GpuBatchOuterLoopTables.install(handle, gpuData, rlCurves);
 
         // Incremental TVC: upload controller data to device (run-constant, not per-chunk).
-        // IncrementalTransformerVoltageControl as a DRIVER PHASE (OLF order 8) when every controlled
-        // bus has a single controller; a shared controlled bus (OLF's one-tap-at-a-time round robin)
-        // keeps the host orchestrator, and the upload says which.
+        // IncrementalTransformerVoltageControl as a DRIVER PHASE (OLF order 8), shared controlled
+        // buses included (the one-tap-at-a-time round robin runs in the group kernel).
         boolean tvcInKernel = false;
         if (incrementalTvcControllers != null && !incrementalTvcControllers.isEmpty()) {
             tvcInKernel = GpuBatchIncrementalTvc.uploadToDevice(handle, incrementalTvcControllers,
                     config.incTvcMaxTapShift());
+        }
+        // The flow-observed incremental loops (RPC at OLF order 9, incremental phase at order 7) as DRIVER PHASES.
+        boolean flowInKernel = false;
+        if (incrementalFlowControllers != null && !incrementalFlowControllers.isEmpty()) {
+            flowInKernel = GpuBatchIncrementalFlowControl.uploadToDevice(handle, incrementalFlowControllers);
+        }
+        // CONTINUOUS PhaseControl as a DRIVER PHASE (OLF order 7); the pre-solve control-ON activation stays host-side.
+        boolean cphInKernel = false;
+        if (continuousPhaseControllers != null && !continuousPhaseControllers.isEmpty()) {
+            cphInKernel = GpuBatchContinuousPhase.uploadToDevice(handle, continuousPhaseControllers);
         }
         // IncrementalShuntVoltageControl as a DRIVER PHASE (OLF order 10).
         boolean shuntInKernel = false;
@@ -1094,7 +1103,7 @@ final class GpuBatchChunkSolver {
                         orchNs.merge("VoltageMonitoring.orchestrate", System.nanoTime() - tOr3, Long::sum);
                     }
                     // OLF order 7: PhaseControl (continuous)
-                    if (continuousPhaseControllers != null && !continuousPhaseControllers.isEmpty()) {
+                    if (continuousPhaseControllers != null && !continuousPhaseControllers.isEmpty() && !cphInKernel) {
                         long tOr5 = System.nanoTime();
                         chunkResults = GpuBatchContinuousPhase.orchestrate(handle, chunkSize, realCount, n,
                                 chunkResults, continuousPhaseControllers, esContext,
@@ -1163,7 +1172,7 @@ final class GpuBatchChunkSolver {
                         orchNs.merge("TransformerControl.orchestrateTransformerControl", System.nanoTime() - tOr10, Long::sum);
                     }
                     // OLF order 9: IncrementalTransformerReactivePowerControl (+ IncrementalPhaseControl)
-                    if (incrementalFlowControllers != null && !incrementalFlowControllers.isEmpty()) {
+                    if (incrementalFlowControllers != null && !incrementalFlowControllers.isEmpty() && !flowInKernel) {
                         long tOr8 = System.nanoTime();
                         chunkResults = GpuBatchIncrementalFlowControl.orchestrate(handle, chunkSize, realCount, n,
                                 chunkResults, incrementalFlowControllers, esContext, rowModePerScenario, baseRowMode, disabledMask,

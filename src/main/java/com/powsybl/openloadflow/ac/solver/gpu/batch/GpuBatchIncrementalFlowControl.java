@@ -46,7 +46,7 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-final class GpuBatchIncrementalFlowControl {
+public final class GpuBatchIncrementalFlowControl {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchIncrementalFlowControl.class);
 
@@ -62,9 +62,9 @@ final class GpuBatchIncrementalFlowControl {
     private GpuBatchIncrementalFlowControl() {
     }
 
-    record Controller(int kind, int pinRow, int pinTapCol, EquationTerm<AcVariableType, AcEquationType> flowTerm,
+    public record Controller(int kind, int pinRow, int pinTapCol, EquationTerm<AcVariableType, AcEquationType> flowTerm,
                       double targetValue, double halfDeadband, double[][] tapRows, int baseTapIdx,
-                      int elemIndex, int controlledElemIndex, int maxTapShift) {
+                      int elemIndex, int controlledElemIndex, int maxTapShift, int controlledSide, int branchNum) {
         double pin(int tap) {
             return tapRows[tap][pinTapCol];
         }
@@ -93,7 +93,7 @@ final class GpuBatchIncrementalFlowControl {
     }
 
     @SuppressWarnings("unchecked")
-    static List<Controller> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    public static List<Controller> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                              GpuBatchElementMapper elementMapper, int rpcMaxTapShift,
                                              boolean rpc, boolean phase) {
         List<Controller> out = new ArrayList<>();
@@ -130,7 +130,7 @@ final class GpuBatchIncrementalFlowControl {
                 double halfDb = rc.getTargetDeadband().orElse(MIN_TARGET_DEADBAND_MVAR) / 2;
                 out.add(new Controller(KIND_RPC, pinRow, 6, term, target, halfDb,
                         tapRows, closestTap(tapRows, 6, controller.getPiModel().getR1()),
-                        elemIndex, ctlElemIndex, rpcMaxTapShift));
+                        elemIndex, ctlElemIndex, rpcMaxTapShift, rc.getControlledSide() == TwoSides.ONE ? 1 : 2, controller.getNum()));
             }
         }
         if (phase) {
@@ -168,10 +168,80 @@ final class GpuBatchIncrementalFlowControl {
                 double halfDb = Math.max(pc.getTargetDeadband(), MIN_TARGET_DEADBAND_P) / 2;
                 out.add(new Controller(kind, pinRow, 7, term, pc.getTargetValue(), halfDb,
                         tapRows, closestTap(tapRows, 7, controller.getPiModel().getA1()),
-                        elemIndex, ctlElemIndex, Integer.MAX_VALUE));
+                        elemIndex, ctlElemIndex, Integer.MAX_VALUE, pc.getControlledSide() == TwoSides.ONE ? 1 : 2, controller.getNum()));
             }
         }
         return out;
+    }
+
+    /** Install the controllers for the in-kernel loops (RPC at OLF order 9, incremental phase at order 7).
+     *  Returns true when the kernel loops OWN them, false when there are none or one controlled branch is
+     *  not a closed branch (the host orchestrator then runs). */
+    public static boolean uploadToDevice(long handle, List<Controller> ctrls) {
+        if (ctrls == null || ctrls.isEmpty()) {
+            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchFlowControllers(handle,
+                    null, null, null, null, null, null, null, null, null, null, null, null);
+            return false;
+        }
+        int nc = ctrls.size();
+        int[] kind = new int[nc];
+        int[] pinRow = new int[nc];
+        int[] pinCol = new int[nc];
+        int[] side = new int[nc];
+        double[] targetValue = new double[nc];
+        double[] halfDb = new double[nc];
+        int[] elem = new int[nc];
+        int[] ctlElem = new int[nc];
+        int[] tapPtr = new int[nc + 1];
+        int[] baseTap = new int[nc];
+        int[] maxShift = new int[nc];
+        List<Double> tapData = new ArrayList<>();
+        for (int c = 0; c < nc; c++) {
+            Controller ctl = ctrls.get(c);
+            kind[c] = ctl.kind();
+            pinRow[c] = ctl.pinRow();
+            pinCol[c] = ctl.pinTapCol();
+            side[c] = ctl.controlledSide();
+            targetValue[c] = ctl.targetValue();
+            halfDb[c] = ctl.halfDeadband();
+            elem[c] = ctl.elemIndex();
+            ctlElem[c] = ctl.controlledElemIndex();
+            tapPtr[c] = tapData.size() / 8;
+            for (double[] row : ctl.tapRows()) {
+                for (double d : row) {
+                    tapData.add(d);
+                }
+            }
+            baseTap[c] = ctl.baseTapIdx();
+            maxShift[c] = ctl.maxTapShift() == Integer.MAX_VALUE ? 1 << 20 : ctl.maxTapShift();
+        }
+        tapPtr[nc] = tapData.size() / 8;
+        boolean owned = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchFlowControllers(handle,
+                kind, pinRow, pinCol, side, targetValue, halfDb, elem, ctlElem, tapPtr,
+                tapData.stream().mapToDouble(Double::doubleValue).toArray(), baseTap, maxShift) != 0;
+        LOGGER.info("Uploaded {} flow-observed incremental controllers to device: {}", nc, owned ? "in-kernel loops" : "host orchestrator");
+        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            System.err.printf("FLOW_UPLOAD nCtrl=%d kernel=%b%n", nc, owned);
+        }
+        return owned;
+    }
+
+    /** Give the driver's final taps (scenario 0) back to the network through the pi model. */
+    public static void writeBackTaps(LfNetwork network, List<Controller> ctrls, int[] taps) {
+        if (ctrls == null || ctrls.isEmpty() || taps == null) {
+            return;
+        }
+        for (int c = 0; c < ctrls.size() && c < taps.length; c++) {
+            Controller ctl = ctrls.get(c);
+            if (taps[c] == ctl.baseTapIdx()) {
+                continue;
+            }
+            LfBranch branch = network.getBranch(ctl.branchNum());
+            if (branch != null) {
+                var pm = branch.getPiModel();
+                pm.setTapPosition(pm.getTapPositionRange().getMinimum() + taps[c]);
+            }
+        }
     }
 
     private static int closestTap(double[][] tapRows, int col, double value) {

@@ -114,7 +114,14 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
 
         @Override
         public void initialize(AcOuterLoopContext context) {
-            // deferred to the first check that OLF's loop actually has to run
+            // OLF's initialize is part of the loop's contract and the device relies on it having run
+            // (PhaseControl.initialize ENABLES the continuous controls the first solve must see as
+            // row-mode-3 rows). The one exception is FreezingHvdcACEmulation: its initialize freezes
+            // every emulation on the network, which the driver replays itself from the warm state.
+            if (!"FreezingHvdcACEmulation".equals(real.getName())) {
+                real.initialize(context);
+                initialized = true;
+            }
         }
 
         @Override

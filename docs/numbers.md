@@ -246,10 +246,17 @@ On the AC batch path the chunk IS the cuDSS `UBATCH` batch: one call factorizes 
 systems, so the batch size decides whether the batched kernel is used at all, and it swings the run
 by x2 on cuDSS 0.8. On the DC Woodbury path there is no batch: the matrix is factorized once and the
 chunk only sizes kernel launches, so it is flat (the table above). On the time-series path the chunk
-is the number of STEPS whose right-hand sides are assembled, solved and downloaded together. One
-factorization serves all of them, so a larger chunk amortizes the per-call overhead over more steps
-and widens the multi-right-hand-side solve. rte6515_full, both loops configured, GPU 1 thread,
-restore + set points + solve:
+is the number of STEPS whose right-hand sides are assembled, solved and downloaded together.
+
+The factorization is NOT what the chunk buys here, and an earlier version of this section implied it
+was. A time-series run factorizes once for the whole plan: `refreshDeviceMatrix` is guarded by
+`deviceMatrixDirty`, so it refactorizes only when an outer loop or a step moves a tap or saturates a
+link. Traced with `OLF_TS_TRACE` on the plan below, the refresh count is ZERO at chunk 32 and ZERO
+at chunk 1024 - one factorization either way. What changes is the number of chunks, and each chunk
+carries a fixed cost: base table uploads, solve setup, the fixed kernel launches, and the outer-loop
+sweep rounds (96 rounds at chunk 32 against 3 at chunk 1024, for the same 1000 steps).
+
+rte6515_full, both loops configured, GPU 1 thread, restore + set points + solve:
 
 | chunk | 1000 steps | 4096 steps |
 |---|---|---|
@@ -259,11 +266,27 @@ restore + set points + solve:
 | 1024 | 0.76 ms/step | 0.62 ms/step (2048) |
 | 4096 | | 0.66 ms/step |
 
-Bigger is better up to about 1024-2048 and then flat or slightly worse, so `DEFAULT_CHUNK` is 1024
-(`-Dolf.gpu.dc.ts.chunk`). The ceiling is memory: a chunk holds one right-hand side and one state
-column per step. The floor on the other side is that a chunk is also the outer-loop grouping unit -
-steps are grouped by configuration WITHIN a chunk, so a chunk too small to contain repeated
-configurations pays a refactorization it could have shared.
+Fitting `total = nChunks x (fixed + marginal x chunk)` to those four points gives a fixed cost of
+**34.8 ms per chunk** and a marginal cost of **0.756 ms per step**, which reproduces the measured
+points to within 8%. So the whole shape of the sweep is one number amortized:
+
+| chunk | fixed share | measured |
+|---|---|---|
+| 32 | 1.09 ms/step | 1.84 ms/step |
+| 128 | 0.27 ms/step | 0.95 ms/step |
+| 256 | 0.14 ms/step | 0.91 ms/step |
+| 1024 | 0.03 ms/step | 0.76 ms/step |
+
+Two things follow. The marginal cost per step is flat across the sweep, so widening the
+multi-right-hand-side solve does NOT itself pay - a 1024-column solve costs about 32 times a
+32-column one. And the curve must flatten once the fixed share is small against 0.756, which is why
+1024 and 2048 measure the same and there is nothing to chase above that.
+
+`DEFAULT_CHUNK` is therefore 1024 (`-Dolf.gpu.dc.ts.chunk`). The ceiling is memory: a chunk holds one
+right-hand side and one state column per step. A second, smaller argument points the same way on
+plans this one does not exercise: the chunk is also the outer-loop grouping unit, steps being grouped
+by configuration WITHIN a chunk, so on a plan that DOES move taps or saturate links a larger chunk
+shares one refactorization between more steps. On this plan that term is zero.
 
 #### Time-series row emission over several host threads (2026-09-15)
 

@@ -1115,14 +1115,26 @@ instructive:
   used at all, and it is worth x2.
 - **DC Woodbury path** - no batch. One factorization, the chunk only sizes kernel launches and the
   state download. Flat: 64/256/1024 land within run-to-run noise.
-- **DC time-series path** - the chunk is a number of STEPS sharing one factorization, so a larger
-  chunk amortizes per-call overhead and widens the multi-right-hand-side solve. It pays up to about
-  1024-2048 steps and is flat after; `DEFAULT_CHUNK` is 1024.
+- **DC time-series path** - the chunk is a number of STEPS assembled, solved and downloaded
+  together. It pays up to about 1024-2048 steps and is flat after; `DEFAULT_CHUNK` is 1024.
 
-The time-series chunk has a second role that argues the same way: it is the outer-loop grouping unit.
-Steps are grouped by configuration within a chunk, so a chunk large enough to contain repeated
-configurations shares one refactorization between them. The cap is memory, one right-hand side and
-one state column per step.
+Why it pays is worth stating exactly, because the obvious answer is the wrong one. It is NOT that a
+larger chunk shares a factorization: a time-series run factorizes ONCE for the whole plan.
+`refreshDeviceMatrix` is guarded by `deviceMatrixDirty` and fires only when an outer loop or a step
+moves a tap or saturates a link, and on the benchmark plan it never fires - traced with
+`OLF_TS_TRACE`, zero refreshes at chunk 32 and zero at chunk 1024.
+
+What a larger chunk buys is fewer chunks, each of which carries a fixed cost: base table uploads,
+solve setup, fixed kernel launches, and the outer-loop sweep rounds (96 at chunk 32 against 3 at
+chunk 1024 for the same 1000 steps). Fitting the sweep gives 34.8 ms fixed per chunk and 0.756 ms
+marginal per step. The marginal term is flat, so widening the multi-right-hand-side solve does not
+itself pay; the entire curve is that one fixed cost amortized, and it flattens once the fixed share
+falls below the marginal one - which is exactly where 1024 sits.
+
+The cap is memory, one right-hand side and one state column per step. The grouping role of the chunk
+is a second, smaller argument in the same direction, but only on plans that actually change
+configuration: steps are grouped by configuration within a chunk, so there a larger chunk shares one
+refactorization between more steps.
 
 Measured tables in `docs/numbers.md`. The headline under the standing comparison rule: mono-thread
 GPU 2.61 ms/step against 8-thread CPU 1.97 ms/step on rte6515_full at 4096 steps, so the GPU arm

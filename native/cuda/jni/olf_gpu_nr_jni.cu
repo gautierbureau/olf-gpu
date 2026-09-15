@@ -82,7 +82,8 @@ enum DeviceLoopKind {
     LOOP_PHASE_KERNEL = 12,  // IncrementalPhaseControl (CONTROLLER + LIMITER) — IN-KERNEL (OLF order 7)
     LOOP_TRPC_KERNEL = 13,   // IncrementalTransformerReactivePowerControl — IN-KERNEL (OLF order 9)
     LOOP_TVD_KERNEL = 14,    // TransformerVoltageControl AFTER_GENERATOR / Simple (WITH_GENERATOR) — IN-KERNEL (OLF order 8)
-    LOOP_SVD_KERNEL = 15     // ShuntVoltageControl WITH_GENERATOR — IN-KERNEL (OLF order 10)
+    LOOP_SVD_KERNEL = 15,    // ShuntVoltageControl WITH_GENERATOR — IN-KERNEL (OLF order 10)
+    LOOP_SVC_KERNEL = 16     // SecondaryVoltageControl — IN-KERNEL (OLF order 4)
 };
 // GpuBatchHvdcAcEmulation's status codes, shared with the host.
 constexpr int HV_LINEAR = 0;
@@ -2876,7 +2877,13 @@ __global__ void initFBatch(int n, int nScenarios, const double* target, double* 
 // Per-scenario RL V-target override (secondary voltage control moves generator-VC targets): entries are
 // (slot, rl index) pairs with the REPLACEMENT target. Linear scan — the list is a handful of entries.
 __device__ inline double rlTargetOf(int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
-                                    int s, int i, double baseTarget) {
+                                    const double* svcRlVt, int nrl, int s, int i, double baseTarget) {
+    if (svcRlVt != nullptr) {                                // a zone moved this controller's target: the
+        double v = svcRlVt[(size_t) s * nrl + i];            // switch-back must compare against the MOVED one
+        if (!isnan(v)) {
+            return v;
+        }
+    }
     for (int k = 0; k < nRlVtOv; k++) {
         if (rlVtOvSlotIdx[2 * k] == s && rlVtOvSlotIdx[2 * k + 1] == i) {
             return rlVtOvVal[k];
@@ -2888,7 +2895,7 @@ __device__ inline double rlTargetOf(int nRlVtOv, const int* rlVtOvSlotIdx, const
 __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* rlVrow,
                                      const double* rlVtarget, const char* rlMonitored,
                                      const int* baseMode, const double* x, char* limitType,
-                                     int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
+                                     int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal, const double* svcRlVt,
                                      const char* rlRemote, const int* rlCmpVrow,
                                      const double* target, const double* rlMinQb, const double* rlMaxQb,
                                      const double* rlLoadQb) {
@@ -2920,7 +2927,7 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
     if (baseMode[vrow] == 1 && rlMonitored[i] == 0) {       // PQ in the base case (a real Q-limit switch —
         // NOT a monitoring SVC standing by: that one seeds UNPINNED so only the VoltageMonitoring
         // orchestrator may activate it, exactly like the CPU's null qLimitType)
-        double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, s, i, rlVtarget[i]);
+        double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]);
         limitType[st] = (x[idx] < vt) ? 2 : 1;              // v below target ⇒ maxQ pinned; above ⇒ minQ pinned
     } else {
         limitType[st] = 0;                                  // base PV (incl. a per-scenario gen-override flip)
@@ -3292,7 +3299,7 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
     switched[s] = 1;                                         // this outer loop is UNSTABLE for s
 }
 
-__global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, int maxSwitch,
+__global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenarios, int n, double tol, int maxSwitch,
                                     const int* rlVrow, const double* rlMinQ, const double* rlMaxQ,
                                     const double* rlLoadQ, const double* rlVtarget, const double* qBuf,
                                     const double* x, const char* rlActive, int* mode, double* target,
@@ -3363,7 +3370,7 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
             }
         } else if (switchCount[rst] < maxSwitch) {           // pinned — switch-back tests the PILOT
             double v = x[(size_t) s * n + rlCmpVrow[i]];
-            double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, s, i, rlVtarget[i]);
+            double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]);
             bool back = (limitType[rst] == 2 && v > vt)
                      || (limitType[rst] == 1 && v < vt);
             if (back) {
@@ -3414,7 +3421,7 @@ __global__ void reactiveLimitsBatch(int nrl, int nScenarios, int n, double tol, 
         }
     } else if (limitType[st] != 0 && switchCount[st] < maxSwitch) {   // pinned at a limit — check switchback
         double v = x[idx];
-        double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, s, i, rlVtarget[i]);
+        double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]);
         // OLF never back-switches a slope-SVC bus: checkPqBus runs with
         // canSwitchToPv = !bus.hasGeneratorsWithSlope() ("we don't support switching PQ to PV
         // for bus with one controller with slope") — once pinned, a slope row stays PQ.
@@ -4394,6 +4401,17 @@ struct BatchSolverContext {
     DeviceBuf dTvdScnStep, dTvdGrpStep, dTvdGrpShMin, dTvdGrpShMax, dTvdGrpShInit;   // per scenario / per (scenario, group)
     DeviceBuf dTvdMemState, dTvdMemTap, dTvdMemRoundFrom;                          // per (scenario, member)
     DeviceBuf dTvdSaved, dTvdReject;                                               // per (scenario, delta row) / per scenario
+    // SECONDARY VOLTAGE CONTROL — LOOP_SVC_KERNEL (OLF order 4). Zones of controller buses regulating a
+    // pilot point: run entirely on the device, the small dense zone system included.
+    int nSvc = 0, nSvcZones = 0;
+    DeviceBuf dSvcCtldVRow, dSvcBusVRow, dSvcRlIdx, dSvcBaseTargetV, dSvcMinQ, dSvcMaxQ, dSvcLoadQ;
+    DeviceBuf dSvcQPtr, dSvcQKind, dSvcQElem, dSvcQBRow;
+    DeviceBuf dSvcZonePtr, dSvcZoneCtl, dSvcZonePilotRow, dSvcZoneTargetV;
+    DeviceBuf dSvcTargetV, dSvcK0, dSvcJk, dSvcJvpp, dSvcEnabled, dSvcNeed, dSvcReject, dSvcRlVt;
+    std::vector<int> hSvcCtldVRow;
+    std::vector<double> hSvcBaseTargetV;
+    double svcMinPlausibleV = 0.8, svcMaxPlausibleV = 1.2;
+
     std::vector<int> hTvdMemElem, hTvdMemBaseTap, hTvdMemTapPtr;
     std::vector<double> hTvdTapData;
     // GeneratorVoltageControlManager (AFTER_GENERATOR): generator VC controller buses under the max
@@ -5964,6 +5982,297 @@ static SvdTables svdTables(BatchSolverContext* ctx) {
 }
 // ======================== END DISCRETE VOLTAGE CONTROL KERNELS ========================
 
+// ======================== SECONDARY VOLTAGE CONTROL KERNELS (LOOP_SVC_KERNEL, OLF order 4) ========================
+// OLF's SecondaryVoltageControlOuterLoop, per (scenario, zone), with nothing left on the host. The
+// observables are the SAME quantities OLF's EquationTerms compute, reached the device's way: a
+// controller bus's reactive injection is the sum of its CLOSED-BRANCH side flows (gradient from the
+// codegen'd evalClosedBranch, exactly as flcGatherSensiBatch does it) plus its shunts' q = -b*v^2
+// (ShuntCompensatorReactiveFlowEquationTerm: dq/dv = -2bv, dq/db = -v^2), and the pilot's calculated V
+// is the BUS_V variable itself, so its sensitivity is dx at the pilot row.
+constexpr int MAX_SVC_CTL = 16;                              // per-scenario dense zone system bound
+constexpr double SVC_DV_EPS = 1e-4;                          // OLF DV_EPS (0.1 kV)
+constexpr double SVC_DK_DIFF_MAX_EPS = 1e-3;                 // OLF DK_DIFF_MAX_EPS (1 MVar)
+
+struct SvcTables {
+    int nCtl, nZones, nrl;
+    const int* ctldVRow; const int* busVRow; const int* rlIdx;
+    const double* baseTargetV; const double* minQ; const double* maxQ; const double* loadQ;
+    const int* qPtr; const int* qKind; const int* qElem; const int* qBRow;
+    const int* zonePtr; const int* zoneCtl; const int* zonePilotRow; const double* zoneTargetV;
+    double* targetV; double* k0; double* jk; double* jvpp; double* rlVt;
+    char* enabled; char* need; char* reject;
+    double minPlausibleV, maxPlausibleV;
+};
+
+__device__ inline double svcQToK(double q, double minQ, double maxQ) {
+    return (2.0 * q - maxQ - minQ) / (maxQ - minQ);          // OLF qToK
+}
+
+// OLF check(): tryToReEnableHelpfulControllerBuses FIRST (a zone with SOME but not all controllers at a
+// reactive limit gives every limited one back its voltage control), then the per-zone trigger on the
+// pilot deadband and the K spread. The re-enable runs whether or not the zone then adjusts — OLF mutates
+// the network before it decides.
+__global__ void svcTriggerBatch(SvcTables T, int nScenarios, int n, const char* rlActive,
+                                const double* qBuf, const double* x, char* limitType, const char* savedMode,
+                                int* mode, double* target, int svcDebug) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= T.nZones * nScenarios) return;
+    int z = tid % T.nZones;
+    int s = tid / T.nZones;
+    if (!rlActive[s]) return;
+    int lo = T.zonePtr[z];
+    int hi = T.zonePtr[z + 1];
+    // ---- tryToReEnableHelpfulControllerBuses ----
+    int nPinned = 0;
+    for (int k = lo; k < hi; k++) {
+        if (limitType[(size_t) s * T.nrl + T.rlIdx[T.zoneCtl[k]]] != 0) nPinned++;
+    }
+    if (nPinned > 0 && nPinned < hi - lo) {
+        for (int k = lo; k < hi; k++) {
+            int c = T.zoneCtl[k];
+            size_t st = (size_t) s * T.nrl + T.rlIdx[c];
+            if (limitType[st] == 0) continue;
+            size_t idx = (size_t) s * n + T.busVRow[c];
+            char sm = savedMode[st];
+            mode[idx] = (sm == 2) ? 2 : 0;                   // back to its PV form
+            target[idx] = T.targetV[(size_t) s * T.nCtl + c];
+            limitType[st] = 0;
+        }
+    }
+    // ---- the zone's trigger: pilot deadband, or K spread while not all controllers are at a limit ----
+    double pilotDv = T.zoneTargetV[z] - x[(size_t) s * n + T.zonePilotRow[z]];
+    double kMin = 1e300;
+    double kMax = -1e300;
+    bool allAbove = true;
+    bool allBelow = true;
+    for (int k = lo; k < hi; k++) {
+        int c = T.zoneCtl[k];
+        double q = qBuf[(size_t) s * n + T.busVRow[c]] + T.loadQ[c];
+        double kk = svcQToK(q, T.minQ[c], T.maxQ[c]);
+        T.k0[(size_t) s * T.nCtl + c] = kk;
+        kMin = fmin(kMin, kk);
+        kMax = fmax(kMax, kk);
+        allAbove &= kk > 1.0;
+        allBelow &= kk < -1.0;
+        T.enabled[(size_t) s * T.nCtl + c] = limitType[(size_t) s * T.nrl + T.rlIdx[c]] == 0 ? 1 : 0;
+    }
+    // OLF filters the zone OUT of the check when it has no controller whose voltage control is enabled
+    // (findAnyControlledBusWithAtLeastOneControllerBusWithVoltageControlEnabled): every controller at a
+    // reactive limit means the zone cannot act, so it is not even looked at. Without this the pilot
+    // deadband still flags the scenario, and the sensitivity solve that follows adjusts nothing while
+    // leaving the driver's factorization state disturbed — 1.0e-10 kV on ieee14's z1.
+    int nEnabled = 0;
+    for (int k = lo; k < hi; k++) {
+        if (T.enabled[(size_t) s * T.nCtl + T.zoneCtl[k]]) nEnabled++;
+    }
+    bool allAtLimits = allAbove || allBelow;
+    if (nEnabled > 0 && (fabs(pilotDv) > SVC_DV_EPS || (!allAtLimits && fabs(kMax - kMin) > SVC_DK_DIFF_MAX_EPS))) {
+        T.need[s] = 1;
+    }
+}
+
+// After the unit-RHS solve for CONTROLLED bus i: OLF's calculateSensiK for every controller j — the sum
+// over j's own Q observables of (term gradient . dx_i), scaled by 2/(maxQ-minQ) — and calculateSensiVpp,
+// which is dx_i at the zone's pilot row.
+__global__ void svcGatherBatch(SvcTables T, int nScenarios, int n, int i, int nElements, int cbOffset, int shOffset,
+                               const double* cbIn, const int* cbIx, const double* shIn, const int* shIx,
+                               int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
+                               int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                               const char* disabled, const double* x, const double* dx) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= T.nCtl * nScenarios) return;
+    int j = tid % T.nCtl;
+    int s = tid / T.nCtl;
+    const double* xs = x + (size_t) s * n;
+    const double* dxs = dx + (size_t) s * n;
+    double sq = 0.0;
+    for (int k = T.qPtr[j]; k < T.qPtr[j + 1]; k++) {
+        int elem = T.qElem[k];
+        // NO isDisabled test here, deliberately: OLF's calculateSensiQ sums the controller bus's branch
+        // terms as they stand, an outaged one included. Replicating the quirk keeps us on its trajectory.
+        if (T.qKind[k] == 2) {                               // shunt: q = -b v^2
+            int e = elem - shOffset;
+            if (e < 0) continue;
+            double g = shIn[e * 2];
+            double b = shIn[e * 2 + 1];
+            applyShuntOverride(nShOv, shOvSlotElem, shOvGb, s, e, g, b);
+            int vCol = shIx[e * 5 + 2];
+            int bCol = shIx[e * 5 + 3];                      // SHUNT_B row when b is a solved variable
+            if (bCol >= 0) b = xs[bCol];
+            double v = xs[vCol];
+            sq += (-2.0 * b * v) * dxs[vCol] + (bCol >= 0 ? (-v * v) * dxs[bCol] : 0.0);
+        } else {
+            int e = elem - cbOffset;
+            if (e < 0) continue;
+            const double* p = cbIn + e * 8;
+            double pOv[8];
+            if (findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv)) p = pOv;
+            const int* q = cbIx + e * 12;
+            double g[18];
+            flcFlowAndGrad(T.qKind[k] == 0 ? 1 : 2, 0, p, xs, q, g);   // kind 0 of flcFlowAndGrad = REACTIVE flow
+            double d[6] = { dxs[q[5]], dxs[q[7]], dxs[q[4]], dxs[q[6]],
+                            q[8] >= 0 ? dxs[q[8]] : 0.0, q[9] >= 0 ? dxs[q[9]] : 0.0 };
+            for (int m = 0; m < 6; m++) sq += g[m] * d[m];
+        }
+    }
+    T.jk[((size_t) s * T.nCtl + i) * T.nCtl + j] = 2.0 * sq / (T.maxQ[j] - T.minQ[j]);
+    if (j == 0) {
+        // the pilot sensitivity of controlled bus i, for whichever zone i belongs to
+        for (int z = 0; z < T.nZones; z++) {
+            for (int k = T.zonePtr[z]; k < T.zonePtr[z + 1]; k++) {
+                if (T.zoneCtl[k] == i) {
+                    T.jvpp[(size_t) s * T.nCtl + i] = dxs[T.zonePilotRow[z]];
+                }
+            }
+        }
+    }
+}
+
+// OLF processSecondaryVoltageControl's small dense system, per scenario: A (per-zone block, 1-1/n on the
+// diagonal and -1/n off it), rhs = -A.k0, b = A.Jk^T, then for each zone the LAST controlled bus's row is
+// replaced by the pilot sensitivities and its rhs by the pilot dv. Solved by Gaussian elimination with
+// partial pivoting; an implausible new target sends the scenario to the CPU, as OLF's FAILED would.
+__global__ void svcZoneSolveBatch(SvcTables T, int nScenarios, int n, const char* rlActive,
+                                  const double* x, char* switched, int svcDebug) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nScenarios || !rlActive[s] || !T.need[s]) return;
+    int idxOf[MAX_SVC_CTL];
+    int ctlOf[MAX_SVC_CTL];
+    int ne = 0;
+    for (int c = 0; c < T.nCtl; c++) {
+        idxOf[c < MAX_SVC_CTL ? c : 0] = -1;
+    }
+    for (int c = 0; c < T.nCtl; c++) {
+        if (!T.enabled[(size_t) s * T.nCtl + c]) continue;
+        if (ne >= MAX_SVC_CTL) {
+            T.reject[s] = 1;                                 // more controllers than the in-kernel system holds
+            return;
+        }
+        idxOf[c] = ne;
+        ctlOf[ne++] = c;
+    }
+    if (ne == 0) return;
+    double a[MAX_SVC_CTL][MAX_SVC_CTL];
+    double bm[MAX_SVC_CTL][MAX_SVC_CTL];
+    double rhs[MAX_SVC_CTL];
+    for (int i = 0; i < ne; i++) {
+        rhs[i] = 0.0;
+        for (int j = 0; j < ne; j++) a[i][j] = 0.0;
+    }
+    for (int z = 0; z < T.nZones; z++) {                     // A: one block per zone over its ENABLED controllers
+        int cnt = 0;
+        for (int k = T.zonePtr[z]; k < T.zonePtr[z + 1]; k++) {
+            if (idxOf[T.zoneCtl[k]] >= 0) cnt++;
+        }
+        if (cnt == 0) continue;
+        for (int k = T.zonePtr[z]; k < T.zonePtr[z + 1]; k++) {
+            int ci = idxOf[T.zoneCtl[k]];
+            if (ci < 0) continue;
+            for (int l = T.zonePtr[z]; l < T.zonePtr[z + 1]; l++) {
+                int cj = idxOf[T.zoneCtl[l]];
+                if (cj < 0) continue;
+                a[ci][cj] = (ci == cj) ? 1.0 - 1.0 / cnt : -1.0 / cnt;
+            }
+        }
+    }
+    for (int i = 0; i < ne; i++) {                           // rhs = -A.k0
+        double v = 0.0;
+        for (int j = 0; j < ne; j++) v += a[i][j] * T.k0[(size_t) s * T.nCtl + ctlOf[j]];
+        rhs[i] = -v;
+    }
+    for (int i = 0; i < ne; i++) {                           // b = A . Jk^T
+        for (int j = 0; j < ne; j++) {
+            double v = 0.0;
+            for (int k = 0; k < ne; k++) {
+                v += a[i][k] * T.jk[((size_t) s * T.nCtl + ctlOf[j]) * T.nCtl + ctlOf[k]];
+            }
+            bm[i][j] = v;
+        }
+    }
+    for (int z = 0; z < T.nZones; z++) {                     // the zone's LAST controlled bus carries the pilot row
+        int last = -1;
+        for (int k = T.zonePtr[z]; k < T.zonePtr[z + 1]; k++) {
+            if (idxOf[T.zoneCtl[k]] >= 0) last = idxOf[T.zoneCtl[k]];
+        }
+        if (last < 0) continue;
+        for (int j = 0; j < ne; j++) bm[last][j] = T.jvpp[(size_t) s * T.nCtl + ctlOf[j]];
+        rhs[last] = T.zoneTargetV[z] - x[(size_t) s * n + T.zonePilotRow[z]];
+    }
+    for (int col = 0; col < ne; col++) {                     // Gaussian elimination, partial pivoting
+        int piv = col;
+        double best = fabs(bm[col][col]);
+        for (int r = col + 1; r < ne; r++) {
+            if (fabs(bm[r][col]) > best) { best = fabs(bm[r][col]); piv = r; }
+        }
+        if (!(best > 0.0)) {
+            T.reject[s] = 1;                                 // singular zone system: OLF would throw
+            return;
+        }
+        if (piv != col) {
+            for (int j = 0; j < ne; j++) { double t = bm[col][j]; bm[col][j] = bm[piv][j]; bm[piv][j] = t; }
+            double t = rhs[col]; rhs[col] = rhs[piv]; rhs[piv] = t;
+        }
+        for (int r = col + 1; r < ne; r++) {
+            double f = bm[r][col] / bm[col][col];
+            if (f == 0.0) continue;
+            for (int j = col; j < ne; j++) bm[r][j] -= f * bm[col][j];
+            rhs[r] -= f * rhs[col];
+        }
+    }
+    for (int r = ne - 1; r >= 0; r--) {
+        double v = rhs[r];
+        for (int j = r + 1; j < ne; j++) v -= bm[r][j] * rhs[j];
+        rhs[r] = v / bm[r][r];
+    }
+    for (int i = 0; i < ne; i++) {                           // plausibility, then commit
+        double nt = T.targetV[(size_t) s * T.nCtl + ctlOf[i]] + rhs[i];
+        if (!(nt >= T.minPlausibleV && nt <= T.maxPlausibleV)) {
+            T.reject[s] = 1;
+            return;
+        }
+    }
+    for (int i = 0; i < ne; i++) {
+        T.targetV[(size_t) s * T.nCtl + ctlOf[i]] += rhs[i];
+    }
+    switched[s] = 1;                                         // OLF: UNSTABLE, the zone adjusted
+}
+
+// Give the moved zone targets to the system: an UNPINNED controller's controlled-bus V identity takes the
+// new target; a PINNED one keeps its Q pin but its switch-back must compare against the moved target.
+__global__ void svcApplyBatch(SvcTables T, int nScenarios, int n, const char* rlActive,
+                              const char* limitType, double* target) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= T.nCtl * nScenarios) return;
+    int c = tid % T.nCtl;
+    int s = tid / T.nCtl;
+    if (!rlActive[s]) return;
+    double tv = T.targetV[(size_t) s * T.nCtl + c];
+    if (tv == T.baseTargetV[c]) return;
+    T.rlVt[(size_t) s * T.nrl + T.rlIdx[c]] = tv;
+    if (limitType[(size_t) s * T.nrl + T.rlIdx[c]] == 0) {
+        target[(size_t) s * n + T.ctldVRow[c]] = tv;
+    }
+}
+
+static SvcTables svcTables(BatchSolverContext* ctx) {
+    SvcTables T;
+    T.nCtl = ctx->nSvc; T.nZones = ctx->nSvcZones; T.nrl = ctx->nrl;
+    T.ctldVRow = ctx->dSvcCtldVRow.as<int>(); T.busVRow = ctx->dSvcBusVRow.as<int>(); T.rlIdx = ctx->dSvcRlIdx.as<int>();
+    T.baseTargetV = ctx->dSvcBaseTargetV.as<double>(); T.minQ = ctx->dSvcMinQ.as<double>();
+    T.maxQ = ctx->dSvcMaxQ.as<double>(); T.loadQ = ctx->dSvcLoadQ.as<double>();
+    T.qPtr = ctx->dSvcQPtr.as<int>(); T.qKind = ctx->dSvcQKind.as<int>();
+    T.qElem = ctx->dSvcQElem.as<int>(); T.qBRow = ctx->dSvcQBRow.as<int>();
+    T.zonePtr = ctx->dSvcZonePtr.as<int>(); T.zoneCtl = ctx->dSvcZoneCtl.as<int>();
+    T.zonePilotRow = ctx->dSvcZonePilotRow.as<int>(); T.zoneTargetV = ctx->dSvcZoneTargetV.as<double>();
+    T.targetV = ctx->dSvcTargetV.as<double>(); T.k0 = ctx->dSvcK0.as<double>();
+    T.jk = ctx->dSvcJk.as<double>(); T.jvpp = ctx->dSvcJvpp.as<double>(); T.rlVt = ctx->dSvcRlVt.as<double>();
+    T.enabled = ctx->dSvcEnabled.as<char>(); T.need = ctx->dSvcNeed.as<char>(); T.reject = ctx->dSvcReject.as<char>();
+    T.minPlausibleV = ctx->svcMinPlausibleV; T.maxPlausibleV = ctx->svcMaxPlausibleV;
+    return T;
+}
+// ======================== END SECONDARY VOLTAGE CONTROL KERNELS ========================
+
+
 BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const double* target,
                               const int* rowMode, const int* baseRowMode, const char* disabled,
                               int nOv, const int* ovIndex, const double* ovValue,
@@ -6104,7 +6413,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // family-free networks with no controllers do ONE pass (no outer loop) — byte-identical to before.
     bool fullLoadflow = !deviceFixedIter && (ctx->nrl > 0 || ctx->nds > 0 || ctx->dsSlackOnly
                                              || ctx->nmon > 0 || ctx->nTvc > 0 || ctx->nShc > 0 || ctx->nFlc > 0 || ctx->nCph > 0
-                                             || ctx->nTvd > 0 || ctx->nSvd > 0);
+                                             || ctx->nTvd > 0 || ctx->nSvd > 0 || ctx->nSvc > 0);
     const int RL_MAX_OUTER = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
     const int RL_MAX_SWITCH = rlMaxSwitch > 0 ? rlMaxSwitch : 3;   // per-bus PV→PQ count cap (OLF maxPqPvSwitch)
     // Outer-loop convergence tolerances (pu) — passed in so the device uses the SAME criteria as the CPU
@@ -6195,6 +6504,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->dRlLimitType.as<char>(),
                         nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
                         nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
+                        ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
                         ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
                         ctx->nRlRemote > 0 ? ctx->dRlCmpVrow.as<int>() : nullptr,
                         ctx->dTarget.as<double>(), ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(),
@@ -6267,6 +6577,20 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             tvdEntryBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(tvdTables(ctx), nS, n, ctx->nElements, ctx->tvdEntryOn,
                     ctx->dDisabled.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>());
             CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        }
+        if (ctx->nSvc > 0) {                                 // per-SOLVE state: zone targets back at the
+            size_t nsc = static_cast<size_t>(nS) * ctx->nSvc;   // network's own, nothing adjusted yet
+            std::vector<double> tv(nsc);
+            for (int s2 = 0; s2 < nS; s2++) {
+                for (int c = 0; c < ctx->nSvc; c++) tv[static_cast<size_t>(s2) * ctx->nSvc + c] = ctx->hSvcBaseTargetV[c];
+            }
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            CUDA_CHECK(cudaMemcpy(ctx->dSvcTargetV.p, tv.data(), nsc * sizeof(double), cudaMemcpyHostToDevice));
+            std::vector<double> nanv(static_cast<size_t>(nS) * std::max(ctx->nrl, 1), std::nan(""));
+            CUDA_CHECK(cudaMemcpy(ctx->dSvcRlVt.p, nanv.data(), nanv.size() * sizeof(double), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemset(ctx->dSvcNeed.p, 0, nS));
+            CUDA_CHECK(cudaMemset(ctx->dSvcReject.p, 0, nS));
+            CUDA_CHECK(cudaMemset(ctx->dSvcEnabled.p, 1, nsc));
         }
         if (ctx->nSvd > 0) {                                 // per-SOLVE state, same shape
             size_t nsm = static_cast<size_t>(nS) * ctx->nSvd;
@@ -6362,8 +6686,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             loopOrder[nLoops++] = LOOP_HVDC_LIMITS;          // OLF: AcHvdcAcEmulationLimits
         }
     }
-    if (ctx->hostLoopMask & (1 << 0)) {
-        loopOrder[nLoops++] = LOOP_HOST_SVC;                 // OLF order 4: SecondaryVoltageControl
+    if (ctx->nSvc > 0) {
+        loopOrder[nLoops++] = LOOP_SVC_KERNEL;               // OLF order 4: SecondaryVoltageControl, IN-KERNEL
+    } else if (ctx->hostLoopMask & (1 << 0)) {
+        loopOrder[nLoops++] = LOOP_HOST_SVC;                 // OLF order 4: SecondaryVoltageControl, host pause
     }
     if (ctx->nmon > 0) {
         loopOrder[nLoops++] = LOOP_MONITORING;               // OLF order 5: MonitoringVoltage
@@ -6827,6 +7153,80 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                          ctx->tvdMode, nS, ctx->nTvd, nCont, nFixed, nRej, step[0], ctx->nR1Ov);
         }
     };
+    // ---- SecondaryVoltageControl as a DRIVER PHASE (OLF order 4). The whole loop: the re-enable step and
+    //      the per-zone trigger on the paused state's own qBuf, one unit-RHS solve per controlled bus on the
+    //      driver's own factors for the K and pilot sensitivities, the small dense zone system per scenario,
+    //      and the moved targets applied to the controlled buses' V rows (plus the switch-back comparison
+    //      target for a pinned controller). Nothing goes back to the host, so the loop sits in OLF's order
+    //      instead of after the sweep. ----
+    auto svcStep = [&]() {
+        int nC = ctx->nSvc;
+        if (nC <= 0) return;
+        // DIAGNOSTIC: keep the slot in the sweep but do nothing in it, to separate "the extra slot moved
+        // the sweep" from "the phase body did". That probe is how the residual below was pinned down.
+        static const bool svcInert = std::getenv("OLF_GPU_SVC_INERT") != nullptr;
+        if (svcInert) return;
+        if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5) {
+            static bool warned = false;
+            if (!warned) { std::fprintf(stderr, "in-kernel SecondaryVc needs a UBATCH mode (3/4/5); mode %d runs it as stable\n", ctx->mode); warned = true; }
+            return;
+        }
+        CUDA_CHECK(cudaMemsetAsync(ctx->dSvcNeed.p, 0, nS, ctx->stream));
+        svcTriggerBatch<<<grid(ctx->nSvcZones * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n,
+                ctx->dRlActive.as<char>(), ctx->dQbuf.as<double>(), ctx->dX.as<double>(),
+                ctx->dRlLimitType.as<char>(), ctx->dRlSavedMode.as<char>(),
+                ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
+                std::getenv("OLF_GPU_SVC_DBG") != nullptr ? 1 : 0);
+        std::vector<char> need(nS);
+        CUDA_CHECK(cudaMemcpyAsync(need.data(), ctx->dSvcNeed.p, nS, cudaMemcpyDeviceToHost, ctx->stream));
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        bool any = false;
+        for (char c : need) any |= c != 0;
+        if (!any) return;                                    // every zone inside its bands: OLF's STABLE
+        std::vector<char> ones(nS, 1);
+        CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
+        fillActiveBatch(false);
+        if (!ctx->analyzed) {
+            CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            ctx->analyzed = true;
+        }
+        bool first = true;
+        for (int i = 0; i < nC; i++) {
+            int row = ctx->st->rowMap[ctx->hSvcCtldVRow[i]];
+            if (row < 0) continue;                           // controlled bus not a live identity: insensitive
+            setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
+            int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
+            first = false;
+            CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            svcGatherBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n, i,
+                    ctx->nElements, ctx->cbOffset, ctx->shOffset,
+                    ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(),
+                    ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(),
+                    ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+                    ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(),
+                    ctx->dDisabled.as<char>(), ctx->dX.as<double>(), ctx->dDx.as<double>());
+        }
+        ctx->factored = true;
+        CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));   // as it was
+        svcZoneSolveBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n,
+                ctx->dRlActive.as<char>(), ctx->dX.as<double>(), ctx->dRlSwitched.as<char>(),
+                std::getenv("OLF_GPU_SVC_DBG") != nullptr ? 1 : 0);
+        svcApplyBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n,
+                ctx->dRlActive.as<char>(), ctx->dRlLimitType.as<char>(), ctx->dTarget.as<double>());
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        std::vector<char> rej(nS);
+        CUDA_CHECK(cudaMemcpy(rej.data(), ctx->dSvcReject.p, nS, cudaMemcpyDeviceToHost));
+        int nRej = 0;
+        for (int s2 = 0; s2 < nS; s2++) {
+            if (rej[s2]) { loopRejected[s2] = 1; nRej++; }
+        }
+        if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+            int nNeed = 0;
+            for (char c : need) nNeed += c ? 1 : 0;
+            std::fprintf(stderr, "SVC_KERNEL nS=%d nCtl=%d nZones=%d adjusting=%d rejected=%d\n",
+                         nS, nC, ctx->nSvcZones, nNeed, nRej);
+        }
+    };
     auto svdStep = [&]() {
         if (ctx->nSvd <= 0) return;
         svdCheckBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(svdTables(ctx), nS, n, ctx->nElements, ctx->dDisabled.as<char>(),
@@ -7263,6 +7663,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             case LOOP_TRPC_KERNEL:  kindName = "TransformerReactivePowerControl"; break;
             case LOOP_TVD_KERNEL:   kindName = ctx->tvdMode == 1 ? "SimpleTransformerVoltageControl" : "TransformerVoltageControl"; break;
             case LOOP_SVD_KERNEL:   kindName = "ShuntVoltageControl"; break;
+            case LOOP_SVC_KERNEL:   kindName = "SecondaryVoltageControl"; break;
         }
         int nSw = 0;
         {
@@ -7336,6 +7737,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         tvdStep();
     } else if (loopKind == LOOP_SVD_KERNEL) {
         svdStep();
+    } else if (loopKind == LOOP_SVC_KERNEL) {
+        svcStep();
     } else if (loopKind == LOOP_MONITORING) {
         monitoringLoopBatch<<<grid(ctx->nmon * nS), BLOCK, 0, ctx->stream>>>(
                 ctx->nmon, nS, n, ctx->dMonVRow.as<int>(), ctx->dMonBand.as<double>(),
@@ -7406,7 +7809,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>());
             }
             CUDA_CHECK(cudaMemsetAsync(ctx->dRlPassSwitched.p, 0, static_cast<size_t>(ctx->nrl) * nS, ctx->stream));
-            reactiveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n, REACTIVE_LIMIT_TOL, RL_MAX_SWITCH,
+            reactiveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(
+                    ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
+                    ctx->nrl, nS, n, REACTIVE_LIMIT_TOL, RL_MAX_SWITCH,
                     ctx->dRlVrow.as<int>(),
                     ctx->ncv > 0 ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
                     ctx->ncv > 0 ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
@@ -9154,6 +9559,95 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
     jintArray out = env->NewIntArray(static_cast<jsize>(cnt));
     env->SetIntArrayRegion(out, 0, static_cast<jsize>(cnt), host.data());
     return out;
+}
+
+/** Install the SecondaryVoltageControl zones for the in-kernel phase (OLF order 4). Controllers are
+ *  addressed by their controlled bus's V row (the sensitivity's unit row and where a moved target lands)
+ *  and their own bus V row (the reactive injection the K comes from); each carries a CSR slice of Q
+ *  observables (kind 0/1 = a closed branch's side-1/side-2 reactive flow, 2 = a shunt) and the zones a
+ *  CSR slice of controllers. Returns 1 when the kernel loop owns them — it refuses a zone set wider than
+ *  the in-kernel dense system, or an observable on an element the batch does not pack. */
+extern "C" JNIEXPORT jint JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchSecondaryVc(
+        JNIEnv* env, jclass, jlong handle,
+        jintArray jCtldVRow, jintArray jBusVRow, jintArray jRlIdx, jdoubleArray jBaseTargetV,
+        jdoubleArray jMinQ, jdoubleArray jMaxQ, jdoubleArray jLoadQ,
+        jintArray jQPtr, jintArray jQKind, jintArray jQElem, jintArray jQBRow,
+        jintArray jZonePtr, jintArray jZoneCtl, jintArray jZonePilotRow, jdoubleArray jZoneTargetV,
+        jdouble minPlausibleV, jdouble maxPlausibleV) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return 0;
+    }
+    ctx->nSvc = 0;
+    ctx->nSvcZones = 0;
+    if (jCtldVRow == nullptr || env->GetArrayLength(jCtldVRow) == 0 || ctx->nrl <= 0) {
+        return 0;
+    }
+    auto readI = [&](jintArray a, std::vector<int>& v) {
+        v.resize(env->GetArrayLength(a));
+        env->GetIntArrayRegion(a, 0, static_cast<jsize>(v.size()), v.data());
+    };
+    auto readD = [&](jdoubleArray a, std::vector<double>& v) {
+        v.resize(env->GetArrayLength(a));
+        env->GetDoubleArrayRegion(a, 0, static_cast<jsize>(v.size()), v.data());
+    };
+    std::vector<int> busVRow, rlIdx, qPtr, qKind, qElem, qBRow, zonePtr, zoneCtl, zonePilotRow;
+    std::vector<double> minQ, maxQ, loadQ, zoneTargetV;
+    readI(jCtldVRow, ctx->hSvcCtldVRow);
+    readI(jBusVRow, busVRow);
+    readI(jRlIdx, rlIdx);
+    readD(jBaseTargetV, ctx->hSvcBaseTargetV);
+    readD(jMinQ, minQ);
+    readD(jMaxQ, maxQ);
+    readD(jLoadQ, loadQ);
+    readI(jQPtr, qPtr);
+    readI(jQKind, qKind);
+    readI(jQElem, qElem);
+    readI(jQBRow, qBRow);
+    readI(jZonePtr, zonePtr);
+    readI(jZoneCtl, zoneCtl);
+    readI(jZonePilotRow, zonePilotRow);
+    readD(jZoneTargetV, zoneTargetV);
+    int nC = static_cast<int>(ctx->hSvcCtldVRow.size());
+    int nZ = static_cast<int>(zonePtr.size()) - 1;
+    if (nC > MAX_SVC_CTL || nZ <= 0) {
+        return 0;                                            // wider than the in-kernel dense zone system
+    }
+    for (int e : qElem) {
+        if (e < 0) {
+            return 0;                                        // an observable the batch does not pack
+        }
+    }
+    ctx->dSvcCtldVRow.upload(ctx->hSvcCtldVRow.data(), nC * sizeof(int));
+    ctx->dSvcBusVRow.upload(busVRow.data(), nC * sizeof(int));
+    ctx->dSvcRlIdx.upload(rlIdx.data(), nC * sizeof(int));
+    ctx->dSvcBaseTargetV.upload(ctx->hSvcBaseTargetV.data(), nC * sizeof(double));
+    ctx->dSvcMinQ.upload(minQ.data(), nC * sizeof(double));
+    ctx->dSvcMaxQ.upload(maxQ.data(), nC * sizeof(double));
+    ctx->dSvcLoadQ.upload(loadQ.data(), nC * sizeof(double));
+    ctx->dSvcQPtr.upload(qPtr.data(), qPtr.size() * sizeof(int));
+    ctx->dSvcQKind.upload(qKind.data(), std::max<size_t>(qKind.size(), 1) * sizeof(int));
+    ctx->dSvcQElem.upload(qElem.data(), std::max<size_t>(qElem.size(), 1) * sizeof(int));
+    ctx->dSvcQBRow.upload(qBRow.data(), std::max<size_t>(qBRow.size(), 1) * sizeof(int));
+    ctx->dSvcZonePtr.upload(zonePtr.data(), zonePtr.size() * sizeof(int));
+    ctx->dSvcZoneCtl.upload(zoneCtl.data(), zoneCtl.size() * sizeof(int));
+    ctx->dSvcZonePilotRow.upload(zonePilotRow.data(), nZ * sizeof(int));
+    ctx->dSvcZoneTargetV.upload(zoneTargetV.data(), nZ * sizeof(double));
+    size_t nS = ctx->nScenarios;
+    ctx->dSvcTargetV.ensure(nS * nC * sizeof(double));
+    ctx->dSvcK0.ensure(nS * nC * sizeof(double));
+    ctx->dSvcJk.ensure(nS * nC * nC * sizeof(double));
+    ctx->dSvcJvpp.ensure(nS * nC * sizeof(double));
+    ctx->dSvcEnabled.ensure(nS * nC * sizeof(char));
+    ctx->dSvcNeed.ensure(nS * sizeof(char));
+    ctx->dSvcReject.ensure(nS * sizeof(char));
+    ctx->dSvcRlVt.ensure(nS * std::max(ctx->nrl, 1) * sizeof(double));
+    ctx->svcMinPlausibleV = minPlausibleV;
+    ctx->svcMaxPlausibleV = maxPlausibleV;
+    ctx->nSvcZones = nZ;
+    ctx->nSvc = nC;
+    return 1;
 }
 
 /** Un-pin reactive-limit entries at a driver pause (SecondaryVoltageControl's re-enable step):

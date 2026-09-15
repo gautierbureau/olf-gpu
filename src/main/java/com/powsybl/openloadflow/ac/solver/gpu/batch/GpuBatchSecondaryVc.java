@@ -19,6 +19,7 @@ import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.LfShunt;
 import com.powsybl.openloadflow.network.LfSecondaryVoltageControl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -70,10 +71,19 @@ public final class GpuBatchSecondaryVc {
      *  rlRemote member entry), {@code ctldVRow} the CONTROLLED bus's pinned BUS_TARGET_V row (the
      *  sensitivity unit row and the row the moved zone target lands on — OLF adjusts the
      *  CONTROLLED bus's VC target). Local control collapses the two. */
+    /** One Q observable of a controller bus, as the DEVICE sees it: {@code kind} 0/1 = the CLOSED
+     *  BRANCH's side-1/side-2 reactive flow, whose gradient comes from the codegen'd evalClosedBranch
+     *  (the very function the fill scatters); 2 = a SHUNT's q = -b*v^2, i.e. OLF's
+     *  ShuntCompensatorReactiveFlowEquationTerm (dq/dv = -2bv, dq/db = -v^2). {@code elem} is the
+     *  PACK-relative element index; {@code bRow} a derived shunt's SHUNT_B row, -1 when b is fixed. */
+    record QObs(int kind, int elem, int bRow) {
+    }
+
     record CtlBus(int vRow, int ctldVRow, int rlIdx, double baseTargetV, double minQ, double maxQ,
                   double loadTargetQ,
                   com.powsybl.openloadflow.util.Evaluable busQ,
-                  List<EquationTerm<AcVariableType, AcEquationType>> qTerms) {
+                  List<EquationTerm<AcVariableType, AcEquationType>> qTerms,
+                  List<QObs> qObs) {
     }
 
     record Zone(int pilotVRow, double pilotTargetV, int[] ctls) {
@@ -112,11 +122,15 @@ public final class GpuBatchSecondaryVc {
     @SuppressWarnings("unchecked")
     static Controllers build(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                              int[] rlVrow, GpuBatchIncrementalFlowControl.EsContext esCtx,
-                             double minPlausibleTargetV, double maxPlausibleTargetV) {
+                             double minPlausibleTargetV, double maxPlausibleTargetV,
+                             GpuBatchElementMapper elementMapper) {
         Map<Integer, Integer> busVRows = new LinkedHashMap<>();
+        Map<Integer, Integer> shuntBRows = new LinkedHashMap<>();
         for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
             if (v.getType() == AcVariableType.BUS_V) {
                 busVRows.put(v.getElementNum(), v.getRow());
+            } else if (v.getType() == AcVariableType.SHUNT_B) {
+                shuntBRows.put(v.getElementNum(), v.getRow());
             }
         }
         Map<Integer, Integer> rlIdxOfVRow = new LinkedHashMap<>();
@@ -137,24 +151,36 @@ public final class GpuBatchSecondaryVc {
                             controller.getId(), svc.getZoneName());
                     return new Controllers(List.of(), List.of(), esCtx, minPlausibleTargetV, maxPlausibleTargetV);
                 }
-                // OLF calculateSensiQ: the controller bus's branch Q flows (side by attachment) + shunts
+                // OLF calculateSensiQ: the controller bus's branch Q flows (side by attachment) + shunts.
+                // qTerms drives the HOST decision (OLF's own EquationTerm.calculateSensi); qObs is the
+                // same list addressed the way the DEVICE reaches it — pack-relative element indices, so
+                // the in-kernel phase evaluates the identical quantities without re-deriving them.
                 List<EquationTerm<AcVariableType, AcEquationType>> qTerms = new ArrayList<>();
+                List<QObs> qObs = new ArrayList<>();
                 for (LfBranch branch : controller.getBranches()) {
                     if (!branch.isDisabled() && branch.isConnectedAtBothSides()) {
+                        int elem = elementMapper.getElementIndex(branch);
                         if (branch.getBus1() == controller) {
                             qTerms.add((EquationTerm<AcVariableType, AcEquationType>) branch.getQ1());
+                            qObs.add(new QObs(0, elem, -1));
                         }
                         if (branch.getBus2() == controller) {
                             qTerms.add((EquationTerm<AcVariableType, AcEquationType>) branch.getQ2());
+                            qObs.add(new QObs(1, elem, -1));
                         }
                     }
                 }
-                controller.getShunt().ifPresent(sh -> qTerms.add((EquationTerm<AcVariableType, AcEquationType>) sh.getQ()));
-                controller.getControllerShunt().ifPresent(sh -> qTerms.add((EquationTerm<AcVariableType, AcEquationType>) sh.getQ()));
-                controller.getSvcShunt().ifPresent(sh -> qTerms.add((EquationTerm<AcVariableType, AcEquationType>) sh.getQ()));
+                for (var shOpt : List.of(controller.getShunt(), controller.getControllerShunt(), controller.getSvcShunt())) {
+                    if (shOpt.isPresent()) {
+                        LfShunt sh = shOpt.get();
+                        qTerms.add((EquationTerm<AcVariableType, AcEquationType>) sh.getQ());
+                        Integer bRow = shuntBRows.get(sh.getNum());
+                        qObs.add(new QObs(2, elementMapper.getElementIndex(sh), bRow != null ? bRow : -1));
+                    }
+                }
                 zoneCtls.add(ctls.size());
                 ctls.add(new CtlBus(vRow, ctldVRow, rlIdx, vc.getTargetValue(), controller.getMinQ(), controller.getMaxQ(),
-                        controller.getLoadTargetQ(), controller.getQ(), qTerms));
+                        controller.getLoadTargetQ(), controller.getQ(), qTerms, qObs));
             }
             Integer pilotVRow = busVRows.get(svc.getPilotBus().getNum());
             if (pilotVRow == null || zoneCtls.isEmpty()) {
@@ -171,6 +197,76 @@ public final class GpuBatchSecondaryVc {
     }
 
     @SuppressWarnings({"java:S107", "java:S3776"})
+    /** Install the zones for the IN-KERNEL SecondaryVoltageControl phase (OLF order 4). Returns true when
+     *  the kernel owns the loop: the whole check — the re-enable step, the per-zone trigger, the
+     *  sensitivities on the driver's own factors, the dense zone system and the moved targets — then runs
+     *  inside the sweep at OLF's position, with no host round trip and no orchestrator after it. */
+    public static boolean uploadToDevice(long handle, Controllers controllers) {
+        if (controllers == null || controllers.ctls().isEmpty() || controllers.zones().isEmpty()) {
+            GpuAcNewtonSolver.setBatchSecondaryVc(handle, null, null, null, null, null, null, null,
+                    null, null, null, null, null, null, null, null, 0, 0);
+            return false;
+        }
+        List<CtlBus> ctls = controllers.ctls();
+        int nc = ctls.size();
+        int[] ctldVRow = new int[nc];
+        int[] busVRow = new int[nc];
+        int[] rlIdx = new int[nc];
+        double[] baseTargetV = new double[nc];
+        double[] minQ = new double[nc];
+        double[] maxQ = new double[nc];
+        double[] loadQ = new double[nc];
+        int[] qPtr = new int[nc + 1];
+        List<Integer> qKind = new ArrayList<>();
+        List<Integer> qElem = new ArrayList<>();
+        List<Integer> qBRow = new ArrayList<>();
+        for (int c = 0; c < nc; c++) {
+            CtlBus ctl = ctls.get(c);
+            ctldVRow[c] = ctl.ctldVRow();
+            busVRow[c] = ctl.vRow();
+            rlIdx[c] = ctl.rlIdx();
+            baseTargetV[c] = ctl.baseTargetV();
+            minQ[c] = ctl.minQ();
+            maxQ[c] = ctl.maxQ();
+            loadQ[c] = ctl.loadTargetQ();
+            qPtr[c] = qKind.size();
+            for (QObs o : ctl.qObs()) {
+                qKind.add(o.kind());
+                qElem.add(o.elem());
+                qBRow.add(o.bRow());
+            }
+        }
+        qPtr[nc] = qKind.size();
+        int nz = controllers.zones().size();
+        int[] zonePtr = new int[nz + 1];
+        List<Integer> zoneCtl = new ArrayList<>();
+        int[] zonePilotRow = new int[nz];
+        double[] zoneTargetV = new double[nz];
+        for (int z = 0; z < nz; z++) {
+            Zone zone = controllers.zones().get(z);
+            zonePtr[z] = zoneCtl.size();
+            for (int c : zone.ctls()) {
+                zoneCtl.add(c);
+            }
+            zonePilotRow[z] = zone.pilotVRow();
+            zoneTargetV[z] = zone.pilotTargetV();
+        }
+        zonePtr[nz] = zoneCtl.size();
+        boolean owned = GpuAcNewtonSolver.setBatchSecondaryVc(handle, ctldVRow, busVRow, rlIdx, baseTargetV,
+                minQ, maxQ, loadQ, qPtr,
+                qKind.stream().mapToInt(Integer::intValue).toArray(),
+                qElem.stream().mapToInt(Integer::intValue).toArray(),
+                qBRow.stream().mapToInt(Integer::intValue).toArray(),
+                zonePtr, zoneCtl.stream().mapToInt(Integer::intValue).toArray(), zonePilotRow, zoneTargetV,
+                controllers.minPlausibleTargetV(), controllers.maxPlausibleTargetV()) != 0;
+        LOGGER.info("Uploaded {} secondary voltage-control zones ({} controllers) to device: {}",
+                nz, nc, owned ? "in-kernel loop" : "host path");
+        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            System.err.printf("SVC_UPLOAD nZones=%d nCtl=%d kernel=%b%n", nz, nc, owned);
+        }
+        return owned;
+    }
+
     /** The sensitivity unit rows (each controlled bus's pinned V row) and the observed columns (every
      *  variable the controller-bus Q terms depend on, plus the pilot V rows). */
     static int[][] observables(Controllers controllers) {

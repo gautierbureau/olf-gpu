@@ -403,7 +403,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     config.secondaryVoltageControl()
                             ? GpuBatchSecondaryVc.build(network, equationSystem, gpuData.rlVrow(),
                                     new GpuBatchIncrementalFlowControl.EsContext(equationSystem.getStateVector(), n),
-                                    config.minPlausibleTargetV(), config.maxPlausibleTargetV())
+                                    config.minPlausibleTargetV(), config.maxPlausibleTargetV(), elementMapper)
                             : null,
                     config.voltageMonitoring()
                             ? GpuBatchVoltageMonitoring.buildControllers(network, equationSystem, targetVector,

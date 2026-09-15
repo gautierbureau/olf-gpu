@@ -548,348 +548,43 @@ on device as a gather-and-dot from J at the flow term's variable columns. Needs:
 each flow term to its J column positions (the scatter table already has this), (b) a kernel that
 reads J[term_cols] · dx[term_cols] → flow sensitivity. Medium effort, NOT blocked.
 
-### SecondaryVoltageControl — full in-kernel scoping (corrected 2026-09-15)
+### SecondaryVoltageControl — the in-kernel phase (built 2026-09-15, opt-in)
 
-The earlier "blocked on task #40" verdict was WRONG. OLF's `SecondaryVoltageControlOuterLoop`
-builds its sensitivities with `j.solveTransposed(rhs)` — the very call `NewtonRaphson.run`
-uses for the Newton step (OLF stores the Jacobian variable-major, so "transposed" is the
-forward system in our layout). `GpuBatchSecondaryVc` has solved it on the driver's own
-factors since 2026-08 (`solveBatchSensitivities`: unit RHS at the controlled buses'
-BUS_TARGET_V rows, gather dx). Task #40 is needed by the GNN adjoint (reverse mode) only.
+The earlier "blocked on task #40" verdict was WRONG. OLF's `SecondaryVoltageControlOuterLoop` builds
+its sensitivities with `j.solveTransposed(rhs)` — the very call `NewtonRaphson.run` uses for the
+Newton step (OLF stores the Jacobian variable-major, so "transposed" is the forward system in our
+layout). Task #40 is needed by the GNN adjoint (reverse mode) only.
 
-What actually still runs on the host, and what a phase needs for each stage: (1) trigger —
-K per controller from `qBuf + loadQ` at the RL entry's live limits (curve/SVC limits are
-already per entry), pilot dv from x; (2) re-enable — the some-but-not-all-pinned rule on
-`dRlLimitType` per zone; (3) sensitivity — the tvcStep skeleton (fill, one unit-RHS solve
-per controlled bus); (4) observables — `calculateSensiQ` = Σ over the controller bus's CLOSED
-branches of the Q-side gradient · dx (`flcFlowAndGrad` kind 0 already returns it) + the
-shunt terms (q = −b·v²: ∂/∂v = −2bv, ∂/∂b = −v² — to be checked against OLF's term), pilot
-`calculatedV` = the BUS_V variable → dx at the pilot row; (5) zone system — A, K0, Jk, Jvpp,
-the pilot-row replacement on the zone's LAST controlled bus, one dense LU of
-nControllers × nControllers per scenario (a per-thread Gaussian elimination is fine at
-these sizes); (6) apply — new V targets on the controlled rows, the RL switch-back
-comparison target per (scenario, entry) (today's `rlVtOv` channel), the plausibility check
-(OLF returns FAILED → the run fails; the kernel would reject the scenario to the CPU).
-Estimated at the TVD port's size. Knife edge to expect: the pilot-point 1e-11 already
-accepted on the host port.
+`LOOP_SVC_KERNEL` (OLF order 4) is the whole loop on the device, behind
+`OLF_GPU_SVC_IN_KERNEL=1`. Nothing is hand-derived: a controller bus's reactive injection is its
+CLOSED-BRANCH side flows, whose gradient comes from the codegen'd `evalClosedBranch` exactly as
+`flcGatherSensiBatch` takes it, plus its shunts' q = -b*v^2 — and that one OLF exposes as three
+static lines (`ShuntCompensatorReactiveFlowEquationTerm`: dq/dv = -2bv, dq/db = -v^2). The pilot's
+calculated V is the BUS_V variable itself, so its sensitivity is dx at the pilot row. The pieces:
 
-### #42 — Base load flow on the FULL device driver + in-kernel incremental TVC (landed 2026-09-14)
+- `svcTriggerBatch` — `tryToReEnableHelpfulControllerBuses` first (a zone with SOME but not all
+  controllers at a reactive limit gives the limited ones back their control, restoring the PV form
+  from `dRlSavedMode`), then OLF's zone filter (a zone with NO enabled controller is not looked at
+  at all), then the pilot-deadband / K-spread trigger with K from the pass's own `qBuf`.
+- one unit-RHS solve per controlled bus on the driver's own factors, then `svcGatherBatch` for
+  `calculateSensiK` and `calculateSensiVpp`.
+- `svcZoneSolveBatch` — A (per-zone block), K0, `b = A.Jk^T`, the zone's LAST controlled bus's row
+  replaced by the pilot sensitivities and its rhs by the pilot dv, solved per scenario with
+  Gaussian elimination; an implausible target rejects the scenario to the CPU, as OLF's FAILED would.
+- `svcApplyBatch` — the moved target on an unpinned controlled bus's V identity, and the switch-back
+  comparison target for a pinned one (a new context buffer `dSvcRlVt` that `rlTargetOf` consults).
 
-**Outcome.** With `OLF_GPU_DRIVER_OUTER_LOOPS=1` the SA's base load flow is a batch-of-one on the SAME
-driver as the contingency chunks: DistributedSlack, HVDC freeze/limits, MonitoringVoltage,
-ReactiveLimits (and incremental TVC in-kernel when every controlled bus has a single controller) —
-`GpuDriverOuterLoopEngine` keeps NOTHING on the Java engine (`GPU_DRIVER_ENGINE ... keptOnHost=[]`).
-rte6515 / RTE params: base CONVERGED under OLF's own criterion (inf-norm 9.4e-6), 9040/9042 on device.
+**Why it is opt-in.** On the two SecondaryVc unit tests it lands 1.04e-10 kV from the CPU, against
+the 1e-11 the driver-pause path holds. The cause is NOT the phase's maths: `OLF_GPU_SVC_INERT=1`
+keeps the slot in the sweep and empties the body, and reproduces the shift to the last digit. So
+simply HAVING a slot at OLF order 4 moves the converged state at the 1e-10 level on this knife-edge
+network. Before promoting it, that has to be understood — the likely candidates are the extra pass's
+effect on the sweep's `seqChanged`/termination bookkeeping and on how many Newton solves the run
+ends up taking (OLF's NR always takes >= 1 step, so one extra solve is ~1e-10 of drift). Note the
+CPU DOES check SecondaryVoltageControl at order 4 in these tests, so the slot is the faithful
+structure; it is the pause path's agreement that may be accidental.
 
-**What actually blocked it** (the "write-back" was only half of it): the base context received
-`createBatchContext` + row criteria and nothing else, while the chunk solver also installs the RL
-curve channel, the SVC quadratic limits, the remote-member RL kinds (`setBatchRlRemote`) and the
-per-generator DS participants. Without the remote kinds `initRlLimitTypeBatch` read every remote
-member's DISTR_Q share row (base mode 1) as a base PQ pin — limit type seeded, never re-checked —
-and three rte6515 remote controllers came out pinned where OLF's loop never touched them
-(BUS_TARGET_Q residuals of 1.46 pu). `GpuBatchOuterLoopTables.install` is now the ONE installer for
-both paths; `GpuBatchHvdcAcEmulation.installDriverLoops` / `GpuBatchVoltageMonitoring.installDriverLoop`
-likewise. A batch of one drives exactly what a batch of five hundred drives.
-
-**Write-back** (`GpuNewtonRaphson.writeBackDriverMutations`, order matters): HVDC statuses through
-`AcEmulationControl.switchTo*`; monitoring activations (VC on, SVC → VOLTAGE, automaton target);
-DistributedSlack per GENERATOR from the water-fill's own `genCum` (`readBatchDsGenCum`), the slack
-bus's generators splitting the retained share (`readBatchDsRetain`) by factor; ReactiveLimits pins
-via `freezeGenerationTargetQAndDisableGeneratorVoltageControl` at the DEVICE's pinned target (the live
-SVC limit — the packed base-V aggregate was 1.3e-4 pu off on VL-6226_0); taps (`readBatchTvcTaps`).
-The extraction uses the run's own loops and DS params (`DistributedSlackOuterLoop.
-getActivePowerDistribution()` — OLF getter added), never `GpuDsParams.DEFAULT`.
-
-**Measured 2026-09-14 (rte6515, 9042 branch contingencies, `GpuVsCpuRte6515SaTest`):** driver ON
-80.8 s cold (×1.20 vs CPU 8 threads 97 s), driver OFF 82.1 s — the base on the driver costs nothing.
-Both arms' base violations agree to 1e-11 (one value differs in the 10th decimal). The 2 differing
-post-contingency lines are the test's own documented residual ("2 out of 583k", identical with the
-driver off): both sit exactly at the SA's 0.1 % increased-violation proportional threshold
-(post/base = 1.00100 on LINE-2533-1468 under LINE-1550-228 and LINE-2219-439 under LINE-5466-2443).
-
-**Three base-on-driver corners found and fixed the same day** (all invisible from the chunk path,
-which extracts AFTER a converged base): (1) `rlV2Base` is NaN on a never-solved network and
-`0 × NaN` poisoned every RL entry's limit — the quadratic SVC delta is now applied to SVC entries
-only (`svcLim`); (2) a SINGLETON remote group has members but no DISTR_Q row, and
-`setBatchRlRemote` keyed `hasDqQrGroups` on the DISTR_Q rows, so the pilot's control-loss flip
-never armed — keyed on the member list now; (3) a device REJECTION (status −2) on the base is a CPU fallback like on the chunks — and since
-2026-09-15 the forced-PV case no longer rejects at all: OLF's "strongest stays PV" election runs
-in-kernel (`rlForcedPvElectBatch`, keys via `setBatchRlElection`), so the forced-PV network solves
-on the device in the chunks AND as the base; `GpuDriverOuterLoopEngine`
-now wraps every device-owned loop in `DeviceDrivenLoop`: STABLE while the solver ran on the device,
-OLF's real loop (initialized late) the moment a solve fell back to the CPU — dropping the loops left
-the fallback base without DS/RL (1.3e-4 kV on the zero-impedance member network).
-
-**2026-09-15 — host-paused loops on the base, second pass.** A host loop that changes the equation
-LAYOUT, the row modes or the element values (a tap/section move, a control it enables or disables:
-every TVC/shunt/phase loop does) voids the paused sequence — the resume channel carries targets
-only. The driver now RESTARTS: the driver's own decisions are written back to the network first,
-the pause is cancelled, the extraction re-runs, the RL state is carried by bus, OLF's loop contexts
-persist across the restart (`hostLoopPairs`), and the restarted sweep resumes AT the loop that went
-UNSTABLE (`setBatchDriverStartLoop`) before restarting from the first loop — OLF's `runOuterLoop`
-order. Two other fixes on the way: the driver owns loops only when `GpuDriverOuterLoopEngine` created
-the solver (`AcloadFlowEngine.createSolver` hook; a plain `LoadFlow.run` keeps OLF's engine and the
-legacy pure-Newton mode, or DS/RL ran twice), and `DeviceDrivenLoop` defers to OLF's loop whenever
-the engine's current solver is not the GPU driver (CPU-routed contingencies had lost DS/RL). The
-per-generator DS accumulator is zeroed per solve (a restarted sweep that never reaches DS handed
-garbage to the write-back → NaN targetP).
-
-**Same day, fourth pass — 39 → 0: `GpuBatchedAcSecurityAnalysisTest` 136/136 under the flag.** The
-"DS re-anchoring class" was exactly that, and it was the base integration, not the loop: OLF's
-`ActivePowerDistribution.run` resets every participant to its INITIAL target P before each
-distribution (`resetToInitialState`, adding back what that undid as `previousMismatch`) and
-re-derives everything — factors, sign rule, limits — from there. The device kernel has done that
-since 2026-09-08 (`absorbedNow`), but the base path fed it the batched-SA extraction, whose contract
-anchors at the row targets the solve starts from (right for the SA: converged base, per-scenario
-channels relative to it), and every restart re-anchored at the written-back targets. Now
-`GpuDsParams.anchorOnInitialTargetP` (base path only): the pack anchors the row targets, the
-per-generator limits, the sign rule and the P-proportional factors at `initialTargetP`
-(`anchorOffset` = Σ(tp − tp₀) over the participants — `absorbedNow` then IS OLF's
-`previousMismatch`); the write-back sets `tp = tp₀ + genCum` and, for the slack bus's own
-generators, `tp₀ + retain` with the retain captured at the last check that FIRED
-(`dDsRetainApplied`, NaN when none did — a STABLE check's ρ·mismatch is not a distribution);
-slack-only bases write back `readBatchSlackAbsorbed`. Two more: a restart starts from the network's
-last state through `PreviousValueVoltageInitializer` exactly as `runOuterLoop` does (the old state
-vector was not even the right length after a control was disabled); and the driver's decisions so
-far (P, RL pins, HVDC statuses, activations) are handed to the network BEFORE each host-loop check
-— SecondaryVoltageControl skips a zone's RL-pinned controllers, and a check that still saw them
-enabled went UNSTABLE where OLF's said STABLE (one extra adjust round, 2.5e-8 kV). The SA contract
-is untouched: with static factors, anchoring at the converged base is linearly equivalent
-(caps are absolute, the sign never flips); PROPORTIONAL_TO_GENERATION_P (|tp₀| vs |tp|) and
-REMAINING_MARGIN margins are the only balance types where it is not — latent for the SA, noted.
-
-**Same day, third pass — 44 → 39, no ENGAGE and nothing above 1e-3 kV left.** Five more base-only
-defects: (1) a converter bus without an active BUS_TARGET_P row (the slack) received the HVDC
-freeze/saturation delta on its PHI identity row (base MAX_ITER, 3 ENGAGE) — packed as ~row now, the
-angle still reads there, no target is ever written; (2) after a host loop's STABLE resume the RL
-check was silently skipped (the resumed call's status vector said "not converged" → rlActive 0):
-the pause saves and the resume restores the per-scenario statuses (SecondaryVoltageControl
-7.3e-2 → 2.5e-8); (3) an SVC's limits are Bmin/Bmax·V² and a never-solved network has NaN V, so
-the packed limits were NaN and the slope SVC never pinned (0.33 kV): the pack evaluates at a flat
-1 pu and restores the NaN; (4) the slack's retained DS share was written back at every check,
-STABLE ones included (ρ·sub-tolerance mismatch, 3.4 kW), now only when a distribution happened;
-(5) the split of that share used LfGenerator.getParticipationFactor(), which OLF fills only inside
-its own distribution step (0 here) — the run's GpuDsParams factors, as the pack uses (l121 severe
-0.71 → 4.2e-4). Remaining 39: 17 at ≤1e-9 kV, 7 at ≤1e-6 kV, 15 between 2e-6 and 4e-4 kV
-(AFTER_GENERATOR/shared TVC, TRPC, node-breaker, l121) — the DS re-anchoring class: OLF resets
-every participant to its INITIAL target and re-derives the whole distribution from the anchor at
-each check, the restarted driver distributes from the written-back base; and the driver re-enters
-the sweep once more than OLF after a STABLE host check (checks only, no solve).
-
-Result (second pass): 61 → 44 failing under the flag. By size: 13 at ≤1e-9 kV and 7 at ≤1e-6 kV — the base's
-converged state differs from OLF's at solver-tolerance level (a different linear solver), and
-AFTER_GENERATOR transformer control FREEZES state-dependent quantities (generator Q under the
-controlled level, the tap rounded from the solved ratio), so the frozen targets differ by ~1e-5 pu;
-inherent to a base on another solver, not a sequence bug (sequences now match call for call).
-Real remaining: 3 HVDC ENGAGE (freeze/saturation/DS carry), 10 medium (shunt VC 9.6e-4, shared
-TVC 4e-4, ...), 11 large (SecondaryVoltageControl 7.3e-2 ×4, slope-SVC pinned 0.33, l121 severe
-0.71, TRPC 1.7e-3, shared incremental TVC 1.2e-3).
-
-**Earlier inventory (2026-09-14):** `GpuBatchedAcSecurityAnalysisTest` with
-`OLF_GPU_DRIVER_OUTER_LOOPS=1` = 61/136 failing (default path: all green). By shape: 16 "batch must
-ENGAGE" (the base's write-back leaves the network in a state the plan or the JAVA guards reject —
-continuous PhaseControl after the host-paused loop, shunt/TVC/SVC host loops), 12 BUS_2 voltage
-mismatches (transformer/shunt voltage-control networks — the host-paused TVC/shunt slots on the
-base), 3 strategy-pair precompute counts, 3 HVDC (freeze/saturation, DS carry), REMAINING_MARGIN DS.
-Every remote gen-VC test (24/26) passes; the rte6515 production case passes. Next: take the failing
-shapes one by one with `OLF_GPU_BATCH_TRACE=1` (HOST_LOOP lines show the pause/resume sequence),
-starting with the host-paused loops (order 7–10) on the base.
-
-### #45 — Flow-observed incremental loops in-kernel: RPC + incremental phase (landed 2026-09-15)
-
-`LOOP_PHASE_KERNEL` (OLF order 7, phase CONTROLLER + LIMITER) and `LOOP_TRPC_KERNEL` (order 9, RPC)
-share one controller table and one step (`flcStep(kindMask)`). Per (scenario, controller):
-`flcCheckBatch` evaluates the CONTROLLED branch's flow at the current state — P/Q through the
-codegen'd `evalClosedBranch` (the very functions the fill scatters, with the branch's tap override
-applied), I through OLF's `ClosedBranchSide{1,2}CurrentMagnitudeEquationTerm` decomposition
-(reI/imI and their eight partials) — and OLF's deadband test (LIMITER one-sided). One unit-RHS
-solve per needed controller at its rho/a1 identity row on the driver's own factors;
-`flcGatherSensiBatch` dots the flow gradient with dx at the branch's six variable columns — this IS
-`EquationTerm.calculateSensi`, including its dr1-less current sensitivity and its `hypot(dre·dx,
-dim·dx)` one-sided rule at I = 0. `flcDecisionBatch`: RPC → closest r1 within the run's
-maxTapShift (no gate); CONTROLLER → `|sensi·toRadians(1)| > SENSI_EPS`, closest a1 unbounded;
-LIMITER → `FirstTapPositionAboveFinder` (walk tap by tap while the remaining shift reaches past the
-next a1) — ratchet as everywhere. `flcApplyBatch` pins the identity row; the r1 override rebuild is
-shared with the TVC phase (`tvcRebuildOverrides` now merges both tables' moved taps). Base path:
-`getMaxTapShift()` (OLF getter) for RPC, `readBatchFlowTaps` → `PiModel.setTapPosition`. The host
-orchestrator (`GpuBatchIncrementalFlowControl.orchestrate`) stays for a controlled branch that is
-not a closed branch. With this every sensitivity-dependent incremental loop runs in-kernel; the
-chunk path's host orchestrators left: SecondaryVoltageControl (transposed solve, task #40); the
-non-incremental TVC / shunt VC flows followed the same day (#47).
-
-### #48 — Obsolete gates lifted, and the SecondaryVoltageControl ORDER gate (2026-09-15)
-
-Three gates written for the host-orchestrator world were re-examined once every control loop became a
-driver phase.
-
-**Lifted.** (a) INCREMENTAL and WITH_GENERATOR transformer voltage control no longer require
-`transformerControlSupported`: neither loop has a GeneratorVoltageControlManager, so the
-generator-under-the-controlled-level condition never applied to them — it was a blanket copied from
-AFTER_GENERATOR (`deviceIncremental/SimpleTvcGeneratorUnderLevelMatchesCpu`, OLF's four-bus network
-with 90 kV generators under a 230 kV controlled bus). (b) The WITH_GENERATOR shunt VC co-presence set
-shrank from seven loop names to nothing: it existed because the host orchestrator CHAIN could not
-model OLF interleaving two simultaneously-unstable loops, and the driver sweeps in OLF's order with
-OLF's restart-on-UNSTABLE semantics (`deviceSimpleShuntWithTransformerControlMatchesCpu`, a shunt at
-the 132 kV bus and a transformer at the 33 kV bus, AFTER_GENERATOR and INCREMENTAL).
-
-**Added, for correctness.** SecondaryVoltageControl co-present with ANY control loop is now a
-whole-run CPU gate. SVC is OLF order 4, before phase (7), transformer (8), RPC (9) and shunt (10), and
-it is the last HOST orchestrator on the chunk path: it runs AFTER the entire device sweep. So an
-in-kernel control loop decides on a state SVC has not corrected yet, and SVC then decides on a state
-whose taps have already moved. Measured on a zone whose pilot bus feeds an AFTER_GENERATOR
-transformer: **1.7e-3 kV** with the control loops in-kernel and **2.4e-1 kV** with the
-pre-2026-09-15 host-orchestrator chain — that combination was SILENTLY WRONG before this gate, and
-routing the host chain back was measured worse, not better (the chain's re-solves do not compose).
-`deviceSecondaryVcWithAfterGeneratorTvcRoutesToCpu` pins it; flip it to `assertGpuMatchesCpu` when
-the gate lifts. This also answers the "restart with a machine mid-flight" question: the shape is
-unreachable while the gate stands, because SVC is the only loop that can force a restart.
-
-**LIFTED the same day — SecondaryVoltageControl runs as a DRIVER PAUSE on the chunk path.** The kernel
-already had the `LOOP_HOST_SVC` slot, `hostLoopMask`, `readBatchDriverPaused`/`setBatchDriverResume` and
-flat per-scenario `setBatchTargetDeltas`; only the base path used them. The chunk solver now arms the
-mask when the run has SVC controllers and, after the main solve, loops: decide on the paused states →
-push the moved V targets as flat deltas → resume. The decision is the SAME code as the host
-orchestrator (`decideRound`, extracted so the two cannot drift), and the distributed-slack carry triple
-is not needed at all because the driver owns the slack. `OLF_GPU_SVC_HOST_ORCHESTRATOR=1` restores the
-old after-the-sweep orchestrator for A/B.
-
-Getting there took two real defects, both found by BISECTING the machinery away from the decision
-rather than by reading the code — the technique is worth keeping:
-
-1. Arm the pause but resume every pause as STABLE, leaving the host orchestrator to decide. Still
-   wrong (361 differing violations vs 4) ⇒ the machinery, not the decision.
-2. Keep the slot in the sweep but make it an in-kernel no-op, so no call split happens
-   (`OLF_GPU_HOST_LOOP_NOOP=1`). Correct again (1 differing on the slice, like the baseline) ⇒ the
-   SPLIT of `solveBatchContext`, not the extra slot.
-
-That pinned it to state a resumed call re-uploads over the sweep's own work:
-
-- **The disabled-element mask.** A resume re-uploaded it from the host, undoing the element bits the
-  HVDC AC-emulation freeze and limits phases had set during the paused sweep. The host mirror is the
-  pre-solve one. Guarded with `!resume`: contingency outages do not change during a sweep, so the
-  device copy is authoritative. This is why only rte6515 broke — ieee14 has no HVDC.
-- **The outer-iteration budget.** A host-loop UNSTABLE verdict did not consume it, while every device
-  loop's change does. Each resume then began a fresh `outer` budget, so a loop that kept moving
-  targets could never retire a scenario: a 2000-contingency slice did not finish in 28 minutes. The
-  resume path now increments `prodIters` for the changed scenarios and retires one that exhausts
-  `RL_MAX_OUTER` to the CPU, exactly as the device loops do.
-
-Result on rte6515 with both zones firing, 9042 contingencies:
-
-| chunk path for SVC | differing violations | batched | GPU cold | vs CPU 8 threads |
-|---|---|---|---|---|
-| host orchestrator | 4 | 9040/9042 | 204 s | x0.47 |
-| driver pause (default) | 4 | 9037/9042 | 150 s | x0.66 |
-| no SVC, same case | 2 | 9040/9042 | 81 s | x1.20 |
-
-Identical parity, 27% faster, and 3 scenarios conservatively retired to the CPU by the budget rule.
-The remaining 4 differing lines are a pre-existing SVC scale gap shared by both paths (2 of them are
-the baseline knife-edge lines) — that is the next SVC question, not this one. SVC still makes the case
-about 2x slower than without it on either path, so it needs a cost pass of its own.
-
-Still on the host inside the pause: the observables (OLF's own `EquationTerm.calculateSensi`) and the
-small zone LU. Moving those into the kernel is a later, optional step — see the stage list below; it
-buys wall time, not correctness.
-
-### #47 — Discrete TransformerVoltageControl and WITH_GENERATOR shunt VC in-kernel (landed 2026-09-15)
-
-`LOOP_TVD_KERNEL` (OLF order 8) runs OLF's non-incremental transformer loops per scenario, one thread
-per scenario (OLF keeps ONE step for all controls): AFTER_GENERATOR (`tvdMode 0`) — INITIAL enables
-every group whose pilot is out of its deadband (TransformerRatioManager bounds computed over the
-alive members), CONTROL clamps each continuous ratio outside its (group-averaged when
-useInitialTapPosition) range to the extreme, rounds it (`tvdRoundToTap`: from the CURRENT tap, strictly
-closer only — `ClosestTapPositionFinder`) and fixes it, else remaps (`updateContinuousRatio`) + rounds
-everything and goes COMPLETE, UNSTABLE in any case (the COMPLETE polish solve); WITH_GENERATOR
-(`tvdMode 1`, SimpleTransformerVoltageControl) — the control is ON at entry (`tvdEntryBatch` applies the
-ON deltas for a chunk, or reads them off the base activation OLF's initialize produced, `entryOn`),
-the first check rounds and fixes every live member. Rows are laid out by ROLE (`tvdLayoutGroup`): the
-pilot's V identity and the other non-member deltas as captured (the scenario's OFF target is SAVED on
-the way on — a per-scenario override on the pilot's Q row comes back), the first alive continuous member
-hosts the relocated pilot Q (the fills' mode scan — `relocChoose` / the DISTR_RHO carrier skip — picks
-the same row), the others DISTR_RHO (0), fixed/outaged members identity pins; a group with no continuous
-member left is OFF. Fixed taps ride the shared r1 override rebuild. The plan-A6 carrier-clamp rejection
-is OFF by default: the in-kernel sequence IS OLF's, and `deviceSharedCarrierClampBatchesAndMatches`
-now batches the clamp scenario (and drives the clamping base) at 1e-12 — `OLF_GPU_TVD_REJECT_CARRIER_CLAMP`
-restores the CPU route for diagnosis. Base path: `readBatchDiscreteTvcState` → `setR1(roundFrom);
-roundR1ToClosestTap(); setVoltageControlEnabled(false)` per fixed member (OLF's own calls).
-
-`LOOP_SVD_KERNEL` (OLF order 10) is the shunt twin (`svdEntryBatch` / `svdCheckBatch`): ON at entry,
-the first check runs `LfShuntImpl.dispatchB` verbatim per controller shunt (residue / remaining to the
-closest section from the CURRENT position over [minPosition, size), strictly closer only), pins the
-SHUNT_B identity at the section total and restores the pilot; OLF's dispatchB leaves the shunt's g
-alone, so no (dG, dB) override is emitted (the host machine's dg was an OLF deviation, harmless on
-constant-G sections). Base path: `readBatchDiscreteShuntState/Positions` → `setB(contB); dispatchB()`.
-
-A solve that FALLS BACK to the CPU Newton-Raphson (a rejected shape) now turns the driver off for the
-REST of that engine run (`driverFallbackForRun`): OLF's real loops took over there and hold the loop
-state, so the device must not restart its machines from INITIAL against contexts sitting at
-CONTROL/COMPLETE (measured 2.2e-3 kV on the carrier-clamp base before the rejection was dropped).
-The host machines (`GpuBatchTransformerControl.orchestrate…`, `GpuBatchSimpleTvc`,
-`GpuBatchSimpleShuntVc.roundAndResolve`) stay for a control the upload refuses (a member without a tap
-table).
-
-**GeneratorVoltageControlManager + fixTransformerVoltageControls (same day, second commit).** The
-last AFTER_GENERATOR gate is gone: generator voltage controls under the transformer-controlled
-level are handled in-kernel. Java (`buildFreezeTables`) replicates the manager's static part —
-`minNominalVoltageLimit` (the `generatorVoltageControlMinNominalVoltage` override, else the max
-nominal voltage over the transformer-controlled buses whose controllers all join two different
-levels, `Double.MIN_VALUE` when none), the candidate controller buses (at or under the limit, no
-`hasStepUpTransformers` exemption; a REMOTE candidate keeps the CPU route, its row is a DISTR_Q
-share) with their controlled-bus V row and load Q, and per member the V rows of the generator-
-controlled buses in the not-controlled side's component with every transformer-controller edge
-removed (`LfNetwork.getConnectivity()` temporary changes). The kernel's INITIAL step, once needRun
-is known: every candidate whose row is still a V identity (mode 0/2 — an RL-pinned one is NOT frozen,
-like OLF's `isGeneratorVoltageControlEnabled` test) saves its mode/target and becomes a Q row at
-`qBuf − loadQ` (OLF freezes the generation target at `q.eval()`, the NET injection, so the row
-target is that minus the load); then each just-enabled member whose PV list holds no bus still in
-mode 0/2 is disabled again (frozen AND pinned buses count as off, exactly `fixTransformerVoltage
-Controls`); then the groups lay out. The COMPLETE transition restores the frozen rows
-(`enableGeneratorVoltageControlsUnderMaxControlledNominalVoltage`). RL ignores a frozen row (mode 1,
-limit type 0) as OLF ignores a bus without QLimitType. Base write-back:
-`freezeGenerationTargetQAndDisableGeneratorVoltageControl(target + loadQ)` while frozen,
-`setGeneratorVoltageControlEnabledAndRecomputeTargetQ(true)` once unfrozen (only a bus whose network
-state shows OUR freeze: control off, target frozen, no QLimitType — the RL write-back keys on the
-QLimitType and never touches it). `getMaxControlledNominalVoltageOverride()` is the second OLF
-getter of the day. Approximations, documented: the component lists are the BASE topology with ALL
-controller edges removed (OLF removes the ENABLED ones plus the contingency's branches per solve),
-so a contingency splitting a not-controlled-side component, or an in-band group whose branch is
-the only path to the PV buses, can differ. Tests: `deviceTransformerControlGeneratorFreezeMatchesCpu`
-(2T2wt at 150 kV: G1 frozen and the controls disabled by the fix; 90 kV / auto: no freeze) and
-`deviceSeveralTvcGeneratorFreezeMatchesCpu` (OLF's four-bus network: auto freezes the 90 kV
-generators; 230 kV freezes all and the fix disables the three controls), 1e-12, count asserted,
-driver off and on.
-
-### #46 — Continuous PhaseControl in the phase phase (landed 2026-09-15)
-
-`cphCheckBatch` shares `LOOP_PHASE_KERNEL` with the incremental kinds (`nCph > 0` selects it).
-Per (scenario, controller) at the phase slot's FIRST check (`dCphIter[s] == 0`): a CONTROLLER
-switches off — its a1 row leaves mode 3 (free a1, P block re-emitted) for the identity pinned at
-the closest tap's a1 (`x` seeded there) — and the scenario is UNSTABLE whenever a live controller
-exists (OLF: `status = UNSTABLE` for every controller at iteration 0, even one whose rounding
-changes nothing — that still costs the CPU a Newton pass, so it costs us one too). From the second
-check on, a LIMITER whose controlled I exceeds its limit moves one tap against sign(dI/da1) —
-`flcFlowAndGrad(kind 2)` at the branch's current state, local control only (remote LIMITERs stay
-CPU-routed at extraction). Taps ride the shared r1 override rebuild (`tvcRebuildOverrides` merges
-TVC + phase + flow tables + the caller's list). Base path: `readBatchContinuousPhaseTaps` →
-`PiModel.setTapPosition` + `setPhaseControlEnabled(false)`; the `DeviceDrivenLoop` proxy now
-forwards `initialize()` to the real loop for every driven loop except FreezingHvdcACEmulation
-(PhaseControl's initialize enables CONTROLLER control, which the extraction must see). The host
-orchestrator (`GpuBatchContinuousPhase.orchestrate`) stays only for a chunk whose tables did not
-upload. 10/10 phase tests at 1e-12, driver off and on.
-
-### #44 — Shared-group incremental TVC in the TVC phase (landed 2026-09-15)
-
-`tvcGroupDecisionBatch` replaces the per-controller decision kernel: one thread per (scenario,
-controlled-bus group) runs OLF's `checkAndAdjustControlledBus` — `adjustWithOneController` (full
-diffV, maxTapShift) for a singleton, `adjustWithSeveralControllers` (one tap per controller per pass
-in merged order, remainingDiffV through each sensitivity, MIN_SENSI_FILTER per controller, until a
-pass moves nothing) otherwise, both through `tvcMoveTap` (closest r1 within the shift bound and the
-ratchet's range, strictly closer than the current one). The JNI upload no longer refuses shared
-buses, so the host TVC orchestrator is off for every incremental group; `deviceIncrementalSharedTvc
-MatchesCpu` runs its 3-member group in-kernel (`nCtrl=3 nGroups=1 kernel=true`) at 1e-12, driver
-off and on.
-
-### #43 — In-kernel IncrementalShuntVoltageControl (landed 2026-09-15)
+### #43 — In-kernel IncrementalShuntVoltageControl### #43 — In-kernel IncrementalShuntVoltageControl (landed 2026-09-15)
 
 `LOOP_SHUNT_KERNEL` at OLF order 10, same shape as the TVC phase: `shcDeadbandCheckBatch` per
 (scenario, controlled-bus group) → one unit-RHS solve per needed controller at its SHUNT_B identity

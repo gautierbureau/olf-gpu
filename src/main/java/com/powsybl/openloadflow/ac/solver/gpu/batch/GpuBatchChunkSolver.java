@@ -899,9 +899,25 @@ final class GpuBatchChunkSolver {
                     // pre-2026-09-15 host chain was worse still at 2.4e-1 kV, its re-solves not composing).
                     // Pausing puts it back in OLF's order with no new maths: the same decision code runs on
                     // the paused states and hands its target moves back as flat deltas.
-                    // OLF_GPU_SVC_HOST_ORCHESTRATOR=1 restores the old after-the-sweep orchestrator for A/B.
-                    boolean svcAsDriverPause = svcActive && rlStateOut != null
-                            && !"1".equals(System.getenv("OLF_GPU_SVC_HOST_ORCHESTRATOR"));
+                    // SecondaryVoltageControl, in OLF's order (order 4). Preferred form: an IN-KERNEL phase,
+                    // the whole check on the device. Where the kernel refuses the zone set (wider than its
+                    // dense system, or an observable on an unpacked element) the driver PAUSES at the same
+                    // slot and the same decision runs on the host instead. OLF_GPU_SVC_HOST_ORCHESTRATOR=1
+                    // falls all the way back to the pre-2026-09-15 after-the-sweep orchestrator for A/B.
+                    boolean svcHostFallback = "1".equals(System.getenv("OLF_GPU_SVC_HOST_ORCHESTRATOR"));
+                    // EXPERIMENTAL, opt-in: the phase itself mirrors OLF (re-enable, zone filter, trigger,
+                    // sensitivities, dense zone system), but simply HAVING a slot at OLF order 4 in the
+                    // device sweep moves the converged state by ~1e-10 kV — proved with OLF_GPU_SVC_INERT=1,
+                    // which keeps the slot and empties the body and reproduces the shift exactly. That is
+                    // above the 1e-11 the pause path holds on the SecondaryVc knife-edge tests, so the pause
+                    // stays the default until the slot's effect on the sweep is understood.
+                    boolean svcInKernel = svcActive && !svcHostFallback
+                            && "1".equals(System.getenv("OLF_GPU_SVC_IN_KERNEL"))
+                            && GpuBatchSecondaryVc.uploadToDevice(handle, svcControllers);
+                    if (!svcInKernel) {
+                        GpuBatchSecondaryVc.uploadToDevice(handle, null);   // clear a cached context's table
+                    }
+                    boolean svcAsDriverPause = svcActive && rlStateOut != null && !svcHostFallback && !svcInKernel;
                     GpuAcNewtonSolver.setBatchHostLoop(handle, svcAsDriverPause ? 1 : 0);
                     long tSolve0 = System.nanoTime();
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
@@ -1175,7 +1191,7 @@ final class GpuBatchChunkSolver {
                     // Post-RL host orchestrators below: SVC(4), Monitoring(5), Phase(7), TVC(8), TRPC(9), Shunt(10).
 
                     // OLF order 4: SecondaryVoltageControl
-                    if (svcActive && rlStateOut != null && !svcAsDriverPause) {
+                    if (svcActive && rlStateOut != null && !svcAsDriverPause && !svcInKernel) {
                         long tOr4 = System.nanoTime();
                         chunkResults = GpuBatchSecondaryVc.orchestrate(handle, chunkSize, realCount, n, nrl,
                                 chunkResults, svcControllers, rlStateOut,

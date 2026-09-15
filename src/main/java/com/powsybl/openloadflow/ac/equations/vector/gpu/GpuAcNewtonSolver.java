@@ -537,6 +537,17 @@ public final class GpuAcNewtonSolver {
      *  the device. No-op for an entry that is not pinned. */
     public static native void setBatchRlUnpin(long handle, int[] pairs, double[] newTargets);
 
+    /** Install the SecondaryVoltageControl zones for the in-kernel phase (OLF order 4); see
+     *  GpuBatchSecondaryVc.uploadToDevice. Returns 1 when the kernel loop owns them — it refuses a zone
+     *  set wider than the in-kernel dense system, or an observable on an element the batch does not pack. */
+    @SuppressWarnings("java:S107")
+    public static native int setBatchSecondaryVc(long handle,
+            int[] ctldVRow, int[] busVRow, int[] rlIdx, double[] baseTargetV,
+            double[] minQ, double[] maxQ, double[] loadQ,
+            int[] qPtr, int[] qKind, int[] qElem, int[] qBRow,
+            int[] zonePtr, int[] zoneCtl, int[] zonePilotRow, double[] zoneTargetV,
+            double minPlausibleV, double maxPlausibleV);
+
     /**
      * Install the PER-GENERATOR distributed-slack participants: the factors and limits OLF's
      * water-fill actually saturates on, grouped by bus ({@code busGenStart}/{@code busGenEnd} slice

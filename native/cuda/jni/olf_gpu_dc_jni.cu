@@ -85,6 +85,14 @@ struct Buf {
             DC_CUDA_CHECK(cudaMemcpy(p, host, n, cudaMemcpyHostToDevice));
         }
     }
+    /** Upload WITHOUT freeing and reallocating: the per-contingency arrays go through here, where a
+     *  cudaMalloc/cudaFree pair each would cost more than the kernels they feed. */
+    void uploadInto(const void* host, size_t n) {
+        ensure(n);
+        if (n > 0) {
+            DC_CUDA_CHECK(cudaMemcpy(p, host, n, cudaMemcpyHostToDevice));
+        }
+    }
     void release() {
         if (p != nullptr) {
             cudaFree(p);
@@ -149,6 +157,18 @@ struct DcContext {
     Buf scalarOut;
     Buf lfState;                                                   // the last solveTarget solution (n), read by the loop kernels
     Buf lodfSelf, lodfMonitored, lodfOut;                          // LODF/PTDF blocks (GpuLodfCalculator)
+    // --- DC sensitivity (GpuDcSensitivityContext): the factor and flow states live here and never
+    // go back to the host; only the sensitivity VALUES do
+    int sensiCols = 0;                                             // factor groups
+    Buf facBase, facAlt, facPost;                                  // n x sensiCols, column-major
+    Buf flowBase, flowAlt, flowPost;                               // n
+    int ctgCols = 0, actCols = 0;
+    Buf ctgSt, actSt;                                              // the +-1 element states, uploaded from OLF
+    int nEl = 0;                                                   // elements of the CURRENT contingency
+    Buf elPh1, elPh2, elIdx, elKind, elDiag, elNewAlpha;
+    Buf alphaLu, alphaPiv, alphaOut;
+    Buf rhsColPtr, rhsRows, rhsValues;
+    Buf pairFunc, pairSide, pairCol, pairOut, funcFunc, funcSide, funcOut;
     // --- DC outer loops on the device (GpuDcLoadFlowEngine)
     // incremental phase control: the controllers, their controlled branch/side/target, the tap a1 tables,
     // and the per-BRANCH direction state of IncrementalContextData.ControllerContext
@@ -970,6 +990,169 @@ __global__ void sensiBlock(int n, int nFunctions, int col0, int cols, const int*
     out[row + (size_t) j * nFunctions] = branchSensi(states, n, col0 + j, functions[row], ph1Row, ph2Row, a1Row, power);
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// DC sensitivity on the device: the factor states (n x nGroups) and the flow states (n) stay here
+// across the whole contingency loop; per contingency the Woodbury update and the per-factor
+// calculateSensi run in kernels and only the VALUES are downloaded
+// ---------------------------------------------------------------------------------------------
+
+constexpr int EL_CONTINGENCY = 0;
+constexpr int EL_ACTION = 1;
+constexpr int SRC_BASE = 0;
+constexpr int SRC_ALT = 1;
+constexpr int SRC_POST = 2;
+
+/** One dense right-hand side block from sparse columns (CSC), zeroed first. */
+__global__ void fillSparseRhs(int n, int col0, int cols, const int* colPtr, const int* rows, const double* values, double* b) {
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= cols) {
+        return;
+    }
+    for (int i = colPtr[col0 + j]; i < colPtr[col0 + j + 1]; i++) {
+        b[rows[i] + (size_t) j * n] += values[i];       // OLF's fillRhs uses add(), and a bus can repeat
+    }
+}
+
+/** The element states column of element e (contingency or action states). */
+__device__ inline const double* elementColumn(int e, int n, const int* elKind, const int* elIdx, const double* ctgSt, const double* actSt) {
+    return (elKind[e] == EL_CONTINGENCY ? ctgSt : actSt) + (size_t) elIdx[e] * n;
+}
+
+/**
+ * WoodburyEngine.setAlphas' matrix, factorized ONCE per contingency: it depends only on the
+ * elements and their states, not on the column being updated (only the right-hand side does). One
+ * thread; k is at most MAX_K. A_ij = (i == j ? diag_j : 0) - (S_j[ph1_i] - S_j[ph2_i]),
+ * getAlphaMatrixValue verbatim. LU with partial pivoting, like DenseMatrix.decomposeLU.
+ */
+__global__ void alphaFactor(int n, int k, const int* elPh1, const int* elPh2, const int* elIdx, const int* elKind,
+                            const double* elDiag, const double* ctgSt, const double* actSt, double* lu, int* piv) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) {
+        return;
+    }
+    for (int i = 0; i < k; i++) {
+        for (int j = 0; j < k; j++) {
+            const double* sj = elementColumn(j, n, elKind, elIdx, ctgSt, actSt);
+            double deltaX = i == j ? elDiag[j] : 0.0;
+            lu[i * MAX_K + j] = __dadd_rn(deltaX, -__dadd_rn(sj[elPh1[i]], -sj[elPh2[i]]));
+        }
+        piv[i] = i;
+    }
+    for (int col = 0; col < k; col++) {
+        int pivot = col;
+        double best = fabs(lu[col * MAX_K + col]);
+        for (int r = col + 1; r < k; r++) {
+            double v = fabs(lu[r * MAX_K + col]);
+            if (v > best) {
+                best = v;
+                pivot = r;
+            }
+        }
+        if (pivot != col) {
+            for (int c = 0; c < k; c++) {
+                double t = lu[col * MAX_K + c];
+                lu[col * MAX_K + c] = lu[pivot * MAX_K + c];
+                lu[pivot * MAX_K + c] = t;
+            }
+            int t = piv[col];
+            piv[col] = piv[pivot];
+            piv[pivot] = t;
+        }
+        double d = lu[col * MAX_K + col];
+        for (int r = col + 1; r < k; r++) {
+            double f = __ddiv_rn(lu[r * MAX_K + col], d);
+            lu[r * MAX_K + col] = f;
+            for (int c = col + 1; c < k; c++) {
+                lu[r * MAX_K + c] = __dadd_rn(lu[r * MAX_K + c], -__dmul_rn(f, lu[col * MAX_K + c]));
+            }
+        }
+    }
+}
+
+/**
+ * The alphas of every column: the right-hand side is WoodburyEngine.getAlphaRhsValue on the
+ * column's own states (states[ph1_i] - states[ph2_i] + newAlpha_i), then the shared LU is applied.
+ * One thread per column.
+ */
+__global__ void alphaSolve(int n, int k, int cols, const double* src, const int* elPh1, const int* elPh2,
+                           const double* elNewAlpha, const double* lu, const int* piv, double* alpha) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= cols) {
+        return;
+    }
+    double b[MAX_K];
+    const double* x = src + (size_t) c * n;
+    for (int i = 0; i < k; i++) {
+        b[i] = __dadd_rn(__dadd_rn(x[elPh1[piv[i]]], -x[elPh2[piv[i]]]), elNewAlpha[piv[i]]);
+    }
+    for (int i = 1; i < k; i++) {                       // forward substitution (unit lower)
+        double sum = b[i];
+        for (int j = 0; j < i; j++) {
+            sum = __dadd_rn(sum, -__dmul_rn(lu[i * MAX_K + j], b[j]));
+        }
+        b[i] = sum;
+    }
+    for (int i = k - 1; i >= 0; i--) {                  // back substitution
+        double sum = b[i];
+        for (int j = i + 1; j < k; j++) {
+            sum = __dadd_rn(sum, -__dmul_rn(lu[i * MAX_K + j], b[j]));
+        }
+        b[i] = __ddiv_rn(sum, lu[i * MAX_K + i]);
+    }
+    for (int i = 0; i < k; i++) {
+        alpha[(size_t) c * MAX_K + i] = b[i];
+    }
+}
+
+/** WoodburyEngine.toPostContingencyAndOperatorStrategyStates: post = pre + sum_k alpha_k S_k.
+ *  One thread per (row, column). */
+__global__ void woodburyCols(int n, int cols, int k, const double* src, const double* alpha, const int* elIdx,
+                             const int* elKind, const double* ctgSt, const double* actSt, double* post) {
+    long t = (long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (long) n * cols) {
+        return;
+    }
+    int c = (int) (t / n);
+    int row = (int) (t % n);
+    double v = src[row + (size_t) c * n];
+    for (int i = 0; i < k; i++) {
+        const double* si = elementColumn(i, n, elKind, elIdx, ctgSt, actSt);
+        v = __dadd_rn(v, __dmul_rn(alpha[(size_t) c * MAX_K + i], si[row]));
+    }
+    post[row + (size_t) c * n] = v;
+}
+
+/** calculateSensi of a branch on a column, side 1 or 2 (side 2 flips every partial derivative). */
+__device__ inline double factorSensi(const double* states, int n, int col, int b, int side, const int* ph1Row,
+                                     const int* ph2Row, const int* a1Row, const double* power) {
+    if (ph1Row[b] < 0 || ph2Row[b] < 0) {
+        return 0.0;                                     // no closed DC flow: OLF gives a predefined result instead
+    }
+    double v = __dmul_rn(power[b], phaseSensi(states, n, col, ph1Row[b], ph2Row[b], a1Row[b]));
+    return side == 1 ? v : -v;
+}
+
+/** The sensitivity value of every (function branch, side, factor column) pair. */
+__global__ void sensiPairs(int n, int nPairs, const double* states, const int* pairFunc, const int* pairSide,
+                           const int* pairCol, const int* ph1Row, const int* ph2Row, const int* a1Row,
+                           const double* power, double* out) {
+    int p = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p >= nPairs) {
+        return;
+    }
+    out[p] = factorSensi(states, n, pairCol[p], pairFunc[p], pairSide[p], ph1Row, ph2Row, a1Row, power);
+}
+
+/** The function reference of every (function branch, side) on the single flow-states column. */
+__global__ void sensiFunctions(int n, int nFunctions, const double* flow, const int* func, const int* side,
+                               const int* ph1Row, const int* ph2Row, const int* a1Row, const double* power, double* out) {
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= nFunctions) {
+        return;
+    }
+    out[f] = factorSensi(flow, n, 0, func[f], side[f], ph1Row, ph2Row, a1Row, power);
+}
+
 DcContext* ctxOf(jlong h) {
     return reinterpret_cast<DcContext*>(h);
 }
@@ -1033,6 +1216,38 @@ void refreshBusGeneration(DcContext* ctx) {
     busGeneration<<<grid(ctx->nBuses), BLOCK, 0, ctx->stream>>>(ctx->nBuses, ctx->busGenStart.as<int>(), ctx->genTarget.as<double>(),
             ctx->busGenP.as<double>());
     DC_CUDA_CHECK(cudaGetLastError());
+}
+
+double* sensiFactorBuffer(DcContext* ctx, jint source) {
+    switch (source) {
+        case SRC_BASE: return ctx->facBase.as<double>();
+        case SRC_ALT: return ctx->facAlt.as<double>();
+        default: return ctx->facPost.as<double>();
+    }
+}
+
+double* sensiFlowBuffer(DcContext* ctx, jint source) {
+    switch (source) {
+        case SRC_BASE: return ctx->flowBase.as<double>();
+        case SRC_ALT: return ctx->flowAlt.as<double>();
+        default: return ctx->flowPost.as<double>();
+    }
+}
+
+/** Solve `cols` sparse right-hand sides into `dst` (n x cols, column-major), in blocks. */
+void solveSparseColumns(DcContext* ctx, const int* colPtr, int cols, double* dst) {
+    for (int col0 = 0; col0 < cols; col0 += S_SOLVE_COLS) {
+        int block = std::min(S_SOLVE_COLS, cols - col0);
+        ctx->ensureRhs(block);
+        DC_CUDA_CHECK(cudaMemsetAsync(ctx->b.p, 0, (size_t) ctx->n * block * sizeof(double), ctx->stream));
+        fillSparseRhs<<<grid(block), BLOCK, 0, ctx->stream>>>(ctx->n, col0, block, ctx->rhsColPtr.as<int>(),
+                ctx->rhsRows.as<int>(), ctx->rhsValues.as<double>(), ctx->b.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        ctx->solveDense(block);
+        DC_CUDA_CHECK(cudaMemcpy(dst + (size_t) col0 * ctx->n, ctx->x.p, (size_t) ctx->n * block * sizeof(double),
+                                 cudaMemcpyDeviceToDevice));
+    }
+    (void) colPtr;
 }
 
 }  // namespace
@@ -2102,6 +2317,381 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_sensiBlock(JNIEnv* env, jclass,
         env->SetDoubleArrayRegion(jOut, 0, (jsize) host.size(), host.data());
     } catch (const std::exception& e) {
         throwJava(env, std::string("GpuDcSolver.sensiBlock: ") + e.what());
+    }
+}
+
+
+
+/** The factor-group right-hand sides (sparse, OLF's own fillRhs recorded) solved into the base or
+ *  the alternate factor states. The states stay on the device. */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_sensiSetFactorColumns(JNIEnv* env, jclass, jlong handle, jintArray jColPtr,
+                                                                       jintArray jRows, jdoubleArray jValues, jint cols, jboolean alt) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        IntArray colPtr(env, jColPtr);
+        IntArray rows(env, jRows);
+        DoubleArray values(env, jValues);
+        if (colPtr.len != cols + 1) {
+            throw std::runtime_error("colPtr length must be cols + 1");
+        }
+        int nnz = colPtr.p[cols];
+        if (rows.len < nnz || values.len < nnz) {
+            throw std::runtime_error("sparse arrays inconsistent with colPtr");
+        }
+        ctx->sensiCols = cols;
+        ctx->rhsColPtr.upload(colPtr.p, (size_t) (cols + 1) * sizeof(int));
+        ctx->rhsRows.upload(rows.p, (size_t) std::max(nnz, 1) * sizeof(int));
+        ctx->rhsValues.upload(values.p, (size_t) std::max(nnz, 1) * sizeof(double));
+        size_t bytes = (size_t) ctx->n * std::max(cols, 1) * sizeof(double);
+        Buf& dst = alt ? ctx->facAlt : ctx->facBase;
+        dst.ensure(bytes);
+        if (!alt) {
+            ctx->facPost.ensure(bytes);
+        }
+        if (cols > 0) {
+            solveSparseColumns(ctx, colPtr.p, cols, dst.as<double>());
+        }
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.sensiSetFactorColumns: ") + e.what());
+    }
+}
+
+/** The single flow-states column (the DC load flow state of the current network), uploaded solved:
+ *  OLF builds it through runDcLoadFlowWithModifiedTargetVector, which needs the network, so the
+ *  host solves that one and hands over the result. */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_sensiSetFlowStates(JNIEnv* env, jclass, jlong handle, jdoubleArray jStates, jboolean alt) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        DoubleArray states(env, jStates);
+        if (states.len != ctx->n) {
+            throw std::runtime_error("flow states length must be n");
+        }
+        Buf& dst = alt ? ctx->flowAlt : ctx->flowBase;
+        dst.upload(states.p, (size_t) ctx->n * sizeof(double));
+        if (!alt) {
+            ctx->flowPost.ensure((size_t) ctx->n * sizeof(double));
+        }
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.sensiSetFlowStates: ") + e.what());
+    }
+}
+
+/** The +-1 element states OLF computed for the contingencies and for the actions (column-major). */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_sensiSetElementStates(JNIEnv* env, jclass, jlong handle, jdoubleArray jCtg,
+                                                                        jint ctgCols, jdoubleArray jAct, jint actCols) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        DoubleArray ctg(env, jCtg);
+        DoubleArray act(env, jAct);
+        if (ctgCols > 0 && ctg.len < (jsize) ((size_t) ctx->n * ctgCols)
+                || actCols > 0 && act.len < (jsize) ((size_t) ctx->n * actCols)) {
+            throw std::runtime_error("element states arrays inconsistent with their column counts");
+        }
+        ctx->ctgCols = ctgCols;
+        ctx->actCols = actCols;
+        ctx->ctgSt.upload(ctg.p, (size_t) ctx->n * std::max(ctgCols, 1) * sizeof(double));
+        ctx->actSt.upload(act.p, (size_t) ctx->n * std::max(actCols, 1) * sizeof(double));
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.sensiSetElementStates: ") + e.what());
+    }
+}
+
+/** The elements of the CURRENT contingency (and its actions): their branch angle rows, their state
+ *  column, their kind, WoodburyEngine's diagonal and the phase shift a tap action imposes. */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_sensiSetElements(JNIEnv* env, jclass, jlong handle, jintArray jPh1, jintArray jPh2,
+                                                                   jintArray jIdx, jintArray jKind, jdoubleArray jDiag, jdoubleArray jNewAlpha) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        IntArray ph1(env, jPh1);
+        IntArray ph2(env, jPh2);
+        IntArray idx(env, jIdx);
+        IntArray kind(env, jKind);
+        DoubleArray diag(env, jDiag);
+        DoubleArray newAlpha(env, jNewAlpha);
+        int k = ph1.len;
+        if (ph2.len != k || idx.len != k || kind.len != k || diag.len != k || newAlpha.len != k) {
+            throw std::runtime_error("element arrays must have the same length");
+        }
+        if (k > MAX_K) {
+            throw std::runtime_error("more than " + std::to_string(MAX_K) + " Woodbury elements");
+        }
+        ctx->nEl = k;
+        size_t ints = (size_t) std::max(k, 1) * sizeof(int);
+        size_t dbls = (size_t) std::max(k, 1) * sizeof(double);
+        ctx->elPh1.uploadInto(ph1.p, ints);
+        ctx->elPh2.uploadInto(ph2.p, ints);
+        ctx->elIdx.uploadInto(idx.p, ints);
+        ctx->elKind.uploadInto(kind.p, ints);
+        ctx->elDiag.uploadInto(diag.p, dbls);
+        ctx->elNewAlpha.uploadInto(newAlpha.p, dbls);
+        ctx->alphaLu.ensure((size_t) MAX_K * MAX_K * sizeof(double));
+        ctx->alphaPiv.ensure((size_t) MAX_K * sizeof(int));
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.sensiSetElements: ") + e.what());
+    }
+}
+
+/** WoodburyEngine.toPostContingencyAndOperatorStrategyStates on the device, for the flow column and
+ *  for every factor column: the alpha matrix is factorized once (it does not depend on the column)
+ *  and each column solves its own right-hand side, then post = pre + sum_k alpha_k S_k. */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_sensiWoodbury(JNIEnv* env, jclass, jlong handle, jint factorSource, jint flowSource) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        int k = ctx->nEl;
+        int n = ctx->n;
+        if (k == 0) {
+            // a contingency with no Woodbury element: WoodburyEngine's update adds nothing, the
+            // post-contingency states ARE the pre-contingency ones
+            ctx->flowPost.ensure((size_t) n * sizeof(double));
+            DC_CUDA_CHECK(cudaMemcpyAsync(ctx->flowPost.p, sensiFlowBuffer(ctx, flowSource), (size_t) n * sizeof(double),
+                                          cudaMemcpyDeviceToDevice, ctx->stream));
+            if (ctx->sensiCols > 0) {
+                ctx->facPost.ensure((size_t) n * ctx->sensiCols * sizeof(double));
+                DC_CUDA_CHECK(cudaMemcpyAsync(ctx->facPost.p, sensiFactorBuffer(ctx, factorSource),
+                                              (size_t) n * ctx->sensiCols * sizeof(double), cudaMemcpyDeviceToDevice, ctx->stream));
+            }
+            DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            return;
+        }
+        alphaFactor<<<1, 32, 0, ctx->stream>>>(n, k, ctx->elPh1.as<int>(), ctx->elPh2.as<int>(), ctx->elIdx.as<int>(),
+                ctx->elKind.as<int>(), ctx->elDiag.as<double>(), ctx->ctgSt.as<double>(), ctx->actSt.as<double>(),
+                ctx->alphaLu.as<double>(), ctx->alphaPiv.as<int>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        // the flow column, then the factor columns: each set has its own alphas (the right-hand side
+        // is built from the column's own values), the shared LU is the same
+        int totalCols = 1 + ctx->sensiCols;
+        ctx->alphaOut.ensure((size_t) std::max(totalCols, 1) * MAX_K * sizeof(double));
+        double* flowSrc = sensiFlowBuffer(ctx, flowSource);
+        ctx->flowPost.ensure((size_t) n * sizeof(double));
+        alphaSolve<<<1, 32, 0, ctx->stream>>>(n, k, 1, flowSrc, ctx->elPh1.as<int>(), ctx->elPh2.as<int>(),
+                ctx->elNewAlpha.as<double>(), ctx->alphaLu.as<double>(), ctx->alphaPiv.as<int>(), ctx->alphaOut.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        woodburyCols<<<grid(n), BLOCK, 0, ctx->stream>>>(n, 1, k, flowSrc, ctx->alphaOut.as<double>(), ctx->elIdx.as<int>(),
+                ctx->elKind.as<int>(), ctx->ctgSt.as<double>(), ctx->actSt.as<double>(), ctx->flowPost.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        if (ctx->sensiCols > 0) {
+            double* facSrc = sensiFactorBuffer(ctx, factorSource);
+            ctx->facPost.ensure((size_t) n * ctx->sensiCols * sizeof(double));
+            alphaSolve<<<grid(ctx->sensiCols), BLOCK, 0, ctx->stream>>>(n, k, ctx->sensiCols, facSrc, ctx->elPh1.as<int>(),
+                    ctx->elPh2.as<int>(), ctx->elNewAlpha.as<double>(), ctx->alphaLu.as<double>(), ctx->alphaPiv.as<int>(),
+                    ctx->alphaOut.as<double>());
+            DC_CUDA_CHECK(cudaGetLastError());
+            woodburyCols<<<grid((long) n * ctx->sensiCols), BLOCK, 0, ctx->stream>>>(n, ctx->sensiCols, k, facSrc,
+                    ctx->alphaOut.as<double>(), ctx->elIdx.as<int>(), ctx->elKind.as<int>(), ctx->ctgSt.as<double>(),
+                    ctx->actSt.as<double>(), ctx->facPost.as<double>());
+            DC_CUDA_CHECK(cudaGetLastError());
+        }
+        DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.sensiWoodbury: ") + e.what());
+    }
+}
+
+namespace {
+/** sensiSetElements' body, without the JNI boilerplate. */
+void uploadSensiElements(JNIEnv* env, DcContext* ctx, jintArray jPh1, jintArray jPh2, jintArray jIdx, jintArray jKind,
+                         jdoubleArray jDiag, jdoubleArray jNewAlpha) {
+    IntArray ph1(env, jPh1);
+    IntArray ph2(env, jPh2);
+    IntArray idx(env, jIdx);
+    IntArray kind(env, jKind);
+    DoubleArray diag(env, jDiag);
+    DoubleArray newAlpha(env, jNewAlpha);
+    int k = ph1.len;
+    if (ph2.len != k || idx.len != k || kind.len != k || diag.len != k || newAlpha.len != k) {
+        throw std::runtime_error("element arrays must have the same length");
+    }
+    if (k > MAX_K) {
+        throw std::runtime_error("more than " + std::to_string(MAX_K) + " Woodbury elements");
+    }
+    ctx->nEl = k;
+    size_t ints = (size_t) std::max(k, 1) * sizeof(int);
+    size_t dbls = (size_t) std::max(k, 1) * sizeof(double);
+    ctx->elPh1.uploadInto(ph1.p, ints);
+    ctx->elPh2.uploadInto(ph2.p, ints);
+    ctx->elIdx.uploadInto(idx.p, ints);
+    ctx->elKind.uploadInto(kind.p, ints);
+    ctx->elDiag.uploadInto(diag.p, dbls);
+    ctx->elNewAlpha.uploadInto(newAlpha.p, dbls);
+    ctx->alphaLu.ensure((size_t) MAX_K * MAX_K * sizeof(double));
+    ctx->alphaPiv.ensure((size_t) MAX_K * sizeof(int));
+}
+
+/** sensiWoodbury's body. */
+void runSensiWoodbury(DcContext* ctx, int factorSource, int flowSource) {
+    int k = ctx->nEl;
+    int n = ctx->n;
+    if (k == 0) {
+        ctx->flowPost.ensure((size_t) n * sizeof(double));
+        DC_CUDA_CHECK(cudaMemcpyAsync(ctx->flowPost.p, sensiFlowBuffer(ctx, flowSource), (size_t) n * sizeof(double),
+                                      cudaMemcpyDeviceToDevice, ctx->stream));
+        if (ctx->sensiCols > 0) {
+            ctx->facPost.ensure((size_t) n * ctx->sensiCols * sizeof(double));
+            DC_CUDA_CHECK(cudaMemcpyAsync(ctx->facPost.p, sensiFactorBuffer(ctx, factorSource),
+                                          (size_t) n * ctx->sensiCols * sizeof(double), cudaMemcpyDeviceToDevice, ctx->stream));
+        }
+        return;
+    }
+    alphaFactor<<<1, 32, 0, ctx->stream>>>(n, k, ctx->elPh1.as<int>(), ctx->elPh2.as<int>(), ctx->elIdx.as<int>(),
+            ctx->elKind.as<int>(), ctx->elDiag.as<double>(), ctx->ctgSt.as<double>(), ctx->actSt.as<double>(),
+            ctx->alphaLu.as<double>(), ctx->alphaPiv.as<int>());
+    DC_CUDA_CHECK(cudaGetLastError());
+    int totalCols = 1 + ctx->sensiCols;
+    ctx->alphaOut.ensure((size_t) std::max(totalCols, 1) * MAX_K * sizeof(double));
+    double* flowSrc = sensiFlowBuffer(ctx, flowSource);
+    ctx->flowPost.ensure((size_t) n * sizeof(double));
+    alphaSolve<<<1, 32, 0, ctx->stream>>>(n, k, 1, flowSrc, ctx->elPh1.as<int>(), ctx->elPh2.as<int>(),
+            ctx->elNewAlpha.as<double>(), ctx->alphaLu.as<double>(), ctx->alphaPiv.as<int>(), ctx->alphaOut.as<double>());
+    DC_CUDA_CHECK(cudaGetLastError());
+    woodburyCols<<<grid(n), BLOCK, 0, ctx->stream>>>(n, 1, k, flowSrc, ctx->alphaOut.as<double>(), ctx->elIdx.as<int>(),
+            ctx->elKind.as<int>(), ctx->ctgSt.as<double>(), ctx->actSt.as<double>(), ctx->flowPost.as<double>());
+    DC_CUDA_CHECK(cudaGetLastError());
+    if (ctx->sensiCols > 0) {
+        double* facSrc = sensiFactorBuffer(ctx, factorSource);
+        ctx->facPost.ensure((size_t) n * ctx->sensiCols * sizeof(double));
+        alphaSolve<<<grid(ctx->sensiCols), BLOCK, 0, ctx->stream>>>(n, k, ctx->sensiCols, facSrc, ctx->elPh1.as<int>(),
+                ctx->elPh2.as<int>(), ctx->elNewAlpha.as<double>(), ctx->alphaLu.as<double>(), ctx->alphaPiv.as<int>(),
+                ctx->alphaOut.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        woodburyCols<<<grid((long) n * ctx->sensiCols), BLOCK, 0, ctx->stream>>>(n, ctx->sensiCols, k, facSrc,
+                ctx->alphaOut.as<double>(), ctx->elIdx.as<int>(), ctx->elKind.as<int>(), ctx->ctgSt.as<double>(),
+                ctx->actSt.as<double>(), ctx->facPost.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+/** sensiValues' body: the kernels and the two downloads. */
+void runSensiValues(JNIEnv* env, DcContext* ctx, jint factorSource, jint flowSource, jintArray jPairFunc, jintArray jPairSide,
+                    jintArray jPairCol, jintArray jFuncFunc, jintArray jFuncSide, jdoubleArray jOutSensi, jdoubleArray jOutFunc) {
+    IntArray pairFunc(env, jPairFunc);
+    IntArray pairSide(env, jPairSide);
+    IntArray pairCol(env, jPairCol);
+    IntArray funcFunc(env, jFuncFunc);
+    IntArray funcSide(env, jFuncSide);
+    int nPairs = pairFunc.len;
+    int nFunctions = funcFunc.len;
+    if (pairSide.len != nPairs || pairCol.len != nPairs || funcSide.len != nFunctions) {
+        throw std::runtime_error("pair arrays must have the same length");
+    }
+    if (ctx->nBranches == 0) {
+        throw std::runtime_error("branches not set (setBranches)");
+    }
+    int n = ctx->n;
+    if (nPairs > 0) {
+        ctx->pairFunc.uploadInto(pairFunc.p, (size_t) nPairs * sizeof(int));
+        ctx->pairSide.uploadInto(pairSide.p, (size_t) nPairs * sizeof(int));
+        ctx->pairCol.uploadInto(pairCol.p, (size_t) nPairs * sizeof(int));
+        ctx->pairOut.ensure((size_t) nPairs * sizeof(double));
+        sensiPairs<<<grid(nPairs), BLOCK, 0, ctx->stream>>>(n, nPairs, sensiFactorBuffer(ctx, factorSource),
+                ctx->pairFunc.as<int>(), ctx->pairSide.as<int>(), ctx->pairCol.as<int>(), ctx->ph1Row.as<int>(),
+                ctx->ph2Row.as<int>(), ctx->a1Row.as<int>(), ctx->power.as<double>(), ctx->pairOut.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+    }
+    if (nFunctions > 0) {
+        ctx->funcFunc.uploadInto(funcFunc.p, (size_t) nFunctions * sizeof(int));
+        ctx->funcSide.uploadInto(funcSide.p, (size_t) nFunctions * sizeof(int));
+        ctx->funcOut.ensure((size_t) nFunctions * sizeof(double));
+        sensiFunctions<<<grid(nFunctions), BLOCK, 0, ctx->stream>>>(n, nFunctions, sensiFlowBuffer(ctx, flowSource),
+                ctx->funcFunc.as<int>(), ctx->funcSide.as<int>(), ctx->ph1Row.as<int>(), ctx->ph2Row.as<int>(),
+                ctx->a1Row.as<int>(), ctx->power.as<double>(), ctx->funcOut.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+    }
+    DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    if (nPairs > 0) {
+        std::vector<double> host((size_t) nPairs);
+        DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->pairOut.p, host.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        env->SetDoubleArrayRegion(jOutSensi, 0, nPairs, host.data());
+    }
+    if (nFunctions > 0) {
+        std::vector<double> host((size_t) nFunctions);
+        DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->funcOut.p, host.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        env->SetDoubleArrayRegion(jOutFunc, 0, nFunctions, host.data());
+    }
+}
+}  // namespace
+
+/**
+ * One contingency, one call: its elements, the Woodbury update of every state column and the
+ * per-factor evaluations, with a single stream synchronization. Split across three calls this cost
+ * more in launch and allocation overhead than in arithmetic.
+ */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_sensiContingency(JNIEnv* env, jclass, jlong handle, jintArray jPh1, jintArray jPh2,
+                                                                   jintArray jIdx, jintArray jKind, jdoubleArray jDiag,
+                                                                   jdoubleArray jNewAlpha, jint factorSource, jint flowSource,
+                                                                   jintArray jPairFunc, jintArray jPairSide, jintArray jPairCol,
+                                                                   jintArray jFuncFunc, jintArray jFuncSide,
+                                                                   jdoubleArray jOutSensi, jdoubleArray jOutFunc) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        uploadSensiElements(env, ctx, jPh1, jPh2, jIdx, jKind, jDiag, jNewAlpha);
+        runSensiWoodbury(ctx, factorSource, flowSource);
+        runSensiValues(env, ctx, SRC_POST, SRC_POST, jPairFunc, jPairSide, jPairCol, jFuncFunc, jFuncSide, jOutSensi, jOutFunc);
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.sensiContingency: ") + e.what());
+    }
+}
+
+/** The sensitivity values of every (function branch, side, factor column) pair, and the function
+ *  reference of every (function branch, side), from the chosen state buffers. The only download. */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_sensiValues(JNIEnv* env, jclass, jlong handle, jint factorSource, jint flowSource,
+                                                              jintArray jPairFunc, jintArray jPairSide, jintArray jPairCol,
+                                                              jintArray jFuncFunc, jintArray jFuncSide,
+                                                              jdoubleArray jOutSensi, jdoubleArray jOutFunc) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        IntArray pairFunc(env, jPairFunc);
+        IntArray pairSide(env, jPairSide);
+        IntArray pairCol(env, jPairCol);
+        IntArray funcFunc(env, jFuncFunc);
+        IntArray funcSide(env, jFuncSide);
+        int nPairs = pairFunc.len;
+        int nFunctions = funcFunc.len;
+        if (pairSide.len != nPairs || pairCol.len != nPairs || funcSide.len != nFunctions) {
+            throw std::runtime_error("pair arrays must have the same length");
+        }
+        if (ctx->nBranches == 0) {
+            throw std::runtime_error("branches not set (setBranches)");
+        }
+        int n = ctx->n;
+        if (nPairs > 0) {
+            ctx->pairFunc.uploadInto(pairFunc.p, (size_t) nPairs * sizeof(int));
+            ctx->pairSide.uploadInto(pairSide.p, (size_t) nPairs * sizeof(int));
+            ctx->pairCol.uploadInto(pairCol.p, (size_t) nPairs * sizeof(int));
+            ctx->pairOut.ensure((size_t) nPairs * sizeof(double));
+            sensiPairs<<<grid(nPairs), BLOCK, 0, ctx->stream>>>(n, nPairs, sensiFactorBuffer(ctx, factorSource),
+                    ctx->pairFunc.as<int>(), ctx->pairSide.as<int>(), ctx->pairCol.as<int>(), ctx->ph1Row.as<int>(),
+                    ctx->ph2Row.as<int>(), ctx->a1Row.as<int>(), ctx->power.as<double>(), ctx->pairOut.as<double>());
+            DC_CUDA_CHECK(cudaGetLastError());
+        }
+        if (nFunctions > 0) {
+            ctx->funcFunc.uploadInto(funcFunc.p, (size_t) nFunctions * sizeof(int));
+            ctx->funcSide.uploadInto(funcSide.p, (size_t) nFunctions * sizeof(int));
+            ctx->funcOut.ensure((size_t) nFunctions * sizeof(double));
+            sensiFunctions<<<grid(nFunctions), BLOCK, 0, ctx->stream>>>(n, nFunctions, sensiFlowBuffer(ctx, flowSource),
+                    ctx->funcFunc.as<int>(), ctx->funcSide.as<int>(), ctx->ph1Row.as<int>(), ctx->ph2Row.as<int>(),
+                    ctx->a1Row.as<int>(), ctx->power.as<double>(), ctx->funcOut.as<double>());
+            DC_CUDA_CHECK(cudaGetLastError());
+        }
+        DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        if (nPairs > 0) {
+            std::vector<double> host((size_t) nPairs);
+            DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->pairOut.p, host.size() * sizeof(double), cudaMemcpyDeviceToHost));
+            env->SetDoubleArrayRegion(jOutSensi, 0, nPairs, host.data());
+        }
+        if (nFunctions > 0) {
+            std::vector<double> host((size_t) nFunctions);
+            DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->funcOut.p, host.size() * sizeof(double), cudaMemcpyDeviceToHost));
+            env->SetDoubleArrayRegion(jOutFunc, 0, nFunctions, host.data());
+        }
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.sensiValues: ") + e.what());
     }
 }
 

@@ -244,6 +244,57 @@ public final class GpuDcSolver implements AutoCloseable {
         sensiBlock(handle(), functions, col0, cols, out);
     }
 
+    // --- DC sensitivity: the factor and flow states live on the device (GpuDcSensitivityAnalysis)
+
+    /** State buffer selector. */
+    public static final int SRC_BASE = 0;
+    public static final int SRC_ALT = 1;
+    public static final int SRC_POST = 2;
+
+    /** Element kinds of the Woodbury alpha system. */
+    public static final int EL_CONTINGENCY = 0;
+    public static final int EL_ACTION = 1;
+
+    /** The factor-group right-hand sides (sparse CSC) solved into the base or the alternate factor states. */
+    public void sensiSetFactorColumns(int[] colPtr, int[] rows, double[] values, int cols, boolean alt) {
+        sensiSetFactorColumns(handle(), colPtr, rows, values, cols, alt);
+    }
+
+    /** The already-solved flow-states column (OLF builds its modified target on the network). */
+    public void sensiSetFlowStates(double[] states, boolean alt) {
+        sensiSetFlowStates(handle(), states, alt);
+    }
+
+    /** The {@code +1/-1} element states OLF computed for the contingencies and the actions, column-major. */
+    public void sensiSetElementStates(double[] contingencyStates, int contingencyColumns, double[] actionStates, int actionColumns) {
+        sensiSetElementStates(handle(), contingencyStates, contingencyColumns, actionStates, actionColumns);
+    }
+
+    /** The elements of the contingency being processed. */
+    public void sensiSetElements(int[] ph1Row, int[] ph2Row, int[] stateColumn, int[] kind, double[] diag, double[] newAlpha) {
+        sensiSetElements(handle(), ph1Row, ph2Row, stateColumn, kind, diag, newAlpha);
+    }
+
+    /** The Woodbury update of the flow column and of every factor column, into the post buffers. */
+    public void sensiWoodbury(int factorSource, int flowSource) {
+        sensiWoodbury(handle(), factorSource, flowSource);
+    }
+
+    /** One contingency in one call: its elements, the Woodbury update and the factor evaluations. */
+    public void sensiContingency(int[] ph1Row, int[] ph2Row, int[] stateColumn, int[] kind, double[] diag, double[] newAlpha,
+                                 int factorSource, int flowSource, int[] pairFunction, int[] pairSide, int[] pairColumn,
+                                 int[] functionBranch, int[] functionSide, double[] outSensi, double[] outFunction) {
+        sensiContingency(handle(), ph1Row, ph2Row, stateColumn, kind, diag, newAlpha, factorSource, flowSource,
+                pairFunction, pairSide, pairColumn, functionBranch, functionSide, outSensi, outFunction);
+    }
+
+    /** The sensitivity values and the function references — the only thing that comes back. */
+    public void sensiValues(int factorSource, int flowSource, int[] pairFunction, int[] pairSide, int[] pairColumn,
+                            int[] functionBranch, int[] functionSide, double[] outSensi, double[] outFunction) {
+        sensiValues(handle(), factorSource, flowSource, pairFunction, pairSide, pairColumn, functionBranch, functionSide,
+                outSensi, outFunction);
+    }
+
     public int size() {
         return n;
     }
@@ -417,4 +468,25 @@ public final class GpuDcSolver implements AutoCloseable {
     private static native void lodfBlock(long handle, int[] monitored, int col0, int cols, double[] out);
 
     private static native void sensiBlock(long handle, int[] functions, int col0, int cols, double[] out);
+
+    private static native void sensiSetFactorColumns(long handle, int[] colPtr, int[] rows, double[] values, int cols, boolean alt);
+
+    private static native void sensiSetFlowStates(long handle, double[] states, boolean alt);
+
+    private static native void sensiSetElementStates(long handle, double[] contingencyStates, int contingencyColumns,
+                                                     double[] actionStates, int actionColumns);
+
+    private static native void sensiSetElements(long handle, int[] ph1Row, int[] ph2Row, int[] stateColumn, int[] kind,
+                                                double[] diag, double[] newAlpha);
+
+    private static native void sensiWoodbury(long handle, int factorSource, int flowSource);
+
+    private static native void sensiContingency(long handle, int[] ph1Row, int[] ph2Row, int[] stateColumn, int[] kind,
+                                                double[] diag, double[] newAlpha, int factorSource, int flowSource,
+                                                int[] pairFunction, int[] pairSide, int[] pairColumn, int[] functionBranch,
+                                                int[] functionSide, double[] outSensi, double[] outFunction);
+
+    private static native void sensiValues(long handle, int factorSource, int flowSource, int[] pairFunction, int[] pairSide,
+                                           int[] pairColumn, int[] functionBranch, int[] functionSide, double[] outSensi,
+                                           double[] outFunction);
 }

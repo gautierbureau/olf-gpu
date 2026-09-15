@@ -905,14 +905,12 @@ final class GpuBatchChunkSolver {
                     // slot and the same decision runs on the host instead. OLF_GPU_SVC_HOST_ORCHESTRATOR=1
                     // falls all the way back to the pre-2026-09-15 after-the-sweep orchestrator for A/B.
                     boolean svcHostFallback = "1".equals(System.getenv("OLF_GPU_SVC_HOST_ORCHESTRATOR"));
-                    // EXPERIMENTAL, opt-in: the phase itself mirrors OLF (re-enable, zone filter, trigger,
-                    // sensitivities, dense zone system), but simply HAVING a slot at OLF order 4 in the
-                    // device sweep moves the converged state by ~1e-10 kV — proved with OLF_GPU_SVC_INERT=1,
-                    // which keeps the slot and empties the body and reproduces the shift exactly. That is
-                    // above the 1e-11 the pause path holds on the SecondaryVc knife-edge tests, so the pause
-                    // stays the default until the slot's effect on the sweep is understood.
+                    // Three layers, most faithful first: the IN-KERNEL phase owns the loop; where it refuses
+                    // the tables (a zone set wider than its dense system, or an observable on an element the
+                    // batch does not pack) the driver PAUSES at the same slot and the same decision runs on
+                    // the host; OLF_GPU_SVC_HOST_ORCHESTRATOR=1 falls all the way back to the
+                    // pre-2026-09-15 after-the-sweep orchestrator, for A/B only.
                     boolean svcInKernel = svcActive && !svcHostFallback
-                            && "1".equals(System.getenv("OLF_GPU_SVC_IN_KERNEL"))
                             && GpuBatchSecondaryVc.uploadToDevice(handle, svcControllers);
                     if (!svcInKernel) {
                         GpuBatchSecondaryVc.uploadToDevice(handle, null);   // clear a cached context's table

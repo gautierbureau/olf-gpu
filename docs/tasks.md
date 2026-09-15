@@ -548,19 +548,19 @@ on device as a gather-and-dot from J at the flow term's variable columns. Needs:
 each flow term to its J column positions (the scatter table already has this), (b) a kernel that
 reads J[term_cols] · dx[term_cols] → flow sensitivity. Medium effort, NOT blocked.
 
-### SecondaryVoltageControl — the in-kernel phase (built 2026-09-15, opt-in)
+### SecondaryVoltageControl — the in-kernel phase (landed 2026-09-15, DEFAULT)
 
 The earlier "blocked on task #40" verdict was WRONG. OLF's `SecondaryVoltageControlOuterLoop` builds
 its sensitivities with `j.solveTransposed(rhs)` — the very call `NewtonRaphson.run` uses for the
 Newton step (OLF stores the Jacobian variable-major, so "transposed" is the forward system in our
 layout). Task #40 is needed by the GNN adjoint (reverse mode) only.
 
-`LOOP_SVC_KERNEL` (OLF order 4) is the whole loop on the device, behind
-`OLF_GPU_SVC_IN_KERNEL=1`. Nothing is hand-derived: a controller bus's reactive injection is its
-CLOSED-BRANCH side flows, whose gradient comes from the codegen'd `evalClosedBranch` exactly as
-`flcGatherSensiBatch` takes it, plus its shunts' q = -b*v^2 — and that one OLF exposes as three
-static lines (`ShuntCompensatorReactiveFlowEquationTerm`: dq/dv = -2bv, dq/db = -v^2). The pilot's
-calculated V is the BUS_V variable itself, so its sensitivity is dx at the pilot row. The pieces:
+`LOOP_SVC_KERNEL` (OLF order 4) is the whole loop on the device. Nothing is hand-derived: a
+controller bus's reactive injection is its CLOSED-BRANCH side flows, whose gradient comes from the
+codegen'd `evalClosedBranch` exactly as `flcGatherSensiBatch` takes it, plus its shunts' q = -b*v^2 —
+and that one OLF exposes as three static lines (`ShuntCompensatorReactiveFlowEquationTerm`:
+dq/dv = -2bv, dq/db = -v^2). The pilot's calculated V is the BUS_V variable itself, so its
+sensitivity is dx at the pilot row. The pieces, in `check()`'s order:
 
 - `svcTriggerBatch` — `tryToReEnableHelpfulControllerBuses` first (a zone with SOME but not all
   controllers at a reactive limit gives the limited ones back their control, restoring the PV form
@@ -569,22 +569,42 @@ calculated V is the BUS_V variable itself, so its sensitivity is dx at the pilot
 - one unit-RHS solve per controlled bus on the driver's own factors, then `svcGatherBatch` for
   `calculateSensiK` and `calculateSensiVpp`.
 - `svcZoneSolveBatch` — A (per-zone block), K0, `b = A.Jk^T`, the zone's LAST controlled bus's row
-  replaced by the pilot sensitivities and its rhs by the pilot dv, solved per scenario with
-  Gaussian elimination; an implausible target rejects the scenario to the CPU, as OLF's FAILED would.
+  replaced by the pilot sensitivities and its rhs by the pilot dv, solved per scenario by Gaussian
+  elimination; an implausible target rejects the scenario to the CPU, as OLF's FAILED would.
 - `svcApplyBatch` — the moved target on an unpinned controlled bus's V identity, and the switch-back
-  comparison target for a pinned one (a new context buffer `dSvcRlVt` that `rlTargetOf` consults).
+  comparison target for a pinned one (`dSvcRlVt`, which `rlTargetOf` consults).
 
-**Why it is opt-in.** On the two SecondaryVc unit tests it lands 1.04e-10 kV from the CPU, against
-the 1e-11 the driver-pause path holds. The cause is NOT the phase's maths: `OLF_GPU_SVC_INERT=1`
-keeps the slot in the sweep and empties the body, and reproduces the shift to the last digit. So
-simply HAVING a slot at OLF order 4 moves the converged state at the 1e-10 level on this knife-edge
-network. Before promoting it, that has to be understood — the likely candidates are the extra pass's
-effect on the sweep's `seqChanged`/termination bookkeeping and on how many Newton solves the run
-ends up taking (OLF's NR always takes >= 1 step, so one extra solve is ~1e-10 of drift). Note the
-CPU DOES check SecondaryVoltageControl at order 4 in these tests, so the slot is the faithful
-structure; it is the pause path's agreement that may be accidental.
+Three layers remain, most faithful first: the in-kernel phase; the driver PAUSE at the same slot
+where the kernel refuses the tables (a zone set wider than `MAX_SVC_CTL`, or an observable on an
+unpacked element); and `OLF_GPU_SVC_HOST_ORCHESTRATOR=1` for A/B against the old after-the-sweep
+orchestrator.
 
-### #43 — In-kernel IncrementalShuntVoltageControl### #43 — In-kernel IncrementalShuntVoltageControl (landed 2026-09-15)
+**The bug that cost the most, and the wrong turn it caused.** The phase first landed 1.04e-10 kV off
+on the SecondaryVc unit tests. `OLF_GPU_SVC_INERT=1` (slot in the sweep, body empty) reproduced the
+shift exactly, and I read that as "an extra sweep slot perturbs the trajectory" and wrote it up as
+such. It was not. The inert probe isolates everything `nSvc > 0` enables, and that includes the new
+`dSvcRlVt` buffer — which `initRlLimitTypeBatch` consults through `rlTargetOf` and which was
+initialised AFTER that seeding. The reactive-limit switch-back was comparing against uninitialised
+memory: ieee14's z1 went 4 pins -> 2 (un-pinning two controllers) where it should go 4 -> 6. Filling
+it with NaN at upload AND before the seeding fixes it, and all three SecondaryVc tests pass at 1e-11.
+LESSON: an inert-slot probe proves "something enabled by this table", NOT "the slot itself"; enumerate
+what else that flag switches on before naming a cause.
+
+**Every OLF outer loop is now a device phase.** rte6515, 9042 branch contingencies, both zones
+firing (`OLF_GPU_SVC=1 OLF_GPU_SVC_PILOT_SHIFT=1.0`), all 4 differing violations identical:
+
+| chunk path for SVC | GPU cold | vs CPU 8 threads |
+|---|---|---|
+| host orchestrator (old) | 208 s | x0.46 |
+| driver pause | 150 s | x0.66 |
+| in-kernel (default) | 119 s | x0.91 |
+
+With the base load flow ALSO on the driver (`OLF_GPU_DRIVER_OUTER_LOOPS=1`), i.e. every outer loop of
+the run on the device and no CPU load flow anywhere, the same SVC-enabled case runs at **83 s against
+the CPU's 102 s, x1.22** — against 80 s / x1.20 for the same case with SVC switched off. So enabling
+SecondaryVoltageControl now costs about 4% of wall time, where the host orchestrator cost 2.5x.
+
+### #43 — In-kernel IncrementalShuntVoltageControl### #43 — In-kernel IncrementalShuntVoltageControl### #43 — In-kernel IncrementalShuntVoltageControl (landed 2026-09-15)
 
 `LOOP_SHUNT_KERNEL` at OLF order 10, same shape as the TVC phase: `shcDeadbandCheckBatch` per
 (scenario, controlled-bus group) → one unit-RHS solve per needed controller at its SHUNT_B identity

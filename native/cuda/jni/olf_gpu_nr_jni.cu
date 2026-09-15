@@ -6439,6 +6439,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         std::fprintf(stderr, "CTX_FLAGS nS=1 nrl=%d nRlRemote=%d hasDqQrGroups=%d nQr=%d ndq=%d nds=%d ngen=%d nzi=%d nziBase=%d nRmq=%d resume=%d fullLoadflow=%d\n",
                      ctx->nrl, ctx->nRlRemote, ctx->hasDqQrGroups ? 1 : 0, ctx->st->nQr, ctx->ndq, ctx->nds, ctx->ngen, ctx->nzi, ctx->nziBase, ctx->nRmq, resume ? 1 : 0, fullLoadflow ? 1 : 0);
     }
+    if (fullLoadflow && !resume && ctx->nSvc > 0) {
+        // BEFORE the reactive-limit seeding below, which consults it: no zone has moved a target yet.
+        std::vector<double> nanv(static_cast<size_t>(nS) * std::max(ctx->nrl, 1), std::nan(""));
+        CUDA_CHECK(cudaMemcpy(ctx->dSvcRlVt.p, nanv.data(), nanv.size() * sizeof(double), cudaMemcpyHostToDevice));
+    }
     if (fullLoadflow && !resume) {                           // per-solve PV↔PQ state: 0 switches, limitType from base
         if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {        // plan-B4: capture each group's pilot-Q target from
             size_t need = static_cast<size_t>(ctx->st->nQr) * nS * sizeof(double);   // the BASE carrier's row,
@@ -6586,8 +6591,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             }
             CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
             CUDA_CHECK(cudaMemcpy(ctx->dSvcTargetV.p, tv.data(), nsc * sizeof(double), cudaMemcpyHostToDevice));
-            std::vector<double> nanv(static_cast<size_t>(nS) * std::max(ctx->nrl, 1), std::nan(""));
-            CUDA_CHECK(cudaMemcpy(ctx->dSvcRlVt.p, nanv.data(), nanv.size() * sizeof(double), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemset(ctx->dSvcNeed.p, 0, nS));
             CUDA_CHECK(cudaMemset(ctx->dSvcReject.p, 0, nS));
             CUDA_CHECK(cudaMemset(ctx->dSvcEnabled.p, 1, nsc));
@@ -9643,6 +9646,14 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->dSvcNeed.ensure(nS * sizeof(char));
     ctx->dSvcReject.ensure(nS * sizeof(char));
     ctx->dSvcRlVt.ensure(nS * std::max(ctx->nrl, 1) * sizeof(double));
+    {
+        // NaN = "this zone has not moved the controller's target", which is what rlTargetOf tests. The
+        // reactive-limit SEEDING reads this buffer before the per-solve reset further down runs, so an
+        // uninitialised one hands the switch-back a garbage comparison voltage and un-pins controllers
+        // that should stay pinned (measured on ieee14's z1: pins 4 -> 2 instead of 4 -> 6, and 1.0e-10 kV).
+        std::vector<double> nanv(nS * std::max(ctx->nrl, 1), std::nan(""));
+        CUDA_CHECK(cudaMemcpy(ctx->dSvcRlVt.p, nanv.data(), nanv.size() * sizeof(double), cudaMemcpyHostToDevice));
+    }
     ctx->svcMinPlausibleV = minPlausibleV;
     ctx->svcMaxPlausibleV = maxPlausibleV;
     ctx->nSvcZones = nZ;

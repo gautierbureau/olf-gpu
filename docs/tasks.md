@@ -717,6 +717,43 @@ not a closed branch. With this every sensitivity-dependent incremental loop runs
 chunk path's host orchestrators left: SecondaryVoltageControl (transposed solve, task #40); the
 non-incremental TVC / shunt VC flows followed the same day (#47).
 
+### #48 — Obsolete gates lifted, and the SecondaryVoltageControl ORDER gate (2026-09-15)
+
+Three gates written for the host-orchestrator world were re-examined once every control loop became a
+driver phase.
+
+**Lifted.** (a) INCREMENTAL and WITH_GENERATOR transformer voltage control no longer require
+`transformerControlSupported`: neither loop has a GeneratorVoltageControlManager, so the
+generator-under-the-controlled-level condition never applied to them — it was a blanket copied from
+AFTER_GENERATOR (`deviceIncremental/SimpleTvcGeneratorUnderLevelMatchesCpu`, OLF's four-bus network
+with 90 kV generators under a 230 kV controlled bus). (b) The WITH_GENERATOR shunt VC co-presence set
+shrank from seven loop names to nothing: it existed because the host orchestrator CHAIN could not
+model OLF interleaving two simultaneously-unstable loops, and the driver sweeps in OLF's order with
+OLF's restart-on-UNSTABLE semantics (`deviceSimpleShuntWithTransformerControlMatchesCpu`, a shunt at
+the 132 kV bus and a transformer at the 33 kV bus, AFTER_GENERATOR and INCREMENTAL).
+
+**Added, for correctness.** SecondaryVoltageControl co-present with ANY control loop is now a
+whole-run CPU gate. SVC is OLF order 4, before phase (7), transformer (8), RPC (9) and shunt (10), and
+it is the last HOST orchestrator on the chunk path: it runs AFTER the entire device sweep. So an
+in-kernel control loop decides on a state SVC has not corrected yet, and SVC then decides on a state
+whose taps have already moved. Measured on a zone whose pilot bus feeds an AFTER_GENERATOR
+transformer: **1.7e-3 kV** with the control loops in-kernel and **2.4e-1 kV** with the
+pre-2026-09-15 host-orchestrator chain — that combination was SILENTLY WRONG before this gate, and
+routing the host chain back was measured worse, not better (the chain's re-solves do not compose).
+`deviceSecondaryVcWithAfterGeneratorTvcRoutesToCpu` pins it; flip it to `assertGpuMatchesCpu` when
+the gate lifts. This also answers the "restart with a machine mid-flight" question: the shape is
+unreachable while the gate stands, because SVC is the only loop that can force a restart.
+
+**The lift is SecondaryVoltageControl as a driver phase** — not blocked (see the corrected scoping
+section: OLF's `solveTransposed` IS the Newton direction). Two routes, cheapest first:
+1. **Chunk-path pause/resume.** The kernel already has the `LOOP_HOST_SVC` slot, `hostLoopMask`,
+   `readBatchDriverPaused`/`setBatchDriverResume` and per-scenario `setBatchTargetDeltas` — the base
+   path uses all of it. The chunk solver never sets the mask, so it never pauses. Pausing at slot 4
+   and running today's `GpuBatchSecondaryVc` decision there puts SVC back in OLF's order with no new
+   maths. SVC changes only TARGETS (`GeneratorVoltageControl.setTargetValue`), so the resume needs no
+   restart — the base path's expensive re-extraction case does not arise.
+2. **Full kernel phase**, per the stage list below.
+
 ### #47 — Discrete TransformerVoltageControl and WITH_GENERATOR shunt VC in-kernel (landed 2026-09-15)
 
 `LOOP_TVD_KERNEL` (OLF order 8) runs OLF's non-incremental transformer loops per scenario, one thread

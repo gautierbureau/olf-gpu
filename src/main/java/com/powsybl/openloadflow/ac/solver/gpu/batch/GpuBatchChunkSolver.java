@@ -192,26 +192,37 @@ final class GpuBatchChunkSolver {
         // Incremental TVC: upload controller data to device (run-constant, not per-chunk).
         // IncrementalTransformerVoltageControl as a DRIVER PHASE (OLF order 8), shared controlled
         // buses included (the one-tap-at-a-time round robin runs in the group kernel).
+        // Every table upload also CLEARS when the run has none: the context is cached across runs on the
+        // same network, and a stale table from a previous run selects the wrong driver phase (a Simple
+        // TVC run after an INCREMENTAL one ran LOOP_TVC_KERNEL on its controls — 3.6e-7 kV).
         boolean tvcInKernel = false;
         if (incrementalTvcControllers != null && !incrementalTvcControllers.isEmpty()) {
             tvcInKernel = GpuBatchIncrementalTvc.uploadToDevice(handle, incrementalTvcControllers,
                     config.incTvcMaxTapShift());
+        } else {
+            GpuBatchIncrementalTvc.uploadToDevice(handle, null, 1);
         }
         // The flow-observed incremental loops (RPC at OLF order 9, incremental phase at order 7) as DRIVER PHASES.
         boolean flowInKernel = false;
         if (incrementalFlowControllers != null && !incrementalFlowControllers.isEmpty()) {
             flowInKernel = GpuBatchIncrementalFlowControl.uploadToDevice(handle, incrementalFlowControllers);
+        } else {
+            GpuBatchIncrementalFlowControl.uploadToDevice(handle, null);
         }
         // CONTINUOUS PhaseControl as a DRIVER PHASE (OLF order 7); the pre-solve control-ON activation stays host-side.
         boolean cphInKernel = false;
         if (continuousPhaseControllers != null && !continuousPhaseControllers.isEmpty()) {
             cphInKernel = GpuBatchContinuousPhase.uploadToDevice(handle, continuousPhaseControllers);
+        } else {
+            GpuBatchContinuousPhase.uploadToDevice(handle, null);
         }
         // IncrementalShuntVoltageControl as a DRIVER PHASE (OLF order 10).
         boolean shuntInKernel = false;
         if (incrementalShuntControllers != null && !incrementalShuntControllers.isEmpty()) {
             shuntInKernel = GpuBatchIncrementalShuntVc.uploadToDevice(handle, incrementalShuntControllers,
                     config.incShuntMaxSectionShift());
+        } else {
+            GpuBatchIncrementalShuntVc.uploadToDevice(handle, null, 3);
         }
         // The DISCRETE TransformerVoltageControl (AFTER_GENERATOR / WITH_GENERATOR, OLF order 8) and the
         // WITH_GENERATOR ShuntVoltageControl (order 10) as DRIVER PHASES: the control-ON entry (OLF's

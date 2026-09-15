@@ -79,12 +79,11 @@ final class GpuSaRunScope {
                 && (GpuBatchTransformerControl.transformerControlSupported(lfNetwork)
                         || GpuBatchTransformerControl.generatorFreezeSupported(lfNetwork,
                                 olfGuardParams.getGeneratorVoltageControlMinNominalVoltage()));
-        // INCREMENTAL (OLF's default TVC mode): the DEVICE runs the loop's decisions per scenario around
-        // batched solves with in-kernel dV/drho sensitivities (GpuBatchIncrementalTvc); stage-1 scope is
-        // the same as the continuous port (no generator VC under the transformer-controlled level).
+        // INCREMENTAL (OLF's default TVC mode): an in-kernel driver phase (LOOP_TVC_KERNEL). The loop never
+        // freezes generators (no GeneratorVoltageControlManager), so the gen-under-the-controlled-level
+        // gate that the AFTER_GENERATOR port needed never applied here — lifted 2026-09-15.
         boolean incrementalTvcBatchable =
-                olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL
-                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
+                olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL;
         // INCREMENTAL shunt VC: same per-scenario orchestrator pattern (GpuBatchIncrementalShuntVc)
         // with in-kernel dV/dB sensitivities.
         boolean incrementalShuntBatchable =
@@ -127,9 +126,10 @@ final class GpuSaRunScope {
                 .filter(java.util.Objects::nonNull)
                 .allMatch(pc -> pc.getMode() == com.powsybl.openloadflow.network.TransformerPhaseControl.Mode.CONTROLLER
                         || pc.getControlledBranch() == pc.getControllerBranch());
+        // (SimpleTransformerVoltageControlOuterLoop has no generator freeze either — no gen-under-level
+        // gate, lifted 2026-09-15.)
         boolean simpleTvcBatchable =
-                olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL
-                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
+                olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL;
         // REMOTE/DISTRIBUTED generator VC groups + reactive limits. Both modes run the full
         // pin/unpin dynamics: NON-free members via mode-4 transitions + own-q accumulation
         // (plan-B3), the FREE member via the pilot-Q relocation candidate groups (plan-B4), and
@@ -152,15 +152,29 @@ final class GpuSaRunScope {
         // chain does not model; co-presence with a transformer/phase/RPC/SecondaryVc loop (or
         // VoltageMonitoring with actual SVCs — the loop is inert otherwise) keeps the whole run on
         // the CPU exactly as before (DS/RL/HVDC phases are in-kernel and compose fine).
-        java.util.Set<String> shuntVcConflicts = java.util.Set.of(
+        // 2026-09-15: the co-presence gate is reduced to SecondaryVoltageControl, which is handled by the
+        // run-wide svcControlLoopConflict gate below. Every transformer, phase, RPC, monitoring and shunt
+        // loop is an in-kernel DRIVER PHASE now, swept in OLF's own order with OLF's restart-on-UNSTABLE
+        // semantics, so simultaneously unstable loops interleave exactly as on the CPU.
+        boolean simpleShuntVcBatchable =
+                olfGuardParams.getShuntVoltageControlMode() == OpenLoadFlowParameters.ShuntVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL;
+        // SecondaryVoltageControl sits at OLF order 4, BEFORE every control loop (phase 7, transformer 8,
+        // RPC 9, shunt 10). On the chunk path SVC is the last HOST orchestrator: it runs AFTER the whole
+        // device sweep, so an in-kernel control loop decides on a state SVC has not seen yet and SVC then
+        // decides on a state whose taps have already moved — the inverse of OLF's order. Measured on a zone
+        // whose pilot bus feeds an AFTER_GENERATOR transformer: 1.7e-3 kV with the control loops in-kernel,
+        // 2.4e-1 kV with the pre-2026-09-15 host-orchestrator chain (that combination was silently wrong
+        // before this gate — the chain re-solves do not compose). Whole-run CPU until SecondaryVoltageControl
+        // is itself a driver phase (tasks #47); `deviceSecondaryVcWithAfterGeneratorTvcRoutesToCpu` is the
+        // parity target that lifts it.
+        java.util.Set<String> svcControlLoops = java.util.Set.of(
                 "TransformerVoltageControl", "SimpleTransformerVoltageControl", "IncrementalTransformerVoltageControl",
                 "PhaseControl", "IncrementalPhaseControl", "IncrementalTransformerReactivePowerControl",
-                "SecondaryVoltageControl");
-        boolean simpleShuntVcBatchable =
-                olfGuardParams.getShuntVoltageControlMode() == OpenLoadFlowParameters.ShuntVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL
-                && acParameters.getOuterLoops().stream().map(AcOuterLoop::getName)
-                        .noneMatch(name -> shuntVcConflicts.contains(name)
-                                || "VoltageMonitoring".equals(name) && !noSvc);
+                "ShuntVoltageControl", "IncrementalShuntVoltageControl");
+        List<String> loopNames = acParameters.getOuterLoops().stream().map(AcOuterLoop::getName).toList();
+        boolean svcControlLoopConflict = loopNames.contains("SecondaryVoltageControl")
+                && loopNames.stream().anyMatch(svcControlLoops::contains);
+
         // DEVICE (CUDA outer loops) vs JAVA (OLF's Java outer loops per scenario) — §5.1 of the design.
         OuterLoopMode outerLoopMode = readOuterLoopMode();
         LoadFlowParameters lfGuardParams = securityAnalysisParameters.getLoadFlowParameters();
@@ -180,7 +194,7 @@ final class GpuSaRunScope {
                             && !(incrementalShuntBatchable && "IncrementalShuntVoltageControl".equals(name))
                             && !(simpleShuntVcBatchable && "ShuntVoltageControl".equals(name))
                             && !(simpleTvcBatchable && "SimpleTransformerVoltageControl".equals(name))
-                            && !(svcBatchable && "SecondaryVoltageControl".equals(name))
+                            && !(svcBatchable && !svcControlLoopConflict && "SecondaryVoltageControl".equals(name))
                             && !"IncrementalPhaseControl".equals(name)
                             && !"IncrementalTransformerReactivePowerControl".equals(name)
                             && !(continuousPhaseBatchable && "PhaseControl".equals(name))

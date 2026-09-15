@@ -1230,6 +1230,120 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         }
     }
 
+    /** INCREMENTAL and WITH_GENERATOR transformer voltage control on a network whose generators sit
+     *  UNDER the transformer-controlled level (OLF's four-bus network): neither loop freezes generators
+     *  (no GeneratorVoltageControlManager), so the AFTER_GENERATOR gate never applied to them — it was
+     *  a blanket; lifted 2026-09-15. Batched at 1e-12 with the count asserted. */
+    @org.junit.jupiter.api.Test
+    void deviceIncrementalTvcGeneratorUnderLevelMatchesCpu() {
+        runTvcGeneratorUnderLevel(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL);
+    }
+
+    @org.junit.jupiter.api.Test
+    void deviceSimpleTvcGeneratorUnderLevelMatchesCpu() {
+        runTvcGeneratorUnderLevel(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL);
+    }
+
+    private void runTvcGeneratorUnderLevel(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode mode) {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        {
+            Network network = com.powsybl.openloadflow.network.FourBusNetworkFactory.createWithSeveralTransformerVoltageControls();
+            com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+            String bis = l0.getId() + "_BIS";
+            network.newLine().setId(bis)
+                    .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                    .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                    .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
+            List<Contingency> ctgs = List.of(new Contingency(bis, new BranchContingency(bis)),
+                    new Contingency(l0.getId(), new BranchContingency(l0.getId())));
+            com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                    .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+            com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setTransformerVoltageControlMode(mode);
+            assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+            assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                    "generators under the controlled level must not gate " + mode);
+        }
+    }
+
+    /** WITH_GENERATOR shunt voltage control CO-PRESENT with a transformer voltage control (AFTER_GENERATOR,
+     *  then INCREMENTAL): the shunt at the 132 kV bus and the transformer at the 33 kV bus both act in
+     *  the same run. The former co-presence gate (the host orchestrator chain could not interleave
+     *  simultaneously unstable loops) is obsolete now that both are driver phases swept in OLF's
+     *  order — lifted 2026-09-15; batched at 1e-12 with the count asserted. */
+    @org.junit.jupiter.api.Test
+    void deviceSimpleShuntWithTransformerControlMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        for (var mode : new com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode[] {
+            com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL,
+            com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL}) {
+            Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
+            var t2wt = network.getTwoWindingsTransformer("T2wT");
+            t2wt.getRatioTapChanger().setTargetDeadband(0).setRegulating(true).setTapPosition(0)
+                    .setRegulationTerminal(t2wt.getTerminal2()).setTargetV(34.0);
+            network.getVoltageLevel("VL_2").newShuntCompensator().setId("SHUNT_2").setBus("BUS_2").setConnectableBus("BUS_2")
+                    .setSectionCount(0).setVoltageRegulatorOn(true).setTargetV(133.0).setTargetDeadband(0.5)
+                    .newNonLinearModel()
+                    .beginSection().setB(1e-3).setG(0.0).endSection()
+                    .beginSection().setB(3e-3).setG(0.0).endSection()
+                    .add().add();
+            com.powsybl.iidm.network.Line l0 = network.getLines().iterator().next();
+            String bis = l0.getId() + "_BIS";
+            network.newLine().setId(bis)
+                    .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                    .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                    .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
+            List<Contingency> ctgs = List.of(new Contingency(bis, new BranchContingency(bis)),
+                    new Contingency(l0.getId(), new BranchContingency(l0.getId())));
+            com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                    .setTransformerVoltageControlOn(true).setShuntCompensatorVoltageControlOn(true)
+                    .setDistributedSlack(true).setUseReactiveLimits(true);
+            com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setTransformerVoltageControlMode(mode)
+                    .setShuntVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.ShuntVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL);
+            assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+            assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                    "shunt VC co-present with " + mode + " must batch");
+        }
+    }
+
+    /** SecondaryVoltageControl CO-PRESENT with an AFTER_GENERATOR transformer voltage control: the zone
+     *  moves GEN_1's target to bring the 132 kV pilot BUS_2 to its target while T2wT drives the 33 kV
+     *  BUS_3. SVC is OLF order 4, the transformer loop order 8, and SVC is the last HOST orchestrator on
+     *  the chunk path — it runs AFTER the whole device sweep, so each decides on a state the other has
+     *  already moved. Measured: 1.7e-3 kV with the control loops in-kernel, 2.4e-1 kV with the
+     *  pre-2026-09-15 host-orchestrator chain (silently wrong before this gate). Whole-run CPU until
+     *  SecondaryVoltageControl is a driver phase; flip this test to assertGpuMatchesCpu then. */
+    @org.junit.jupiter.api.Test
+    void deviceSecondaryVcWithAfterGeneratorTvcRoutesToCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
+        var t2wt = network.getTwoWindingsTransformer("T2wT");
+        t2wt.getRatioTapChanger().setTargetDeadband(0).setRegulating(true).setTapPosition(0)
+                .setRegulationTerminal(t2wt.getTerminal2()).setTargetV(34.0);
+        network.newExtension(com.powsybl.iidm.network.extensions.SecondaryVoltageControlAdder.class)
+                .newControlZone().withName("z1")
+                .newPilotPoint().withTargetV(133.5).withBusbarSectionsOrBusesIds(List.of("BUS_2")).add()
+                .newControlUnit().withId("GEN_1").add()
+                .add().add();
+        com.powsybl.iidm.network.Line l0 = network.getLine("LINE_12");
+        String bis = l0.getId() + "_BIS";
+        network.newLine().setId(bis)
+                .setVoltageLevel1(l0.getTerminal1().getVoltageLevel().getId()).setBus1(l0.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l0.getTerminal2().getVoltageLevel().getId()).setBus2(l0.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l0.getR() * 2).setX(l0.getX() * 2).setG1(l0.getG1()).setB1(l0.getB1()).setG2(l0.getG2()).setB2(l0.getB2()).add();
+        List<Contingency> ctgs = List.of(new Contingency(bis, new BranchContingency(bis)));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL)
+                .setSecondaryVoltageControl(true).setMaxPlausibleTargetVoltage(1.6);
+        assertGpuMatchesCpuNoEngage(network, ctgs, 1e-11, lfp);
+        assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() <= 0,
+                "SVC co-present with a control loop must route the whole run to the CPU (order inversion)");
+    }
+
     /** useInitialTapPosition SHARED-ratio semantics (OLF TransformerRatioManager, ported to the
      *  machine 2026-09-07): T2wT2 starts at a DIFFERENT tap so the spread-preserving remap is
      *  non-trivial (group-averaged bounds + normalized-headroom initial; each member's continuous

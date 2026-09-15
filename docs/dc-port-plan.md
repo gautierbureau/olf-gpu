@@ -682,6 +682,84 @@ Note on the OLF scenario transposed to DC: `AcLoadFlowVscTest` saturates `hvdc12
 but in DC that link carries 49.7 MW and never reaches it — the DC tests use 20 MW, which makes
 both loops fire on the same network.
 
+## 4i. Phase 4 — DC sensitivity analysis on the device (2026-09-15)
+
+Landed: `GpuDcSensitivityAnalysis` (package `com.powsybl.openloadflow.sensi` in this extension, a
+split package so OLF's protected factor machinery is nameable), `GpuSensitivityAnalysisProvider`
+(`"OpenLoadFlowGpu"`), and the sensitivity kernels.
+
+**The shape follows §4h's verdict**: the factor states (`equations x factor groups`) and the flow
+states (`equations`) are solved into device memory and STAY there for the whole contingency loop;
+per contingency the Woodbury update rebuilds them on the device and the per-factor `calculateSensi`
+evaluations run in a kernel; the only thing that crosses back is the VALUES, one double per factor.
+
+**Almost no OLF bookkeeping was duplicated.** Four seams were widened upstream-style on
+`olf-local-patches-dc` (e57ea8add): `calculateFlowStates`, `calculateFactorStates` and
+`calculateSensitivityValues` became protected, a `createWoodburyEngine` factory was added, and
+`OpenSensitivityAnalysisProvider` got a `createDcSensitivityAnalysis` factory. The subclass overrides
+those four and inherits everything else — factor reading and checking, grouping, participation
+factors, the connectivity break analysis, GLSK rescaling, the per-contingency network state
+save/restore, statuses, unscaling, filtering and writing.
+
+The trick that makes it possible: the state matrices OLF passes between those seams are
+PLACEHOLDERS, tiny `DenseMatrix` instances whose ROW COUNT tags which device buffer they stand for
+(base/alternate x flow/factor). OLF only ever copies them (`new DenseMatrix(rows, cols)` +
+`copyValuesFrom`) and hands them to the seams, so the tag survives and nothing reads the contents.
+The right-hand sides are not re-derived either: OLF's own `SensitivityFactorGroup.fillRhs` writes
+into a `SparseColumnRecorder`, a `Matrix` that records instead of storing, and the device fills the
+dense columns from those triplets.
+
+Device pieces: `fillSparseRhs`, `alphaFactor` (the Woodbury alpha matrix is the same for every
+column — only the right-hand side changes — so it is factorized ONCE per contingency instead of
+per column as the CPU does), `alphaSolve` (one thread per column), `woodburyCols` (one thread per
+row x column), `sensiPairs` and `sensiFunctions`. One JNI call per contingency carries the
+elements, the Woodbury update and the evaluations: split across three calls it cost more in launch
+and allocation overhead than in arithmetic (13.0 s -> 4.9 s on 500 contingencies, and `Buf::upload`
+grew an `uploadInto` that keeps the allocation instead of a cudaMalloc/cudaFree pair per array).
+
+**Gate: OLF's own DC sensitivity suites, rerun against the GPU provider**, assertions and tolerances
+untouched — `DcSensitivityAnalysisTest` 58, `DcSensitivityAnalysisContingenciesTest` 81 (+1 skipped:
+`testDebug` needs a platform configuration directory this module does not vendor, verified to fail
+identically on the STOCK provider from here), `DcSensitivityAnalysisActionsTest` 12. Plus
+`GpuDcSensitivityEngagementTest`, which asserts both the values against the stock engine AND the
+device engagement counter, because a comparison test alone cannot tell that the device never ran.
+The OLF test jar had to start shipping the sensitivity test harness (a pom include list).
+
+**Numbers** (rte6515, 50 injection variables x 200 monitored branches = 10 000 factors, 200
+contingencies = 2 M factor evaluations; the CPU arm is single-threaded because
+`DcSensitivityAnalysis.analyse` ignores the executor it is given):
+
+| run | CPU | GPU | ratio |
+|---|---|---|---|
+| 1 | 2876 ms | 2030 ms | x1.42 |
+| 2 | 2740 ms | 2012 ms | x1.36 |
+| outlier | 2437 ms | 6664 ms | x0.37 |
+
+The outlier is GPU contention, not the code: the card is shared with the AC session, which held
+1.7 GB and was computing during that run; its device calls took 4480 ms against 65-68 ms in the
+clean runs. Quote the clean pair and the caveat.
+
+**Where the remaining wall is**, from the in-run phase split (200 states x 10 000 factors):
+
+| | time |
+|---|---|
+| device calls (elements + Woodbury + 2 M evaluations + download) | 65-68 ms |
+| OLF's per-factor `getPredefinedResults` scan | 171-216 ms |
+| OLF's per-factor unscale + filter + write | 96-99 ms |
+| everything else (OLF's per-contingency orchestration, the host flow-state solve, setup) | ~1.7 s |
+
+So the linear algebra is no longer on the critical path at all: 2 million factor evaluations plus
+200 Woodbury updates of a 6536 x 50 state matrix cost 68 ms. What is left is OLF's own host
+bookkeeping, identical on both arms — the per-factor predefined-result scan and result writing, and
+the per-contingency network state save/restore. That is the next thing to attack if this needs to go
+faster, and it is a HOST problem, not a device one.
+
+Not ported, deliberately: the contingency and action element states (`ConnectivityBreakAnalysis`
+and `ComputedElement.calculateElementsStates`) are still solved by OLF on the host and uploaded —
+one solve per distinct outaged branch, done once per run. The per-contingency flow-states re-solve
+also stays on the host, because it needs OLF's modified-target build on the network; it is one
+column.
+
 ## 5. Validation and benches
 
 - Parity oracle = stock OLF Woodbury on the same `LfNetwork` (same slack, same

@@ -131,3 +131,14 @@ subject|limitType|side|limitName + statuses + monitored flows; the two arms shar
 | 2026-09-15 | f0e981e | 100 | 17.3 | 13.4 | 1.49 | x1.29 | 9042/9042 | 0 lines, 2.5e-10 MW | phase 2a: modified-target columns |
 | 2026-09-15 | 660867b | 0 | 16.5 | 3.65 | 0.40 | x4.52 | 9042/9042 | 0 lines | phase 2b: device criterion, IR off — target met |
 | 2026-09-15 | 660867b | 100 | 18.4 | 8.3 | 0.92 | x2.22 | 9042/9042 | 0 lines, 2.5e-10 MW | the extra 5.7 s is OLF's monitored-result walk, on both arms |
+| 2026-09-15 | full LF on device | 0 | 15.2 / 16.7 | 5.30 / 5.59 | 0.59 / 0.62 | x2.87 / x2.99 | 9042/9042 | 0 lines, 1.7e-9 MW | matrix values, target, slack distribution and solve assembled on the device (GpuDcAssembly); capture 39 ms, cuDSS analysis+factorization 2.1 s in both runs |
+
+### DC — full load flow (GpuLoadFlowProvider vs OpenLoadFlowProvider)
+
+rte6515_full, RTE production parameters with `dc=true`, one `LoadFlow.run` per arm in one JVM
+(`DcLoadFlowGpuProbe`). Cold = first run of each arm (network load excluded, CUDA/cuDSS init
+included on the GPU arm); warm = second run.
+
+| date | commit | CPU cold (ms) | GPU cold (ms) | CPU warm (ms) | GPU warm (ms) | parity | note |
+|---|---|---|---|---|---|---|---|
+| 2026-09-15 | full LF on device | 664 | 2529 | 154 | 225 | flows 1.7e-10 MW, angles 1e-11°, dispatch bit-identical | a single DC solve does not pay on the device (cuDSS analysis > KLU's whole run); the assembled context pays when reused (SA, time series) |

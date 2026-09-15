@@ -232,22 +232,15 @@ destroyDcContext(ctx)
 ```
 
 **Do we need kernels to assemble the DC matrix on the device? (user question, 2026-09-15)**
-Not for objectives 1 and 3: OLF assembles the DC matrix ONCE per run on the host (it is
-constant — `power` per branch never moves during a Woodbury SA or a sensitivity run), so the
-host CSR is uploaded once and factorized once; every other structure (the ±1 element RHS, the
-factor RHS) is built on the device from row indices. A **DC fill family IS needed for the
-time-series engine and the outer loops (§3.3, §3.5)**, for two things the host must stop
-walking per column: (a) `fillDcTargets` — the target column from per-bus injection tables
-(Σ gen targetP − Σ load p0 − PST `-power·A2`/α rhs terms, HVDC p0), i.e. the DC analogue of the
-AC fill kernels' F side, so a step is applied as array writes, not LfNetwork mutations; (b)
-`fillDcValues` — the CSR values from per-branch `power` (4 entries per branch: +p on both
-diagonals, −p on both off-diagonals, plus the α column entries) for per-scenario matrix values
-on the fixed pattern (HVDC saturation, tap changes that modify impedance) when the UBATCH route
-is taken. Both are trivial formulas, but they must come from the same source of truth as the AC
-kernels: a `closed_branch_dc` family in `codegen/java2cuda` parsed from
-`ClosedBranchSide{1,2}DcFlowEquationTerm` (`eval`/`der`/`rhs`, `computePower`), with its own
-golden and scatter stamp — never hand-written formulas. Phase 3 builds it; phases 0–2 and 4 do
-not need it.
+Not for objectives 1 and 3 alone — but the user then asked for the **full DC load flow assembled
+and run on the GPU (2026-09-15)**, and that is now what the device path does (§4f): the matrix
+VALUES, the target vector, the slack distribution and the solve are device work; the host keeps
+the equation system's STRUCTURE, which it captures once (`GpuDcAssembly`) as contribution lists
+in OLF's own `initDer` / `DcTargetVector.init` order, so the device sums are OLF's sums —
+bit-identical values and targets, tested against `SparseMatrix.getValues()` and
+`TargetVector.getArray()`. No codegen family was needed: the DC "formulas" are `±power`,
+`∓power·(A2−a1)`, `±1`, `±k` — the wiring is the risk, and the bit-identical oracle on OLF's own
+assembled system is a stronger proof than a parse of the term classes.
 
 Row indices are the equation-system's own `Variable.getRow()`/`Equation.getColumn()` (stable
 for the run: the DC matrix never changes structure during a Woodbury SA, and the time-series
@@ -570,6 +563,77 @@ contingencies, the modified-target columns (host replay / array model) and the r
 **Timing caveat worth knowing**: the cuDSS context creation (CUDA init + analysis + factorization)
 varies from 0.22 s to 2.6 s between otherwise identical runs while the AC session shares the GPU;
 the per-contingency work is stable (~0.2 ms). Report cold numbers with that spread.
+
+## 4f. Full DC load flow on the device (2026-09-15, user: "Full LF DC should be assembled and run on gpu")
+
+Landed on `dc`:
+- **`GpuDcAssembly`** (Java, `dc.gpu`): the structure capture. Walks the equation system exactly
+  like `JacobianMatrix.initDer` (single equations and the `BUS_TARGET_P` array interleaved by
+  column; `SingleEquation.der`'s TreeMap-by-variable order; `EquationArray.der`'s stable sort by
+  variable, runs of equal rows closed by the additional single terms, then the leftover single-term
+  rows) and records per matrix element an ordered list of contributions `(kind, element, coef)`:
+  `coef·power[b]` for a closed-branch term (side 1: +,−,+ on ph1, ph2, a1; side 2 opposite),
+  a constant for a variable term (±1) or an HVDC AC-emulation term (±k). Same for the target:
+  a base kind per column (`BUS_P` with the multi-slack share, `ALPHA1`, `ZERO_PHI`, 0) and an
+  ordered rhs list (`∓power·(A2−a1fixed)`, `±p0`). Every classification is checked at capture
+  against the term's own `der`/`rhs` value (`Double.compare`), an unknown term class throws
+  `UnsupportedOperationException` and the caller keeps the host path. Also the bus tables (P
+  column, angle row, load target P, flags, synchronous component, generator range), the
+  synchronous components' bus lists and slack counts, and the generator tables in OLF's iteration
+  order (bus, then `bus.getGenerators()`).
+- **Native** (`olf_gpu_dc_jni.cu`): `createAssembled` (structure only, cuDSS analysis on the
+  first `fillValues`), kernels `fillValues` (one thread per non-zero, `v = 0; v += …` in OLF's
+  order, `__dadd_rn`/`__dmul_rn` so nvcc cannot fuse), `busGeneration` (`getGenerationTargetP`'s
+  sum from 0.0 in generator order), `scMismatches`, `fillTarget` (`DcTargetVector.init` per
+  column), `activePowerMismatch` (sequential, one thread), and **`distributeSlack`** — one thread,
+  sequential like the CPU: `ActivePowerDistribution.run` + `GenerationActivePowerDistributionStep`
+  with the reference-generator reset and the step reset accumulated SEPARATELY and added at the
+  end (as OLF does — accumulating them in one running sum was a last-ulp difference), the JDK's
+  compensated `DoubleStream.sum()` for the factor norm (the `sum − comp` final, verified 20000/20000
+  against the JDK on random data), Java's `Math.max/min` semantics, iterator removal by
+  compaction. `setBuses/setBusLoads/setExcludedBuses/setGenerators/setGeneratorTargets/
+  readGeneratorTargets/readValues/readTarget/solveTarget` round it out.
+- **`GpuDcLoadFlowEngine`**: `DcLoadFlowEngine.run` line for line — `initStateVector`, the
+  device mismatch, the device (or, for load-based balance types, host) distribution with OLF's
+  `handleDistributionFailureBehavior` and reports, the device target + solve, the outer loops
+  (host `check`, re-`prepare()` after an unstable iteration: same pattern → refill + refactorize,
+  structure change → rebuild), cleanup, `buildDcLoadFlowResult`. Protocol: the LfNetwork is the
+  source of truth between phases; the device distribution's generator targets are written back at
+  once. `solveBase()` is the Woodbury pre-contingency solve (distribution over all buses without
+  epsilon/failure handling, target, solve).
+- **`GpuLoadFlowProvider`** (`"OpenLoadFlowGpu"`, `@AutoService(LoadFlowProvider)`): OLF's
+  provider with the DC engine swapped through a new protected seam `runDcEngine` on
+  `olf-local-patches-dc` (217214135; also `DcOuterLoopContext`'s constructor made public,
+  c8e4e563f). It returns no JSON parameter serializer of its own (OLF's is keyed by extension
+  name and a duplicate throws in `JsonLoadFlowParameters`). AC runs → stock.
+- **The Woodbury SA** builds its device context from the assembly (no `JacobianMatrix`, no KLU
+  on the device path at all) and takes its base from `solveBase()`.
+
+Gates (all green 2026-09-15):
+- `GpuDcAssemblyTest` (14 dynamic cases: ieee14 scalar and vectorized, distributed P_MAX / P /
+  LOAD, three slack buses, eurostag, IGNORE_G, phase shifter fixed / regulating / alpha variable,
+  HVDC AC emulation, zero-impedance line, ieee118): pattern identical, values and target
+  **bit-identical** to OLF's, device solve vs KLU < 1e-10 pu, and the distribution kernel
+  bit-identical to `ActivePowerDistribution` for the four generation types × limits on/off ×
+  four mismatches (targets, remaining, iterations).
+- `GpuDcLoadFlowProviderTest` (23 cases incl. every balance type, multi-slack, the regulating
+  phase shifter outer loop, HVDC emulation, zero impedance, the three distribution failure
+  behaviors on ieee57, THROW parity, ieee118/300): component results equal, angles 1e-7°, flows
+  1e-8 MW, generator and load P bit-identical, tap positions equal.
+- `GpuWoodburyDcSecurityAnalysisTest` 13/13 on the new base; rte6515 × 9042: 9042/9042 on the
+  device, 0 differing lines, 5.3–5.6 s GPU 1-thread vs 15.2–16.7 s CPU 8 threads
+  (capture 39 ms; cuDSS analysis+factorization 2.1 s in these runs — the known spread).
+- `DcLoadFlowGpuProbe` (rte6515 full DC LF, RTE parameters): flows within 1.7e-10 MW, angles
+  1e-11°, generators bit-identical; **cold GPU 2.5 s vs CPU 0.66 s, warm 225 vs 154 ms** — a
+  single DC solve is not where the device pays (the cuDSS analysis alone outweighs KLU's whole
+  run); the assembled context pays when reused: the SA above, the time-series engine next.
+
+Left for later (noted, not blocking): the SA's per-contingency modified-target columns still
+come from the host (array model / exact replay) — the device `setExcludedBuses` +
+`distributeSlack` + `fillTarget` can build them too (islanding class first; lost power needs
+`processLostPowerChanges` on the tables); OLF's own target vector goes stale by one ulp after
+`updateNetwork` writes the solved alpha back (nothing invalidates it on `setA1`) — the device
+engine re-captures the current alpha instead, a 1e-17 difference the gate cannot see.
 
 ## 5. Validation and benches
 

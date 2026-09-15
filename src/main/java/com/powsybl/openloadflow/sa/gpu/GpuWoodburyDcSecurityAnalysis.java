@@ -26,6 +26,7 @@ import com.powsybl.openloadflow.dc.fastdc.ComputedElement;
 import com.powsybl.openloadflow.dc.fastdc.ComputedSwitchBranchElement;
 import com.powsybl.openloadflow.dc.fastdc.ComputedTapPositionChangeElement;
 import com.powsybl.openloadflow.dc.fastdc.ConnectivityBreakAnalysis;
+import com.powsybl.openloadflow.dc.gpu.GpuDcLoadFlowEngine;
 import com.powsybl.openloadflow.dc.gpu.GpuDcSolver;
 import com.powsybl.openloadflow.equations.Equation;
 import com.powsybl.openloadflow.equations.EquationSystem;
@@ -141,24 +142,26 @@ public class GpuWoodburyDcSecurityAnalysis extends WoodburyDcSecurityAnalysis {
 
             long tPre0 = System.nanoTime();
             EquationSystem<DcVariableType, DcEquationType> equationSystem = context.getEquationSystem();
-            // the device: factorization first — the base solve runs on it too, so KLU never factorizes here
-            SparseMatrix matrix = (SparseMatrix) context.getJacobianMatrix().getMatrix();
-            GpuDcSolver solver = GpuDcSolver.create(matrix);
-            // pre-contingency state: WoodburyEngine.runDcLoadFlowWithModifiedTargetVector with an empty disabled
-            // network, minus its KLU solve — the base slack distribution on the network, then the target vector
+            // the device assembles the DC system itself (GpuDcAssembly) and factorizes it: the base solve runs on
+            // it too — the slack distribution over every bus, the target vector, the solve — so no host matrix,
+            // no KLU, and the generators written back so the host sees the distributed dispatch
+            GpuDcLoadFlowEngine engine = new GpuDcLoadFlowEngine(context);
+            try {
+                engine.prepare();
+            } catch (UnsupportedOperationException e) {
+                LOGGER.warn("GPU Woodbury: {} — whole run on the stock path", e.getMessage());
+                LAST_GPU_PRECOMPUTED_COUNT.set(-1);
+                return super.runSimulations(lfNetwork, propagatedContingencies, dcParameters, securityAnalysisParameters,
+                        operatorStrategies, actions, limitReductions, contingencyActivePowerLossDistribution);
+            }
+            GpuDcSolver solver = engine.getSolver();
             double[] preContingencyStates;
             try {
-                if (dcParameters.isDistributedSlack()) {
-                    com.powsybl.openloadflow.dc.DcLoadFlowEngine.distributeSlack(lfNetwork, lfNetwork.getBuses(), dcParameters.getBalanceType(),
-                            dcParameters.getNetworkParameters().isUseActiveLimits());
-                }
-                preContingencyStates = solver.solve(context.getTargetVector().getArray().clone());
+                preContingencyStates = engine.solveBase();
             } catch (RuntimeException e) {
                 solver.close();
                 throw e;
             }
-            equationSystem.getStateVector().set(preContingencyStates);
-            updateNetwork(lfNetwork, equationSystem, preContingencyStates);
             if (context.getParameters().isSetVToNan()) {
                 for (LfBus bus : lfNetwork.getBuses()) {
                     bus.setV(Double.NaN);

@@ -481,6 +481,55 @@ ms (300 RHS); cuDSS ≈ 400–500 ms warm per context (analysis + factorization 
 memory's "one context ≈ 425 ms" holds here too) — the drop-in wins only because the SA's
 per-contingency host work, not the LU, is the wall (§3.2).
 
+## 4c. Phase 1 + 2a log (2026-09-15)
+
+**Landed** (`dc` commits 9fed038 phase 1, f0e981e phase 2a, 660867b phase 2b): `GpuDcSolver` + `olf_gpu_dc_jni.cu` (cuDSS
+factorization with matching, device-resident S built from the ±1 rows, per-chunk alphas
+k ≤ 8 in registers, states, flows, the relaxed limit screen, per-contingency base columns from
+host-built modified targets); `GpuWoodburyDcSecurityAnalysis` (stock pre-contingency and
+connectivity analysis; device for every pure branch outage INCLUDING islanding ones and lost
+PSTs; host confirms candidates on OLF's evaluables and builds the stock results; no apply, no
+restore); `DcSlackDistributionModel` (OLF's generation distribution on arrays — its trap:
+`NetworkState.save` re-anchors `initialTargetP` to the base dispatch before the loop, so the
+per-contingency water-filling starts from the base, not the original network; 240 differing
+lines until that was mirrored). Stock-routed per contingency: lost power from propagation,
+HVDC without power, shunt shifts, bus loss, > 8 Woodbury elements, load-based balance types,
+multi-slack; whole run: operator strategies/actions.
+
+**Comparison rule (user, 2026-09-15): GPU single-thread vs CPU with 8 threads.**
+
+| rte6515 × 9042, RTE parameters in DC, 100 monitored | wall | ms/ctg | parity |
+|---|---|---|---|
+| stock Woodbury, KLU, 1 thread (phase 0) | 65.3 s | 7.22 | reference |
+| stock Woodbury, KLU, **8 threads** | 17.3 s | 1.92 | reference |
+| GPU Woodbury, 1 thread, phase 1 (6458 on device, 2584 breaking on stock) | 29.3 s | 3.24 | 0 differing lines |
+| **GPU Woodbury, 1 thread, phase 2a (9042/9042 on device)** | **13.4 s** | **1.49** | **0 differing lines**, flows ≤ 2.5e-10 MW |
+
+| **GPU Woodbury, 1 thread, phase 2b (device criterion, refinement off), 0 monitored** | **3.65 s** | **0.40** | 0 differing lines |
+| GPU Woodbury, 1 thread, phase 2b, 100 monitored | 8.3 s (CPU 8 threads: 18.4 s) | 0.92 | 0 differing lines, flows ≤ 2.5e-10 MW over 904093 |
+
+**Phase 2b split** (0 monitored, 3.65 s): pre-contingency 0.06 s, cuDSS factorization 0.23,
+device S (9042 columns, IR off) 0.54, connectivity 0.51 (device criterion + OLF's graph
+confirmation of 2648 potentially breaking), modified-target columns 0.50 (2584), device chunks
+0.47, host per-contingency loop 1.12 (0.12 ms: state load, candidate confirm, stock result
+objects), the rest outside (LfNetwork load, contingency list). **The §3.2 target is met on the
+0-monitored run: 0.40 ms/ctg, ×17.9 the 1-thread CPU, ×4.5 the 8-thread CPU.** With 100
+monitored branches the host loop grows to 5.7 s on BOTH arms: it is OLF's own
+`PostContingencyNetworkResult.addResults` (a per-contingency walk with string-keyed set
+lookups — the JFR of the GPU run is 60% `String.hashCode` under `HashSet.contains`), which the
+stock path pays identically; an OLF-side fix (index the monitored branches once) would help
+both arms and is upstream-worthy, not a GPU item.
+
+Phase 2a split (`OLF_GPU_PHASE_TIME`): setup 4.9 s (cuDSS init + factorization, device S, OLF's
+host connectivity analysis with ITS KLU S, limit table, NetworkState.save), modified-target
+columns 1.07 s (2584 islanding outages, 0.41 ms each), device calls 1.12 s, host per-contingency
+5.2 s (0.58 ms each: state load + candidate confirm + stock result objects). The §3.2 target
+(≤ 0.5 ms/ctg end-to-end, ≥ 10× the 1-thread CPU) is NOT met yet: 1.49 ms/ctg, 4.9× the
+1-thread CPU, 1.3× the 8-thread CPU. Next levers, in order of size: the host per-contingency
+work (profile below), the setup (device connectivity criterion instead of the host KLU S; the
+limit table and the model are already once-per-run), the column build (mismatch by a plain
+loop instead of a bus-set copy; the distribution model's boxed lists).
+
 ## 5. Validation and benches
 
 - Parity oracle = stock OLF Woodbury on the same `LfNetwork` (same slack, same
@@ -520,8 +569,10 @@ per-contingency host work, not the LU, is the wall (§3.2).
   (append-only), `docs/gpu-vs-cpu-capabilities.md` (a new DC section). Everything else is new
   files under `dc/gpu`, `sa/GpuWoodburyDc*`, `native/cuda/jni/olf_gpu_dc_jni.cu`,
   `native/cuda/dc/`.
-- **No OLF patches from this session for SA and time-series.** Everything those need is public
-  or reachable from the `sa` split package. Sensitivity (phase 4) may need 3-4 `private →
+- **OLF patches live on `olf-local-patches-dc`** (our own branch/jar, no coordination needed
+  until the merge): so far ONE, `ConnectivityBreakAnalysis.computeConnectivityAnalysisResult` and
+  `createContingencyElementsIndexByBranchId` widened to public (upstream-friendly) so the device
+  criterion can hand only the flagged contingencies to OLF's graph confirmation. Sensitivity (phase 4) may need 3-4 `private →
   protected` widenings in `DcSensitivityAnalysis` (§2.4). Any OLF patch goes on
   `olf-local-patches` in `powsybl-open-loadflow-3` (the AC session's checkout, with uncommitted
   work in it) and needs one coordinated rebuild — say so explicitly before doing it, and batch

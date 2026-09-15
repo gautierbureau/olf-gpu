@@ -95,6 +95,111 @@ public final class GpuDcSolver implements AutoCloseable {
         return new GpuDcSolver(n, handle);
     }
 
+    /**
+     * A context the DEVICE assembles: the structure {@link GpuDcAssembly} captured, the values from
+     * the branch powers, the target vector from the generator and load targets, the slack
+     * distribution on the device generator tables. Uploads every table of the assembly and fills +
+     * factorizes once; {@link #fillTarget()} / {@link #solveTarget()} then run a load flow with no
+     * host-side matrix at all.
+     */
+    public static GpuDcSolver createAssembled(GpuDcAssembly a) {
+        Objects.requireNonNull(a);
+        if (!isAvailable()) {
+            throw new IllegalStateException("GPU native library not available");
+        }
+        long handle = createAssembled(a.n, a.rowPtr, a.colIdx, a.contribPtr, a.contribKind, a.contribElem, a.contribCoef,
+                a.targetKind, a.targetElem, a.rhsPtr, a.rhsKind, a.rhsElem, a.rhsCoef);
+        GpuDcSolver solver = new GpuDcSolver(a.n, handle);
+        try {
+            solver.setBranches(a.ph1Row, a.ph2Row, a.a1Row, a.a1, a.power);
+            solver.setBuses(a);
+            solver.setGenerators(a);
+            solver.fillValues();
+        } catch (RuntimeException e) {
+            solver.close();
+            throw e;
+        }
+        return solver;
+    }
+
+    /** Re-upload the branch model (powers, fixed shifts) after a tap change, then refill and refactorize. */
+    public void refreshBranches(GpuDcAssembly a) {
+        setBranches(a.ph1Row, a.ph2Row, a.a1Row, a.a1, a.power);
+        fillValues();
+    }
+
+    private void setBuses(GpuDcAssembly a) {
+        setBuses(handle(), a.busPColumn, a.busPhRow, a.busLoadTargetP, a.busFlags, a.busSc, a.busGenStart, a.scBusPtr, a.scBusList, a.scSlackCount);
+    }
+
+    private void setGenerators(GpuDcAssembly a) {
+        setGenerators(handle(), a.genInitialTargetP, a.genTargetP, a.genMinTargetP, a.genMaxTargetP, a.genMinP, a.genMaxP,
+                a.genDroop, a.genParticipationFactor, a.genParticipating);
+    }
+
+    /** The loads' target P per bus (LfNetwork.getBuses() order). */
+    public void setBusLoads(double[] loadTargetP) {
+        setBusLoads(handle(), loadTargetP);
+    }
+
+    /** The buses left out of the mismatch and the distribution (islanded); {@code null} clears. */
+    public void setExcludedBuses(int[] buses) {
+        setExcludedBuses(handle(), buses);
+    }
+
+    /** The generators' current target P (the assembly's generator order). */
+    public void setGeneratorTargets(double[] targetP) {
+        setGeneratorTargets(handle(), targetP);
+    }
+
+    public double[] readGeneratorTargets() {
+        return readGeneratorTargets(handle());
+    }
+
+    /** The matrix values from the branch powers, then the factorization (analysis on the first call). */
+    public void fillValues() {
+        fillValues(handle());
+    }
+
+    /** The device matrix values (pattern order) — the assembly tests' probe. */
+    public double[] readValues() {
+        return readValues(handle());
+    }
+
+    /** {@code DcLoadFlowEngine.getActivePowerMismatch} over the enabled buses (minus the excluded ones when asked). */
+    public double activePowerMismatch(boolean withExcluded) {
+        return activePowerMismatch(handle(), withExcluded);
+    }
+
+    /** The result of a device slack distribution: what {@code ActivePowerDistribution.Result} carries. */
+    public record Distribution(double remainingMismatch, int iterations) {
+    }
+
+    /**
+     * {@code ActivePowerDistribution.run} with the generation step on the device generator targets.
+     *
+     * @param participationType 0 = P_MAX, 1 = P, 2 = PARTICIPATION_FACTOR, 3 = REMAINING_MARGIN (the generation balance types)
+     * @param referenceGenerator the assembly's reference generator index, or -1
+     */
+    public Distribution distributeSlack(int participationType, boolean useActiveLimits, int referenceGenerator, boolean withExcluded, double mismatch) {
+        double[] out = distributeSlack(handle(), participationType, useActiveLimits, referenceGenerator, withExcluded, mismatch);
+        return new Distribution(out[0], (int) out[1]);
+    }
+
+    /** The target vector on the device from the current generator targets, loads and branch model. */
+    public void fillTarget() {
+        fillTarget(handle());
+    }
+
+    public double[] readTarget() {
+        return readTarget(handle());
+    }
+
+    /** Solve against the device target vector; returns the state. */
+    public double[] solveTarget() {
+        return solveTarget(handle());
+    }
+
     public int size() {
         return n;
     }
@@ -216,4 +321,37 @@ public final class GpuDcSolver implements AutoCloseable {
     private static native void setChunkTargets(long handle, double[] targets, int count);
 
     private static native double[] connectivityCriterion(long handle, int[] ctgPtr, int[] ctgElem);
+
+    private static native long createAssembled(int n, int[] rowPtr, int[] colIdx, int[] contribPtr, int[] contribKind, int[] contribElem,
+                                               double[] contribCoef, int[] targetKind, int[] targetElem, int[] rhsPtr, int[] rhsKind,
+                                               int[] rhsElem, double[] rhsCoef);
+
+    private static native void setBuses(long handle, int[] pColumn, int[] phRow, double[] loadP, int[] flags, int[] sc, int[] genStart,
+                                        int[] scBusPtr, int[] scBusList, int[] scSlackCount);
+
+    private static native void setBusLoads(long handle, double[] loadP);
+
+    private static native void setExcludedBuses(long handle, int[] buses);
+
+    private static native void setGenerators(long handle, double[] init, double[] target, double[] minT, double[] maxT, double[] minP,
+                                             double[] maxP, double[] droop, double[] pf, int[] participating);
+
+    private static native void setGeneratorTargets(long handle, double[] target);
+
+    private static native double[] readGeneratorTargets(long handle);
+
+    private static native void fillValues(long handle);
+
+    private static native double[] readValues(long handle);
+
+    private static native double activePowerMismatch(long handle, boolean withExcluded);
+
+    private static native double[] distributeSlack(long handle, int participationType, boolean useActiveLimits, int referenceGenerator,
+                                                   boolean withExcluded, double mismatch);
+
+    private static native void fillTarget(long handle);
+
+    private static native double[] readTarget(long handle);
+
+    private static native double[] solveTarget(long handle);
 }

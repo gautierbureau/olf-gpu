@@ -173,26 +173,24 @@ final class DcSlackDistributionModel {
     Map<Integer, Double> distribute(Set<Integer> excludedBuses, double mismatch) {
         int m = genBus.length;
         double[] target = genBaseTargetP.clone();
-        double remaining = mismatch;
 
-        // resetToInitialState: the reference generator first, then every participating generator of a
-        // participating (remaining) bus, each back to its initial target P
-        boolean[] reset = new boolean[m];
+        // resetToInitialState: the reference generator first (the interface default), then every participating
+        // generator of a participating (remaining) bus, each back to its initial target P — two separately
+        // accumulated amounts added at the end, then added to the mismatch, as ActivePowerDistribution.run does
+        double refPrevious = 0.;
         if (referenceGenerator >= 0) {
-            remaining -= genInitialTargetP[referenceGenerator] - target[referenceGenerator];
+            refPrevious -= genInitialTargetP[referenceGenerator] - target[referenceGenerator];
             target[referenceGenerator] = genInitialTargetP[referenceGenerator];
-            reset[referenceGenerator] = true;
         }
+        double stepPrevious = 0;
         for (int i = 0; i < m; i++) {
             if (excludedBuses.contains(genBus[i]) || !genParticipating[i]) {
                 continue;
             }
-            if (!reset[i]) {
-                remaining -= genInitialTargetP[i] - target[i];
-                target[i] = genInitialTargetP[i];
-                reset[i] = true;
-            }
+            stepPrevious -= genInitialTargetP[i] - target[i];
+            target[i] = genInitialTargetP[i];
         }
+        double remaining = mismatch + (stepPrevious + refPrevious);
 
         // getParticipatingElements, with factors evaluated on the RESET targets
         int[] elements = new int[m];

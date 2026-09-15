@@ -19,6 +19,8 @@ import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfHvdc;
+import com.powsybl.openloadflow.network.PiModelArray;
+import com.powsybl.openloadflow.network.TransformerPhaseControl;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfNetworkParameters;
 import com.powsybl.openloadflow.network.LoadFlowModel;
@@ -110,7 +112,21 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
     private final int[] chunkHvdcStatus;
     private final double[] chunkHvdcP0;
     private final int maxOuterLoopIterations;
-    private int[] currentConfiguration;
+    private int[] currentHvdcConfiguration;
+    private int[] currentTapConfiguration;
+
+    // the incremental phase control loop, per step
+    private final List<TransformerPhaseControl> phaseControls;
+    private final List<PiModelArray> phaseModels;
+    private final int[] phaseLowTapPosition;
+    private final int[] baseTapIndex;
+    private int[] chunkTapIndex;
+    private int[] chunkAllowedDirection;
+    private int[] chunkDirectionChangeCount;
+    private int[] chunkCurrentDirection;
+
+    /** The loops OLF would run on this network, in its order; 0 = AC-emulation limits, 1 = phase control. */
+    private final int[] loopKinds;
 
     private GpuTimeSeriesDcEngine(DcLoadFlowContext context, GpuDcAssembly assembly, GpuDcSolver solver, int chunk) {
         this.context = context;
@@ -165,10 +181,85 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
         }
         this.chunkHvdcStatus = new int[chunk * Math.max(hvdcs.size(), 1)];
         this.chunkHvdcP0 = new double[chunk * Math.max(hvdcs.size(), 1)];
-        this.currentConfiguration = baseHvdcStatus.clone();
+        this.currentHvdcConfiguration = baseHvdcStatus.clone();
         if (!hvdcs.isEmpty()) {
             uploadHvdcTables();
         }
+
+        // AbstractPhaseControlOuterLoop.getControllerBranches, then the CONTROLLER-mode controls
+        List<TransformerPhaseControl> controls = new java.util.ArrayList<>();
+        List<PiModelArray> models = new java.util.ArrayList<>();
+        List<Integer> lows = new java.util.ArrayList<>();
+        for (LfBranch branch : network.getBranches()) {
+            if (branch.isDisabled() || !branch.isPhaseController() || !branch.isConnectedAtBothSides()) {
+                continue;
+            }
+            var control = branch.getPhaseControl().orElse(null);
+            if (control == null || control.getMode() != TransformerPhaseControl.Mode.CONTROLLER) {
+                continue;
+            }
+            if (!(branch.getPiModel() instanceof PiModelArray piModelArray)) {
+                throw new UnsupportedOperationException("phase controller '" + branch.getId() + "' has no tap table");
+            }
+            controls.add(control);
+            models.add(piModelArray);
+            lows.add(piModelArray.getTapPositionRange().getMinimum());
+        }
+        this.phaseControls = List.copyOf(controls);
+        this.phaseModels = List.copyOf(models);
+        this.phaseLowTapPosition = new int[lows.size()];
+        this.baseTapIndex = new int[lows.size()];
+        for (int i = 0; i < lows.size(); i++) {
+            phaseLowTapPosition[i] = lows.get(i);
+            baseTapIndex[i] = phaseModels.get(i).getTapPosition() - phaseLowTapPosition[i];
+        }
+        this.currentTapConfiguration = baseTapIndex.clone();
+        if (!phaseControls.isEmpty()) {
+            uploadPhaseTables();
+        }
+        this.loopKinds = context.getParameters().getOuterLoops().stream()
+                .filter(o -> o.isNeeded(context))
+                .mapToInt(o -> o instanceof com.powsybl.openloadflow.dc.DcHvdcAcEmulationLimitsOuterLoop ? 0 : 1)
+                .toArray();
+    }
+
+    /** The controller tables; the tap position and the ratchet are per step. */
+    private void uploadPhaseTables() {
+        int m = phaseControls.size();
+        int[] branch = new int[m];
+        int[] alphaColumn = new int[m];
+        int[] controlled = new int[m];
+        int[] side = new int[m];
+        double[] target = new double[m];
+        double[] halfDeadband = new double[m];
+        int[] tapIndex = new int[m];
+        int[] tapPtr = new int[m + 1];
+        List<Double> tapA1 = new java.util.ArrayList<>();
+        for (int i = 0; i < m; i++) {
+            TransformerPhaseControl control = phaseControls.get(i);
+            PiModelArray piModel = phaseModels.get(i);
+            branch[i] = control.getControllerBranch().getNum();
+            alphaColumn[i] = context.getEquationSystem()
+                    .getEquation(branch[i], com.powsybl.openloadflow.dc.equations.DcEquationType.BRANCH_TARGET_ALPHA1)
+                    .map(com.powsybl.openloadflow.equations.Equation::getColumn)
+                    .orElse(-1);
+            controlled[i] = control.getControlledBranch().getNum();
+            side[i] = control.getControlledSide() == com.powsybl.iidm.network.TwoSides.ONE ? 1 : 2;
+            target[i] = control.getTargetValue();
+            halfDeadband[i] = Math.max(control.getTargetDeadband(), 1 / com.powsybl.openloadflow.util.PerUnit.SB) / 2;
+            tapPtr[i] = tapA1.size();
+            var range = piModel.getTapPositionRange();
+            for (int tap = range.getMinimum(); tap <= range.getMaximum(); tap++) {
+                tapA1.add(piModel.getModel(tap).getA1());
+            }
+            tapIndex[i] = piModel.getTapPosition() - phaseLowTapPosition[i];
+        }
+        tapPtr[m] = tapA1.size();
+        double[] a1 = new double[tapA1.size()];
+        for (int i = 0; i < a1.length; i++) {
+            a1[i] = tapA1.get(i);
+        }
+        solver.setPhaseControllerTables(branch, alphaColumn, controlled, side, target, halfDeadband, tapIndex, tapPtr, a1);
     }
 
     private static int statusCode(LfHvdc.AcEmulationControl.AcEmulationStatus status) {
@@ -257,9 +348,12 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
                     // whether or not the network has an AC-emulation link
                     // the AC-emulation limits loop is driven over the chunk (below); any other loop
                     // still sends the run to the stock engine
+                    // both DC loops that decide from the state are driven over the chunk; anything
+                    // else (area interchange control) still sends the run to the stock engine
                     List<?> needed = dcParameters.getOuterLoops().stream()
                             .filter(o -> o.isNeeded(context))
-                            .filter(o -> !(o instanceof com.powsybl.openloadflow.dc.DcHvdcAcEmulationLimitsOuterLoop))
+                            .filter(o -> !(o instanceof com.powsybl.openloadflow.dc.DcHvdcAcEmulationLimitsOuterLoop)
+                                    && !(o instanceof com.powsybl.openloadflow.dc.DcIncrementalPhaseControlOuterLoop))
                             .toList();
                     if (!needed.isEmpty()) {
                         LOGGER.info("GPU time-series DC: {} outer loop(s) with no device model on this network, stock engine", needed.size());
@@ -301,7 +395,7 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
         for (int i = 0; i < baseAlpha.length; i++) {
             alphaBranches.get(i).getPiModel().setA1(baseAlpha[i]);
         }
-        applyConfiguration(baseHvdcStatus);
+        applyConfiguration(baseHvdcStatus, baseTapIndex);
     }
 
     /** Capture the step's injections: the generator targets and the buses' load target P. */
@@ -334,6 +428,30 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
         }
     }
 
+    private void resetPhaseState(int count) {
+        int m = phaseControls.size();
+        if (m == 0) {
+            return;
+        }
+        int size = count * m;
+        if (chunkTapIndex == null || chunkTapIndex.length < size) {
+            chunkTapIndex = new int[size];
+            chunkAllowedDirection = new int[size];
+            chunkDirectionChangeCount = new int[size];
+            chunkCurrentDirection = new int[size];
+        }
+        // every step is an independent run, so every step starts from the network's tap positions
+        // and from a fresh IncrementalContextData
+        for (int step = 0; step < count; step++) {
+            for (int c = 0; c < m; c++) {
+                chunkTapIndex[step * m + c] = baseTapIndex[c];
+                chunkAllowedDirection[step * m + c] = 2;          // AllowedDirection.BOTH
+                chunkDirectionChangeCount[step * m + c] = 0;
+                chunkCurrentDirection[step * m + c] = -1;
+            }
+        }
+    }
+
     /**
      * The chunk on the device: per step the slack distribution and the target vector, then one
      * multi-right-hand-side solve for every step at once.
@@ -348,117 +466,293 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
             chunkDistributed = new double[count];
             chunkMismatch = new double[count];
         }
+        applyConfiguration(baseHvdcStatus, baseTapIndex);
+        refreshDeviceMatrix();
         solver.timeSeriesChunk(count, chunkGeneratorTargets, generatorCount, chunkLoadTargets, busCount,
                 chunkGeneratorInitial, chunkGeneratorParticipating, chunkGeneratorMinTargetP, chunkGeneratorMaxTargetP,
                 chunkGeneratorMinP, chunkGeneratorMaxP, chunkGeneratorDroop, chunkGeneratorParticipationFactor, chunkHvdcP0,
                 distributedSlack ? participationType : -1, useActiveLimits, assembly.referenceGenerator,
                 chunkStates, chunkGeneratorTargets, chunkDistributed, chunkMismatch);
-        runHvdcLoop(count);
+        runOuterLoops(count);
         LAST_DEVICE_STEP_COUNT.addAndGet(count);
     }
 
     /**
-     * {@code DcHvdcAcEmulationLimitsOuterLoop} over the whole chunk: every step's decision is taken
-     * on its own state by a kernel, and the steps that changed are regrouped by the configuration
-     * they now ask for. A configuration is applied to the network with OLF's own mutators, the
-     * device matrix is refilled and refactorized for it — 12 ms on rte6515, against 580 for the
-     * analysis, which is why grouping beats a per-step Woodbury correction here — and that group's
-     * steps are re-solved together. Repeats until no step changes, within OLF's outer-loop budget.
+     * OLF's DC outer loops, over the whole chunk.
+     *
+     * <p>A step whose loop fires needs a different matrix, and the steps of a chunk only batch
+     * because they share one factorization. So the steps are grouped by the CONFIGURATION they ask
+     * for — the AC-emulation status of every link and the tap position of every phase controller —
+     * and a group is solved against its own. A refill and a cuDSS refactorization is 12 ms on
+     * rte6515 against 580 for the analysis, which is what makes switching between configurations
+     * affordable.
+     *
+     * <p>Each step carries its own loop state machine, because a step is an independent run:
+     * {@code DcLoadFlowEngine.run}'s sweep runs one loop to stability before moving to the next and
+     * stops when a full pass solves nothing, and the phase controllers' direction ratchet
+     * ({@code IncrementalContextData}) is per run, hence here per step.
      */
-    private void runHvdcLoop(int count) {
+    private void runOuterLoops(int count) {
         int hvdcCount = hvdcs.size();
-        if (hvdcCount == 0) {
+        int controllerCount = phaseControls.size();
+        if (loopKinds.length == 0 || hvdcCount + controllerCount == 0) {
             return;
         }
-        int[] status = java.util.Arrays.copyOf(chunkHvdcStatus, count * hvdcCount);
-        double[] offsets = java.util.Arrays.copyOf(chunkHvdcP0, count * hvdcCount);
-        for (int round = 0; round < maxOuterLoopIterations; round++) {
-            int[] decisions = solver.timeSeriesHvdcCheck(count, status, offsets);
+        resetPhaseState(count);
+        int[] status = java.util.Arrays.copyOf(chunkHvdcStatus, Math.max(count * hvdcCount, 1));
+        double[] offsets = java.util.Arrays.copyOf(chunkHvdcP0, Math.max(count * hvdcCount, 1));
+
+        // per step: where it is in OLF's sweep, what fired last, how many solves it has had, and
+        // whether the pass it is in has solved anything
+        int[] loopIndex = new int[count];
+        int[] lastUnstable = new int[count];
+        int[] totalIterations = new int[count];
+        int[] passSolves = new int[count];
+        boolean[] done = new boolean[count];
+        boolean[] needsResolve = new boolean[count];
+        java.util.Arrays.fill(lastUnstable, -1);
+
+        for (int round = 0; round < MAX_SWEEP_ROUNDS; round++) {
             java.util.Map<String, List<Integer>> groups = new java.util.LinkedHashMap<>();
             for (int step = 0; step < count; step++) {
-                boolean changed = false;
-                for (int h = 0; h < hvdcCount; h++) {
-                    int decision = decisions[step * hvdcCount + h];
-                    if (decision >= 0) {
-                        status[step * hvdcCount + h] = decision;
-                        changed = true;
-                    }
-                }
-                if (changed) {
-                    StringBuilder key = new StringBuilder();
-                    for (int h = 0; h < hvdcCount; h++) {
-                        key.append(status[step * hvdcCount + h]).append(',');
-                    }
-                    groups.computeIfAbsent(key.toString(), k -> new java.util.ArrayList<>()).add(step);
+                if (!done[step]) {
+                    groups.computeIfAbsent(configurationKey(step, status, hvdcCount, controllerCount), k -> new java.util.ArrayList<>())
+                            .add(step);
                 }
             }
             if (groups.isEmpty()) {
                 break;
             }
-            LAST_DEVICE_LOOP_REGROUPINGS.addAndGet(groups.size());
+            if (System.getenv("OLF_TS_TRACE") != null) {
+                System.err.printf("TS_SWEEP round=%d groups=%d%n", round, groups.size());
+            }
             for (List<Integer> group : groups.values()) {
-                int[] configuration = new int[hvdcCount];
                 int first = group.get(0);
-                System.arraycopy(status, first * hvdcCount, configuration, 0, hvdcCount);
-                applyConfiguration(configuration);
+                applyConfiguration(configurationOf(first, status, hvdcCount, baseHvdcStatus.length),
+                        tapConfigurationOf(first, controllerCount));
                 refreshDeviceMatrix();
-                // the converter stations of a saturating link are retargeted: that is an injection
-                // change, and it belongs to the steps of this group only
-                int generatorCount = generators.size();
-                for (int step : group) {
-                    for (int h = 0; h < hvdcCount; h++) {
-                        if (hvdcStation1Generator[h] >= 0) {
-                            chunkGeneratorTargets[step * generatorCount + hvdcStation1Generator[h]] =
-                                    hvdcs.get(h).getConverterStation1().getTargetP();
-                        }
-                        if (hvdcStation2Generator[h] >= 0) {
-                            chunkGeneratorTargets[step * generatorCount + hvdcStation2Generator[h]] =
-                                    hvdcs.get(h).getConverterStation2().getTargetP();
-                        }
+                int[] steps = group.stream().mapToInt(Integer::intValue).toArray();
+                boolean resolve = false;
+                for (int step : steps) {
+                    resolve |= needsResolve[step];
+                }
+                if (System.getenv("OLF_TS_TRACE") != null) {
+                    System.err.printf("TS_SWEEP   group steps=%s config=%s resolve=%s loopIdx=%d lastUnstable=%d%n",
+                            group, configurationKey(first, status, hvdcCount, controllerCount), resolve, loopIndex[first], lastUnstable[first]);
+                }
+                if (resolve) {
+                    LAST_DEVICE_LOOP_REGROUPINGS.incrementAndGet();
+                    updateHvdcInjections(steps, hvdcCount);
+                    solver.timeSeriesResolve(steps, chunkGeneratorTargets, generators.size(), chunkLoadTargets,
+                            network.getBuses().size(), chunkStates);
+                    for (int step : steps) {
+                        needsResolve[step] = false;
                     }
                 }
-                int[] steps = group.stream().mapToInt(Integer::intValue).toArray();
-                solver.timeSeriesResolve(steps, chunkGeneratorTargets, generatorCount, chunkLoadTargets,
-                        network.getBuses().size(), chunkStates);
+                // the decisions of both loops on this group's steps, each on its own state
+                int[] hvdcDecisions = hvdcCount > 0 ? solver.timeSeriesHvdcCheck(count, status, offsets) : new int[0];
+                int[] phaseDecisions = new int[0];
+                int[] tapSlice = null;
+                int[] allowedSlice = null;
+                int[] countSlice = null;
+                int[] directionSlice = null;
+                if (controllerCount > 0) {
+                    tapSlice = gather(chunkTapIndex, steps, controllerCount);
+                    allowedSlice = gather(chunkAllowedDirection, steps, controllerCount);
+                    countSlice = gather(chunkDirectionChangeCount, steps, controllerCount);
+                    directionSlice = gather(chunkCurrentDirection, steps, controllerCount);
+                    phaseDecisions = solver.timeSeriesPhaseCheck(steps, tapSlice, allowedSlice, countSlice, directionSlice);
+                }
+                for (int i = 0; i < steps.length; i++) {
+                    int step = steps[i];
+                    int kind = loopKinds[loopIndex[step]];
+                    boolean changed = false;
+                    if (kind == 0) {
+                        for (int h = 0; h < hvdcCount; h++) {
+                            int decision = hvdcDecisions[step * hvdcCount + h];
+                            if (decision >= 0) {
+                                status[step * hvdcCount + h] = decision;
+                                changed = true;
+                            }
+                        }
+                    } else {
+                        for (int c = 0; c < controllerCount; c++) {
+                            if (phaseDecisions[i * controllerCount + c] >= 0) {
+                                changed = true;
+                            }
+                        }
+                    }
+                    if (controllerCount > 0 && kind == 1) {
+                        // the decisions are evaluated for the whole group, but only a step whose
+                        // sweep is ON the phase control loop has actually run it: keeping the
+                        // ratchet of the others would advance a loop OLF has not reached for them
+                        scatter(chunkTapIndex, tapSlice, step, i, controllerCount);
+                        scatter(chunkAllowedDirection, allowedSlice, step, i, controllerCount);
+                        scatter(chunkDirectionChangeCount, countSlice, step, i, controllerCount);
+                        scatter(chunkCurrentDirection, directionSlice, step, i, controllerCount);
+                    }
+                    if (changed) {
+                        lastUnstable[step] = loopIndex[step];
+                        totalIterations[step]++;
+                        passSolves[step]++;
+                        needsResolve[step] = true;
+                        if (totalIterations[step] >= maxOuterLoopIterations) {
+                            done[step] = true;
+                        }
+                    } else {
+                        advance(step, loopIndex, lastUnstable, passSolves, done);
+                    }
+                }
             }
         }
-        System.arraycopy(status, 0, chunkHvdcStatus, 0, count * hvdcCount);
-        // the reported mismatch is the one the network ends on, and the loop moved injections
+        if (hvdcCount > 0) {
+            System.arraycopy(status, 0, chunkHvdcStatus, 0, count * hvdcCount);
+        }
+        // the reported mismatch is the one the network ends on, and a loop moves injections
         solver.timeSeriesMismatch(count, chunkMismatch);
     }
 
-    /** Put the links in the given AC-emulation configuration, with OLF's own mutators. */
-    private void applyConfiguration(int[] configuration) {
-        if (hvdcs.isEmpty() || java.util.Arrays.equals(configuration, currentConfiguration)) {
+    /** A bound on the sweep; each round advances every step's own state machine at least one slot. */
+    private static final int MAX_SWEEP_ROUNDS = 1000;
+
+    /**
+     * {@code DcLoadFlowEngine.run}'s sweep for one step: a loop that reports stable hands over to
+     * the next, the pass ends when the list is exhausted or the next loop is the one that fired
+     * last, and the run ends when a whole pass has solved nothing.
+     */
+    private void advance(int step, int[] loopIndex, int[] lastUnstable, int[] passSolves, boolean[] done) {
+        loopIndex[step]++;
+        while (loopIndex[step] >= loopKinds.length || loopIndex[step] == lastUnstable[step]) {
+            if (passSolves[step] == 0) {
+                done[step] = true;
+                return;
+            }
+            passSolves[step] = 0;
+            loopIndex[step] = 0;
+            if (loopKinds.length > 0 && loopIndex[step] != lastUnstable[step]) {
+                return;
+            }
+            if (loopKinds.length == 0) {
+                done[step] = true;
+                return;
+            }
+            // the first loop of the new pass is the one that fired last: the pass ends at once
+            done[step] = true;
             return;
         }
+    }
+
+    private static int[] gather(int[] source, int[] steps, int width) {
+        int[] slice = new int[steps.length * width];
+        for (int i = 0; i < steps.length; i++) {
+            System.arraycopy(source, steps[i] * width, slice, i * width, width);
+        }
+        return slice;
+    }
+
+    private static void scatter(int[] target, int[] slice, int step, int i, int width) {
+        System.arraycopy(slice, i * width, target, step * width, width);
+    }
+
+    private String configurationKey(int step, int[] status, int hvdcCount, int controllerCount) {
+        StringBuilder key = new StringBuilder();
+        for (int h = 0; h < hvdcCount; h++) {
+            key.append(status[step * hvdcCount + h]).append(',');
+        }
+        key.append('|');
+        for (int c = 0; c < controllerCount; c++) {
+            key.append(chunkTapIndex[step * controllerCount + c]).append(',');
+        }
+        return key.toString();
+    }
+
+    private static int[] configurationOf(int step, int[] status, int hvdcCount, int size) {
+        int[] configuration = new int[size];
+        if (hvdcCount > 0) {
+            System.arraycopy(status, step * hvdcCount, configuration, 0, hvdcCount);
+        }
+        return configuration;
+    }
+
+    private int[] tapConfigurationOf(int step, int controllerCount) {
+        int[] taps = new int[controllerCount];
+        if (controllerCount > 0) {
+            System.arraycopy(chunkTapIndex, step * controllerCount, taps, 0, controllerCount);
+        }
+        return taps;
+    }
+
+    /** A saturating link retargets its converter stations: that is an injection change of those steps. */
+    private void updateHvdcInjections(int[] steps, int hvdcCount) {
+        int generatorCount = generators.size();
+        for (int step : steps) {
+            for (int h = 0; h < hvdcCount; h++) {
+                if (hvdcStation1Generator[h] >= 0) {
+                    chunkGeneratorTargets[step * generatorCount + hvdcStation1Generator[h]] =
+                            hvdcs.get(h).getConverterStation1().getTargetP();
+                }
+                if (hvdcStation2Generator[h] >= 0) {
+                    chunkGeneratorTargets[step * generatorCount + hvdcStation2Generator[h]] =
+                            hvdcs.get(h).getConverterStation2().getTargetP();
+                }
+            }
+        }
+    }
+
+    /** Put the network in the given configuration, with OLF's own mutators. */
+    private boolean applyConfiguration(int[] hvdcConfiguration, int[] tapConfiguration) {
+        boolean changed = false;
         for (int h = 0; h < hvdcs.size(); h++) {
-            if (configuration[h] == currentConfiguration[h]) {
+            if (hvdcConfiguration[h] == currentHvdcConfiguration[h]) {
                 continue;
             }
+            changed = true;
             var control = hvdcs.get(h).getAcEmulationControl();
-            switch (configuration[h]) {
+            switch (hvdcConfiguration[h]) {
                 case 0 -> control.switchToLinearMode();
                 case 1 -> control.switchToSaturationFromCS1toCS2(false);
                 case 2 -> control.switchToSaturationFromCS2toCS1(false);
-                default -> throw new IllegalStateException("unexpected AC emulation status " + configuration[h]);
+                default -> throw new IllegalStateException("unexpected AC emulation status " + hvdcConfiguration[h]);
             }
         }
-        currentConfiguration = configuration.clone();
+        currentHvdcConfiguration = hvdcConfiguration.clone();
+        for (int c = 0; c < phaseControls.size(); c++) {
+            if (tapConfiguration[c] != currentTapConfiguration[c]) {
+                phaseModels.get(c).setTapPosition(phaseLowTapPosition[c] + tapConfiguration[c]);
+                changed = true;
+            }
+        }
+        currentTapConfiguration = tapConfiguration.clone();
+        deviceMatrixDirty |= changed;
+        return changed;
     }
+
+    /** True when the network's configuration has moved since the device matrix was last filled. */
+    private boolean deviceMatrixDirty;
 
     /** Refill the device matrix for the configuration the network now carries, and refactorize. */
     private void refreshDeviceMatrix() {
+        if (!deviceMatrixDirty) {
+            return;
+        }
         GpuDcAssembly refreshed = GpuDcAssembly.capture(network, context.getEquationSystem(),
                 context.getParameters().getEquationSystemCreationParameters());
         if (!assembly.samePattern(refreshed)) {
-            throw new IllegalStateException("the AC emulation switch changed the matrix pattern");
+            throw new IllegalStateException("an outer loop changed the matrix pattern");
         }
-        if (!assembly.sameStructure(refreshed)) {
+        boolean structureChanged = !assembly.sameStructure(refreshed);
+        if (structureChanged) {
             solver.setContributions(refreshed);
+        }
+        if (System.getenv("OLF_TS_TRACE") != null) {
+            System.err.printf("TS_SWEEP   refresh structureChanged=%s nnz=%d%n", structureChanged, refreshed.nonZeroCount());
         }
         solver.refreshBranches(refreshed);
         assembly = refreshed;
+        deviceMatrixDirty = false;
+        if (!phaseControls.isEmpty()) {
+            uploadPhaseTables();
+        }
     }
 
     /**
@@ -468,6 +762,10 @@ public final class GpuTimeSeriesDcEngine implements TimeSeriesLoadFlow.StepEngin
      */
     @Override
     public TimeSeriesLoadFlow.SolveResult apply(int slot) {
+        // the step's own configuration first: a branch flow is read from the network's pi model, so
+        // a controller sitting on another step's tap would be emitted with the wrong power and shift
+        applyConfiguration(configurationOf(slot, chunkHvdcStatus, hvdcs.size(), baseHvdcStatus.length),
+                tapConfigurationOf(slot, phaseControls.size()));
         int n = assembly.size();
         double[] state = new double[n];
         System.arraycopy(chunkStates, slot * n, state, 0, n);

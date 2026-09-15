@@ -308,6 +308,18 @@ public final class GpuDcSolver implements AutoCloseable {
         return timeSeriesHvdcCheck(handle(), steps, statusPerStep, p0PerStep);
     }
 
+    /** The incremental phase control decision for a subset of steps; the ratchet arrays are updated in place. */
+    public int[] timeSeriesPhaseCheck(int[] stepIndices, int[] tapIndex, int[] allowedDirection, int[] directionChangeCount,
+                                      int[] currentDirection) {
+        return timeSeriesPhaseCheck(handle(), stepIndices, tapIndex, allowedDirection, directionChangeCount, currentDirection);
+    }
+
+    /** The phase controllers of the run ({@link GpuDcOuterLoops} builds the same tables). */
+    public void setPhaseControllerTables(int[] branch, int[] alphaColumn, int[] controlled, int[] side, double[] target,
+                                         double[] halfDeadband, int[] tapIndex, int[] tapPtr, double[] tapA1) {
+        setPhaseControllers(handle(), branch, alphaColumn, controlled, side, target, halfDeadband, tapIndex, tapPtr, tapA1);
+    }
+
     /** Re-solve a subset of the chunk's steps against the current factorization. */
     public void timeSeriesResolve(int[] stepIndices, double[] generatorTargets, int generatorCount, double[] loadTargetP,
                                   int busCount, double[] outStates) {
@@ -530,6 +542,9 @@ public final class GpuDcSolver implements AutoCloseable {
                                                boolean useActiveLimits,
                                                int referenceGenerator, double[] outStates, double[] outGeneratorTargets,
                                                double[] outDistributed, double[] outMismatch);
+
+    private static native int[] timeSeriesPhaseCheck(long handle, int[] stepIndices, int[] tapIndex, int[] allowedDirection,
+                                                     int[] directionChangeCount, int[] currentDirection);
 
     private static native int[] timeSeriesHvdcCheck(long handle, int steps, int[] statusPerStep, double[] p0PerStep);
 

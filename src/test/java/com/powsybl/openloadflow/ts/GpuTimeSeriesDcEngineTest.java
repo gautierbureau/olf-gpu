@@ -123,6 +123,19 @@ class GpuTimeSeriesDcEngineTest {
         return plan;
     }
 
+    /** OLF's own phase shifter case, with the shifter regulating active power. */
+    private static Network phaseShifterNetwork() {
+        Network network = com.powsybl.iidm.network.test.PhaseShifterTestCaseFactory.create();
+        var ps1 = network.getTwoWindingsTransformer("PS1");
+        ps1.getPhaseTapChanger().getStep(0).setAlpha(-5);
+        ps1.getPhaseTapChanger().getStep(2).setAlpha(5);
+        ps1.getPhaseTapChanger().setTargetDeadband(10);
+        ps1.getPhaseTapChanger().setRegulationMode(com.powsybl.iidm.network.PhaseTapChanger.RegulationMode.ACTIVE_POWER_CONTROL);
+        ps1.getPhaseTapChanger().setRegulationValue(-80);
+        ps1.getPhaseTapChanger().setRegulating(true);
+        return network;
+    }
+
     static List<Case> cases() {
         List<Case> cases = new ArrayList<>();
         cases.add(new Case("eurostag generators", () -> EurostagFactory.fix(EurostagTutorialExample1Factory.create()),
@@ -169,6 +182,26 @@ class GpuTimeSeriesDcEngineTest {
             }
             return List.of(TimeSeries.createDouble("hvdc12", index, values));
         }, () -> dc().setHvdcAcEmulation(true)));
+        // the incremental phase control loop over the chunk: the plan moves the load so the shifter
+        // has to chase its target, landing different steps on different taps
+        cases.add(new Case("phase shifter regulating across steps", GpuTimeSeriesDcEngineTest::phaseShifterNetwork, () -> {
+            Network n = phaseShifterNetwork();
+            int steps = 14;
+            RegularTimeSeriesIndex index = index(steps);
+            double[] values = new double[steps];
+            for (int s = 0; s < steps; s++) {
+                values[s] = 60 + 60.0 * s / (steps - 1);
+            }
+            return List.of(TimeSeries.createDouble("LD2", index, values));
+        }, () -> dc().setPhaseShifterRegulationOn(true)));
+        cases.add(new Case("phase shifter regulating and hvdc together", () -> {
+            Network n = com.powsybl.openloadflow.network.HvdcNetworkFactory.createHvdcInAcEmulationAndPSTInSymetricNetwork();
+            n.getHvdcLine("hvdc12").setMaxP(20);
+            return n;
+        }, () -> {
+            Network n = com.powsybl.openloadflow.network.HvdcNetworkFactory.createHvdcInAcEmulationAndPSTInSymetricNetwork();
+            return loadPlan(n, 10, 2);
+        }, () -> dc().setHvdcAcEmulation(true).setPhaseShifterRegulationOn(true)));
         cases.add(new Case("ieee300 generators", IeeeCdfNetworkFactory::create300,
                 () -> generatorPlan(IeeeCdfNetworkFactory.create300(), 13, 8),
                 () -> dc().setDistributedSlack(true).setBalanceType(LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_P_MAX)));

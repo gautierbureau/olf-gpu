@@ -223,3 +223,17 @@ chunk instead of sending the run to the stock engine:
 1000/1000 steps on the device, and zero AC-emulation configuration changes on this plan: the loop
 costs one check kernel per chunk here. A refill plus refactorization, the price of one configuration
 change, is 11.6 ms on rte6515 against 583 ms for the initial analysis and factorization.
+
+With BOTH DC outer loops configured (AC-emulation limits and incremental phase control), driven over
+the chunk. Two runs, to show the machine's noise:
+
+| date | steps | phase | CPU | GPU | ratio |
+|---|---|---|---|---|---|
+| 2026-09-15 | 1000 | restore + set points + solve | 4.49 ms/step | 0.98 ms/step | x4.60 |
+| 2026-09-15 | 1000 | whole run, all rows | 14.69 ms/step | 5.54 ms/step | x2.65 |
+| 2026-09-15 (repeat) | 1000 | restore + set points + solve | ~6.8 ms/step | 1.12 ms/step | x6.09 |
+| 2026-09-15 (repeat) | 1000 | whole run, all rows | 6.79 ms/step | 2.94 ms/step | x2.31 |
+
+1000/1000 steps on the device. This plan never saturates a link nor moves a tap, so the loops cost
+one decision kernel per chunk; what they buy is that rte6515 runs on the device with its own
+configuration at all.

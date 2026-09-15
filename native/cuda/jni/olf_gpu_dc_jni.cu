@@ -175,6 +175,7 @@ struct DcContext {
     Buf tsGenInit, tsGenPart, tsGenMinT, tsGenMaxT, tsGenMinP, tsGenMaxP, tsGenDroop, tsGenPf;
     Buf tsHvStatus, tsHvP0, tsHvOut, tsSteps2, tsTargets;
     Buf hvdcP0;                                                    // the AC-emulation offsets the target rhs reads
+    Buf tsPcSteps, tsPcTap, tsPcAllowed, tsPcDirCount, tsPcCurDir, tsPcNewTap;
     // --- DC outer loops on the device (GpuDcLoadFlowEngine)
     // incremental phase control: the controllers, their controlled branch/side/target, the tap a1 tables,
     // and the per-BRANCH direction state of IncrementalContextData.ControllerContext
@@ -1497,6 +1498,84 @@ __global__ void tsScatterStates(int nSubset, int n, const int* stepIndices, cons
     int i = (int) (idx / n);
     int row = (int) (idx % n);
     states[(size_t) stepIndices[i] * n + row] = solved[(size_t) i * n + row];
+}
+
+
+/**
+ * AbstractIncrementalPhaseControlOuterLoop.checkActivePowerControlPhaseControls for a subset of the
+ * chunk's steps: one thread per (step, controller), on that step's own state and its own direction
+ * ratchet. The sensitivities are shared — they depend on the matrix, not on the step — so the
+ * caller solves them once per configuration.
+ */
+__global__ void tsPhaseDecision(int nSubset, int n, int nCtrl, const int* stepIndices, const double* states, const double* sens,
+                                const int* pcBranch, const int* pcControlled, const int* pcSide, const double* pcTarget,
+                                const double* pcHalfDb, int* tapIdx, const int* pcTapPtr, const double* pcTapA1,
+                                int* allowed, int* dirCount, int* curDir, const int* ph1Row, const int* ph2Row,
+                                const int* a1Row, const double* a1Const, const double* power, int* newTap) {
+    long t = (long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (long) nSubset * nCtrl) {
+        return;
+    }
+    int i = (int) (t / nCtrl);
+    int c = (int) (t % nCtrl);
+    size_t at = (size_t) i * nCtrl + c;
+    newTap[at] = -1;
+    const double* x = states + (size_t) stepIndices[i] * n;
+    int controller = pcBranch[c];
+    int controlled = pcControlled[c];
+    int side = pcSide[c];
+    double pValue = branchFlow(x, controlled, side, ph1Row, ph2Row, a1Row, a1Const, power);
+    if (!(fabs(__dadd_rn(pValue, -pcTarget[c])) > pcHalfDb[c])) {
+        return;
+    }
+    double dp = __dadd_rn(pcTarget[c], -pValue);
+    const double* s = sens + (size_t) c * n;
+    double dph1 = s[ph1Row[controlled]];
+    double dph2 = s[ph2Row[controlled]];
+    double da1 = a1Row[controlled] >= 0 ? s[a1Row[controlled]] : 0.0;
+    double p = power[controlled];
+    double a2p = side == 1
+        ? __dadd_rn(__dadd_rn(__dmul_rn(p, dph1), __dmul_rn(-p, dph2)), __dmul_rn(p, da1))
+        : __dadd_rn(__dadd_rn(__dmul_rn(-p, dph1), __dmul_rn(p, dph2)), __dmul_rn(-p, da1));
+    if (!(fabs(a2p) > SENSI_EPS)) {
+        return;
+    }
+    double da = __dmul_rn(__ddiv_rn(dp, a2p), DEGREES_TO_RADIANS);
+    double currentA1 = a1Row[controller] >= 0 ? x[a1Row[controller]] : a1Const[controller];
+    double newA1 = __dadd_rn(currentA1, da);
+    int tapStart = pcTapPtr[c];
+    int tapCount = pcTapPtr[c + 1] - tapStart;
+    int idx = tapIdx[at];
+    int lo = 0;
+    int hi = tapCount - 1;
+    switch (allowed[at]) {
+        case ALLOWED_INCREASE: lo = idx; break;
+        case ALLOWED_DECREASE: hi = idx; break;
+        default: break;
+    }
+    int closest = idx;
+    double smallest = fabs(__dadd_rn(newA1, -pcTapA1[tapStart + idx]));
+    for (int k = lo; k <= hi; k++) {
+        double distance = fabs(__dadd_rn(newA1, -pcTapA1[tapStart + k]));
+        if (distance < smallest) {
+            closest = k;
+            smallest = distance;
+        }
+    }
+    if (closest == idx) {
+        return;
+    }
+    int direction = closest - idx > 0 ? DIR_INCREASE : DIR_DECREASE;
+    if (dirCount[at] < MAX_DIRECTION_CHANGE) {
+        if (curDir[at] != DIR_NONE && curDir[at] != direction) {
+            dirCount[at]++;
+        }
+        curDir[at] = direction;
+    } else {
+        allowed[at] = direction == DIR_INCREASE ? ALLOWED_INCREASE : ALLOWED_DECREASE;
+    }
+    tapIdx[at] = closest;
+    newTap[at] = closest;
 }
 
 DcContext* ctxOf(jlong h) {
@@ -3338,6 +3417,88 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_timeSeriesMismatch(JNIEnv* env,
         env->SetDoubleArrayRegion(jOutMismatch, 0, steps, host.data());
     } catch (const std::exception& e) {
         throwJava(env, std::string("GpuDcSolver.timeSeriesMismatch: ") + e.what());
+    }
+}
+
+
+/**
+ * The incremental phase control decision for a subset of the chunk's steps. The sensitivities are
+ * solved here once against the CURRENT factorization — they are the same for every step sharing a
+ * configuration — then each (step, controller) decides on its own state and its own ratchet, which
+ * is carried in and out so that each step keeps the per-run state OLF gives a controller.
+ */
+JNIEXPORT jintArray JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_timeSeriesPhaseCheck(JNIEnv* env, jclass, jlong handle, jintArray jSteps,
+                                                                      jintArray jTapIdx, jintArray jAllowed, jintArray jDirCount,
+                                                                      jintArray jCurDir) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        IntArray stepIndices(env, jSteps);
+        int subset = stepIndices.len;
+        int m = ctx->nCtrl;
+        jintArray result = env->NewIntArray(std::max(subset * m, 1));
+        if (subset == 0 || m == 0) {
+            return result;
+        }
+        if (ctx->tsStates.p == nullptr || !ctx->analyzed) {
+            throw std::runtime_error("no chunk states (timeSeriesChunk)");
+        }
+        IntArray tapIdx(env, jTapIdx);
+        IntArray allowed(env, jAllowed);
+        IntArray dirCount(env, jDirCount);
+        IntArray curDir(env, jCurDir);
+        if (tapIdx.len != subset * m || allowed.len != subset * m || dirCount.len != subset * m || curDir.len != subset * m) {
+            throw std::runtime_error("ratchet arrays must be steps x controllers");
+        }
+        int n = ctx->n;
+        // the sensitivities of this configuration, one column per controller
+        ctx->pcSens.ensure((size_t) n * m * sizeof(double));
+        for (int col0 = 0; col0 < m; col0 += S_SOLVE_COLS) {
+            int cols = std::min(S_SOLVE_COLS, m - col0);
+            ctx->ensureRhs(cols);
+            DC_CUDA_CHECK(cudaMemsetAsync(ctx->b.p, 0, (size_t) n * cols * sizeof(double), ctx->stream));
+            phaseRhs<<<grid(cols), BLOCK, 0, ctx->stream>>>(n, cols, ctx->pcAlphaCol.as<int>() + col0, ctx->b.as<double>());
+            DC_CUDA_CHECK(cudaGetLastError());
+            ctx->solveDense(cols);
+            DC_CUDA_CHECK(cudaMemcpy(ctx->pcSens.as<double>() + (size_t) col0 * n, ctx->x.p,
+                                     (size_t) n * cols * sizeof(double), cudaMemcpyDeviceToDevice));
+        }
+        size_t ints = (size_t) subset * m * sizeof(int);
+        ctx->tsPcSteps.ensure((size_t) subset * sizeof(int));
+        DC_CUDA_CHECK(cudaMemcpy(ctx->tsPcSteps.p, stepIndices.p, (size_t) subset * sizeof(int), cudaMemcpyHostToDevice));
+        ctx->tsPcTap.ensure(ints);
+        DC_CUDA_CHECK(cudaMemcpy(ctx->tsPcTap.p, tapIdx.p, ints, cudaMemcpyHostToDevice));
+        ctx->tsPcAllowed.ensure(ints);
+        DC_CUDA_CHECK(cudaMemcpy(ctx->tsPcAllowed.p, allowed.p, ints, cudaMemcpyHostToDevice));
+        ctx->tsPcDirCount.ensure(ints);
+        DC_CUDA_CHECK(cudaMemcpy(ctx->tsPcDirCount.p, dirCount.p, ints, cudaMemcpyHostToDevice));
+        ctx->tsPcCurDir.ensure(ints);
+        DC_CUDA_CHECK(cudaMemcpy(ctx->tsPcCurDir.p, curDir.p, ints, cudaMemcpyHostToDevice));
+        ctx->tsPcNewTap.ensure(ints);
+        tsPhaseDecision<<<grid((long) subset * m), BLOCK, 0, ctx->stream>>>(subset, n, m, ctx->tsPcSteps.as<int>(),
+                ctx->tsStates.as<double>(), ctx->pcSens.as<double>(), ctx->pcBranch.as<int>(), ctx->pcControlled.as<int>(),
+                ctx->pcSide.as<int>(), ctx->pcTarget.as<double>(), ctx->pcHalfDb.as<double>(), ctx->tsPcTap.as<int>(),
+                ctx->pcTapPtr.as<int>(), ctx->pcTapA1.as<double>(), ctx->tsPcAllowed.as<int>(), ctx->tsPcDirCount.as<int>(),
+                ctx->tsPcCurDir.as<int>(), ctx->ph1Row.as<int>(), ctx->ph2Row.as<int>(), ctx->a1Row.as<int>(),
+                ctx->a1Const.as<double>(), ctx->power.as<double>(), ctx->tsPcNewTap.as<int>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        std::vector<int> host((size_t) subset * m);
+        DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->tsPcNewTap.p, ints, cudaMemcpyDeviceToHost));
+        env->SetIntArrayRegion(result, 0, subset * m, host.data());
+        // the ratchet moves with the step: hand it back
+        DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->tsPcTap.p, ints, cudaMemcpyDeviceToHost));
+        env->SetIntArrayRegion(jTapIdx, 0, subset * m, host.data());
+        DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->tsPcAllowed.p, ints, cudaMemcpyDeviceToHost));
+        env->SetIntArrayRegion(jAllowed, 0, subset * m, host.data());
+        DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->tsPcDirCount.p, ints, cudaMemcpyDeviceToHost));
+        env->SetIntArrayRegion(jDirCount, 0, subset * m, host.data());
+        DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->tsPcCurDir.p, ints, cudaMemcpyDeviceToHost));
+        env->SetIntArrayRegion(jCurDir, 0, subset * m, host.data());
+        return result;
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.timeSeriesPhaseCheck: ") + e.what());
+        return nullptr;
     }
 }
 

@@ -938,12 +938,57 @@ ratio comes from the chunked solve and the cheap restore, not from loop work. Wh
 is that rte6515 runs on the device at all; the regrouping path is exercised by the two unit cases,
 not by this plan.
 
-Left for later, in order of value: the emission is 3.3 ms/step of the GPU's 3.36 — running it on
-several host threads while the device solves the next chunk is the obvious next multiplier (OLF
-already partitions by step range, but each partition would build its own device context today). And
-the incremental phase control loop still sends a run to the stock engine: its decision carries the
-per-controller direction ratchet of `IncrementalContextData`, which would have to become per-step
-state on the device.
+### Both DC outer loops over the chunk (2026-09-15)
+
+The incremental phase control loop joined the AC-emulation one, so every DC loop that decides from
+the state now runs over a chunk and only area interchange control still sends a run to the stock
+engine.
+
+What it needed beyond the HVDC case:
+- **A per-step ratchet.** `IncrementalContextData`'s allowed direction, direction-change count and
+  current direction are per RUN, and a step IS a run, so they became per (step, controller) arrays
+  carried into the decision kernel and back out of it.
+- **Per-configuration sensitivities.** The `dP/dα` columns depend on the matrix, not on the step, so
+  they are solved once per configuration group and shared by its steps.
+- **The configuration is now (AC-emulation statuses, tap positions)**, and a tap moves the matrix —
+  `power` and the phase shift — as well as the target's identity row.
+- **A per-step loop state machine**, replicating `DcLoadFlowEngine.run`'s sweep: a loop that reports
+  stable hands over to the next, the pass ends when the list is exhausted or the next loop is the
+  one that fired last, and the run ends when a whole pass solves nothing.
+
+Three bugs the row-for-row gate caught, all in that sweep, and all worth remembering:
+- the decisions are evaluated for a whole group, but only a step whose sweep is ON that loop has
+  actually run it — writing the ratchet back for the others advances a loop OLF has not reached;
+- **the sweep must not stop when a round changes no configuration.** Termination is per step, on
+  the state machine's own `done`: a step that merely advanced to the next loop still has to run it,
+  and stopping early left the phase loop unevaluated;
+- `apply(slot)` has to put the step's own configuration back before emitting, because a branch flow
+  is read from the network's pi model — a controller sitting on another step's tap is emitted with
+  the wrong power and shift.
+
+Gate: `GpuTimeSeriesDcEngineTest` is now 11 cases, adding a shifter that has to chase its target
+across steps and a network where the shifter and a saturating link interact, both compared row for
+row. The whole DC GPU suite is 247 tests, green.
+
+**Numbers** (rte6515, 1000 steps, 200 planned generators, all rows, both loops configured; the
+machine is noisy between runs, so the range of two runs):
+
+| | CPU | GPU | ratio |
+|---|---|---|---|
+| restore + set points + solve | 4.49 / 6.8 ms/step | 0.98 / 1.12 ms/step | **x4.6 to x6.1** |
+| the whole run, all rows streamed | 14.69 / 6.79 ms/step | 5.54 / 2.94 ms/step | **x2.3 to x2.65** |
+
+Same honest caveat as before: this plan never saturates a link and never moves a tap, so the loops
+cost one decision kernel per chunk here. What they buy is that rte6515 runs on the device with its
+own configuration instead of falling back; the regrouping and the sweep are exercised by the four
+loop cases in the gate.
+
+Left for later: the emission is now the whole remaining cost, and it parallelizes — running it on
+several host threads while the device solves the next chunk is the next multiplier (OLF already
+partitions by step range, but each partition would build its own device context today). And a
+configuration switch re-captures the assembly (39 ms on rte6515) before the 12 ms refactorization;
+for a tap-only change the powers and shifts could be patched in place instead, which would matter
+on a plan that moves taps often.
 
 ## 5. Validation and benches
 

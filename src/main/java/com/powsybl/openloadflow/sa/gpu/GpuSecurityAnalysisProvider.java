@@ -158,13 +158,15 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
             if (OpenSecurityAnalysisParameters.getOrDefault(runParameters.getSecurityAnalysisParameters()).isDcFastMode()
                     && com.powsybl.openloadflow.dc.gpu.GpuDcSolver.isAvailable()) {
                 LOGGER.info("Version: {} (GPU Woodbury DC security analysis)", new PowsyblOpenLoadFlowVersion());
+                int dcRequestedThreads = forceSinglePartition(runParameters.getSecurityAnalysisParameters());   // one device, one partition
                 GraphConnectivityFactory<LfBus, LfBranch> dcConnectivityFactory = runParameters.getOperatorStrategies().isEmpty()
                         ? connectivityFactory : new NaiveGraphConnectivityFactory<>(LfBus::getNum);
                 GpuWoodburyDcSecurityAnalysis dcAnalysis = new GpuWoodburyDcSecurityAnalysis(network, matrixFactory,
                         dcConnectivityFactory, runParameters.getMonitors(), runParameters.getReportNode());
                 return dcAnalysis.run(workingVariantId, runParameters.getSecurityAnalysisParameters(), contingenciesProvider,
                         runParameters.getComputationManager(), runParameters.getOperatorStrategies(), runParameters.getActions(),
-                        runParameters.getLimitReductions());
+                        runParameters.getLimitReductions())
+                        .whenComplete((r, t) -> restoreThreadCount(runParameters.getSecurityAnalysisParameters(), dcRequestedThreads));
             }
             return super.run(network, workingVariantId, contingenciesProvider, runParameters);
         }

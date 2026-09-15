@@ -51,7 +51,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * is a bug, never a tolerance to widen.
  *
  * <p>Knobs: {@code OLF_DC_MAX_CTG} caps the contingency list (default: all), {@code OLF_DC_THREADS}
- * sets the SA threadCount (default 1), {@code OLF_DC_MONITORED} the number of monitored branches
+ * sets the CPU arms' threadCount (default 8 — the GPU arm is single-threaded by construction), {@code OLF_DC_MONITORED} the number of monitored branches
  * (default 100), {@code OLF_DC_SKIP_CUDSS=1} runs the KLU arm only (CPU profiling runs).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
@@ -82,9 +82,10 @@ class DcWoodburyBaselineProbe {
         }
         int monitored = Integer.parseInt(System.getenv().getOrDefault("OLF_DC_MONITORED", "100"));
         List<String> monitoredBranches = contingencies.stream().limit(monitored).map(Contingency::getId).toList();
-        int threads = Integer.parseInt(System.getenv().getOrDefault("OLF_DC_THREADS", "1"));
+        // the performance comparison: GPU single-thread vs the CPU with 8 threads (user rule, 2026-09-15)
+        int threads = Integer.parseInt(System.getenv().getOrDefault("OLF_DC_THREADS", "8"));
 
-        System.out.printf("DC-BASELINE rte6515_full | %d N-1 contingencies | %d monitored branches | threadCount %d%n",
+        System.out.printf("DC-BASELINE rte6515_full | %d N-1 contingencies | %d monitored branches | CPU threadCount %d, GPU 1%n",
                 contingencies.size(), monitoredBranches.size(), threads);
 
         if ("1".equals(System.getenv("OLF_DC_SKIP_KLU"))) {
@@ -103,7 +104,7 @@ class DcWoodburyBaselineProbe {
             // phase 1: the GPU Woodbury path (device S, in-kernel Woodbury, flows, screen) vs the stock KLU arm
             assumeTrue(com.powsybl.openloadflow.dc.gpu.GpuDcSolver.isAvailable(), "GPU native library not available");
             com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.set(-1);
-            Arm gpu = run("GPU", new SparseMatrixFactory(), network, contingencies, monitoredBranches, threads, true);
+            Arm gpu = run("GPU", new SparseMatrixFactory(), network, contingencies, monitoredBranches, 1, true);
             int onDevice = com.powsybl.openloadflow.sa.gpu.GpuWoodburyDcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get();
             System.out.printf("DC-BASELINE %-5s wall %6d ms | %.3f ms/ctg | statuses %s | violations %d | x%.2f vs KLU | %d/%d on the device%n",
                     gpu.name(), gpu.wallMs(), gpu.wallMs() / (double) contingencies.size(), statusCounts(gpu.result()),

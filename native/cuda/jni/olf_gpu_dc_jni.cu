@@ -123,7 +123,11 @@ struct DcContext {
     Buf branchGroupStart, branchGroupEnd, groupQty, groupLimStart, groupLimEnd, limThreshold;
     double dcPowerFactor = 1.0;
     // chunk scratch
-    Buf ctgPtr, ctgElem, alpha, states, flows, records, counts;
+    Buf ctgPtr, ctgElem, ctgBase, alpha, states, flows, records, counts;
+    // per-chunk modified-target solutions (n x nBases, column-major): the base state of the
+    // contingencies that need one (islands, lost power, lost PST) — setChunkTargets
+    Buf bases;
+    int nBases = 0;
 
     ~DcContext() {
         if (matB) { cudssMatrixDestroy(matB); }
@@ -195,9 +199,10 @@ __device__ inline double phaseSensi(const double* s, int n, int col, int ph1, in
  *  system A alpha = b with A_ij = delta_ij / power_i - (S[ph1_i, e_j] - S[ph2_i, e_j]) and
  *  b_i = x0[ph1_i] - x0[ph2_i] (no tap action: newAlpha = 0), Gaussian elimination with partial
  *  pivoting (OLF: DenseMatrix.decomposeLU). k == 1 is the plain division OLF also takes. */
-__global__ void woodburyAlphas(int nCtg, int n, const int* ctgPtr, const int* ctgElem,
+__global__ void woodburyAlphas(int nCtg, int n, const int* ctgPtr, const int* ctgElem, const int* ctgBase,
                                const int* elemBranch, const int* ph1Row, const int* ph2Row,
-                               const double* power, const double* s, const double* x0, double* alpha, int* bad) {
+                               const double* power, const double* s, const double* x0, const double* bases,
+                               double* alpha, int* bad) {
     int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= nCtg) {
         return;
@@ -205,17 +210,21 @@ __global__ void woodburyAlphas(int nCtg, int n, const int* ctgPtr, const int* ct
     int start = ctgPtr[c];
     int k = ctgPtr[c + 1] - start;
     double* out = alpha + (size_t) c * MAX_K;
-    if (k <= 0 || k > MAX_K) {
+    if (k == 0) {
+        return;                                              // every element reconnects: the base column IS the state
+    }
+    if (k < 0 || k > MAX_K) {
         bad[c] = 1;
         return;
     }
+    const double* x = ctgBase[c] >= 0 ? bases + (size_t) ctgBase[c] * n : x0;
     double a[MAX_K][MAX_K];
     double rhs[MAX_K];
     for (int i = 0; i < k; i++) {
         int bi = elemBranch[ctgElem[start + i]];
         int p1 = ph1Row[bi];
         int p2 = ph2Row[bi];
-        rhs[i] = x0[p1] - x0[p2];                            // getAlphaRhsValue: ph1 - ph2 (+ 0, no tap action)
+        rhs[i] = x[p1] - x[p2];                              // getAlphaRhsValue: ph1 - ph2 (+ 0, no tap action)
         for (int j = 0; j < k; j++) {
             int ej = ctgElem[start + j];
             double deltaX = i == j ? 1.0 / power[bi] : 0.0;
@@ -265,8 +274,8 @@ __global__ void woodburyAlphas(int nCtg, int n, const int* ctgPtr, const int* ct
 }
 
 /** x_post[row, c] = x0[row] + sum_i alpha_i S[row, e_i] — WoodburyEngine.toPostContingencyStates. */
-__global__ void woodburyStates(int nCtg, int n, const int* ctgPtr, const int* ctgElem, const double* alpha,
-                               const double* s, const double* x0, double* states) {
+__global__ void woodburyStates(int nCtg, int n, const int* ctgPtr, const int* ctgElem, const int* ctgBase, const double* alpha,
+                               const double* s, const double* x0, const double* bases, double* states) {
     long t = (long) blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= (long) n * nCtg) {
         return;
@@ -275,7 +284,7 @@ __global__ void woodburyStates(int nCtg, int n, const int* ctgPtr, const int* ct
     int row = (int) (t % n);
     int start = ctgPtr[c];
     int k = ctgPtr[c + 1] - start;
-    double v = x0[row];
+    double v = ctgBase[c] >= 0 ? bases[row + (size_t) ctgBase[c] * n] : x0[row];
     const double* al = alpha + (size_t) c * MAX_K;
     for (int i = 0; i < k; i++) {
         v += al[i] * s[row + (size_t) ctgElem[start + i] * n];
@@ -599,21 +608,61 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_setLimitTable(JNIEnv* env, jcla
     }
 }
 
+/** The modified target columns of a chunk (n x nBases, column-major), solved against the
+ *  factorization and kept on the device as the base states of the contingencies that need one
+ *  (WoodburyEngine.runDcLoadFlowWithModifiedTargetVector, batched). */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_setChunkTargets(JNIEnv* env, jclass, jlong handle, jdoubleArray jTargets, jint nBases) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        ctx->nBases = nBases;
+        if (nBases == 0) {
+            return;
+        }
+        DoubleArray targets(env, jTargets);
+        if (targets.len < (jsize) ((size_t) ctx->n * nBases)) {
+            throw std::runtime_error("targets too small");
+        }
+        ctx->bases.ensure((size_t) ctx->n * nBases * sizeof(double));
+        for (int col0 = 0; col0 < nBases; col0 += S_SOLVE_COLS) {
+            int cols = std::min(S_SOLVE_COLS, nBases - col0);
+            ctx->ensureRhs(cols);
+            DC_CUDA_CHECK(cudaMemcpy(ctx->b.p, targets.p + (size_t) col0 * ctx->n, (size_t) ctx->n * cols * sizeof(double), cudaMemcpyHostToDevice));
+            ctx->solveDense(cols);
+            DC_CUDA_CHECK(cudaMemcpy(ctx->bases.as<double>() + (size_t) col0 * ctx->n, ctx->x.p,
+                                     (size_t) ctx->n * cols * sizeof(double), cudaMemcpyDeviceToDevice));
+        }
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.setChunkTargets: ") + e.what());
+    }
+}
+
 /**
  * One chunk of contingencies: alphas, states, flows, screen. Writes the n x nCtg post-contingency
  * states (column-major) into outStates and returns [counts(nCtg) | records(nCtg x capacity)]; a
- * count above capacity means "screen this one on the host". A contingency with more than MAX_K
- * elements (or none) makes the call throw — the host routes those to the CPU beforehand.
+ * count above capacity means "screen this one on the host". ctgBase[c] is the column of the
+ * chunk's modified-target solutions (setChunkTargets) the contingency starts from, or -1 for
+ * the pre-contingency state. A contingency with more than MAX_K elements makes the call throw —
+ * the host routes those to the CPU beforehand.
  */
 JNIEXPORT jintArray JNICALL
 Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_woodburyChunk(JNIEnv* env, jclass, jlong handle, jintArray jCtgPtr,
-                                                               jintArray jCtgElem, jdouble band, jint capacity,
+                                                               jintArray jCtgElem, jintArray jCtgBase, jdouble band, jint capacity,
                                                                jdoubleArray jOutStates) {
     DcContext* ctx = ctxOf(handle);
     try {
         IntArray ctgPtr(env, jCtgPtr);
         IntArray ctgElem(env, jCtgElem);
+        IntArray ctgBase(env, jCtgBase);
         int nCtg = ctgPtr.len - 1;
+        if (ctgBase.len != nCtg) {
+            throw std::runtime_error("ctgBase length must be nCtg");
+        }
+        for (int c = 0; c < nCtg; c++) {
+            if (ctgBase.p[c] >= ctx->nBases) {
+                throw std::runtime_error("ctgBase refers to a column beyond setChunkTargets");
+            }
+        }
         if (nCtg <= 0) {
             throw std::runtime_error("empty chunk");
         }
@@ -624,6 +673,7 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_woodburyChunk(JNIEnv* env, jcla
         int nb = ctx->nBranches;
         ctx->ctgPtr.upload(ctgPtr.p, (size_t) ctgPtr.len * sizeof(int));
         ctx->ctgElem.upload(ctgElem.p, (size_t) std::max<jsize>(ctgElem.len, 1) * sizeof(int));
+        ctx->ctgBase.upload(ctgBase.p, (size_t) nCtg * sizeof(int));
         ctx->alpha.ensure((size_t) nCtg * MAX_K * sizeof(double));
         ctx->states.ensure((size_t) n * nCtg * sizeof(double));
         ctx->flows.ensure((size_t) nb * nCtg * sizeof(double));
@@ -634,12 +684,13 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_woodburyChunk(JNIEnv* env, jcla
         DC_CUDA_CHECK(cudaMemsetAsync(bad.p, 0, (size_t) nCtg * sizeof(int), ctx->stream));
         DC_CUDA_CHECK(cudaMemsetAsync(ctx->counts.p, 0, (size_t) nCtg * sizeof(int), ctx->stream));
 
-        woodburyAlphas<<<grid(nCtg), BLOCK, 0, ctx->stream>>>(nCtg, n, ctx->ctgPtr.as<int>(), ctx->ctgElem.as<int>(),
+        const double* bases = ctx->nBases > 0 ? ctx->bases.as<double>() : ctx->x0.as<double>();
+        woodburyAlphas<<<grid(nCtg), BLOCK, 0, ctx->stream>>>(nCtg, n, ctx->ctgPtr.as<int>(), ctx->ctgElem.as<int>(), ctx->ctgBase.as<int>(),
                 ctx->elemBranch.as<int>(), ctx->ph1Row.as<int>(), ctx->ph2Row.as<int>(),
-                ctx->power.as<double>(), ctx->s.as<double>(), ctx->x0.as<double>(), ctx->alpha.as<double>(), bad.as<int>());
+                ctx->power.as<double>(), ctx->s.as<double>(), ctx->x0.as<double>(), bases, ctx->alpha.as<double>(), bad.as<int>());
         DC_CUDA_CHECK(cudaGetLastError());
-        woodburyStates<<<grid((long) n * nCtg), BLOCK, 0, ctx->stream>>>(nCtg, n, ctx->ctgPtr.as<int>(), ctx->ctgElem.as<int>(),
-                ctx->alpha.as<double>(), ctx->s.as<double>(), ctx->x0.as<double>(), ctx->states.as<double>());
+        woodburyStates<<<grid((long) n * nCtg), BLOCK, 0, ctx->stream>>>(nCtg, n, ctx->ctgPtr.as<int>(), ctx->ctgElem.as<int>(), ctx->ctgBase.as<int>(),
+                ctx->alpha.as<double>(), ctx->s.as<double>(), ctx->x0.as<double>(), bases, ctx->states.as<double>());
         DC_CUDA_CHECK(cudaGetLastError());
         dcFlows<<<grid((long) nb * nCtg), BLOCK, 0, ctx->stream>>>(nCtg, n, nb, ctx->ph1Row.as<int>(), ctx->ph2Row.as<int>(),
                 ctx->a1Row.as<int>(), ctx->a1Const.as<double>(), ctx->power.as<double>(), ctx->states.as<double>(), ctx->flows.as<double>());
@@ -657,7 +708,7 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_woodburyChunk(JNIEnv* env, jcla
         DC_CUDA_CHECK(cudaMemcpy(badHost.data(), bad.p, (size_t) nCtg * sizeof(int), cudaMemcpyDeviceToHost));
         for (int c = 0; c < nCtg; c++) {
             if (badHost[c]) {
-                throw std::runtime_error("contingency " + std::to_string(c) + " has 0 or more than " + std::to_string(MAX_K) + " elements");
+                throw std::runtime_error("contingency " + std::to_string(c) + " has more than " + std::to_string(MAX_K) + " elements");
             }
         }
         // states out

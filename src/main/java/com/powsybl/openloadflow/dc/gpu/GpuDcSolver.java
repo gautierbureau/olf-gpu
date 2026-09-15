@@ -151,9 +151,20 @@ public final class GpuDcSolver implements AutoCloseable {
      * {@code n x nCtg} post-contingency states (column-major) and returns
      * {@code [counts(nCtg) | records(nCtg x capacity)]} — the limit-table candidates per
      * contingency; a count above {@code capacity} means "screen this one on the host".
+     * {@code ctgBase[c]} is the column of {@link #setChunkTargets} the contingency starts from, or
+     * {@code -1} for the pre-contingency state.
      */
-    public int[] woodburyChunk(int[] ctgPtr, int[] ctgElem, double band, int capacity, double[] outStates) {
-        return woodburyChunk(handle(), ctgPtr, ctgElem, band, capacity, outStates);
+    public int[] woodburyChunk(int[] ctgPtr, int[] ctgElem, int[] ctgBase, double band, int capacity, double[] outStates) {
+        return woodburyChunk(handle(), ctgPtr, ctgElem, ctgBase, band, capacity, outStates);
+    }
+
+    /**
+     * The modified target columns of the coming chunk ({@code n x count}, column-major), solved
+     * against the factorization and kept as the base states {@code ctgBase} refers to — the
+     * batched form of {@code WoodburyEngine.runDcLoadFlowWithModifiedTargetVector}.
+     */
+    public void setChunkTargets(double[] targets, int count) {
+        setChunkTargets(handle(), targets, count);
     }
 
     @Override
@@ -178,5 +189,7 @@ public final class GpuDcSolver implements AutoCloseable {
     private static native void setLimitTable(long handle, int[] branchGroupStart, int[] branchGroupEnd, int[] groupQuantity,
                                              int[] groupLimitStart, int[] groupLimitEnd, double[] limitThreshold, double dcPowerFactor);
 
-    private static native int[] woodburyChunk(long handle, int[] ctgPtr, int[] ctgElem, double band, int capacity, double[] outStates);
+    private static native int[] woodburyChunk(long handle, int[] ctgPtr, int[] ctgElem, int[] ctgBase, double band, int capacity, double[] outStates);
+
+    private static native void setChunkTargets(long handle, double[] targets, int count);
 }

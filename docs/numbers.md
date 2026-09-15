@@ -242,3 +242,22 @@ rte6515 × 9042, GPU 1-thread, 0 monitored:
 | 1024 | 5.45 | 0.60 |
 
 The spread is run-to-run noise (the same knob on the AC batch path swings ×2 on cuDSS 0.8).
+
+### DC — sensitivity analysis with contingencies (GpuDcSensitivityAnalysis vs DcSensitivityAnalysis)
+
+rte6515_full, RTE parameters in DC, 50 injection variables x 200 monitored branches = 10 000
+factors, 200 contingencies (2 M factor evaluations), `DcSensitivityGpuProbe`. The CPU arm is
+single-threaded: OLF's DC sensitivity analysis ignores the executor it is given, so unlike the
+security analysis there is no 8-thread arm.
+
+| date | CPU 1t | GPU | ratio | parity |
+|---|---|---|---|---|
+| 2026-09-15 | 2876 ms | 2030 ms | x1.42 | sensitivities 4.9e-13, function references 8.3e-11 MW |
+| 2026-09-15 | 2740 ms | 2012 ms | x1.36 | same |
+| 2026-09-15 (contended) | 2437 ms | 6664 ms | x0.37 | same |
+
+The third row is the AC session computing on the same card (1.7 GB resident): the device calls took
+4480 ms instead of 65-68 ms. Phase split of a clean run: device calls 68 ms, OLF's per-factor
+predefined-result scan 216 ms, OLF's unscale/filter/write 96 ms, the rest OLF's per-contingency
+orchestration. The linear algebra is off the critical path; what remains is host bookkeeping,
+identical on both arms.

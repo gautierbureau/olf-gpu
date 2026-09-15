@@ -158,3 +158,20 @@ rte6515 × 9042, GPU 1-thread, 0 monitored:
 | 1024 | 5.45 | 0.60 |
 
 The spread is run-to-run noise (the same knob on the AC batch path swings ×2 on cuDSS 0.8).
+
+### DC — LODF factors (GpuLodfCalculator vs OLF's LodfCalculator)
+
+rte6515_full, all 9042 outageable branches, one shared `DcLoadFlowContext`, both arms streaming
+into the same thread-safe digest (`DcLodfGpuProbe`). CPU 8 threads, GPU single-threaded.
+
+| date | monitored | factors | CPU 8t | GPU factors | GPU setup | ratio on factors | parity |
+|---|---|---|---|---|---|---|---|
+| 2026-09-15 | 200 | 1.8 M | 671 ms | 597 ms | 2200 ms | x1.13 | exact counts, sum to 9 digits |
+| 2026-09-15 | 9042 (full N-1) | 81.8 M | 880 ms | 2006 ms | 2165 ms | x0.44 | exact counts, sum to 9 digits |
+
+Stage breakdown of the full case, which is the verdict: element states alone 512 ms CPU vs 561 ms
+GPU (the 9042-column solve is a wash); computing all 81.8 M factors without consuming them 818 vs
+969 ms (the GPU's extra is the 650 MB crossing PCIe); streaming them to a writer 880 vs 2006 ms
+(one host thread walking 650 MB against eight). A LODF factor is three loads and three flops, so
+producing factors for the host is bandwidth-bound and the device cannot win it. It wins when the
+factors are consumed on the device — which is what the Woodbury SA already does, at 0.53 ms/ctg.

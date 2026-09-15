@@ -148,6 +148,7 @@ struct DcContext {
     Buf dsElem, dsFactor, dsOut;                                   // distribution scratch and its 2 outputs
     Buf scalarOut;
     Buf lfState;                                                   // the last solveTarget solution (n), read by the loop kernels
+    Buf lodfSelf, lodfMonitored, lodfOut;                          // LODF/PTDF blocks (GpuLodfCalculator)
     // --- DC outer loops on the device (GpuDcLoadFlowEngine)
     // incremental phase control: the controllers, their controlled branch/side/target, the tap a1 tables,
     // and the per-BRANCH direction state of IncrementalContextData.ControllerContext
@@ -895,6 +896,78 @@ __global__ void hvdcDecision(int nHvdc, const double* x, const int* ph1, const i
         default:
             break;
     }
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// LODF / PTDF factors from the element states (LodfCalculator on the device)
+// ---------------------------------------------------------------------------------------------
+
+/** ClosedBranchSide1DcFlowEquationTerm.calculateSensi of a branch on a column of the states:
+ *  eval(dph1, dph2, da1) - eval(0, 0, 0) = -power * (((dph2 - dph1) + A2) - da1) + power * A2, which
+ *  is bit-for-bit power * ((dph1 - dph2) + da1) (IEEE subtraction is antisymmetric and A2 = 0).
+ *  NaN when the branch has no closed DC flow equation (open side or zero impedance): the same
+ *  branches for which LodfCalculator gets a null equation term. */
+__device__ inline double branchSensi(const double* states, int n, int col, int b, const int* ph1Row, const int* ph2Row,
+                                     const int* a1Row, const double* power) {
+    if (ph1Row[b] < 0 || ph2Row[b] < 0) {
+        return nan("");
+    }
+    return __dmul_rn(power[b], phaseSensi(states, n, col, ph1Row[b], ph2Row[b], a1Row[b]));
+}
+
+/** The self-PTDF of every outaged branch of the block: LodfCalculator.streamLodfColumn's selfPtdf. */
+__global__ void lodfSelfPtdf(int n, int col0, int cols, const int* elemBranch, const int* ph1Row, const int* ph2Row,
+                             const int* a1Row, const double* power, const double* states, double* selfPtdf) {
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= cols) {
+        return;
+    }
+    selfPtdf[j] = branchSensi(states, n, col0 + j, elemBranch[col0 + j], ph1Row, ph2Row, a1Row, power);
+}
+
+/**
+ * LodfCalculator.computeLodfValue for a block of outage columns: one thread per (monitored branch,
+ * outaged branch). NaN when the outage breaks connectivity (|selfPtdf| > 1 - 1e-6, the criterion
+ * ConnectivityBreakAnalysis uses too) or the monitored branch has no closed DC flow, then -1 for a
+ * branch monitored under its own outage, else ptdf / (1 - selfPtdf). Column-major, like the
+ * DenseMatrix LodfCalculator fills.
+ */
+__global__ void lodfBlock(int n, int nMonitored, int col0, int cols, const int* monitored, const int* elemBranch,
+                          const int* ph1Row, const int* ph2Row, const int* a1Row, const double* power,
+                          const double* states, const double* selfPtdf, double* out) {
+    long t = (long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (long) nMonitored * cols) {
+        return;
+    }
+    int j = (int) (t / nMonitored);
+    int row = (int) (t % nMonitored);
+    double self = selfPtdf[j];
+    int monitoredBranch = monitored[row];
+    bool breaksConnectivity = fabs(self) > 1.0 - 1e-6;          // LodfCalculator.CONNECTIVITY_LOSS_THRESHOLD
+    double value;
+    if (breaksConnectivity || ph1Row[monitoredBranch] < 0 || ph2Row[monitoredBranch] < 0) {
+        value = nan("");
+    } else if (monitoredBranch == elemBranch[col0 + j]) {
+        value = -1.0;
+    } else {
+        double ptdf = branchSensi(states, n, col0 + j, monitoredBranch, ph1Row, ph2Row, a1Row, power);
+        value = __ddiv_rn(ptdf, __dadd_rn(1.0, -self));
+    }
+    out[row + (size_t) j * nMonitored] = value;
+}
+
+/** The sensitivity of every function branch to every column of the states, with no LODF
+ *  post-processing: the PTDF block of DcSensitivityAnalysis' function side. Column-major. */
+__global__ void sensiBlock(int n, int nFunctions, int col0, int cols, const int* functions, const int* ph1Row,
+                           const int* ph2Row, const int* a1Row, const double* power, const double* states, double* out) {
+    long t = (long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (long) nFunctions * cols) {
+        return;
+    }
+    int j = (int) (t / nFunctions);
+    int row = (int) (t % nFunctions);
+    out[row + (size_t) j * nFunctions] = branchSensi(states, n, col0 + j, functions[row], ph1Row, ph2Row, a1Row, power);
 }
 
 DcContext* ctxOf(jlong h) {
@@ -1954,6 +2027,81 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_hvdcCheck(JNIEnv* env, jclass, 
     } catch (const std::exception& e) {
         throwJava(env, std::string("GpuDcSolver.hvdcCheck: ") + e.what());
         return nullptr;
+    }
+}
+
+
+namespace {
+/** The (monitored/function branch x column block) factor kernels share this preamble. */
+void checkFactorBlock(DcContext* ctx, jint col0, jint cols, jsize monitoredLen, jsize outLen) {
+    if (ctx->nElem == 0 || ctx->s.p == nullptr) {
+        throw std::runtime_error("element states not set (setElements)");
+    }
+    if (ctx->nBranches == 0) {
+        throw std::runtime_error("branches not set (setBranches)");
+    }
+    if (col0 < 0 || cols <= 0 || col0 + cols > ctx->nElem) {
+        throw std::runtime_error("column block out of range");
+    }
+    if ((size_t) outLen < (size_t) monitoredLen * cols) {
+        throw std::runtime_error("out array too small");
+    }
+}
+}  // namespace
+
+/** One block of LODF columns: out[row + j * nMonitored] is the factor of monitored[row] for the
+ *  outage held in the element column col0 + j. */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_lodfBlock(JNIEnv* env, jclass, jlong handle, jintArray jMonitored,
+                                                           jint col0, jint cols, jdoubleArray jOut) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        IntArray monitored(env, jMonitored);
+        jsize outLen = env->GetArrayLength(jOut);
+        checkFactorBlock(ctx, col0, cols, monitored.len, outLen);
+        int nMonitored = monitored.len;
+        ctx->lodfMonitored.upload(monitored.p, (size_t) std::max(nMonitored, 1) * sizeof(int));
+        ctx->lodfSelf.ensure((size_t) cols * sizeof(double));
+        ctx->lodfOut.ensure((size_t) nMonitored * cols * sizeof(double));
+        lodfSelfPtdf<<<grid(cols), BLOCK, 0, ctx->stream>>>(ctx->n, col0, cols, ctx->elemBranch.as<int>(), ctx->ph1Row.as<int>(),
+                ctx->ph2Row.as<int>(), ctx->a1Row.as<int>(), ctx->power.as<double>(), ctx->s.as<double>(), ctx->lodfSelf.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        lodfBlock<<<grid((long) nMonitored * cols), BLOCK, 0, ctx->stream>>>(ctx->n, nMonitored, col0, cols,
+                ctx->lodfMonitored.as<int>(), ctx->elemBranch.as<int>(), ctx->ph1Row.as<int>(), ctx->ph2Row.as<int>(),
+                ctx->a1Row.as<int>(), ctx->power.as<double>(), ctx->s.as<double>(), ctx->lodfSelf.as<double>(), ctx->lodfOut.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        std::vector<double> host((size_t) nMonitored * cols);
+        DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->lodfOut.p, host.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        env->SetDoubleArrayRegion(jOut, 0, (jsize) host.size(), host.data());
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.lodfBlock: ") + e.what());
+    }
+}
+
+/** One block of raw sensitivity columns (no LODF post-processing): the PTDF of every function
+ *  branch to every column of the element states. */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_sensiBlock(JNIEnv* env, jclass, jlong handle, jintArray jFunctions,
+                                                            jint col0, jint cols, jdoubleArray jOut) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        IntArray functions(env, jFunctions);
+        jsize outLen = env->GetArrayLength(jOut);
+        checkFactorBlock(ctx, col0, cols, functions.len, outLen);
+        int nFunctions = functions.len;
+        ctx->lodfMonitored.upload(functions.p, (size_t) std::max(nFunctions, 1) * sizeof(int));
+        ctx->lodfOut.ensure((size_t) nFunctions * cols * sizeof(double));
+        sensiBlock<<<grid((long) nFunctions * cols), BLOCK, 0, ctx->stream>>>(ctx->n, nFunctions, col0, cols,
+                ctx->lodfMonitored.as<int>(), ctx->ph1Row.as<int>(), ctx->ph2Row.as<int>(), ctx->a1Row.as<int>(),
+                ctx->power.as<double>(), ctx->s.as<double>(), ctx->lodfOut.as<double>());
+        DC_CUDA_CHECK(cudaGetLastError());
+        DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        std::vector<double> host((size_t) nFunctions * cols);
+        DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->lodfOut.p, host.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        env->SetDoubleArrayRegion(jOut, 0, (jsize) host.size(), host.data());
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.sensiBlock: ") + e.what());
     }
 }
 

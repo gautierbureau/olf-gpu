@@ -682,6 +682,80 @@ Note on the OLF scenario transposed to DC: `AcLoadFlowVscTest` saturates `hvdc12
 but in DC that link carries 49.7 MW and never reaches it — the DC tests use 20 MW, which makes
 both loops fire on the same network.
 
+## 4h. LODF and PTDF on the device (2026-09-15, user: "Now what about ptdf and lodf on gpu?")
+
+**Landed**: `GpuLodfCalculator`, mirroring the API and every convention of the CPU
+`LodfCalculator` on the user's OLF branch, and the two kernels it needs. **Verdict: as a factor
+PRODUCER the device does not pay.** The measurements are below; the reason is structural and it
+tells us exactly where the sensitivity work should go.
+
+The port itself is small because the ingredients were already device-resident: the CPU
+calculator's "injection states" are the SAME ±1 element states the Woodbury SA keeps on the
+device, and its `calculateSensi` is the same expression the connectivity criterion already
+evaluates (and bit-for-bit so: the scalar term's `eval(dph1,dph2,da1) - eval(0,0,0)` equals
+`power·((dph1-dph2)+da1)` exactly, because IEEE subtraction is antisymmetric and A2 = 0). So:
+`lodfSelfPtdf` (self-PTDF per column) + `lodfBlock` (one thread per monitored branch × outage,
+with OLF's NaN/-1 conventions) + a `sensiBlock` kernel for raw PTDF, streamed in outage batches
+and column blocks.
+
+Parity: `GpuLodfCalculatorTest`, 7 networks (ieee14 scalar and vectorized, ieee30, ieee118,
+eurostag, a phase shifter with an alpha variable, a zero-impedance line among the monitored),
+every cell against `LodfCalculator` at 1e-10 with the NaN and -1 structure identical; rte6515
+9042 × 9042 = 81,757,764 factors, identical finite/NaN counts and identical sum to 9 digits.
+One property does NOT hold: the factors are not bit-identical across batchings, because a cuDSS
+multi-right-hand-side solve blocks its columns and the same column solved in a block of 4 and of
+186 differs by an ulp or two. Within the 1e-10 bound either way.
+
+**The numbers (rte6515, 9042 outages, CPU 8 threads vs GPU 1 thread, `DcLodfGpuProbe`)**:
+
+| stage | CPU 8 threads | GPU |
+|---|---|---|
+| element states only (1 monitored branch) | 512 ms | 561 ms |
+| + all 81.8 M factors computed, not consumed | 818 ms | 969 ms |
+| + streamed to a writer | 880 ms | 2006 ms |
+| one-off device analysis + factorization | — | 2165 ms |
+
+Read it stage by stage. The 9042-column solve is a wash (cuDSS 561 vs KLU 512) — the same phase-0
+finding, the linear algebra is not where the device wins. Evaluating the 81.8 M factors costs the
+CPU 306 ms across 8 threads and the device 408 ms, and that 408 ms is mostly the **650 MB of
+results crossing PCIe**. Streaming them out then costs the CPU 62 ms (8 threads) and the device
+1037 ms (one thread walking a 650 MB buffer). A LODF factor is three loads and three flops: the
+whole computation is bandwidth-bound, the CPU calculator is already at memory bandwidth, and the
+device adds a PCIe crossing the CPU does not have.
+
+**The consequence, which is the useful part.** A device sensitivity kernel pays only when the
+factors are CONSUMED on the device instead of shipped. Two shapes qualify:
+- **Screening** — "which (monitored, outage) pairs exceed a threshold", post-contingency flow
+  `p + LODF·p_outaged` against limits. This is the SA's "the kernel screens, the host decides"
+  pattern, and its strongest form already exists and already pays: the Woodbury DC SA at
+  0.53 ms/contingency, ×3 against CPU 8 threads. A `lodfScreen` entry point is the same kernel
+  with a threshold and a compacted output; worth adding when a caller wants LODF screening
+  specifically rather than a security analysis.
+- **Sensitivity analysis WITH contingencies (phase 4)** — there the expensive object is the
+  `n × nGroups` factor-state matrix that `WoodburyEngine.toPostContingencyAndOperatorStrategyStates`
+  rebuilds PER CONTINGENCY (O(n · nGroups · k), plus a small dense LU per column for the alphas).
+  On the device that matrix never leaves: only the sensitivity VALUES come back, `nFactors` per
+  contingency, orders of magnitude smaller than the states. That is where PTDF-on-device pays, and
+  it is what phase 4 should build — not a bare PTDF matrix producer, which would land exactly where
+  LODF just landed.
+
+**Phase 4 map** (from a source survey of `DcSensitivityAnalysis`, 768 lines): `analyse` is ~95%
+bookkeeping (parameters, network load, factor reading and grouping, predefined results, unscaling,
+filtering, writing) around four solves — base flow (1 column), base factors (nGroups columns),
+contingency states (one per distinct outaged branch), action states — and then, per contingency,
+up to two re-solves plus two in-place Woodbury updates. Port targets in order of payoff:
+(1) `WoodburyEngine.toPostContingencyAndOperatorStrategyStates(DenseMatrix)` and its per-column
+`setAlphas` dense LU, (2) the two `calculateSensi` calls of `createBranchSensitivityValue` (already
+the `sensiBlock` kernel), (3) the multi-column factor-state solves (already `setElements` /
+`setSparseColumns` shaped). Everything else stays on the host. Visibility: an extension can live in
+`com.powsybl.openloadflow.sensi` (no `module-info.java` in OLF), which reaches the protected
+factor/group machinery; the fine-grained seams inside `DcSensitivityAnalysis` are private and
+would need widening — `calculateFactorStates`, `calculateSensitivityValues`,
+`createBranchSensitivityValue`, `calculateSensitivityValuesForContingencyAndOperatorStrategy`,
+`processContingencyAndOperatorStrategy` — or `analyse` can be overridden wholesale (it is public,
+and the constructor is public). Worth knowing: `DcSensitivityAnalysis.analyse` **ignores the
+`Executor`** it is given, so the CPU DC sensitivity reference is single-threaded.
+
 ## 5. Validation and benches
 
 - Parity oracle = stock OLF Woodbury on the same `LfNetwork` (same slack, same

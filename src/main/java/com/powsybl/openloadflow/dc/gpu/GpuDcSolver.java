@@ -231,6 +231,19 @@ public final class GpuDcSolver implements AutoCloseable {
         return hvdcCheck(handle());
     }
 
+    /**
+     * One block of LODF columns from the element states: {@code out[row + j * monitored.length]} is
+     * the factor of {@code monitored[row]} for the outage held in element column {@code col0 + j}.
+     */
+    void lodfBlock(int[] monitored, int col0, int cols, double[] out) {
+        lodfBlock(handle(), monitored, col0, cols, out);
+    }
+
+    /** One block of raw sensitivities of the function branches to the element states (the PTDF block). */
+    void sensiBlock(int[] functions, int col0, int cols, double[] out) {
+        sensiBlock(handle(), functions, col0, cols, out);
+    }
+
     public int size() {
         return n;
     }
@@ -400,4 +413,8 @@ public final class GpuDcSolver implements AutoCloseable {
                                         double[] pMax21, int[] status, int[] active);
 
     private static native int[] hvdcCheck(long handle);
+
+    private static native void lodfBlock(long handle, int[] monitored, int col0, int cols, double[] out);
+
+    private static native void sensiBlock(long handle, int[] functions, int col0, int cols, double[] out);
 }

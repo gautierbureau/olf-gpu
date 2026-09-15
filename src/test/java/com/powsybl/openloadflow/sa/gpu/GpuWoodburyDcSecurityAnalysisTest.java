@@ -197,6 +197,21 @@ class GpuWoodburyDcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest
         assertTrue(violations > 20, "the case must produce post-contingency violations, got " + violations);
     }
 
+    /** A phase-shifting transformer outage: its alpha row is zeroed in the modified target (the stock's
+     *  lostPhaseControllers re-solve) — the PST network of OLF's phase-control tests, with limits. */
+    @Test
+    void phaseShifterOutageMatchesStock() {
+        assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");
+        Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createWithOneT2wtTwoLines();
+        addActivePowerLimits(network, 0.7);
+        List<Contingency> contingencies = allBranches(network);
+        SecurityAnalysisResult cpu = runStock(network, contingencies, monitorAll(network));
+        SecurityAnalysisResult gpu = runGpu(network, contingencies, monitorAll(network));
+        assertSameResults(cpu, gpu);
+        assertEquals(contingencies.size(), GpuWoodburyDcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "all outages on the device, the PST's included");
+        assertTrue(network.getTwoWindingsTransformerStream().anyMatch(t -> t.hasPhaseTapChanger()), "the case must have a phase shifter");
+    }
+
     @Test
     void ieee14WithoutMonitorsMatchStock() {
         assumeTrue(GpuDcSolver.isAvailable(), "GPU native library not available");

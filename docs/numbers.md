@@ -116,3 +116,18 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-11 | 97a9fba+dirty | 20.00 | 16.07 | 26.85 | x1.67 | 0/0/0 | 7.41 | 4.40 | 499/500 | 122/133 (92%) | SecondaryVoltageControl left the SHARED equation-system state vector holding the last scenario's state: base LF 7.2 MW out, 16 differing lines with SVC on -> 0 |
 | 2026-09-11 | e36a2ad+dirty | 19.15 | 16.08 | 27.10 | x1.69 | 0/0/0 | 7.53 | 4.52 | 499/500 | 122/133 (92%) | Base LF batch-of-one can now drive the device outer loops (OLF_GPU_DRIVER_OUTER_LOOPS=1); default path unchanged |
 | 2026-09-11 | 1a12a91+dirty | 19.38 | 16.30 | 26.75 | x1.64 | 0/0/0 | 7.66 | 4.64 | 499/500 | 122/133 (92%) | Base LF on the device driver: Java loops now suppressed at the engine layer; blocker is the driver's DS<->RL cycling on a cold-start base |
+
+## DC — Woodbury security analysis (the `dc` branch)
+
+rte6515_full, ALL-branch N-1 of the main synchronous component (9042), RTE production parameters
+switched to DC, `dcFastMode`; probe `DcWoodburyBaselineProbe` (`OLF_DC_GPU=1`). Rule: GPU
+single-thread vs CPU 8 threads (user, 2026-09-15). Parity = violation sets keyed
+subject|limitType|side|limitName + statuses + monitored flows; the two arms share one JVM (KLU first).
+
+| date | commit | monitored | CPU 8t (s) | GPU 1t (s) | GPU ms/ctg | ratio | on device | parity | note |
+|---|---|---|---|---|---|---|---|---|---|
+| 2026-09-15 | phase 0 | 100 | 65.3 (1 thread) | 66.2 (cuDSS drop-in) | 7.32 | x0.99 | — | 0 lines, 1.2e-9 MW | zero-code baseline: the LU is <5% of the wall |
+| 2026-09-15 | 9fed038 | 100 | 66.7 (1 thread) | 29.3 | 3.24 | x2.28 | 6458/9042 | 0 lines | phase 1: breaking outages still on the stock path |
+| 2026-09-15 | f0e981e | 100 | 17.3 | 13.4 | 1.49 | x1.29 | 9042/9042 | 0 lines, 2.5e-10 MW | phase 2a: modified-target columns |
+| 2026-09-15 | 660867b | 0 | 16.5 | 3.65 | 0.40 | x4.52 | 9042/9042 | 0 lines | phase 2b: device criterion, IR off — target met |
+| 2026-09-15 | 660867b | 100 | 18.4 | 8.3 | 0.92 | x2.22 | 9042/9042 | 0 lines, 2.5e-10 MW | the extra 5.7 s is OLF's monitored-result walk, on both arms |

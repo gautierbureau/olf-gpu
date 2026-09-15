@@ -159,6 +159,7 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
                     && com.powsybl.openloadflow.dc.gpu.GpuDcSolver.isAvailable()) {
                 LOGGER.info("Version: {} (GPU Woodbury DC security analysis)", new PowsyblOpenLoadFlowVersion());
                 int dcRequestedThreads = forceSinglePartition(runParameters.getSecurityAnalysisParameters());   // one device, one partition
+                GpuWoodburyDcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.set(-1);                              // accumulates over the components
                 GraphConnectivityFactory<LfBus, LfBranch> dcConnectivityFactory = runParameters.getOperatorStrategies().isEmpty()
                         ? connectivityFactory : new NaiveGraphConnectivityFactory<>(LfBus::getNum);
                 GpuWoodburyDcSecurityAnalysis dcAnalysis = new GpuWoodburyDcSecurityAnalysis(network, matrixFactory,

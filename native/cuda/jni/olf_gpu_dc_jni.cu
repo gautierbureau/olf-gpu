@@ -53,7 +53,7 @@ static_assert(CUDSS_VERSION >= 701, "olf_gpu_dc requires cuDSS >= 0.7.1");
         + " at " __FILE__ ":" + std::to_string(__LINE__) + " [" #x "]"); } } while (0)
 
 constexpr int BLOCK = 256;
-constexpr int MAX_K = 8;                     // elements per contingency solved in-kernel
+constexpr int MAX_K = 32;                    // elements per contingency solved in-kernel (32x32 doubles of local memory per thread)
 constexpr int QTY_I = 0;                     // GpuLimitTable.QTY_I
 constexpr int QTY_P = 1;                     // GpuLimitTable.QTY_P
 constexpr int QTY_S = 2;                     // apparent power: NaN in DC, never a candidate
@@ -651,16 +651,17 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_connectivityCriterion(JNIEnv* e
         if (nCtg <= 0) {
             return env->NewDoubleArray(0);
         }
-        if (ctx->s.p == nullptr || ctx->nBranches == 0) {
+        if ((ctx->nElem > 0 && ctx->s.p == nullptr) || ctx->nBranches == 0) {
             throw std::runtime_error("context not set up (elements, branches)");
         }
         ctx->ctgPtr.upload(ctgPtr.p, (size_t) ctgPtr.len * sizeof(int));
         ctx->ctgElem.upload(ctgElem.p, (size_t) std::max<jsize>(ctgElem.len, 1) * sizeof(int));
         Buf out;
         out.alloc((size_t) nCtg * sizeof(double));
+        const double* sPtr = ctx->nElem > 0 ? ctx->s.as<double>() : ctx->power.as<double>();   // never read when nElem == 0
         connectivityCriterion<<<grid(nCtg), BLOCK, 0, ctx->stream>>>(nCtg, ctx->n, ctx->ctgPtr.as<int>(), ctx->ctgElem.as<int>(),
                 ctx->elemBranch.as<int>(), ctx->ph1Row.as<int>(), ctx->ph2Row.as<int>(), ctx->a1Row.as<int>(), ctx->power.as<double>(),
-                ctx->s.as<double>(), out.as<double>());
+                sPtr, out.as<double>());
         DC_CUDA_CHECK(cudaGetLastError());
         DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         std::vector<double> host(nCtg);
@@ -732,7 +733,7 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_woodburyChunk(JNIEnv* env, jcla
         if (nCtg <= 0) {
             throw std::runtime_error("empty chunk");
         }
-        if (ctx->x0.p == nullptr || ctx->s.p == nullptr || ctx->nBranches == 0) {
+        if (ctx->x0.p == nullptr || (ctx->nElem > 0 && ctx->s.p == nullptr) || ctx->nBranches == 0) {
             throw std::runtime_error("context not set up (base, elements, branches)");
         }
         int n = ctx->n;
@@ -751,12 +752,13 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_woodburyChunk(JNIEnv* env, jcla
         DC_CUDA_CHECK(cudaMemsetAsync(ctx->counts.p, 0, (size_t) nCtg * sizeof(int), ctx->stream));
 
         const double* bases = ctx->nBases > 0 ? ctx->bases.as<double>() : ctx->x0.as<double>();
+        const double* sPtr = ctx->nElem > 0 ? ctx->s.as<double>() : ctx->x0.as<double>();       // never read when nElem == 0
         woodburyAlphas<<<grid(nCtg), BLOCK, 0, ctx->stream>>>(nCtg, n, ctx->ctgPtr.as<int>(), ctx->ctgElem.as<int>(), ctx->ctgBase.as<int>(),
                 ctx->elemBranch.as<int>(), ctx->ph1Row.as<int>(), ctx->ph2Row.as<int>(),
-                ctx->power.as<double>(), ctx->s.as<double>(), ctx->x0.as<double>(), bases, ctx->alpha.as<double>(), bad.as<int>());
+                ctx->power.as<double>(), sPtr, ctx->x0.as<double>(), bases, ctx->alpha.as<double>(), bad.as<int>());
         DC_CUDA_CHECK(cudaGetLastError());
         woodburyStates<<<grid((long) n * nCtg), BLOCK, 0, ctx->stream>>>(nCtg, n, ctx->ctgPtr.as<int>(), ctx->ctgElem.as<int>(), ctx->ctgBase.as<int>(),
-                ctx->alpha.as<double>(), ctx->s.as<double>(), ctx->x0.as<double>(), bases, ctx->states.as<double>());
+                ctx->alpha.as<double>(), sPtr, ctx->x0.as<double>(), bases, ctx->states.as<double>());
         DC_CUDA_CHECK(cudaGetLastError());
         dcFlows<<<grid((long) nb * nCtg), BLOCK, 0, ctx->stream>>>(nCtg, n, nb, ctx->ph1Row.as<int>(), ctx->ph2Row.as<int>(),
                 ctx->a1Row.as<int>(), ctx->a1Const.as<double>(), ctx->power.as<double>(), ctx->states.as<double>(), ctx->flows.as<double>());

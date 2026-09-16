@@ -147,7 +147,8 @@ public final class GpuBatchSecondaryVc {
                 Integer ctldVRow = busVRows.get(vc.getControlledBus().getNum());
                 Integer rlIdx = vRow != null ? rlIdxOfVRow.get(vRow) : null;
                 if (vRow == null || ctldVRow == null || rlIdx == null) {
-                    LOGGER.info("Secondary VC controller {} not representable on the GPU batch — skipped zone {}",
+                    GpuBatchSkips.record(GpuBatchSkips.Slot.SVC, LOGGER,
+                            "Secondary VC controller {} not representable on the GPU batch — skipped zone {}",
                             controller.getId(), svc.getZoneName());
                     return new Controllers(List.of(), List.of(), esCtx, minPlausibleTargetV, maxPlausibleTargetV);
                 }

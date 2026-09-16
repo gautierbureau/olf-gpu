@@ -118,7 +118,8 @@ public final class GpuBatchIncrementalFlowControl {
                 int ctlElemIndex = elementMapper.getElementIndex(controlled);
                 double[][] tapRows = GpuBatchTransformerControl.tapModels(controller.getPiModel());
                 if (pinRow == null || elemIndex < 0 || ctlElemIndex < 0 || tapRows.length == 0) {
-                    LOGGER.info("Incremental RPC controller {} not representable on the GPU batch — skipped", controller.getId());
+                    GpuBatchSkips.record(GpuBatchSkips.Slot.RPC, LOGGER,
+                            "Incremental RPC controller {} not representable on the GPU batch — skipped", controller.getId());
                     continue;
                 }
                 var term = (EquationTerm<AcVariableType, AcEquationType>) (rc.getControlledSide() == TwoSides.ONE
@@ -154,7 +155,8 @@ public final class GpuBatchIncrementalFlowControl {
                 int ctlElemIndex = elementMapper.getElementIndex(controlled);
                 double[][] tapRows = GpuBatchTransformerControl.tapModels(controller.getPiModel());
                 if (pinRow == null || elemIndex < 0 || ctlElemIndex < 0 || tapRows.length == 0) {
-                    LOGGER.info("Incremental phase controller {} not representable on the GPU batch — skipped", controller.getId());
+                    GpuBatchSkips.record(GpuBatchSkips.Slot.PHASE, LOGGER,
+                            "Incremental phase controller {} not representable on the GPU batch — skipped", controller.getId());
                     continue;
                 }
                 EquationTerm<AcVariableType, AcEquationType> term;

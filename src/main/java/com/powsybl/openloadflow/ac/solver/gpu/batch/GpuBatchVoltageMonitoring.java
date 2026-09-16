@@ -113,7 +113,8 @@ public final class GpuBatchVoltageMonitoring {
             Integer vRow = busVRows.get(bus.getNum());
             Integer rlIdx = vRow != null ? rlIdxOfVRow.get(vRow) : null;
             if (automatonOpt.isEmpty() || vRow == null || rlIdx == null || bus.isGeneratorVoltageControlEnabled()) {
-                LOGGER.info("Monitoring SVC bus {} not representable on the GPU batch — skipped", bus.getId());
+                GpuBatchSkips.record(GpuBatchSkips.Slot.MONITORING, LOGGER,
+                        "Monitoring SVC bus {} not representable on the GPU batch — skipped", bus.getId());
                 continue;
             }
             var automaton = automatonOpt.orElseThrow();

@@ -360,6 +360,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                             config.perEqCriteria().angle(), config.perEqCriteria().ratio(), config.perEqCriteria().b(),
                             config.perEqCriteria().eps())
                     : null;
+            GpuBatchSkips.reset();                           // account what the builders below cannot represent
             List<GpuBatchTransformerControl.TransformerController> tvdControllers =
                     config.transformerControl() || config.simpleTransformerControl()
                             ? GpuBatchTransformerControl.buildTransformerControllers(network, equationSystem, targetVector, baseActivation,
@@ -371,6 +372,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     ? GpuBatchTransformerControl.buildFreezeTables(network, equationSystem, tvdControllers,
                             config.genVcMinNominalV(), gpuData.rlBusNum())
                     : null;
+            // All-or-nothing, the same rule the base load flow applies: a loop the builders represented
+            // only PARTIALLY would have the device drive a SUBSET of it, and this path has no host-pause
+            // slot to hand it back to, so the whole run goes to the CPU (resultsByIndex stays null).
+            if (GpuBatchPhaseOwnership.batchable()) {
             GpuBatchChunkSolver.solveQualifiedInChunks(batchedIndices, contingencies, elementMapper, gpuData, baseState,
                     baseTargets, baseActivation.rowMode(), plan.frozenRowsByIndex(), plan.frozenTargetsByIndex(), plan.genOutagesByIndex(),
                     plan.activePowerLossByIndex(),
@@ -415,6 +420,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                                     baseActivation, baseTargets, elementMapper)
                             : null,
                     config);
+            }
         }
 
         // Assemble results in the original contingency order: batched scenarios carry their

@@ -143,3 +143,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-16 | 8d514f8+dirty | 19.35 | 15.97 | 27.72 | x1.74 | 0/0/0 | 7.61 | 4.50 | 499/500 | 122/133 (92%) | fixTransformerVoltageControls connectivity is per scenario, bracketed by two masks |
 | 2026-09-16 | f97e006+dirty | 19.17 | 16.52 | 27.16 | x1.64 | 0/0/0 | 7.51 | 4.45 | 499/500 | 122/133 (92%) | Remote generator-VC freeze candidates run in-kernel; no whole-run gate left in AFTER_GENERATOR |
 | 2026-09-16 | d3ace41+dirty | 18.83 | 15.65 | 27.70 | x1.77 | 0/0/0 | 7.60 | 4.45 | 499/500 | 122/133 (92%) | SecondaryVoltageControl in-kernel on the BASE load flow too, same route as the SA |
+| 2026-09-16 | bbe028b+dirty | 18.51 | 15.78 | 27.46 | x1.74 | 0/0/0 | 7.53 | 4.46 | 499/500 | 122/133 (92%) | One all-or-nothing ownership rule for both routes; partial representation no longer silent |

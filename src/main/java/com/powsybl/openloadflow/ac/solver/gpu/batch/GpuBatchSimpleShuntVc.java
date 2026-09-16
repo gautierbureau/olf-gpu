@@ -93,7 +93,8 @@ public final class GpuBatchSimpleShuntVc {
             boolean representable = !memberShunts.isEmpty()
                     && memberShunts.stream().allMatch(sh -> shuntBRows.get(sh.getNum()) != null);
             if (!representable) {
-                LOGGER.info("Shunt voltage control of {} not representable on the GPU batch — skipped "
+                GpuBatchSkips.record(GpuBatchSkips.Slot.SHUNT, LOGGER,
+                        "Shunt voltage control of {} not representable on the GPU batch — skipped "
                         + "(results follow the base sections)", controlled.getId());
                 continue;
             }

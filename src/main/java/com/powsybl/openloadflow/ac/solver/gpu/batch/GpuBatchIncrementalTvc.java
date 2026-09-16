@@ -124,7 +124,8 @@ public final class GpuBatchIncrementalTvc {
                 int elemIndex = elementMapper.getElementIndex(branch);
                 double[][] tapRows = GpuBatchTransformerControl.tapModels(branch.getPiModel());
                 if (rhoRow == null || vRow == null || elemIndex < 0 || tapRows.length == 0) {
-                    LOGGER.info("Incremental transformer controller {} not representable on the GPU batch — skipped", branch.getId());
+                    GpuBatchSkips.record(GpuBatchSkips.Slot.TVC, LOGGER,
+                            "Incremental transformer controller {} not representable on the GPU batch — skipped", branch.getId());
                     continue;
                 }
                 double r1Now = branch.getPiModel().getR1();

@@ -11,6 +11,39 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #57 — One ownership rule for both routes, and the partial-representation hole (2026-09-16)
+
+Asked why the four host-pause slots are needed when every loop has a kernel. Answering it found the
+hole they were only half covering.
+
+Every phase builder walks OLF's controllers and SKIPS the ones it cannot express — a control whose
+variable is not in the equation system, a branch the extraction does not pack. Nine such sites, all of
+which only LOGGED. That gives three cases, and only two were handled:
+
+| builder result | what happened | correct? |
+| --- | --- | --- |
+| complete | kernel drives the loop | yes |
+| EMPTY | kernel declines, the base pauses and the SA refuses | yes |
+| PARTIAL | kernel takes the loop, the pause slot is CLEARED, the skipped controllers are dropped | NO |
+
+The partial case is the dangerous one precisely because nothing flags it: the device drives a loop on a
+subset of what OLF drives and every equation still converges. So the slots were the all-or-nothing net,
+covering only the all-or-nothing case.
+
+`GpuBatchSkips` now counts the skips per thread (the SA builds on OLF's partition threads) and
+`GpuBatchPhaseOwnership` turns the count into the one decision both routes take: a loop is device-owned
+only when its representation is COMPLETE. Incomplete hands it back — the base load flow clears the
+kernel tables and restores the host-pause bit so OLF's own loop runs at its own slot, and the batched
+SA, which has no pause slot for anything but secondary voltage control, routes the run to the CPU.
+
+**Measured before enforcing**: zero skips on rte6515 and across the whole 261-test suite. So the rule
+is behaviour-neutral on everything we validate against, which is also why the hole had never shown up —
+and why it would have been found the hard way, on a customer network, without this.
+
+The slots stay. Deleting them needs every builder to be provably total, which is a different piece of
+work from porting AreaInterchangeControl and AutomationSystem: those two never used the pause
+mechanism at all.
+
 ### #56 — The base load flow takes the same route as the SA (2026-09-16)
 
 `SecondaryVoltageControl` was the one in-kernel phase the base load flow never handed to the driver.

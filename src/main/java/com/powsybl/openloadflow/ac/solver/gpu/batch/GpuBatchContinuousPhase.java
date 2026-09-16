@@ -91,7 +91,8 @@ public final class GpuBatchContinuousPhase {
             // branch is simply never consulted. The device builds its I term from the controller too,
             // so a remote LIMITER runs identically; refusing it only routed the run to the CPU.
             if (a1Row == null || elemIndex < 0 || tapRows.length == 0) {
-                LOGGER.info("Continuous phase controller {} not representable on the GPU batch — skipped", branch.getId());
+                GpuBatchSkips.record(GpuBatchSkips.Slot.PHASE, LOGGER,
+                        "Continuous phase controller {} not representable on the GPU batch — skipped", branch.getId());
                 continue;
             }
             double a1Now = branch.getPiModel().getA1();

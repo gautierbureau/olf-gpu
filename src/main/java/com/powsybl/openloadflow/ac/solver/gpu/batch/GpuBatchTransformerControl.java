@@ -577,7 +577,8 @@ public final class GpuBatchTransformerControl {
                     && memberBranches.stream().allMatch(b -> branchR1Cols.get(b.getNum()) != null
                             && elementMapper.getElementIndex(b) >= 0);
             if (!representable) {
-                LOGGER.info("Transformer control of {} not representable on the GPU batch — skipped (results follow the base taps)",
+                GpuBatchSkips.record(GpuBatchSkips.Slot.TVC, LOGGER,
+                        "Transformer control of {} not representable on the GPU batch — skipped (results follow the base taps)",
                         controlled.getId());
                 continue;
             }

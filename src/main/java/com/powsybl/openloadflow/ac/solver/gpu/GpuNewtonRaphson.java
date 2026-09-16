@@ -845,6 +845,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 }
                 GpuBatchVoltageMonitoring.installDriverLoop(handle, monCtls);
                 int hostMask = buildHostLoopMask();
+                com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips.reset();
                 // SecondaryVoltageControl (OLF order 4) IN-KERNEL — the same phase, built the same way,
                 // as the batched security analysis. It used to be the one loop the base load flow never
                 // handed to the driver, so every network with a zone paused it here while the chunk path
@@ -988,6 +989,11 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 }
                 // Host-owned outer-loop slots: the driver pauses at their OLF positions and the
                 // pause/resume cycle after solveBatchContext runs OLF's loop there. 0 clears a cached mask.
+                // All-or-nothing, the same rule the batched SA applies: a loop the builders represented only
+                // PARTIALLY goes back to OLF's engine at its own slot, rather than the device driving a
+                // subset of it while the pause bit says nobody has to.
+                hostMask = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchPhaseOwnership.enforceComplete(
+                        handle, hostMask);
                 activeHostMask = hostMask;
                 GpuAcNewtonSolver.setBatchHostLoop(handle, hostMask);
                 if (restart && restartLoopKind > 0) {        // re-check the loop that went UNSTABLE first

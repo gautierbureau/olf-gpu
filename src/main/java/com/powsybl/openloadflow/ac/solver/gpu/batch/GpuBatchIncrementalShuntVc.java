@@ -117,7 +117,8 @@ public final class GpuBatchIncrementalShuntVc {
             // the dedicated test was hollow: its 5 kV deadband never moved a section post-outage.)
             int elemIndex = elementMapper.getElementIndex(shunt);
             if (bRow == null || vRow == null) {
-                LOGGER.info("Incremental shunt controller {} not representable on the GPU batch — skipped", shunt.getId());
+                GpuBatchSkips.record(GpuBatchSkips.Slot.SHUNT, LOGGER,
+                        "Incremental shunt controller {} not representable on the GPU batch — skipped", shunt.getId());
                 continue;
             }
             List<Sub> subs = new ArrayList<>();

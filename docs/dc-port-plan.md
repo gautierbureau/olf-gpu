@@ -616,10 +616,12 @@ Gates (all green 2026-09-15):
   1e-8 MW, generator and load P bit-identical, tap positions equal.
 - `GpuWoodburyDcSecurityAnalysisTest` 13/13 on the new base; rte6515 × 9042: 9042/9042 on the
   device, 0 differing lines, 5.3–5.6 s GPU 1-thread vs 15.2–16.7 s CPU 8 threads
-  (capture 39 ms; cuDSS analysis+factorization 2.1 s in these runs — the known spread).
+  (capture 39 ms; the 2.1 s once attributed to cuDSS here is wrong — the analysis is 47 ms,
+  see the correction in docs/numbers.md).
 - `DcLoadFlowGpuProbe` (rte6515 full DC LF, RTE parameters): flows within 1.7e-10 MW, angles
   1e-11°, generators bit-identical; **cold GPU 2.5 s vs CPU 0.66 s, warm 225 vs 154 ms** — a
-  single DC solve is not where the device pays (the cuDSS analysis alone outweighs KLU's whole
+  single DC solve is not where the device pays (start-up and capture, NOT the cuDSS analysis,
+  which is 47-158 ms — the claim that it outweighs KLU's whole
   run); the assembled context pays when reused: the SA above, the time-series engine next.
 
 Left for later (noted, not blocking): the SA's per-contingency modified-target columns still

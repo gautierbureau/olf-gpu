@@ -136,3 +136,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-16 | 82a36d6+dirty | 19.27 | 15.97 | 28.22 | x1.77 | 0/0/0 | 7.56 | 4.46 | 499/500 | 122/133 (92%) | host orchestrators deleted; device driver is the default for the base load flow |
 | 2026-09-16 | 91a44ac+dirty | 20.26 | 17.42 | 31.37 | x1.80 | 0/0/0 | 7.94 | 4.47 | 499/500 | 122/133 (92%) | SecondaryVoltageControl zone systems solved by cuBLAS batched LU; no hand-written linear algebra |
 | 2026-09-16 | abd078c+dirty | 18.90 | 15.47 | 26.54 | x1.72 | 0/0/0 | 7.48 | 4.43 | 499/500 | 122/133 (92%) | Robust-mode realistic-V criteria in the RL kernel; forced-PV election installed at context creation |
+| 2026-09-16 | df4062e+dirty | 19.72 | 16.49 | 29.55 | x1.79 | 0/0/0 | 7.88 | 4.45 | 499/500 | 122/133 (92%) | Distributed-slack residual flagged on P_RESIDUE_EPS, OLF's own failure threshold |

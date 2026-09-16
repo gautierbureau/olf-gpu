@@ -4016,7 +4016,13 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
     if (changed) {
         switched[s] = 1;
     }
-    if (fabs(rem) > fsGlobal * slackDistTol) {
+    // OLF decides the distribution FAILED on ActivePowerDistribution.P_RESIDUE_EPS (1e-5 pu, 1 kW),
+    // not on slackBusPMaxMismatch: handleDistributionFailureBehavior is entered whenever the water-fill
+    // left more than P_RESIDUE_EPS unplaced. Flagging on the (much looser) entry band instead let a
+    // saturated scenario with, say, 0.3 MW still unplaced come back CONVERGED where the CPU reports
+    // FAILED. The flag only routes the scenario to the CPU fallback, so the tighter test can cost
+    // batching share but can never make the device answer where OLF refuses to.
+    if (fabs(rem) > residueEps) {
         dsResidual[s] = 1;                                   // saturated: residual stays at the slack — the host
     }                                                        // decides per the run's slackDistributionFailureBehavior
 }

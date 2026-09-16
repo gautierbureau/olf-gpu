@@ -815,11 +815,12 @@ and `solveBatchContext` refuses a context that reaches it with RL entries and no
 **(c) Distributed slack.** Re-verified against the current code. `dsRejectResidual` is ON by
 default (OLF's `slackDistributionFailureBehavior` default is FAIL, not LEAVE_ON_SLACK_BUS), and
 it flags a saturated distribution on the ENTRY band (`fsGlobal * slackBusPMaxMismatch`) where OLF
-decides the distribution failed on `ActivePowerDistribution.P_RESIDUE_EPS` (1e-5 pu, 1 kW). A
-scenario that saturates with, say, 0.3 MW still unplaced therefore comes back CONVERGED from the
-device where the CPU reports FAILED. That is the one live DIVERGENCE among the slack gaps, and
-the fix is to flag on P_RESIDUE_EPS: the flag only routes the scenario to the CPU fallback, so a
-tighter test can cost batching share and can never make the device answer where OLF refuses to.
+decided the distribution failed on `ActivePowerDistribution.P_RESIDUE_EPS` (1e-5 pu, 1 kW). A
+scenario that saturated with, say, 0.3 MW still unplaced therefore came back CONVERGED from the
+device where the CPU reports FAILED. That was the one live DIVERGENCE among the slack gaps, and
+it now flags on P_RESIDUE_EPS. The flag only routes the scenario to the CPU fallback, so the
+tighter test can cost batching share and can never make the device answer where OLF refuses to;
+on rte6515 it costs nothing, the batched share stays at 9040 of 9042.
 
 The rest are fallbacks rather than divergences, with what each one needs:
 

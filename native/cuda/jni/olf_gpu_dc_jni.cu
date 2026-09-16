@@ -195,6 +195,9 @@ struct DcContext {
     // go back to the host; only the sensitivity VALUES do
     int sensiCols = 0;                                             // factor groups
     Buf facBase, facAlt, facPost;                                  // n x sensiCols, column-major
+    Buf ptdf;                                                      // nPtdfRows x ptdfCols, column-major, resident
+    int ptdfRows = 0;
+    int ptdfCols = 0;
     Buf flowBase, flowAlt, flowPost;                               // n
     int ctgCols = 0, actCols = 0;
     Buf ctgSt, actSt;                                              // the +-1 element states, uploaded from OLF
@@ -2382,6 +2385,82 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_sensiBlock(JNIEnv* env, jclass,
 
 /** The factor-group right-hand sides (sparse, OLF's own fillRhs recorded) solved into the base or
  *  the alternate factor states. The states stay on the device. */
+/**
+ * Assembles the whole PTDF onto the device and LEAVES IT THERE: one row per function branch, one
+ * column per factor column already solved into facBase by sensiSetFactorColumns, column-major.
+ *
+ * <p>This is the same arithmetic as sensiBlock - the only difference is where the answer goes. A
+ * block kernel hands each block back to the host, which is right when the factors are the product
+ * being shipped; this keeps the matrix resident, which is what a caller wants when the factors are
+ * an INPUT to something else that runs here.
+ *
+ * <p>The caller pays for it in memory: rows x columns doubles, on top of the n x columns states that
+ * produced them. Both are reported back so the caller can size its blocks.
+ */
+JNIEXPORT jlong JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_ptdfAssemble(JNIEnv* env, jclass, jlong handle, jintArray jFunctions) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        IntArray functions(env, jFunctions);
+        if (ctx->sensiCols <= 0) {
+            throw std::runtime_error("no factor columns: call sensiSetFactorColumns first");
+        }
+        ctx->ptdfRows = functions.len;
+        ctx->ptdfCols = ctx->sensiCols;
+        size_t elements = (size_t) ctx->ptdfRows * ctx->ptdfCols;
+        ctx->ptdf.ensure(elements * sizeof(double));
+        Buf fn;
+        fn.upload(functions.p, (size_t) std::max(functions.len, 1) * sizeof(int));
+        double t0 = 0;
+        if (dcTiming()) {
+            DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            t0 = dcNowMs();
+        }
+        // one launch per column block, so a large matrix does not need a single huge grid
+        for (int col0 = 0; col0 < ctx->ptdfCols; col0 += S_SOLVE_COLS) {
+            int cols = std::min(S_SOLVE_COLS, ctx->ptdfCols - col0);
+            long threads = (long) ctx->ptdfRows * cols;
+            sensiBlock<<<grid(threads), BLOCK, 0, ctx->stream>>>(ctx->n, ctx->ptdfRows, col0, cols, fn.as<int>(),
+                    ctx->ph1Row.as<int>(), ctx->ph2Row.as<int>(), ctx->a1Row.as<int>(), ctx->power.as<double>(),
+                    ctx->facBase.as<double>(), ctx->ptdf.as<double>() + (size_t) col0 * ctx->ptdfRows);
+            DC_CUDA_CHECK(cudaGetLastError());
+        }
+        DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        if (dcTiming()) {
+            std::fprintf(stderr, "DC_TIMING ptdf assemble %d x %d %.1f ms\n", ctx->ptdfRows, ctx->ptdfCols, dcNowMs() - t0);
+        }
+        return (jlong) (elements * sizeof(double));
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.ptdfAssemble: ") + e.what());
+        return 0;
+    }
+}
+
+/** A block of columns of the resident PTDF, column-major, into a host array. */
+JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_ptdfBlock(JNIEnv* env, jclass, jlong handle, jint col0, jint cols,
+                                                           jdoubleArray jOut) {
+    DcContext* ctx = ctxOf(handle);
+    try {
+        if (ctx->ptdf.p == nullptr) {
+            throw std::runtime_error("no PTDF assembled");
+        }
+        if (col0 < 0 || cols < 0 || col0 + cols > ctx->ptdfCols) {
+            throw std::runtime_error("column block outside the PTDF");
+        }
+        size_t elements = (size_t) ctx->ptdfRows * cols;
+        if ((size_t) env->GetArrayLength(jOut) < elements) {
+            throw std::runtime_error("output array too small for the block");
+        }
+        std::vector<double> host(elements);
+        DC_CUDA_CHECK(cudaMemcpy(host.data(), ctx->ptdf.as<double>() + (size_t) col0 * ctx->ptdfRows,
+                                 elements * sizeof(double), cudaMemcpyDeviceToHost));
+        env->SetDoubleArrayRegion(jOut, 0, (jsize) elements, host.data());
+    } catch (const std::exception& e) {
+        throwJava(env, std::string("GpuDcSolver.ptdfBlock: ") + e.what());
+    }
+}
+
 JNIEXPORT void JNICALL
 Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_sensiSetFactorColumns(JNIEnv* env, jclass, jlong handle, jintArray jColPtr,
                                                                        jintArray jRows, jdoubleArray jValues, jint cols, jboolean alt) {

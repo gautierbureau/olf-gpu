@@ -916,6 +916,47 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
     }
 
+    /** A FIXED-Q generator lost from a bus its sibling keeps in voltage control. A bus's reactive
+     *  aggregate is NOT the sum of its generators' getMinQ()/getMaxQ(): OLF's AbstractLfBus.getLimitQ
+     *  takes a generator's LIMIT only when it controls voltage (or remote reactive power) and its
+     *  TARGET Q otherwise. So B6-Q, regulating nothing, contributes its 5 MVAr target to the aggregate
+     *  and not its +-100 MVAr capability, and that 5 MVAr is all the outage may take off.
+     *
+     *  <p>B6-G survives and holds B6 in voltage control with tight limits, so the bus pins and the
+     *  aggregate reaches the answer; charging the lost generator's limit instead moves the pinned
+     *  target by 100 MVAr rather than 5. Measured on rte6515 GEN-2899 and GEN-820#0 as 0.32 kV and
+     *  0.19 kV, five differing violations between them — invisible until the generator set was widened
+     *  below 220 kV, where the fixed-Q machines live. VERIFIED by reverting to the plain sum and
+     *  watching this test fail. */
+    @org.junit.jupiter.api.Test
+    void deviceLosingFixedQGeneratorFromControllingBusMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        com.powsybl.iidm.network.Generator g1 = network.getGenerator("B1-G");
+        g1.setTargetP(g1.getTargetP() - 5);                  // keep the case's generation/load balance
+        com.powsybl.iidm.network.Generator bq = network.getVoltageLevel("VL6").newGenerator()
+                .setId("B6-Q").setBus("B6").setConnectableBus("B6")
+                .setMinP(0).setMaxP(50).setTargetP(5).setTargetQ(5).setVoltageRegulatorOn(false)
+                .add();
+        bq.newMinMaxReactiveLimits().setMinQ(-100).setMaxQ(100).add();   // wide, and NOT what counts
+        // Out of the slack distribution: losing a PARTICIPATING generator while the slack bus also
+        // participates is a CPU route by design (the retain math does not hold), and would take the
+        // scenario off the device before the aggregate is ever read. Its 5 MW still shifts the row
+        // target, which is a pure base shift and keeps the factors exact.
+        bq.newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                .withParticipate(false).withParticipationFactor(0).add();
+        network.getGenerator("B6-G").newMinMaxReactiveLimits().setMinQ(-5).setMaxQ(5).add();
+        for (String wide : List.of("B1-G", "B2-G", "B3-G", "B8-G")) {    // only B6 pins: the all-pinned
+            network.getGenerator(wide).newMinMaxReactiveLimits().setMinQ(-990).setMaxQ(990).add();
+        }                                                                // corner is a CPU route by design
+        List<Contingency> ctgs = List.of(
+                new Contingency("B6-Q", new com.powsybl.contingency.GeneratorContingency("B6-Q")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
+    }
+
     /** A Q-carrying LOAD shed at a bus PINNED on its reactive limit. The reactive-limit pack holds the
      *  bus's load target Q as a run-constant, and reads it in two paired forms: the pinned row target is
      *  limit - loadQ, and the controller's own q is the net injection + loadQ. Shedding the load makes

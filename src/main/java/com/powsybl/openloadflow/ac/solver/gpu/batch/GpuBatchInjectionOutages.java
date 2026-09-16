@@ -36,6 +36,18 @@ final class GpuBatchInjectionOutages {
     private GpuBatchInjectionOutages() {
     }
 
+    /** OLF's AbstractLfBus.getLimitQ: a bus's reactive aggregate takes each generator's LIMIT when it
+     *  controls voltage (or remote reactive power) and its TARGET Q otherwise — the aggregate is NOT a
+     *  plain sum of getMinQ()/getMaxQ(). A fixed-Q generator lost from a bus its siblings keep in
+     *  voltage control therefore takes its targetQ off the aggregate, not its limit; charging the limit
+     *  instead moved rte6515 GEN-2899 by 0.32 kV and three violations, on a bus whose own limit is
+     *  1.0 pu against a bus aggregate of 0.997. */
+    private static double qContrib(LfGenerator g, java.util.function.ToDoubleFunction<LfGenerator> limit) {
+        return g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE
+                || g.getGeneratorControlType() == LfGenerator.GeneratorControlType.REMOTE_REACTIVE_POWER
+                ? limit.applyAsDouble(g) : g.getTargetQ();
+    }
+
     /** WHY one bus's injection outage could not be represented. All twelve exits share the
      *  PLAN:INJECTION_OUTAGE_SHAPE census tag, which is too coarse to pick the next thing to fix;
      *  OLF_GPU_GENOUT_REJECT=1 names the exit and the bus. */
@@ -230,8 +242,8 @@ final class GpuBatchInjectionOutages {
         }
         double loadQDelta = 0;
         if (rlEntry >= 0 && !toPq) {
-            minQDelta = -lost.stream().mapToDouble(LfGenerator::getMinQ).sum();
-            maxQDelta = -lost.stream().mapToDouble(LfGenerator::getMaxQ).sum();
+            minQDelta = -lost.stream().mapToDouble(g -> qContrib(g, LfGenerator::getMinQ)).sum();
+            maxQDelta = -lost.stream().mapToDouble(g -> qContrib(g, LfGenerator::getMaxQ)).sum();
             // The pack's loadQ is the bus's load target Q as EXTRACTED, and the reactive-limit
             // machinery reads it in two paired forms: the pinned target is limit - loadQ, and the
             // controller's own q is the net injection + loadQ. Shed a Q-carrying load and both go
@@ -247,10 +259,12 @@ final class GpuBatchInjectionOutages {
         boolean allGensLost = bus.getGenerators().stream().allMatch(lostSet::contains);
         if (System.getenv("OLF_GPU_GENOUT_TRACE") != null) {
             System.err.printf("GENOUT bus=%s busPv=%b frozenQ=%b toPq=%b qOverride=%b lost=%s busGens=%d rlEntry=%d "
-                    + "dMinQ=%.6f dMaxQ=%.6f busMinQ=%.6f busMaxQ=%.6f%n",
+                    + "dMinQ=%.6f dMaxQ=%.6f busMinQ=%.6f busMaxQ=%.6f distrQ=%b ctrlBus=%s dsBus=%d dFactor=%.9f dBase=%.9f%n",
                     bus.getId(), busPv, bus.isGenerationTargetQFrozen(), toPq, qOverride,
                     lost.stream().map(LfGenerator::getId).toList(), bus.getGenerators().size(),
-                    rlEntry, minQDelta, maxQDelta, bus.getMinQ(), bus.getMaxQ());
+                    rlEntry, minQDelta, maxQDelta, bus.getMinQ(), bus.getMaxQ(), distrQBus,
+                    bus.getGeneratorVoltageControl().map(vc -> vc.getControlledBus().getId()).orElse("-"),
+                    dsBus, dsFactorDelta, dsBaseDelta);
         }
         // Identity of what was lost, for the reactive-capability CURVE channel: it evaluates each
         // generator's curve at its OWN post-DS active power, which it reconstructs from the bus's row

@@ -150,3 +150,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-16 | e5390df+dirty | 18.71 | 16.24 | 27.90 | x1.72 | 0/0/0 | 7.56 | 4.47 | 499/500 | 122/133 (92%) | Generator N-1 on rte6515 agrees exactly: 0 differing violations |
 | 2026-09-16 | e077b73+dirty | 18.86 | 15.74 | 26.91 | x1.71 | 0/0/0 | 7.78 | 4.49 | 499/500 | 122/133 (92%) | Generator outages batch through the reactive-capability curve channel |
 | 2026-09-16 | 82d733b+dirty | 19.02 | 15.32 | 29.67 | x1.94 | 0/0/0 | 7.56 | 4.44 | 499/500 | 122/133 (92%) | Per-scenario load target Q: every generator and load contingency batches |
+| 2026-09-16 | 1c4c40f+dirty | 19.14 | 15.85 | 27.61 | x1.74 | 0/0/0 | 7.56 | 4.42 | 499/500 | 122/133 (92%) | Reactive aggregate follows OLF's per-generator rule, not a sum of limits |

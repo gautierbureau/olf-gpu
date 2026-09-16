@@ -33,6 +33,11 @@ loop, because the `BatchConfig` field it comes from on the analysis side is name
 
 Behaviour-neutral otherwise: suite 261/0, rte6515 unchanged at 9040/9042 with the same two lines.
 
+**Second half, same day:** the tables now TRAVEL as that record too. `solveQualifiedInChunks` took ten
+positional phase arguments, several of the same type and several nullable, which is precisely how a new
+phase gets mis-wired — a swapped pair compiles. They are one `GpuBatchPhases.Built` parameter now, the
+equation-system context folded in with them, and the chunk solver's body reads them off the record.
+
 ### #58 — PLAN: what "every builder is total" would take (scoped 2026-09-16)
 
 Totality would let the four host-pause slots go. Since #57 it is an OPTIMISATION, not a correctness

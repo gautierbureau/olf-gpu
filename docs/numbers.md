@@ -145,3 +145,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-16 | d3ace41+dirty | 18.83 | 15.65 | 27.70 | x1.77 | 0/0/0 | 7.60 | 4.45 | 499/500 | 122/133 (92%) | SecondaryVoltageControl in-kernel on the BASE load flow too, same route as the SA |
 | 2026-09-16 | bbe028b+dirty | 18.51 | 15.78 | 27.46 | x1.74 | 0/0/0 | 7.53 | 4.46 | 499/500 | 122/133 (92%) | One all-or-nothing ownership rule for both routes; partial representation no longer silent |
 | 2026-09-16 | b187bd5+dirty | 19.09 | 15.80 | 26.66 | x1.69 | 0/0/0 | 7.64 | 4.48 | 499/500 | 122/133 (92%) | Both routes build their phase tables with ONE function |
+| 2026-09-16 | 37b361c+dirty | 18.95 | 16.05 | 27.59 | x1.72 | 0/0/0 | 7.75 | 4.52 | 499/500 | 122/133 (92%) | Phase tables travel as one record, not ten positional arguments |

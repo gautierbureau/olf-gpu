@@ -378,28 +378,20 @@ public final class GpuBatchedSecurityAnalysisSolver {
             // only PARTIALLY would have the device drive a SUBSET of it, and this path has no host-pause
             // slot to hand it back to, so the whole run goes to the CPU (resultsByIndex stays null).
             if (GpuBatchPhaseOwnership.batchable()) {
-            GpuBatchChunkSolver.solveQualifiedInChunks(batchedIndices, contingencies, elementMapper, gpuData, baseState,
-                    baseTargets, baseActivation.rowMode(), plan.frozenRowsByIndex(), plan.frozenTargetsByIndex(), plan.genOutagesByIndex(),
-                    plan.activePowerLossByIndex(),
-                    GpuBatchHvdcAcEmulation.elementIndices(network, nElements), rowCriteria, rlCurves,
-                    plan.dqOvContribByIndex(), plan.dqOvWByIndex(),
-                    plan.drOvContribByIndex(), plan.drOvCByIndex(), plan.islandedDsByIndex(),
-                    plan.islandedRlByIndex(), plan.islandedHvdcsByIndex(),
-                    n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
-                    config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
-                    phases.discreteTvc(), phases.freeze(),
-                    phases.incrementalTvc(),
-                    phases.incrementalShunt(),
-                    phases.simpleShunt(),
-                    phases.flow(),
-                    new GpuBatchIncrementalFlowControl.EsContext(equationSystem.getStateVector(), n),
-                    config.hvdcFreezing() || config.hvdcLimits()
-                            ? GpuBatchHvdcAcEmulation.buildControllers(network, equationSystem, nElements)
-                            : null,
-                    phases.secondaryVc(),
-                    phases.monitoring(),
-                    phases.continuousPhase(),
-                    config);
+                GpuBatchChunkSolver.solveQualifiedInChunks(batchedIndices, contingencies, elementMapper, gpuData, baseState,
+                        baseTargets, baseActivation.rowMode(), plan.frozenRowsByIndex(), plan.frozenTargetsByIndex(), plan.genOutagesByIndex(),
+                        plan.activePowerLossByIndex(),
+                        GpuBatchHvdcAcEmulation.elementIndices(network, nElements), rowCriteria, rlCurves,
+                        plan.dqOvContribByIndex(), plan.dqOvWByIndex(),
+                        plan.drOvContribByIndex(), plan.drOvCByIndex(), plan.islandedDsByIndex(),
+                        plan.islandedRlByIndex(), plan.islandedHvdcsByIndex(),
+                        n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
+                        config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
+                        phases,
+                        config.hvdcFreezing() || config.hvdcLimits()
+                                ? GpuBatchHvdcAcEmulation.buildControllers(network, equationSystem, nElements)
+                                : null,
+                        config);
             }
         }
 

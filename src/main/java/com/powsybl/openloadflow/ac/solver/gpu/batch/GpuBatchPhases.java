@@ -65,7 +65,8 @@ public final class GpuBatchPhases {
                         List<GpuBatchContinuousPhase.Ctl> continuousPhase,
                         List<GpuBatchTransformerControl.TransformerController> discreteTvc,
                         GpuBatchTransformerControl.FreezeTables freeze,
-                        GpuBatchSecondaryVc.Controllers secondaryVc) {
+                        GpuBatchSecondaryVc.Controllers secondaryVc,
+                        GpuBatchIncrementalFlowControl.EsContext esContext) {
     }
 
     /**
@@ -117,6 +118,7 @@ public final class GpuBatchPhases {
                         ? GpuBatchSecondaryVc.build(network, es, rlVrow,
                                 new GpuBatchIncrementalFlowControl.EsContext(es.getStateVector(), n),
                                 request.minPlausibleTargetV(), request.maxPlausibleTargetV(), mapper)
-                        : null);
+                        : null,
+                new GpuBatchIncrementalFlowControl.EsContext(es.getStateVector(), n));
     }
 }

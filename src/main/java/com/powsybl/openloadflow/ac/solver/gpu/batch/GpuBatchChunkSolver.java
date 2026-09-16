@@ -59,17 +59,8 @@ final class GpuBatchChunkSolver {
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
-                                               List<GpuBatchTransformerControl.TransformerController> transformerControllers,
-                                               GpuBatchTransformerControl.FreezeTables tvdFreeze,
-                                               List<GpuBatchIncrementalTvc.Controller> incrementalTvcControllers,
-                                               List<GpuBatchIncrementalShuntVc.Controller> incrementalShuntControllers,
-                                               List<GpuBatchSimpleShuntVc.Group> simpleShuntGroups,
-                                               List<GpuBatchIncrementalFlowControl.Controller> incrementalFlowControllers,
-                                               GpuBatchIncrementalFlowControl.EsContext esContext,
+                                               GpuBatchPhases.Built phases,
                                                List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers,
-                                               GpuBatchSecondaryVc.Controllers svcControllers,
-                                               List<GpuBatchVoltageMonitoring.Ctl> monitoringControllers,
-                                               List<GpuBatchContinuousPhase.Ctl> continuousPhaseControllers,
                                                BatchConfig config) {
         int nb = batchedIndices.size();
         // Chunk sizing is a device-memory ESTIMATE (a cuDSS probe on the shared structure). When it
@@ -87,9 +78,7 @@ final class GpuBatchChunkSolver {
                         dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
                         islandedRlByIndex, islandedHvdcsByIndex,
                         n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
-                        varType, transformerControllers, tvdFreeze, incrementalTvcControllers, incrementalShuntControllers,
-                        simpleShuntGroups, incrementalFlowControllers, esContext, hvdcControllers, svcControllers,
-                        monitoringControllers, continuousPhaseControllers, config);
+                        varType, phases, hvdcControllers, config);
                 return;
             } catch (RuntimeException e) {
                 if (chunkSize <= 1 || !isDeviceAllocFailure(e)) {
@@ -158,17 +147,8 @@ final class GpuBatchChunkSolver {
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, int[] varType,
-                                               List<GpuBatchTransformerControl.TransformerController> transformerControllers,
-                                               GpuBatchTransformerControl.FreezeTables tvdFreeze,
-                                               List<GpuBatchIncrementalTvc.Controller> incrementalTvcControllers,
-                                               List<GpuBatchIncrementalShuntVc.Controller> incrementalShuntControllers,
-                                               List<GpuBatchSimpleShuntVc.Group> simpleShuntGroups,
-                                               List<GpuBatchIncrementalFlowControl.Controller> incrementalFlowControllers,
-                                               GpuBatchIncrementalFlowControl.EsContext esContext,
+                                               GpuBatchPhases.Built phases,
                                                List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers,
-                                               GpuBatchSecondaryVc.Controllers svcControllers,
-                                               List<GpuBatchVoltageMonitoring.Ctl> monitoringControllers,
-                                               List<GpuBatchContinuousPhase.Ctl> continuousPhaseControllers,
                                                BatchConfig config) {
         int nb = batchedIndices.size();
         int nChunks = (nb + chunkCap - 1) / chunkCap;
@@ -198,30 +178,30 @@ final class GpuBatchChunkSolver {
         // same network, and a stale table from a previous run selects the wrong driver phase (a Simple
         // TVC run after an INCREMENTAL one ran LOOP_TVC_KERNEL on its controls — 3.6e-7 kV).
         boolean tvcInKernel = false;
-        if (incrementalTvcControllers != null && !incrementalTvcControllers.isEmpty()) {
-            tvcInKernel = GpuBatchIncrementalTvc.uploadToDevice(handle, incrementalTvcControllers,
+        if (phases.incrementalTvc() != null && !phases.incrementalTvc().isEmpty()) {
+            tvcInKernel = GpuBatchIncrementalTvc.uploadToDevice(handle, phases.incrementalTvc(),
                     config.incTvcMaxTapShift());
         } else {
             GpuBatchIncrementalTvc.uploadToDevice(handle, null, 1);
         }
         // The flow-observed incremental loops (RPC at OLF order 9, incremental phase at order 7) as DRIVER PHASES.
         boolean flowInKernel = false;
-        if (incrementalFlowControllers != null && !incrementalFlowControllers.isEmpty()) {
-            flowInKernel = GpuBatchIncrementalFlowControl.uploadToDevice(handle, incrementalFlowControllers);
+        if (phases.flow() != null && !phases.flow().isEmpty()) {
+            flowInKernel = GpuBatchIncrementalFlowControl.uploadToDevice(handle, phases.flow());
         } else {
             GpuBatchIncrementalFlowControl.uploadToDevice(handle, null);
         }
         // CONTINUOUS PhaseControl as a DRIVER PHASE (OLF order 7); the pre-solve control-ON activation stays host-side.
         boolean cphInKernel = false;
-        if (continuousPhaseControllers != null && !continuousPhaseControllers.isEmpty()) {
-            cphInKernel = GpuBatchContinuousPhase.uploadToDevice(handle, continuousPhaseControllers);
+        if (phases.continuousPhase() != null && !phases.continuousPhase().isEmpty()) {
+            cphInKernel = GpuBatchContinuousPhase.uploadToDevice(handle, phases.continuousPhase());
         } else {
             GpuBatchContinuousPhase.uploadToDevice(handle, null);
         }
         // IncrementalShuntVoltageControl as a DRIVER PHASE (OLF order 10).
         boolean shuntInKernel = false;
-        if (incrementalShuntControllers != null && !incrementalShuntControllers.isEmpty()) {
-            shuntInKernel = GpuBatchIncrementalShuntVc.uploadToDevice(handle, incrementalShuntControllers,
+        if (phases.incrementalShunt() != null && !phases.incrementalShunt().isEmpty()) {
+            shuntInKernel = GpuBatchIncrementalShuntVc.uploadToDevice(handle, phases.incrementalShunt(),
                     config.incShuntMaxSectionShift());
         } else {
             GpuBatchIncrementalShuntVc.uploadToDevice(handle, null, 3);
@@ -232,13 +212,13 @@ final class GpuBatchChunkSolver {
         // control the upload refuses (a member without a tap table).
         boolean tvdInKernel = false;
         if ((config.transformerControl() || config.simpleTransformerControl())
-                && transformerControllers != null && !transformerControllers.isEmpty()) {
-            tvdInKernel = GpuBatchTransformerControl.uploadToDevice(handle, transformerControllers,
+                && phases.discreteTvc() != null && !phases.discreteTvc().isEmpty()) {
+            tvdInKernel = GpuBatchTransformerControl.uploadToDevice(handle, phases.discreteTvc(),
                     config.simpleTransformerControl() ? 1 : 0, false);
             if (tvdInKernel) {
                 // AFTER_GENERATOR: OLF's GeneratorVoltageControlManager freeze + fixTransformerVoltageControls
-                GpuBatchTransformerControl.uploadFreeze(handle, config.transformerControl() ? tvdFreeze : null);
-            } else if (tvdFreeze != null && tvdFreeze.hasCandidates()) {
+                GpuBatchTransformerControl.uploadFreeze(handle, config.transformerControl() ? phases.freeze() : null);
+            } else if (phases.freeze() != null && phases.freeze().hasCandidates()) {
                 throw new com.powsybl.commons.PowsyblException("GPU batch: the transformer voltage control needs the "
                         + "in-kernel phase (generator freeze under the controlled level) but a control has no tap table");
             }
@@ -246,8 +226,8 @@ final class GpuBatchChunkSolver {
             GpuBatchTransformerControl.uploadToDevice(handle, null, 0, false);   // clears a cached context's table
         }
         boolean svdInKernel = false;
-        if (config.simpleShuntControl() && simpleShuntGroups != null && !simpleShuntGroups.isEmpty()) {
-            svdInKernel = GpuBatchSimpleShuntVc.uploadToDevice(handle, simpleShuntGroups, false);
+        if (config.simpleShuntControl() && phases.simpleShunt() != null && !phases.simpleShunt().isEmpty()) {
+            svdInKernel = GpuBatchSimpleShuntVc.uploadToDevice(handle, phases.simpleShunt(), false);
         } else {
             GpuBatchSimpleShuntVc.uploadToDevice(handle, null, false);
         }
@@ -258,23 +238,23 @@ final class GpuBatchChunkSolver {
         // the only honest alternative to wrong, so the whole group goes to the CPU: leaving resultsByIndex
         // null is exactly how the caller routes a contingency to the stock per-contingency path.
         List<String> refusedLoops = new ArrayList<>();
-        if (incrementalTvcControllers != null && !incrementalTvcControllers.isEmpty() && !tvcInKernel) {
+        if (phases.incrementalTvc() != null && !phases.incrementalTvc().isEmpty() && !tvcInKernel) {
             refusedLoops.add("IncrementalTransformerVoltageControl");
         }
-        if (incrementalFlowControllers != null && !incrementalFlowControllers.isEmpty() && !flowInKernel) {
+        if (phases.flow() != null && !phases.flow().isEmpty() && !flowInKernel) {
             refusedLoops.add("IncrementalTransformerReactivePowerControl/IncrementalPhaseControl");
         }
-        if (continuousPhaseControllers != null && !continuousPhaseControllers.isEmpty() && !cphInKernel) {
+        if (phases.continuousPhase() != null && !phases.continuousPhase().isEmpty() && !cphInKernel) {
             refusedLoops.add("PhaseControl");
         }
-        if (incrementalShuntControllers != null && !incrementalShuntControllers.isEmpty() && !shuntInKernel) {
+        if (phases.incrementalShunt() != null && !phases.incrementalShunt().isEmpty() && !shuntInKernel) {
             refusedLoops.add("IncrementalShuntVoltageControl");
         }
         if ((config.transformerControl() || config.simpleTransformerControl())
-                && transformerControllers != null && !transformerControllers.isEmpty() && !tvdInKernel) {
+                && phases.discreteTvc() != null && !phases.discreteTvc().isEmpty() && !tvdInKernel) {
             refusedLoops.add("TransformerVoltageControl");
         }
-        if (config.simpleShuntControl() && simpleShuntGroups != null && !simpleShuntGroups.isEmpty() && !svdInKernel) {
+        if (config.simpleShuntControl() && phases.simpleShunt() != null && !phases.simpleShunt().isEmpty() && !svdInKernel) {
             refusedLoops.add("ShuntVoltageControl");
         }
         if (!refusedLoops.isEmpty()) {
@@ -380,12 +360,12 @@ final class GpuBatchChunkSolver {
                     overrides.clear();
                     // fixTransformerVoltageControls is a POST-CONTINGENCY check on the CPU, so its
                     // connectivity masks are per scenario and belong to the chunk, not to the run.
-                    if (tvdInKernel && config.transformerControl() && tvdFreeze != null && tvdFreeze.hasFix()) {
+                    if (tvdInKernel && config.transformerControl() && phases.freeze() != null && phases.freeze().hasFix()) {
                         List<BatchContingency> slotCtgs = new ArrayList<>(realCount);
                         for (int s = 0; s < realCount; s++) {
                             slotCtgs.add(contingencies.get(group.get(chunkStart + s)));
                         }
-                        GpuBatchTransformerControl.uploadFixMasks(handle, tvdFreeze, slotCtgs, chunkSize);
+                        GpuBatchTransformerControl.uploadFixMasks(handle, phases.freeze(), slotCtgs, chunkSize);
                     }
                     // {slot, participant} pairs: the distributed-slack participants this scenario
                     // strands in another synchronous component (see distributeSlackBatch).
@@ -723,10 +703,10 @@ final class GpuBatchChunkSolver {
                     // in-kernel phase expects the activation to already carry it.
                     List<Integer> prePcOvIdx = null;
                     List<Double> prePcOvVal = null;
-                    if (continuousPhaseControllers != null && !continuousPhaseControllers.isEmpty()) {
+                    if (phases.continuousPhase() != null && !phases.continuousPhase().isEmpty()) {
                         prePcOvIdx = new ArrayList<>(overrides.indexList());
                         prePcOvVal = new ArrayList<>(overrides.valueList());
-                        GpuBatchContinuousPhase.applyPhaseOn(realCount, n, continuousPhaseControllers,
+                        GpuBatchContinuousPhase.applyPhaseOn(realCount, n, phases.continuousPhase(),
                                 rowModePerScenario, baseRowMode, disabledMask, overrides.mutableIndexList(), overrides.mutableValueList());
                     }
                     int[] targetOverrideIndex = overrides.indexArray();
@@ -883,8 +863,8 @@ final class GpuBatchChunkSolver {
                                 hvdcStatus, disabledMask);
                     }
                     boolean dbgPairRl = pairPhase && nrl > 0 && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_RL"));
-                    boolean svcActive = svcControllers != null && !svcControllers.ctls().isEmpty();
-                    boolean monActive = monitoringControllers != null && !monitoringControllers.isEmpty();
+                    boolean svcActive = phases.secondaryVc() != null && !phases.secondaryVc().ctls().isEmpty();
+                    boolean monActive = phases.monitoring() != null && !phases.monitoring().isEmpty();
                     int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl || svcActive || monActive
                             || System.getenv("OLF_GPU_RL_TRACE") != null) && nrl > 0 ? new int[chunkSize * nrl] : null;
                     // DISTR_Q weight overrides: per-chunk context state (orchestrator re-solves keep
@@ -915,7 +895,7 @@ final class GpuBatchChunkSolver {
                     // HVDC loops and ReactiveLimits) instead of as a host orchestrator after the whole
                     // solve. Run-constant table, but the context is per chunk.
                     boolean monInKernel = monActive;
-                    GpuBatchVoltageMonitoring.installDriverLoop(handle, monInKernel ? monitoringControllers : null);
+                    GpuBatchVoltageMonitoring.installDriverLoop(handle, monInKernel ? phases.monitoring() : null);
                     // SecondaryVoltageControl as a DRIVER PAUSE at its OLF slot (order 4). Run as a host
                     // orchestrator it executed AFTER the whole device sweep — i.e. after the control loops
                     // OLF puts at orders 7-10 — so each decided on a state the other had already moved
@@ -935,7 +915,7 @@ final class GpuBatchChunkSolver {
                     // the host; OLF_GPU_SVC_HOST_ORCHESTRATOR=1 falls all the way back to the
                     // pre-2026-09-15 after-the-sweep orchestrator, for A/B only.
                     boolean svcInKernel = svcActive && !svcHostFallback
-                            && GpuBatchSecondaryVc.uploadToDevice(handle, svcControllers);
+                            && GpuBatchSecondaryVc.uploadToDevice(handle, phases.secondaryVc());
                     if (!svcInKernel) {
                         GpuBatchSecondaryVc.uploadToDevice(handle, null);   // clear a cached context's table
                     }
@@ -964,11 +944,11 @@ final class GpuBatchChunkSolver {
                     tMainSolveNs += System.nanoTime() - tSolve0;
                     if (svcAsDriverPause) {
                         long tSvc0 = System.nanoTime();
-                        int nSvcCtl = svcControllers.ctls().size();
+                        int nSvcCtl = phases.secondaryVc().ctls().size();
                         double[][] svcTargetV = new double[chunkSize][nSvcCtl];
                         for (int s2 = 0; s2 < chunkSize; s2++) {
                             for (int c = 0; c < nSvcCtl; c++) {
-                                svcTargetV[s2][c] = svcControllers.ctls().get(c).baseTargetV();
+                                svcTargetV[s2][c] = phases.secondaryVc().ctls().get(c).baseTargetV();
                             }
                         }
                         // The driver re-pauses at the SVC slot on EVERY sweep restart, and a reactive-limit
@@ -981,7 +961,7 @@ final class GpuBatchChunkSolver {
                         while (GpuAcNewtonSolver.readBatchDriverPaused(handle) == GpuAcNewtonSolver.HOST_LOOP_SVC
                                 && svcRounds++ < maxSvcRounds) {
                             var dec = GpuBatchSecondaryVc.decideAtPause(handle, chunkSize, realCount, n, nrl,
-                                    chunkResults, svcControllers, rlStateOut, svcTargetV, baseState);
+                                    chunkResults, phases.secondaryVc(), rlStateOut, svcTargetV, baseState);
                             if (dec.targetRows() != null && dec.targetRows().length > 0) {
                                 GpuAcNewtonSolver.setBatchTargetDeltas(handle, dec.targetRows(), dec.targetValues());
                             }

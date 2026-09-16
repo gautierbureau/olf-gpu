@@ -1223,3 +1223,24 @@ Collapsing them into one map of a per-load record would fix both, but it changes
 that returns one of those maps and it touches the state save and restore path, which is core to the
 security analysis as well as to the time series. That is a change to propose deliberately, not to
 slip in behind a performance sweep.
+
+### The load state made positional (2026-09-16)
+
+The structural item left open above, done. `LfLoadImpl` kept four maps keyed by the same original load
+identifier, so applying one set point hashed that string four times, and `BusDcState` copied two of
+them into fresh `HashMap`s on every state save - once per step of a time series, once per contingency
+of a security analysis. They are now one `OriginalLoad` record per load held in a list, with an index
+by identifier retained for the callers that arrive by name, and `LfLoad` gained positional accessors
+so that the state save and restore use `double[]` with neither hashing nor boxing.
+
+The precedent is in the same file: the generator state of `BusDcState` was converted from four maps to
+parallel arrays on 2026-09-10 for exactly this reason. This is the load half of that change.
+
+Measured on the phase it targets, four runs each side because the box is too noisy for one: restore
+plus set points goes from 1.22-2.17 to 0.84-1.50 ms/step, a 31% cut at the minimum.
+
+Two notes on honesty. A first pair of security analysis runs suggested this cut that path by a third;
+a confirming run on the same code landed back at the control, so the effect there is not separable
+from the machine and is written up as noise, not as a result. And the one map deliberately left alone
+is the disabling status: `setOriginalLoadsDisablingStatus` swaps the whole map and callers mutate the
+instance they get back afterwards, so its copy is load-bearing rather than wasteful.

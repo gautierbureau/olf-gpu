@@ -385,3 +385,28 @@ rte6515_full, 4096 steps, 1 thread, two runs:
 Against 1.49 to 1.64 for the GPU arm before them, so both fixes together sit inside the machine's own
 noise. The row count is unchanged at 69,591,040, which is the check that the per-partition counters
 add up.
+
+#### The load state made positional (2026-09-16)
+
+`LfLoadImpl` kept four maps keyed by the same original load identifier - the reference, p0, q0 and the
+absolute variable target - so applying one set point hashed that string four times, and `BusDcState`
+copied two of those maps into fresh `HashMap`s on every state save. They are now one record per load
+in a list, with an index by identifier for the callers that arrive by name, and the state save and
+restore go by position into `double[]`. Same move, for the same reason, as the generator arrays in the
+same class.
+
+This box is shared with the AC session and noisy enough to swallow a single run, so the targeted phase
+was measured four times on each side of the change, at 1000 steps:
+
+| | runs (ms/step) | min |
+|---|---|---|
+| before | 1.22, 1.43, 1.71, 2.17 | 1.22 |
+| after | 0.84, 0.94, 0.96, 1.50 | 0.84 |
+
+A 31% cut on restore plus set points, with the two distributions barely overlapping.
+
+**The security analysis gain was noise, and is reported as such.** A first pair of runs suggested the
+DC security analysis dropped from 6.57 to 3.71 s, which would have been a third. A confirming run on
+the same code gave 6.09 s. Two runs of identical code thus spanned 3.71 to 6.09, so the effect on that
+path is not separable from the machine here. Parity is unchanged, 0 differing lines on all 9042
+contingencies.

@@ -116,6 +116,14 @@ final class GpuBatchInjectionOutages {
                     .anyMatch(g -> !lostHere.contains(g)
                             && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
             if (!keepsController || !lostLoads.isEmpty()) {   // group restructure / Q-carrying load shape — CPU
+                // The load-loss half is NOT closed by the per-scenario load target Q. Measured on
+                // rte6515 LOAD-1263 with the gate lifted: the channel fires (the load carries
+                // -0.092 pu and the delta is applied), every violation still matches, and the bus is
+                // 0.105 kV out — local to the outage bus. That bus is a DISTR_Q group's pilot AND one
+                // of its controllers, so its reactive accounting runs through the relocation path
+                // (qBuf / pilotQ), which reads a load Q the per-scenario channel does not reach.
+                // Violation parity alone would have called this fixed; the 1e-12 bus diff is what
+                // caught it.
                 return reject(keepsController ? "DISTR_Q_BUS_WITH_LOAD_LOSS" : "DISTR_Q_LAST_CONTROLLER", bus);
             }
         }
@@ -259,12 +267,12 @@ final class GpuBatchInjectionOutages {
         boolean allGensLost = bus.getGenerators().stream().allMatch(lostSet::contains);
         if (System.getenv("OLF_GPU_GENOUT_TRACE") != null) {
             System.err.printf("GENOUT bus=%s busPv=%b frozenQ=%b toPq=%b qOverride=%b lost=%s busGens=%d rlEntry=%d "
-                    + "dMinQ=%.6f dMaxQ=%.6f busMinQ=%.6f busMaxQ=%.6f distrQ=%b ctrlBus=%s dsBus=%d dFactor=%.9f dBase=%.9f%n",
+                    + "dMinQ=%.6f dMaxQ=%.6f busMinQ=%.6f busMaxQ=%.6f distrQ=%b ctrlBus=%s dsBus=%d dFactor=%.9f dBase=%.9f lostLoadQ=%.9f dLoadQ=%.9f%n",
                     bus.getId(), busPv, bus.isGenerationTargetQFrozen(), toPq, qOverride,
                     lost.stream().map(LfGenerator::getId).toList(), bus.getGenerators().size(),
                     rlEntry, minQDelta, maxQDelta, bus.getMinQ(), bus.getMaxQ(), distrQBus,
                     bus.getGeneratorVoltageControl().map(vc -> vc.getControlledBus().getId()).orElse("-"),
-                    dsBus, dsFactorDelta, dsBaseDelta);
+                    dsBus, dsFactorDelta, dsBaseDelta, lostLoadQ, loadQDelta);
         }
         // Identity of what was lost, for the reactive-capability CURVE channel: it evaluates each
         // generator's curve at its OWN post-DS active power, which it reconstructs from the bus's row

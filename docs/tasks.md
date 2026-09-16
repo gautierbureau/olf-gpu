@@ -11,7 +11,7 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
-### #55 — PLAN: freeze a REMOTE generator voltage controller in-kernel (scoped 2026-09-16)
+### #55 — Freeze a REMOTE generator voltage controller in-kernel (landed 2026-09-16)
 
 The last whole-run CPU gate in the AFTER_GENERATOR phase. `freezeCandidates` returns null the moment
 one candidate is a REMOTE controller, because the kernel's freeze writes a V identity row
@@ -45,7 +45,24 @@ BOTH branches, since OLF's reactive-limits loop never sees a bus whose voltage c
 COMPLETE restore puts mode, target and limit type back. The packed RL state already has three bits for
 the type, so no JNI width change.
 
-Test it the way #53 was tested: on the transition, not only end to end.
+**Landed, and the test earned its keep.** Built as scoped, plus one thing the plan missed: freezing a
+remote controller can take the LAST live member of its group, and then the group controls nothing —
+OLF's freeze disables the voltage control, so the CONTROLLED bus stops carrying a V identity. That
+flip is `updatePilotVeqBatch`, which the reactive-limits phase runs after its own pins; the freeze
+happens two loops later (OLF order 8 against 6), so the pilot held a target for a control that no
+longer existed until the next sweep came back round to RL. Measured 0.6 kV on BUS_2. The same kernel
+now runs after the discrete transformer phase too, and it restores the identity at COMPLETE on the
+same rule.
+
+The test builds a remote controller whose CONTROLLED bus is under the transformer-controlled level
+WITHOUT being the bus the transformers control — putting it there takes their control away and the
+whole thing passes vacuously, which is what the first attempt did (`controllers=0`). Two settings: the
+automatic limit freezes only the remote controller, the not-controlled side keeps a PV bus, the #53
+bracket decides locally and the scenario BATCHES at 1e-12 with the freeze in-kernel; forcing the limit
+to 150 kV freezes the local generator too, empties the min mask, and the bracket sends the scenario to
+the CPU, where the two arms still have to agree.
+
+rte6515 unchanged at 9040/9042 with the same two lines.
 
 ### #54 — A second SA run in one JVM re-pays the cuDSS ANALYSIS (found 2026-09-16)
 

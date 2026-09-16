@@ -508,10 +508,12 @@ public final class GpuAcNewtonSolver {
     public static native double[] readBatchDiscreteTvcState(long handle);
 
     /** GeneratorVoltageControlManager tables for the AFTER_GENERATOR phase (after setBatchDiscreteTvc): the
-     *  freeze candidates (controller-bus V row, load Q) and the UNIVERSE of
+     *  freeze candidates (controller-bus V row, load Q, and the reactive-limit entry of a REMOTE
+     *  controller or −1) and the UNIVERSE of
      *  fixTransformerVoltageControls — the {@code BUS_V} row of every generator-voltage-controlled bus,
      *  which the per-scenario masks index. Returns 1 when installed. */
-    public static native int setBatchDiscreteTvcFreeze(long handle, int[] fzVRow, double[] fzLoadQ, int[] fixPvRow);
+    public static native int setBatchDiscreteTvcFreeze(long handle, int[] fzVRow, double[] fzLoadQ, int[] fzRlEntry,
+                                                      int[] fixPvRow);
 
     /** fixTransformerVoltageControls' per-(scenario, member) connectivity masks over the
      *  {@code fixPvRow} universe, {@code words} ints each: {@code minMask} cuts every controller branch

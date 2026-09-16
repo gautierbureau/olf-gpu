@@ -343,6 +343,12 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                         + " vcEnabled=" + bus.isGeneratorVoltageControlEnabled() + " qLimitType=" + bus.getQLimitType().map(Object::toString).orElse("-")
                         + " remote=" + data.rlRemote()[i]);
             }
+            if (limitType == 5) {
+                // Frozen by the generator voltage control manager, not pinned at a reactive limit:
+                // writeBackFreeze owns that bus. A solve normally unfreezes at COMPLETE, so this only
+                // shows up when one ended mid-phase.
+                continue;
+            }
             if (limitType != 0 && bus.isGeneratorVoltageControlEnabled()) {
                 // The limit the device pinned at — its row target is limit − loadQ, evaluated at the LIVE
                 // voltage for an SVC (OLF freezes at bus.getMinQ()/getMaxQ() read at the check, the same
@@ -916,7 +922,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                         // level freeze while the transformers act; a REMOTE candidate is out of the kernel's
                         // scope — the host-paused OLF loop keeps the slot then
                         tvdFreeze = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.buildFreezeTables(
-                                network, equationSystem, tvdCtls, tag.getMaxControlledNominalVoltageOverride());
+                                network, equationSystem, tvdCtls, tag.getMaxControlledNominalVoltageOverride(),
+                                cachedData.rlBusNum());
                         if (tvdFreeze == null) {
                             com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.uploadToDevice(handle, null, 0, false);
                             tvdOwned = false;

@@ -209,8 +209,11 @@ public final class GpuBatchTransformerControl {
 
     /** The generator voltage controls OLF's manager would freeze under the transformer-controlled level:
      *  the controller buses (in merged order) of every generator-controlled bus at or under the limit that
-     *  have no step-up exemption. Null when one of them is a REMOTE controller (its row is a DISTR_Q share,
-     *  not a V identity — out of the in-kernel scope). */
+     *  have no step-up exemption. OLF freezes a REMOTE controller exactly like a local one, and so does the
+     *  kernel — through the reactive-limit remote PIN (row mode 4) rather than a V identity flip — as long
+     *  as the member has a reactive-limit ENTRY, which is what carries the limit type the DISTR_Q key
+     *  renormalization reads. A remote candidate without one (equal Q limits, no pilot column) has no slot
+     *  to mark and still gates the run: null. */
     private static List<LfBus> freezeCandidates(LfNetwork network, double limit) {
         List<LfBus> out = new ArrayList<>();
         for (LfBus bus : network.getControlledBuses(VoltageControl.Type.GENERATOR)) {
@@ -225,13 +228,37 @@ public final class GpuBatchTransformerControl {
                 if (hasStepUpTransformers(controller, limit)) {
                     continue;
                 }
-                if (controller != bus) {
-                    return null;
+                if (controller != bus && !remoteFreezeRepresentable(controller)) {
+                    return null;                             // no reactive-limit entry to carry the type
                 }
                 out.add(controller);
             }
         }
         return out;
+    }
+
+    /** Can a REMOTE controller be frozen in-kernel? It is frozen as a reactive-limit remote PIN, and the
+     *  limit type that marks it lives on its reactive-limit ENTRY — which the pack creates for a MAIN
+     *  generator voltage control with distinct Q limits. This is the network-only half of the condition,
+     *  so the whole-run gate can be decided before the extraction exists; {@link #buildFreezeTables}
+     *  checks the entry really is there and fails loudly if the two ever disagree. */
+    private static boolean remoteFreezeRepresentable(LfBus controller) {
+        return controller.getGeneratorVoltageControl()
+                .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                .isPresent() && controller.getMinQ() < controller.getMaxQ();
+    }
+
+    /** The reactive-limit pack entry of a bus, or −1. */
+    private static int rlEntryOf(int[] rlBusNum, int busNum) {
+        if (rlBusNum == null) {
+            return -1;
+        }
+        for (int i = 0; i < rlBusNum.length; i++) {
+            if (rlBusNum[i] == busNum) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     /** True when the AFTER_GENERATOR loop's generator freeze can run IN-KERNEL on this network: every
@@ -262,7 +289,7 @@ public final class GpuBatchTransformerControl {
      * control. No PV bus in the max mask means OLF sees none either — disable it. In between, the answer
      * depends on which controllers this scenario enabled, and the scenario goes to the CPU.
      */
-    public record FreezeTables(int[] vRow, double[] loadQ, int[] busNum,
+    public record FreezeTables(int[] vRow, double[] loadQ, int[] busNum, int[] rlEntry,
                                int[] fixPvRow, int fixWords, int[] minMask, int[] maxMask, int nMembers,
                                FixMaskBuilder builder) {
         public boolean hasCandidates() {
@@ -281,7 +308,8 @@ public final class GpuBatchTransformerControl {
      *  branches — at the base neither exists yet; the kernel then asks which of those buses is still ON).
      *  Null when a candidate is a remote controller. */
     public static FreezeTables buildFreezeTables(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                                 List<TransformerController> tcs, double minNominalVOverride) {
+                                                 List<TransformerController> tcs, double minNominalVOverride,
+                                                 int[] rlBusNum) {
         double limit = minNominalVoltageLimit(network, minNominalVOverride);
         List<LfBus> candidates = freezeCandidates(network, limit);
         if (candidates == null) {
@@ -296,6 +324,7 @@ public final class GpuBatchTransformerControl {
         int[] vRow = new int[candidates.size()];
         double[] loadQ = new double[candidates.size()];
         int[] busNum = new int[candidates.size()];
+        int[] rlEntry = new int[candidates.size()];
         for (int c = 0; c < candidates.size(); c++) {
             LfBus bus = candidates.get(c);
             Integer row = busVRows.get(bus.getNum());
@@ -305,6 +334,17 @@ public final class GpuBatchTransformerControl {
             vRow[c] = row;
             loadQ[c] = bus.getLoadTargetQ();
             busNum[c] = bus.getNum();
+            // REMOTE controller (the controlled bus is not this one): the kernel freezes it as a
+            // reactive-limit remote pin and marks its ENTRY, so the DISTR_Q shares renormalize.
+            boolean remote = bus.getGeneratorVoltageControl().map(c2 -> c2.getControlledBus() != bus).orElse(false);
+            rlEntry[c] = remote ? rlEntryOf(rlBusNum, bus.getNum()) : -1;
+            if (remote && rlEntry[c] < 0) {
+                // The gate admitted it on the network-only condition but the pack has no entry, so
+                // nothing would carry the frozen limit type and the group's DISTR_Q shares would not
+                // renormalize. Silently skipping the freeze is the one outcome worth refusing.
+                throw new com.powsybl.commons.PowsyblException("GPU batch: remote generator voltage controller '"
+                        + bus.getId() + "' is a freeze candidate with no reactive-limit entry");
+            }
         }
         int nMembers = 0;
         for (TransformerController tc : tcs) {
@@ -335,7 +375,7 @@ public final class GpuBatchTransformerControl {
         int[] minMask = new int[nMembers * words];
         int[] maxMask = new int[nMembers * words];
         builder.fill(List.of(), minMask, 0, maxMask, 0);       // base topology: no contingency branches
-        return new FreezeTables(vRow, loadQ, busNum, fixPvRow, words, minMask, maxMask, nMembers, builder);
+        return new FreezeTables(vRow, loadQ, busNum, rlEntry, fixPvRow, words, minMask, maxMask, nMembers, builder);
     }
 
     /**
@@ -440,10 +480,10 @@ public final class GpuBatchTransformerControl {
      *  installed (AFTER_GENERATOR only). */
     public static void uploadFreeze(long handle, FreezeTables fz) {
         if (fz == null) {
-            GpuAcNewtonSolver.setBatchDiscreteTvcFreeze(handle, null, null, null);
+            GpuAcNewtonSolver.setBatchDiscreteTvcFreeze(handle, null, null, null, null);
             return;
         }
-        GpuAcNewtonSolver.setBatchDiscreteTvcFreeze(handle, fz.vRow(), fz.loadQ(), fz.fixPvRow());
+        GpuAcNewtonSolver.setBatchDiscreteTvcFreeze(handle, fz.vRow(), fz.loadQ(), fz.rlEntry(), fz.fixPvRow());
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
             System.err.printf("TVD_FREEZE_UPLOAD nCandidates=%d fixPvBuses=%d members=%d%n",
                     fz.vRow().length, fz.fixPvRow().length, fz.nMembers());

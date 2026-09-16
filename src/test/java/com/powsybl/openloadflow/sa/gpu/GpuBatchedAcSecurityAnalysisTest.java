@@ -1257,6 +1257,84 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         }
     }
 
+    /** A REMOTE generator voltage controller under the transformer-controlled level. OLF's
+     *  GeneratorVoltageControlManager walks {@code getMergedControllerElements()} and freezes every
+     *  enabled one at {@code getQ().eval()}, local or remote alike; the device used to gate the whole
+     *  run to the CPU because a remote controller's own row is the group's DISTR_Q SHARE, not a V
+     *  identity. It is now frozen the way the reactive-limits pass pins one — row mode 4 with the
+     *  current injection as the target — and marked with limit type 5, which is what makes the group's
+     *  DISTR_Q shares renormalize over the members that are left. */
+    @org.junit.jupiter.api.Test
+    void deviceRemoteGeneratorFreezeUnderControlledLevelMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        // The AUTOMATIC limit (33 kV) freezes GEN_R and leaves GEN_1 controlling at 132 kV, so the
+        // not-controlled side of the transformers still holds a PV bus and the connectivity fix decides
+        // locally: the scenario batches, with the remote freeze running in-kernel.
+        assertGpuMatchesCpu(remoteFreezeNetwork(), remoteFreezeContingencies(), 1e-12, remoteFreezeParameters(-1));
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "a remote freeze candidate must batch in-kernel");
+        // Forcing the limit to 150 kV freezes GEN_1 too, which empties the not-controlled side of PV
+        // buses in the min mask while the max mask still finds one — the #53 bracket is ambiguous and
+        // sends the scenario to the CPU. The freeze itself still runs; what is asserted here is that
+        // the two arms agree either way.
+        assertGpuMatchesCpuNoEngage(remoteFreezeNetwork(), remoteFreezeContingencies(), 1e-12,
+                remoteFreezeParameters(150));
+    }
+
+    private static List<Contingency> remoteFreezeContingencies() {
+        return List.of(new Contingency("LINE_3R_BIS", new BranchContingency("LINE_3R_BIS")));
+    }
+
+    private static com.powsybl.loadflow.LoadFlowParameters remoteFreezeParameters(double minNominalV) {
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL)
+                .setVoltageRemoteControl(true)
+                .setGeneratorVoltageControlMinNominalVoltage(minNominalV);
+        return lfp;
+    }
+
+    /** GEN_R sits on its own 33 kV bus and regulates BUS_S, a THIRD 33 kV bus down the feeder — so it is
+     *  a REMOTE controller, and its controlled bus is under the transformer-controlled level (33 kV)
+     *  without being the bus the transformers control, which would have taken their control away.
+     *  Distinct Q limits give it a reactive-limit entry, which is what carries the frozen limit type. */
+    private static Network remoteFreezeNetwork() {
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWith2T2wt();
+        var t1 = network.getTwoWindingsTransformer("T2wT1");
+        var t2 = network.getTwoWindingsTransformer("T2wT2");
+        t1.getRatioTapChanger().setTargetDeadband(0).setRegulating(true).setTapPosition(3)
+                .setRegulationTerminal(t1.getTerminal2()).setTargetV(34.0);
+        t2.getRatioTapChanger().setTargetDeadband(0).setRegulating(true).setTapPosition(0)
+                .setRegulationTerminal(t2.getTerminal2()).setTargetV(34.0);
+        var sr = network.newSubstation().setId("SUBSTATION_R").add();
+        var vlr = sr.newVoltageLevel().setId("VL_R").setNominalV(33.0)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        vlr.getBusBreakerView().newBus().setId("BUS_R").add();
+        var vls = sr.newVoltageLevel().setId("VL_S").setNominalV(33.0)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        vls.getBusBreakerView().newBus().setId("BUS_S").add();
+        vls.newLoad().setId("LOAD_S").setBus("BUS_S").setConnectableBus("BUS_S").setP0(3.0).setQ0(1.0).add();
+        var genR = vlr.newGenerator().setId("GEN_R").setBus("BUS_R").setConnectableBus("BUS_R")
+                .setMinP(0).setMaxP(20).setTargetP(5).setTargetV(33.5).setVoltageRegulatorOn(true)
+                .setRegulatingTerminal(network.getLoad("LOAD_S").getTerminal()).add();
+        genR.newMinMaxReactiveLimits().setMinQ(-20).setMaxQ(20).add();
+        network.newLine().setId("LINE_3R")
+                .setVoltageLevel1("VL_3").setBus1("BUS_3").setConnectableBus1("BUS_3")
+                .setVoltageLevel2("VL_R").setBus2("BUS_R").setConnectableBus2("BUS_R")
+                .setR(0.5).setX(1.5).add();
+        network.newLine().setId("LINE_RS")
+                .setVoltageLevel1("VL_R").setBus1("BUS_R").setConnectableBus1("BUS_R")
+                .setVoltageLevel2("VL_S").setBus2("BUS_S").setConnectableBus2("BUS_S")
+                .setR(0.5).setX(1.5).add();
+        network.newLine().setId("LINE_3R_BIS")               // the contingency, clear of the transformer group
+                .setVoltageLevel1("VL_3").setBus1("BUS_3").setConnectableBus1("BUS_3")
+                .setVoltageLevel2("VL_R").setBus2("BUS_R").setConnectableBus2("BUS_R")
+                .setR(1.0).setX(3.0).add();
+        return network;
+    }
+
     /** OLF's testGeneratorVoltageControlMinNominalVoltage network (several transformer voltage controls,
      *  generators at 90 kV): the automatic limit freezes the 90 kV generators while three transformers act;
      *  forcing the limit to 230 kV freezes every generator and fixTransformerVoltageControls disables all

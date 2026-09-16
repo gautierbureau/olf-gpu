@@ -368,7 +368,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
             // AFTER_GENERATOR: the generator freeze under the transformer-controlled level and the
             // connectivity fix, for the in-kernel phase (null tables = no candidate needs a remote shape)
             GpuBatchTransformerControl.FreezeTables tvdFreeze = config.transformerControl() && tvdControllers != null
-                    ? GpuBatchTransformerControl.buildFreezeTables(network, equationSystem, tvdControllers, config.genVcMinNominalV())
+                    ? GpuBatchTransformerControl.buildFreezeTables(network, equationSystem, tvdControllers,
+                            config.genVcMinNominalV(), gpuData.rlBusNum())
                     : null;
             GpuBatchChunkSolver.solveQualifiedInChunks(batchedIndices, contingencies, elementMapper, gpuData, baseState,
                     baseTargets, baseActivation.rowMode(), plan.frozenRowsByIndex(), plan.frozenTargetsByIndex(), plan.genOutagesByIndex(),

@@ -3309,6 +3309,12 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
     switched[s] = 1;                                         // this outer loop is UNSTABLE for s
 }
 
+// Reactive-limit limit types: 0 unpinned, 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V, 4 MAX_REALISTIC_V, and
+// 5 = frozen by OLF's GeneratorVoltageControlManager. The DISTR_Q key renormalization drops any member
+// whose type is non-zero, which is why the freeze needs one; the reactive-limits pass must then LEAVE
+// type 5 alone, because a bus whose voltage control is off is not one of its controllers at all.
+#define RL_LIMIT_FROZEN 5
+
 __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenarios, int n, double tol, int maxSwitch,
                                     const int* rlVrow, const double* rlMinQ, const double* rlMaxQ,
                                     const double* rlLoadQ, const double* rlVtarget, const double* qBuf,
@@ -3335,6 +3341,10 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
     // VL-6432_0, an ISLANDED bus, giving it 20 pinned controllers against OLF's 19 and one extra
     // LOW_VOLTAGE violation at VL-1624.
     if (rlIslanded != nullptr && rlIslanded[(size_t) s * nrl + i]) return;
+    // A controller FROZEN by the generator voltage control manager has its voltage control OFF, so it
+    // is not one of this loop's controllers at all — OLF iterates buses with voltage control and never
+    // reaches it. Leave the type (and the row) to the transformer phase that set it.
+    if (limitType[(size_t) s * nrl + i] == RL_LIMIT_FROZEN) return;
     // SVC reactive limits are VOLTAGE-DEPENDENT: LfStaticVarCompensatorImpl evaluates
     // Bmin/Bmax*(v*nomV)^2 at the LIVE bus V on every CPU check (and a pinned bus re-freezes at
     // the moved limit via busesWithUpdatedQLimits). rlMinQ/rlMaxQ hold the base-V aggregates;
@@ -4527,6 +4537,7 @@ struct BatchSolverContext {
     int nTvdFz = 0;
     DeviceBuf dTvdFzVRow, dTvdFzLoadQ;                       // per candidate
     DeviceBuf dTvdFzFrozen, dTvdFzSavedMode, dTvdFzSavedTarget;   // per (scenario, candidate)
+    DeviceBuf dTvdFzRlEntry;                                 // per candidate: RL entry of a REMOTE one, else -1
     DeviceBuf dTvdFixPvRow;                                  // the fix universe: every gen-VC bus's V row
     DeviceBuf dTvdFixMinMask, dTvdFixMaxMask;                // per (scenario, member): fixWords ints each
     int tvdFixWords = 0;
@@ -5626,6 +5637,10 @@ __global__ void rlUnpinBatch(int nPairs, int nS, int n, int nrl, const int* pair
     if (s < 0 || s >= nS || i < 0 || i >= nrl) return;
     size_t st = (size_t) s * nrl + i;
     if (limitType[st] == 0) return;                          // not pinned: nothing to give back
+    // A member FROZEN by the generator voltage control manager is not a reactive-limit pin: giving it
+    // back would restore a V identity on a row that holds the group's DISTR_Q share, and would undo a
+    // decision the transformer phase owns and will undo itself at COMPLETE.
+    if (limitType[st] == RL_LIMIT_FROZEN) return;
     size_t idx = (size_t) s * n + rlVrow[i];
     char sm = savedMode[st];
     mode[idx] = (sm == 2) ? 2 : 0;                           // the PV form saved at pin time (2 = slope SVC)
@@ -5657,8 +5672,9 @@ struct TvdTables {
     int* scnStep; int* grpStep; double* grpShMin; double* grpShMax; double* grpShInit;
     int* memState; int* memTap; double* memRoundFrom; double* saved; char* reject;
     // generator freeze + connectivity fix (AFTER_GENERATOR only)
-    int nFz, hasFix, fixWords;
-    const int* fzVRow; const double* fzLoadQ; const int* fixPvRow;
+    int nFz, hasFix, fixWords, nrl;
+    const int* fzVRow; const double* fzLoadQ; const int* fzRlEntry; const int* fixPvRow;
+    char* rlLimitType;                                       // the freeze marks a REMOTE member here
     const int* fixMinMask; const int* fixMaxMask;               // per (scenario, member), fixWords ints
     int* fzFrozen; int* fzSavedMode; double* fzSavedTarget;
 };
@@ -5840,7 +5856,27 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
         for (int c = 0; c < T.nFz; c++) {
             size_t sr = sn + T.fzVRow[c];
             size_t sc = (size_t) s * T.nFz + c;
-            if (T.fzFrozen[sc] || (mode[sr] != 0 && mode[sr] != 2)) continue;
+            if (T.fzFrozen[sc]) continue;
+            int re = T.fzRlEntry[c];
+            if (re >= 0) {
+                // REMOTE controller. OLF freezes it exactly like a local one, but its own row is the
+                // group's DISTR_Q SHARE, not a V identity — so the freeze is the reactive-limit remote
+                // PIN (mode 4, "the row hosts its own Q balance") with the CURRENT injection as the
+                // target instead of a Q limit. The limit type is what the DISTR_Q key renormalization
+                // reads to drop a member, so it has to be set, and RL_LIMIT_FROZEN keeps it
+                // distinguishable from a real Q-limit pin (which the switch-back may undo; this must
+                // not be, OLF's reactive-limits loop never sees a bus whose voltage control is off).
+                size_t st = (size_t) s * T.nrl + re;
+                if (mode[sr] != 1 || T.rlLimitType[st] != 0) continue;   // pinned already, or not live
+                T.fzSavedMode[sc] = mode[sr];
+                T.fzSavedTarget[sc] = target[sr];
+                mode[sr] = 4;
+                target[sr] = qBuf[sr] - T.fzLoadQ[c];
+                T.rlLimitType[st] = RL_LIMIT_FROZEN;
+                T.fzFrozen[sc] = 1;
+                continue;
+            }
+            if (mode[sr] != 0 && mode[sr] != 2) continue;
             T.fzSavedMode[sc] = mode[sr];
             T.fzSavedTarget[sc] = target[sr];
             mode[sr] = 1;
@@ -5957,6 +5993,9 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
         size_t sr = sn + T.fzVRow[c];
         mode[sr] = T.fzSavedMode[sc];
         target[sr] = T.fzSavedTarget[sc];
+        if (T.fzRlEntry[c] >= 0) {                           // a remote member rejoins the DISTR_Q shares
+            T.rlLimitType[(size_t) s * T.nrl + T.fzRlEntry[c]] = 0;
+        }
         T.fzFrozen[sc] = 0;
     }
     T.scnStep[s] = 2;
@@ -6097,6 +6136,7 @@ static TvdTables tvdTables(BatchSolverContext* ctx) {
     T.saved = ctx->dTvdSaved.as<double>(); T.reject = ctx->dTvdReject.as<char>();
     T.nFz = ctx->nTvdFz; T.hasFix = ctx->tvdFixTables ? 1 : 0; T.fixWords = ctx->tvdFixWords;
     T.fzVRow = ctx->dTvdFzVRow.as<int>(); T.fzLoadQ = ctx->dTvdFzLoadQ.as<double>();
+    T.fzRlEntry = ctx->dTvdFzRlEntry.as<int>(); T.nrl = ctx->nrl; T.rlLimitType = ctx->dRlLimitType.as<char>();
     T.fixPvRow = ctx->dTvdFixPvRow.as<int>();
     T.fixMinMask = ctx->dTvdFixMinMask.as<int>(); T.fixMaxMask = ctx->dTvdFixMaxMask.as<int>();
     T.fzFrozen = ctx->dTvdFzFrozen.as<int>(); T.fzSavedMode = ctx->dTvdFzSavedMode.as<int>(); T.fzSavedTarget = ctx->dTvdFzSavedTarget.as<double>();
@@ -7293,6 +7333,20 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         tvdCheckBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(tvdTables(ctx), nS, n, ctx->nElements, ctx->dDisabled.as<char>(),
                 ctx->dRlActive.as<char>(), ctx->dQbuf.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->dX.as<double>(),
                 ctx->dRlSwitched.as<char>());
+        // Freezing a REMOTE controller can take the LAST live member of its group, and then the group
+        // controls nothing: OLF's freeze disables the voltage control, so the CONTROLLED bus stops
+        // carrying a V identity. That flip lives in its own kernel, which the reactive-limits phase runs
+        // after its pins; the freeze happens two loops later and would otherwise leave the pilot holding
+        // a target for a control that no longer exists until the next sweep reached RL again (measured
+        // 0.6 kV). Same kernel, run again here — it restores the identity at COMPLETE on the same rule.
+        if (ctx->hasDqQrGroups && ctx->st->nQr > 0 && ctx->nTvdFz > 0) {
+            updatePilotVeqBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
+                    ctx->st->nQr, nS, n,
+                    ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), ctx->dQrGenVc.as<char>(),
+                    ctx->dQrPilotQ.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
+                    ctx->dQrVeqOff.as<char>(), ctx->dQrSavedVT.as<double>(),
+                    ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
+        }
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         std::vector<char> rej(nS);
         CUDA_CHECK(cudaMemcpy(rej.data(), ctx->dTvdReject.p, nS, cudaMemcpyDeviceToHost));
@@ -10359,7 +10413,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
  *  PV-candidate row lists (CSR, [nM+1]; null = no connectivity fix). Returns 1 when installed. */
 extern "C" JNIEXPORT jint JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDiscreteTvcFreeze(
-        JNIEnv* env, jclass, jlong handle, jintArray jFzVRow, jdoubleArray jFzLoadQ, jintArray jFixPvRow) {
+        JNIEnv* env, jclass, jlong handle, jintArray jFzVRow, jdoubleArray jFzLoadQ, jintArray jFzRlEntry,
+        jintArray jFixPvRow) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || ctx->nTvd <= 0) {
         return 0;
@@ -10377,8 +10432,16 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     }
     int nFz = static_cast<int>(vRow.size());
     if (nFz > 0) {
+        std::vector<int> rlEntry;
+        if (jFzRlEntry != nullptr) {
+            readI(jFzRlEntry, rlEntry);
+        }
+        if (static_cast<int>(rlEntry.size()) != nFz) {
+            rlEntry.assign(nFz, -1);                         // no remote candidate
+        }
         ctx->dTvdFzVRow.upload(vRow.data(), nFz * sizeof(int));
         ctx->dTvdFzLoadQ.upload(loadQ.data(), nFz * sizeof(double));
+        ctx->dTvdFzRlEntry.upload(rlEntry.data(), nFz * sizeof(int));
         size_t nsc = static_cast<size_t>(ctx->nScenarios) * nFz;
         ctx->dTvdFzFrozen.ensure(nsc * sizeof(int));
         ctx->dTvdFzSavedMode.ensure(nsc * sizeof(int));

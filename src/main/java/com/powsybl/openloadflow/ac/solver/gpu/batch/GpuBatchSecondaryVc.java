@@ -76,20 +76,20 @@ public final class GpuBatchSecondaryVc {
      *  (the very function the fill scatters); 2 = a SHUNT's q = -b*v^2, i.e. OLF's
      *  ShuntCompensatorReactiveFlowEquationTerm (dq/dv = -2bv, dq/db = -v^2). {@code elem} is the
      *  PACK-relative element index; {@code bRow} a derived shunt's SHUNT_B row, -1 when b is fixed. */
-    record QObs(int kind, int elem, int bRow) {
+    public record QObs(int kind, int elem, int bRow) {
     }
 
-    record CtlBus(int vRow, int ctldVRow, int rlIdx, double baseTargetV, double minQ, double maxQ,
+    public record CtlBus(int vRow, int ctldVRow, int ctldBusNum, int rlIdx, double baseTargetV, double minQ, double maxQ,
                   double loadTargetQ,
                   com.powsybl.openloadflow.util.Evaluable busQ,
                   List<EquationTerm<AcVariableType, AcEquationType>> qTerms,
                   List<QObs> qObs) {
     }
 
-    record Zone(int pilotVRow, double pilotTargetV, int[] ctls) {
+    public record Zone(int pilotVRow, double pilotTargetV, int[] ctls) {
     }
 
-    record Controllers(List<CtlBus> ctls, List<Zone> zones,
+    public record Controllers(List<CtlBus> ctls, List<Zone> zones,
                        GpuBatchIncrementalFlowControl.EsContext esCtx,
                        double minPlausibleTargetV, double maxPlausibleTargetV) {
     }
@@ -120,7 +120,7 @@ public final class GpuBatchSecondaryVc {
     }
 
     @SuppressWarnings("unchecked")
-    static Controllers build(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    public static Controllers build(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                              int[] rlVrow, GpuBatchIncrementalFlowControl.EsContext esCtx,
                              double minPlausibleTargetV, double maxPlausibleTargetV,
                              GpuBatchElementMapper elementMapper) {
@@ -179,7 +179,8 @@ public final class GpuBatchSecondaryVc {
                     }
                 }
                 zoneCtls.add(ctls.size());
-                ctls.add(new CtlBus(vRow, ctldVRow, rlIdx, vc.getTargetValue(), controller.getMinQ(), controller.getMaxQ(),
+                ctls.add(new CtlBus(vRow, ctldVRow, vc.getControlledBus().getNum(), rlIdx, vc.getTargetValue(),
+                        controller.getMinQ(), controller.getMaxQ(),
                         controller.getLoadTargetQ(), controller.getQ(), qTerms, qObs));
             }
             Integer pilotVRow = busVRows.get(svc.getPilotBus().getNum());
@@ -190,6 +191,39 @@ public final class GpuBatchSecondaryVc {
                     zoneCtls.stream().mapToInt(Integer::intValue).toArray()));
         }
         return new Controllers(ctls, zones, esCtx, minPlausibleTargetV, maxPlausibleTargetV);
+    }
+
+    /**
+     * Give the in-kernel zone regulation back to the network — the batch-of-one's analogue of what
+     * OLF's {@code SecondaryVoltageControlOuterLoop} does as a side effect of running: it moves each
+     * controller's generator voltage control TARGET, and without this OLF's world keeps the
+     * pre-regulation targets while the device solved at the moved ones.
+     *
+     * <p>The moved target comes from the phase's OWN state, not from the controlled bus's row. Reading
+     * the row looks right and is not: that row carries a Q target the moment the bus is pinned or is a
+     * shared-distribution member, and writing 0.165 pu in as a target voltage puts the control outside
+     * the plausible band and OLF drops it.
+     */
+    public static void writeBack(LfNetwork network, Controllers controllers, double[] movedTargetV) {
+        if (controllers == null || movedTargetV == null) {
+            return;
+        }
+        List<CtlBus> ctls = controllers.ctls();
+        for (int c = 0; c < ctls.size() && c < movedTargetV.length; c++) {
+            double moved = movedTargetV[c];                  // batch of one: scenario 0
+            if (Double.isNaN(moved) || moved <= 0) {
+                continue;                                    // the phase never adjusted this controller
+            }
+            LfBus ctld = network.getBus(ctls.get(c).ctldBusNum());
+            if (ctld == null) {
+                continue;
+            }
+            final double v = moved;
+            if (System.getenv("OLF_GPU_SVC_WB_TRACE") != null) {
+                System.err.printf("SVC_WB bus=%s base=%.6f moved=%.6f%n", ctld.getId(), ctls.get(c).baseTargetV(), v);
+            }
+            ctld.getGeneratorVoltageControl().ifPresent(vc -> vc.setTargetValue(v));
+        }
     }
 
     private static double qToK(double q, CtlBus c) {         // OLF qToK

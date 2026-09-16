@@ -457,6 +457,10 @@ public final class GpuAcNewtonSolver {
      *  (pu), NaN while standing by — null without the table. Layout {@code s * nmon + c}. */
     public static native double[] readBatchMonitoringTargets(long handle);
 
+    /** The zone-regulated generator voltage control targets the SecondaryVoltageControl phase settled
+     *  on, per {@code (scenario, controller)} — what OLF's own loop leaves on the network. */
+    public static native double[] readBatchSecondaryVcTargets(long handle);
+
     /** Per (scenario, incremental TVC controller): the tap index the driver's TransformerVoltageControl
      *  phase left — null without the table. Layout {@code s * nTvc + c}. */
     public static native int[] readBatchTvcTaps(long handle);

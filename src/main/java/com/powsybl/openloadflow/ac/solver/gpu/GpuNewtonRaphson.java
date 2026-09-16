@@ -211,6 +211,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             GpuBatchVoltageMonitoring.writeBack(network, monCtls, GpuAcNewtonSolver.readBatchMonitoringTargets(handle),
                     data.rlBusNum());
         }
+        if (svcCtls != null) {
+            com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSecondaryVc.writeBack(network, svcCtls,
+                    GpuAcNewtonSolver.readBatchSecondaryVcTargets(handle));
+        }
         writeBackDistributedSlack(deviceTargets,
                 GpuAcNewtonSolver.readBatchDsGenCum(handle), GpuAcNewtonSolver.readBatchDsRetain(handle), data);
         writeBackReactiveLimits(data, deviceTargets);
@@ -453,6 +457,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private List<com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.TransformerController> tvdCtls;
     private boolean tvdOwned;
     private com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.FreezeTables tvdFreeze;
+    /** SecondaryVoltageControl's in-kernel tables — the same phase the batched SA drives by default. */
+    private com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSecondaryVc.Controllers svcCtls;
     private List<com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSimpleShuntVc.Group> svdGroups;
     private boolean svdOwned;
     /** The host-loop bits the CURRENT solve actually pauses for (in-kernel phases clear theirs). */
@@ -838,8 +844,29 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     invalidation.activationDirty = ad;
                 }
                 GpuBatchVoltageMonitoring.installDriverLoop(handle, monCtls);
-                // IncrementalTransformerVoltageControl (OLF order 8) IN-KERNEL, shared groups included.
                 int hostMask = buildHostLoopMask();
+                // SecondaryVoltageControl (OLF order 4) IN-KERNEL — the same phase, built the same way,
+                // as the batched security analysis. It used to be the one loop the base load flow never
+                // handed to the driver, so every network with a zone paused it here while the chunk path
+                // ran it on device; a pause whose mutation dirties the structure is also what forces the
+                // driver RESTART, so the divergence was not only a throughput one.
+                svcCtls = null;
+                if (driverLoop("SecondaryVoltageControl") != null
+                        && com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSecondaryVc.supported(network)) {
+                    svcCtls = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSecondaryVc.build(
+                            network, equationSystem, cachedData.rlVrow(),
+                            new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchIncrementalFlowControl.EsContext(
+                                    equationSystem.getStateVector(), n),
+                            acLoadFlowParameters.getNetworkParameters().getMinPlausibleTargetVoltage(),
+                            acLoadFlowParameters.getNetworkParameters().getMaxPlausibleTargetVoltage(),
+                            new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper(network));
+                }
+                if (com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSecondaryVc.uploadToDevice(handle, svcCtls)) {
+                    hostMask &= ~1;                          // bit 0 = HOST_LOOP_SVC
+                } else {
+                    svcCtls = null;                          // refused: OLF's own loop runs at the pause
+                }
+                // IncrementalTransformerVoltageControl (OLF order 8) IN-KERNEL, shared groups included.
                 if (driverLoop("IncrementalTransformerVoltageControl")
                         instanceof com.powsybl.openloadflow.ac.outerloop.IncrementalTransformerVoltageControlOuterLoop itvc) {
                     tvcCtls = GpuBatchIncrementalTvc.buildControllers(network, equationSystem,

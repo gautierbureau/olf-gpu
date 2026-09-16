@@ -11,6 +11,34 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #56 — The base load flow takes the same route as the SA (2026-09-16)
+
+`SecondaryVoltageControl` was the one in-kernel phase the base load flow never handed to the driver.
+The kernel landed on the chunk path, where it is the default; `GpuNewtonRaphson` builds every other
+phase (monitoring, incremental TVC, incremental shunt, the flow-observed family, continuous phase,
+discrete TVC with the generator freeze, simple shunt) and never built this one. So
+`buildHostLoopMask` set its bit and nothing cleared it: every network with a zone PAUSED the driver
+there, by construction rather than by refusal — while the same network ran it on device under the
+security analysis. Two routes through the same loop, which is the divergence class this project keeps
+paying for.
+
+Now built and uploaded the same way, from the same builder, with the same inputs. Everything it needs
+was already on the base path: the reactive-limit rows, the state vector, the plausible-target-V bounds
+off `getNetworkParameters()`, an element mapper.
+
+**What the chunk path did not need and the base path does: a write-back.** The batched SA restores the
+network per scenario, so the moved zone targets never have to reach it; a load flow has to leave them
+on the network exactly as OLF's own loop does. The first attempt read the moved target out of the
+CONTROLLED bus's row, which looks right and is wrong — that row carries a Q target the moment the bus
+is pinned or is a shared-distribution member, and writing 0.165 pu in as a target voltage puts the
+control outside the plausible band, so OLF drops it and the run stops batching. Two JAVA-mode tests
+caught it. The targets now come from the phase's own state (`dSvcTargetV`, read back per
+(scenario, controller)), which is the thing the kernel actually settled on.
+
+This also closes the most reachable route into the restart gap: a paused loop whose mutation dirties
+the structure is what cancels the pause and forces a restart, and moving generator VC targets is
+exactly that kind of mutation.
+
 ### #55 — Freeze a REMOTE generator voltage controller in-kernel (landed 2026-09-16)
 
 The last whole-run CPU gate in the AFTER_GENERATOR phase. `freezeCandidates` returns null the moment

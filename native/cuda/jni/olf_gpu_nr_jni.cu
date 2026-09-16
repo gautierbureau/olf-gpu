@@ -9631,6 +9631,24 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
     return out;
 }
 
+// The zone-regulated generator voltage control TARGETS the SVC phase settled on, per
+// (scenario, controller) — what OLF's SecondaryVoltageControlOuterLoop leaves on the network. The
+// batched SA restores per scenario and needs none of this; the base load flow has to give them back.
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchSecondaryVcTargets(
+        JNIEnv* env, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || ctx->nSvc <= 0 || !ctx->dSvcTargetV.p) {
+        return nullptr;
+    }
+    size_t cnt = static_cast<size_t>(ctx->nSvc) * ctx->nScenarios;
+    std::vector<double> host(cnt);
+    cudaMemcpy(host.data(), ctx->dSvcTargetV.p, cnt * sizeof(double), cudaMemcpyDeviceToHost);
+    jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(cnt));
+    env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(cnt), host.data());
+    return out;
+}
+
 extern "C" JNIEXPORT jintArray JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchTvcTaps(
         JNIEnv* env, jclass, jlong handle) {

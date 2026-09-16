@@ -89,7 +89,7 @@ public final class GpuBatchIncrementalFlowControl {
 
     /** The observable-evaluation context captured at build time: the shared es state vector (scenario
      *  states are loaded into it so OLF's own flow terms evaluate/differentiate at the right point). */
-    record EsContext(StateVector stateVector, int n) {
+    public record EsContext(StateVector stateVector, int n) {
     }
 
     @SuppressWarnings("unchecked")

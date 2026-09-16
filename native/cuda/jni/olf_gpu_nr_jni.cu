@@ -7760,11 +7760,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // scenario that is EVER unrealistic to the CPU replay, which applies OLF's rule itself. That is
     // stricter than OLF (a state it would have let a later loop fix also leaves the batch), so it
     // can cost batching share and can never change an answer.
-    // OLF_GPU_REALISTIC_CHECK=0 turns the intermediate check off, so its cost in batching share can
-    // be measured against the same binary (the FINAL state is still checked host-side either way).
-    static const bool realisticCheckOff = std::getenv("OLF_GPU_REALISTIC_CHECK") != nullptr
-            && std::string(std::getenv("OLF_GPU_REALISTIC_CHECK")) == "0";
-    if (ctx->realisticCheck && solvePass && !realisticCheckOff && loopIdx > realisticFixingIdx) {
+    if (ctx->realisticCheck && solvePass && loopIdx > realisticFixingIdx) {
         std::vector<char> gate(nS);
         for (int s = 0; s < nS; s++) {
             gate[s] = (wasActive[s] && res.status[s] == 0 && live[s]) ? 1 : 0;

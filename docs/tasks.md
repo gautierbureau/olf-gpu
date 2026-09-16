@@ -818,9 +818,11 @@ being to let those loops repair the state instead of failing the run on it. The 
 that loop's identity as a hint from the Java side (−1 none, 0 ReactiveLimits, 1 the discrete
 TransformerVoltageControl), finds its slot in its own loop order and checks only past it. rte6515 is
 back to 9040 of 9042 with no sweep rejections at all, same two differing lines.
-`OLF_GPU_REALISTIC_CHECK=0` turns the intermediate check off and `OLF_GPU_UNREALISTIC_TRACE` names
-the slot, the pass and the loop that rejected — the two levers that made the cost measurable against
-one binary.
+`OLF_GPU_UNREALISTIC_TRACE` names the slot, the pass and the loop that rejected, which is what made
+the four visible. The temporary switch that turned the intermediate check off is gone with them: the
+deferred check is what OLF does, so a switch selecting the other behaviour would only preserve a known
+wrong answer — the same reason `olf.gpu.sa.hvdcLoopsInKernel` and `olf.gpu.sa.batchStrandedDs` were
+deleted rather than defaulted.
 
 **(b) Forced-PV: the per-scenario rejection detector.** The stated gap was that the in-kernel
 election had landed but a silent per-scenario rejection to the CPU remained as a safety net.

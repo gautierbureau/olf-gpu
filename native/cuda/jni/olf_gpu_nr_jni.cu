@@ -284,7 +284,7 @@ inline void applyReorderAlg(cudssConfig_t config) {
 // Report the LU fill after an ANALYSIS when sweeping (or tracing): one stderr line the
 // sweep driver greps. Non-fatal — some (version, ordering) combinations may not expose
 // CUDSS_DATA_LU_NNZ; the sweep then judges on the bench timing alone.
-inline void traceLuNnz(cudssHandle_t handle, cudssData_t data, const char* where) {
+inline void traceLuNnz(cudssHandle_t handle, cudssData_t data, const char* where, int nScenarios = 0) {
     if (std::getenv("OLF_GPU_REORDER_ALG") == nullptr && std::getenv("OLF_GPU_TRACE") == nullptr) {
         return;
     }
@@ -299,8 +299,8 @@ inline void traceLuNnz(cudssHandle_t handle, cudssData_t data, const char* where
 #else
         const char* unsetName = "default";
 #endif
-        std::fprintf(stderr, "OLF_GPU_CUDSS reorder=%s %s LU_NNZ=%lld\n",
-                     alg != nullptr ? alg : unsetName, where, static_cast<long long>(luNnz));
+        std::fprintf(stderr, "OLF_GPU_CUDSS reorder=%s %s nScenarios=%d LU_NNZ=%lld\n",
+                     alg != nullptr ? alg : unsetName, where, nScenarios, static_cast<long long>(luNnz));
         return;
     }
 #endif
@@ -7616,7 +7616,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
         if (!ctx->analyzed) {
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch));
-            traceLuNnz(ctx->ds.handle, ctx->ds.data, "batch-api");
+            traceLuNnz(ctx->ds.handle, ctx->ds.data, "batch-api", ctx->nScenarios);
             ctx->analyzed = true;
         }
         CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
@@ -7637,7 +7637,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
         if (!ctx->analyzed) {
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matBig, ctx->matBigX, ctx->matBigB));
-            traceLuNnz(ctx->ds.handle, ctx->ds.data, "blkdiag");
+            traceLuNnz(ctx->ds.handle, ctx->ds.data, "blkdiag", ctx->nScenarios);
             ctx->analyzed = true;
         }
         CUDSS_CHECK(cudssExecute(ctx->ds.handle,
@@ -7664,7 +7664,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
         if (!ctx->analyzed) {
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
-            traceLuNnz(ctx->ds.handle, ctx->ds.data, "ubatch");
+            traceLuNnz(ctx->ds.handle, ctx->ds.data, "ubatch", ctx->nScenarios);
             ctx->analyzed = true;
         }
         // ONE cudssExecute per iteration (phases are OR-able bit flags): halves the per-iteration
@@ -7767,7 +7767,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matX, dxS));
             if (!ctx->analyzed) {
                 CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
-                traceLuNnz(ctx->ds.handle, ctx->ds.data, "per-scenario");
+                traceLuNnz(ctx->ds.handle, ctx->ds.data, "per-scenario", ctx->nScenarios);
                 ctx->analyzed = true;
             }
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,

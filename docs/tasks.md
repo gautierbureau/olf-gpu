@@ -11,6 +11,41 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #54 — A second SA run in one JVM re-pays the cuDSS ANALYSIS (found 2026-09-16)
+
+Measured, not suspected. `OLF_GPU_TRACE=1` now tags every ANALYSIS with the context's batch width, and
+the production bench (three GPU runs: a 20-scenario qualification pass, then cold and warm at 250)
+prints six:
+
+```
+ubatch nScenarios=1   LU_NNZ=260076      <- base load flow, run 1
+ubatch nScenarios=20  LU_NNZ=260076
+ubatch nScenarios=1   LU_NNZ=260076      <- base load flow, run 2
+CONTEXT_EVICT cached chunk=20 -> requested chunk=250
+ubatch nScenarios=250 LU_NNZ=260076
+ubatch nScenarios=1   LU_NNZ=260076      <- base load flow, run 3
+CONTEXT_EVICT cached chunk=250 -> requested chunk=250
+ubatch nScenarios=250 LU_NNZ=260076
+```
+
+Within ONE analysis the contingencies are fine: the chunk context is acquired before both the chunk
+loop and the strategy-pair group, `ctx->analyzed` latches, and every chunk of every group shares that
+one ANALYSIS. The base load flow pays its own, at width 1.
+
+The third eviction is the finding: `chunk=250 -> chunk=250`, the same width and the same LU_NNZ, so the
+PATTERN is identical and the symbolic analysis would have been reusable. `acquireBatchContext` misses
+because it keys on `GpuAcData.sameAs`, which compares element PARAMETER VALUES (`cbIn` and friends) —
+and the previous run left the network at different tap positions. The base load flow already has the
+right pattern for this: `sameStructureInputsAs` + `refreshStructureValues`, reuse the device structure
+and push the new values.
+
+What makes it more than a one-line change: `createBatchContext` takes the reactive-limit and
+distributed-slack packs as CONSTRUCTOR arguments (`rlMinQ`, `rlVtarget`, `dsFactor`, …) and
+`GpuBatchOuterLoopTables.install` does not re-upload them, so reusing a context across runs needs
+those packs to become setters like the channels installed beside them. Size it against the measured
+ANALYSIS cost first — the cold/warm delta on the bench is ~1.4 s over 500 contingencies and the
+analysis is only part of that.
+
 ### #30 — Multi-stage conditional actions
 Pending. The only item left **in** the operator-strategy machinery; everything else in #24
 is done. Single-stage conditions (True / violation / threshold) all qualify today via

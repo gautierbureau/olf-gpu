@@ -865,3 +865,62 @@ column.
   with the AC session's; unit tests on IEEE/small cases are fine in parallel.
 - **The device gets the RUN's parameters** (dcPowerFactor, balanceType, useTransformerRatio,
   dcApproximationType, limit reductions) — never `new ...Parameters()` in the GPU path.
+
+## 8. Scope: a PTDF matrix and N-1 by matrix multiply (asked 2026-09-16)
+
+**Do we assemble a PTDF matrix on the device today? No.** Nothing in the DC port ever materializes
+one. `GpuLodfCalculator` can produce LODF (and therefore PTDF-shaped) factors, but it computes them in
+column blocks and streams them straight out, precisely so the full matrix never exists. The security
+analysis does not use factors at all: it keeps the Woodbury element states, solves a small dense alpha
+system per contingency in registers, builds that contingency's state vector, and reads flows off it.
+
+**Would the matrix formulation work? Yes, for part of the list.** For an outage of a single branch k
+with no injection change, the post-contingency flow on branch l is
+
+    f_l^(k) = f_l + LODF(l, k) * f_k,    LODF(l, k) = PTDF(l, k) / (1 - PTDF(k, k))
+
+so the whole post-contingency flow matrix is the LODF matrix with column k scaled by the base flow on
+k, plus the base flow broadcast. Building LODF from the element states is a sparse-by-dense product:
+each monitored branch contributes a row of two or three non-zeros against the state columns. That is
+the `sensiBlock` kernel that already exists.
+
+**What it would buy: essentially nothing, and this is measured.** Sizes for rte6515, all 9042 branches
+monitored, full N-1:
+
+| | |
+|---|---|
+| element states, all outages | 451 MB |
+| full LODF or PTDF block | 624 MB |
+| post-contingency state vectors written today | 451 MB |
+| post-contingency flows | 624 MB |
+| rough device traffic for a whole sweep | 3.3 GB, about 17 ms at 190 GB/s |
+| measured wall for that sweep | 4427 ms |
+
+The device side is already around one percent of the run. A Flight Recorder profile of a device-only
+security analysis makes the same point from the other direction: of 69 samples under `runOnDevice`,
+NONE are in a device call. They are `DcNetworkVector.updateClosedBranches`, map iteration, the slack
+distribution replay, modified-target building and violation object construction. Another 50 samples
+are the host connectivity analysis, 40 of them inserting into hash maps.
+
+So reformulating the algebra would optimize something that is not the cost. The one structural saving
+in it - computing flows directly from `x0 + sum alpha_i * S_i` instead of materializing each
+contingency's state vector first, which is a kernel fusion and does not need PTDF at all - is worth
+about 10 ms of 4427.
+
+**What it would not cover.** The matrix form is the k = 1 special case with fixed injections. It does
+not cover lost generation, load or HVDC, islanding, lost phase shifters, load-based balance types or
+multi-slack, all of which need the modified-target columns, nor N-k, nor operator strategies. Those
+are the classes phase 2c spent its time on. Keeping both paths would mean maintaining two algebras for
+one answer.
+
+**Where the time actually is, ranked, if the DC security analysis is to get faster:**
+
+1. Host bookkeeping inside the per-contingency loop: the network vector refresh, the slack
+   distribution replay, the modified-target build, and building one violation object per violation.
+2. The host connectivity analysis on the potentially-breaking subset. The device criterion already
+   screens the rest, so this is the graph work itself plus its map building.
+3. The kernels, at about one percent. Not worth touching.
+
+**Recommendation: do not build it for performance.** Build a PTDF or LODF product on the device only
+if a caller wants the factors themselves, which is the case `docs/numbers.md` already measured and
+found does not pay over PCIe either. The N-1 answer is not where a matrix multiply helps.

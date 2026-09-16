@@ -75,7 +75,8 @@ public final class GpuAcOuterLoopPacks {
     record RlPack(int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget,
                   double[] rlSvcBmin, double[] rlSvcBmax, double[] rlV2Base,
                   byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow, int[] rlBusNum,
-                  double[] rlNominalV, int[] rlPRow, double[] rlTargetP, int[] rlIdRank) {
+                  double[] rlNominalV, int[] rlPRow, double[] rlTargetP, int[] rlIdRank,
+                  double[] rlInitTargetQ) {
     }
 
     /** Remote-member OWN reactive-injection contributors (plan-B3): per contribution, the member's
@@ -372,6 +373,10 @@ public final class GpuAcOuterLoopPacks {
         List<Integer> rlPRow = new ArrayList<>();
         List<Double> rlTargetP = new ArrayList<>();
         List<String> rlBusId = new ArrayList<>();
+        // Robust-mode pin target (ReactiveLimitsOuterLoop.getInitialGenerationTargetQ): the sum of the
+        // bus generators' targetQ, which is what OLF freezes a REMOTE controller at when its own voltage
+        // leaves the realistic band while its Q is still inside its limits.
+        List<Double> rlInitTargetQ = new ArrayList<>();
         // A never-solved network has NaN bus voltages, and an SVC's reactive limits are Bmin/Bmax·V²:
         // packing them (and the quadratic reference v²) at NaN left the entry's limits NaN and the
         // device never pinned it (the base load flow on the driver; a chunk extracts after a solve).
@@ -411,6 +416,7 @@ public final class GpuAcOuterLoopPacks {
                         rlPRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.phiCol()[bn] : -1);
                         rlTargetP.add(bus.getTargetP());
                         rlBusId.add(bus.getId());
+                        rlInitTargetQ.add(initialGenerationTargetQ(bus));
                     }
                     continue;                                  // never let a base-pinned remote member
                 }                                              // masquerade as a LOCAL basePqCapable entry
@@ -456,6 +462,7 @@ public final class GpuAcOuterLoopPacks {
                     rlPRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.phiCol()[bn] : -1);
                     rlTargetP.add(bus.getTargetP());
                     rlBusId.add(bus.getId());
+                    rlInitTargetQ.add(initialGenerationTargetQ(bus));
                 }
             }
         }
@@ -485,7 +492,12 @@ public final class GpuAcOuterLoopPacks {
                 mon, rem, GpuAcArrays.toIntArray(rlCmpVrow),
                 GpuAcArrays.toIntArray(rlBusNum),
                 GpuAcArrays.toDoubleArray(rlNominalV), GpuAcArrays.toIntArray(rlPRow), GpuAcArrays.toDoubleArray(rlTargetP),
-                idRanks(rlBusId));
+                idRanks(rlBusId), GpuAcArrays.toDoubleArray(rlInitTargetQ));
+    }
+
+    /** {@code ReactiveLimitsOuterLoop.getInitialGenerationTargetQ}, verbatim. */
+    private static double initialGenerationTargetQ(LfBus bus) {
+        return bus.getGenerators().stream().mapToDouble(LfGenerator::getTargetQ).sum();
     }
 
     static DsPack distributedSlackPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,

@@ -187,7 +187,8 @@ final class GpuBatchChunkSolver {
         GpuAcNewtonSolver.setBatchRowCriteria(handle,
                 rowCriteria != null ? rowCriteria[0] : null, rowCriteria != null ? rowCriteria[1] : null);
         // The run-constant outer-loop tables, shared with the base load flow's batch-of-one.
-        GpuBatchOuterLoopTables.install(handle, gpuData, rlCurves);
+        GpuBatchOuterLoopTables.install(handle, gpuData, rlCurves,
+                config.rlRobustMode(), config.minRealisticVoltage(), config.maxRealisticVoltage());
 
         // Incremental TVC: upload controller data to device (run-constant, not per-chunk).
         // IncrementalTransformerVoltageControl as a DRIVER PHASE (OLF order 8), shared controlled
@@ -1105,7 +1106,7 @@ final class GpuBatchChunkSolver {
                         }
                     }
                     if (System.getenv("OLF_GPU_RL_TRACE") != null && rlStateOut != null) {
-                        // rlStateOut packs (limitType & 3) | (switchCount << 2) per (controller, scenario):
+                        // rlStateOut packs (limitType & 7) | (switchCount << 3) per (controller, scenario):
                         // switchCount > 0 means the DEVICE switched that controller during THIS solve, which
                         // is exactly the decision OLF's ReactiveLimitsOuterLoop makes (and logs) on the CPU.
                         for (int s = 0; s < realCount; s++) {
@@ -1114,20 +1115,20 @@ final class GpuBatchChunkSolver {
                             StringBuilder ids = new StringBuilder();
                             for (int i = 0; i < nrl; i++) {
                                 int v = rlStateOut[s * nrl + i];
-                                if ((v & 3) != 0) {
+                                if ((v & 7) != 0) {
                                     pinned++;
                                     if (ids.length() < 4000) {
                                         // vRow identifies WHICH controller: it is the bus's stable device
                                         // row, the same number the DISTR_Q / target dumps print.
                                         ids.append(" p").append(i).append("(vRow=").append(gpuData.rlVrow()[i])
-                                           .append(",lt=").append(v & 3).append(')');
+                                           .append(",lt=").append(v & 7).append(')');
                                     }
                                 }
-                                if ((v >> 2) > 0) {
+                                if ((v >> 3) > 0) {
                                     switched++;
                                     if (ids.length() < 300) {
                                         ids.append(" rl").append(i).append("(vRow=")
-                                           .append(gpuData.rlVrow()[i]).append(",lt=").append(v & 3).append(')');
+                                           .append(gpuData.rlVrow()[i]).append(",lt=").append(v & 7).append(')');
                                     }
                                 }
                             }
@@ -1153,8 +1154,8 @@ final class GpuBatchChunkSolver {
                             StringBuilder sb = new StringBuilder("GPU-PAIR-RL " + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(GpuBatchStatus.STRATEGY_KEY_SEP, '|'));
                             for (int i2 = 0; i2 < nrl; i2++) {
                                 int v = rlStateOut[s2 * nrl + i2];
-                                if ((v & 3) != 0) {
-                                    sb.append(" ctl").append(i2).append("=lt").append(v & 3).append("/sc").append(v >> 2);
+                                if ((v & 7) != 0) {
+                                    sb.append(" ctl").append(i2).append("=lt").append(v & 7).append("/sc").append(v >> 3);
                                 }
                             }
                             System.err.println(sb);
@@ -1224,15 +1225,15 @@ final class GpuBatchChunkSolver {
                         for (int s = 0; s < realCount; s++) {
                             int pinned = 0;
                             for (int i = 0; i < nrl; i++) {
-                                if ((rlStateOut[s * nrl + i] & 3) != 0) {
+                                if ((rlStateOut[s * nrl + i] & 7) != 0) {
                                     pinned++;
                                 }
                             }
                             StringBuilder ids = new StringBuilder();
                             for (int i = 0; i < nrl; i++) {
-                                if ((rlStateOut[s * nrl + i] & 3) != 0) {
+                                if ((rlStateOut[s * nrl + i] & 7) != 0) {
                                     ids.append(' ').append(i).append("(vRow=").append(gpuData.rlVrow()[i])
-                                       .append(",lt=").append(rlStateOut[s * nrl + i] & 3).append(')');
+                                       .append(",lt=").append(rlStateOut[s * nrl + i] & 7).append(')');
                                 }
                             }
                             System.err.printf("GPU_RL_FINAL ctg=%s pinnedTotal=%d%s%n",

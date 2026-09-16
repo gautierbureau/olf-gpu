@@ -24,10 +24,31 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
  */
 public final class GpuBatchOuterLoopTables {
 
+    /** ReactiveLimitsOuterLoop.REALISTIC_VOLTAGE_MARGIN. */
+    private static final double REALISTIC_VOLTAGE_MARGIN = 1.02;
+
     private GpuBatchOuterLoopTables() {
     }
 
-    public static void install(long handle, GpuAcData gpuData, GpuBatchRlCurves.Channel rlCurves) {
+    /**
+     * OLF's forced-PV election keys, installed on a batch context the moment it is CREATED.
+     *
+     * <p>Every context carrying reactive-limit entries drives the RL phase — a full load flow does so
+     * even when OLF, not the device, owns the outer loops (the device stabilizes the loop internally
+     * and OLF's own loop then finds nothing to switch). {@code switchPvPq}'s network-wide rule that
+     * the strongest bus stays PV when EVERY PV bus would switch is part of that phase, so its keys
+     * belong to the context's construction and not to the driver's optional table install. They used
+     * to be installed only for a driver run, and a context without them fell back to a silent
+     * per-scenario rejection to the CPU; installing them here makes that rejection unreachable, which
+     * is why {@code solveBatchContext} now refuses a context that reaches it without them.
+     */
+    public static void installRlElection(long handle, GpuAcData gpuData) {
+        GpuAcNewtonSolver.setBatchRlElection(handle, gpuData.rlNominalV(), gpuData.rlPRow(),
+                gpuData.rlTargetP(), gpuData.rlIdRank());
+    }
+
+    public static void install(long handle, GpuAcData gpuData, GpuBatchRlCurves.Channel rlCurves,
+                               boolean rlRobustMode, double minRealisticVoltage, double maxRealisticVoltage) {
         // Curve limits at runtime P: install (or clear, for cached contexts) the per-gen curve channel.
         GpuAcNewtonSolver.setBatchRlCurves(handle,
                 rlCurves != null ? rlCurves.cvIdx() : null,
@@ -41,6 +62,12 @@ public final class GpuBatchOuterLoopTables {
         // OLF's global forced-PV election keys — the RL pass keeps the strongest bus PV when every
         // PV bus would switch, instead of rejecting the scenario to the CPU.
         GpuAcNewtonSolver.setBatchRlElection(handle, gpuData.rlNominalV(), gpuData.rlPRow(), gpuData.rlTargetP(), gpuData.rlIdRank());
+        // voltageRemoteControlRobustMode: install (or clear, for a cached context whose run has the
+        // mode off) the realistic-V criteria the RL pass applies to REMOTE voltage controllers.
+        // REALISTIC_VOLTAGE_MARGIN = 1.02, straight out of ReactiveLimitsOuterLoop.
+        GpuAcNewtonSolver.setBatchRlRobust(handle, gpuData.rlInitTargetQ(),
+                minRealisticVoltage * REALISTIC_VOLTAGE_MARGIN, maxRealisticVoltage / REALISTIC_VOLTAGE_MARGIN,
+                rlRobustMode ? 1 : 0);
         // Remote-member RL entries (plan-B1): install (or clear, on a cached context) the kinds.
         boolean anyRlRemote = false;
         for (byte b : gpuData.rlRemote()) {

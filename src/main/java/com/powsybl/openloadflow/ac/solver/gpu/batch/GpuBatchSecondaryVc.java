@@ -339,7 +339,7 @@ public final class GpuBatchSecondaryVc {
             for (int c = 0; c < nc; c++) {
                 CtlBus ctl = ctls.get(c);
                 int e = s * nrl + ctl.rlIdx();
-                if ((pinnedBefore[e] & 3) != 0 && (rlState[e] & 3) == 0) {
+                if ((pinnedBefore[e] & 7) != 0 && (rlState[e] & 7) == 0) {
                     unpin.add(s);                            // OLF's re-enable: back to PV at the zone's target
                     unpin.add(ctl.rlIdx());
                     unpinT.add(targetV[s][c]);
@@ -351,7 +351,7 @@ public final class GpuBatchSecondaryVc {
                 if (targetV[s][c] == ctl.baseTargetV()) {
                     continue;
                 }
-                if ((rlState[e] & 3) == 0) {
+                if ((rlState[e] & 7) == 0) {
                     rows.add(s * n + ctl.ctldVRow());        // the CONTROLLED bus's V target moves now
                     vals.add(targetV[s][c]);
                 }                                            // pinned row: the Q pin stays; the override below
@@ -398,13 +398,13 @@ public final class GpuBatchSecondaryVc {
             for (Zone z : zones) {
                 int pinned = 0;
                 for (int c : z.ctls()) {
-                    if ((rlState[s * nrl + ctls.get(c).rlIdx()] & 3) != 0) {
+                    if ((rlState[s * nrl + ctls.get(c).rlIdx()] & 7) != 0) {
                         pinned++;
                     }
                 }
                 if (pinned > 0 && pinned < z.ctls().length) {
                     for (int c : z.ctls()) {
-                        if ((rlState[s * nrl + ctls.get(c).rlIdx()] & 3) != 0) {
+                        if ((rlState[s * nrl + ctls.get(c).rlIdx()] & 7) != 0) {
                             reEnabled[s][c] = true;
                         }
                     }
@@ -467,7 +467,7 @@ public final class GpuBatchSecondaryVc {
             // enabled controllers this scenario: unpinned or just re-enabled
             List<Integer> enabled = new ArrayList<>();
             for (int c = 0; c < nc; c++) {
-                if ((rlState[s * nrl + ctls.get(c).rlIdx()] & 3) == 0 || reEnabled[s][c]) {
+                if ((rlState[s * nrl + ctls.get(c).rlIdx()] & 7) == 0 || reEnabled[s][c]) {
                     enabled.add(c);
                 }
             }

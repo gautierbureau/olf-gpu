@@ -770,6 +770,80 @@ not a closed branch. With this every sensitivity-dependent incremental loop runs
 chunk path's host orchestrators left: SecondaryVoltageControl (transposed solve, task #40); the
 non-incremental TVC / shunt VC flows followed the same day (#47).
 
+### #51 — Gaps inside the ported phases: robust mode, forced-PV, distributed slack (2026-09-16)
+
+Three of the gaps left inside the phases that are already on the device. All three were
+verified against the current code first — two of the three turned out not to be what the
+earlier summary said they were.
+
+**(a) Reactive limits: `voltageRemoteControlRobustMode`.** OLF's default is TRUE, so these
+criteria were active in every default run and the RL kernel did not implement any of them —
+a silent divergence, not a fallback. `ReactiveLimitsOuterLoop.checkControllerBus` applies two
+things to a bus whose generator voltage control is REMOTE (`controlledBus != bus`):
+
+  1. a bus that just switched PV -> PQ on a reactive limit, and whose OWN voltage is outside
+     `[minRealisticVoltage * 1.02, maxRealisticVoltage / 1.02]`, is reseeded at 1 pu;
+  2. a bus whose Q is still INSIDE its limits but whose own voltage is already outside that
+     band stops maintaining the remote voltage: it is frozen at its INITIAL generation target
+     Q (the sum of its generators' `targetQ`) with a `MIN_REALISTIC_V` / `MAX_REALISTIC_V`
+     limit type, and is likewise reseeded at 1 pu.
+
+Ported into the RL phase. The freeze is the existing remote pin (row mode 4) with a different
+target, so only three things are new: a per-entry `rlInitTargetQ` table, limit types 3 and 4
+alongside 1 (MIN_Q) and 2 (MAX_Q), and the 1 pu reseed. Two details matter. The switch-back
+reads 3 like a min limit and 4 like a max limit (`LfBus.QLimitType.isMinLimit()`), but the
+"Q limit moved while pinned" re-freeze is guarded to MIN_Q/MAX_Q in OLF and so skips 3/4. And
+the reseed is a WRITE to the state vector the check kernel is reading, so it runs as its own
+pass (`rlRobustVResetBatch`) against the pre-pass state rather than racing inside the check.
+
+The packed per-(controller, scenario) RL state widened from two limit-type bits to three
+(`(limitType & 7) | (switchCount << 3)`), on both sides of the JNI.
+
+**(b) Forced-PV: the per-scenario rejection detector.** The stated gap was that the in-kernel
+election had landed but a silent per-scenario rejection to the CPU remained as a safety net.
+The first reading — that the detector was dead code because the election keys were always
+installed — was wrong, and the contract check that replaced it failed five tests. The keys were
+installed by the driver's table install, and the RL phase runs on ANY context carrying RL
+entries, including a full load flow where OLF (not the device) owns the outer loops. Those
+contexts had no keys, so the detector was live there and every such scenario went to the CPU.
+
+Fixed at the root: the keys are now installed where the context is CREATED (all four creators,
+including the one-shot `solveBatch` entry, which has no network behind it and so gets neutral
+keys that reduce the rule to OLF's last tie-break, lowest id stays PV). The detector is deleted
+and `solveBatchContext` refuses a context that reaches it with RL entries and no keys.
+
+**(c) Distributed slack.** Re-verified against the current code. `dsRejectResidual` is ON by
+default (OLF's `slackDistributionFailureBehavior` default is FAIL, not LEAVE_ON_SLACK_BUS), and
+it flags a saturated distribution on the ENTRY band (`fsGlobal * slackBusPMaxMismatch`) where OLF
+decides the distribution failed on `ActivePowerDistribution.P_RESIDUE_EPS` (1e-5 pu, 1 kW). A
+scenario that saturates with, say, 0.3 MW still unplaced therefore comes back CONVERGED from the
+device where the CPU reports FAILED. That is the one live DIVERGENCE among the slack gaps, and
+the fix is to flag on P_RESIDUE_EPS: the flag only routes the scenario to the CPU fallback, so a
+tighter test can cost batching share and can never make the device answer where OLF refuses to.
+
+The rest are fallbacks rather than divergences, with what each one needs:
+
+- **`slackDistributionFailureBehavior` on-device.** FAIL (the default) could be answered
+  in-kernel — a FAILED post-contingency result reports no violations — instead of replaying the
+  scenario on the CPU. What stops it being a pure win is `distributedActivePower`: OLF reverts
+  its reporting on a FAILED distribution, and the batched result carries that field.
+  DISTRIBUTE_ON_REFERENCE_GENERATOR needs the reference generator's row; THROW must reach the
+  host for its message.
+- **Strategy-pair legs take the aggregate water-fill.** A re-anchored scenario (`dsAnchorShift`
+  non-zero) skips the per-GENERATOR water-fill, because the anchor shift is a BUS-level
+  displacement and nothing in the pack says how to split it across a bus's generators. Closing
+  it means capturing the parent's per-generator cumulative deltas (`genCum`, already per
+  (scenario, generator) on the device) and feeding them back as a per-generator anchor shift.
+- **`loadPowerFactorConstant` + load-based balance, whole-run CPU.** `ensurePowerFactorConstant`
+  moves each load's targetQ with its targetP, per round. The DS pack is per BUS with a
+  per-generator sub-list and has no per-LOAD granularity, and the device never writes a Q target
+  during distribution. Needs a per-load pack (Q row, participation factor, initial P and Q, the
+  `ensurePowerFactorConstantByLoad` flag) plus a Q-target write in the water-fill.
+- **`useLoadModel` + load-based balance, whole-run CPU.** Rescaling a load's targetP rescales its
+  voltage-dependent coefficients, which are static on the device.
+- **Custom `ContingencyActivePowerLossDistribution` SPI, whole-run CPU.** Only the "Default" impl
+  is replayed host-side; an arbitrary SPI cannot be.
+
 ### #50 — PLAN: fold the JAVA hybrid into the driver's host-slot mechanism (reviewed 2026-09-16)
 
 Not started. A review, not a design commitment — the measurement in stage 0 decides whether it is worth

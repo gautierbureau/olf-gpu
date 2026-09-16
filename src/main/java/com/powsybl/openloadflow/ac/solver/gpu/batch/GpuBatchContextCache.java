@@ -126,6 +126,7 @@ public final class GpuBatchContextCache {
                 data.dsBaseTargetP(), data.dsMaxDelta(), data.dsMinDelta(),
                 data.dsMode(), data.dsMarginUp(), data.dsMarginDown(),
                 data.dsSlackMarginUp(), data.dsSlackMarginDown());
+        GpuBatchOuterLoopTables.installRlElection(handle, data);
         cachedContext = new CachedBatchContext(handle, data, chunkSize, mode);
         return handle;
     }

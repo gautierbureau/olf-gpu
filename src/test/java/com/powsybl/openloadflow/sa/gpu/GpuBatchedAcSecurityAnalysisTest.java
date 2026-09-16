@@ -1540,6 +1540,81 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, remotePinParameters());
     }
 
+    /** voltageRemoteControlRobustMode — OLF's DEFAULT — now a criterion of the RL kernel. g1 controls
+     *  b2 REMOTELY through a very reactive transformer; losing one of the two parallel b2-b3 lines
+     *  collapses g1's OWN 20 kV bus far below the realistic band while its reactive power is still
+     *  well inside [-3000, 6000] MVAr. ReactiveLimitsOuterLoop then stops maintaining the remote
+     *  voltage: it freezes the generation at its INITIAL target Q with a MIN_REALISTIC_V limit type
+     *  and reseeds the bus at 1 pu for the next solve. Turning the mode off rejects the very same
+     *  state as unrealistic, so the status assertion below keeps the parity assertion honest. */
+    @Test
+    void deviceRemoteRobustRealisticVoltageMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = robustRealisticVNetwork();
+        List<Contingency> ctgs = List.of(new Contingency("l23b", new BranchContingency("l23b")));
+        // Non-vacuity: the criteria are what makes this network solvable at all. With the mode off the
+        // base state is outside the realistic band and OLF rejects it, so there is no contingency to
+        // compare; with it on the base converges and the contingency follows.
+        assertEquals(com.powsybl.loadflow.LoadFlowResult.ComponentResult.Status.FAILED,
+                runSecurityAnalysis(network, ctgs, robustRealisticVParameters(false))
+                        .getPreContingencyResult().getStatus(),
+                "without robust mode the base state is unrealistic");
+        assertEquals(com.powsybl.loadflow.LoadFlowResult.ComponentResult.Status.CONVERGED,
+                runSecurityAnalysis(network, ctgs, robustRealisticVParameters(true))
+                        .getPreContingencyResult().getStatus(),
+                "robust mode recovers it — this is the criterion under test");
+        assertGpuMatchesCpu(network, ctgs, 1e-12, robustRealisticVParameters(true));
+    }
+
+    private static com.powsybl.loadflow.LoadFlowParameters robustRealisticVParameters(boolean robustMode) {
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setVoltageRemoteControl(true)
+                .setMinRealisticVoltage(0.8)
+                .setMaxRealisticVoltage(1.2)
+                .setVoltageRemoteControlRobustMode(robustMode);
+        return lfp;
+    }
+
+    /** GeneratorRemoteControlPQSwitchTest's collapsing remote-control network, with the b2-b3 line
+     *  doubled so a branch outage leaves the network connected (and reproduces the single-line
+     *  impedance the CPU test collapses at). */
+    private static Network robustRealisticVNetwork() {
+        Network network = com.powsybl.iidm.network.NetworkFactory.findDefault().createNetwork("robustRealisticV", "java");
+        com.powsybl.iidm.network.Substation s12 = network.newSubstation().setId("s12").add();
+        com.powsybl.iidm.network.VoltageLevel vl1 = s12.newVoltageLevel().setId("vl1").setNominalV(20)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        com.powsybl.iidm.network.VoltageLevel vl2 = s12.newVoltageLevel().setId("vl2").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        com.powsybl.iidm.network.VoltageLevel vl3 = network.newVoltageLevel().setId("vl3").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        vl1.getBusBreakerView().newBus().setId("b1").add();
+        vl2.getBusBreakerView().newBus().setId("b2").add();
+        vl3.getBusBreakerView().newBus().setId("b3").add();
+        for (String id : List.of("l23a", "l23b")) {
+            network.newLine().setId(id).setR(0.2).setX(0.2)
+                    .setBus1("b2").setConnectableBus1("b2")
+                    .setBus2("b3").setConnectableBus2("b3").add();
+        }
+        com.powsybl.iidm.network.TwoWindingsTransformer t12a = s12.newTwoWindingsTransformer().setId("t12a")
+                .setR(0.1).setX(15)
+                .setBus1("b1").setConnectableBus1("b1")
+                .setBus2("b2").setConnectableBus2("b2").add();
+        com.powsybl.iidm.network.Generator g1 = vl1.newGenerator().setId("g1")
+                .setMaxP(500).setMinP(0).setTargetP(200)
+                .setBus("b1").setConnectableBus("b1")
+                .setVoltageRegulatorOn(true).setRegulatingTerminal(t12a.getTerminal2())
+                .setTargetV(401).setTargetQ(10).add();
+        g1.newMinMaxReactiveLimits().setMinQ(-3000).setMaxQ(6000).add();
+        vl3.newGenerator().setId("g3").setMaxP(10).setMinP(0).setTargetP(0)
+                .setBus("b3").setConnectableBus("b3")
+                .setVoltageRegulatorOn(true).setTargetV(402).add();
+        vl3.newLoad().setId("l3").setBus("b3").setConnectableBus("b3").setP0(200).setQ0(0).add();
+        return network;
+    }
+
     private static com.powsybl.loadflow.LoadFlowParameters remotePinParameters() {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true);

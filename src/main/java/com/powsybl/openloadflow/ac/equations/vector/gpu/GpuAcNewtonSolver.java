@@ -599,6 +599,12 @@ public final class GpuAcNewtonSolver {
     public static native void setBatchRlSvcLimits(long handle, double[] svcBmin, double[] svcBmax,
                                                   double[] v2Base);
 
+    /** {@code voltageRemoteControlRobustMode} (OLF's default): per RL entry, the initial generation
+     *  target Q a realistic-V freeze pins at, plus the two thresholds the controller's OWN voltage is
+     *  tested against ({@code minRealisticVoltage * 1.02} and {@code maxRealisticVoltage / 1.02}).
+     *  {@code robust = 0} clears the channel on a cached context. */
+    public static native void setBatchRlRobust(long handle, double[] rlInitTargetQ, double vLo, double vHi, int robust);
+
     public static native void setBatchRlRemote(long handle, byte[] rlRemote, int[] rlCmpVrow,
                                                int[] rmqRow, int[] rmqElem, int[] rmqSide, int[] rmqKind,
                                                double[] rmqWeight,
@@ -690,6 +696,19 @@ public final class GpuAcNewtonSolver {
                     dsPhiRow, dsFactor, dsSlackPhiRow, dsSlackTargetP,
                     dsBaseTargetP, dsMaxDelta, dsMinDelta, 0, new double[0], new double[0], 0, 0);
             try {
+                // OLF's forced-PV election keys. This one-shot entry point has no network behind it
+                // (the caller hands raw rows), so the keys are NEUTRAL: equal nominal voltage, no
+                // live target-P row, and the entry order as the id rank — which reduces the rule to
+                // OLF's last tie-break, "lowest id stays PV". A context that reaches a solve without
+                // any keys is refused, and the rule can only fire at all when every PV bus is
+                // pinnable, so this keeps the low-level entry usable without inventing a ranking.
+                int[] idRank = new int[rlVrow.length];
+                int[] pRow = new int[rlVrow.length];
+                for (int i = 0; i < idRank.length; i++) {
+                    idRank[i] = i;
+                    pRow[i] = -1;
+                }
+                setBatchRlElection(handle, new double[rlVrow.length], pRow, new double[rlVrow.length], idRank);
                 // one-shot: no per-scenario gen-override flips, so any scenario's row mode IS the base row mode
                 return solveBatchContext(handle, x0Base, targetBase, rowMode, rowMode[0], disabledElementMask,
                         new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null,

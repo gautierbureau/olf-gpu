@@ -337,7 +337,10 @@ final class GpuSaRunScope {
                                 olfParams.getMaxVoltageMismatch(), olfParams.getMaxAngleMismatch(),
                                 olfParams.getMaxRatioMismatch(), olfParams.getMaxSusceptanceMismatch())
                         : null,
-                olfGuardParams.getGeneratorVoltageControlMinNominalVoltage());
+                olfGuardParams.getGeneratorVoltageControlMinNominalVoltage(),
+                // voltageRemoteControlRobustMode (OLF default TRUE): the RL kernel's realistic-V criteria.
+                acParameters.isVoltageRemoteControlRobustMode(),
+                acParameters.getMinRealisticVoltage(), acParameters.getMaxRealisticVoltage());
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
     }

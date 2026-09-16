@@ -187,8 +187,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         return mask;
     }
 
-    /** The driver's per-controller reactive-limit state after the last solve ({@code (limitType & 3) |
-     *  (switchCount << 2)}), read back so the PV↔PQ decisions can be given to the network. */
+    /** The driver's per-controller reactive-limit state after the last solve ({@code (limitType & 7) |
+     *  (switchCount << 3)}), read back so the PV↔PQ decisions can be given to the network. The limit
+     *  type takes three bits because robust mode adds MIN/MAX_REALISTIC_V to MIN_Q/MAX_Q. */
     private int[] rlStateOut;
 
     /**
@@ -324,20 +325,21 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      *  OLF's loop freezes the bus's generation Q at that limit and disables its voltage control — the
      *  same two calls, so OLF's equation system swaps BUS_TARGET_V for BUS_TARGET_Q on its own and the
      *  target vector picks the limit up. A pin the device released (a PQ→PV switch-back) is undone the
-     *  way OLF undoes it. Realistic-V limits are not modeled on the device and never appear here. */
+     *  way OLF undoes it. Limit types 3/4 are robust mode's MIN/MAX_REALISTIC_V freezes: the pin is the
+     *  same, only the recorded type differs (and OLF never re-freezes those at a moved Q limit). */
     private void writeBackReactiveLimits(GpuAcData data, double[] deviceTargets) {
         if (rlStateOut == null || data == null || data.rlBusNum() == null) {
             return;
         }
         int nrl = Math.min(rlStateOut.length, data.rlBusNum().length);
         for (int i = 0; i < nrl; i++) {
-            int limitType = rlStateOut[i] & 3;
+            int limitType = rlStateOut[i] & 7;
             LfBus bus = network.getBus(data.rlBusNum()[i]);
             if (bus == null) {
                 continue;
             }
-            if (System.getenv("OLF_GPU_BATCH_TRACE") != null && (limitType != 0 || (rlStateOut[i] >> 2) != 0)) {
-                System.err.println("WB_RL bus=" + bus.getId() + " limitType=" + limitType + " switchCount=" + (rlStateOut[i] >> 2)
+            if (System.getenv("OLF_GPU_BATCH_TRACE") != null && (limitType != 0 || (rlStateOut[i] >> 3) != 0)) {
+                System.err.println("WB_RL bus=" + bus.getId() + " limitType=" + limitType + " switchCount=" + (rlStateOut[i] >> 3)
                         + " vcEnabled=" + bus.isGeneratorVoltageControlEnabled() + " qLimitType=" + bus.getQLimitType().map(Object::toString).orElse("-")
                         + " remote=" + data.rlRemote()[i]);
             }
@@ -348,9 +350,15 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 int vRow = data.rlVrow()[i];
                 double qLimit = deviceTargets != null && vRow >= 0 && vRow < deviceTargets.length
                         ? deviceTargets[vRow] + data.rlLoadQ()[i]
-                        : (limitType == 1 ? data.rlMinQ()[i] : data.rlMaxQ()[i]);
+                        : (limitType == 1 ? data.rlMinQ()[i]
+                           : limitType == 2 ? data.rlMaxQ()[i] : data.rlInitTargetQ()[i]);
                 bus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(qLimit);
-                bus.setQLimitType(limitType == 1 ? LfBus.QLimitType.MIN_Q : LfBus.QLimitType.MAX_Q);
+                bus.setQLimitType(switch (limitType) {
+                    case 1 -> LfBus.QLimitType.MIN_Q;
+                    case 2 -> LfBus.QLimitType.MAX_Q;
+                    case 3 -> LfBus.QLimitType.MIN_REALISTIC_V;
+                    default -> LfBus.QLimitType.MAX_REALISTIC_V;
+                });
             } else if (limitType == 0 && !bus.isGeneratorVoltageControlEnabled() && bus.getQLimitType().isPresent()
                     && bus.getQLimitType().get() != LfBus.QLimitType.MIN_REALISTIC_V
                     && bus.getQLimitType().get() != LfBus.QLimitType.MAX_REALISTIC_V) {
@@ -658,6 +666,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                             data.dsBaseTargetP(), data.dsMaxDelta(), data.dsMinDelta(),
                             data.dsMode(), data.dsMarginUp(), data.dsMarginDown(),
                             data.dsSlackMarginUp(), data.dsSlackMarginDown()));
+                    // The RL phase runs on any context carrying RL entries, driver run or not, so
+                    // OLF's forced-PV election keys are part of creating one.
+                    GpuBatchOuterLoopTables.installRlElection(context.handle.get(), data);
                     cachedData = data;
                     rebuilt = true;
                     criteriaDirty = true;
@@ -670,6 +681,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     // extraction so content matching never aliases it under the old one
                     GpuAcStructures.rebind(cachedData, data);
                     cachedData = data;
+                    // The election keys are per-extraction (nominal V, live target P, id rank), so a
+                    // value refresh re-installs them too — a driver run would, and a non-driver run
+                    // drives the RL phase all the same.
+                    GpuBatchOuterLoopTables.installRlElection(context.handle.get(), data);
                     tablesDirty = true;
                     VALUE_REFRESHES.incrementAndGet();
                 }
@@ -727,7 +742,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                         ? GpuBatchRlCurves.build(network, equationSystem, cachedData, driverDsParams(), true, target,
                                 acLoadFlowParameters.getNetworkParameters().isExtrapolateReactiveLimits())
                         : null;
-                GpuBatchOuterLoopTables.install(context.handle.get(), cachedData, rlCurves);
+                GpuBatchOuterLoopTables.install(context.handle.get(), cachedData, rlCurves,
+                        acLoadFlowParameters.isVoltageRemoteControlRobustMode(),
+                        acLoadFlowParameters.getMinRealisticVoltage(), acLoadFlowParameters.getMaxRealisticVoltage());
                 tablesDirty = false;
             }
             if (lsMode == 1) {                               // batch loop LINE_SEARCH (ported 2026-09-08)

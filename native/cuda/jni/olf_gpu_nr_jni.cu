@@ -3318,7 +3318,9 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                                     const double* rowSlope, double* savedTarget, int cvStride,
                                     const char* rlRemote, const int* rlCmpVrow,
                                     const double* rlSvcBmin, const double* rlSvcBmax, const double* rlV2Base,
-                                    const char* rlIslanded) {
+                                    const char* rlIslanded,
+                                    const double* rlInitTgtQ, double vLoRobust, double vHiRobust,
+                                    int robust) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -3359,6 +3361,11 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         if (limitType[rst] == 0) {
             if (mode[ridx] != 1) return;                     // islanded / frozen this scenario
             double q = qBuf[ridx] + rlLoadQ[i];              // own q via fillRemoteMemberQBatch
+            // voltageRemoteControlRobustMode (ReactiveLimitsOuterLoop.checkControllerBus): the criteria
+            // below test this REMOTE controller's OWN voltage — the same x row the quadratic SVC delta
+            // reads — against the realistic band shrunk by the 1.02 margin.
+            bool unrealisticLo = robust && x[ridx] < vLoRobust;
+            bool unrealisticHi = robust && x[ridx] > vHiRobust;
             if (q < rliMin - tol) {
                 savedTarget[rst] = target[ridx];             // the DISTR_Q row target (NOT 0 in general:
                                                              // see updateDistrQTargetsBatch)
@@ -3376,19 +3383,36 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                 switchCount[rst]++;
                 switched[s] = 1;
                 passSwitched[rst] = 1;
+            } else if (unrealisticLo || unrealisticHi) {
+                // Q inside its limits but the controller's own voltage is already unrealistic: OLF
+                // stops maintaining the REMOTE voltage and freezes the generation at its INITIAL
+                // target Q, with a realistic-V limit type (3 = MIN_REALISTIC_V, 4 = MAX_REALISTIC_V)
+                // that the switch-back reads like a min/max limit but the Q-limit drift ignores.
+                savedTarget[rst] = target[ridx];
+                mode[ridx] = 4;
+                target[ridx] = rlInitTgtQ[i] - rlLoadQ[i];
+                limitType[rst] = unrealisticLo ? 3 : 4;
+                switchCount[rst]++;
+                switched[s] = 1;
+                passSwitched[rst] = 1;
             }
+            // OLF also sets the controller's V to a safe 1 pu for the next computation, under BOTH
+            // robust criteria. That WRITES the state vector every other entry is still reading here,
+            // so it runs as its own pass (rlRobustVResetBatch) once this one has finished.
         } else if (switchCount[rst] < maxSwitch) {           // pinned — switch-back tests the PILOT
             double v = x[(size_t) s * n + rlCmpVrow[i]];
             double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]);
-            bool back = (limitType[rst] == 2 && v > vt)
-                     || (limitType[rst] == 1 && v < vt);
+            bool minPin = limitType[rst] == 1 || limitType[rst] == 3;   // LfBus.QLimitType.isMinLimit()
+            bool back = (!minPin && v > vt) || (minPin && v < vt);
             if (back) {
                 mode[ridx] = 1;                              // back to the DISTR_Q share row
                 target[ridx] = savedTarget[rst];
                 limitType[rst] = 0;
                 switched[s] = 1;
                 passSwitched[rst] = 2;
-            } else if (cvStride || svcLim) {                 // curve/SVC limit drift while pinned
+            } else if ((cvStride || svcLim) && limitType[rst] <= 2) {   // curve/SVC limit drift while pinned
+                // OLF re-freezes at a moved limit only for MIN_Q/MAX_Q (checkPqBusWithQLimitType tests
+                // the type explicitly); a realistic-V freeze holds its initial target Q.
                 double lim = limitType[rst] == 1 ? rliMin : rliMax;
                 if (fabs(lim - (target[ridx] + rlLoadQ[i])) > tol) {
                     target[ridx] = lim - rlLoadQ[i];
@@ -3455,6 +3479,29 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                 passSwitched[st] = 3;
             }
         }
+    }
+}
+
+// voltageRemoteControlRobustMode, second half: "Set V to a safe 1 pu for the next computation".
+// ReactiveLimitsOuterLoop does this to every REMOTE voltage controller it switched PV->PQ in this
+// check whose OWN voltage is outside the realistic band — whether it switched on a reactive limit
+// (the first robust block) or on the realistic-V criterion itself. It is a WRITE to the state
+// vector the check kernel reads, so it gets its own pass: one thread per (entry, scenario), reading
+// the same pre-pass x, which makes the result independent of the order the entries happen to run in.
+// x is the next inner solve's warm start, so this is OLF's controllerBus.setV(1) verbatim.
+__global__ void rlRobustVResetBatch(int nrl, int nScenarios, int n, const int* rlVrow, const char* rlRemote,
+                                    const char* rlActive, const char* passSwitched, double* x,
+                                    double vLoRobust, double vHiRobust) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nrl * nScenarios) return;
+    int i = tid % nrl;
+    int s = tid / nrl;
+    if (!rlActive[s]) return;
+    if (rlRemote == nullptr || !rlRemote[i]) return;         // robust mode is remote-controller only
+    if (passSwitched[(size_t) s * nrl + i] != 1) return;     // switched PV -> PQ in THIS check
+    size_t idx = (size_t) s * n + rlVrow[i];
+    if (x[idx] < vLoRobust || x[idx] > vHiRobust) {
+        x[idx] = 1.0;
     }
 }
 
@@ -4236,7 +4283,6 @@ struct BatchSolverContext {
     // threshold skew that lands stops up to the criterion apart. Empty = use n for every scenario.
     std::vector<int> hNActive;
     DeviceBuf dRlMonitored;                                // per controller: 1 = MONITORING_VOLTAGE SVC standing by
-    std::vector<char> hRlMonitored;                        // host copy, for the forced-PV detector
     int allPvPinnable = 0;                                 // every non-monitored RL entry has finite limits — the
                                                            // ONLY networks where OLF's global "strongest stays PV"
                                                            // rule (remainingPvBusCount 0) is reachable
@@ -4285,6 +4331,12 @@ struct BatchSolverContext {
     DeviceBuf dRlPassSwitched, dRlSavedMode;
     DeviceBuf dRlElectNomV, dRlElectPRow, dRlElectStaticP, dRlElectIdRank;
     int hasRlElection = 0;
+    // voltageRemoteControlRobustMode (OLF default TRUE): a REMOTE voltage controller whose OWN bus
+    // voltage leaves the realistic band is reseeded at 1 pu, and — when its Q is still inside its
+    // limits — frozen at its initial generation target Q with a MIN/MAX_REALISTIC_V limit type.
+    DeviceBuf dRlInitTgtQ;                                 // per entry: Σ generator targetQ (pu)
+    int rlRobust = 0;
+    double rlVLoRobust = 0.0, rlVHiRobust = 0.0;           // minRealisticV·1.02 and maxRealisticV/1.02
     // Distributed slack: the (mapped) slack BUS_PHI row + its scheduled targetP give the per-scenario
     // mismatch (read from dQbuf); dDsPhiRow/dDsFactor are the participating buses' P-target rows + normalized
     // participation factors. Reuses dRlActive/dRlSwitched (same outer schedule as reactive limits).
@@ -4699,7 +4751,6 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
         ctx->dRlLoadQ.upload(rlLoadQ, nrl * sizeof(double));
         ctx->dRlVtarget.upload(rlVtarget, nrl * sizeof(double));
         ctx->dRlMonitored.upload(rlMonitored, nrl * sizeof(char));
-        ctx->hRlMonitored.assign(rlMonitored, rlMonitored + nrl);
         ctx->allPvPinnable = 1;
         for (int i = 0; i < nrl; i++) {
             if (!rlMonitored[i] && !((rlMinQ[i] > -1e7 || rlMaxQ[i] < 1e7) && rlMinQ[i] < rlMaxQ[i])) {
@@ -6499,8 +6550,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             // like the CPU's per-contingency action solve does.
             std::vector<char> lt(static_cast<size_t>(ctx->nrl) * nS), sc(static_cast<size_t>(ctx->nrl) * nS);
             for (size_t k = 0; k < lt.size(); k++) {
-                lt[k] = static_cast<char>(rlStateIn[k] & 3);
-                sc[k] = static_cast<char>(rlStateIn[k] >> 2);
+                lt[k] = static_cast<char>(rlStateIn[k] & 7);
+                sc[k] = static_cast<char>(rlStateIn[k] >> 3);
             }
             CUDA_CHECK(cudaMemcpyAsync(ctx->dRlLimitType.p, lt.data(), lt.size(), cudaMemcpyHostToDevice, ctx->stream));
             CUDA_CHECK(cudaMemcpy(ctx->dRlSwitchCount.p, sc.data(), sc.size(), cudaMemcpyHostToDevice));
@@ -7867,7 +7918,15 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
                     ctx->nRlRemote > 0 ? ctx->dRlCmpVrow.as<int>() : nullptr,
                     ctx->dRlSvcBmin.as<double>(), ctx->dRlSvcBmax.as<double>(), ctx->dRlV2Base.as<double>(),
-                    ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr);
+                    ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
+                    ctx->rlRobust ? ctx->dRlInitTgtQ.as<double>() : nullptr,
+                    ctx->rlVLoRobust, ctx->rlVHiRobust, ctx->rlRobust);
+            if (ctx->rlRobust && ctx->nRlRemote > 0) {       // "set V to a safe 1 pu", as its own pass
+                rlRobustVResetBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(
+                        ctx->nrl, nS, n, ctx->dRlVrow.as<int>(), ctx->dRlRemote.as<char>(),
+                        ctx->dRlActive.as<char>(), ctx->dRlPassSwitched.as<char>(), ctx->dX.as<double>(),
+                        ctx->rlVLoRobust, ctx->rlVHiRobust);
+            }
             if (ctx->hasRlElection && ctx->allPvPinnable) {  // the rule can only fire when every PV is pinnable
                 rlForcedPvElectBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n,
                         ctx->dRlVrow.as<int>(),
@@ -7917,32 +7976,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             active[s] = 0;
             rlSwitched[s] = 0;
             loopRejected[s] = 0;
-        }
-    }
-    // FORCED-PV detector: OLF's switchPvPq NEVER lets the network reach zero PV buses ("all PV
-    // buses should switch PQ, strongest one will stay PV" — a network-wide election the device
-    // does not run). The moment a scenario's RL state has EVERY non-monitored entry pinned, its
-    // trajectory has already diverged from the CPU's (measured 1.9 kV) — reject it to the
-    // per-contingency CPU fallback. Only reachable when every PV-capable entry has finite limits
-    // (allPvPinnable, precomputed): one unlimited PV bus anywhere skips the check entirely.
-    if (!inDsPhase && !skipRlPhase && ctx->nrl > 0 && ctx->allPvPinnable && !ctx->hasRlElection) {
-        // Safety net for a context WITHOUT the election keys (setBatchRlElection not called): the
-        // in-kernel election above otherwise keeps OLF's strongest bus PV and nothing is rejected.
-        std::vector<char> ltHost(static_cast<size_t>(ctx->nrl) * nS);
-        CUDA_CHECK(cudaMemcpy(ltHost.data(), ctx->dRlLimitType.p, ltHost.size(), cudaMemcpyDeviceToHost));
-        for (int s = 0; s < nS; s++) {
-            if (!rlActive[s]) {
-                continue;
-            }
-            bool anyPv = false;
-            for (int i = 0; i < ctx->nrl && !anyPv; i++) {
-                anyPv = !ctx->hRlMonitored[i] && ltHost[(size_t) s * ctx->nrl + i] == 0;
-            }
-            if (!anyPv) {
-                res.status[s] = -2;                          // STATUS_REJECTED -> CPU recomputes it
-                live[s] = 0;
-                active[s] = 0;
-            }
         }
     }
     if (!inDsPhase && (ctx->nRlRemote > 0 || nS == 1) && ctx->nrl > 0 && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {   // RL trace
@@ -8075,7 +8108,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         CUDA_CHECK(cudaMemcpy(lt.data(), ctx->dRlLimitType.p, lt.size(), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(sc.data(), ctx->dRlSwitchCount.p, sc.size(), cudaMemcpyDeviceToHost));
         for (size_t k = 0; k < lt.size(); k++) {
-            rlStateOut[k] = (lt[k] & 3) | (sc[k] << 2);
+            rlStateOut[k] = (lt[k] & 7) | (sc[k] << 3);
         }
     }
     CUDA_CHECK(cudaMemcpy(res.x.data(), ctx->dX.p, nTot * sizeof(double), cudaMemcpyDeviceToHost));
@@ -8461,6 +8494,20 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jint maxOuterProductive, jint rlMaxSwitch, jint dsRejectResidual, jint skipRlPhase,
         jint nziBase, jintArray jZiOnSlotElem, jintArray jZiOffSlotElem) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    // CONTRACT: reactive-limit entries require OLF's forced-PV election keys. switchPvPq never lets
+    // a network reach zero PV buses ("all PV buses should switch PQ, strongest one will stay PV"),
+    // and rlForcedPvElectBatch is the only thing on the device that reproduces it. A context that
+    // installed RL entries without the keys would pin every candidate and silently diverge from the
+    // CPU (measured 1.9 kV on the forced-PV network). GpuBatchOuterLoopTables.install always sets
+    // them, so reaching this is a table-installation bug — say so instead of routing the scenario
+    // away and hiding it.
+    if (ctx != nullptr && ctx->nrl > 0 && !ctx->hasRlElection) {
+        env->ThrowNew(env->FindClass("java/lang/IllegalStateException"),
+                      "solveBatchContext: reactive-limit entries installed without the forced-PV "
+                      "election keys (setBatchRlElection) — OLF's strongest-bus-stays-PV rule "
+                      "cannot be reproduced on the device");
+        return nullptr;
+    }
     long long tMarshal0 = jniPhaseTime() ? nowNs() : 0;
     std::vector<int> r1OvSlotElemVec;
     std::vector<double> r1OvValVec;
@@ -8951,6 +8998,34 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     env->ReleaseDoubleArrayElements(jStaticP, sp, JNI_ABORT);
     env->ReleaseIntArrayElements(jIdRank, ir, JNI_ABORT);
     ctx->hasRlElection = 1;
+}
+
+// voltageRemoteControlRobustMode (OLF's default): install the robust-mode channel on a batch context —
+// the per-entry initial generation target Q that a realistic-V freeze pins at, and the two thresholds
+// ReactiveLimitsOuterLoop tests the controller's OWN voltage against (minRealisticVoltage ·
+// REALISTIC_VOLTAGE_MARGIN and maxRealisticVoltage / REALISTIC_VOLTAGE_MARGIN, margin 1.02). robust = 0
+// clears the channel, so a cached context reused by a run with the mode off stops applying it.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlRobust(
+        JNIEnv* env, jclass, jlong handle, jdoubleArray jInitTgtQ, jdouble vLo, jdouble vHi, jint robust) {
+    BatchSolverContext* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->rlRobust = 0;
+    if (ctx->nrl == 0 || robust == 0 || jInitTgtQ == nullptr) {
+        return;
+    }
+    if (env->GetArrayLength(jInitTgtQ) != ctx->nrl) {
+        env->ThrowNew(env->FindClass("java/lang/RuntimeException"), "setBatchRlRobust: array length != nrl");
+        return;
+    }
+    jdouble* q0 = env->GetDoubleArrayElements(jInitTgtQ, nullptr);
+    ctx->dRlInitTgtQ.upload(q0, static_cast<size_t>(ctx->nrl) * sizeof(double));
+    env->ReleaseDoubleArrayElements(jInitTgtQ, q0, JNI_ABORT);
+    ctx->rlVLoRobust = vLo;
+    ctx->rlVHiRobust = vHi;
+    ctx->rlRobust = 1;
 }
 
 extern "C" JNIEXPORT void JNICALL

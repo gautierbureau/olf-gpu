@@ -27,7 +27,15 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
  */
 public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, boolean toPq, boolean qOverride,
                         int dsBus, double dsFactorDelta, double dsBaseDelta, double dsMaxDelta, double dsMinDelta,
-                        int rlEntry, double minQDelta, double maxQDelta, boolean allGensLost) {
+                        int rlEntry, double minQDelta, double maxQDelta, boolean allGensLost,
+                        java.util.Set<String> lostGenIds, double lostFactorSum, double pStep) {
+    // lostGenIds / lostFactorSum exist for the reactive-capability CURVE channel, which evaluates each
+    // generator's curve at its OWN post-distribution active power, reconstructed from the bus's row
+    // target by participation share. Losing a generator skews that reconstruction three ways — the lost
+    // entry, the step the outage puts in the row target, and the survivors' shares — and the chunk
+    // solver repairs all three per scenario from this identity. pStep is the outage's OWN move of the
+    // bus row target (-lostP +lostLoadP): not reconstructible from the base targets, which already carry
+    // the base loadflow's slack distribution.
 
     /**
      * A bus that KEEPS voltage control after losing a generator still has that generator's reactive

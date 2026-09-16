@@ -527,31 +527,13 @@ final class GpuBatchQualification {
                     continue;
                 }
                 // Curve-limits channel active: its p_now linkage models the DS delta ONLY. An injection
-                // override at a curve bus's P row, or a strategy PAIR (anchor shifts move every DS row),
-                // would skew the evaluated limits — CPU.
-                if (curvePRows != null) {
-                    boolean skewsCurve = c.contingencyId().indexOf(GpuBatchStatus.STRATEGY_KEY_SEP) >= 0;
-                    for (GenOutage go : gos) {
-                        if (go.toPq()) {
-                            // The outage takes this bus OUT of voltage control, so its reactive-limit entry
-                            // is inert for the rest of the solve: the unpinned branch of the RL pass wants a
-                            // V row (mode 0 or 2) and finds a power row, the pinned branch wants a limit type
-                            // and finds none. The curve channel still writes a dynamic limit for it and
-                            // nobody reads it — a skew that cannot reach an answer is not a reason to leave
-                            // the batch. This is most of a generator N-1 set: losing the only generator at a
-                            // bus is exactly what takes it to PQ.
-                            continue;
-                        }
-                        for (int pr : curvePRows) {
-                            if (go.pRow() == pr) {
-                                skewsCurve = true;           // survivors still control V here, and their
-                            }                                // share of the bus P step would be misread
-                        }
-                    }
-                    if (skewsCurve) {
-                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:GEN_OUTAGE_SHAPE");
-                        continue;
-                    }
+                // outage at a curve bus's P row used to skew the evaluated limits, and the chunk solver
+                // now repairs that per scenario (the lost entry, the outage's own row step, and the
+                // survivors' renormalized shares). A strategy PAIR still cannot: its anchor shift moves
+                // EVERY distributed-slack row, so there is no single bus step to take back out — CPU.
+                if (curvePRows != null && c.contingencyId().indexOf(GpuBatchStatus.STRATEGY_KEY_SEP) >= 0) {
+                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:PAIR_CURVE_LINKAGE");
+                    continue;                                // same reason as the other arm: one tag
                 }
                 if (!c.outagedBranches().isEmpty()) {        // COMBO: the branch part must also qualify
                     // COMBO (generator + branch): stay conservative — this path already carries the
@@ -648,7 +630,7 @@ final class GpuBatchQualification {
                             break;
                         }
                         vcOff.add(new GenOutage(-1, 0, vVar.getRow(), sb.getTargetQ(), true, true,
-                                -1, 0, 0, 0, 0, -1, 0, 0, false));
+                                -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0));
                     }
                     if (vcOff == null) {
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");

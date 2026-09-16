@@ -161,9 +161,21 @@ final class GpuBatchInjectionOutages {
         boolean qOverride = toPq || !busPv;
         double qTarget = 0;
         if (qOverride) {
-            double remainingGenQ = bus.getGenerators().stream().filter(g -> !lostSet.contains(g))
-                    .mapToDouble(LfGenerator::getTargetQ).sum();
-            qTarget = remainingGenQ - (bus.getLoadTargetQ() - lostLoadQ);
+            // A bus the BASE loadflow pinned at a reactive limit has its generation target Q FROZEN at
+            // that limit, and OLF keeps that value as long as a VOLTAGE-type generator survives:
+            // processLostGenerators calls setGeneratorVoltageControlEnabledAndRecomputeTargetQ only when
+            // none does, and invalidateGenerationTargetP leaves a frozen bus frozen. Summing the
+            // survivors' own targetQ instead hands the first inner solve a target 1.7 pu off the one
+            // OLF solves (measured at rte6515 VL-6003_0: 1.03 vs 2.69 pu) — the reactive-limit pass
+            // then makes its pin/unpin decisions along a trajectory the CPU never takes. When the last
+            // VOLTAGE generator goes, OLF unfreezes and recomputes over what is left, which is what the
+            // survivor sum gives (rte6515 GEN-6095/6130/6226/6239, one generator on the bus: keeping the
+            // frozen value there injects the dead generator's reactive limit, ~1 kV).
+            double genQ = bus.isGenerationTargetQFrozen() && otherController
+                    ? bus.getGenerationTargetQ()
+                    : bus.getGenerators().stream().filter(g -> !lostSet.contains(g))
+                            .mapToDouble(LfGenerator::getTargetQ).sum();
+            qTarget = genQ - (bus.getLoadTargetQ() - lostLoadQ);
         }
         // Distributed-slack reweight for the affected bus. The bus's base target P always drops by the lost
         // gen's P. The participation factor / headroom / footroom drop only if the LOST gen itself participated
@@ -195,8 +207,12 @@ final class GpuBatchInjectionOutages {
         }
         // A bus that KEEPS voltage control still carries the lost generators' reactive capability in the
         // device's run-constant aggregate, while OLF's bus.getMinQ()/getMaxQ() sum only the generators
-        // that are still there. Name the reactive-limit entry and how much to take off it. (A bus going
-        // to PQ needs nothing: its entry stops being a controller and the limits are never read.)
+        // that are still there. Name the reactive-limit entry and how much to take off it. (A bus the
+        // outage takes to PQ needs nothing: its entry stops being a controller and the limits are never
+        // read.) A bus the BASE loadflow already PINNED at a limit is NOT that case, though it reads
+        // busPv=false: its entry is still a controller, its pinned target Q IS the limit, and it can
+        // switch back to PV. Measured on rte6515 GEN-6003 — one generator of three lost at a pinned
+        // bus, the stale capability injected as Q, and 1.9 kV network-wide.
         int rlEntry = -1;
         double minQDelta = 0;
         double maxQDelta = 0;
@@ -207,7 +223,7 @@ final class GpuBatchInjectionOutages {
                 break;
             }
         }
-        if (rlEntry >= 0 && !toPq && busPv) {
+        if (rlEntry >= 0 && !toPq) {
             minQDelta = -lost.stream().mapToDouble(LfGenerator::getMinQ).sum();
             maxQDelta = -lost.stream().mapToDouble(LfGenerator::getMaxQ).sum();
         }
@@ -218,13 +234,22 @@ final class GpuBatchInjectionOutages {
         // 0.995 kV at that node against 2.2e-4 everywhere else, and one apparent-power violation.)
         boolean allGensLost = bus.getGenerators().stream().allMatch(lostSet::contains);
         if (System.getenv("OLF_GPU_GENOUT_TRACE") != null) {
-            System.err.printf("GENOUT bus=%s busPv=%b toPq=%b qOverride=%b lost=%s busGens=%d rlEntry=%d "
+            System.err.printf("GENOUT bus=%s busPv=%b frozenQ=%b toPq=%b qOverride=%b lost=%s busGens=%d rlEntry=%d "
                     + "dMinQ=%.6f dMaxQ=%.6f busMinQ=%.6f busMaxQ=%.6f%n",
-                    bus.getId(), busPv, toPq, qOverride,
+                    bus.getId(), busPv, bus.isGenerationTargetQFrozen(), toPq, qOverride,
                     lost.stream().map(LfGenerator::getId).toList(), bus.getGenerators().size(),
                     rlEntry, minQDelta, maxQDelta, bus.getMinQ(), bus.getMaxQ());
         }
+        // Identity of what was lost, for the reactive-capability CURVE channel: it evaluates each
+        // generator's curve at its OWN post-DS active power, which it reconstructs from the bus's row
+        // target by participation share. The lost generator's entry has to go, the survivors' shares
+        // have to renormalize over what is left, and the step the outage itself puts in the row target
+        // is not DS power and must not move any curve. All three need per-generator identity.
+        java.util.Set<String> lostGenIds = lost.stream().map(LfGenerator::getId)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        double lostFactorSum = lost.stream().mapToDouble(dsParams::factor).sum();
         return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
-                dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost);
+                dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum,
+                lostLoadP - lostP);
     }
 }

@@ -48,7 +48,8 @@ public final class GpuBatchRlCurves {
      *  {@code extrapolate} = OLF's extrapolateReactiveLimits: the kernel continues the boundary
      *  two-point slope past [minP, maxP] instead of clamping (the base evals in cvIn come from
      *  OLF's own gen.getMinQ()/getMaxQ(), which already honor the flag). */
-    public record Channel(int[] cvIdx, double[] cvIn, double[] cvPts, boolean extrapolate) {
+    public record Channel(int[] cvIdx, double[] cvIn, double[] cvPts, boolean extrapolate,
+                         String[] cvGenId, double[] cvBusFactor) {
     }
 
     /** True when any generator carries a reactive capability CURVE (the guard input for the
@@ -71,6 +72,8 @@ public final class GpuBatchRlCurves {
         List<int[]> cvIdx = new ArrayList<>();
         List<double[]> cvIn = new ArrayList<>();
         List<Double> cvPts = new ArrayList<>();
+        List<String> cvGenId = new ArrayList<>();
+        List<Double> cvBusFactor = new ArrayList<>();
         int rlIdx = 0;
         for (LfBus bus : network.getBuses()) {
             int bn = bus.getNum();
@@ -94,7 +97,8 @@ public final class GpuBatchRlCurves {
                 // remote members keep STATIC limits in the channel (a curve gen at a remote member is
                 // possible but its own P participation is the same as a local bus's) — fall through to
                 // the same per-generator curve packing below.
-                packBusCurves(bus, rlIdx, es, dsParams, baseTargets, cvIdx, cvIn, cvPts);
+                packBusCurves(bus, rlIdx, es, dsParams, baseTargets, cvIdx, cvIn, cvPts,
+                        cvGenId, cvBusFactor);
                 rlIdx++;
                 continue;
             }
@@ -109,7 +113,8 @@ public final class GpuBatchRlCurves {
                 throw new PowsyblException("GPU AC solver: RL-pack enumeration drift while packing curve limits (bus "
                         + bus.getId() + ")");
             }
-            packBusCurves(bus, rlIdx, es, dsParams, baseTargets, cvIdx, cvIn, cvPts);
+            packBusCurves(bus, rlIdx, es, dsParams, baseTargets, cvIdx, cvIn, cvPts,
+                    cvGenId, cvBusFactor);
             rlIdx++;
         }
         if (cvIdx.isEmpty()) {
@@ -118,13 +123,16 @@ public final class GpuBatchRlCurves {
         return new Channel(
                 cvIdx.stream().flatMapToInt(java.util.stream.IntStream::of).toArray(),
                 cvIn.stream().flatMapToDouble(java.util.stream.DoubleStream::of).toArray(),
-                cvPts.stream().mapToDouble(Double::doubleValue).toArray(), extrapolate);
+                cvPts.stream().mapToDouble(Double::doubleValue).toArray(), extrapolate,
+                cvGenId.toArray(new String[0]),
+                cvBusFactor.stream().mapToDouble(Double::doubleValue).toArray());
     }
 
     @SuppressWarnings("java:S107")
     private static void packBusCurves(LfBus bus, int rlIdx, EquationSystem<AcVariableType, AcEquationType> es,
                                       GpuDsParams dsParams, double[] baseTargets,
-                                      List<int[]> cvIdx, List<double[]> cvIn, List<Double> cvPts) {
+                                      List<int[]> cvIdx, List<double[]> cvIn, List<Double> cvPts,
+                                      List<String> cvGenId, List<Double> cvBusFactor) {
         double busFactor = bus.getGenerators().stream().mapToDouble(dsParams::factor).sum();
         for (LfGenerator gen : bus.getGenerators()) {
             var curve = gen instanceof AbstractLfGenerator alg
@@ -145,6 +153,9 @@ public final class GpuBatchRlCurves {
             cvIdx.add(new int[] {rlIdx, pRow, ptsOff, points.size()});
             cvIn.add(new double[] {gen.getTargetP(), dsParams.factor(gen) / busFactor, baseTargets[pRow],
                 gen.getMinQ(), gen.getMaxQ()});              // base evals AT base targetP (bit-zero delta at base)
+            cvGenId.add(gen.getId());                        // host-side only: which generator this entry is,
+            cvBusFactor.add(busFactor);                      // and the denominator its share was built on, so a
+                                                             // scenario losing a sibling can renormalize it
         }
     }
 }

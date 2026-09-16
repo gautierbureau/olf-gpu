@@ -171,6 +171,17 @@ final class GpuBatchChunkSolver {
                 config.rlRobustMode(), config.minRealisticVoltage(), config.maxRealisticVoltage(),
                 config.minNominalVoltageRealisticVoltageCheck(), config.realisticFixingLoop());
 
+        // Which reactive-capability CURVE entries hang off each bus P row. Run-constant, and the
+        // index a generator outage needs to find the entries it disturbs at its own bus.
+        java.util.Map<Integer, int[]> curveEntriesByPRow = new java.util.HashMap<>();
+        if (rlCurves != null) {
+            java.util.Map<Integer, List<Integer>> acc = new java.util.HashMap<>();
+            for (int e = 0; e < rlCurves.cvGenId().length; e++) {
+                acc.computeIfAbsent(rlCurves.cvIdx()[e * 4 + 1], k -> new ArrayList<>()).add(e);
+            }
+            acc.forEach((row, es) -> curveEntriesByPRow.put(row, es.stream().mapToInt(Integer::intValue).toArray()));
+        }
+
         // Incremental TVC: upload controller data to device (run-constant, not per-chunk).
         // IncrementalTransformerVoltageControl as a DRIVER PHASE (OLF order 8), shared controlled
         // buses included (the one-tap-at-a-time round robin runs in the group kernel).
@@ -375,6 +386,11 @@ final class GpuBatchChunkSolver {
                     // takes with it, at a bus that still controls voltage.
                     List<Integer> rlQOvSlot = new ArrayList<>();
                     List<Double> rlQOvVal = new ArrayList<>();
+                    // {slot, curveEntry} pairs + {pStep, shareScale}: how a generator outage repairs
+                    // the reactive-capability CURVE channel at its own bus (shareScale < 0 = the entry
+                    // is the lost generator's own and stops evaluating).
+                    List<Integer> cvOvSlot = new ArrayList<>();
+                    List<Double> cvOvVal = new ArrayList<>();
                     List<Integer> dqOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_Q reweight)
                     List<Double> dqOvWList = new ArrayList<>();
                     List<Integer> drOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_RHO renorm, plan A5)
@@ -588,6 +604,28 @@ final class GpuBatchChunkSolver {
                                         rlQOvSlot.add(go.rlEntry());
                                         rlQOvVal.add(go.minQDelta());
                                         rlQOvVal.add(go.maxQDelta());
+                                    }
+                                    if (go.pRow() >= 0 && curveEntriesByPRow.containsKey(go.pRow())) {
+                                        // The CURVE channel reconstructs each generator's OWN active
+                                        // power from the bus row target, to re-evaluate its capability
+                                        // curve there. A generator loss skews that reconstruction three
+                                        // ways, and all three are repaired here, per scenario:
+                                        //  - the lost generator's entry must stop evaluating (its base
+                                        //    capability is already taken off by minQDelta/maxQDelta);
+                                        //    a pure LOAD loss loses nobody and only needs the second;
+                                        //  - the step the outage itself puts in the row target is not
+                                        //    distributed-slack power and must move nobody's curve;
+                                        //  - the survivors now share the bus's slack over their own
+                                        //    factors alone, so each one's share renormalizes.
+                                        for (int e : curveEntriesByPRow.get(go.pRow())) {
+                                            double busFactor = rlCurves.cvBusFactor()[e];
+                                            double left = busFactor - go.lostFactorSum();
+                                            boolean dead = go.lostGenIds().contains(rlCurves.cvGenId()[e]);
+                                            cvOvSlot.add(s);
+                                            cvOvSlot.add(e);
+                                            cvOvVal.add(go.pStep());
+                                            cvOvVal.add(dead || left <= 0 ? -1 : busFactor / left);
+                                        }
                                     }
                                     if (hasDs && go.dsBus() >= 0) {   // lost gen(s) on a DS-participant bus: per-scenario reweight
                                         dsOvBus[s] = go.dsBus();
@@ -950,6 +988,8 @@ final class GpuBatchChunkSolver {
                             null, null,
                             rlQOvSlot.stream().mapToInt(Integer::intValue).toArray(),
                             rlQOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
+                            cvOvSlot.stream().mapToInt(Integer::intValue).toArray(),
+                            cvOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                             parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                             config.lsMode(), config.maxDv(), config.maxDphi(),
                             config.lsMode() == 2 ? varType : null, x0Full,
@@ -999,6 +1039,8 @@ final class GpuBatchChunkSolver {
                                     dec.rlVtSlotIdx(), dec.rlVtValues(),
                                     rlQOvSlot.stream().mapToInt(Integer::intValue).toArray(),
                                     rlQOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
+                                    cvOvSlot.stream().mapToInt(Integer::intValue).toArray(),
+                                    cvOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                                     parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                                     config.lsMode(), config.maxDv(), config.maxDphi(),
                                     config.lsMode() == 2 ? varType : null, x0Full,

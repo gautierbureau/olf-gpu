@@ -916,6 +916,68 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
     }
 
+    /** A generator outage at a bus whose SURVIVORS carry sloped reactive capability curves. The curve
+     *  channel reconstructs each generator's own active power from the bus's P row target to evaluate
+     *  its curve there, and losing one of the bus's generators skews that reconstruction three ways at
+     *  once: the dead generator's entry must stop evaluating, the step the OUTAGE puts in the row target
+     *  is not distributed-slack power and must move nobody's curve, and the survivors now share the
+     *  bus's slack over their own factors alone. B3 keeps voltage control (B3-G survives) so its
+     *  reactive-limit entry stays live and the evaluated limit reaches the answer. The curve slopes
+     *  steeply and B3-G2's 60 MW is large next to the distributed-slack movement, so each of the three,
+     *  left unrepaired, moves the limit by MVAr — far above the bar here. (rte6515's curves are flat
+     *  over their working range, so the production set exercises this path without testing its
+     *  arithmetic; B2 cannot host it, that is the slack bus and its P is free.)
+     *
+     *  <p>The curve sits low enough that B3 is genuinely PINNED at its maxQ, which is what makes the
+     *  evaluated limit reach the answer — VERIFIED by disabling each of the three repairs in turn and
+     *  watching this test fail on each. An earlier version of it, with the same shape but a curve the
+     *  bus never reached, passed with all three disabled and proved nothing. */
+    @org.junit.jupiter.api.Test
+    void deviceCurveLimitsWithLostSiblingGeneratorMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        com.powsybl.iidm.network.Generator g3 = network.getGenerator("B3-G");
+        g3.setTargetP(40).setMinP(0).setMaxP(200);
+        com.powsybl.iidm.network.Generator g3b = network.getVoltageLevel("VL3").newGenerator()
+                .setId("B3-G2")
+                .setBus("B3").setConnectableBus("B3")
+                .setTargetP(60).setMinP(0).setMaxP(200)
+                .setTargetV(g3.getTargetV()).setVoltageRegulatorOn(true)
+                .add();
+        // Sloped over the whole working range, and steeply: a mis-attributed P moves maxQ by MVAr.
+        for (com.powsybl.iidm.network.Generator g : List.of(g3, g3b)) {
+            g.newReactiveCapabilityCurve()
+                    .beginPoint().setP(0).setMinQ(-40).setMaxQ(5).endPoint()
+                    .beginPoint().setP(200).setMinQ(-40).setMaxQ(-45).endPoint()
+                    .add();
+        }
+        network.getGenerator("B1-G").newMinMaxReactiveLimits().setMinQ(-990).setMaxQ(990).add();
+        // B3's 100 MW comes off B1-G so the case keeps its original generation/load balance: the
+        // participants below can only absorb by coming DOWN, and an unbalanced case exhausts that
+        // headroom and fails the distribution outright (the base loadflow does not even converge).
+        com.powsybl.iidm.network.Generator g1 = network.getGenerator("B1-G");
+        g1.setTargetP(g1.getTargetP() - 100);
+        // A participating SLACK bus combined with a factor reweight is CPU-routed by design (the retain
+        // math does not hold), so the two generators at the slack end sit out and the condensers take
+        // their place. Four equal participants, two of them at B3: losing B3-G2 leaves B3 with 1 of the
+        // remaining 3, so its survivor's renormalized share is exactly 2 — a value the unrepaired
+        // channel cannot produce by accident.
+        network.getGenerator("B6-G").setMinP(0).setMaxP(100);
+        network.getGenerator("B8-G").setMinP(0).setMaxP(100);
+        java.util.Set<String> sitOut = java.util.Set.of("B1-G", "B2-G");
+        for (com.powsybl.iidm.network.Generator g : network.getGenerators()) {
+            g.newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                    .withParticipate(!sitOut.contains(g.getId())).withParticipationFactor(1.0).add();
+        }
+        List<Contingency> ctgs = List.of(
+                new Contingency("B3-G2", new com.powsybl.contingency.GeneratorContingency("B3-G2")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true)
+                .setBalanceType(com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_PARTICIPATION_FACTOR);
+        assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
+    }
+
     /** Curve-limit EXTRAPOLATION (extrapolateReactiveLimits — ON in the RTE production params;
      *  was a whole-run CPU gate on any curve network): the curve stops at P = 41 MW just above
      *  B2-G's base 40 MW, so the post-outage DS raise pushes P OUTSIDE the range and the limit

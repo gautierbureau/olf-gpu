@@ -11,6 +11,42 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #55 — PLAN: freeze a REMOTE generator voltage controller in-kernel (scoped 2026-09-16)
+
+The last whole-run CPU gate in the AFTER_GENERATOR phase. `freezeCandidates` returns null the moment
+one candidate is a REMOTE controller, because the kernel's freeze writes a V identity row
+(`mode 0/2 -> 1, target = qBuf - loadQ`) and a remote controller's own row is a DISTR_Q SHARE, not a V
+identity. OLF itself does not care: `disableGeneratorVoltageControlsUnderMaxControlledNominalVoltage`
+walks `getMergedControllerElements()` and freezes every enabled one at `getQ().eval()`, local or
+remote alike. So this is a device representation gap, not a semantic one.
+
+**The primitive already exists.** A frozen remote member is the reactive-limit remote PIN with a
+different target: row mode 4 ("the row hosts its own Q balance"), `target = qBuf - loadQ`, saved mode
+and target for the restore — which is exactly what `rlCheckBatch`'s remote branch writes, with a Q
+LIMIT as the target instead of the current injection. `qBuf` at a member's own row is already the
+member's own reactive injection (`fillRemoteMemberQBatch`), and OLF's freeze target is
+`getQ().eval() - loadTargetQ`, the same expression the local freeze uses.
+
+**What comes for free, and what does not.** Checked against the kernels:
+
+- carrier relocation and the all-members-gone pilot flip key on `mode` (`relocChoose` counts members
+  at mode 1, `updatePilotVeqBatch` flips the pilot's V identity when none is left), so a frozen member
+  at mode 4 is handled like a pinned one — nothing to do;
+- the DISTR_Q key renormalization keys on `limitType[(scenario, entry)] != 0`, NOT on the mode. A
+  freeze that only wrote mode 4 would leave the survivors on their old shares while the frozen member
+  stopped participating. It needs its own limit type.
+
+**Shape of the change.** Add limit type 5, "frozen by the generator voltage control manager", beside
+1 MIN_Q / 2 MAX_Q / 3 MIN_REALISTIC_V / 4 MAX_REALISTIC_V — the renormalization's `!= 0` test then
+drops the member with no change, while the type stays distinguishable from a Q-limit pin.
+`freezeCandidates` keeps remote candidates and records each one's RL entry index (−1 when local);
+`FreezeTables` carries it; the kernel freeze branches on it; `rlCheckBatch` skips an entry at type 5 in
+BOTH branches, since OLF's reactive-limits loop never sees a bus whose voltage control is off; the
+COMPLETE restore puts mode, target and limit type back. The packed RL state already has three bits for
+the type, so no JNI width change.
+
+Test it the way #53 was tested: on the transition, not only end to end.
+
 ### #54 — A second SA run in one JVM re-pays the cuDSS ANALYSIS (found 2026-09-16)
 
 Measured, not suspected. `OLF_GPU_TRACE=1` now tags every ANALYSIS with the context's batch size, and

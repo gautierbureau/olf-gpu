@@ -51,8 +51,8 @@ public class GpuNewtonRaphsonFactory extends NewtonRaphsonFactory {
         // A batch of one is still a batch: if the device driver runs OLF's outer loops for a 600-scenario
         // chunk it runs them for nS == 1 too. olf.gpu.driverOuterLoops hands them over; the bands come
         // from the run's OWN configured loops so the device decides at OLF's thresholds.
-        boolean driverLoops = Boolean.getBoolean("olf.gpu.driverOuterLoops")
-                || "1".equals(System.getenv("OLF_GPU_DRIVER_OUTER_LOOPS"));
+        boolean driverLoops = !"0".equals(System.getenv("OLF_GPU_DRIVER_OUTER_LOOPS"))
+                && !"false".equalsIgnoreCase(System.getProperty("olf.gpu.driverOuterLoops", "true"));
         if (System.getenv("OLF_GPU_DRIVER_OUTER_LOOPS") != null) {
             LOGGER.info("GPU base solver: driverOuterLoops={} (DS/ReactiveLimits move from OLF's engine "
                     + "into the device driver, batch-of-one)", driverLoops);

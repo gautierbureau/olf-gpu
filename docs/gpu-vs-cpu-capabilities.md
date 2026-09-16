@@ -770,6 +770,14 @@ the histogram counts rejected pairs alongside rejected contingencies.
    (~~`extrapolateReactiveLimits` with curve generators~~ retired 2026-09-08 — the device
    curve evaluator implements the slope branch, §5 backlog item 7). (The balance-type guard itself is
    future-proofing — all six current types are modeled.)
+4b. **Host orchestrators: GONE (2026-09-16).** Every control loop is a device phase, and a loop the
+   kernel REFUSES no longer falls back to an after-the-sweep host orchestrator — the whole run goes to
+   the CPU instead. Such an orchestrator ran out of OLF's order (after the loops OLF puts at 7-10) and
+   two in a chain discarded each other's target moves (measured 2.4e-1 kV). The refusals that can still
+   fire: a transformer control whose tap table the reflection cannot read, a flow/phase controller whose
+   controlled element is not a packed closed branch, and a secondary-VC zone set wider than the
+   in-kernel dense system (that one falls back to the driver PAUSE at the same slot, which IS in OLF's
+   order, not to an orchestrator).
 5. Base-only CPU (contingencies still batch): threadCount>1 disables base-on-GPU only
    (~~frozen-HVDC base~~ retired 2026-09-08 — the batch-of-1 route derives the hv bits
    from the live AC-emulation statuses per solve).

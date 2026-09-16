@@ -250,6 +250,37 @@ final class GpuBatchChunkSolver {
             GpuBatchSimpleShuntVc.uploadToDevice(handle, null, false);
         }
 
+        // A control loop the kernel REFUSES must never fall back to an after-the-sweep host orchestrator.
+        // Such an orchestrator runs out of OLF's order — after the loops OLF puts at orders 7 to 10 — and
+        // two of them in a chain discard each other's target moves (measured 2.4e-1 kV). Un-accelerated is
+        // the only honest alternative to wrong, so the whole group goes to the CPU: leaving resultsByIndex
+        // null is exactly how the caller routes a contingency to the stock per-contingency path.
+        List<String> refusedLoops = new ArrayList<>();
+        if (incrementalTvcControllers != null && !incrementalTvcControllers.isEmpty() && !tvcInKernel) {
+            refusedLoops.add("IncrementalTransformerVoltageControl");
+        }
+        if (incrementalFlowControllers != null && !incrementalFlowControllers.isEmpty() && !flowInKernel) {
+            refusedLoops.add("IncrementalTransformerReactivePowerControl/IncrementalPhaseControl");
+        }
+        if (continuousPhaseControllers != null && !continuousPhaseControllers.isEmpty() && !cphInKernel) {
+            refusedLoops.add("PhaseControl");
+        }
+        if (incrementalShuntControllers != null && !incrementalShuntControllers.isEmpty() && !shuntInKernel) {
+            refusedLoops.add("IncrementalShuntVoltageControl");
+        }
+        if ((config.transformerControl() || config.simpleTransformerControl())
+                && transformerControllers != null && !transformerControllers.isEmpty() && !tvdInKernel) {
+            refusedLoops.add("TransformerVoltageControl");
+        }
+        if (config.simpleShuntControl() && simpleShuntGroups != null && !simpleShuntGroups.isEmpty() && !svdInKernel) {
+            refusedLoops.add("ShuntVoltageControl");
+        }
+        if (!refusedLoops.isEmpty()) {
+            LOGGER.warn("GPU batched N-1 disabled for this run: the device cannot own {} — every contingency "
+                    + "runs on the CPU rather than through a host orchestrator out of OLF's loop order", refusedLoops);
+            return;
+        }
+
         // The base state / targets are IDENTICAL for every scenario (a single-branch N-1 starts from the
         // same converged base operating point): passed as single length-n rows and tiled on-device. The
         // disabled mask is per-scenario (each chunk clears the one flag each slot set, sets the new one).
@@ -676,11 +707,9 @@ final class GpuBatchChunkSolver {
                             }
                         }
                     }
-                    // SIMPLE (WITH_GENERATOR) transformer VC: OLF's initialize() enables continuous VC
-                    // BEFORE the first solve — apply the VC-ON activation deltas now, and keep the
-                    // pre-TVC override lists for the round-to-tap re-solve.
                     // CONTINUOUS phase control: OLF's initialize() enables the CONTROLLER-mode controls
-                    // BEFORE the first solve — keep the pre-enable override lists for the pinned re-solves.
+                    // BEFORE the first solve. This is the loop's initialize(), not an orchestrator — the
+                    // in-kernel phase expects the activation to already carry it.
                     List<Integer> prePcOvIdx = null;
                     List<Double> prePcOvVal = null;
                     if (continuousPhaseControllers != null && !continuousPhaseControllers.isEmpty()) {
@@ -688,22 +717,6 @@ final class GpuBatchChunkSolver {
                         prePcOvVal = new ArrayList<>(overrides.valueList());
                         GpuBatchContinuousPhase.applyPhaseOn(realCount, n, continuousPhaseControllers,
                                 rowModePerScenario, baseRowMode, disabledMask, overrides.mutableIndexList(), overrides.mutableValueList());
-                    }
-                    List<Integer> preShuntOvIdx = null;
-                    List<Double> preShuntOvVal = null;
-                    if (config.simpleShuntControl() && simpleShuntGroups != null && !simpleShuntGroups.isEmpty() && !svdInKernel) {
-                        preShuntOvIdx = new ArrayList<>(overrides.indexList());
-                        preShuntOvVal = new ArrayList<>(overrides.valueList());
-                        GpuBatchSimpleShuntVc.applyVcOn(realCount, n, simpleShuntGroups,
-                                rowModePerScenario, baseRowMode, disabledMask, overrides.mutableIndexList(), overrides.mutableValueList());
-                    }
-                    List<Integer> preTvcOvIdx = null;
-                    List<Double> preTvcOvVal = null;
-                    if (config.simpleTransformerControl() && transformerControllers != null && !transformerControllers.isEmpty() && !tvdInKernel) {
-                        preTvcOvIdx = new ArrayList<>(overrides.indexList());
-                        preTvcOvVal = new ArrayList<>(overrides.valueList());
-                        GpuBatchSimpleTvc.applyVcOn(realCount, n, transformerControllers,
-                                rowModePerScenario, baseRowMode, disabledMask, baseState, overrides.mutableIndexList(), overrides.mutableValueList());
                     }
                     int[] targetOverrideIndex = overrides.indexArray();
                     double[] targetOverrideValue = overrides.valueArray();
@@ -1188,167 +1201,6 @@ final class GpuBatchChunkSolver {
                     // In-kernel: DS(0), HVDC(1,2), Monitoring(5), RL(6) already ran in the main solve.
                     // Post-RL host orchestrators below: SVC(4), Monitoring(5), Phase(7), TVC(8), TRPC(9), Shunt(10).
 
-                    // OLF order 4: SecondaryVoltageControl
-                    if (svcActive && rlStateOut != null && !svcAsDriverPause && !svcInKernel) {
-                        long tOr4 = System.nanoTime();
-                        chunkResults = GpuBatchSecondaryVc.orchestrate(handle, chunkSize, realCount, n, nrl,
-                                chunkResults, svcControllers, rlStateOut,
-                                rowModePerScenario, baseRowMode, disabledMask,
-                                targetOverrideIndex, targetOverrideValue,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("SecondaryVc.orchestrate", System.nanoTime() - tOr4, Long::sum);
-                    }
-                    // OLF order 5: VoltageMonitoring (when not in-kernel)
-                    if (monActive && !monInKernel && rlStateOut != null) {
-                        long tOr3 = System.nanoTime();
-                        chunkResults = GpuBatchVoltageMonitoring.orchestrate(handle, chunkSize, realCount, n, nrl,
-                                chunkResults, monitoringControllers, rlStateOut, rlSolvedPerScenario,
-                                rowModePerScenario, baseRowMode, disabledMask,
-                                targetOverrideIndex, targetOverrideValue,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("VoltageMonitoring.orchestrate", System.nanoTime() - tOr3, Long::sum);
-                    }
-                    // OLF order 7: PhaseControl (continuous)
-                    if (continuousPhaseControllers != null && !continuousPhaseControllers.isEmpty() && !cphInKernel) {
-                        long tOr5 = System.nanoTime();
-                        chunkResults = GpuBatchContinuousPhase.orchestrate(handle, chunkSize, realCount, n,
-                                chunkResults, continuousPhaseControllers, esContext,
-                                rowModePerScenario, baseRowMode, disabledMask,
-                                prePcOvIdx, prePcOvVal,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("ContinuousPhase.orchestrate", System.nanoTime() - tOr5, Long::sum);
-                    }
-                    // OLF order 8: TransformerVoltageControl (three variants: incremental, simple, AFTER_GENERATOR)
-                    if (incrementalTvcControllers != null && !incrementalTvcControllers.isEmpty() && !tvcInKernel) {
-                        long t00 = System.nanoTime();
-                        chunkResults = GpuBatchIncrementalTvc.orchestrate(handle, chunkSize, realCount, n,
-                                chunkResults, incrementalTvcControllers, rowModePerScenario, baseRowMode, disabledMask,
-                                targetOverrideIndex, targetOverrideValue,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("IncrementalTvc.orchestrate", System.nanoTime() - t00, Long::sum);
-                    }
-                    if (config.simpleTransformerControl() && transformerControllers != null && !transformerControllers.isEmpty() && !tvdInKernel) {
-                        long tOr7 = System.nanoTime();
-                        chunkResults = GpuBatchSimpleTvc.roundAndResolve(handle, chunkSize, realCount, n,
-                                chunkResults, transformerControllers, rowModePerScenario, baseRowMode, disabledMask,
-                                preTvcOvIdx, preTvcOvVal,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                dsAnchorShift, dsSlackShift,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("SimpleTvc.roundAndResolve", System.nanoTime() - tOr7, Long::sum);
-                    }
-                    if (config.transformerControl() && transformerControllers != null && !transformerControllers.isEmpty() && !tvdInKernel) {
-                        long tOr10 = System.nanoTime();
-                        chunkResults = GpuBatchTransformerControl.orchestrateTransformerControl(handle, chunkSize, realCount, n,
-                                chunkResults, transformerControllers, rowModePerScenario, baseRowMode, disabledMask,
-                                targetOverrideIndex, targetOverrideValue,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                drOvIdxList.isEmpty() ? null : drOvIdxList.stream().mapToInt(Integer::intValue).toArray(),
-                                drOvCList.isEmpty() ? null : drOvCList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                gpuData.drRow(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, varType,
-                                config);
-                        orchNs.merge("TransformerControl.orchestrateTransformerControl", System.nanoTime() - tOr10, Long::sum);
-                    }
-                    // OLF order 9: IncrementalTransformerReactivePowerControl (+ IncrementalPhaseControl)
-                    if (incrementalFlowControllers != null && !incrementalFlowControllers.isEmpty() && !flowInKernel) {
-                        long tOr8 = System.nanoTime();
-                        chunkResults = GpuBatchIncrementalFlowControl.orchestrate(handle, chunkSize, realCount, n,
-                                chunkResults, incrementalFlowControllers, esContext, rowModePerScenario, baseRowMode, disabledMask,
-                                targetOverrideIndex, targetOverrideValue,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("IncrementalFlowControl.orchestrate", System.nanoTime() - tOr8, Long::sum);
-                    }
-                    // OLF order 10: ShuntVoltageControl (incremental and simple/continuous)
-                    if (incrementalShuntControllers != null && !incrementalShuntControllers.isEmpty() && !shuntInKernel) {
-                        long tOr9 = System.nanoTime();
-                        chunkResults = GpuBatchIncrementalShuntVc.orchestrate(handle, chunkSize, realCount, n,
-                                chunkResults, incrementalShuntControllers, rowModePerScenario, baseRowMode, disabledMask,
-                                targetOverrideIndex, targetOverrideValue,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("IncrementalShuntVc.orchestrate", System.nanoTime() - tOr9, Long::sum);
-                    }
-                    if (config.simpleShuntControl() && simpleShuntGroups != null && !simpleShuntGroups.isEmpty() && !svdInKernel) {
-                        long tOr6 = System.nanoTime();
-                        chunkResults = GpuBatchSimpleShuntVc.roundAndResolve(handle, chunkSize, realCount, n,
-                                chunkResults, simpleShuntGroups, rowModePerScenario, baseRowMode, disabledMask,
-                                preShuntOvIdx, preShuntOvVal,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                dsAnchorShift, dsSlackShift,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("SimpleShuntVc.roundAndResolve", System.nanoTime() - tOr6, Long::sum);
-                    }
                     tOrchestratorNs += System.nanoTime() - tOrch0;
                     if (System.getenv("OLF_GPU_DS_TARGET_DUMP") != null && nds > 0) {
                         // The FINAL distributed target on every participant row, after every

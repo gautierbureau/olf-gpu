@@ -133,3 +133,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-15 | ae5dd28+dirty | 19.19 | 15.57 | 28.72 | x1.84 | 0/0/0 | 7.68 | 4.46 | 499/500 | 122/133 (92%) | SecondaryVoltageControl driver pause is the DEFAULT: matches the host orchestrator at 27 percent less wall time |
 | 2026-09-15 | a50c98d+dirty | 19.16 | 16.05 | 26.26 | x1.64 | 0/0/0 | 7.49 | 4.45 | 499/500 | 122/133 (92%) | SecondaryVoltageControl in-kernel phase (opt-in): the whole loop on the device, residual = the extra sweep slot |
 | 2026-09-16 | 03d37d8+dirty | 19.20 | 15.55 | 27.37 | x1.76 | 0/0/0 | 7.69 | 4.52 | 499/500 | 122/133 (92%) | SecondaryVoltageControl in-kernel by default: every OLF outer loop is now a device phase |
+| 2026-09-16 | 82a36d6+dirty | 19.27 | 15.97 | 28.22 | x1.77 | 0/0/0 | 7.56 | 4.46 | 499/500 | 122/133 (92%) | host orchestrators deleted; device driver is the default for the base load flow |

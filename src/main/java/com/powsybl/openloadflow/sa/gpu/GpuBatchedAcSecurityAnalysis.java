@@ -310,10 +310,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     }
 
     /** True when the base load flow's batch-of-one drives OLF's outer loops on the DEVICE, so this
-     *  analysis must not also drive them in Java. */
+     *  analysis must not also drive them in Java. DEFAULT since 2026-09-16: a batch of one is still a
+     *  batch, and running the base through the same driver as the chunks is what keeps the two on one
+     *  trajectory — rte6515 parity is identical either way (9040/9042, the same 2 knife-edge lines) and
+     *  the driver is never slower. {@code OLF_GPU_DRIVER_OUTER_LOOPS=0} or
+     *  {@code -Dolf.gpu.driverOuterLoops=false} puts OLF's Java engine back in charge of the base. */
     static boolean driverOuterLoopsEnabled() {
-        return Boolean.getBoolean("olf.gpu.driverOuterLoops")
-                || "1".equals(System.getenv("OLF_GPU_DRIVER_OUTER_LOOPS"));
+        return !"0".equals(System.getenv("OLF_GPU_DRIVER_OUTER_LOOPS"))
+                && !"false".equalsIgnoreCase(System.getProperty("olf.gpu.driverOuterLoops", "true"));
     }
 
     @Override

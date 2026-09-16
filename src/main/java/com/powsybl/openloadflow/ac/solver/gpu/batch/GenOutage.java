@@ -26,5 +26,18 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, boolean toPq, boolean qOverride,
-                        int dsBus, double dsFactorDelta, double dsBaseDelta, double dsMaxDelta, double dsMinDelta) {
+                        int dsBus, double dsFactorDelta, double dsBaseDelta, double dsMaxDelta, double dsMinDelta,
+                        int rlEntry, double minQDelta, double maxQDelta) {
+
+    /**
+     * A bus that KEEPS voltage control after losing a generator still has that generator's reactive
+     * capability in the device's aggregate: {@code rlMinQ}/{@code rlMaxQ} are run-constant while OLF's
+     * {@code bus.getMinQ()} sums the generators that are still there. {@code rlEntry} names the
+     * reactive-limit entry to correct and the two deltas are what to add to it (negative: the lost
+     * generator's own share). {@code rlEntry < 0} when there is nothing to correct — the bus goes to PQ,
+     * or it is not a reactive-limit controller at all.
+     */
+    public boolean shrinksReactiveLimits() {
+        return rlEntry >= 0 && (minQDelta != 0 || maxQDelta != 0);
+    }
 }

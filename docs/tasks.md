@@ -58,8 +58,24 @@ generator side is where the work is.
    now, a copy-paste from the block above it; the census is how we pick what to fix, so a tag that lies
    about the reason sends the next person at the wrong gate. Renamed.
 3. **Three differing violations, all on generator contingencies** (GEN-5997, GEN-5997#0, GEN-6130, each
-   −1). Not yet root-caused, and not to be written off as a knife edge without an instrument that proves
-   it — the standing rule.
+   −1). **Two of the three are now fixed, and the cause was a real modelling gap**, not a knife edge.
+
+   A probe settled it in one run: routing out every generator outage at a bus that KEEPS voltage control
+   took the difference from 3 to 0. The device's `rlMinQ`/`rlMaxQ` are RUN-CONSTANT — the bus aggregate as
+   extracted — while OLF's `bus.getMinQ()`/`getMaxQ()` sum the generators still there. Lose one generator
+   at a two-generator bus and OLF's reactive limits shrink while the device's do not, so the two arms
+   disagree about when that bus pins, and every equation still converges on both.
+
+   `GenOutage` now carries the reactive-limit entry and the capability the lost generators take with them,
+   and it reaches the kernel as a per-(scenario, entry) delta on the same dynamic-limit arrays the CURVE
+   channel writes. Those arrays existed only when curves did; the selection is now `useDynRlLimits`, true
+   for either channel, and they are allocated lazily when only the new one is live. **3 differing -> 1**,
+   the branch reference set untouched at 9040/9042 with the same two lines, suite 261/0.
+
+   GEN-6130 survives and is the next thread to pull. Hypotheses worth testing in order: the lost generator
+   is CURVE-limited, so its `getMinQ()` at the extraction point is not the contribution that was packed;
+   the bus is a remote / DISTR_Q group member, where the aggregate is not the whole story; or the bus
+   carries a MONITORING SVC, whose pack captures the ACTIVATED limits rather than the standby ones.
 
 ### #59 — Both routes build their phase tables with one function (2026-09-16)
 

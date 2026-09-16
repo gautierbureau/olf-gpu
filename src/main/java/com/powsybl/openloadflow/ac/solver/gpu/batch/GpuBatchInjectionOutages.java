@@ -193,6 +193,27 @@ final class GpuBatchInjectionOutages {
                 }
             }
         }
-        return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta, dsMaxDelta, dsMinDelta);
+        // A bus that KEEPS voltage control still carries the lost generators' reactive capability in the
+        // device's run-constant aggregate, while OLF's bus.getMinQ()/getMaxQ() sum only the generators
+        // that are still there. Name the reactive-limit entry and how much to take off it. (A bus going
+        // to PQ needs nothing: its entry stops being a controller and the limits are never read.)
+        int rlEntry = -1;
+        double minQDelta = 0;
+        double maxQDelta = 0;
+        if (!toPq && busPv) {
+            int[] rlBusNum = gpuData.rlBusNum();
+            for (int i = 0; rlBusNum != null && i < rlBusNum.length; i++) {
+                if (rlBusNum[i] == bus.getNum()) {
+                    rlEntry = i;
+                    break;
+                }
+            }
+            if (rlEntry >= 0) {
+                minQDelta = -lost.stream().mapToDouble(LfGenerator::getMinQ).sum();
+                maxQDelta = -lost.stream().mapToDouble(LfGenerator::getMaxQ).sum();
+            }
+        }
+        return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
+                dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta);
     }
 }

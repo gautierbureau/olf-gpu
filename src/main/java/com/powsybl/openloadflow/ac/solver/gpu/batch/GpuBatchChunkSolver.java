@@ -371,6 +371,10 @@ final class GpuBatchChunkSolver {
                     // strands in another synchronous component (see distributeSlackBatch).
                     List<Integer> dsIslandedList = new ArrayList<>();
                     List<Integer> rlIslandedList = new ArrayList<>();
+                    // {slot, rlEntry} pairs + {dMinQ, dMaxQ}: the reactive capability a lost generator
+                    // takes with it, at a bus that still controls voltage.
+                    List<Integer> rlQOvSlot = new ArrayList<>();
+                    List<Double> rlQOvVal = new ArrayList<>();
                     List<Integer> dqOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_Q reweight)
                     List<Double> dqOvWList = new ArrayList<>();
                     List<Integer> drOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_RHO renorm, plan A5)
@@ -566,6 +570,15 @@ final class GpuBatchChunkSolver {
                                         int[] row = rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rowModePerScenario[s];
                                         row[go.vRow()] = 1;  // BUS_V row becomes the reactive-power equation (PV→PQ)
                                         rowModePerScenario[s] = row;
+                                    }
+                                    if (go.shrinksReactiveLimits()) {
+                                        // The bus KEEPS voltage control, so its reactive-limit entry is
+                                        // still read — and the device's aggregate still holds the lost
+                                        // generator's capability, which OLF's bus.getMinQ() does not.
+                                        rlQOvSlot.add(s);
+                                        rlQOvSlot.add(go.rlEntry());
+                                        rlQOvVal.add(go.minQDelta());
+                                        rlQOvVal.add(go.maxQDelta());
                                     }
                                     if (hasDs && go.dsBus() >= 0) {   // lost gen(s) on a DS-participant bus: per-scenario reweight
                                         dsOvBus[s] = go.dsBus();
@@ -926,6 +939,8 @@ final class GpuBatchChunkSolver {
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
                             dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
                             null, null,
+                            rlQOvSlot.stream().mapToInt(Integer::intValue).toArray(),
+                            rlQOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                             parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                             config.lsMode(), config.maxDv(), config.maxDphi(),
                             config.lsMode() == 2 ? varType : null, x0Full,
@@ -973,6 +988,8 @@ final class GpuBatchChunkSolver {
                                     rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
                                     dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
                                     dec.rlVtSlotIdx(), dec.rlVtValues(),
+                                    rlQOvSlot.stream().mapToInt(Integer::intValue).toArray(),
+                                    rlQOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                                     parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                                     config.lsMode(), config.maxDv(), config.maxDphi(),
                                     config.lsMode() == 2 ? varType : null, x0Full,

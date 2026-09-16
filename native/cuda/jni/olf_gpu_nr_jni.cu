@@ -3004,6 +3004,7 @@ __device__ double rlCurveEval(double pMW, const double* pts, int npts, int sel, 
 __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int cvExtrapolate,
                                    const int* cvIdx, const double* cvIn, const double* cvPts,
                                    const double* rlMinQ, const double* rlMaxQ, const double* target,
+                                   int nQOv, const int* qOvSlotEntry, const double* qOvMinMax,
                                    double* minQDyn, double* maxQDyn) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
@@ -3019,6 +3020,16 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
         double pNow = cvIn[g * 5] + cvIn[g * 5 + 1] * (target[(size_t) s * n + pRow] - cvIn[g * 5 + 2]);
         mn += rlCurveEval(pNow * 100.0, pts, npts, 0, cvExtrapolate) / 100.0 - cvIn[g * 5 + 3];
         mx += rlCurveEval(pNow * 100.0, pts, npts, 1, cvExtrapolate) / 100.0 - cvIn[g * 5 + 4];
+    }
+    // A generator lost at a bus that KEEPS voltage control takes its reactive capability with it. The
+    // static aggregate is run-constant and still holds it, while OLF's bus.getMinQ()/getMaxQ() sum only
+    // the generators still there, so the scenario's own delta comes in here. Without curves this is the
+    // ONLY reason the dynamic limits exist, which is why the seeding above starts from the static pair.
+    for (int k = 0; k < nQOv; k++) {
+        if (qOvSlotEntry[2 * k] == s && qOvSlotEntry[2 * k + 1] == i) {
+            mn += qOvMinMax[2 * k];
+            mx += qOvMinMax[2 * k + 1];
+        }
     }
     minQDyn[(size_t) s * nrl + i] = mn;
     maxQDyn[(size_t) s * nrl + i] = mx;
@@ -6455,6 +6466,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               const double* dsOvMaxDelta, const double* dsOvMinDelta, const double* dsAnchorShift,
                               const double* dsSlackShift,
                               int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
+                              int nRlQOv, const int* rlQOvSlotEntry, const double* rlQOvMinMax,
                               int maxIter, double tol,
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                               int lsMode, double maxDv, double maxDphi, const int* varType,
@@ -6604,6 +6616,18 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // outerLoopTotalIterations budget. The raw pass loop gets a generous safety bound on top, because the
     // sequential driver also spends non-productive passes (phase transitions / stability re-checks) that OLF
     // does not count.
+    // The reactive-limit limits become PER-SCENARIO as soon as either channel is live: curve limits at
+    // the runtime P, or a generator lost at a bus that keeps voltage control taking its capability away.
+    DeviceBuf dRlQOvSlotEntry, dRlQOvMinMax;
+    if (nRlQOv > 0) {
+        dRlQOvSlotEntry.upload(rlQOvSlotEntry, static_cast<size_t>(nRlQOv) * 2 * sizeof(int));
+        dRlQOvMinMax.upload(rlQOvMinMax, static_cast<size_t>(nRlQOv) * 2 * sizeof(double));
+    }
+    bool useDynRlLimits = ctx->nrl > 0 && (ctx->ncv > 0 || nRlQOv > 0);
+    if (useDynRlLimits && !ctx->dRlMinQDyn.p) {              // curves allocate these; a Q override alone must too
+        ctx->dRlMinQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
+        ctx->dRlMaxQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
+    }
     int maxOuter = fullLoadflow ? 8 * RL_MAX_OUTER : 1;
     std::vector<char> rlActive(nS), rlSwitched(nS), wasActive(nS);
     // ...but NOT on a resume: these are per-SOLVE state, and a resumed driver is continuing the SAME
@@ -6663,18 +6687,20 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             }
             CUDA_CHECK(cudaMemcpyAsync(ctx->dRlLimitType.p, lt.data(), lt.size(), cudaMemcpyHostToDevice, ctx->stream));
             CUDA_CHECK(cudaMemcpy(ctx->dRlSwitchCount.p, sc.data(), sc.size(), cudaMemcpyHostToDevice));
-            if (ctx->ncv > 0) {                              // curve limits at the CURRENT (seeded) targets
+            if (useDynRlLimits) {                            // curve limits at the CURRENT (seeded) targets,
                 rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
                         ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
                         ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dTarget.as<double>(),
+                        nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
+                        nRlQOv > 0 ? dRlQOvMinMax.as<double>() : nullptr,
                         ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>());
             }
             seedRlModeFromState<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n,
                     ctx->dRlVrow.as<int>(),
-                    ctx->ncv > 0 ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
-                    ctx->ncv > 0 ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
+                    useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
+                    useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
                     ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(),
-                    ctx->dMode.as<int>(), ctx->dTarget.as<double>(), ctx->ncv > 0 ? 1 : 0,
+                    ctx->dMode.as<int>(), ctx->dTarget.as<double>(), useDynRlLimits ? 1 : 0,
                     ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr);
         } else {
             CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitchCount.p, 0, static_cast<size_t>(ctx->nrl) * nS * sizeof(char), ctx->stream));
@@ -8092,10 +8118,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
     } else {                                               // reactive-limits outer loop: switch PV->PQ over Q limit
         if (loopKind == LOOP_RL && ctx->nrl > 0 && !skipRlPhase) {                  // skipRlPhase: a monitoring interleave solve — the
-            if (ctx->ncv > 0) {                              // curve limits at the CURRENT (post-DS) targets
+            if (useDynRlLimits) {                            // curve limits at the CURRENT (post-DS) targets,
                 rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
                         ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
                         ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dTarget.as<double>(),
+                        nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
+                        nRlQOv > 0 ? dRlQOvMinMax.as<double>() : nullptr,
                         ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>());
             }
             CUDA_CHECK(cudaMemsetAsync(ctx->dRlPassSwitched.p, 0, static_cast<size_t>(ctx->nrl) * nS, ctx->stream));
@@ -8103,8 +8131,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
                     ctx->nrl, nS, n, REACTIVE_LIMIT_TOL, RL_MAX_SWITCH,
                     ctx->dRlVrow.as<int>(),
-                    ctx->ncv > 0 ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
-                    ctx->ncv > 0 ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
+                    useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
+                    useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
                     ctx->dRlLoadQ.as<double>(),
                     ctx->dRlVtarget.as<double>(), ctx->dQbuf.as<double>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
                     ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
@@ -8112,7 +8140,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dRlPassSwitched.as<char>(), ctx->dRlSavedMode.as<char>(),
                     nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
                     nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
-                    ctx->dRowSlope.as<double>(), ctx->dRlSavedTarget.as<double>(), ctx->ncv > 0 ? 1 : 0,
+                    ctx->dRowSlope.as<double>(), ctx->dRlSavedTarget.as<double>(), useDynRlLimits ? 1 : 0,
                     ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
                     ctx->nRlRemote > 0 ? ctx->dRlCmpVrow.as<int>() : nullptr,
                     ctx->dRlSvcBmin.as<double>(), ctx->dRlSvcBmax.as<double>(), ctx->dRlV2Base.as<double>(),
@@ -8144,9 +8172,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->dDqMemberGroupStart.as<int>(), ctx->dDqMemberGroupCount.as<int>(),
                         ctx->dDqMemberRow.as<int>(), ctx->dDqMemberHasRow.as<char>(),
                         ctx->dRlVrow.as<int>(),
-                        ctx->ncv > 0 ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
-                        ctx->ncv > 0 ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
-                        ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(), ctx->ncv > 0 ? 1 : 0,
+                        useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
+                        useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
+                        ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(), useDynRlLimits ? 1 : 0,
                         ctx->dTarget.as<double>(), ctx->dRlActive.as<char>(),
                         ctx->dDqMemberTargetQ.as<double>(),
                         ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr,
@@ -8683,7 +8711,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jintArray jtargetOverrideIndex, jdoubleArray jtargetOverrideValue,
         jintArray jdsOverrideBus, jdoubleArray jdsOverrideFactorDelta, jdoubleArray jdsOverrideBaseDelta,
         jdoubleArray jdsOverrideMaxDelta, jdoubleArray jdsOverrideMinDelta, jdoubleArray jdsAnchorShift,
-        jdoubleArray jdsSlackShift, jintArray jrlVtOvSlotIdx, jdoubleArray jrlVtOvVal, jint maxIter, jdouble tol,
+        jdoubleArray jdsSlackShift, jintArray jrlVtOvSlotIdx, jdoubleArray jrlVtOvVal,
+        jintArray jrlQOvSlotEntry, jdoubleArray jrlQOvMinMax, jint maxIter, jdouble tol,
         jdouble reactiveLimitTol, jdouble slackDistTol, jdouble convEpsPerEq,
         jint lsMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType, jdoubleArray jx0Full,
         jintArray jShuntOvSlotElem, jdoubleArray jShuntOvGb,
@@ -8842,6 +8871,14 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         }
         std::vector<int> rlVtOvSlotIdxVec;
         std::vector<double> rlVtOvValVec;
+        std::vector<int> rlQOvSlotEntryVec;
+        std::vector<double> rlQOvMinMaxVec;
+        if (jrlQOvSlotEntry != nullptr && jrlQOvMinMax != nullptr) {
+            rlQOvSlotEntryVec.resize(env->GetArrayLength(jrlQOvSlotEntry));
+            env->GetIntArrayRegion(jrlQOvSlotEntry, 0, static_cast<jsize>(rlQOvSlotEntryVec.size()), rlQOvSlotEntryVec.data());
+            rlQOvMinMaxVec.resize(env->GetArrayLength(jrlQOvMinMax));
+            env->GetDoubleArrayRegion(jrlQOvMinMax, 0, static_cast<jsize>(rlQOvMinMaxVec.size()), rlQOvMinMaxVec.data());
+        }
         if (jrlVtOvSlotIdx != nullptr && jrlVtOvVal != nullptr) {
             rlVtOvSlotIdxVec.resize(env->GetArrayLength(jrlVtOvSlotIdx));
             env->GetIntArrayRegion(jrlVtOvSlotIdx, 0, static_cast<jsize>(rlVtOvSlotIdxVec.size()), rlVtOvSlotIdxVec.data());
@@ -8861,7 +8898,10 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
                                 dsSlackShiftVec.empty() ? nullptr : dsSlackShiftVec.data(),
                                 static_cast<int>(rlVtOvValVec.size()),
                                 rlVtOvSlotIdxVec.empty() ? nullptr : rlVtOvSlotIdxVec.data(),
-                                rlVtOvValVec.empty() ? nullptr : rlVtOvValVec.data(), maxIter, tol,
+                                rlVtOvValVec.empty() ? nullptr : rlVtOvValVec.data(),
+                                static_cast<int>(rlQOvMinMaxVec.size() / 2),
+                                rlQOvSlotEntryVec.empty() ? nullptr : rlQOvSlotEntryVec.data(),
+                                rlQOvMinMaxVec.empty() ? nullptr : rlQOvMinMaxVec.data(), maxIter, tol,
                                 reactiveLimitTol, slackDistTol, convEpsPerEq,
                                 lsMode, maxDv, maxDphi, varTypeVec.empty() ? nullptr : varTypeVec.data(),
                                 x0FullVec.empty() ? nullptr : x0FullVec.data(),

@@ -770,6 +770,88 @@ not a closed branch. With this every sensitivity-dependent incremental loop runs
 chunk path's host orchestrators left: SecondaryVoltageControl (transposed solve, task #40); the
 non-incremental TVC / shunt VC flows followed the same day (#47).
 
+### #50 — PLAN: fold the JAVA hybrid into the driver's host-slot mechanism (reviewed 2026-09-16)
+
+Not started. A review, not a design commitment — the measurement in stage 0 decides whether it is worth
+doing at all.
+
+**Why now.** The hybrid (`GpuHybridBatchOuterLoopEngine`, 1484 lines, plus `GpuHybridOuterLoopBridge`
+270 and `HybridScenarioState` 85) exists because OLF's own Java loops make decisions no port can get
+subtly wrong. It pays for that with a per-scenario, per-round save/restore of the compact network
+state, which measured **54% snapshots / 44% Java loops / 2% device**. It is also an all-or-nothing
+MODE: choosing JAVA replays EVERY loop per scenario in Java, even the ones the device now owns.
+
+Since 2026-09-15/16 that trade is obsolete. Every loop in OLF's order is a device phase except two,
+and the driver already knows how to stop at a named loop's OLF position, hand control to Java, and
+resume with its sweep state intact (`LOOP_HOST_*`, `readBatchDriverPaused` / `setBatchDriverResume`,
+flat per-scenario `setBatchTargetDeltas`, the RL v-target and un-pin channels). SecondaryVoltageControl
+used exactly that before its kernel phase landed, at chunk scale, and it held parity.
+
+OLF's `DefaultAcOuterLoopConfig` order, with what owns each slot today:
+
+| order | loop | owner |
+|---|---|---|
+| 0 | DistributedSlack | kernel |
+| 1 | FreezingHvdcACEmulation | kernel |
+| 2 | AcHvdcAcEmulationLimits | kernel |
+| **3** | **AreaInterchangeControl** | **nobody — whole-run CPU** |
+| 4 | SecondaryVoltageControl | kernel (pause as fallback) |
+| 5 | MonitoringVoltage | kernel |
+| 6 | ReactiveLimits | kernel |
+| 7 | PhaseControl / Incremental | kernel |
+| 8 | TransformerVoltageControl, all 3 flavors | kernel |
+| 9 | TransformerReactivePowerControl | kernel |
+| 10 | ShuntVoltageControl, both modes | kernel |
+| **11** | **AutomationSystem** | **nobody — whole-run CPU** |
+
+So the hybrid's remaining reason to exist is two loops, and the proposal is to serve them with a host
+SLOT at their own position instead of a whole parallel engine.
+
+**What it would buy.** The per-scenario snapshot/restore disappears for every loop the device owns,
+which is where most of that 54% goes. The duplicated outer-loop sequencer goes too: the bridge
+re-implements OLF's nested `runOuterLoop` so it can drive one scenario at a time, while the device
+sweep already sequences in OLF's order with OLF's restart-on-UNSTABLE semantics — one sequencer
+instead of two. And the two coverage gates (`JAVA_SUPPORTED_LOOPS` versus the DEVICE filter) collapse
+into one question: does the kernel own this loop, or does it have a host slot.
+
+**Stages.**
+
+0. **Measure first.** Re-run the hybrid's cost split now that every loop is in-kernel, and confirm the
+   claim above. If a real case never enables AreaInterchangeControl or AutomationSystem, the honest
+   answer is to delete the hybrid outright and route those two loops to the CPU, which is cheaper than
+   any of the work below.
+1. **Generalise the slot mechanism.** `hostLoopMask` is five bits keyed to `HOST_LOOP_SVC..SHUNT`.
+   Make it a registry of (OLF order, loop name, kind) so a new host-owned loop is a table entry rather
+   than a new constant in three files. Add `LOOP_HOST_AIC` at 3 and `LOOP_HOST_AUTOMATION` at 11.
+2. **AreaInterchangeControl first.** It adjusts generator targetP to meet area interchange targets, so
+   like DistributedSlack and SecondaryVoltageControl its mutations should be TARGET-only, which the
+   existing `setBatchTargetDeltas` channel already carries. That makes it a near-copy of the SVC pause,
+   including the budget rule (a host-UNSTABLE verdict must consume `prodIters`, or the pause cycle can
+   spin — see #49). CONFIRM the target-only claim against OLF before building; its interaction with
+   DistributedSlack at order 0 is the part to read carefully.
+3. **AutomationSystem is the hard one and should be scoped separately.** It switches topology per
+   round, so it changes the equation LAYOUT, not just targets. The base path handles that by
+   re-extracting and restarting the sweep, which does not generalise to a 500-scenario chunk where one
+   scenario changed layout. Two candidate answers: reject the scenarios it actually fires on to the
+   CPU (cheap and honest if it fires rarely), or express the switching through the per-scenario
+   element-disable and zero-impedance on/off channels that already exist. Decide with a measurement of
+   how often it fires, not a priori.
+4. **Retire the hybrid.** Once both loops have slots, delete `GpuHybridBatchOuterLoopEngine`, the
+   bridge, `HybridScenarioState`, the `OuterLoopMode` enum and `javaUnsupportedOuterLoops`. That is
+   ~1,800 lines and one of the two coverage gates.
+
+**Risks to weigh before starting.**
+
+- A paused Java loop still reads the `LfNetwork`, not just the state vector, so running it for one
+  scenario still needs that scenario's network state. The slot NARROWS this to the loops and scenarios
+  that need it; it does not remove it. If the unported loop fires on most scenarios, the snapshot cost
+  comes straight back and the hybrid's structure was not the problem.
+- The per-scenario Java work at a pause is serial. With 500-scenario chunks that is the thing to
+  measure in stage 0, not to assume.
+- Two host slots means two places the sweep can stop per pass. The SVC experience says an added slot is
+  cheap, but it also says a new context buffer read by an existing kernel must be initialised at UPLOAD
+  time, not only in the per-solve reset (#49's `dSvcRlVt` bug).
+
 ### #49 — Host orchestrators deleted; the device driver is the default (2026-09-16)
 
 Every decision loop that ran AFTER the device sweep is gone: `GpuBatchSecondaryVc.orchestrate`,

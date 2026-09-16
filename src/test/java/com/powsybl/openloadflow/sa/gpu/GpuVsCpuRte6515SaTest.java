@@ -135,6 +135,85 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                     new com.powsybl.contingency.ShuntCompensatorContingency(id))));
             System.out.printf("  + %d shunt compensator contingencies%n", ids.size());
         }
+        if (kinds.contains("busbar")) {
+            // A busbar section outage disconnects everything attached to it — the heaviest topological
+            // change of any single-element contingency, and rte6515's biggest untested population.
+            int top = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_BUSBAR_TOP", "500"));
+            List<String> ids = network.getBusbarSectionStream()
+                    .map(com.powsybl.iidm.network.BusbarSection::getId).sorted().limit(top).toList();
+            ids.forEach(id -> all.add(new Contingency(id,
+                    new com.powsybl.contingency.BusbarSectionContingency(id))));
+            System.out.printf("  + %d busbar section contingencies%n", ids.size());
+        }
+        if (kinds.contains("battery")) {
+            List<String> ids = network.getBatteryStream()
+                    .map(com.powsybl.iidm.network.Battery::getId).toList();
+            ids.forEach(id -> all.add(new Contingency(id, new com.powsybl.contingency.BatteryContingency(id))));
+            System.out.printf("  + %d battery contingencies%n", ids.size());
+        }
+        // No "vsc" kind: OLF itself refuses VOLTAGE_SOURCE_CONVERTER (and the DC_* types) in
+        // PropagatedContingency — "Unsupported contingency element type" — so there is nothing for the
+        // device to be behind on. rte6515 has 10 VSC stations; they are reachable only through their
+        // HVDC line, which IS covered.
+        // N-2. OLF_GPU_SA_N2_BRANCH / _N2_GEN = how many PAIRS to build. Pairs are drawn from a fixed
+        // seed so a differing pair reproduces, and preferentially from elements sharing a voltage level
+        // — the double-circuit shape that actually islands things, which is the point of running N-2.
+        int n2Branch = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_N2_BRANCH", "0"));
+        if (n2Branch > 0) {
+            List<String> brIds = network.getBranchStream().map(Branch::getId).sorted().toList();
+            java.util.Random rnd = new java.util.Random(20260917L);
+            int added = 0;
+            for (int t = 0; t < n2Branch * 50 && added < n2Branch; t++) {
+                String aId = brIds.get(rnd.nextInt(brIds.size()));
+                var a = network.getBranch(aId);
+                String vl = a.getTerminal1().getVoltageLevel().getId();
+                List<String> nb = brIds.stream().filter(id -> !id.equals(aId))
+                        .filter(id -> {
+                            var b = network.getBranch(id);
+                            return b.getTerminal1().getVoltageLevel().getId().equals(vl)
+                                    || b.getTerminal2().getVoltageLevel().getId().equals(vl);
+                        }).toList();
+                if (nb.isEmpty()) {
+                    continue;
+                }
+                String bId = nb.get(rnd.nextInt(nb.size()));
+                all.add(new Contingency(aId + "+" + bId,
+                        List.of(new BranchContingency(aId), new BranchContingency(bId))));
+                added++;
+            }
+            System.out.printf("  + %d N-2 branch pairs (same voltage level)%n", added);
+        }
+        int n2Gen = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_N2_GEN", "0"));
+        if (n2Gen > 0) {
+            List<String> gs = network.getGeneratorStream().map(com.powsybl.iidm.network.Generator::getId)
+                    .sorted().toList();
+            java.util.Random rnd = new java.util.Random(20260917L);
+            for (int t = 0; t < n2Gen; t++) {
+                String a = gs.get(rnd.nextInt(gs.size()));
+                String b = gs.get(rnd.nextInt(gs.size()));
+                if (a.equals(b)) {
+                    continue;
+                }
+                all.add(new Contingency(a + "+" + b,
+                        List.of(new com.powsybl.contingency.GeneratorContingency(a),
+                                new com.powsybl.contingency.GeneratorContingency(b))));
+            }
+            System.out.printf("  + %d N-2 generator pairs%n", n2Gen);
+        }
+        // OLF_GPU_SA_INVENTORY=1: what the case actually CONTAINS, per contingency element type. The
+        // answer to "which kinds are we not testing" is a property of the network, not of memory.
+        if ("1".equals(System.getenv("OLF_GPU_SA_INVENTORY"))) {
+            // A class histogram over getIdentifiables() rather than per-type accessors: it cannot go
+            // stale against the iidm API and it cannot miss a type nobody thought to ask for.
+            Map<String, Long> byType = new TreeMap<>();
+            network.getIdentifiables().forEach(o -> {
+                String t = java.util.Arrays.stream(o.getClass().getInterfaces())
+                        .map(Class::getSimpleName).findFirst().orElse(o.getClass().getSimpleName());
+                byType.merge(t, 1L, Long::sum);
+            });
+            byType.forEach((t, n) -> System.out.printf("  INVENTORY %-28s %d%n", t, n));
+            System.out.printf("  INVENTORY %-28s %d%n", "(switches)", network.getSwitchStream().count());
+        }
         // OLF_GPU_SA_CTG_ONLY=<id>[,<id>]: run only these — the instrument for a single differing line.
         String only = System.getenv("OLF_GPU_SA_CTG_ONLY");
         if (only != null) {
@@ -202,6 +281,14 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 network.getBranchCount(), contingencies.size());
 
         LoadFlowParameters lfp = JsonLoadFlowParameters.read(PARAMS_FILE);
+        // OLF_GPU_DBG_CONV_EPS: tighten the inner-Newton criterion on BOTH arms. The only honest way to
+        // tell a real state difference from convergence slack is to squeeze the slack and watch what
+        // survives — see the standing rule against calling a difference a tolerance artefact unproven.
+        String convEpsEnv = System.getenv("OLF_GPU_DBG_CONV_EPS");
+        if (convEpsEnv != null) {
+            com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp)
+                    .setNewtonRaphsonConvEpsPerEq(Double.parseDouble(convEpsEnv));
+        }
         // OLF_GPU_SVC=1: enable SecondaryVoltageControl — the RTE params default to off, but
         // the rte6515 case carries SVC zones. This is the path that differed between GPU and
         // CPU when SVC support was incomplete (the base LF didn't go through the chunk solver).
@@ -244,12 +331,20 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // new contingency KIND needs before anyone calls it clean.
         boolean busDiff = System.getenv("OLF_GPU_SA_CTG_ONLY") != null
                 || "1".equals(System.getenv("OLF_GPU_SA_BUSDIFF"));
-        List<com.powsybl.security.monitor.StateMonitor> monitors = !busDiff
+        // OLF_GPU_SA_MON_BRANCH=<id>[,<id>]: monitor these branches and print BOTH arms' flows. A
+        // one-sided violation says only that the other arm is on the other side of the limit — it does
+        // NOT say by how much, and "the margin is small" is a statement about the CPU's distance to its
+        // limit, not about the distance between the two arms.
+        java.util.Set<String> monBranches = System.getenv("OLF_GPU_SA_MON_BRANCH") == null
+                ? java.util.Set.of()
+                : java.util.Arrays.stream(System.getenv("OLF_GPU_SA_MON_BRANCH").split(","))
+                        .map(String::trim).collect(Collectors.toSet());
+        List<com.powsybl.security.monitor.StateMonitor> monitors = !busDiff && monBranches.isEmpty()
                 ? Collections.emptyList()
                 : List.of(new com.powsybl.security.monitor.StateMonitor(
-                        com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(),
-                        network.getVoltageLevelStream().map(com.powsybl.iidm.network.VoltageLevel::getId)
-                                .collect(Collectors.toSet()), java.util.Set.of()));
+                        com.powsybl.contingency.ContingencyContext.all(), monBranches,
+                        busDiff ? network.getVoltageLevelStream().map(com.powsybl.iidm.network.VoltageLevel::getId)
+                                .collect(Collectors.toSet()) : java.util.Set.of(), java.util.Set.of()));
         SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, monitors, sap);
         long cpuMs = (System.nanoTime() - cpuT0) / 1_000_000;
 
@@ -328,6 +423,27 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 p.getLimitViolationsResult().getLimitViolations()));
         gpuCold.getPostContingencyResults().forEach(p -> gpuViolByCtg.put(p.getContingency().getId(),
                 p.getLimitViolationsResult().getLimitViolations()));
+        if (!monBranches.isEmpty()) {
+            Map<String, com.powsybl.security.results.BranchResult> gpuBr = new TreeMap<>();
+            for (var gp : gpuWarm.getPostContingencyResults()) {
+                gp.getNetworkResult().getBranchResults()
+                        .forEach(b -> gpuBr.put(gp.getContingency().getId() + "|" + b.getBranchId(), b));
+            }
+            for (var cp : cpu.getPostContingencyResults()) {
+                for (var cb : cp.getNetworkResult().getBranchResults()) {
+                    var gb = gpuBr.get(cp.getContingency().getId() + "|" + cb.getBranchId());
+                    if (gb == null) {
+                        continue;
+                    }
+                    double i1d = Math.abs(cb.getI1() - gb.getI1());
+                    System.out.printf("  BRDIFF ctg=%-14s %s I1 cpu=%.6f gpu=%.6f d=%.3e (%.3e rel) "
+                            + "| P1 cpu=%.6f gpu=%.6f | Q1 cpu=%.6f gpu=%.6f%n",
+                            cp.getContingency().getId(), cb.getBranchId(), cb.getI1(), gb.getI1(),
+                            i1d, i1d / Math.max(1e-9, Math.abs(cb.getI1())),
+                            cb.getP1(), gb.getP1(), cb.getQ1(), gb.getQ1());
+                }
+            }
+        }
         if (busDiff) {
             for (var cp : cpu.getPostContingencyResults()) {
                 var gp = gpuCold.getPostContingencyResults().stream()

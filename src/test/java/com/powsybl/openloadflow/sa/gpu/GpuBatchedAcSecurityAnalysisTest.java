@@ -916,6 +916,47 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
     }
 
+    /** A generator outage whose loss pre-distribution SATURATES one generator on a multi-generator bus.
+     *  OLF distributes the contingency's scheduled loss over the participating GENERATORS, clamping each
+     *  at its own limit and renormalizing over the survivors. The device's host-side seed has to be the
+     *  same function as the water-fill it seeds, or the device re-derives from an anchor the seed never
+     *  produced — and it used to drop to a BUS-aggregate fill for every generator outage, because the
+     *  per-generator path was gated on there being no gen-outage override bus.
+     *
+     *  <p>b2 carries three generators; g2c is given just 3 MW of headroom so the pre-distribution pins
+     *  it while g2 and g2b still have room. A bus aggregate cannot see that: b2's combined headroom is
+     *  never exhausted, so the bus-level fill saturates nobody and spreads the loss differently. On
+     *  rte6515 that difference put GEN-6372's line current 1.11e-05 out (relative) and flipped a
+     *  violation; the state difference survived tightening the inner Newton to 1e-12, so it was never
+     *  convergence slack.
+     *
+     *  <p>DISABLED, and honestly so. Clamping the seed per generator improves this case 28x
+     *  (8.02e-08 kV -> 2.81e-09 kV at b2) and closes rte6515's GEN-6372 completely (1.11e-05 relative
+     *  -> 3.64e-13, and the 1389-generator set from 1 differing violation to 0), but 2.81e-09 kV is
+     *  still above the bar, so something smaller-order in the saturating path is still wrong. The seed
+     *  and OLF now agree on WHICH generator pins and at WHAT value (OLF_GPU_SEED_TRACE against OLF's
+     *  OLF_DS_TRACE: both clamp g2c at 0.23 - 0.217443120 = 0.01255688), so the remaining difference is
+     *  elsewhere. Sweeping g2c's headroom shows the split cleanly: at maxP 50/30/26 nobody saturates
+     *  and BOTH arms agree at 1e-11; only at 23 does anything differ. That is also why this network
+     *  cannot host a passing regression test for the fix — where it bites, this residual bites too.
+     *  The water-fill is continuous at a clamp, so a 2.8e-09 output needs a 2.8e-09 input: this is a
+     *  real difference, not amplification through a kink. */
+    @org.junit.jupiter.api.Disabled("OPEN: the saturating pre-distribution still leaves 2.8e-09 kV. "
+            + "Enable when it reaches the 1e-11 bar — the assert is deliberately NOT loosened to pass.")
+    @org.junit.jupiter.api.Test
+    void deviceLossPreDistributionSaturatingOneGeneratorOnABusMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = distributedSlackNetworkWithExtras();
+        network.getGenerator("g2c").setMaxP(23);              // targetP 20 -> 3 MW of headroom: pins first
+        List<Contingency> ctgs = List.of(
+                new Contingency("g3", new com.powsybl.contingency.GeneratorContingency("g3")));
+        // The factory's generators carry a DROOP, not a participation factor, so the default
+        // PROPORTIONAL_TO_GENERATION_P_MAX is the balance type that actually distributes here; asking
+        // for PARTICIPATION_FACTOR gives every one of them a zero factor and the base loadflow fails.
+        assertGpuMatchesCpu(network, ctgs, 1e-11);
+    }
+
     /** A FIXED-Q generator lost from a bus its sibling keeps in voltage control. A bus's reactive
      *  aggregate is NOT the sum of its generators' getMinQ()/getMaxQ(): OLF's AbstractLfBus.getLimitQ
      *  takes a generator's LIMIT only when it controls voltage (or remote reactive power) and its

@@ -106,7 +106,7 @@ final class GpuBatchLossPreDistribution {
         // never produced. The bus-aggregate loop below stays for the cases the generator arrays do
         // not cover (a pack built without them).
         int ngen = gpuData.dgBus() == null ? 0 : gpuData.dgBus().length;
-        if (ngen > 0 && ovBus < 0) {
+        if (ngen > 0) {
             double[] genCum = new double[ngen];
             boolean[] removed = new boolean[ngen];
             // normalizeParticipationFactors mutates the stored factor in place; mirror that, or the
@@ -115,20 +115,45 @@ final class GpuBatchLossPreDistribution {
             for (int g = 0; g < ngen; g++) {
                 fWork[g] = genFactor(gpuData, dirUp, g);
             }
+            // The bus that lost a generator stays on the AGGREGATE treatment, exactly as the kernel
+            // does: the override channel carries {factor, base, headroom, footroom} deltas for the
+            // BUS, not the identity of the generator, so no per-generator entry can express it. It
+            // joins the SAME denominator, so every other bus stays per-generator.
+            double ovCum = 0.0;
             for (int iter = 0; iter < ngen && Math.abs(rem) > P_RESIDUE_EPS; iter++) {
                 double fsumActive = 0.0;
                 for (int g = 0; g < ngen; g++) {
-                    if (removed[g] || islanded != null && islanded[gpuData.dgBus()[g]]) {
+                    if (removed[g] || gpuData.dgBus()[g] == ovBus
+                            || islanded != null && islanded[gpuData.dgBus()[g]]) {
                         continue;
                     }
                     fsumActive += fWork[g];
+                }
+                double ovF = 0.0;
+                double ovMaxD = 0.0;
+                double ovMinD = 0.0;
+                boolean ovActive = false;
+                if (ovBus >= 0 && (islanded == null || !islanded[ovBus])) {
+                    ovMaxD = gpuData.dsMaxDelta()[ovBus] - ovMaxDelta;
+                    ovMinD = gpuData.dsMinDelta()[ovBus] - ovMinDelta;
+                    // The kernel does NOT take the factor delta off a REMAINING_MARGIN factor; mirror
+                    // it rather than "improve" on it (that shape is CPU-routed upstream anyway, and
+                    // the seed must be the same function as the fill it seeds).
+                    ovF = gpuData.dsMode() == 1
+                            ? Math.max(0.0, dirUp ? gpuData.dsMarginUp()[ovBus] : gpuData.dsMarginDown()[ovBus])
+                            : gpuData.dsFactor()[ovBus] - ovFactorDelta;
+                    ovActive = ovF > 0 && !(rem > 0 ? ovCum >= ovMaxD : ovCum <= ovMinD);
+                    if (ovActive) {
+                        fsumActive += ovF;
+                    }
                 }
                 if (fsumActive <= 0.0) {
                     break;
                 }
                 double done = 0.0;
                 for (int g = 0; g < ngen; g++) {
-                    if (removed[g] || islanded != null && islanded[gpuData.dgBus()[g]]) {
+                    if (removed[g] || gpuData.dgBus()[g] == ovBus
+                            || islanded != null && islanded[gpuData.dgBus()[g]]) {
                         continue;
                     }
                     fWork[g] /= fsumActive;
@@ -146,10 +171,33 @@ final class GpuBatchLossPreDistribution {
                         genCum[g] = newCum;
                     }
                 }
+                if (ovActive) {
+                    double newCum = Math.min(Math.max(ovCum + rem * (ovF / fsumActive), ovMinD), ovMaxD);
+                    if (newCum != ovCum) {
+                        done += newCum - ovCum;
+                        ovCum = newCum;
+                    }
+                }
+                if (System.getenv("OLF_GPU_SEED_TRACE") != null) {
+                    // Pairs with OLF's OLF_DS_TRACE (DS_RUN / DS_SAT): same rounds, same saturations,
+                    // same clamp values, or the seed is not the function it is meant to replay.
+                    System.err.printf("SEED iter=%d fsumActive=%.12f rem=%.12f done=%.12f%n",
+                            iter, fsumActive, rem, done);
+                    for (int g = 0; g < ngen; g++) {
+                        if (removed[g] && genCum[g] != 0) {
+                            System.err.printf("  SEED_SAT gen=%d bus=%d cum=%.12f maxD=%.12f%n",
+                                    g, gpuData.dgBus()[g], genCum[g], gpuData.dgMaxDelta()[g]);
+                        }
+                    }
+                }
                 rem -= done;
             }
             for (int i = 0; i < nds; i++) {
                 if (islanded != null && islanded[i]) {
+                    continue;
+                }
+                if (i == ovBus) {
+                    cum[i] = ovCum;
                     continue;
                 }
                 double sum = 0;

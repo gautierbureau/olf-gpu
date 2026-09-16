@@ -770,6 +770,46 @@ not a closed branch. With this every sensitivity-dependent incremental loop runs
 chunk path's host orchestrators left: SecondaryVoltageControl (transposed solve, task #40); the
 non-incremental TVC / shunt VC flows followed the same day (#47).
 
+### #53 — fixTransformerVoltageControls is a per-SCENARIO check (2026-09-16)
+
+The last of the four gaps in the ported phases: the freeze approximation. The generator freeze itself
+was already OLF's (`GeneratorVoltageControlManager` frozen at `q.eval()`, restored at COMPLETE); what
+was approximate was the connectivity check that runs beside it.
+
+`LfNetwork.fixTransformerVoltageControls` disables a just-enabled transformer voltage control when the
+not-controlled side's connected component holds no enabled generator voltage control. It computes that
+component on the POST-CONTINGENCY graph, cutting the contingency's branches AND the ENABLED controller
+branches. The device built ONE table, at base topology, cutting EVERY controller branch, and per
+scenario asked only which of those buses was still PV. Two errors in opposite directions: a contingency
+that split the component was invisible, and cutting non-enabled controller branches made the component
+smaller than OLF's.
+
+The dynamic half stays in the kernel — which buses are PV depends on the freeze and on the reactive
+limits, and only the kernel knows that. The topological half moves to the host, per scenario. The
+obstacle is that OLF's cut set is not host-knowable: the contingency is, but the ENABLED controllers
+are decided inside the solve. So the host brackets it with two masks over a fixed universe (the
+{@code BUS_V} row of every generator-voltage-controlled bus, one bit each):
+
+| mask | cut set | relation to OLF's component |
+| --- | --- | --- |
+| min | contingency + EVERY controller | subset |
+| max | contingency only | superset |
+
+A PV bus in min means OLF sees one too, so the control stays enabled. No PV bus in max means OLF sees
+none either, so it is disabled. Between the two the answer genuinely depends on which controllers the
+scenario enabled, and the scenario goes to the CPU rather than to a guess. The freeze-driven cases —
+where the check fires because everything under the level is frozen, which is what the mode is for —
+land outside the bracket and still batch; it is the connectivity-driven ones that are ambiguous.
+
+Cost: two connectivity sessions per scenario, each O(PV buses + members) — the component NUMBER of
+every PV bus is read once and members look up their own component's mask, instead of walking a
+component per member. Masks upload per chunk, not per run.
+
+`GpuBatchTvcFixMaskTest` pins the builder directly rather than through a security analysis, where the
+same scenario can be routed to the CPU for unrelated reasons and hide the difference: BUS_2 reaches the
+only generator over LINE_12 alone, a 33 kV loop through a non-regulating transformer keeps the pocket
+energized when that line opens, and the base mask and the scenario's differ exactly as designed.
+
 ### #52 — Remote LIMITER phase control, and the tap table without reflection (2026-09-16)
 
 Two of the four gaps left in the ported phases. Both turned out to be self-imposed.

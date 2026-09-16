@@ -246,10 +246,31 @@ public final class GpuBatchTransformerControl {
                 .allMatch(b -> tapModels(b.getPiModel()).length > 0);
     }
 
-    /** The GeneratorVoltageControlManager + fixTransformerVoltageControls tables of the in-kernel phase. */
-    public record FreezeTables(int[] vRow, double[] loadQ, int[] busNum, int[] memFixPtr, int[] memFixRow) {
+    /**
+     * The GeneratorVoltageControlManager + fixTransformerVoltageControls tables of the in-kernel phase.
+     *
+     * <p>{@code fixPvRow} is the UNIVERSE the connectivity fix looks at: the {@code BUS_V} row of every
+     * generator-voltage-controlled bus, in a fixed order. A member's component is then a BITMASK over
+     * that universe, {@code fixWords} ints per member, and the kernel asks which of those buses is
+     * still PV in its own scenario.
+     *
+     * <p>Two masks, because OLF's component is not computable from one. It cuts the CONTINGENCY's
+     * branches and the ENABLED controller branches; the device knows the contingency host-side but
+     * learns the enabled set only inside the solve. So the host brackets it: {@code minMask} cuts every
+     * controller branch (a SUBSET of OLF's component, since OLF cuts only the enabled ones) and
+     * {@code maxMask} cuts none (a SUPERSET). A PV bus in the min mask means OLF sees one too — keep the
+     * control. No PV bus in the max mask means OLF sees none either — disable it. In between, the answer
+     * depends on which controllers this scenario enabled, and the scenario goes to the CPU.
+     */
+    public record FreezeTables(int[] vRow, double[] loadQ, int[] busNum,
+                               int[] fixPvRow, int fixWords, int[] minMask, int[] maxMask, int nMembers,
+                               FixMaskBuilder builder) {
         public boolean hasCandidates() {
             return vRow.length > 0;
+        }
+
+        public boolean hasFix() {
+            return fixPvRow.length > 0 && nMembers > 0;
         }
     }
 
@@ -289,58 +310,171 @@ public final class GpuBatchTransformerControl {
         for (TransformerController tc : tcs) {
             nMembers += tc.members().length;
         }
-        int[] memFixPtr = new int[nMembers + 1];
-        List<Integer> memFixRow = new ArrayList<>();
-        var connectivity = network.getConnectivity();
-        connectivity.startTemporaryChanges();
-        try {
-            for (LfBranch branch : network.getBranches()) {
-                if (!branch.isDisabled() && branch.isVoltageController() && branch.getBus1() != null && branch.getBus2() != null) {
-                    connectivity.removeEdge(branch);
-                }
+        // The universe of the connectivity fix: every generator-voltage-CONTROLLED bus, in bus order.
+        // OLF's test is isGeneratorVoltageControlled() && isGeneratorVoltageControlEnabled(); the first
+        // half is structural and lives here, the second is the per-scenario row mode the kernel reads.
+        List<LfBus> pvBuses = new ArrayList<>();
+        List<Integer> pvRows = new ArrayList<>();
+        for (LfBus bus : network.getBuses()) {
+            Integer row = bus.isGeneratorVoltageControlled() ? busVRows.get(bus.getNum()) : null;
+            if (row != null) {
+                pvBuses.add(bus);
+                pvRows.add(row);
             }
-            int m = 0;
-            for (TransformerController tc : tcs) {
-                for (Member mem : tc.members()) {
-                    memFixPtr[m++] = memFixRow.size();
-                    LfBranch branch = network.getBranch(mem.branchNum());
-                    var vc = branch != null ? branch.getVoltageControl().orElse(null) : null;
-                    java.util.Collection<LfBus> component;
-                    if (vc == null) {
-                        component = network.getBuses();       // defensive: OLF skips the check (never disables)
-                    } else if (vc.getControlledBus() == branch.getBus1()) {
-                        component = connectivity.getConnectedComponent(branch.getBus2());
-                    } else if (vc.getControlledBus() == branch.getBus2()) {
-                        component = connectivity.getConnectedComponent(branch.getBus1());
-                    } else {
-                        component = network.getBuses();
+        }
+        int words = (pvBuses.size() + 31) / 32;
+        int[] fixPvRow = pvRows.stream().mapToInt(Integer::intValue).toArray();
+        int[] memberBranchNum = new int[nMembers];
+        int mi = 0;
+        for (TransformerController tc : tcs) {
+            for (Member mem : tc.members()) {
+                memberBranchNum[mi++] = mem.branchNum();
+            }
+        }
+        FixMaskBuilder builder = new FixMaskBuilder(network, memberBranchNum, pvBuses, words);
+        int[] minMask = new int[nMembers * words];
+        int[] maxMask = new int[nMembers * words];
+        builder.fill(List.of(), minMask, 0, maxMask, 0);       // base topology: no contingency branches
+        return new FreezeTables(vRow, loadQ, busNum, fixPvRow, words, minMask, maxMask, nMembers, builder);
+    }
+
+    /**
+     * Builds the two connectivity masks of {@link FreezeTables} for one scenario's topology.
+     *
+     * <p>Held per run and called per scenario, because OLF re-runs {@code fixTransformerVoltageControls}
+     * on the post-contingency network: the base-topology masks are wrong the moment a contingency splits
+     * a not-controlled side's component. The cost is two connectivity sessions per scenario, each
+     * {@code O(pv buses + members)} — the component NUMBER of every PV bus is read once and members look
+     * their own component's mask up, rather than walking a component per member.
+     */
+    public static final class FixMaskBuilder {
+
+        private final LfNetwork network;
+        private final int[] memberBranchNum;
+        private final List<LfBus> pvBuses;
+        private final int words;
+
+        /** Members are named by BRANCH NUMBER, which is all the connectivity question needs — and lets a
+         *  test build one from a bare network without the whole controller pack. */
+        FixMaskBuilder(LfNetwork network, int[] memberBranchNum, List<LfBus> pvBuses, int words) {
+            this.network = network;
+            this.memberBranchNum = memberBranchNum;
+            this.pvBuses = pvBuses;
+            this.words = words;
+        }
+
+        public int words() {
+            return words;
+        }
+
+        public int nMembers() {
+            return memberBranchNum.length;
+        }
+
+        /** Fill {@code minMask} (every controller branch cut) and {@code maxMask} (none cut) for a
+         *  scenario whose contingency opens {@code outaged}, each at its own offset. */
+        public void fill(List<LfBranch> outaged, int[] minMask, int minOff, int[] maxMask, int maxOff) {
+            session(outaged, true, minMask, minOff);
+            session(outaged, false, maxMask, maxOff);
+        }
+
+        private void session(List<LfBranch> outaged, boolean cutControllers, int[] mask, int off) {
+            var connectivity = network.getConnectivity();
+            connectivity.startTemporaryChanges();
+            try {
+                java.util.Set<LfBranch> removed = new java.util.HashSet<>();
+                for (LfBranch b : outaged) {
+                    if (b.getBus1() != null && b.getBus2() != null && removed.add(b)) {
+                        connectivity.removeEdge(b);
                     }
-                    for (LfBus bus : component) {
-                        Integer row = bus.isGeneratorVoltageControlled() ? busVRows.get(bus.getNum()) : null;
-                        if (row != null) {
-                            memFixRow.add(row);
+                }
+                if (cutControllers) {
+                    for (LfBranch b : network.getBranches()) {
+                        if (!b.isDisabled() && b.isVoltageController()
+                                && b.getBus1() != null && b.getBus2() != null && removed.add(b)) {
+                            connectivity.removeEdge(b);
                         }
                     }
                 }
+                // component number -> the PV buses it holds, built once per session
+                java.util.Map<Integer, int[]> byComponent = new java.util.HashMap<>();
+                for (int i = 0; i < pvBuses.size(); i++) {
+                    Integer comp = componentOf(connectivity, pvBuses.get(i));
+                    if (comp != null) {
+                        byComponent.computeIfAbsent(comp, k -> new int[words])[i >> 5] |= 1 << (i & 31);
+                    }
+                }
+                int[] all = new int[words];                    // "every PV bus": OLF skips the check entirely
+                for (int i = 0; i < pvBuses.size(); i++) {
+                    all[i >> 5] |= 1 << (i & 31);
+                }
+                for (int m = 0; m < memberBranchNum.length; m++) {
+                    LfBranch branch = network.getBranch(memberBranchNum[m]);
+                    var vc = branch != null ? branch.getVoltageControl().orElse(null) : null;
+                    int[] src;
+                    if (vc == null) {
+                        src = all;                             // defensive: OLF never disables such a member
+                    } else {
+                        LfBus notControlled = vc.getControlledBus() == branch.getBus1() ? branch.getBus2()
+                                : vc.getControlledBus() == branch.getBus2() ? branch.getBus1() : null;
+                        Integer comp = notControlled != null ? componentOf(connectivity, notControlled) : null;
+                        src = comp == null ? all : byComponent.getOrDefault(comp, new int[words]);
+                    }
+                    System.arraycopy(src, 0, mask, off + m * words, words);
+                }
+            } finally {
+                connectivity.undoTemporaryChanges();
             }
-            memFixPtr[nMembers] = memFixRow.size();
-        } finally {
-            connectivity.undoTemporaryChanges();
         }
-        return new FreezeTables(vRow, loadQ, busNum, memFixPtr, memFixRow.stream().mapToInt(Integer::intValue).toArray());
+
+        private static Integer componentOf(com.powsybl.openloadflow.graph.GraphConnectivity<LfBus, LfBranch> c, LfBus bus) {
+            try {
+                return c.getComponentNumber(bus);
+            } catch (RuntimeException e) {
+                return null;                                   // a bus outside the graph (disabled): no component
+            }
+        }
     }
 
     /** Install the freeze tables on a context whose discrete TVC tables {@link #uploadToDevice} just
      *  installed (AFTER_GENERATOR only). */
     public static void uploadFreeze(long handle, FreezeTables fz) {
         if (fz == null) {
-            GpuAcNewtonSolver.setBatchDiscreteTvcFreeze(handle, null, null, null, null);
+            GpuAcNewtonSolver.setBatchDiscreteTvcFreeze(handle, null, null, null);
             return;
         }
-        GpuAcNewtonSolver.setBatchDiscreteTvcFreeze(handle, fz.vRow(), fz.loadQ(), fz.memFixPtr(), fz.memFixRow());
+        GpuAcNewtonSolver.setBatchDiscreteTvcFreeze(handle, fz.vRow(), fz.loadQ(), fz.fixPvRow());
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
-            System.err.printf("TVD_FREEZE_UPLOAD nCandidates=%d fixRows=%d%n", fz.vRow().length, fz.memFixRow().length);
+            System.err.printf("TVD_FREEZE_UPLOAD nCandidates=%d fixPvBuses=%d members=%d%n",
+                    fz.vRow().length, fz.fixPvRow().length, fz.nMembers());
         }
+    }
+
+    /**
+     * Per-scenario connectivity masks for the chunk about to solve: OLF re-runs
+     * {@code fixTransformerVoltageControls} on the POST-CONTINGENCY network, so each scenario gets its
+     * own pair. Padding slots repeat the base-topology masks, which is what an unused slot would have
+     * used anyway.
+     */
+    public static void uploadFixMasks(long handle, FreezeTables fz, List<BatchContingency> scenarios, int chunkSize) {
+        if (fz == null || !fz.hasFix()) {
+            GpuAcNewtonSolver.setBatchDiscreteTvcFixMasks(handle, null, null, 0);
+            return;
+        }
+        int stride = fz.nMembers() * fz.fixWords();
+        int[] minMask = new int[chunkSize * stride];
+        int[] maxMask = new int[chunkSize * stride];
+        for (int s = 0; s < chunkSize; s++) {
+            if (s < scenarios.size()) {
+                List<LfBranch> outaged = new ArrayList<>(scenarios.get(s).outagedBranches());
+                outaged.addAll(scenarios.get(s).outagedZiBranches());
+                fz.builder().fill(outaged, minMask, s * stride, maxMask, s * stride);
+            } else {
+                System.arraycopy(fz.minMask(), 0, minMask, s * stride, stride);
+                System.arraycopy(fz.maxMask(), 0, maxMask, s * stride, stride);
+            }
+        }
+        GpuAcNewtonSolver.setBatchDiscreteTvcFixMasks(handle, minMask, maxMask, fz.fixWords());
     }
 
     /** Give the freeze state back to the network (batch-of-one): a frozen candidate is

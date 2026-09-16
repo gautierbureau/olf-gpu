@@ -4526,7 +4526,9 @@ struct BatchSolverContext {
     int nTvdFz = 0;
     DeviceBuf dTvdFzVRow, dTvdFzLoadQ;                       // per candidate
     DeviceBuf dTvdFzFrozen, dTvdFzSavedMode, dTvdFzSavedTarget;   // per (scenario, candidate)
-    DeviceBuf dTvdMemFixPtr, dTvdMemFixRow;                  // CSR member -> PV-candidate V rows of its component
+    DeviceBuf dTvdFixPvRow;                                  // the fix universe: every gen-VC bus's V row
+    DeviceBuf dTvdFixMinMask, dTvdFixMaxMask;                // per (scenario, member): fixWords ints each
+    int tvdFixWords = 0;
     bool tvdFixTables = false;
     // DISCRETE SHUNT VOLTAGE CONTROL — LOOP_SVD_KERNEL (OLF order 10): ShuntVoltageControlOuterLoop
     // (WITH_GENERATOR): control ON for the first solve, LfShuntImpl.dispatchB at the first check.
@@ -5654,10 +5656,29 @@ struct TvdTables {
     int* scnStep; int* grpStep; double* grpShMin; double* grpShMax; double* grpShInit;
     int* memState; int* memTap; double* memRoundFrom; double* saved; char* reject;
     // generator freeze + connectivity fix (AFTER_GENERATOR only)
-    int nFz, hasFix;
-    const int* fzVRow; const double* fzLoadQ; const int* memFixPtr; const int* memFixRow;
+    int nFz, hasFix, fixWords;
+    const int* fzVRow; const double* fzLoadQ; const int* fixPvRow;
+    const int* fixMinMask; const int* fixMaxMask;               // per (scenario, member), fixWords ints
     int* fzFrozen; int* fzSavedMode; double* fzSavedTarget;
 };
+
+// Does any generator-voltage-CONTROLLED bus in this mask still carry an ENABLED control? Row mode 0 is
+// a plain V identity and 2 a slope SVC — both are voltage control ON; a frozen or reactive-limit-pinned
+// bus is a power row, which is exactly OLF's isGeneratorVoltageControlEnabled() == false.
+__device__ inline bool tvdAnyPv(const TvdTables& T, size_t sn, const int* mode, const int* mask) {
+    for (int w = 0; w < T.fixWords; w++) {
+        unsigned int bits = (unsigned int) mask[w];
+        while (bits) {
+            int b = __ffs((int) bits) - 1;
+            bits &= bits - 1;
+            int mr = mode[sn + T.fixPvRow[w * 32 + b]];
+            if (mr == 0 || mr == 2) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
 
 // OLF PiModelArray.roundR1ToClosestTap: ClosestTapPositionFinder starts at the CURRENT (base) tap and
 // takes a strictly closer one only.
@@ -5827,18 +5848,24 @@ __global__ void tvdCheckBatch(TvdTables T, int nScenarios, int n, int nElements,
         }
         // LfNetwork.fixTransformerVoltageControls: a just-enabled controller whose not-controlled side's
         // component holds no ENABLED generator voltage control (frozen and pinned buses count as off)
-        // is disabled again
+        // is disabled again. OLF cuts the CONTINGENCY's branches and the ENABLED controller branches;
+        // the host knows the first and brackets the second with two masks (see FreezeTables), so a PV
+        // bus in the MIN mask is one OLF sees too, and no PV bus in the MAX mask means OLF sees none.
+        // Between the two the answer depends on which controllers THIS scenario enabled, which is not
+        // something the host could precompute — that scenario goes to the CPU.
         if (T.hasFix) {
             for (int g = 0; g < T.nG; g++) {
                 for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
                     size_t sm = (size_t) s * T.nM + m;
                     if (T.memState[sm] != 1) continue;
-                    bool pv = false;
-                    for (int k = T.memFixPtr[m]; k < T.memFixPtr[m + 1] && !pv; k++) {
-                        int mr = mode[sn + T.memFixRow[k]];
-                        pv = mr == 0 || mr == 2;
+                    size_t base = ((size_t) s * T.nM + m) * T.fixWords;
+                    bool pvMin = tvdAnyPv(T, sn, mode, T.fixMinMask + base);
+                    if (pvMin) continue;                       // OLF keeps this control enabled
+                    if (tvdAnyPv(T, sn, mode, T.fixMaxMask + base)) {
+                        T.reject[s] = 1;                       // ambiguous without the enabled set
+                        return;
                     }
-                    if (!pv) T.memState[sm] = 0;
+                    T.memState[sm] = 0;                        // OLF disables it
                 }
             }
         }
@@ -6067,9 +6094,10 @@ static TvdTables tvdTables(BatchSolverContext* ctx) {
     T.grpShMin = ctx->dTvdGrpShMin.as<double>(); T.grpShMax = ctx->dTvdGrpShMax.as<double>(); T.grpShInit = ctx->dTvdGrpShInit.as<double>();
     T.memState = ctx->dTvdMemState.as<int>(); T.memTap = ctx->dTvdMemTap.as<int>(); T.memRoundFrom = ctx->dTvdMemRoundFrom.as<double>();
     T.saved = ctx->dTvdSaved.as<double>(); T.reject = ctx->dTvdReject.as<char>();
-    T.nFz = ctx->nTvdFz; T.hasFix = ctx->tvdFixTables ? 1 : 0;
+    T.nFz = ctx->nTvdFz; T.hasFix = ctx->tvdFixTables ? 1 : 0; T.fixWords = ctx->tvdFixWords;
     T.fzVRow = ctx->dTvdFzVRow.as<int>(); T.fzLoadQ = ctx->dTvdFzLoadQ.as<double>();
-    T.memFixPtr = ctx->dTvdMemFixPtr.as<int>(); T.memFixRow = ctx->dTvdMemFixRow.as<int>();
+    T.fixPvRow = ctx->dTvdFixPvRow.as<int>();
+    T.fixMinMask = ctx->dTvdFixMinMask.as<int>(); T.fixMaxMask = ctx->dTvdFixMaxMask.as<int>();
     T.fzFrozen = ctx->dTvdFzFrozen.as<int>(); T.fzSavedMode = ctx->dTvdFzSavedMode.as<int>(); T.fzSavedTarget = ctx->dTvdFzSavedTarget.as<double>();
     return T;
 }
@@ -10227,6 +10255,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->nTvd = 0;
     ctx->nTvdFz = 0;
     ctx->tvdFixTables = false;
+    ctx->tvdFixWords = 0;
     if (jMemRhoRow == nullptr || env->GetArrayLength(jMemRhoRow) == 0) {
         return 0;
     }
@@ -10310,7 +10339,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
  *  PV-candidate row lists (CSR, [nM+1]; null = no connectivity fix). Returns 1 when installed. */
 extern "C" JNIEXPORT jint JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDiscreteTvcFreeze(
-        JNIEnv* env, jclass, jlong handle, jintArray jFzVRow, jdoubleArray jFzLoadQ, jintArray jMemFixPtr, jintArray jMemFixRow) {
+        JNIEnv* env, jclass, jlong handle, jintArray jFzVRow, jdoubleArray jFzLoadQ, jintArray jFixPvRow) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr || ctx->nTvd <= 0) {
         return 0;
@@ -10319,7 +10348,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
         v.resize(env->GetArrayLength(a));
         env->GetIntArrayRegion(a, 0, static_cast<jsize>(v.size()), v.data());
     };
-    std::vector<int> vRow, fixPtr, fixRow;
+    std::vector<int> vRow, fixRow;
     std::vector<double> loadQ;
     if (jFzVRow != nullptr) {
         readI(jFzVRow, vRow);
@@ -10336,17 +10365,46 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
         ctx->dTvdFzSavedTarget.ensure(nsc * sizeof(double));
     }
     ctx->nTvdFz = nFz;
-    ctx->tvdFixTables = false;
-    if (jMemFixPtr != nullptr) {
-        readI(jMemFixPtr, fixPtr);
-        readI(jMemFixRow, fixRow);
-        if (static_cast<int>(fixPtr.size()) == ctx->nTvd + 1) {
-            ctx->dTvdMemFixPtr.upload(fixPtr.data(), fixPtr.size() * sizeof(int));
-            ctx->dTvdMemFixRow.upload(fixRow.data(), std::max<size_t>(fixRow.size(), 1) * sizeof(int));
-            ctx->tvdFixTables = true;
+    ctx->tvdFixTables = false;                               // armed by setBatchDiscreteTvcFixMasks
+    ctx->tvdFixWords = 0;
+    if (jFixPvRow != nullptr) {
+        readI(jFixPvRow, fixRow);
+        if (!fixRow.empty()) {
+            ctx->dTvdFixPvRow.upload(fixRow.data(), fixRow.size() * sizeof(int));
         }
     }
     return 1;
+}
+
+// The per-(scenario, member) connectivity masks of fixTransformerVoltageControls. Uploaded per CHUNK,
+// unlike the tables above: OLF re-runs the check on the POST-CONTINGENCY network, so the component of a
+// not-controlled side is a property of the scenario, not of the run.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDiscreteTvcFixMasks(
+        JNIEnv* env, jclass, jlong handle, jintArray jMin, jintArray jMax, jint words) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || ctx->nTvd <= 0) {
+        return;
+    }
+    ctx->tvdFixTables = false;
+    ctx->tvdFixWords = 0;
+    if (jMin == nullptr || jMax == nullptr || words <= 0) {
+        return;
+    }
+    size_t want = static_cast<size_t>(ctx->nScenarios) * ctx->nTvd * words;
+    if (static_cast<size_t>(env->GetArrayLength(jMin)) != want
+            || static_cast<size_t>(env->GetArrayLength(jMax)) != want) {
+        env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
+                      "setBatchDiscreteTvcFixMasks: array length != nScenarios * nMembers * words");
+        return;
+    }
+    std::vector<int> mn(want), mx(want);
+    env->GetIntArrayRegion(jMin, 0, static_cast<jsize>(want), mn.data());
+    env->GetIntArrayRegion(jMax, 0, static_cast<jsize>(want), mx.data());
+    ctx->dTvdFixMinMask.upload(mn.data(), want * sizeof(int));
+    ctx->dTvdFixMaxMask.upload(mx.data(), want * sizeof(int));
+    ctx->tvdFixWords = words;
+    ctx->tvdFixTables = true;
 }
 
 /** Per (scenario, freeze candidate): {frozen (0/1), the row target while frozen (gen − load)} — layout

@@ -140,3 +140,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-16 | 9fc0767+dirty | 19.80 | 16.77 | 28.75 | x1.71 | 0/0/0 | 7.75 | 4.46 | 499/500 | 122/133 (92%) | Realistic-voltage check on the driver's intermediate states, routed to CPU |
 | 2026-09-16 | d83be41+dirty | 18.71 | 15.87 | 27.98 | x1.76 | 0/0/0 | 7.46 | 4.51 | 499/500 | 122/133 (92%) | Realistic-voltage check DEFERRED to OLF's fixing loop: rte6515 back to 9040/9042 |
 | 2026-09-16 | a195ade+dirty | 18.37 | 15.86 | 28.83 | x1.82 | 0/0/0 | 7.76 | 4.46 | 499/500 | 122/133 (92%) | Remote LIMITER phase control batches; tap table via the OLF getter, no reflection |
+| 2026-09-16 | 8d514f8+dirty | 19.35 | 15.97 | 27.72 | x1.74 | 0/0/0 | 7.61 | 4.50 | 499/500 | 122/133 (92%) | fixTransformerVoltageControls connectivity is per scenario, bracketed by two masks |

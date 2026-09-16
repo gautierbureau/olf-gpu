@@ -378,6 +378,15 @@ final class GpuBatchChunkSolver {
                 for (int chunkStart = 0; chunkStart < nbg; chunkStart += chunkSize) {
                     int realCount = Math.min(chunkSize, nbg - chunkStart);
                     overrides.clear();
+                    // fixTransformerVoltageControls is a POST-CONTINGENCY check on the CPU, so its
+                    // connectivity masks are per scenario and belong to the chunk, not to the run.
+                    if (tvdInKernel && config.transformerControl() && tvdFreeze != null && tvdFreeze.hasFix()) {
+                        List<BatchContingency> slotCtgs = new ArrayList<>(realCount);
+                        for (int s = 0; s < realCount; s++) {
+                            slotCtgs.add(contingencies.get(group.get(chunkStart + s)));
+                        }
+                        GpuBatchTransformerControl.uploadFixMasks(handle, tvdFreeze, slotCtgs, chunkSize);
+                    }
                     // {slot, participant} pairs: the distributed-slack participants this scenario
                     // strands in another synchronous component (see distributeSlackBatch).
                     List<Integer> dsIslandedList = new ArrayList<>();

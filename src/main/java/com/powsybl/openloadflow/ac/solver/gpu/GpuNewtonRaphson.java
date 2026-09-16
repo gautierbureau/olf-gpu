@@ -922,6 +922,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                             tvdOwned = false;
                         } else {
                             com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.uploadFreeze(handle, tvdFreeze);
+                            // Batch of one on the live network: its own topology IS the scenario, so the
+                            // masks come from an empty contingency.
+                            com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.uploadFixMasks(
+                                    handle, tvdFreeze, java.util.List.of(), 1);
                         }
                     }
                     if (tvdOwned) {

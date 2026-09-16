@@ -508,9 +508,17 @@ public final class GpuAcNewtonSolver {
     public static native double[] readBatchDiscreteTvcState(long handle);
 
     /** GeneratorVoltageControlManager tables for the AFTER_GENERATOR phase (after setBatchDiscreteTvc): the
-     *  freeze candidates (controller-bus V row, load Q) and fixTransformerVoltageControls' per-member
-     *  PV-candidate row lists (CSR [nMembers+1], null = no connectivity fix). Returns 1 when installed. */
-    public static native int setBatchDiscreteTvcFreeze(long handle, int[] fzVRow, double[] fzLoadQ, int[] memFixPtr, int[] memFixRow);
+     *  freeze candidates (controller-bus V row, load Q) and the UNIVERSE of
+     *  fixTransformerVoltageControls — the {@code BUS_V} row of every generator-voltage-controlled bus,
+     *  which the per-scenario masks index. Returns 1 when installed. */
+    public static native int setBatchDiscreteTvcFreeze(long handle, int[] fzVRow, double[] fzLoadQ, int[] fixPvRow);
+
+    /** fixTransformerVoltageControls' per-(scenario, member) connectivity masks over the
+     *  {@code fixPvRow} universe, {@code words} ints each: {@code minMask} cuts every controller branch
+     *  (a subset of OLF's component), {@code maxMask} cuts none (a superset). A PV bus in min means keep
+     *  the control, no PV bus in max means disable it, anything between routes the scenario to the CPU.
+     *  Null clears the channel. */
+    public static native void setBatchDiscreteTvcFixMasks(long handle, int[] minMask, int[] maxMask, int words);
 
     /** Per (scenario, freeze candidate): {frozen (0/1), the row target while frozen (generation − load Q)},
      *  layout {@code (s * nFz + c) * 2} — null without candidates. */

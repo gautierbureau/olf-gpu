@@ -113,6 +113,28 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             loads.forEach(id -> all.add(new Contingency(id, new com.powsybl.contingency.LoadContingency(id))));
             System.out.printf("  + %d load contingencies (the biggest by P0)%n", loads.size());
         }
+        // The non-injection equipment kinds. Each is a whole-element outage like a branch, but each
+        // reaches different machinery: an HVDC line carries the AC-emulation freeze, an SVC is a
+        // slope-controlled (mode-2) row, and a shunt moves the bus susceptance.
+        if (kinds.contains("hvdc")) {
+            List<String> ids = network.getHvdcLineStream().map(com.powsybl.iidm.network.HvdcLine::getId).toList();
+            ids.forEach(id -> all.add(new Contingency(id, new com.powsybl.contingency.HvdcLineContingency(id))));
+            System.out.printf("  + %d HVDC line contingencies%n", ids.size());
+        }
+        if (kinds.contains("svc")) {
+            List<String> ids = network.getStaticVarCompensatorStream()
+                    .map(com.powsybl.iidm.network.StaticVarCompensator::getId).toList();
+            ids.forEach(id -> all.add(new Contingency(id,
+                    new com.powsybl.contingency.StaticVarCompensatorContingency(id))));
+            System.out.printf("  + %d static var compensator contingencies%n", ids.size());
+        }
+        if (kinds.contains("shunt")) {
+            List<String> ids = network.getShuntCompensatorStream()
+                    .map(com.powsybl.iidm.network.ShuntCompensator::getId).toList();
+            ids.forEach(id -> all.add(new Contingency(id,
+                    new com.powsybl.contingency.ShuntCompensatorContingency(id))));
+            System.out.printf("  + %d shunt compensator contingencies%n", ids.size());
+        }
         // OLF_GPU_SA_CTG_ONLY=<id>[,<id>]: run only these — the instrument for a single differing line.
         String only = System.getenv("OLF_GPU_SA_CTG_ONLY");
         if (only != null) {
@@ -216,7 +238,13 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         long cpuT0 = System.nanoTime();
         // With a single contingency under the lens, monitor every voltage level: whether the two arms
         // differ LOCALLY or network-wide is the first thing that splits the candidate causes.
-        List<com.powsybl.security.monitor.StateMonitor> monitors = System.getenv("OLF_GPU_SA_CTG_ONLY") == null
+        // Bus-level diffing is the check that actually holds: violation parity is a THRESHOLD test and
+        // will report zero while a bus is 0.1 kV out (measured — rte6515 LOAD-1263). CTG_ONLY turns it
+        // on for one contingency; OLF_GPU_SA_BUSDIFF=1 turns it on for the whole set, which is what a
+        // new contingency KIND needs before anyone calls it clean.
+        boolean busDiff = System.getenv("OLF_GPU_SA_CTG_ONLY") != null
+                || "1".equals(System.getenv("OLF_GPU_SA_BUSDIFF"));
+        List<com.powsybl.security.monitor.StateMonitor> monitors = !busDiff
                 ? Collections.emptyList()
                 : List.of(new com.powsybl.security.monitor.StateMonitor(
                         com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(),
@@ -300,7 +328,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 p.getLimitViolationsResult().getLimitViolations()));
         gpuCold.getPostContingencyResults().forEach(p -> gpuViolByCtg.put(p.getContingency().getId(),
                 p.getLimitViolationsResult().getLimitViolations()));
-        if (System.getenv("OLF_GPU_SA_CTG_ONLY") != null) {
+        if (busDiff) {
             for (var cp : cpu.getPostContingencyResults()) {
                 var gp = gpuCold.getPostContingencyResults().stream()
                         .filter(x -> x.getContingency().getId().equals(cp.getContingency().getId()))

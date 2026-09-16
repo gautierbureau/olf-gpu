@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -48,6 +49,20 @@
  * solve. Analysis happens once per context and handle creation once per context, so this costs
  * nothing on the hot path and cannot be forgotten by a new caller.
  */
+/**
+ * {@code OLF_GPU_DC_TIMING=1}: print how long each cuDSS phase takes, to stderr. The analysis is the
+ * phase worth watching - it is paid once per context and it dominates a short run.
+ */
+bool dcTiming() {
+    static const bool on = std::getenv("OLF_GPU_DC_TIMING") != nullptr;
+    return on;
+}
+
+/** Wall-clock milliseconds since an arbitrary origin. */
+double dcNowMs() {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 std::mutex& cudssGlobalLock() {
     static std::mutex lock;
     return lock;
@@ -2347,11 +2362,24 @@ Java_com_powsybl_openloadflow_dc_gpu_GpuDcSolver_fillValues(JNIEnv* env, jclass,
         ctx->ensureRhs(1);
         if (!ctx->analyzed) {
             std::lock_guard<std::mutex> guard(cudssGlobalLock());
+            double t0 = 0;
+            if (dcTiming()) {
+                DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                t0 = dcNowMs();
+            }
             DC_CUDSS_CHECK(cudssExecute(ctx->handle, CUDSS_PHASE_ANALYSIS, ctx->config, ctx->data, ctx->matA, ctx->matX, ctx->matB));
+            if (dcTiming()) {
+                DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                std::fprintf(stderr, "DC_TIMING analysis n=%d nnz=%d %.1f ms\n", ctx->n, ctx->nnz, dcNowMs() - t0);
+            }
             ctx->analyzed = true;
         }
+        double tf = dcTiming() ? dcNowMs() : 0;
         DC_CUDSS_CHECK(cudssExecute(ctx->handle, CUDSS_PHASE_FACTORIZATION, ctx->config, ctx->data, ctx->matA, ctx->matX, ctx->matB));
         DC_CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        if (dcTiming()) {
+            std::fprintf(stderr, "DC_TIMING factorization %.1f ms\n", dcNowMs() - tf);
+        }
     } catch (const std::exception& e) {
         throwJava(env, std::string("GpuDcSolver.fillValues: ") + e.what());
     }

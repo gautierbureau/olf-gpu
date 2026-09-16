@@ -131,7 +131,7 @@ subject|limitType|side|limitName + statuses + monitored flows; the two arms shar
 | 2026-09-15 | f0e981e | 100 | 17.3 | 13.4 | 1.49 | x1.29 | 9042/9042 | 0 lines, 2.5e-10 MW | phase 2a: modified-target columns |
 | 2026-09-15 | 660867b | 0 | 16.5 | 3.65 | 0.40 | x4.52 | 9042/9042 | 0 lines | phase 2b: device criterion, IR off — target met |
 | 2026-09-15 | 660867b | 100 | 18.4 | 8.3 | 0.92 | x2.22 | 9042/9042 | 0 lines, 2.5e-10 MW | the extra 5.7 s is OLF's monitored-result walk, on both arms |
-| 2026-09-15 | full LF on device | 0 | 15.2 / 16.7 | 5.30 / 5.59 | 0.59 / 0.62 | x2.87 / x2.99 | 9042/9042 | 0 lines, 1.7e-9 MW | matrix values, target, slack distribution and solve assembled on the device (GpuDcAssembly); capture 39 ms, cuDSS analysis+factorization 2.1 s in both runs |
+| 2026-09-15 | full LF on device | 0 | 15.2 / 16.7 | 5.30 / 5.59 | 0.59 / 0.62 | x2.87 / x2.99 | 9042/9042 | 0 lines, 1.7e-9 MW | matrix values, target, slack distribution and solve assembled on the device (GpuDcAssembly); capture 39 ms; the 2.1 s once attributed here to cuDSS is wrong, see the correction below |
 
 ### DC — full load flow (GpuLoadFlowProvider vs OpenLoadFlowProvider)
 
@@ -141,7 +141,7 @@ included on the GPU arm); warm = second run.
 
 | date | commit | CPU cold (ms) | GPU cold (ms) | CPU warm (ms) | GPU warm (ms) | parity | note |
 |---|---|---|---|---|---|---|---|
-| 2026-09-15 | full LF on device | 664 | 2529 | 154 | 225 | flows 1.7e-10 MW, angles 1e-11°, dispatch bit-identical | a single DC solve does not pay on the device (cuDSS analysis > KLU's whole run); the assembled context pays when reused (SA, time series) |
+| 2026-09-15 | full LF on device | 664 | 2529 | 154 | 225 | flows 1.7e-10 MW, angles 1e-11°, dispatch bit-identical | a single DC solve did not pay on the device; the reason given here (cuDSS analysis outweighing KLU's whole run) is wrong, see the correction below |
 
 ### DC — contingency chunk size (the AC batch-size question, asked 2026-09-15)
 
@@ -222,7 +222,8 @@ chunk instead of sending the run to the stock engine:
 
 1000/1000 steps on the device, and zero AC-emulation configuration changes on this plan: the loop
 costs one check kernel per chunk here. A refill plus refactorization, the price of one configuration
-change, is 11.6 ms on rte6515 against 583 ms for the initial analysis and factorization.
+change, is 11.6 ms on rte6515. The 583 ms quoted here for the initial analysis and
+factorization is wrong, see the correction below.
 
 With BOTH DC outer loops configured (AC-emulation limits and incremental phase control), driven over
 the chunk. Two runs, to show the machine's noise:
@@ -293,7 +294,7 @@ shares one refactorization between more steps. On this plan that term is zero.
 Once the device takes restore, set points and solve, the row emission is the whole remaining cost,
 and it is host work identical on both arms. OLF's own step-range partitioning parallelizes it: each
 partition thread walks its own steps and writes its own rows, and the device section serializes
-behind `GpuDcSolver.DEVICE_LOCK` (cuDSS analysis is not thread-safe across host threads - concurrent
+in the native layer (cuDSS analysis is not thread-safe across host threads - concurrent
 analysis calls segfault the JVM). rte6515_full, 4096 steps, 200 planned generators, chunk 1024, both
 loops configured, 69,591,040 rows, end-to-end ms/step:
 
@@ -410,3 +411,28 @@ DC security analysis dropped from 6.57 to 3.71 s, which would have been a third.
 the same code gave 6.09 s. Two runs of identical code thus spanned 3.71 to 6.09, so the effect on that
 path is not separable from the machine here. Parity is unchanged, 0 differing lines on all 9042
 contingencies.
+
+### Correction: what the cuDSS analysis actually costs (2026-09-16)
+
+Several rows above carried figures of 583 ms and 2.1 s for the cuDSS analysis, and a verdict that a
+single DC solve cannot pay on the device because the analysis alone outweighs KLU's whole run. Both
+are wrong. Nothing had ever timed the phase; the numbers were inferred from wall-clock gaps and from
+native profiler samples landing in `createAssembled`, which is where CUDA initializes its context and
+where the assembly tables upload - not where the analysis runs.
+
+Timed directly, with `OLF_GPU_DC_TIMING=1`:
+
+| run | n | nnz | analysis | factorization |
+|---|---|---|---|---|
+| security analysis | 6536 | 22774 | 47 ms | 15 ms |
+| single load flow | 6520 | 22736 | 124 to 158 ms | 11 to 21 ms |
+
+So the analysis is one to three percent of a multi-second security analysis or time series, not a
+third. A permutation cache across contexts, which is what those wrong numbers were about to justify,
+would buy about 130 ms on a REPEATED single load flow and nothing measurable anywhere else. It was
+not built.
+
+The single load flow has also moved a long way since that row was written, on a machine measured the
+same day: cold CPU 662 ms against GPU 906 ms, warm CPU 163 ms against GPU 482 ms, versus 2529 ms cold
+before. The verdict stands - a single DC solve still does not pay on the device - but the reason is
+CUDA and library start-up plus the assembly capture, not the symbolic analysis.

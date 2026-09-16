@@ -116,14 +116,18 @@ final class GpuBatchInjectionOutages {
                     .anyMatch(g -> !lostHere.contains(g)
                             && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
             if (!keepsController || !lostLoads.isEmpty()) {   // group restructure / Q-carrying load shape — CPU
-                // The load-loss half is NOT closed by the per-scenario load target Q. Measured on
-                // rte6515 LOAD-1263 with the gate lifted: the channel fires (the load carries
-                // -0.092 pu and the delta is applied), every violation still matches, and the bus is
-                // 0.105 kV out — local to the outage bus. That bus is a DISTR_Q group's pilot AND one
-                // of its controllers, so its reactive accounting runs through the relocation path
-                // (qBuf / pilotQ), which reads a load Q the per-scenario channel does not reach.
-                // Violation parity alone would have called this fixed; the 1e-12 bus diff is what
-                // caught it.
+                // BOTH halves are load-bearing, measured 2026-09-16 by lifting them on rte6515's full
+                // 1389-generator / 3673-load sets. The qPct rediff in the qualifier (which toggles the
+                // lost generators OFF, runs OLF's own updateReactiveKeys and diffs the weights) is NOT
+                // enough on its own: the member's ROW must also stop being a controller row, and that
+                // restructure is not modeled.
+                //   last controller: 8 of the 9 land wrong, up to 3.157 kV (GEN-1522) — and the
+                //   violation count caught exactly ONE of the eight.
+                //   load loss: LOAD-1263 lands 0.105 kV out with every violation matching; that bus is
+                //   its group's pilot AND one of its controllers, so its Q runs through the relocation
+                //   path (qBuf/pilotQ), which reads a load Q the per-scenario channel does not reach.
+                // If you come back to lift either, diff BUSES (OLF_GPU_SA_BUSDIFF=1). Violation parity
+                // is a threshold test and it will tell you this is fine.
                 return reject(keepsController ? "DISTR_Q_BUS_WITH_LOAD_LOSS" : "DISTR_Q_LAST_CONTROLLER", bus);
             }
         }

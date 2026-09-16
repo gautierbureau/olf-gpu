@@ -524,6 +524,11 @@ final class GpuBatchQualification {
                     // outage shape, and the census is how we pick what to fix — a tag that lies about
                     // the reason sends the next person at the wrong gate.)
                     com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:INJECTION_OUTAGE_SHAPE");
+                    if (System.getenv("OLF_GPU_GENOUT_REJECT") != null) {
+                        // The exit named itself and its bus a moment ago; name the CONTINGENCY too, so
+                        // the reason, the bus and the id that reproduces it are on adjacent lines.
+                        System.err.println("GENOUT_REJECT   ctg=" + c.contingencyId());
+                    }
                     continue;
                 }
                 // Curve-limits channel active: its p_now linkage models the DS delta ONLY. An injection

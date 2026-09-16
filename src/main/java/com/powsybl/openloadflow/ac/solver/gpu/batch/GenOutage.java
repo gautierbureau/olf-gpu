@@ -27,7 +27,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
  */
 public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, boolean toPq, boolean qOverride,
                         int dsBus, double dsFactorDelta, double dsBaseDelta, double dsMaxDelta, double dsMinDelta,
-                        int rlEntry, double minQDelta, double maxQDelta) {
+                        int rlEntry, double minQDelta, double maxQDelta, boolean allGensLost) {
 
     /**
      * A bus that KEEPS voltage control after losing a generator still has that generator's reactive
@@ -37,6 +37,11 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      * generator's own share). {@code rlEntry < 0} when there is nothing to correct — the bus goes to PQ,
      * or it is not a reactive-limit controller at all.
      */
+    /** The bus keeps NO generator: its reactive-limit entry is not a controller in this scenario. */
+    public boolean silencesReactiveLimitEntry() {
+        return rlEntry >= 0 && allGensLost;
+    }
+
     public boolean shrinksReactiveLimits() {
         return rlEntry >= 0 && (minQDelta != 0 || maxQDelta != 0);
     }

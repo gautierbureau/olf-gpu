@@ -147,3 +147,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-16 | b187bd5+dirty | 19.09 | 15.80 | 26.66 | x1.69 | 0/0/0 | 7.64 | 4.48 | 499/500 | 122/133 (92%) | Both routes build their phase tables with ONE function |
 | 2026-09-16 | 37b361c+dirty | 18.95 | 16.05 | 27.59 | x1.72 | 0/0/0 | 7.75 | 4.52 | 499/500 | 122/133 (92%) | Phase tables travel as one record, not ten positional arguments |
 | 2026-09-16 | 0c3eaf4+dirty | 19.08 | 15.94 | 27.33 | x1.71 | 0/0/0 | 7.77 | 4.48 | 499/500 | 122/133 (92%) | Bus reactive limits shrink when a generator is lost and the bus keeps V control |
+| 2026-09-16 | e5390df+dirty | 18.71 | 16.24 | 27.90 | x1.72 | 0/0/0 | 7.56 | 4.47 | 499/500 | 122/133 (92%) | Generator N-1 on rte6515 agrees exactly: 0 differing violations |

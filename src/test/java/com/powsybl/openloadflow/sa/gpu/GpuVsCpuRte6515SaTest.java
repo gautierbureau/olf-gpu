@@ -113,6 +113,15 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             loads.forEach(id -> all.add(new Contingency(id, new com.powsybl.contingency.LoadContingency(id))));
             System.out.printf("  + %d load contingencies (the biggest by P0)%n", loads.size());
         }
+        // OLF_GPU_SA_CTG_ONLY=<id>[,<id>]: run only these — the instrument for a single differing line.
+        String only = System.getenv("OLF_GPU_SA_CTG_ONLY");
+        if (only != null) {
+            java.util.Set<String> want = java.util.Set.of(only.split(","));
+            all.removeIf(c -> !want.contains(c.getId()));
+            System.out.printf("  DIAGNOSTIC: %d contingencies selected by id%n", all.size());
+            all.forEach(c -> describeContingency(network, c.getId()));
+            return all;
+        }
         // OLF_GPU_SA_MAX_CTG=<n>: run only the first n — a DIAGNOSTIC slice, so a parity question can be
         // iterated in seconds instead of the full 9042. Never quote a slice as the scope result.
         String max = System.getenv("OLF_GPU_SA_MAX_CTG");
@@ -124,6 +133,29 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             }
         }
         return all;
+    }
+
+    /** What kind of bus a generator contingency lands on — the facts that decide which reactive-limit
+     *  path the two arms take: other generators at the bus, their limit KIND, and whether control is
+     *  remote. */
+    private static void describeContingency(Network network, String id) {
+        var gen = network.getGenerator(id);
+        if (gen == null) {
+            return;
+        }
+        var bus = gen.getTerminal().getBusBreakerView().getBus();
+        System.out.printf("  CTG %s: bus=%s nominalV=%.1f targetP=%.3f minQ=%.3f maxQ=%.3f limits=%s remote=%b%n",
+                id, bus == null ? "?" : bus.getId(), gen.getTerminal().getVoltageLevel().getNominalV(),
+                gen.getTargetP(), gen.getReactiveLimits().getMinQ(gen.getTargetP()),
+                gen.getReactiveLimits().getMaxQ(gen.getTargetP()), gen.getReactiveLimits().getKind(),
+                gen.getRegulatingTerminal() != null
+                        && gen.getRegulatingTerminal().getBusBreakerView().getBus() != bus);
+        if (bus != null) {
+            bus.getVoltageLevel().getGeneratorStream()
+                    .filter(g -> g.getTerminal().getBusBreakerView().getBus() == bus)
+                    .forEach(g -> System.out.printf("      at the same bus: %s regulating=%b limits=%s targetP=%.3f%n",
+                            g.getId(), g.isVoltageRegulatorOn(), g.getReactiveLimits().getKind(), g.getTargetP()));
+        }
     }
 
     private static Map<String, Long> statusCounts(SecurityAnalysisResult r) {
@@ -182,7 +214,15 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 new OpenSecurityAnalysisParameters().setThreadCount(cpuThreads));
 
         long cpuT0 = System.nanoTime();
-        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, Collections.emptyList(), sap);
+        // With a single contingency under the lens, monitor every voltage level: whether the two arms
+        // differ LOCALLY or network-wide is the first thing that splits the candidate causes.
+        List<com.powsybl.security.monitor.StateMonitor> monitors = System.getenv("OLF_GPU_SA_CTG_ONLY") == null
+                ? Collections.emptyList()
+                : List.of(new com.powsybl.security.monitor.StateMonitor(
+                        com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(),
+                        network.getVoltageLevelStream().map(com.powsybl.iidm.network.VoltageLevel::getId)
+                                .collect(Collectors.toSet()), java.util.Set.of()));
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, monitors, sap);
         long cpuMs = (System.nanoTime() - cpuT0) / 1_000_000;
 
         // GPU arm: single-thread, cold + warm runs
@@ -200,7 +240,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
 
             GpuBatchScopeCensus.reset();
             long g0 = System.nanoTime();
-            gpuCold = runSecurityAnalysis(network, contingencies, Collections.emptyList(), sapGpu);
+            gpuCold = runSecurityAnalysis(network, contingencies, monitors, sapGpu);
             gpuColdMs = (System.nanoTime() - g0) / 1_000_000;
 
             // Check census: how many contingencies fell back to CPU?
@@ -212,7 +252,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
 
             GpuBatchScopeCensus.reset();
             long g1 = System.nanoTime();
-            gpuWarm = runSecurityAnalysis(network, contingencies, Collections.emptyList(), sapGpu);
+            gpuWarm = runSecurityAnalysis(network, contingencies, monitors, sapGpu);
             gpuWarmMs = (System.nanoTime() - g1) / 1_000_000;
             Map<String, Long> censusWarm = GpuBatchScopeCensus.snapshot();
             System.out.printf("  GPU CENSUS (warm): %s%n", censusWarm);
@@ -260,6 +300,44 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 p.getLimitViolationsResult().getLimitViolations()));
         gpuCold.getPostContingencyResults().forEach(p -> gpuViolByCtg.put(p.getContingency().getId(),
                 p.getLimitViolationsResult().getLimitViolations()));
+        if (System.getenv("OLF_GPU_SA_CTG_ONLY") != null) {
+            for (var cp : cpu.getPostContingencyResults()) {
+                var gp = gpuCold.getPostContingencyResults().stream()
+                        .filter(x -> x.getContingency().getId().equals(cp.getContingency().getId()))
+                        .findFirst().orElse(null);
+                if (gp == null) {
+                    continue;
+                }
+                Map<String, Double> gpuV = new TreeMap<>();
+                gp.getNetworkResult().getBusResults().forEach(b -> gpuV.put(b.getBusId(), b.getV()));
+                List<String> worst = cp.getNetworkResult().getBusResults().stream()
+                        .filter(b -> gpuV.containsKey(b.getBusId()))
+                        .sorted(java.util.Comparator.comparingDouble(
+                                (com.powsybl.security.results.BusResult b) -> -Math.abs(b.getV() - gpuV.get(b.getBusId()))))
+                        .limit(8)
+                        .map(b -> String.format("%s %.6f vs %.6f (%.3e)", b.getBusId(), b.getV(),
+                                gpuV.get(b.getBusId()), b.getV() - gpuV.get(b.getBusId())))
+                        .toList();
+                // 1e-12 kV is the project's bar for "the two arms agree" — anything looser hides exactly
+                // the class of difference this instrument exists to find.
+                long above = cp.getNetworkResult().getBusResults().stream()
+                        .filter(b -> gpuV.containsKey(b.getBusId()))
+                        .filter(b -> Math.abs(b.getV() - gpuV.get(b.getBusId())) > 1e-12).count();
+                double worstAbs = cp.getNetworkResult().getBusResults().stream()
+                        .filter(b -> gpuV.containsKey(b.getBusId()))
+                        .mapToDouble(b -> Math.abs(b.getV() - gpuV.get(b.getBusId()))).max().orElse(0);
+                double worstRel = cp.getNetworkResult().getBusResults().stream()
+                        .filter(b -> gpuV.containsKey(b.getBusId()))
+                        .mapToDouble(b -> Math.abs(b.getV() - gpuV.get(b.getBusId())) / Math.max(1e-9, Math.abs(b.getV())))
+                        .max().orElse(0);
+                // Absolute AND relative: 1e-12 kV is below one ulp of a 400 kV bus (~5.7e-14), so an
+                // absolute bar alone cannot tell a real divergence from accumulated round-off.
+                System.out.printf("  BUSDIFF ctg=%s buses>1e-12kV=%d of %d | worst abs=%.3e kV rel=%.3e%n",
+                        cp.getContingency().getId(), above, cp.getNetworkResult().getBusResults().size(),
+                        worstAbs, worstRel);
+                worst.forEach(w -> System.out.printf("      %s%n", w));
+            }
+        }
         for (String ctgId : cpuViolByCtg.keySet()) {
             int cpuCount = cpuViolByCtg.getOrDefault(ctgId, List.of()).size();
             int gpuCount = gpuViolByCtg.getOrDefault(ctgId, List.of()).size();

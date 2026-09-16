@@ -25,9 +25,9 @@ small deliberate slice, not every injection. The all-branch 9042 set stays the d
 
 | | value |
 | --- | --- |
-| batched | 83 / 156 |
-| violations | CPU 14073, GPU 14070, **3 differing** |
-| warm vs CPU-8t | x0.58 — slower, because half the set is CPU-routed |
+| batched | 83 / 156 at first fold, **101 / 156** after the two fixes below |
+| violations | CPU 14073, GPU 14070 at first fold, **14073 / 14073, 0 differing** now |
+| warm vs CPU-8t | x0.69 — still slower, because a third of the set is CPU-routed |
 
 Loads alone: 41 / 50 batched and **0 differing violations**. The two kinds fold differently and the
 generator side is where the work is.
@@ -72,10 +72,21 @@ generator side is where the work is.
    for either channel, and they are allocated lazily when only the new one is live. **3 differing -> 1**,
    the branch reference set untouched at 9040/9042 with the same two lines, suite 261/0.
 
-   GEN-6130 survives and is the next thread to pull. Hypotheses worth testing in order: the lost generator
-   is CURVE-limited, so its `getMinQ()` at the extraction point is not the contribution that was packed;
-   the bus is a remote / DISTR_Q group member, where the aggregate is not the whole story; or the bus
-   carries a MONITORING SVC, whose pack captures the ACTIVATED limits rather than the standby ones.
+   **GEN-6130 is fixed too, and all three hypotheses above were wrong.** The instrument that found it:
+   `OLF_GPU_SA_CTG_ONLY=<id>` runs one contingency, describes its bus, and monitors every voltage level.
+   It said the difference was LOCAL — 0.995 kV at that node against 2.2e-4 kV everywhere else — and
+   `OLF_GPU_GENOUT_TRACE` then said `busPv=false`, `busGens=1`.
+
+   So the bus was ALREADY PQ: the base loadflow's reactive-limits loop had pinned it. The RL pack keeps
+   such a bus as a `basePqCapable` entry with a seeded limit type, exactly so a RELIEVING contingency can
+   switch it back to PV — and with its only generator gone there is nothing to switch back to, while OLF
+   has no controller there at all. `GenOutage` now reports when a bus keeps NO generator and the entry is
+   masked for that scenario through the same channel a contingency-stranded controller uses.
+
+   **The whole set now agrees**: 106 generators at 380 kV plus the 50 biggest loads, 14073 violations on
+   both arms, 0 differing. On GEN-6130 alone, every one of the 29832 buses agrees to 3.6e-13 RELATIVE
+   (worst absolute 5.7e-11 kV, which moves run to run — round-off, not an offset). Note that an absolute
+   1e-12 kV bar is below one ulp of a 400 kV bus (~5.7e-14), so the instrument reports both.
 
 ### #59 — Both routes build their phase tables with one function (2026-09-16)
 

@@ -571,6 +571,15 @@ final class GpuBatchChunkSolver {
                                         row[go.vRow()] = 1;  // BUS_V row becomes the reactive-power equation (PV→PQ)
                                         rowModePerScenario[s] = row;
                                     }
+                                    if (go.silencesReactiveLimitEntry()) {
+                                        // Nothing left to control voltage at that bus: mask its
+                                        // reactive-limit entry for this scenario, the same channel a
+                                        // contingency-stranded controller uses. A bus the BASE loadflow
+                                        // pinned PQ otherwise keeps a seeded limit type and can switch
+                                        // BACK to PV with its only generator gone.
+                                        rlIslandedList.add(s);
+                                        rlIslandedList.add(go.rlEntry());
+                                    }
                                     if (go.shrinksReactiveLimits()) {
                                         // The bus KEEPS voltage control, so its reactive-limit entry is
                                         // still read — and the device's aggregate still holds the lost

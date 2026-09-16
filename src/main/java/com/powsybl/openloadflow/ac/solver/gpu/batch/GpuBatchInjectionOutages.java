@@ -200,20 +200,31 @@ final class GpuBatchInjectionOutages {
         int rlEntry = -1;
         double minQDelta = 0;
         double maxQDelta = 0;
-        if (!toPq && busPv) {
-            int[] rlBusNum = gpuData.rlBusNum();
-            for (int i = 0; rlBusNum != null && i < rlBusNum.length; i++) {
-                if (rlBusNum[i] == bus.getNum()) {
-                    rlEntry = i;
-                    break;
-                }
-            }
-            if (rlEntry >= 0) {
-                minQDelta = -lost.stream().mapToDouble(LfGenerator::getMinQ).sum();
-                maxQDelta = -lost.stream().mapToDouble(LfGenerator::getMaxQ).sum();
+        int[] rlBusNum = gpuData.rlBusNum();
+        for (int i = 0; rlBusNum != null && i < rlBusNum.length; i++) {
+            if (rlBusNum[i] == bus.getNum()) {
+                rlEntry = i;
+                break;
             }
         }
+        if (rlEntry >= 0 && !toPq && busPv) {
+            minQDelta = -lost.stream().mapToDouble(LfGenerator::getMinQ).sum();
+            maxQDelta = -lost.stream().mapToDouble(LfGenerator::getMaxQ).sum();
+        }
+        // No generator left at all. The reactive-limit entry must stop being a controller for this
+        // scenario: a bus the BASE loadflow had already pinned PQ keeps a seeded limit type so a
+        // relieving contingency can switch it back to PV — and with its only generator gone there is
+        // nothing to switch back to. OLF simply has no controller there. (Measured on rte6515 GEN-6130:
+        // 0.995 kV at that node against 2.2e-4 everywhere else, and one apparent-power violation.)
+        boolean allGensLost = bus.getGenerators().stream().allMatch(lostSet::contains);
+        if (System.getenv("OLF_GPU_GENOUT_TRACE") != null) {
+            System.err.printf("GENOUT bus=%s busPv=%b toPq=%b qOverride=%b lost=%s busGens=%d rlEntry=%d "
+                    + "dMinQ=%.6f dMaxQ=%.6f busMinQ=%.6f busMaxQ=%.6f%n",
+                    bus.getId(), busPv, toPq, qOverride,
+                    lost.stream().map(LfGenerator::getId).toList(), bus.getGenerators().size(),
+                    rlEntry, minQDelta, maxQDelta, bus.getMinQ(), bus.getMaxQ());
+        }
         return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
-                dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta);
+                dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost);
     }
 }

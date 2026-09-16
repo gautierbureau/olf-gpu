@@ -11,6 +11,28 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #59 — Both routes build their phase tables with one function (2026-09-16)
+
+The base load flow and the batched security analysis called the SAME nine builders with the SAME
+arguments from two places, 150 lines against 60. `GpuBatchPhases.build` is now the only one, taking a
+`Request` of which loops the run configures (the analysis fills it from its `BatchConfig`, the base from
+the configured outer loops) and returning every phase's controllers.
+
+Building is shared; INSTALLING is not and cannot be — the base uploads straight onto its batch-of-one
+context, the analysis builds before its chunk context exists and uploads per chunk. HVDC stays inline on
+the base path for the same reason: it applies its freeze into that solve's own target overrides.
+
+Two accidental divergences fell out of merging them. The base constructed a fresh
+`GpuBatchElementMapper` per builder, three times over, where the analysis built one and shared it. And a
+parameter: the base fed the flow builder the incremental transformer REACTIVE POWER loop's
+`getMaxTapShift()` while I merged it onto a `Request` field I had named after the transformer VOLTAGE
+loop, because the `BatchConfig` field it comes from on the analysis side is named
+`incTvcMaxTapShift` and holds the ratio-tap-control value. The test caught it at 1.3e-4 kV on BUS_2 —
+`deviceIncrementalTransformerReactivePowerControlMatchesCpu` — and the field is named
+`rpcMaxTapShift` now.
+
+Behaviour-neutral otherwise: suite 261/0, rte6515 unchanged at 9040/9042 with the same two lines.
+
 ### #58 — PLAN: what "every builder is total" would take (scoped 2026-09-16)
 
 Totality would let the four host-pause slots go. Since #57 it is an OPTIMISATION, not a correctness

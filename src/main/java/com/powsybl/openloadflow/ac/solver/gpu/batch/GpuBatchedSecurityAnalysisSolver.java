@@ -360,18 +360,20 @@ public final class GpuBatchedSecurityAnalysisSolver {
                             config.perEqCriteria().angle(), config.perEqCriteria().ratio(), config.perEqCriteria().b(),
                             config.perEqCriteria().eps())
                     : null;
-            GpuBatchSkips.reset();                           // account what the builders below cannot represent
-            List<GpuBatchTransformerControl.TransformerController> tvdControllers =
-                    config.transformerControl() || config.simpleTransformerControl()
-                            ? GpuBatchTransformerControl.buildTransformerControllers(network, equationSystem, targetVector, baseActivation,
-                                    baseTargets, elementMapper, config.tvcUseInitialTapPosition())
-                            : null;
-            // AFTER_GENERATOR: the generator freeze under the transformer-controlled level and the
-            // connectivity fix, for the in-kernel phase (null tables = no candidate needs a remote shape)
-            GpuBatchTransformerControl.FreezeTables tvdFreeze = config.transformerControl() && tvdControllers != null
-                    ? GpuBatchTransformerControl.buildFreezeTables(network, equationSystem, tvdControllers,
-                            config.genVcMinNominalV(), gpuData.rlBusNum())
-                    : null;
+            // Every phase's tables, built by the SAME function the base load flow calls (#58): a phase
+            // added there reaches both routes or neither.
+            GpuBatchPhases.Built phases = GpuBatchPhases.build(new GpuBatchPhases.Request(
+                    config.voltageMonitoring(),
+                    config.incrementalTransformerControl(),
+                    config.incrementalShuntControl(),
+                    config.simpleShuntControl(),
+                    config.incrementalRpcControl(), config.incrementalPhaseControl(), config.incTvcMaxTapShift(),
+                    config.continuousPhaseControl(),
+                    config.transformerControl() || config.simpleTransformerControl(),
+                    config.tvcUseInitialTapPosition(), config.genVcMinNominalV(),
+                    config.secondaryVoltageControl(), config.minPlausibleTargetV(), config.maxPlausibleTargetV()),
+                    network, equationSystem, targetVector, baseActivation, baseTargets,
+                    gpuData.rlVrow(), gpuData.rlBusNum(), n);
             // All-or-nothing, the same rule the base load flow applies: a loop the builders represented
             // only PARTIALLY would have the device drive a SUBSET of it, and this path has no host-pause
             // slot to hand it back to, so the whole run goes to the CPU (resultsByIndex stays null).
@@ -385,40 +387,18 @@ public final class GpuBatchedSecurityAnalysisSolver {
                     plan.islandedRlByIndex(), plan.islandedHvdcsByIndex(),
                     n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                     config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
-                    tvdControllers, tvdFreeze,
-                    config.incrementalTransformerControl()
-                            ? GpuBatchIncrementalTvc.buildControllers(network, equationSystem, elementMapper)
-                            : null,
-                    config.incrementalShuntControl()
-                            ? GpuBatchIncrementalShuntVc.buildControllers(network, equationSystem, elementMapper,
-                                    elementMapper.getClosedBranchCount() + elementMapper.getOpenBranchCount())
-                            : null,
-                    config.simpleShuntControl()
-                            ? GpuBatchSimpleShuntVc.buildGroups(network, equationSystem, targetVector, baseActivation,
-                                    baseTargets, elementMapper,
-                                    elementMapper.getClosedBranchCount() + elementMapper.getOpenBranchCount())
-                            : null,
-                    config.incrementalRpcControl() || config.incrementalPhaseControl()
-                            ? GpuBatchIncrementalFlowControl.buildControllers(network, equationSystem, elementMapper,
-                                    config.incTvcMaxTapShift(), config.incrementalRpcControl(), config.incrementalPhaseControl())
-                            : null,
+                    phases.discreteTvc(), phases.freeze(),
+                    phases.incrementalTvc(),
+                    phases.incrementalShunt(),
+                    phases.simpleShunt(),
+                    phases.flow(),
                     new GpuBatchIncrementalFlowControl.EsContext(equationSystem.getStateVector(), n),
                     config.hvdcFreezing() || config.hvdcLimits()
                             ? GpuBatchHvdcAcEmulation.buildControllers(network, equationSystem, nElements)
                             : null,
-                    config.secondaryVoltageControl()
-                            ? GpuBatchSecondaryVc.build(network, equationSystem, gpuData.rlVrow(),
-                                    new GpuBatchIncrementalFlowControl.EsContext(equationSystem.getStateVector(), n),
-                                    config.minPlausibleTargetV(), config.maxPlausibleTargetV(), elementMapper)
-                            : null,
-                    config.voltageMonitoring()
-                            ? GpuBatchVoltageMonitoring.buildControllers(network, equationSystem, targetVector,
-                                    baseActivation, baseTargets, gpuData.rlVrow())
-                            : null,
-                    config.continuousPhaseControl()
-                            ? GpuBatchContinuousPhase.buildControllers(network, equationSystem, targetVector,
-                                    baseActivation, baseTargets, elementMapper)
-                            : null,
+                    phases.secondaryVc(),
+                    phases.monitoring(),
+                    phases.continuousPhase(),
                     config);
             }
         }

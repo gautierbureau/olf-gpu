@@ -805,6 +805,38 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             if (driverOuterLoops) {
                 long handle = context.handle.get();
                 int nElements = cachedData.getTotalElementCount();
+                // Every phase's tables, from the SAME builder the batched SA calls (#58). The monitoring
+                // and transformer builders probe controls with an on/off round trip that fires network
+                // events, so the whole call sits inside our dirty-flag guard.
+                var tvcAfterGenLoop = driverLoop("TransformerVoltageControl");
+                var incTvcLoop = driverLoop("IncrementalTransformerVoltageControl");
+                var incShuntLoop = driverLoop("IncrementalShuntVoltageControl");
+                boolean sdAll = invalidation.structureDirty;
+                boolean adAll = invalidation.activationDirty;
+                var phases = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchPhases.build(
+                        new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchPhases.Request(
+                                driverLoop("VoltageMonitoring") != null,
+                                incTvcLoop != null,
+                                incShuntLoop != null,
+                                driverLoop("ShuntVoltageControl") != null,
+                                driverLoop("IncrementalTransformerReactivePowerControl") != null,
+                                driverLoop("IncrementalPhaseControl") != null,
+                                driverLoop("IncrementalTransformerReactivePowerControl")
+                                        instanceof com.powsybl.openloadflow.ac.outerloop.IncrementalTransformerReactivePowerControlOuterLoop r
+                                        ? r.getMaxTapShift() : 1,
+                                driverLoop("PhaseControl") != null,
+                                tvcAfterGenLoop != null || driverLoop("SimpleTransformerVoltageControl") != null,
+                                tvcAfterGenLoop instanceof com.powsybl.openloadflow.ac.outerloop.TransformerVoltageControlOuterLoop tg
+                                        && tg.isUseInitialTapPosition(),
+                                tvcAfterGenLoop instanceof com.powsybl.openloadflow.ac.outerloop.TransformerVoltageControlOuterLoop tg2
+                                        ? tg2.getMaxControlledNominalVoltageOverride() : -1,
+                                driverLoop("SecondaryVoltageControl") != null,
+                                acLoadFlowParameters.getNetworkParameters().getMinPlausibleTargetVoltage(),
+                                acLoadFlowParameters.getNetworkParameters().getMaxPlausibleTargetVoltage()),
+                        network, equationSystem, targetVector, activation, target,
+                        cachedData.rlVrow(), cachedData.rlBusNum(), n);
+                invalidation.structureDirty = sdAll;
+                invalidation.activationDirty = adAll;
                 // HVDC AC emulation (freeze at OLF order 4, limits at 5) as driver phases. The freeze is
                 // what OLF's FreezingHvdcACEmulation.initialize does before the first solve — every
                 // emulation frozen at the warm state's flow — replayed host-side into target overrides,
@@ -835,33 +867,15 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 }
                 // MonitoringVoltage (OLF order 6) as a driver phase. The builder probes each standby bus
                 // with a VC-on/off round trip that fires network events — keep our dirty flags as they were.
-                if (driverLoop("VoltageMonitoring") != null) {
-                    boolean sd = invalidation.structureDirty;
-                    boolean ad = invalidation.activationDirty;
-                    monCtls = GpuBatchVoltageMonitoring.buildControllers(network, equationSystem, targetVector,
-                            activation, target, cachedData.rlVrow());
-                    invalidation.structureDirty = sd;
-                    invalidation.activationDirty = ad;
-                }
+                monCtls = phases.monitoring();
                 GpuBatchVoltageMonitoring.installDriverLoop(handle, monCtls);
                 int hostMask = buildHostLoopMask();
-                com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSkips.reset();
                 // SecondaryVoltageControl (OLF order 4) IN-KERNEL — the same phase, built the same way,
                 // as the batched security analysis. It used to be the one loop the base load flow never
                 // handed to the driver, so every network with a zone paused it here while the chunk path
                 // ran it on device; a pause whose mutation dirties the structure is also what forces the
                 // driver RESTART, so the divergence was not only a throughput one.
-                svcCtls = null;
-                if (driverLoop("SecondaryVoltageControl") != null
-                        && com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSecondaryVc.supported(network)) {
-                    svcCtls = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSecondaryVc.build(
-                            network, equationSystem, cachedData.rlVrow(),
-                            new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchIncrementalFlowControl.EsContext(
-                                    equationSystem.getStateVector(), n),
-                            acLoadFlowParameters.getNetworkParameters().getMinPlausibleTargetVoltage(),
-                            acLoadFlowParameters.getNetworkParameters().getMaxPlausibleTargetVoltage(),
-                            new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper(network));
-                }
+                svcCtls = phases.secondaryVc();
                 if (com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSecondaryVc.uploadToDevice(handle, svcCtls)) {
                     hostMask &= ~1;                          // bit 0 = HOST_LOOP_SVC
                 } else {
@@ -870,8 +884,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // IncrementalTransformerVoltageControl (OLF order 8) IN-KERNEL, shared groups included.
                 if (driverLoop("IncrementalTransformerVoltageControl")
                         instanceof com.powsybl.openloadflow.ac.outerloop.IncrementalTransformerVoltageControlOuterLoop itvc) {
-                    tvcCtls = GpuBatchIncrementalTvc.buildControllers(network, equationSystem,
-                            new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper(network));
+                    tvcCtls = phases.incrementalTvc();
                     tvcOwned = GpuBatchIncrementalTvc.uploadToDevice(handle, tvcCtls, itvc.getMaxTapShift());
                     if (tvcOwned) {
                         hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_TVC - GpuAcNewtonSolver.HOST_LOOP_SVC));
@@ -882,9 +895,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // IncrementalShuntVoltageControl (OLF order 10) IN-KERNEL, groups included.
                 if (driverLoop("IncrementalShuntVoltageControl")
                         instanceof com.powsybl.openloadflow.ac.outerloop.IncrementalShuntVoltageControlOuterLoop isvc) {
-                    var mapper = new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper(network);
-                    shuntCtls = GpuBatchIncrementalShuntVc.buildControllers(network, equationSystem, mapper,
-                            mapper.getClosedBranchCount() + mapper.getOpenBranchCount());
+                    shuntCtls = phases.incrementalShunt();
                     shuntOwned = GpuBatchIncrementalShuntVc.uploadToDevice(handle, shuntCtls, isvc.getMaxSectionShift());
                     if (shuntOwned) {
                         hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_SHUNT - GpuAcNewtonSolver.HOST_LOOP_SVC));
@@ -899,8 +910,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     var mapper = new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper(network);
                     int rpcShift = rpcLoop instanceof com.powsybl.openloadflow.ac.outerloop.IncrementalTransformerReactivePowerControlOuterLoop r
                             ? r.getMaxTapShift() : 1;
-                    flowCtls = GpuBatchIncrementalFlowControl.buildControllers(network, equationSystem, mapper, rpcShift,
-                            rpcLoop != null, incPhase);
+                    flowCtls = phases.flow();
                     flowOwned = GpuBatchIncrementalFlowControl.uploadToDevice(handle, flowCtls);
                     if (flowOwned) {
                         if (rpcLoop != null) {
@@ -918,7 +928,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // first check switches them off and rounds, later checks run the LIMITER.
                 if (driverLoop("PhaseControl") != null && !incPhase) {
                     var mapper = new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper(network);
-                    cphCtls = GpuBatchContinuousPhase.buildControllers(network, equationSystem, targetVector, activation, target, mapper);
+                    cphCtls = phases.continuousPhase();
                     cphOwned = GpuBatchContinuousPhase.uploadToDevice(handle, cphCtls);
                     if (cphOwned) {
                         hostMask &= ~(1 << (GpuAcNewtonSolver.HOST_LOOP_PHASE - GpuAcNewtonSolver.HOST_LOOP_SVC));
@@ -938,9 +948,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     boolean ad = invalidation.activationDirty;
                     boolean useInitial = tvcAfterGen instanceof com.powsybl.openloadflow.ac.outerloop.TransformerVoltageControlOuterLoop t
                             && t.isUseInitialTapPosition();
-                    tvdCtls = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.buildTransformerControllers(
-                            network, equationSystem, targetVector, activation, target,
-                            new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper(network), useInitial);
+                    tvdCtls = phases.discreteTvc();
                     invalidation.structureDirty = sd;
                     invalidation.activationDirty = ad;
                     tvdOwned = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.uploadToDevice(
@@ -949,9 +957,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                         // GeneratorVoltageControlManager: the generator controls under the transformer-controlled
                         // level freeze while the transformers act; a REMOTE candidate is out of the kernel's
                         // scope — the host-paused OLF loop keeps the slot then
-                        tvdFreeze = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.buildFreezeTables(
-                                network, equationSystem, tvdCtls, tag.getMaxControlledNominalVoltageOverride(),
-                                cachedData.rlBusNum());
+                        tvdFreeze = phases.freeze();
                         if (tvdFreeze == null) {
                             com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchTransformerControl.uploadToDevice(handle, null, 0, false);
                             tvdOwned = false;
@@ -975,9 +981,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     boolean sd = invalidation.structureDirty;
                     boolean ad = invalidation.activationDirty;
                     var mapper = new com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper(network);
-                    svdGroups = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSimpleShuntVc.buildGroups(
-                            network, equationSystem, targetVector, activation, target, mapper,
-                            mapper.getClosedBranchCount() + mapper.getOpenBranchCount());
+                    svdGroups = phases.simpleShunt();
                     invalidation.structureDirty = sd;
                     invalidation.activationDirty = ad;
                     svdOwned = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchSimpleShuntVc.uploadToDevice(handle, svdGroups, true);

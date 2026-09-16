@@ -532,10 +532,20 @@ final class GpuBatchQualification {
                 if (curvePRows != null) {
                     boolean skewsCurve = c.contingencyId().indexOf(GpuBatchStatus.STRATEGY_KEY_SEP) >= 0;
                     for (GenOutage go : gos) {
+                        if (go.toPq()) {
+                            // The outage takes this bus OUT of voltage control, so its reactive-limit entry
+                            // is inert for the rest of the solve: the unpinned branch of the RL pass wants a
+                            // V row (mode 0 or 2) and finds a power row, the pinned branch wants a limit type
+                            // and finds none. The curve channel still writes a dynamic limit for it and
+                            // nobody reads it — a skew that cannot reach an answer is not a reason to leave
+                            // the batch. This is most of a generator N-1 set: losing the only generator at a
+                            // bus is exactly what takes it to PQ.
+                            continue;
+                        }
                         for (int pr : curvePRows) {
                             if (go.pRow() == pr) {
-                                skewsCurve = true;
-                            }
+                                skewsCurve = true;           // survivors still control V here, and their
+                            }                                // share of the bus P step would be misread
                         }
                     }
                     if (skewsCurve) {

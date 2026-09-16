@@ -34,11 +34,25 @@ generator side is where the work is.
 
 **Three things to correct before going full throttle.**
 
-1. **`PLAN:GEN_OUTAGE_SHAPE` rejects 64 of the 106 generator contingencies** — by far the biggest item.
-   The reactive-capability CURVE channel's `p_now` linkage models the DISTRIBUTED-SLACK delta only, so an
-   injection override at a curve bus's P row would skew the evaluated Q limits and the scenario is routed
-   out. Losing a generator IS an injection override at exactly such a bus, which is why it hits most of
-   them. The fix is to make that linkage carry the override as well as the DS delta.
+1. **`PLAN:GEN_OUTAGE_SHAPE` rejected 64 of the 106 generator contingencies** — by far the biggest item.
+   The reactive-capability CURVE channel's `p_now` linkage models the DISTRIBUTED-SLACK delta only
+   (`pNow = basePpu + share * (target[pRow] - baseRowTargetP)`), so an injection override at a curve bus's
+   P row would charge every generator on that bus a share of the lost generator's own output. Losing a
+   generator IS such an override, which is why it hit most of them.
+
+   **Half of it is now batched, on an argument rather than a model change.** When the outage takes the
+   bus OUT of voltage control (`GenOutage.toPq()` — losing the only generator at a bus does exactly
+   that), its reactive-limit entry is inert for the rest of the solve: the RL pass's unpinned branch
+   wants a V row and finds a power row, its pinned branch wants a limit type and finds none. The curve
+   channel still writes a dynamic limit for that entry and nobody reads it, and a skew that cannot reach
+   an answer is not a reason to leave the batch. **64 rejections -> 46, batched 42 -> 60 of 106**, with
+   the branch reference set untouched at 9040/9042 and the same two lines.
+
+   What stays on the CPU is the case the argument does not cover: a bus with SEVERAL generators where the
+   survivors still control voltage. Those need the model change — `pNow` corrected by the outage step so
+   only the DS part is shared, the dead generator's own curve entry dropped, and the bus's aggregate
+   `rlMinQ`/`rlMaxQ` reduced by its limits. That needs per-GENERATOR outage identity in the curve channel,
+   which the plan currently aggregates per bus.
 2. **`PLAN:INJECTION_OUTAGE_SHAPE` rejects 9 of the 50 loads** — the shape computation returns null for a
    slack bus, more than one distributed-slack bus, or a remote generator. Tagged `PLAN:SHUNT_SHAPE` until
    now, a copy-paste from the block above it; the census is how we pick what to fix, so a tag that lies

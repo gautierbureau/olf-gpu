@@ -11,6 +11,42 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #58 — PLAN: what "every builder is total" would take (scoped 2026-09-16)
+
+Totality would let the four host-pause slots go. Since #57 it is an OPTIMISATION, not a correctness
+requirement: a builder that cannot represent a controller now hands the whole loop back loudly instead
+of dropping it silently. So this is about how often a loop leaves the device, not about whether the
+answer is right.
+
+The nine skip sites fall into four classes, and only one of them is real work.
+
+**1. Already impossible — turn the skip into an assertion.** `tapRows.length == 0` on a tap controller.
+Since the tap table moved off reflection onto `PiModelArray.getModels()` (#52), an empty table means the
+branch carries a continuous `SimplePiModel` and has no taps, which a voltage or phase controller never
+does. Five sites. Cost: an afternoon, and it converts five "can't happen" branches into proof.
+
+**2. Not skips at all — stop counting them.** `branch.isDisabled()`, `!isConnectedAtBothSides()`,
+`shunt.getControllers().isEmpty()`. OLF's own loops skip these too, so representing them is not owed.
+They share a `continue` with the real refusals today; splitting the two is mechanical.
+
+**3. The real work: a variable that is not in the equation system.** `rhoRow` / `a1Row` / `vRow` /
+`shuntBRow` / `rlIdx` null. One root cause: the row index is taken at extraction time, and several loops
+run with their control DISABLED at the base, so the variable does not exist yet. The project already has
+the fix pattern and uses it twice — `GpuBatchContinuousPhase` toggles a CONTROLLER-mode control on and
+diffs the activation, `GpuBatchTransformerControl` does the ON/OFF toggle diff — and the standing lesson
+says it outright: never key a pack or a guard on control-ENABLED state, key it on the equations
+EXISTING. Generalising the toggle-and-diff to every builder is the piece that would move the needle.
+
+**4. Genuinely unmodelled, and honest about it.** A control element that is zero-impedance in AC (the
+element mapper packs those through the zero-impedance family, not as a branch), and a controller or SVC
+shunt whose conductance varies with section (`elemIndex < 0 && gVaries`) — the device cannot carry the g
+change for a shunt it does not pack. These want extraction work or a whole-run gate, not a per-controller
+skip.
+
+**Do not chase this blind.** Zero skips on rte6515 and across the whole 261-test suite, so there is no
+measured case to fix. `GpuBatchSkips.summary()` is on every run and both routes log when it is non-empty:
+let a production network name a class-3 or class-4 case, then fix that one.
+
 ### #57 — One ownership rule for both routes, and the partial-representation hole (2026-09-16)
 
 Asked why the four host-pause slots are needed when every loop has a kernel. Answering it found the

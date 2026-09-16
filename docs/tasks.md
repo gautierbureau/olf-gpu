@@ -770,6 +770,30 @@ not a closed branch. With this every sensitivity-dependent incremental loop runs
 chunk path's host orchestrators left: SecondaryVoltageControl (transposed solve, task #40); the
 non-incremental TVC / shunt VC flows followed the same day (#47).
 
+### #52 — Remote LIMITER phase control, and the tap table without reflection (2026-09-16)
+
+Two of the four gaps left in the ported phases. Both turned out to be self-imposed.
+
+**Remote LIMITER phase control.** A CONTINUOUS phase control in LIMITER mode whose regulation
+terminal sits on another branch routed the whole run to the CPU, in DEVICE and JAVA alike, on the
+reading that "OLF's own loop is local-only". It is local BY CONSTRUCTION, not by restriction:
+`PhaseControlOuterLoop.changeTapPositions` caps `controllerBranch.getI1()`/`getI2()` against the
+target and `isSensitivityCurrentPerA1Positive` differentiates those same terms, so the phase
+control's controlled branch never enters the decision at all. LIMITER mode is also never enabled as
+an equation control — `initialize` enables CONTROLLER mode only — so there is no row-mode or
+`cbPcSide` question either. The device already built its I term from the controller branch, so the
+gate was refusing a computation it performs identically. Lifted in all three places; both modes now
+batch local and remote. New tests build PS1 in CURRENT_LIMITER mode regulating the parallel line L2,
+DEVICE and JAVA, both at 1e-12 with the batch engaged.
+
+**Transformer control without a tap table.** `tapModels` read `PiModelArray.models` by REFLECTION and
+returned an empty table on any failure, which meant a JVM configuration could silently turn into
+unrounded continuous ratios and into whole-run CPU fallbacks (`generatorFreezeSupported`) that no
+gate would explain. `PiModelArray.getModels()` already existed, package-private; it is public on the
+patched OLF now (`olf-local-patches`), and the reflection is gone. An empty table means one thing
+after this: the branch carries a continuous `SimplePiModel` and has no taps, which a voltage or phase
+controller never does.
+
 ### #51 — Gaps inside the ported phases: robust mode, forced-PV, distributed slack (2026-09-16)
 
 Three of the gaps left inside the phases that are already on the device. All three were

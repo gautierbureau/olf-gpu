@@ -83,12 +83,14 @@ public final class GpuBatchContinuousPhase {
             Integer a1Row = a1Rows.get(branch.getNum());
             int elemIndex = elementMapper.getElementIndex(branch);
             double[][] tapRows = GpuBatchTransformerControl.tapModels(branch.getPiModel());
-            // REMOTE control is fine for CONTROLLER mode (the activation diff + tap rounding live on
-            // the CONTROLLER; the P row re-emission is keyed by cbPcSide on the controlled element);
-            // LIMITER stays local-only — OLF's own loop reads the CONTROLLER's I terms.
-            boolean remoteLimiter = pc.getMode() == TransformerPhaseControl.Mode.LIMITER
-                    && pc.getControlledBranch() != branch;
-            if (a1Row == null || elemIndex < 0 || tapRows.length == 0 || remoteLimiter) {
+            // REMOTE control is fine in BOTH modes. CONTROLLER: the activation diff + tap rounding live
+            // on the CONTROLLER and the P row re-emission is keyed by cbPcSide on the controlled
+            // element. LIMITER: OLF's loop is local BY CONSTRUCTION, not by restriction —
+            // changeTapPositions reads controllerBranch.getI1()/getI2() and
+            // isSensitivityCurrentPerA1Positive differentiates those same terms, so the controlled
+            // branch is simply never consulted. The device builds its I term from the controller too,
+            // so a remote LIMITER runs identically; refusing it only routed the run to the CPU.
+            if (a1Row == null || elemIndex < 0 || tapRows.length == 0) {
                 LOGGER.info("Continuous phase controller {} not representable on the GPU batch — skipped", branch.getId());
                 continue;
             }

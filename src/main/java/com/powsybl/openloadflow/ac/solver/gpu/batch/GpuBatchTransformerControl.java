@@ -19,6 +19,8 @@ import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfVscConverterStation;
+import com.powsybl.openloadflow.network.PiModel;
+import com.powsybl.openloadflow.network.PiModelArray;
 import com.powsybl.openloadflow.network.TransformerVoltageControl;
 import com.powsybl.openloadflow.network.VoltageControl;
 import org.slf4j.Logger;
@@ -623,30 +625,26 @@ public final class GpuBatchTransformerControl {
         return taps;
     }
 
-    /** Full per-tap static branch rows, snapshotted read-only via reflection on
-     *  PiModelArray.models: one row [y, g1, g2, b1, b2, ksi, r1, a1] per tap position — the
-     *  EXACT cbIn packing, so a tap/PST action's override is the target row verbatim (empty
-     *  when not a tap array or inaccessible). */
+    /** Full per-tap static branch rows, snapshotted read-only from {@code PiModelArray.getModels()}:
+     *  one row [y, g1, g2, b1, b2, ksi, r1, a1] per tap position — the EXACT cbIn packing, so a
+     *  tap/PST action's override is the target row verbatim.
+     *
+     *  <p>Empty means the branch carries a continuous {@code SimplePiModel} and has no taps at all.
+     *  It used to also mean "reflection on the private field did not work", which turned a JVM
+     *  configuration into silently unrounded ratios and into whole-run CPU fallbacks that no gate
+     *  explained; the accessor is public on the patched OLF, so that failure mode is gone. */
     public static double[][] tapModels(Object piModel) {
-        try {
-            if (!"PiModelArray".equals(piModel.getClass().getSimpleName())) {
-                return new double[0][];
-            }
-            java.lang.reflect.Field f = piModel.getClass().getDeclaredField("models");
-            f.setAccessible(true);
-            List<?> models = (List<?>) f.get(piModel);
-            String[] getters = {"getY", "getG1", "getG2", "getB1", "getB2", "getKsi", "getR1", "getA1"};
-            double[][] taps = new double[models.size()][getters.length];
-            for (int i = 0; i < models.size(); i++) {
-                for (int g = 0; g < getters.length; g++) {
-                    taps[i][g] = (double) models.get(i).getClass().getMethod(getters[g]).invoke(models.get(i));
-                }
-            }
-            return taps;
-        } catch (ReflectiveOperationException | RuntimeException e) {
-            LOGGER.info("Transformer tap table not accessible ({}) — continuous ratios will not be rounded", e.toString());
+        if (!(piModel instanceof PiModelArray array)) {
             return new double[0][];
         }
+        List<PiModel> models = array.getModels();
+        double[][] taps = new double[models.size()][8];
+        for (int i = 0; i < models.size(); i++) {
+            PiModel m = models.get(i);
+            taps[i] = new double[] {m.getY(), m.getG1(), m.getG2(), m.getB1(), m.getB2(),
+                                    m.getKsi(), m.getR1(), m.getA1()};
+        }
+        return taps;
     }
 
 }

@@ -118,14 +118,12 @@ final class GpuSaRunScope {
         // monitoring SVC is local with an automaton — slope-less plain-VOLTAGE SVCs need no loop support
         // (ordinary generator-VC buses on the device).
         boolean monitoringBatchable = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.supported(lfNetwork);
-        // CONTINUOUS phase control (GpuBatchContinuousPhase): CONTROLLER mode batches LOCAL and REMOTE
-        // (2026-09-05 — cbPcSide carries the controller's a1 column); LIMITER must stay LOCAL (OLF's
-        // own loop reads the controller's I terms).
-        boolean continuousPhaseBatchable = lfNetwork.getBranches().stream()
-                .map(b -> b.getPhaseControl().orElse(null))
-                .filter(java.util.Objects::nonNull)
-                .allMatch(pc -> pc.getMode() == com.powsybl.openloadflow.network.TransformerPhaseControl.Mode.CONTROLLER
-                        || pc.getControlledBranch() == pc.getControllerBranch());
+        // CONTINUOUS phase control (GpuBatchContinuousPhase): both modes batch LOCAL and REMOTE.
+        // CONTROLLER since 2026-09-05 (cbPcSide carries the controller's a1 column); LIMITER since
+        // 2026-09-16 — OLF's PhaseControlOuterLoop is local BY CONSTRUCTION there, reading the
+        // CONTROLLER branch's own I terms and differentiating them, so the controlled branch never
+        // enters the decision and a remote LIMITER is the same computation.
+        boolean continuousPhaseBatchable = true;
         // (SimpleTransformerVoltageControlOuterLoop has no generator freeze either — no gen-under-level
         // gate, lifted 2026-09-15.)
         boolean simpleTvcBatchable =
@@ -442,13 +440,10 @@ final class GpuSaRunScope {
                     // control toggles the BRANCH_TARGET_P row, which the activation extractor maps to the
                     // batch row mode 3 (the cb family re-emits the controlled side's P block at the α1 row) —
                     // the hybrid re-extracts activation after every loop mutation, and the rounding/limiter
-                    // tap moves reach the device via the per-scenario pi-model refresh. CONTROLLER mode may
-                    // be REMOTE (2026-09-05); LIMITER stays local (OLF's own loop is local-only).
-                    || "PhaseControl".equals(name) && lfNetwork.getBranches().stream()
-                            .map(b -> b.getPhaseControl().orElse(null))
-                            .filter(java.util.Objects::nonNull)
-                            .allMatch(pc -> pc.getMode() == com.powsybl.openloadflow.network.TransformerPhaseControl.Mode.CONTROLLER
-                                    || pc.getControlledBranch() == pc.getControllerBranch())
+                    // tap moves reach the device via the per-scenario pi-model refresh. Either mode may be
+                    // REMOTE — CONTROLLER since 2026-09-05, LIMITER since 2026-09-16 (OLF's loop reads the
+                    // CONTROLLER's own I terms, so remoteness changes nothing about the decision).
+                    || "PhaseControl".equals(name)
                     // SecondaryVoltageControl: adjusts GENERATOR-VC TARGET VALUES only (pilot-point regulation);
                     // targets are re-read per round and the engine isolates every MAIN generator VC's target per
                     // scenario (vcSnap), so the hybrid replays OLF's loop verbatim.

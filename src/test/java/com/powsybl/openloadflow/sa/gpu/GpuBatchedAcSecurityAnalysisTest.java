@@ -1013,6 +1013,62 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** REMOTE continuous phase control in CURRENT_LIMITER mode: PS1's regulation terminal sits on the
+     *  PARALLEL line L2, so the phase control's controlled branch is not its controller. OLF's
+     *  PhaseControlOuterLoop is local BY CONSTRUCTION there and not by restriction — changeTapPositions
+     *  caps {@code controllerBranch.getI1()} against the target and differentiates that same term for
+     *  the shift direction, so the controlled branch never enters the decision. The device builds its I
+     *  term from the controller too, which is why this batches at 1e-12 rather than routing to the CPU. */
+    @org.junit.jupiter.api.Test
+    void deviceRemoteContinuousPhaseControlCurrentLimiterMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertGpuMatchesCpu(remoteCurrentLimiterNetwork(), remoteCurrentLimiterContingencies(), 1e-12,
+                remoteCurrentLimiterParameters());
+    }
+
+    /** The same network in JAVA hybrid mode — its own whole-run gate refused a remote LIMITER too. */
+    @org.junit.jupiter.api.Test
+    void javaRemoteContinuousPhaseControlCurrentLimiterMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        System.setProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY, "JAVA");
+        try {
+            assertGpuMatchesCpu(remoteCurrentLimiterNetwork(), remoteCurrentLimiterContingencies(), 1e-12,
+                    remoteCurrentLimiterParameters());
+        } finally {
+            System.clearProperty(GpuBatchedAcSecurityAnalysis.GPU_OUTER_LOOP_MODE_PROPERTY);
+        }
+    }
+
+    private static Network remoteCurrentLimiterNetwork() {
+        Network network = com.powsybl.openloadflow.network.PhaseControlFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.TwoWindingsTransformer ps1 = network.getTwoWindingsTransformer("PS1");
+        ps1.getPhaseTapChanger().setRegulationMode(com.powsybl.iidm.network.PhaseTapChanger.RegulationMode.CURRENT_LIMITER)
+                .setTargetDeadband(1).setRegulating(true).setTapPosition(1)
+                .setRegulationTerminal(network.getLine("L2").getTerminal1()).setRegulationValue(100);
+        com.powsybl.iidm.network.Line l1 = network.getLine("L1");
+        network.newLine().setId("L1_BIS")
+                .setVoltageLevel1(l1.getTerminal1().getVoltageLevel().getId()).setBus1(l1.getTerminal1().getBusBreakerView().getBus().getId())
+                .setVoltageLevel2(l1.getTerminal2().getVoltageLevel().getId()).setBus2(l1.getTerminal2().getBusBreakerView().getBus().getId())
+                .setR(l1.getR() * 2).setX(l1.getX() * 2)
+                .setG1(l1.getG1()).setB1(l1.getB1()).setG2(l1.getG2()).setB2(l1.getB2()).add();
+        return network;
+    }
+
+    private static List<Contingency> remoteCurrentLimiterContingencies() {
+        return List.of(new Contingency("L1_BIS", new BranchContingency("L1_BIS")),
+                new Contingency("L1", new BranchContingency("L1")));
+    }
+
+    private static com.powsybl.loadflow.LoadFlowParameters remoteCurrentLimiterParameters() {
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setPhaseShifterRegulationOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setPhaseShifterControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.PhaseShifterControlMode.CONTINUOUS_WITH_DISCRETISATION);
+        return lfp;
+    }
+
     /** PROBE: remote generator voltage control (DISTR_Q — three generators regulating one pilot bus)
      *  under batched SA: parallel-line outage keeps all controllers live. DS+RL on. */
     @org.junit.jupiter.api.Test

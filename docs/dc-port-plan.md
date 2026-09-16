@@ -1307,3 +1307,29 @@ one answer.
 **Recommendation: do not build it for performance.** Build a PTDF or LODF product on the device only
 if a caller wants the factors themselves, which is the case `docs/numbers.md` already measured and
 found does not pay over PCIe either. The N-1 answer is not where a matrix multiply helps.
+
+### The full PTDF, assembled and resident on the device (2026-09-16)
+
+Section 8 recommended against a PTDF matrix as a way to make N-1 faster, and that recommendation
+stands. This is the other reason to want one: a caller that needs the factors themselves, and a
+caller that wants them as an INPUT to further device work without ever moving them.
+
+`GpuPtdfMatrix` assembles it. The pieces were already there, which is why this is small: the factor
+columns are the sparse right-hand sides `sensiSetFactorColumns` already solves and leaves resident,
+and the product is the `sensiBlock` kernel the sensitivity path already uses. What was missing was a
+destination that stays on the device, so `ptdfAssemble` writes the blocks into a resident buffer and
+`ptdfBlock` hands one back only when asked.
+
+A column is a unit injection at one bus with the slack absorbing, which is the ordinary PTDF against
+that slack. Two things the implementation had to get right, both found by the tests:
+
+- **The slack bus has an active power equation.** OLF deactivates it rather than removing it, so
+  `getEquation` finds it and only its COLUMN says it carries no row. Checking for presence accepts
+  the slack and then writes a right-hand side entry at column -1.
+- **A sensitivity result is not promised in factor order.** The first version of the test compared by
+  position and reported differences of about 1.0. Looking the values up by identifier made 9858
+  factors on IEEE 118 agree to 1e-10.
+
+Measured on rte6515_full: 9042 x 6519, 59 million factors, 412 ms to assemble, 450 MB resident,
+576 ms to read back. Assembling is cheap; shipping is not, which is section 8's verdict seen from the
+production side rather than the consumption side.

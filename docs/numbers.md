@@ -436,3 +436,28 @@ The single load flow has also moved a long way since that row was written, on a 
 same day: cold CPU 662 ms against GPU 906 ms, warm CPU 163 ms against GPU 482 ms, versus 2529 ms cold
 before. The verdict stands - a single DC solve still does not pay on the device - but the reason is
 CUDA and library start-up plus the assembly capture, not the symbolic analysis.
+
+### DC - the full PTDF assembled on the device (GpuPtdfMatrix, 2026-09-16)
+
+One row per branch, one column per non-slack bus, the sensitivity of that branch's flow to a unit
+injection at that bus with the slack absorbing. Assembled in column blocks and LEFT on the device.
+rte6515_full, RTE parameters in DC, `DcPtdfGpuProbe`:
+
+| | |
+|---|---|
+| shape | 9042 branches x 6519 buses = 58,944,798 factors |
+| engine prepare (capture, upload, analysis, factorization) | 470 ms |
+| assemble (6519-column solve plus the sensitivity kernel) | 412 ms |
+| resident | 450 MB |
+| read back over PCIe, with a full scan of the values | 576 ms |
+| values | max abs 1.20, 49,069,731 non-zero, no NaN |
+
+So about 143 million factors a second to produce, and the read-back costs more than half the assemble
+again. That is the whole verdict in one table: assembling is cheap, shipping is not. A caller that
+consumes the factors on the device gets them for 412 ms; a caller that wants them in host memory pays
+the transfer, and at that point the earlier finding stands that producing factors is not where a GPU
+wins.
+
+Correctness is gated against OLF's own DC sensitivity analysis, which computes the same factors by a
+different route on the host: `GpuPtdfMatrixTest` compares every (branch, bus) pair on IEEE 14 and
+IEEE 118, 9858 factors on the latter, at 1e-10.

@@ -270,6 +270,21 @@ public final class GpuDcSolver implements AutoCloseable {
     }
 
     /** The already-solved flow-states column (OLF builds its modified target on the network). */
+    /**
+     * Assembles the PTDF of these function branches against the factor columns already solved by
+     * {@link #sensiSetFactorColumns}, and leaves it on the device.
+     *
+     * @return the bytes the resident matrix occupies
+     */
+    public long ptdfAssemble(int[] functionBranches) {
+        return ptdfAssemble(handle(), functionBranches);
+    }
+
+    /** A block of columns of the resident PTDF, column-major, {@code rows x cols} values. */
+    public void ptdfBlock(int col0, int cols, double[] out) {
+        ptdfBlock(handle(), col0, cols, out);
+    }
+
     public void sensiSetFlowStates(double[] states, boolean alt) {
         sensiSetFlowStates(handle(), states, alt);
     }
@@ -479,6 +494,10 @@ public final class GpuDcSolver implements AutoCloseable {
     private static native void sensiBlock(long handle, int[] functions, int col0, int cols, double[] out);
 
     private static native void sensiSetFactorColumns(long handle, int[] colPtr, int[] rows, double[] values, int cols, boolean alt);
+
+    private static native long ptdfAssemble(long handle, int[] functionBranches);
+
+    private static native void ptdfBlock(long handle, int col0, int cols, double[] out);
 
     private static native void sensiSetFlowStates(long handle, double[] states, boolean alt);
 

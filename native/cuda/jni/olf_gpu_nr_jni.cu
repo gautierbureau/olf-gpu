@@ -41,6 +41,7 @@
 #include <jni.h>
 #include <cuda_runtime.h>
 #include <cudss.h>
+#include <cublas_v2.h>
 
 #include <algorithm>
 #include <chrono>
@@ -103,6 +104,14 @@ using namespace powsybl::openloadflow;
 
 #define CUDA_CHECK(x) do { cudaError_t e_ = (x); if (e_ != cudaSuccess) { \
     throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(e_)); } } while (0)
+#define CUBLAS_CHECK(call)                                                                       \
+    do {                                                                                         \
+        cublasStatus_t st_ = (call);                                                             \
+        if (st_ != CUBLAS_STATUS_SUCCESS) {                                                      \
+            throw std::runtime_error("cuBLAS error " + std::to_string(static_cast<int>(st_)));    \
+        }                                                                                        \
+    } while (0)
+
 #define CUDSS_CHECK(x) do { cudssStatus_t s_ = (x); if (s_ != CUDSS_STATUS_SUCCESS) { \
     throw std::runtime_error(std::string("cuDSS error, status ") + std::to_string((int) s_) \
         + " at " __FILE__ ":" + std::to_string(__LINE__) + " [" #x "]"); } } while (0)
@@ -4408,6 +4417,10 @@ struct BatchSolverContext {
     DeviceBuf dSvcQPtr, dSvcQKind, dSvcQElem, dSvcQBRow;
     DeviceBuf dSvcZonePtr, dSvcZoneCtl, dSvcZonePilotRow, dSvcZoneTargetV;
     DeviceBuf dSvcTargetV, dSvcK0, dSvcJk, dSvcJvpp, dSvcEnabled, dSvcNeed, dSvcReject, dSvcRlVt;
+    // Batched dense LU workspaces: the zone systems live in DEVICE memory, one N*N column-major matrix
+    // and one RHS per scenario, plus the pointer/pivot/info arrays cuBLAS's batched API takes.
+    DeviceBuf dSvcMat, dSvcRhs, dSvcMatPtr, dSvcRhsPtr, dSvcPiv, dSvcInfo, dSvcCtlZone;
+    cublasHandle_t svcBlas = nullptr;
     std::vector<int> hSvcCtldVRow;
     std::vector<double> hSvcBaseTargetV;
     double svcMinPlausibleV = 0.8, svcMaxPlausibleV = 1.2;
@@ -4492,6 +4505,10 @@ struct BatchSolverContext {
     // whatever this conversion misses.
     cudaStream_t stream = nullptr;
     ~BatchSolverContext() {
+        if (svcBlas != nullptr) {
+            cublasDestroy(svcBlas);
+            svcBlas = nullptr;
+        }
         if (stream) cudaStreamDestroy(stream);
         if (matABatch) cudssMatrixDestroy(matABatch);
         if (matBBatch) cudssMatrixDestroy(matBBatch);
@@ -5989,7 +6006,7 @@ static SvdTables svdTables(BatchSolverContext* ctx) {
 // codegen'd evalClosedBranch, exactly as flcGatherSensiBatch does it) plus its shunts' q = -b*v^2
 // (ShuntCompensatorReactiveFlowEquationTerm: dq/dv = -2bv, dq/db = -v^2), and the pilot's calculated V
 // is the BUS_V variable itself, so its sensitivity is dx at the pilot row.
-constexpr int MAX_SVC_CTL = 16;                              // per-scenario dense zone system bound
+constexpr double SVC_MAT_BUDGET_BYTES = 512.0 * 1024 * 1024;   // zone-system workspace ceiling
 constexpr double SVC_DV_EPS = 1e-4;                          // OLF DV_EPS (0.1 kV)
 constexpr double SVC_DK_DIFF_MAX_EPS = 1e-3;                 // OLF DK_DIFF_MAX_EPS (1 MVar)
 
@@ -6128,113 +6145,112 @@ __global__ void svcGatherBatch(SvcTables T, int nScenarios, int n, int i, int nE
     }
 }
 
-// OLF processSecondaryVoltageControl's small dense system, per scenario: A (per-zone block, 1-1/n on the
-// diagonal and -1/n off it), rhs = -A.k0, b = A.Jk^T, then for each zone the LAST controlled bus's row is
-// replaced by the pilot sensitivities and its rhs by the pilot dv. Solved by Gaussian elimination with
-// partial pivoting; an implausible new target sends the scenario to the CPU, as OLF's FAILED would.
-__global__ void svcZoneSolveBatch(SvcTables T, int nScenarios, int n, const char* rlActive,
-                                  const double* x, char* switched, int svcDebug) {
+// OLF processSecondaryVoltageControl's zone system, ASSEMBLED per scenario into device memory for a
+// batched dense LU. OLF builds one system over every ENABLED controller of every zone — A is block
+// diagonal by zone but Jk is full, since a controller in one zone moves a controlled bus in another
+// through the network — so the size is the total controller count, not a per-zone one. A DISABLED
+// controller (at a reactive limit) is padded out with an identity row and a zero right-hand side,
+// which leaves the enabled block exactly the system OLF solves and gives the disabled one dv = 0.
+// Column-major, because that is what cuBLAS reads.
+__global__ void svcAssembleBatch(SvcTables T, int nScenarios, int n, const char* rlActive,
+                                 const int* ctlZone, const double* x, double* mat, double* rhs) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= T.nCtl * nScenarios) return;
+    int i = tid % T.nCtl;
+    int s = tid / T.nCtl;
+    int nC = T.nCtl;
+    double* m = mat + (size_t) s * nC * nC;
+    double* r = rhs + (size_t) s * nC;
+    bool live = rlActive[s] && T.need[s];
+    if (!live || !T.enabled[(size_t) s * nC + i]) {
+        for (int j = 0; j < nC; j++) {
+            m[(size_t) j * nC + i] = (i == j) ? 1.0 : 0.0;   // identity row: this controller does not move
+        }
+        r[i] = 0.0;
+        return;
+    }
+    int z = ctlZone[i];
+    int lo = T.zonePtr[z];
+    int hi = T.zonePtr[z + 1];
+    int cnt = 0;
+    int last = -1;
+    for (int k = lo; k < hi; k++) {
+        int c = T.zoneCtl[k];
+        if (T.enabled[(size_t) s * nC + c]) {
+            cnt++;
+            last = c;
+        }
+    }
+    if (i == last) {                                         // the zone's LAST controlled bus carries the pilot row
+        for (int j = 0; j < nC; j++) {
+            m[(size_t) j * nC + i] = T.enabled[(size_t) s * nC + j] ? T.jvpp[(size_t) s * nC + j] : 0.0;
+        }
+        r[i] = T.zoneTargetV[z] - x[(size_t) s * n + T.zonePilotRow[z]];
+        return;
+    }
+    for (int j = 0; j < nC; j++) {                           // b = A . Jk^T, restricted to enabled columns
+        if (!T.enabled[(size_t) s * nC + j]) {
+            m[(size_t) j * nC + i] = 0.0;
+            continue;
+        }
+        double v = 0.0;
+        for (int k = lo; k < hi; k++) {
+            int c = T.zoneCtl[k];
+            if (!T.enabled[(size_t) s * nC + c]) continue;
+            double a = (c == i) ? 1.0 - 1.0 / cnt : -1.0 / cnt;
+            v += a * T.jk[((size_t) s * nC + j) * nC + c];
+        }
+        m[(size_t) j * nC + i] = v;
+    }
+    double rv = 0.0;                                         // rhs = -A . k0
+    for (int k = lo; k < hi; k++) {
+        int c = T.zoneCtl[k];
+        if (!T.enabled[(size_t) s * nC + c]) continue;
+        double a = (c == i) ? 1.0 - 1.0 / cnt : -1.0 / cnt;
+        rv += a * T.k0[(size_t) s * nC + c];
+    }
+    r[i] = -rv;
+}
+
+// The pointer arrays cuBLAS's batched API takes, one entry per scenario.
+__global__ void svcPointersBatch(int nScenarios, int nC, double* mat, double* rhs,
+                                 double** matPtr, double** rhsPtr) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nScenarios) return;
+    matPtr[s] = mat + (size_t) s * nC * nC;
+    rhsPtr[s] = rhs + (size_t) s * nC;
+}
+
+// After the batched solve: OLF's plausibility test on the new targets, then commit. A singular zone
+// system (cuBLAS info != 0) or an implausible target sends the scenario to the CPU, which is where
+// OLF's own MatrixException / FAILED verdict would land it.
+__global__ void svcCommitBatch(SvcTables T, int nScenarios, const char* rlActive,
+                               const int* info, const double* rhs, char* switched) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios || !rlActive[s] || !T.need[s]) return;
-    int idxOf[MAX_SVC_CTL];
-    int ctlOf[MAX_SVC_CTL];
-    int ne = 0;
-    for (int c = 0; c < T.nCtl; c++) {
-        idxOf[c < MAX_SVC_CTL ? c : 0] = -1;
+    int nC = T.nCtl;
+    if (info[s] != 0) {
+        T.reject[s] = 1;
+        return;
     }
-    for (int c = 0; c < T.nCtl; c++) {
-        if (!T.enabled[(size_t) s * T.nCtl + c]) continue;
-        if (ne >= MAX_SVC_CTL) {
-            T.reject[s] = 1;                                 // more controllers than the in-kernel system holds
-            return;
-        }
-        idxOf[c] = ne;
-        ctlOf[ne++] = c;
-    }
-    if (ne == 0) return;
-    double a[MAX_SVC_CTL][MAX_SVC_CTL];
-    double bm[MAX_SVC_CTL][MAX_SVC_CTL];
-    double rhs[MAX_SVC_CTL];
-    for (int i = 0; i < ne; i++) {
-        rhs[i] = 0.0;
-        for (int j = 0; j < ne; j++) a[i][j] = 0.0;
-    }
-    for (int z = 0; z < T.nZones; z++) {                     // A: one block per zone over its ENABLED controllers
-        int cnt = 0;
-        for (int k = T.zonePtr[z]; k < T.zonePtr[z + 1]; k++) {
-            if (idxOf[T.zoneCtl[k]] >= 0) cnt++;
-        }
-        if (cnt == 0) continue;
-        for (int k = T.zonePtr[z]; k < T.zonePtr[z + 1]; k++) {
-            int ci = idxOf[T.zoneCtl[k]];
-            if (ci < 0) continue;
-            for (int l = T.zonePtr[z]; l < T.zonePtr[z + 1]; l++) {
-                int cj = idxOf[T.zoneCtl[l]];
-                if (cj < 0) continue;
-                a[ci][cj] = (ci == cj) ? 1.0 - 1.0 / cnt : -1.0 / cnt;
-            }
-        }
-    }
-    for (int i = 0; i < ne; i++) {                           // rhs = -A.k0
-        double v = 0.0;
-        for (int j = 0; j < ne; j++) v += a[i][j] * T.k0[(size_t) s * T.nCtl + ctlOf[j]];
-        rhs[i] = -v;
-    }
-    for (int i = 0; i < ne; i++) {                           // b = A . Jk^T
-        for (int j = 0; j < ne; j++) {
-            double v = 0.0;
-            for (int k = 0; k < ne; k++) {
-                v += a[i][k] * T.jk[((size_t) s * T.nCtl + ctlOf[j]) * T.nCtl + ctlOf[k]];
-            }
-            bm[i][j] = v;
-        }
-    }
-    for (int z = 0; z < T.nZones; z++) {                     // the zone's LAST controlled bus carries the pilot row
-        int last = -1;
-        for (int k = T.zonePtr[z]; k < T.zonePtr[z + 1]; k++) {
-            if (idxOf[T.zoneCtl[k]] >= 0) last = idxOf[T.zoneCtl[k]];
-        }
-        if (last < 0) continue;
-        for (int j = 0; j < ne; j++) bm[last][j] = T.jvpp[(size_t) s * T.nCtl + ctlOf[j]];
-        rhs[last] = T.zoneTargetV[z] - x[(size_t) s * n + T.zonePilotRow[z]];
-    }
-    for (int col = 0; col < ne; col++) {                     // Gaussian elimination, partial pivoting
-        int piv = col;
-        double best = fabs(bm[col][col]);
-        for (int r = col + 1; r < ne; r++) {
-            if (fabs(bm[r][col]) > best) { best = fabs(bm[r][col]); piv = r; }
-        }
-        if (!(best > 0.0)) {
-            T.reject[s] = 1;                                 // singular zone system: OLF would throw
-            return;
-        }
-        if (piv != col) {
-            for (int j = 0; j < ne; j++) { double t = bm[col][j]; bm[col][j] = bm[piv][j]; bm[piv][j] = t; }
-            double t = rhs[col]; rhs[col] = rhs[piv]; rhs[piv] = t;
-        }
-        for (int r = col + 1; r < ne; r++) {
-            double f = bm[r][col] / bm[col][col];
-            if (f == 0.0) continue;
-            for (int j = col; j < ne; j++) bm[r][j] -= f * bm[col][j];
-            rhs[r] -= f * rhs[col];
-        }
-    }
-    for (int r = ne - 1; r >= 0; r--) {
-        double v = rhs[r];
-        for (int j = r + 1; j < ne; j++) v -= bm[r][j] * rhs[j];
-        rhs[r] = v / bm[r][r];
-    }
-    for (int i = 0; i < ne; i++) {                           // plausibility, then commit
-        double nt = T.targetV[(size_t) s * T.nCtl + ctlOf[i]] + rhs[i];
+    const double* dv = rhs + (size_t) s * nC;
+    for (int i = 0; i < nC; i++) {
+        if (!T.enabled[(size_t) s * nC + i]) continue;
+        double nt = T.targetV[(size_t) s * nC + i] + dv[i];
         if (!(nt >= T.minPlausibleV && nt <= T.maxPlausibleV)) {
             T.reject[s] = 1;
             return;
         }
     }
-    for (int i = 0; i < ne; i++) {
-        T.targetV[(size_t) s * T.nCtl + ctlOf[i]] += rhs[i];
+    bool moved = false;
+    for (int i = 0; i < nC; i++) {
+        if (!T.enabled[(size_t) s * nC + i]) continue;
+        T.targetV[(size_t) s * nC + i] += dv[i];
+        moved = true;
     }
-    switched[s] = 1;                                         // OLF: UNSTABLE, the zone adjusted
+    if (moved) {
+        switched[s] = 1;                                     // OLF: UNSTABLE, the zone adjusted
+    }
 }
 
 // Give the moved zone targets to the system: an UNPINNED controller's controlled-bus V identity takes the
@@ -7211,9 +7227,31 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
         ctx->factored = true;
         CUDA_CHECK(cudaMemcpy(ctx->dActive.p, active.data(), nS, cudaMemcpyHostToDevice));   // as it was
-        svcZoneSolveBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n,
-                ctx->dRlActive.as<char>(), ctx->dX.as<double>(), ctx->dRlSwitched.as<char>(),
-                std::getenv("OLF_GPU_SVC_DBG") != nullptr ? 1 : 0);
+        // ---- the zone systems: assembled into device memory, solved by cuBLAS's BATCHED dense LU ----
+        if (ctx->svcBlas == nullptr) {
+            CUBLAS_CHECK(cublasCreate(&ctx->svcBlas));
+        }
+        CUBLAS_CHECK(cublasSetStream(ctx->svcBlas, ctx->stream));
+        svcAssembleBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n,
+                ctx->dRlActive.as<char>(), ctx->dSvcCtlZone.as<int>(), ctx->dX.as<double>(),
+                ctx->dSvcMat.as<double>(), ctx->dSvcRhs.as<double>());
+        svcPointersBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, nC,
+                ctx->dSvcMat.as<double>(), ctx->dSvcRhs.as<double>(),
+                reinterpret_cast<double**>(ctx->dSvcMatPtr.p), reinterpret_cast<double**>(ctx->dSvcRhsPtr.p));
+        CUBLAS_CHECK(cublasDgetrfBatched(ctx->svcBlas, nC,
+                reinterpret_cast<double**>(ctx->dSvcMatPtr.p), nC,
+                ctx->dSvcPiv.as<int>(), ctx->dSvcInfo.as<int>(), nS));
+        int trsInfo = 0;
+        CUBLAS_CHECK(cublasDgetrsBatched(ctx->svcBlas, CUBLAS_OP_N, nC, 1,
+                reinterpret_cast<const double* const*>(ctx->dSvcMatPtr.p), nC,
+                ctx->dSvcPiv.as<int>(),
+                reinterpret_cast<double**>(ctx->dSvcRhsPtr.p), nC, &trsInfo, nS));
+        if (trsInfo != 0) {
+            throw std::runtime_error("cublasDgetrsBatched rejected its arguments");
+        }
+        svcCommitBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS,
+                ctx->dRlActive.as<char>(), ctx->dSvcInfo.as<int>(), ctx->dSvcRhs.as<double>(),
+                ctx->dRlSwitched.as<char>());
         svcApplyBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n,
                 ctx->dRlActive.as<char>(), ctx->dRlLimitType.as<char>(), ctx->dTarget.as<double>());
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -9614,8 +9652,18 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     readD(jZoneTargetV, zoneTargetV);
     int nC = static_cast<int>(ctx->hSvcCtldVRow.size());
     int nZ = static_cast<int>(zonePtr.size()) - 1;
-    if (nC > MAX_SVC_CTL || nZ <= 0) {
-        return 0;                                            // wider than the in-kernel dense zone system
+    if (nZ <= 0) {
+        return 0;
+    }
+    // OLF solves ONE system over every enabled controller of every zone, so the size is the total
+    // controller count. The batched LU holds an N*N matrix per scenario, which is what actually bounds
+    // this: refuse when that workspace would not fit rather than at an arbitrary controller count.
+    double matBytes = static_cast<double>(ctx->nScenarios) * nC * nC * sizeof(double);
+    if (matBytes > SVC_MAT_BUDGET_BYTES) {
+        std::fprintf(stderr, "SVC in-kernel declined: %d controllers x %d scenarios needs %.1f MB of zone-system "
+                     "workspace (budget %.0f MB)\n", nC, ctx->nScenarios, matBytes / 1048576.0,
+                     SVC_MAT_BUDGET_BYTES / 1048576.0);
+        return 0;
     }
     for (int e : qElem) {
         if (e < 0) {
@@ -9646,6 +9694,21 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->dSvcNeed.ensure(nS * sizeof(char));
     ctx->dSvcReject.ensure(nS * sizeof(char));
     ctx->dSvcRlVt.ensure(nS * std::max(ctx->nrl, 1) * sizeof(double));
+    ctx->dSvcMat.ensure(nS * static_cast<size_t>(nC) * nC * sizeof(double));
+    ctx->dSvcRhs.ensure(nS * nC * sizeof(double));
+    ctx->dSvcMatPtr.ensure(nS * sizeof(double*));
+    ctx->dSvcRhsPtr.ensure(nS * sizeof(double*));
+    ctx->dSvcPiv.ensure(nS * nC * sizeof(int));
+    ctx->dSvcInfo.ensure(nS * sizeof(int));
+    {
+        std::vector<int> zoneOf(nC, 0);                      // controller -> its zone, for the assembly
+        for (int z = 0; z < nZ; z++) {
+            for (int k = zonePtr[z]; k < zonePtr[z + 1]; k++) {
+                zoneOf[zoneCtl[k]] = z;
+            }
+        }
+        ctx->dSvcCtlZone.upload(zoneOf.data(), zoneOf.size() * sizeof(int));
+    }
     {
         // NaN = "this zone has not moved the controller's target", which is what rlTargetOf tests. The
         // reactive-limit SEEDING reads this buffer before the per-solve reset further down runs, so an

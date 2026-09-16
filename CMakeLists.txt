@@ -92,7 +92,10 @@ target_include_directories(olfgpu
     ${CMAKE_CURRENT_SOURCE_DIR}/native/cuda
     ${CUDSS_INCLUDE_DIR}
 )
-target_link_libraries(olfgpu PRIVATE ${CUDSS_LIBRARY})
+# cuBLAS supplies the BATCHED dense LU the SecondaryVoltageControl phase solves its per-scenario zone
+# systems with (cublasDgetrfBatched/cublasDgetrsBatched) — many small matrices is exactly its case, and
+# no linear algebra is written by hand. It is already present wherever cuDSS is (cuDSS links it).
+target_link_libraries(olfgpu PRIVATE ${CUDSS_LIBRARY} CUDA::cublas)
 # Both batched N-1 solve modes (per-scenario loop + uniform batched cuDSS API) are compiled
 # in and selected at RUNTIME via -Dolf.gpu.batchMode (default 0). cuDSS >= 0.7.1 is required
 # (static_assert in olf_gpu_nr_jni.cu); the cudssMatrixCreate* data-type args are shimmed by

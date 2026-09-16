@@ -134,3 +134,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-15 | a50c98d+dirty | 19.16 | 16.05 | 26.26 | x1.64 | 0/0/0 | 7.49 | 4.45 | 499/500 | 122/133 (92%) | SecondaryVoltageControl in-kernel phase (opt-in): the whole loop on the device, residual = the extra sweep slot |
 | 2026-09-16 | 03d37d8+dirty | 19.20 | 15.55 | 27.37 | x1.76 | 0/0/0 | 7.69 | 4.52 | 499/500 | 122/133 (92%) | SecondaryVoltageControl in-kernel by default: every OLF outer loop is now a device phase |
 | 2026-09-16 | 82a36d6+dirty | 19.27 | 15.97 | 28.22 | x1.77 | 0/0/0 | 7.56 | 4.46 | 499/500 | 122/133 (92%) | host orchestrators deleted; device driver is the default for the base load flow |
+| 2026-09-16 | 91a44ac+dirty | 20.26 | 17.42 | 31.37 | x1.80 | 0/0/0 | 7.94 | 4.47 | 499/500 | 122/133 (92%) | SecondaryVoltageControl zone systems solved by cuBLAS batched LU; no hand-written linear algebra |

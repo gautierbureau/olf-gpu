@@ -568,16 +568,31 @@ sensitivity is dx at the pilot row. The pieces, in `check()`'s order:
   at all), then the pilot-deadband / K-spread trigger with K from the pass's own `qBuf`.
 - one unit-RHS solve per controlled bus on the driver's own factors, then `svcGatherBatch` for
   `calculateSensiK` and `calculateSensiVpp`.
-- `svcZoneSolveBatch` — A (per-zone block), K0, `b = A.Jk^T`, the zone's LAST controlled bus's row
-  replaced by the pilot sensitivities and its rhs by the pilot dv, solved per scenario by Gaussian
-  elimination; an implausible target rejects the scenario to the CPU, as OLF's FAILED would.
+- `svcAssembleBatch` + **cuBLAS batched dense LU** (`cublasDgetrfBatched` / `cublasDgetrsBatched`) +
+  `svcCommitBatch` — A (per-zone block), K0, `b = A.Jk^T`, the zone's LAST controlled bus's row
+  replaced by the pilot sensitivities and its rhs by the pilot dv. NO hand-written linear algebra: the
+  systems are assembled column-major into device memory and handed to the library, one matrix per
+  scenario. A controller at a reactive limit is padded out with an identity row and a zero rhs, which
+  leaves the enabled block exactly OLF's system and gives the disabled one dv = 0. A singular system
+  (cuBLAS info != 0) or an implausible target rejects the scenario to the CPU, where OLF's own
+  MatrixException / FAILED verdict would land it.
 - `svcApplyBatch` — the moved target on an unpinned controlled bus's V identity, and the switch-back
   comparison target for a pinned one (`dSvcRlVt`, which `rlTargetOf` consults).
 
-Three layers remain, most faithful first: the in-kernel phase; the driver PAUSE at the same slot
-where the kernel refuses the tables (a zone set wider than `MAX_SVC_CTL`, or an observable on an
-unpacked element); and `OLF_GPU_SVC_HOST_ORCHESTRATOR=1` for A/B against the old after-the-sweep
-orchestrator.
+Two layers remain: the in-kernel phase, and the driver PAUSE at the same slot where the kernel
+refuses the tables (an observable on an unpacked element, or a zone system whose per-scenario
+workspace exceeds `SVC_MAT_BUDGET_BYTES`).
+
+**Sizing, for real networks.** OLF solves ONE system over every enabled controller of every zone —
+A is block diagonal by zone but Jk is full, since a controller in one zone moves a controlled bus in
+another through the network — so N is the TOTAL controller count, not a per-zone one. Production
+cases are quoted at 30 to 60 zones of 4 to 20 controllers, i.e. N = 120 to 1200. Two consequences
+the original 16-controller cap hid: the batched LU holds an N*N matrix per scenario, so the workspace
+is scenarios * N^2 * 8 bytes (58 MB at N=120 with 500-scenario chunks, 5.8 GB at N=1200 — hence the
+budget, and chunk sizing will have to follow N); and Jk needs one unit-RHS solve per controlled bus,
+so N solves per scenario per check, which is inherent (the matrix is genuinely N functions by N
+parameters, so neither forward nor adjoint avoids it) and is what will dominate at the top of that
+range. NOT YET VALIDATED above N = 4: rte6515 carries two zones of two.
 
 **The bug that cost the most, and the wrong turn it caused.** The phase first landed 1.04e-10 kV off
 on the SecondaryVc unit tests. `OLF_GPU_SVC_INERT=1` (slot in the sweep, body empty) reproduced the

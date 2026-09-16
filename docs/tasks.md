@@ -13,7 +13,7 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ### #54 — A second SA run in one JVM re-pays the cuDSS ANALYSIS (found 2026-09-16)
 
-Measured, not suspected. `OLF_GPU_TRACE=1` now tags every ANALYSIS with the context's batch width, and
+Measured, not suspected. `OLF_GPU_TRACE=1` now tags every ANALYSIS with the context's batch size, and
 the production bench (three GPU runs: a 20-scenario qualification pass, then cold and warm at 250)
 prints six:
 
@@ -30,9 +30,9 @@ ubatch nScenarios=250 LU_NNZ=260076
 
 Within ONE analysis the contingencies are fine: the chunk context is acquired before both the chunk
 loop and the strategy-pair group, `ctx->analyzed` latches, and every chunk of every group shares that
-one ANALYSIS. The base load flow pays its own, at width 1.
+one ANALYSIS. The base load flow pays its own, for a batch of one.
 
-The third eviction is the finding: `chunk=250 -> chunk=250`, the same width and the same LU_NNZ, so the
+The third eviction is the finding: `chunk=250 -> chunk=250`, the same batch size and the same LU_NNZ, so the
 PATTERN is identical and the symbolic analysis would have been reusable. `acquireBatchContext` misses
 because it keys on `GpuAcData.sameAs`, which compares element PARAMETER VALUES (`cbIn` and friends) —
 and the previous run left the network at different tap positions. The base load flow already has the
@@ -42,9 +42,23 @@ and push the new values.
 What makes it more than a one-line change: `createBatchContext` takes the reactive-limit and
 distributed-slack packs as CONSTRUCTOR arguments (`rlMinQ`, `rlVtarget`, `dsFactor`, …) and
 `GpuBatchOuterLoopTables.install` does not re-upload them, so reusing a context across runs needs
-those packs to become setters like the channels installed beside them. Size it against the measured
-ANALYSIS cost first — the cold/warm delta on the bench is ~1.4 s over 500 contingencies and the
-analysis is only part of that.
+those packs to become setters like the channels installed beside them.
+
+**Size it against the measured cost.** The trace now times the ANALYSIS: ~64 ms at the chunk's batch
+size, ~80 ms for the base load flow's batch of one, and the cost is INDEPENDENT of the batch size
+(63.4 ms at 20, 63.6 ms at 250) because UBATCH analyzes a single block and carries the batch size as
+`CUDSS_CONFIG_UBATCH_SIZE`. So ~144 ms per run, about 1.8% of a 7.9 s warm bench and 0.2% of the
+82 s rte6515 run. Worth doing, not urgent.
+
+**And one analysis CANNOT serve two batch sizes — tested, not assumed.** A COST that does not move with
+the batch size invites analyzing once and re-setting `CUDSS_CONFIG_UBATCH_SIZE`, which is what the
+compaction path's tier change would avoid. Tried: cuDSS ACCEPTS the resize without a new analysis, the
+production bench ran 11% faster warm (7073 ms vs 7917 ms) with EXACT violation parity, and then
+pegase9241 died with `CUDA error: an illegal memory access was encountered` — the data object's
+buffers are sized for the batch size it was analyzed at. The analysis does not cost more for a bigger
+batch, but its STATE belongs to that batch size. The compaction path's destroy-and-re-analyze is right; the note there now says
+why, so nobody re-derives the same false economy. A bench that gets faster while corrupting memory is
+the reason to run the whole suite on a perf idea, not just the bench.
 
 ### #30 — Multi-stage conditional actions
 Pending. The only item left **in** the operator-strategy machinery; everything else in #24

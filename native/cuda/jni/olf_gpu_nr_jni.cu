@@ -284,7 +284,8 @@ inline void applyReorderAlg(cudssConfig_t config) {
 // Report the LU fill after an ANALYSIS when sweeping (or tracing): one stderr line the
 // sweep driver greps. Non-fatal — some (version, ordering) combinations may not expose
 // CUDSS_DATA_LU_NNZ; the sweep then judges on the bench timing alone.
-inline void traceLuNnz(cudssHandle_t handle, cudssData_t data, const char* where, int nScenarios = 0) {
+inline void traceLuNnz(cudssHandle_t handle, cudssData_t data, const char* where, int nScenarios = 0,
+                       double ms = -1.0) {
     if (std::getenv("OLF_GPU_REORDER_ALG") == nullptr && std::getenv("OLF_GPU_TRACE") == nullptr) {
         return;
     }
@@ -299,8 +300,8 @@ inline void traceLuNnz(cudssHandle_t handle, cudssData_t data, const char* where
 #else
         const char* unsetName = "default";
 #endif
-        std::fprintf(stderr, "OLF_GPU_CUDSS reorder=%s %s nScenarios=%d LU_NNZ=%lld\n",
-                     alg != nullptr ? alg : unsetName, where, nScenarios, static_cast<long long>(luNnz));
+        std::fprintf(stderr, "OLF_GPU_CUDSS reorder=%s %s nScenarios=%d LU_NNZ=%lld analysis=%.1f ms\n",
+                     alg != nullptr ? alg : unsetName, where, nScenarios, static_cast<long long>(luNnz), ms);
         return;
     }
 #endif
@@ -7663,8 +7664,21 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 ctx->st->dDiagPos.as<int>(), ctx->dActive.as<char>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
         if (!ctx->analyzed) {
+            bool timeIt = std::getenv("OLF_GPU_TRACE") != nullptr;
+            long long t0 = 0;
+            if (timeIt) {
+                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                t0 = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+            }
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
-            traceLuNnz(ctx->ds.handle, ctx->ds.data, "ubatch", ctx->nScenarios);
+            double ms = -1.0;
+            if (timeIt) {
+                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                ms = (std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count() - t0) / 1.0e6;
+            }
+            traceLuNnz(ctx->ds.handle, ctx->ds.data, "ubatch", ctx->nScenarios, ms);
             ctx->analyzed = true;
         }
         // ONE cudssExecute per iteration (phases are OR-able bit flags): halves the per-iteration
@@ -7730,6 +7744,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             CUDA_CHECK(cudaMemcpyAsync(ctx->dMapC.p, cmap.data(), w * sizeof(int), cudaMemcpyHostToDevice, ctx->stream));
             gatherScenarios<<<grid(nnz * w), BLOCK, 0, ctx->stream>>>(nnz, w, ctx->dMapC.as<int>(), ctx->dVals.as<double>(), ctx->dValsC.as<double>());
             gatherScenarios<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n, w, ctx->dMapC.as<int>(), ctx->dB.as<double>(), ctx->dBC.as<double>());
+            // A new batch size needs a FRESH data object and a fresh ANALYSIS. Setting
+            // CUDSS_CONFIG_UBATCH_SIZE on the existing data and skipping the analysis is accepted by
+            // cuDSS and even looks faster on a bench -- measured 2026-09-16 at -11% warm with exact
+            // violation parity -- and then fails with an illegal memory access on a bigger network:
+            // the data object's buffers are sized for the batch size it was analyzed at. The analysis
+            // is cheap (~64 ms) and costs the same at any batch size, but its STATE belongs to one.
             if (w != ctx->compactWidth) {                     // tier change: fresh data + single-block ANALYSIS
                 if (ctx->dsC.data) {
                     CUDSS_CHECK(cudssDataDestroy(ctx->dsC.handle, ctx->dsC.data));

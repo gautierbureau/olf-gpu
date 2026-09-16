@@ -605,6 +605,13 @@ public final class GpuAcNewtonSolver {
      *  {@code robust = 0} clears the channel on a cached context. */
     public static native void setBatchRlRobust(long handle, double[] rlInitTargetQ, double vLo, double vHi, int robust);
 
+    /** {@code AcloadFlowEngine.isStateUnrealistic} on the driver's INTERMEDIATE states: per row, 1 = a
+     *  non-fictitious bus's {@code BUS_V} at or above {@code minNominalVoltageRealisticVoltageCheck},
+     *  plus the realistic band. A scenario that ever leaves the band goes to the CPU replay.
+     *  {@code enabled = 0} clears the channel on a cached context. */
+    public static native void setBatchRealisticCheck(long handle, byte[] rowChecked, double minV, double maxV,
+                                                     int enabled);
+
     public static native void setBatchRlRemote(long handle, byte[] rlRemote, int[] rlCmpVrow,
                                                int[] rmqRow, int[] rmqElem, int[] rmqSide, int[] rmqKind,
                                                double[] rmqWeight,

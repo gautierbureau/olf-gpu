@@ -799,6 +799,16 @@ pass (`rlRobustVResetBatch`) against the pre-pass state rather than racing insid
 The packed per-(controller, scenario) RL state widened from two limit-type bits to three
 (`(limitType & 7) | (switchCount << 3)`), on both sides of the JNI.
 
+The other half of that gap was the realistic-voltage check. `AcloadFlowEngine.isStateUnrealistic`
+runs after every solver run once the last `canFixUnrealisticState` loop has run, and an unrealistic
+state ends the outer-loop cycle with `UNREALISTIC_STATE`: the run FAILS and reports no violations.
+The device only ever checked the FINAL restored state, so a scenario that passed through an
+unrealistic state and recovered came back CONVERGED where OLF reports FAILED. Which solve the check
+belongs to depends on the configured loop order and on robust mode, so rather than reproduce that
+ordering the device now flags any scenario that is EVER unrealistic inside the sweep and routes it to
+the CPU replay, which applies OLF's rule itself. Stricter than OLF, so it costs batching share and
+cannot change an answer: rte6515 goes from 9040 to 9036 of 9042 batched, same two differing lines.
+
 **(b) Forced-PV: the per-scenario rejection detector.** The stated gap was that the in-kernel
 election had landed but a silent per-scenario rejection to the CPU remained as a safety net.
 The first reading — that the detector was dead code because the election keys were always

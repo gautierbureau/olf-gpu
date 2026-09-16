@@ -111,6 +111,23 @@ public final class GpuAcDataExtractor {
                 }
             }
         }
+        // Realistic-voltage check (AcloadFlowEngine.isStateUnrealistic): it walks the BUS_V variables
+        // of NON-FICTITIOUS buses and compares the state against [minRealisticVoltage,
+        // maxRealisticVoltage], but only where the bus's nominal voltage reaches
+        // minNominalVoltageRealisticVoltageCheck. The nominal voltage is network data and the
+        // thresholds are run parameters, so the row carries the nominal voltage and the install site
+        // applies the parameters. 0 marks a row the check never looks at.
+        double[] rowNominalV = new double[es.getIndex().getSortedVariablesToFind().size()];
+        for (com.powsybl.openloadflow.network.LfBus bus : network.getBuses()) {
+            if (bus.isFictitious()) {
+                continue;
+            }
+            int vRow = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcRowIndexing.col(
+                    es, bus.getNum(), com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_V);
+            if (vRow >= 0) {
+                rowNominalV[vRow] = bus.getNominalV();
+            }
+        }
         return new GpuAcData(
                 GpuAcArrays.flatD(family.cbIn(), 8), GpuAcArrays.flatI(family.cbIdx(), 12),
                 family.cbPcSide().stream().mapToInt(Integer::intValue).toArray(),
@@ -128,7 +145,7 @@ public final class GpuAcDataExtractor {
                 rl.rlSvcBmin(), rl.rlSvcBmax(), rl.rlV2Base(), rl.rlMonitored(),
                 rl.rlRemote(), rl.rlCmpVrow(), rl.rlBusNum(),
                 rl.rlNominalV(), rl.rlPRow(), rl.rlTargetP(), rl.rlIdRank(), rl.rlInitTargetQ(),
-                rmq.row(), rmq.elem(), rmq.side(), rmq.kind(), rmq.weight(), rowSlope,
+                rmq.row(), rmq.elem(), rmq.side(), rmq.kind(), rmq.weight(), rowSlope, rowNominalV,
                 ds.dsPhiRow(), ds.dsFactor(), ds.dsSlackPhiRow(), ds.dsSlackTargetP(),
                 ds.dsBaseTargetP(), ds.dsMaxDelta(), ds.dsMinDelta(),
                 ds.dsMode(), ds.dsMarginUp(), ds.dsMarginDown(), ds.dsSlackMarginUp(), ds.dsSlackMarginDown(),

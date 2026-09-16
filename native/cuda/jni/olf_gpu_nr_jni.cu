@@ -3482,6 +3482,29 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
     }
 }
 
+// AcloadFlowEngine.isStateUnrealistic, on the states INSIDE the sweep. OLF re-checks after every
+// solver run once the last loop that can fix an unrealistic state has run, and a state outside
+// [minRealisticVoltage, maxRealisticVoltage] on a non-fictitious bus at or above
+// minNominalVoltageRealisticVoltageCheck ends the outer-loop cycle with UNREALISTIC_STATE — the run
+// FAILS and reports no violations. The device only ever checked the FINAL restored state, so a
+// scenario that passed through an unrealistic state and recovered came back CONVERGED where OLF
+// reports FAILED. Flagged here after every inner solve and routed to the CPU replay, which applies
+// OLF's own rule about WHICH solve the check belongs to (it depends on the configured loop order and
+// on robust mode) instead of the device guessing at it. Rejecting is always sound: it changes the
+// route, never the answer.
+__global__ void realisticCheckBatch(int n, int nScenarios, const char* rowChecked, const double* x,
+                                    const char* live, double minV, double maxV, char* bad) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n * nScenarios) return;
+    int i = t % n;
+    int s = t / n;
+    if (!live[s] || !rowChecked[i]) return;
+    double v = x[(size_t) s * n + i];
+    if (v < minV || v > maxV) {
+        bad[s] = 1;
+    }
+}
+
 // voltageRemoteControlRobustMode, second half: "Set V to a safe 1 pu for the next computation".
 // ReactiveLimitsOuterLoop does this to every REMOTE voltage controller it switched PV->PQ in this
 // check whose OWN voltage is outside the realistic band — whether it switched on a reactive limit
@@ -4343,6 +4366,11 @@ struct BatchSolverContext {
     DeviceBuf dRlInitTgtQ;                                 // per entry: Σ generator targetQ (pu)
     int rlRobust = 0;
     double rlVLoRobust = 0.0, rlVHiRobust = 0.0;           // minRealisticV·1.02 and maxRealisticV/1.02
+    // AcloadFlowEngine's realistic-voltage check, run on the INTERMEDIATE states of the driver's
+    // sweep: per row, 1 = a non-fictitious bus's BUS_V at or above minNominalVoltageRealisticVoltageCheck.
+    DeviceBuf dRealisticRow, dRealisticGate, dRealisticBad;
+    int realisticCheck = 0;
+    double realisticMinV = 0.0, realisticMaxV = 0.0;
     // Distributed slack: the (mapped) slack BUS_PHI row + its scheduled targetP give the per-scenario
     // mismatch (read from dQbuf); dDsPhiRow/dDsFactor are the participating buses' P-target rows + normalized
     // participation factors. Reuses dRlActive/dRlSwitched (same outer schedule as reactive limits).
@@ -7700,6 +7728,39 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }   // ---- end inner Newton loop ----
     }   // ---- end if (solvePass) ----
 
+    // ---- AcloadFlowEngine's realistic-voltage check, on this INTERMEDIATE state ----
+    // OLF re-checks after every solver run once the last loop that can fix an unrealistic state has
+    // run, and an unrealistic state ends the outer-loop cycle with UNREALISTIC_STATE: the run FAILS
+    // and reports no violations. Which solve the check belongs to depends on the configured loop
+    // order and on robust mode, so rather than reproduce that ordering the device routes any
+    // scenario that is EVER unrealistic to the CPU replay, which applies OLF's rule itself. That is
+    // stricter than OLF (a state it would have let a later loop fix also leaves the batch), so it
+    // can cost batching share and can never change an answer.
+    if (ctx->realisticCheck && solvePass) {
+        std::vector<char> gate(nS);
+        for (int s = 0; s < nS; s++) {
+            gate[s] = (wasActive[s] && res.status[s] == 0 && live[s]) ? 1 : 0;
+        }
+        if (!ctx->dRealisticGate.p) ctx->dRealisticGate.alloc(nS * sizeof(char));
+        if (!ctx->dRealisticBad.p) ctx->dRealisticBad.alloc(nS * sizeof(char));
+        CUDA_CHECK(cudaMemcpyAsync(ctx->dRealisticGate.p, gate.data(), nS * sizeof(char),
+                                   cudaMemcpyHostToDevice, ctx->stream));
+        CUDA_CHECK(cudaMemsetAsync(ctx->dRealisticBad.p, 0, nS * sizeof(char), ctx->stream));
+        realisticCheckBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dRealisticRow.as<char>(),
+                ctx->dX.as<double>(), ctx->dRealisticGate.as<char>(),
+                ctx->realisticMinV, ctx->realisticMaxV, ctx->dRealisticBad.as<char>());
+        std::vector<char> bad(nS);
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        CUDA_CHECK(cudaMemcpy(bad.data(), ctx->dRealisticBad.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
+        for (int s = 0; s < nS; s++) {
+            if (bad[s]) {
+                res.status[s] = -2;                          // STATUS_REJECTED -> the CPU replays it
+                live[s] = 0;
+                active[s] = 0;
+            }
+        }
+    }
+
     if (!fullLoadflow) {
         break;                                              // fixed-iter / no controllers: one pass only
     }
@@ -9032,6 +9093,31 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->rlVLoRobust = vLo;
     ctx->rlVHiRobust = vHi;
     ctx->rlRobust = 1;
+}
+
+// AcloadFlowEngine's realistic-voltage check: install (or clear) the per-row "this row is a
+// checked bus voltage" mask and the two bounds. enabled = 0 clears it on a cached context.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRealisticCheck(
+        JNIEnv* env, jclass, jlong handle, jbyteArray jRowChecked, jdouble minV, jdouble maxV, jint enabled) {
+    BatchSolverContext* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->realisticCheck = 0;
+    if (enabled == 0 || jRowChecked == nullptr) {
+        return;
+    }
+    if (env->GetArrayLength(jRowChecked) != ctx->n) {
+        env->ThrowNew(env->FindClass("java/lang/RuntimeException"), "setBatchRealisticCheck: array length != n");
+        return;
+    }
+    jbyte* rc = env->GetByteArrayElements(jRowChecked, nullptr);
+    ctx->dRealisticRow.upload(rc, static_cast<size_t>(ctx->n) * sizeof(char));
+    env->ReleaseByteArrayElements(jRowChecked, rc, JNI_ABORT);
+    ctx->realisticMinV = minV;
+    ctx->realisticMaxV = maxV;
+    ctx->realisticCheck = 1;
 }
 
 extern "C" JNIEXPORT void JNICALL

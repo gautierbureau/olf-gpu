@@ -744,7 +744,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                         : null;
                 GpuBatchOuterLoopTables.install(context.handle.get(), cachedData, rlCurves,
                         acLoadFlowParameters.isVoltageRemoteControlRobustMode(),
-                        acLoadFlowParameters.getMinRealisticVoltage(), acLoadFlowParameters.getMaxRealisticVoltage());
+                        acLoadFlowParameters.getMinRealisticVoltage(), acLoadFlowParameters.getMaxRealisticVoltage(),
+                        acLoadFlowParameters.getMinNominalVoltageRealisticVoltageCheck());
                 tablesDirty = false;
             }
             if (lsMode == 1) {                               // batch loop LINE_SEARCH (ported 2026-09-08)

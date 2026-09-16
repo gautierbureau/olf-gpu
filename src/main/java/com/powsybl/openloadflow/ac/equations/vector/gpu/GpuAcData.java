@@ -84,7 +84,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         double[] rlNominalV, int[] rlPRow, double[] rlTargetP, int[] rlIdRank,
                         double[] rlInitTargetQ,
                         int[] rmqRow, int[] rmqElem, int[] rmqSide, int[] rmqKind, double[] rmqWeight,
-                        double[] rowSlope,
+                        double[] rowSlope, double[] rowNominalV,
                         int[] dsPhiRow, double[] dsFactor, int dsSlackPhiRow, double dsSlackTargetP,
                         double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
                         int dsMode, double[] dsMarginUp, double[] dsMarginDown,
@@ -191,6 +191,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(rmqSide, other.rmqSide) && java.util.Arrays.equals(rmqKind, other.rmqKind)
                 && java.util.Arrays.equals(rmqWeight, other.rmqWeight)
                 && java.util.Arrays.equals(rowSlope, other.rowSlope)
+                && java.util.Arrays.equals(rowNominalV, other.rowNominalV)
                 && java.util.Arrays.equals(cbPcSide, other.cbPcSide)
                 && dsMode == other.dsMode
                 && java.util.Arrays.equals(dsMarginUp, other.dsMarginUp) && java.util.Arrays.equals(dsMarginDown, other.dsMarginDown)

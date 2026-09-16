@@ -340,7 +340,8 @@ final class GpuSaRunScope {
                 olfGuardParams.getGeneratorVoltageControlMinNominalVoltage(),
                 // voltageRemoteControlRobustMode (OLF default TRUE): the RL kernel's realistic-V criteria.
                 acParameters.isVoltageRemoteControlRobustMode(),
-                acParameters.getMinRealisticVoltage(), acParameters.getMaxRealisticVoltage());
+                acParameters.getMinRealisticVoltage(), acParameters.getMaxRealisticVoltage(),
+                acParameters.getMinNominalVoltageRealisticVoltageCheck());
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
     }

@@ -188,7 +188,8 @@ final class GpuBatchChunkSolver {
                 rowCriteria != null ? rowCriteria[0] : null, rowCriteria != null ? rowCriteria[1] : null);
         // The run-constant outer-loop tables, shared with the base load flow's batch-of-one.
         GpuBatchOuterLoopTables.install(handle, gpuData, rlCurves,
-                config.rlRobustMode(), config.minRealisticVoltage(), config.maxRealisticVoltage());
+                config.rlRobustMode(), config.minRealisticVoltage(), config.maxRealisticVoltage(),
+                config.minNominalVoltageRealisticVoltageCheck());
 
         // Incremental TVC: upload controller data to device (run-constant, not per-chunk).
         // IncrementalTransformerVoltageControl as a DRIVER PHASE (OLF order 8), shared controlled

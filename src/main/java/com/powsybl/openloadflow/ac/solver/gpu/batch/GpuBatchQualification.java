@@ -630,7 +630,7 @@ final class GpuBatchQualification {
                             break;
                         }
                         vcOff.add(new GenOutage(-1, 0, vVar.getRow(), sb.getTargetQ(), true, true,
-                                -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0));
+                                -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0));
                     }
                     if (vcOff == null) {
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");

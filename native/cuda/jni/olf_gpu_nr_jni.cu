@@ -3003,16 +3003,18 @@ __device__ double rlCurveEval(double pMW, const double* pts, int npts, int sel, 
 // model). At the base point the delta is bit-zero (same formula both sides).
 __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int cvExtrapolate,
                                    const int* cvIdx, const double* cvIn, const double* cvPts,
-                                   const double* rlMinQ, const double* rlMaxQ, const double* target,
+                                   const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
+                                   const double* target,
                                    int nQOv, const int* qOvSlotEntry, const double* qOvMinMax,
                                    const int* cvOvPtr, const int* cvOvEntry, const double* cvOvVal,
-                                   double* minQDyn, double* maxQDyn) {
+                                   double* minQDyn, double* maxQDyn, double* loadQDyn) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
     int s = tid / nrl;
     double mn = rlMinQ[i];
     double mx = rlMaxQ[i];
+    double lq = rlLoadQ[i];
     int ovLo = cvOvPtr != nullptr ? cvOvPtr[s] : 0;           // this scenario's curve repairs, if any
     int ovHi = cvOvPtr != nullptr ? cvOvPtr[s + 1] : 0;       // (CSR by scenario: a handful of entries)
     for (int g = 0; g < ncv; g++) {
@@ -3046,12 +3048,14 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
     // ONLY reason the dynamic limits exist, which is why the seeding above starts from the static pair.
     for (int k = 0; k < nQOv; k++) {
         if (qOvSlotEntry[2 * k] == s && qOvSlotEntry[2 * k + 1] == i) {
-            mn += qOvMinMax[2 * k];
-            mx += qOvMinMax[2 * k + 1];
-        }
-    }
+            mn += qOvMinMax[3 * k];
+            mx += qOvMinMax[3 * k + 1];
+            lq += qOvMinMax[3 * k + 2];                      // a SHED load's reactive power: the pinned
+        }                                                    // target and the controller's own q both
+    }                                                        // measure against the bus's load target Q
     minQDyn[(size_t) s * nrl + i] = mn;
     maxQDyn[(size_t) s * nrl + i] = mx;
+    loadQDyn[(size_t) s * nrl + i] = lq;
 }
 
 // DISTR_Q target compensation (plan-B3): OLF's DISTR_Q row target is
@@ -3103,7 +3107,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
             // so getTargetQ() = limit - loadTargetQ. Unpinned members keep their packed targetQ.
             size_t li = cvStride ? (size_t) s * nrl + re : (size_t) re;
             char lt = limitType[(size_t) s * nrl + re];
-            sumTargetQ += (lt == 1 ? rlMinQ[li] : rlMaxQ[li]) - rlLoadQ[re];
+            sumTargetQ += (lt == 1 ? rlMinQ[li] : rlMaxQ[li]) - rlLoadQ[li];
         } else {
             sumTargetQ += mTargetQ[m];
         }
@@ -3401,7 +3405,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         double rliMax = rlMaxQ[rli] + (svcLim ? rlSvcBmax[i] * rdv2 : 0.0);
         if (limitType[rst] == 0) {
             if (mode[ridx] != 1) return;                     // islanded / frozen this scenario
-            double q = qBuf[ridx] + rlLoadQ[i];              // own q via fillRemoteMemberQBatch
+            double q = qBuf[ridx] + rlLoadQ[rli];            // own q via fillRemoteMemberQBatch
             // voltageRemoteControlRobustMode (ReactiveLimitsOuterLoop.checkControllerBus): the criteria
             // below test this REMOTE controller's OWN voltage — the same x row the quadratic SVC delta
             // reads — against the realistic band shrunk by the 1.02 margin.
@@ -3411,7 +3415,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                 savedTarget[rst] = target[ridx];             // the DISTR_Q row target (NOT 0 in general:
                                                              // see updateDistrQTargetsBatch)
                 mode[ridx] = 4;
-                target[ridx] = rliMin - rlLoadQ[i];
+                target[ridx] = rliMin - rlLoadQ[rli];
                 limitType[rst] = 1;
                 switchCount[rst]++;
                 switched[s] = 1;
@@ -3419,7 +3423,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             } else if (q > rliMax + tol) {
                 savedTarget[rst] = target[ridx];
                 mode[ridx] = 4;
-                target[ridx] = rliMax - rlLoadQ[i];
+                target[ridx] = rliMax - rlLoadQ[rli];
                 limitType[rst] = 2;
                 switchCount[rst]++;
                 switched[s] = 1;
@@ -3431,7 +3435,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                 // that the switch-back reads like a min/max limit but the Q-limit drift ignores.
                 savedTarget[rst] = target[ridx];
                 mode[ridx] = 4;
-                target[ridx] = rlInitTgtQ[i] - rlLoadQ[i];
+                target[ridx] = rlInitTgtQ[i] - rlLoadQ[rli];
                 limitType[rst] = unrealisticLo ? 3 : 4;
                 switchCount[rst]++;
                 switched[s] = 1;
@@ -3455,8 +3459,8 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                 // OLF re-freezes at a moved limit only for MIN_Q/MAX_Q (checkPqBusWithQLimitType tests
                 // the type explicitly); a realistic-V freeze holds its initial target Q.
                 double lim = limitType[rst] == 1 ? rliMin : rliMax;
-                if (fabs(lim - (target[ridx] + rlLoadQ[i])) > tol) {
-                    target[ridx] = lim - rlLoadQ[i];
+                if (fabs(lim - (target[ridx] + rlLoadQ[rli])) > tol) {
+                    target[ridx] = lim - rlLoadQ[rli];
                     switched[s] = 1;
                     passSwitched[rst] = 3;
                 }
@@ -3473,12 +3477,12 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
     double liMin = rlMinQ[li] + (svcLim ? rlSvcBmin[i] * dv2 : 0.0);
     double liMax = rlMaxQ[li] + (svcLim ? rlSvcBmax[i] * dv2 : 0.0);
     if ((mode[idx] == 0 || mode[idx] == 2) && limitType[st] == 0) {   // currently PV — check the reactive limits
-        double q = qBuf[idx] + rlLoadQ[i];
+        double q = qBuf[idx] + rlLoadQ[li];
         if (q < liMin - tol) {
             savedTarget[st] = target[idx];                   // remember the row target for the switch-back
             savedMode[st] = static_cast<char>(mode[idx]);   // and the PV form (0, or 2 for a slope SVC)
             mode[idx] = 1;
-            target[idx] = liMin - rlLoadQ[i];
+            target[idx] = liMin - rlLoadQ[li];
             limitType[st] = 1;
             switchCount[st]++;
             switched[s] = 1;
@@ -3487,7 +3491,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             savedTarget[st] = target[idx];
             savedMode[st] = static_cast<char>(mode[idx]);
             mode[idx] = 1;
-            target[idx] = liMax - rlLoadQ[i];
+            target[idx] = liMax - rlLoadQ[li];
             limitType[st] = 2;
             switchCount[st]++;
             switched[s] = 1;
@@ -3514,8 +3518,8 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             // the pinned Q at the NEW limit when it drifted by more than the mismatch tol.
             // Unreachable with static limits — gated on the channels.
             double lim = limitType[st] == 1 ? liMin : liMax;
-            if (fabs(lim - (target[idx] + rlLoadQ[i])) > tol) {
-                target[idx] = lim - rlLoadQ[i];
+            if (fabs(lim - (target[idx] + rlLoadQ[li])) > tol) {
+                target[idx] = lim - rlLoadQ[li];
                 switched[s] = 1;
                 passSwitched[st] = 3;
             }
@@ -4123,7 +4127,7 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
         size_t li = cvStride ? (size_t) s * nrl + i : (size_t) i;
         // a pinned REMOTE member's row is mode 4 (own Q balance), a pinned local one mode 1
         mode[idx] = (rlRemote != nullptr && rlRemote[i]) ? 4 : 1;
-        target[idx] = (lt == 1 ? rlMinQ[li] : rlMaxQ[li]) - rlLoadQ[i];
+        target[idx] = (lt == 1 ? rlMinQ[li] : rlMaxQ[li]) - rlLoadQ[li];
     }
 }
 
@@ -4333,6 +4337,7 @@ struct BatchSolverContext {
     // buffer); dRlActive marks which scenarios to RL-check this pass; dRlSwitched flags scenarios that switched.
     int nrl = 0;
     DeviceBuf dRlVrow, dRlMinQ, dRlMaxQ, dRlLoadQ, dRlVtarget;   // per controller (nrl)
+    DeviceBuf dRlLoadQDyn;                                       // per (scenario, controller) — shed load Q
     // Reactive capability CURVES at runtime P (setBatchRlCurves): per participating curve gen —
     // cvIdx {rlIdx, pRow, ptsOff, npts}, cvIn {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu},
     // cvPts {p_MW, minQ_MW, maxQ_MW} sorted by p; dRlMinQDyn/dRlMaxQDyn = nS*nrl evaluated limits.
@@ -6641,7 +6646,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     DeviceBuf dRlQOvSlotEntry, dRlQOvMinMax;
     if (nRlQOv > 0) {
         dRlQOvSlotEntry.upload(rlQOvSlotEntry, static_cast<size_t>(nRlQOv) * 2 * sizeof(int));
-        dRlQOvMinMax.upload(rlQOvMinMax, static_cast<size_t>(nRlQOv) * 2 * sizeof(double));
+        dRlQOvMinMax.upload(rlQOvMinMax, static_cast<size_t>(nRlQOv) * 3 * sizeof(double));   // {dMinQ, dMaxQ, dLoadQ}
     }
     // Per-scenario curve repairs, CSR by scenario: the dynamic-limits kernel runs one thread per
     // (reactive-limit entry, scenario) and walks the curve entries inside, so a flat {slot, entry}
@@ -6665,7 +6670,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         dCvOvVal.upload(val.data(), val.size() * sizeof(double));
     }
     bool useDynRlLimits = ctx->nrl > 0 && (ctx->ncv > 0 || nRlQOv > 0);
-    if (useDynRlLimits && !ctx->dRlMinQDyn.p) {              // curves allocate these; a Q override alone must too
+    if (useDynRlLimits && (!ctx->dRlMinQDyn.p || !ctx->dRlLoadQDyn.p)) {   // curves allocate these on their own
+                                                            // table upload; a Q override alone must too, and a
+                                                            // guard that names only ONE of them silently leaves
+                                                            // the others null on a curve network (measured: the
+                                                            // whole precompute fell back to the CPU)
+        ctx->dRlLoadQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
         ctx->dRlMinQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
         ctx->dRlMaxQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
     }
@@ -6731,19 +6741,21 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             if (useDynRlLimits) {                            // curve limits at the CURRENT (seeded) targets,
                 rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
                         ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
-                        ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dTarget.as<double>(),
+                        ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
+                        ctx->dTarget.as<double>(),
                         nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
                         nRlQOv > 0 ? dRlQOvMinMax.as<double>() : nullptr,
                         nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
-                        ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>());
+                        ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
+                        ctx->dRlLoadQDyn.as<double>());
             }
             seedRlModeFromState<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n,
                     ctx->dRlVrow.as<int>(),
                     useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
                     useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
-                    ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(),
+                    useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(),
                     ctx->dMode.as<int>(), ctx->dTarget.as<double>(), useDynRlLimits ? 1 : 0,
                     ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr);
         } else {
@@ -8165,13 +8177,15 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             if (useDynRlLimits) {                            // curve limits at the CURRENT (post-DS) targets,
                 rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
                         ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
-                        ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dTarget.as<double>(),
+                        ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
+                        ctx->dTarget.as<double>(),
                         nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
                         nRlQOv > 0 ? dRlQOvMinMax.as<double>() : nullptr,
                         nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
-                        ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>());
+                        ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
+                        ctx->dRlLoadQDyn.as<double>());
             }
             CUDA_CHECK(cudaMemsetAsync(ctx->dRlPassSwitched.p, 0, static_cast<size_t>(ctx->nrl) * nS, ctx->stream));
             reactiveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(
@@ -8180,7 +8194,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dRlVrow.as<int>(),
                     useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
                     useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
-                    ctx->dRlLoadQ.as<double>(),
+                    useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(),
                     ctx->dRlVtarget.as<double>(), ctx->dQbuf.as<double>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
                     ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
                     ctx->dRlLimitType.as<char>(), ctx->dRlSwitchCount.as<char>(), ctx->dRlSwitched.as<char>(),
@@ -8221,7 +8235,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->dRlVrow.as<int>(),
                         useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
                         useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
-                        ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(), useDynRlLimits ? 1 : 0,
+                        useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(), useDynRlLimits ? 1 : 0,
                         ctx->dTarget.as<double>(), ctx->dRlActive.as<char>(),
                         ctx->dDqMemberTargetQ.as<double>(),
                         ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr,
@@ -8955,7 +8969,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
                                 static_cast<int>(rlVtOvValVec.size()),
                                 rlVtOvSlotIdxVec.empty() ? nullptr : rlVtOvSlotIdxVec.data(),
                                 rlVtOvValVec.empty() ? nullptr : rlVtOvValVec.data(),
-                                static_cast<int>(rlQOvMinMaxVec.size() / 2),
+                                static_cast<int>(rlQOvMinMaxVec.size() / 3),
                                 rlQOvSlotEntryVec.empty() ? nullptr : rlQOvSlotEntryVec.data(),
                                 rlQOvMinMaxVec.empty() ? nullptr : rlQOvMinMaxVec.data(),
                                 static_cast<int>(cvOvStepScaleVec.size() / 2),
@@ -9257,6 +9271,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->dCvPts.upload(cvPts, static_cast<size_t>(env->GetArrayLength(jCvPts)) * sizeof(double));
     ctx->dRlMinQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
     ctx->dRlMaxQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
+    ctx->dRlLoadQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
     env->ReleaseIntArrayElements(jCvIdx, cvIdx, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jCvIn, cvIn, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jCvPts, cvPts, JNI_ABORT);

@@ -604,6 +604,7 @@ final class GpuBatchChunkSolver {
                                         rlQOvSlot.add(go.rlEntry());
                                         rlQOvVal.add(go.minQDelta());
                                         rlQOvVal.add(go.maxQDelta());
+                                        rlQOvVal.add(go.loadQDelta());
                                     }
                                     if (go.pRow() >= 0 && curveEntriesByPRow.containsKey(go.pRow())) {
                                         // The CURVE channel reconstructs each generator's OWN active

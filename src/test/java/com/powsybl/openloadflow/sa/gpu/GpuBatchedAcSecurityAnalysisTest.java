@@ -916,6 +916,37 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
     }
 
+    /** A Q-carrying LOAD shed at a bus PINNED on its reactive limit. The reactive-limit pack holds the
+     *  bus's load target Q as a run-constant, and reads it in two paired forms: the pinned row target is
+     *  limit - loadQ, and the controller's own q is the net injection + loadQ. Shedding the load makes
+     *  both stale. B6-G is given tight limits (+-5 MVAr) so B6 certainly pins, and B6's load carries
+     *  7.5 MVAr, so the stale term is larger than the limit itself. B6 rather than the bigger B3: its
+     *  load is 11 MW, small enough that the slack distribution does not saturate and reject.
+     *
+     *  <p>This used to be TWO defects on the two halves of one condition: a PV bus was routed to the CPU
+     *  for it, and a bus the base loadflow had ALREADY pinned reads busPv=false, fell through that gate,
+     *  batched, and was silently wrong (rte6515 LOAD-6157, 0.37 kV — found only by widening the load set
+     *  past the top 50). One per-scenario load Q closes both. VERIFIED by disabling the fix and watching
+     *  this test fail. */
+    @org.junit.jupiter.api.Test
+    void devicePinnedBusLosingReactiveLoadMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        // ONLY B3 is tight. Pin every PV bus in the case instead and the run hits the all-pinned
+        // corner, which the device rejects by design (OLF's global "strongest stays PV" election is
+        // not a kernel) — the scenario would go to the CPU and the test would prove nothing.
+        network.getGenerator("B6-G").newMinMaxReactiveLimits().setMinQ(-5).setMaxQ(5).add();
+        for (String wide : List.of("B1-G", "B2-G", "B3-G", "B8-G")) {
+            network.getGenerator(wide).newMinMaxReactiveLimits().setMinQ(-990).setMaxQ(990).add();
+        }
+        List<Contingency> ctgs = List.of(
+                new Contingency("B6-L", new com.powsybl.contingency.LoadContingency("B6-L")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
+    }
+
     /** A generator outage at a bus whose SURVIVORS carry sloped reactive capability curves. The curve
      *  channel reconstructs each generator's own active power from the bus's P row target to evaluate
      *  its curve there, and losing one of the bus's generators skews that reconstruction three ways at

@@ -28,7 +28,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, boolean toPq, boolean qOverride,
                         int dsBus, double dsFactorDelta, double dsBaseDelta, double dsMaxDelta, double dsMinDelta,
                         int rlEntry, double minQDelta, double maxQDelta, boolean allGensLost,
-                        java.util.Set<String> lostGenIds, double lostFactorSum, double pStep) {
+                        java.util.Set<String> lostGenIds, double lostFactorSum, double pStep, double loadQDelta) {
     // lostGenIds / lostFactorSum exist for the reactive-capability CURVE channel, which evaluates each
     // generator's curve at its OWN post-distribution active power, reconstructed from the bus's row
     // target by participation share. Losing a generator skews that reconstruction three ways — the lost
@@ -50,7 +50,10 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
         return rlEntry >= 0 && allGensLost;
     }
 
+    /** Anything this outage changes about the entry's run-constant reactive inputs: the capability the
+     *  lost generators take with them, and the load target Q the pinned target and the controller's own
+     *  q are both measured against. */
     public boolean shrinksReactiveLimits() {
-        return rlEntry >= 0 && (minQDelta != 0 || maxQDelta != 0);
+        return rlEntry >= 0 && (minQDelta != 0 || maxQDelta != 0 || loadQDelta != 0);
     }
 }

@@ -36,6 +36,16 @@ final class GpuBatchInjectionOutages {
     private GpuBatchInjectionOutages() {
     }
 
+    /** WHY one bus's injection outage could not be represented. All twelve exits share the
+     *  PLAN:INJECTION_OUTAGE_SHAPE census tag, which is too coarse to pick the next thing to fix;
+     *  OLF_GPU_GENOUT_REJECT=1 names the exit and the bus. */
+    private static <T> T reject(String why, LfBus bus) {
+        if (System.getenv("OLF_GPU_GENOUT_REJECT") != null) {
+            System.err.println("GENOUT_REJECT " + why + " bus=" + (bus == null ? "?" : bus.getId()));
+        }
+        return null;
+    }
+
     /** Merged per-BUS outages for a MULTI-generator contingency: gens grouped by bus, each bus's
      *  targets/DS deltas summed. Stage-1 constraint: at most ONE distributed-slack-participant bus
      *  per contingency (the native DS override carries one entry per scenario) — more, or any
@@ -48,7 +58,7 @@ final class GpuBatchInjectionOutages {
         java.util.Map<LfBus, List<LoadLoss>> loadsByBus = new java.util.LinkedHashMap<>();
         for (LfGenerator g : gens) {
             if (g.getBus() == null) {
-                return null;
+                return reject("GEN_WITHOUT_BUS", null);
             }
             byBus.computeIfAbsent(g.getBus(), b -> new ArrayList<>()).add(g);
         }
@@ -63,11 +73,11 @@ final class GpuBatchInjectionOutages {
             GenOutage go = computeBusGenOutage(es, gpuData, dsSum, slackParticipates, dsParams, e.getKey(), e.getValue(),
                     loadsByBus.getOrDefault(e.getKey(), List.of()));
             if (go == null) {
-                return null;
+                return null;                                 // the per-bus exit already named itself
             }
             if (go.dsBus() >= 0 && ++dsBuses > 1) {
                 LOGGER.debug("Multi-injection contingency touches several DS-participant buses — CPU fallback");
-                return null;
+                return reject("MULTI_DS_BUS", e.getKey());
             }
             out[k++] = go;
         }
@@ -80,7 +90,7 @@ final class GpuBatchInjectionOutages {
                                                  List<LfGenerator> lost, List<LoadLoss> lostLoads) {
         int busNum = bus.getNum();
         if (es.getEquation(busNum, AcEquationType.BUS_TARGET_PHI).isPresent()) {     // slack/reference: P is free
-            return null;
+            return reject("SLACK_BUS", bus);
         }
         // DISTR_Q controller bus (remote/distributed VC): the qPct weights are BAKED into the
         // equation system at creation — the CPU does not rebuild them on a gen loss either. When the
@@ -93,21 +103,21 @@ final class GpuBatchInjectionOutages {
             boolean keepsController = bus.getGenerators().stream()
                     .anyMatch(g -> !lostHere.contains(g)
                             && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
-            if (!keepsController || !lostLoads.isEmpty()) {
-                return null;                                 // group restructure / Q-carrying load shape — CPU
+            if (!keepsController || !lostLoads.isEmpty()) {   // group restructure / Q-carrying load shape — CPU
+                return reject(keepsController ? "DISTR_Q_BUS_WITH_LOAD_LOSS" : "DISTR_Q_LAST_CONTROLLER", bus);
             }
         }
-        if (bus.hasGeneratorsWithSlope()) {
-            return null;                                     // slope-SVC bus outage: the mode-2 row's fate on a
-        }                                                    // gen loss is not modeled — CPU
-        if (dsParams.isLoadBased() && !lostLoads.isEmpty()) {
-            return null;                                     // a lost/shifted load changes the LOAD participation
-        }                                                    // factors — per-scenario load reweight not modeled: CPU
+        if (bus.hasGeneratorsWithSlope()) {               // slope-SVC bus outage: the mode-2 row's fate on a
+            return reject("SLOPE_SVC_BUS", bus);             // gen loss is not modeled — CPU
+        }
+        if (dsParams.isLoadBased() && !lostLoads.isEmpty()) {   // a lost/shifted load changes the LOAD
+            return reject("LOAD_BASED_DS_LOAD_LOSS", bus);   // participation factors — not modeled: CPU
+        }
         java.util.Set<LfGenerator> lostSet = new java.util.HashSet<>(lost);
         int pRow = es.getVariableSet().getVariable(busNum, AcVariableType.BUS_PHI).getRow();
         int vRow = es.getVariableSet().getVariable(busNum, AcVariableType.BUS_V).getRow();
         if (pRow < 0 || vRow < 0) {
-            return null;
+            return reject("NO_P_OR_V_ROW", bus);
         }
         // Is this bus a distributed-slack participant? Matters for BOTH shapes: lost generators
         // leave the participation (factor/headroom reweight), AND pure injection deltas (load
@@ -127,25 +137,20 @@ final class GpuBatchInjectionOutages {
         }
         boolean lostParticipation = lost.stream().anyMatch(g -> dsParams.factor(g) != 0);
         if (dsParams.isRemainingMargin() && dsBus >= 0 && lostParticipation) {
-            return null;                                     // RM margins reweight per scenario is not modeled — CPU
+            return reject("REMAINING_MARGIN_DS", bus);       // RM margins reweight per scenario: not modeled — CPU
         }
         if (dsBus >= 0 && lostParticipation && slackParticipates) {
-            return null;                            // FACTOR reweight + participating slack: retain math doesn't hold
-        }                                           // (a pure base shift keeps the factors — retain stays exact)
+            return reject("PARTICIPATING_SLACK", bus);   // FACTOR reweight + participating slack: the retain math
+        }                                           // doesn't hold (a pure base shift keeps the factors — exact)
         if (!distrQBus && bus.getGeneratorVoltageControl().map(vc -> vc.getControlledBus() != null
                 && vc.getControlledBus().getNum() != busNum).orElse(false)) {
-            return null;                            // remote SINGLE-controller shape (pilot-Q remap, no DISTR_Q row
-        }                                           // at this bus): its q accounting is not modeled — CPU
+            return reject("REMOTE_SINGLE_CONTROLLER", bus);   // (pilot-Q remap, no DISTR_Q row at this bus):
+        }                                                        // its q accounting is not modeled — CPU
         double lostP = lost.stream().mapToDouble(LfGenerator::getTargetP).sum();
         double lostLoadP = lostLoads.stream().mapToDouble(LoadLoss::p).sum();
         double lostLoadQ = lostLoads.stream().mapToDouble(LoadLoss::q).sum();
         double pTarget = bus.getTargetP() - lostP + lostLoadP;   // shedding load RAISES the P target
         boolean busPv = bus.isGeneratorVoltageControlEnabled();
-        // A Q-carrying load delta at a voltage-controlling bus would make the RL pack's static
-        // loadQ go stale — CPU fallback. P-only deltas (e.g. redispatch actions) are safe: PV Q is free.
-        if (busPv && lostLoads.stream().anyMatch(l -> l.q() != 0)) {
-            return null;
-        }
         boolean lostControls = lost.stream()
                 .anyMatch(g -> g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
         boolean otherController = bus.getGenerators().stream()
@@ -223,9 +228,16 @@ final class GpuBatchInjectionOutages {
                 break;
             }
         }
+        double loadQDelta = 0;
         if (rlEntry >= 0 && !toPq) {
             minQDelta = -lost.stream().mapToDouble(LfGenerator::getMinQ).sum();
             maxQDelta = -lost.stream().mapToDouble(LfGenerator::getMaxQ).sum();
+            // The pack's loadQ is the bus's load target Q as EXTRACTED, and the reactive-limit
+            // machinery reads it in two paired forms: the pinned target is limit - loadQ, and the
+            // controller's own q is the net injection + loadQ. Shed a Q-carrying load and both go
+            // stale. This used to be a CPU gate for a PV bus; the bus the base loadflow had already
+            // PINNED fell through it and was silently wrong instead (rte6515 LOAD-6157, 0.37 kV).
+            loadQDelta = -lostLoadQ;
         }
         // No generator left at all. The reactive-limit entry must stop being a controller for this
         // scenario: a bus the BASE loadflow had already pinned PQ keeps a seeded limit type so a
@@ -250,6 +262,6 @@ final class GpuBatchInjectionOutages {
         double lostFactorSum = lost.stream().mapToDouble(dsParams::factor).sum();
         return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
                 dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum,
-                lostLoadP - lostP);
+                lostLoadP - lostP, loadQDelta);
     }
 }

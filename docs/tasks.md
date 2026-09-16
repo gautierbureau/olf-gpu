@@ -591,18 +591,25 @@ LESSON: an inert-slot probe proves "something enabled by this table", NOT "the s
 what else that flag switches on before naming a cause.
 
 **Every OLF outer loop is now a device phase.** rte6515, 9042 branch contingencies, both zones
-firing (`OLF_GPU_SVC=1 OLF_GPU_SVC_PILOT_SHIFT=1.0`), all 4 differing violations identical:
+firing (`OLF_GPU_SVC=1 OLF_GPU_SVC_PILOT_SHIFT=1.0`), all 4 differing violations identical. Cold and
+warm are two identical SA runs in the same JVM, so COLD carries the CUDA context, the cuDSS analysis
+and JIT; WARM is the fair comparator when asking what a LOOP costs:
 
-| chunk path for SVC | GPU cold | vs CPU 8 threads |
+| chunk path for SVC | cold | warm |
 |---|---|---|
-| host orchestrator (old) | 208 s | x0.46 |
-| driver pause | 150 s | x0.66 |
-| in-kernel (default) | 119 s | x0.91 |
+| host orchestrator (old) | 208 s | 172 s |
+| driver pause | 150 s | 142 s |
+| in-kernel | 119 s | 91 s |
+| in-kernel + base load flow on the driver | 83 s | 85 s |
+| (same case with SVC switched off) | 80 s | 83 s |
 
-With the base load flow ALSO on the driver (`OLF_GPU_DRIVER_OUTER_LOOPS=1`), i.e. every outer loop of
-the run on the device and no CPU load flow anywhere, the same SVC-enabled case runs at **83 s against
-the CPU's 102 s, x1.22** — against 80 s / x1.20 for the same case with SVC switched off. So enabling
-SecondaryVoltageControl now costs about 4% of wall time, where the host orchestrator cost 2.5x.
+So the port is worth 172 s -> 91 s of steady-state time, and SecondaryVoltageControl now costs about
+3% over the SVC-off baseline (85 vs 83 s) where the host orchestrator cost more than double (172 vs
+83 s). **Do NOT read the 119 -> 83 cold pair as the driver flag's doing**: that run's cold carried a
+28.7 s first-run penalty (119 cold vs 91 warm) which the other run did not (83 cold vs 85 warm), and
+on warm terms the flag is worth about 6%. Calibration for any single-run comparison here: the CPU arm
+does identical work in every one of these runs and ranged 96 s to 109 s, so differences under ~10%
+are not attributable.
 
 ### #43 — In-kernel IncrementalShuntVoltageControl### #43 — In-kernel IncrementalShuntVoltageControl### #43 — In-kernel IncrementalShuntVoltageControl (landed 2026-09-15)
 

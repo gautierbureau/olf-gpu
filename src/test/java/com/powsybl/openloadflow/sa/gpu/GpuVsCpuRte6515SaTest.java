@@ -73,12 +73,46 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 new EvenShiloachGraphDecrementalConnectivityFactory<>());
     }
 
-    /** Generate ALL branch N-1 contingencies from the network. */
+    /**
+     * The contingency set for this run. {@code OLF_GPU_SA_CTG_KINDS} picks the kinds as a comma list of
+     * {@code branch}, {@code generator} and {@code load} (default {@code branch}, the 9042-contingency
+     * reference set — never quote a different set as the scope result).
+     *
+     * <p>{@code OLF_GPU_SA_GEN_MIN_KV} keeps generators at or above a nominal voltage (default 400) and
+     * {@code OLF_GPU_SA_LOAD_TOP} the N biggest loads by P0 (default 50), so a first pass on the two new
+     * kinds is a small, deliberately chosen slice rather than every injection in the network.
+     */
     private static List<Contingency> allBranchContingencies(Network network) {
-        List<Contingency> all = network.getBranchStream()
-                .map(Branch::getId)
-                .map(id -> new Contingency(id, new BranchContingency(id)))
-                .collect(Collectors.toList());
+        String kinds = System.getenv().getOrDefault("OLF_GPU_SA_CTG_KINDS", "branch");
+        List<Contingency> all = new java.util.ArrayList<>();
+        if (kinds.contains("branch")) {
+            network.getBranchStream().map(Branch::getId)
+                    .forEach(id -> all.add(new Contingency(id, new BranchContingency(id))));
+        }
+        if (kinds.contains("generator")) {
+            double minKv = Double.parseDouble(System.getenv().getOrDefault("OLF_GPU_SA_GEN_MIN_KV", "400"));
+            java.util.Map<Double, Long> byKv = new TreeMap<>();
+            network.getGeneratorStream().forEach(g ->
+                    byKv.merge(g.getTerminal().getVoltageLevel().getNominalV(), 1L, Long::sum));
+            System.out.printf("  generators by nominal voltage: %s%n", byKv);
+            List<String> gens = network.getGeneratorStream()
+                    .filter(g -> g.getTerminal().getVoltageLevel().getNominalV() >= minKv)
+                    .map(com.powsybl.iidm.network.Generator::getId)
+                    .toList();
+            gens.forEach(id -> all.add(new Contingency(id, new com.powsybl.contingency.GeneratorContingency(id))));
+            System.out.printf("  + %d generator contingencies at or above %.0f kV%n", gens.size(), minKv);
+        }
+        if (kinds.contains("load")) {
+            int top = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_LOAD_TOP", "50"));
+            List<String> loads = network.getLoadStream()
+                    .sorted(java.util.Comparator.comparingDouble(
+                            (com.powsybl.iidm.network.Load l) -> l.getP0()).reversed())
+                    .limit(top)
+                    .map(com.powsybl.iidm.network.Load::getId)
+                    .toList();
+            loads.forEach(id -> all.add(new Contingency(id, new com.powsybl.contingency.LoadContingency(id))));
+            System.out.printf("  + %d load contingencies (the biggest by P0)%n", loads.size());
+        }
         // OLF_GPU_SA_MAX_CTG=<n>: run only the first n — a DIAGNOSTIC slice, so a parity question can be
         // iterated in seconds instead of the full 9042. Never quote a slice as the scope result.
         String max = System.getenv("OLF_GPU_SA_MAX_CTG");

@@ -520,7 +520,10 @@ final class GpuBatchQualification {
                 GenOutage[] gos = GpuBatchInjectionOutages.computeInjectionOutages(es, gpuData, dsSum, slackParticipates,
                         dsParams, c.lostGenerators(), c.lostLoads());
                 if (gos == null) {                           // slack / >1 DS bus / remote gen — route to CPU
-                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:SHUNT_SHAPE");
+                    // (was tagged SHUNT_SHAPE, a copy-paste from the block above: this is the INJECTION
+                    // outage shape, and the census is how we pick what to fix — a tag that lies about
+                    // the reason sends the next person at the wrong gate.)
+                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:INJECTION_OUTAGE_SHAPE");
                     continue;
                 }
                 // Curve-limits channel active: its p_now linkage models the DS delta ONLY. An injection

@@ -11,6 +11,42 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #60 — Generator and load contingencies on rte6515: first fold (2026-09-16)
+
+Both kinds have been batchable and unit-tested for a while; what had never been run is a REAL set.
+`GpuVsCpuRte6515SaTest` can now pick its kinds — `OLF_GPU_SA_CTG_KINDS=branch,generator,load`, with
+`OLF_GPU_SA_GEN_MIN_KV` (default 400) and `OLF_GPU_SA_LOAD_TOP` (default 50) — so a first pass is a
+small deliberate slice, not every injection. The all-branch 9042 set stays the default and the reference.
+
+**The transmission level in this case is 380 kV, not 400.** Generators by nominal voltage:
+3 kV … 63 kV=550, 90 kV=232, 150 kV=18, 225 kV=63, **380 kV=106**. A 400 kV filter selects nothing.
+
+**How it folds** (106 generators at 380 kV + the 50 biggest loads, 156 contingencies):
+
+| | value |
+| --- | --- |
+| batched | 83 / 156 |
+| violations | CPU 14073, GPU 14070, **3 differing** |
+| warm vs CPU-8t | x0.58 — slower, because half the set is CPU-routed |
+
+Loads alone: 41 / 50 batched and **0 differing violations**. The two kinds fold differently and the
+generator side is where the work is.
+
+**Three things to correct before going full throttle.**
+
+1. **`PLAN:GEN_OUTAGE_SHAPE` rejects 64 of the 106 generator contingencies** — by far the biggest item.
+   The reactive-capability CURVE channel's `p_now` linkage models the DISTRIBUTED-SLACK delta only, so an
+   injection override at a curve bus's P row would skew the evaluated Q limits and the scenario is routed
+   out. Losing a generator IS an injection override at exactly such a bus, which is why it hits most of
+   them. The fix is to make that linkage carry the override as well as the DS delta.
+2. **`PLAN:INJECTION_OUTAGE_SHAPE` rejects 9 of the 50 loads** — the shape computation returns null for a
+   slack bus, more than one distributed-slack bus, or a remote generator. Tagged `PLAN:SHUNT_SHAPE` until
+   now, a copy-paste from the block above it; the census is how we pick what to fix, so a tag that lies
+   about the reason sends the next person at the wrong gate. Renamed.
+3. **Three differing violations, all on generator contingencies** (GEN-5997, GEN-5997#0, GEN-6130, each
+   −1). Not yet root-caused, and not to be written off as a knife edge without an instrument that proves
+   it — the standing rule.
+
 ### #59 — Both routes build their phase tables with one function (2026-09-16)
 
 The base load flow and the batched security analysis called the SAME nine builders with the SAME

@@ -610,7 +610,7 @@ public final class GpuAcNewtonSolver {
      *  plus the realistic band. A scenario that ever leaves the band goes to the CPU replay.
      *  {@code enabled = 0} clears the channel on a cached context. */
     public static native void setBatchRealisticCheck(long handle, byte[] rowChecked, double minV, double maxV,
-                                                     int enabled);
+                                                     int enabled, int fixingLoop);
 
     public static native void setBatchRlRemote(long handle, byte[] rlRemote, int[] rlCmpVrow,
                                                int[] rmqRow, int[] rmqElem, int[] rmqSide, int[] rmqKind,

@@ -805,9 +805,22 @@ state ends the outer-loop cycle with `UNREALISTIC_STATE`: the run FAILS and repo
 The device only ever checked the FINAL restored state, so a scenario that passed through an
 unrealistic state and recovered came back CONVERGED where OLF reports FAILED. Which solve the check
 belongs to depends on the configured loop order and on robust mode, so rather than reproduce that
-ordering the device now flags any scenario that is EVER unrealistic inside the sweep and routes it to
-the CPU replay, which applies OLF's rule itself. Stricter than OLF, so it costs batching share and
-cannot change an answer: rte6515 goes from 9040 to 9036 of 9042 batched, same two differing lines.
+ordering, the device flags a scenario that is unrealistic inside the sweep and routes it to the CPU
+replay, which decides the status itself.
+
+The ordering could NOT be skipped, and measuring said so. Checking after every solve cost four
+rte6515 contingencies (9040 -> 9036 batched), and naming them showed every hit landing at the FIRST
+solve, before any outer loop had run — exactly where OLF defers. Under robust mode
+`AcloadFlowEngine` keeps `checkUnrealisticStates` false up to and including the last loop that
+declares `canFixUnrealisticState()` (ReactiveLimits, or the discrete TransformerVoltageControl),
+turns it on for the rest of the sweep, and resets it at the top of the next one — the whole point
+being to let those loops repair the state instead of failing the run on it. The device now takes
+that loop's identity as a hint from the Java side (−1 none, 0 ReactiveLimits, 1 the discrete
+TransformerVoltageControl), finds its slot in its own loop order and checks only past it. rte6515 is
+back to 9040 of 9042 with no sweep rejections at all, same two differing lines.
+`OLF_GPU_REALISTIC_CHECK=0` turns the intermediate check off and `OLF_GPU_UNREALISTIC_TRACE` names
+the slot, the pass and the loop that rejected — the two levers that made the cost measurable against
+one binary.
 
 **(b) Forced-PV: the per-scenario rejection detector.** The stated gap was that the in-kernel
 election had landed but a silent per-scenario rejection to the CPU remained as a safety net.

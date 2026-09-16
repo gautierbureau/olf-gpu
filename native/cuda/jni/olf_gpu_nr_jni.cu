@@ -4371,6 +4371,11 @@ struct BatchSolverContext {
     DeviceBuf dRealisticRow, dRealisticGate, dRealisticBad;
     int realisticCheck = 0;
     double realisticMinV = 0.0, realisticMaxV = 0.0;
+    // AcloadFlowEngine DEFERS the check until the last outer loop that can FIX an unrealistic state
+    // has run (voltageRemoteControlRobustMode; ReactiveLimits and the discrete TransformerVoltageControl
+    // are the two loops that declare canFixUnrealisticState). -1 = no such loop, check every solve.
+    // 0 = ReactiveLimits is the last one, 1 = the discrete TransformerVoltageControl.
+    int realisticFixingLoop = -1;
     // Distributed slack: the (mapped) slack BUS_PHI row + its scheduled targetP give the per-scenario
     // mismatch (read from dQbuf); dDsPhiRow/dDsFactor are the participating buses' P-target rows + normalized
     // participation factors. Reuses dRlActive/dRlSwitched (same outer schedule as reactive limits).
@@ -6828,6 +6833,25 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     if (nLoops == 0) {
         loopOrder[nLoops++] = LOOP_RL;                       // nothing to drive: the old code's phase-1 fallback
     }
+    // Where the realistic-voltage check STARTS applying in this sweep. AcloadFlowEngine keeps
+    // checkUnrealisticStates false up to and including the last loop that can fix an unrealistic state
+    // (that is the whole point of robust mode: give ReactiveLimits / the discrete
+    // TransformerVoltageControl a chance to repair the state instead of failing the run on it), then
+    // turns it on for the rest of the sweep and resets it at the top of the next one. A device pass at
+    // index i applies loopOrder[i] to the state its solve produced, so "past the fixing loop" is
+    // i > realisticFixingIdx. Not found, or no fixing loop at all, means check every solve — the
+    // conservative direction, since a check that fires too early only routes to the CPU.
+    int realisticFixingIdx = -1;
+    for (int i = 0; i < nLoops; i++) {
+        bool isFixing = ctx->realisticFixingLoop == 0
+                ? loopOrder[i] == LOOP_RL
+                : (ctx->realisticFixingLoop == 1
+                        && (loopOrder[i] == LOOP_HOST_TVC
+                            || (loopOrder[i] == LOOP_TVD_KERNEL && ctx->tvdMode != 1)));
+        if (isFixing) {
+            realisticFixingIdx = i;
+        }
+    }
     int loopIdx = 0;
     bool seqChanged = false;                                 // did any outer loop re-solve during the current RL->DS sequence
     if (!resume && ctx->startLoopKind >= 0) {
@@ -7736,7 +7760,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // scenario that is EVER unrealistic to the CPU replay, which applies OLF's rule itself. That is
     // stricter than OLF (a state it would have let a later loop fix also leaves the batch), so it
     // can cost batching share and can never change an answer.
-    if (ctx->realisticCheck && solvePass) {
+    // OLF_GPU_REALISTIC_CHECK=0 turns the intermediate check off, so its cost in batching share can
+    // be measured against the same binary (the FINAL state is still checked host-side either way).
+    static const bool realisticCheckOff = std::getenv("OLF_GPU_REALISTIC_CHECK") != nullptr
+            && std::string(std::getenv("OLF_GPU_REALISTIC_CHECK")) == "0";
+    if (ctx->realisticCheck && solvePass && !realisticCheckOff && loopIdx > realisticFixingIdx) {
         std::vector<char> gate(nS);
         for (int s = 0; s < nS; s++) {
             gate[s] = (wasActive[s] && res.status[s] == 0 && live[s]) ? 1 : 0;
@@ -7752,8 +7780,13 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         std::vector<char> bad(nS);
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         CUDA_CHECK(cudaMemcpy(bad.data(), ctx->dRealisticBad.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
+        static const bool traceUnrealistic = std::getenv("OLF_GPU_UNREALISTIC_TRACE") != nullptr;
         for (int s = 0; s < nS; s++) {
             if (bad[s]) {
+                if (traceUnrealistic) {
+                    std::fprintf(stderr, "GPU_UNREALISTIC_SWEEP slot=%d outer=%d loop=%d band=[%.4f, %.4f]\n",
+                                 s, outer, loopOrder[loopIdx], ctx->realisticMinV, ctx->realisticMaxV);
+                }
                 res.status[s] = -2;                          // STATUS_REJECTED -> the CPU replays it
                 live[s] = 0;
                 active[s] = 0;
@@ -9099,7 +9132,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // checked bus voltage" mask and the two bounds. enabled = 0 clears it on a cached context.
 extern "C" JNIEXPORT void JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRealisticCheck(
-        JNIEnv* env, jclass, jlong handle, jbyteArray jRowChecked, jdouble minV, jdouble maxV, jint enabled) {
+        JNIEnv* env, jclass, jlong handle, jbyteArray jRowChecked, jdouble minV, jdouble maxV, jint enabled,
+        jint fixingLoop) {
     BatchSolverContext* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
@@ -9117,6 +9151,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     env->ReleaseByteArrayElements(jRowChecked, rc, JNI_ABORT);
     ctx->realisticMinV = minV;
     ctx->realisticMaxV = maxV;
+    ctx->realisticFixingLoop = fixingLoop;
     ctx->realisticCheck = 1;
 }
 

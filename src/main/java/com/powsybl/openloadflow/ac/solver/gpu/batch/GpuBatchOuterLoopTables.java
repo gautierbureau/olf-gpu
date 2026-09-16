@@ -27,6 +27,28 @@ public final class GpuBatchOuterLoopTables {
     /** ReactiveLimitsOuterLoop.REALISTIC_VOLTAGE_MARGIN. */
     private static final double REALISTIC_VOLTAGE_MARGIN = 1.02;
 
+    /** {@code AcloadFlowEngine.runOuterLoops}: under {@code voltageRemoteControlRobustMode} the
+     *  realistic-voltage check is DEFERRED until the last configured loop that declares
+     *  {@code canFixUnrealisticState()} has run, so that loop gets its chance to repair the state
+     *  instead of the run failing on it. Returns which loop that is, as the device's hint:
+     *  −1 = none, so every solve is checked (robust mode off, or no such loop is configured);
+     *  0 = ReactiveLimits; 1 = the discrete TransformerVoltageControl. */
+    public static int realisticFixingLoop(com.powsybl.openloadflow.ac.AcLoadFlowParameters p) {
+        if (!p.isVoltageRemoteControlRobustMode()) {
+            return -1;
+        }
+        com.powsybl.openloadflow.ac.outerloop.AcOuterLoop last = null;
+        for (var ol : p.getOuterLoops()) {
+            if (ol.canFixUnrealisticState()) {
+                last = ol;
+            }
+        }
+        if (last == null) {
+            return -1;
+        }
+        return last instanceof com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop ? 0 : 1;
+    }
+
     private GpuBatchOuterLoopTables() {
     }
 
@@ -49,7 +71,7 @@ public final class GpuBatchOuterLoopTables {
 
     public static void install(long handle, GpuAcData gpuData, GpuBatchRlCurves.Channel rlCurves,
                                boolean rlRobustMode, double minRealisticVoltage, double maxRealisticVoltage,
-                               double minNominalVoltageRealisticVoltageCheck) {
+                               double minNominalVoltageRealisticVoltageCheck, int realisticFixingLoop) {
         // AcloadFlowEngine's realistic-voltage check, applied to the states INSIDE the driver's sweep.
         // The row carries its bus's nominal voltage (0 = a row the check never looks at, which is
         // every row that is not a non-fictitious bus's BUS_V), so the run's threshold is applied here.
@@ -59,7 +81,8 @@ public final class GpuBatchOuterLoopTables {
             rowChecked[r] = rowNominalV[r] > 0 && rowNominalV[r] >= minNominalVoltageRealisticVoltageCheck
                     ? (byte) 1 : (byte) 0;
         }
-        GpuAcNewtonSolver.setBatchRealisticCheck(handle, rowChecked, minRealisticVoltage, maxRealisticVoltage, 1);
+        GpuAcNewtonSolver.setBatchRealisticCheck(handle, rowChecked, minRealisticVoltage, maxRealisticVoltage, 1,
+                realisticFixingLoop);
         // Curve limits at runtime P: install (or clear, for cached contexts) the per-gen curve channel.
         GpuAcNewtonSolver.setBatchRlCurves(handle,
                 rlCurves != null ? rlCurves.cvIdx() : null,

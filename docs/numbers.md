@@ -138,3 +138,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-16 | abd078c+dirty | 18.90 | 15.47 | 26.54 | x1.72 | 0/0/0 | 7.48 | 4.43 | 499/500 | 122/133 (92%) | Robust-mode realistic-V criteria in the RL kernel; forced-PV election installed at context creation |
 | 2026-09-16 | df4062e+dirty | 19.72 | 16.49 | 29.55 | x1.79 | 0/0/0 | 7.88 | 4.45 | 499/500 | 122/133 (92%) | Distributed-slack residual flagged on P_RESIDUE_EPS, OLF's own failure threshold |
 | 2026-09-16 | 9fc0767+dirty | 19.80 | 16.77 | 28.75 | x1.71 | 0/0/0 | 7.75 | 4.46 | 499/500 | 122/133 (92%) | Realistic-voltage check on the driver's intermediate states, routed to CPU |
+| 2026-09-16 | d83be41+dirty | 18.71 | 15.87 | 27.98 | x1.76 | 0/0/0 | 7.46 | 4.51 | 499/500 | 122/133 (92%) | Realistic-voltage check DEFERRED to OLF's fixing loop: rte6515 back to 9040/9042 |

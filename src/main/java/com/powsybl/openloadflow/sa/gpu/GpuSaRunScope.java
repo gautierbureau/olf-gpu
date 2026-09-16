@@ -341,7 +341,8 @@ final class GpuSaRunScope {
                 // voltageRemoteControlRobustMode (OLF default TRUE): the RL kernel's realistic-V criteria.
                 acParameters.isVoltageRemoteControlRobustMode(),
                 acParameters.getMinRealisticVoltage(), acParameters.getMaxRealisticVoltage(),
-                acParameters.getMinNominalVoltageRealisticVoltageCheck());
+                acParameters.getMinNominalVoltageRealisticVoltageCheck(),
+                com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOuterLoopTables.realisticFixingLoop(acParameters));
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
     }

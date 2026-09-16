@@ -370,3 +370,18 @@ the 8-thread CPU, so on this plan one GPU thread now beats a fully threaded CPU,
 of the day it needed two threads to draw level. The emission is still the largest single term on the
 GPU arm, and the per-branch identifier resolution and the per-step zero-impedance flow map are the
 next two items in it.
+
+#### After the counter and load-lookup fixes (2026-09-16)
+
+rte6515_full, 4096 steps, 1 thread, two runs:
+
+| | run a | run b |
+|---|---|---|
+| CPU total | 5.38 | 4.97 |
+| GPU total | 1.46 | 1.44 |
+| GPU device section | 0.53 | 0.52 |
+| branch emit | 0.90 | 1.17 |
+
+Against 1.49 to 1.64 for the GPU arm before them, so both fixes together sit inside the machine's own
+noise. The row count is unchanged at 69,591,040, which is the check that the per-partition counters
+add up.

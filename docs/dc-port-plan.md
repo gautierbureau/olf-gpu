@@ -1187,3 +1187,39 @@ Still open in the emission, in order of measured size: the per-branch identifier
 result is an identifier that IIDM permits renaming, so it cannot simply be cached in a field), and
 the zero-impedance flow map, which is rebuilt every step and then consulted once per zero-impedance
 branch by identifier.
+
+### Re-profiling after the scale fix: two phantoms and the real remainder (2026-09-16)
+
+The two items left open above were re-profiled before being worked on, and neither survived.
+
+- **The per-branch identifier resolution was already gone.** It never was a weak-reference cost, and
+  once the scales stopped being recomputed the frame left the profile entirely. Nothing to do.
+- **The zero-impedance flow map costs nothing here.** Three samples out of 2476, one tenth of a
+  percent. The map lookups the earlier profile showed were never this map: they come from the LOAD
+  set points, a different phase altogether. Switches and transformer legs emit no rows at all, so the
+  map is consulted far less often than reading the code suggests.
+
+What the new profile does show, on a 2000-step run:
+
+| | share | where |
+|---|---|---|
+| load set point map lookups | 13% | `LfLoadImpl.setOriginalLoadP0`, four maps keyed by the same id |
+| the probe's own row counter | 11% | `DcTimeSeriesBaselineProbe`, one shared `LongAdder` |
+| bus state restore | 11% | `BusDcState.restore` through `AbstractLfBus.setDisabled` |
+
+Two of those are now fixed. The probe gives each partition its own counter with a plain field add, so
+our own measurements stop charging the emission for a contended atomic. And both load set point
+setters do one hash lookup instead of two, by taking the previous value from `put`.
+
+Both are small, and on a box shared with the AC session the run-to-run noise is larger than either:
+the GPU arm reads 1.44 to 1.46 ms/step against 1.49 to 1.64 before them. They are worth having and
+they are not a result.
+
+**The real remaining item is structural, and was deliberately not done.** `LfLoadImpl` keeps four
+parallel maps keyed by the same original load identifier - the reference, p0, q0 and the absolute
+variable target - so applying one set point hashes the same string four times. Worse, `BusDcState`
+copies two of those maps wholesale into new `HashMap`s on every state save, which is once per step.
+Collapsing them into one map of a per-load record would fix both, but it changes a public accessor
+that returns one of those maps and it touches the state save and restore path, which is core to the
+security analysis as well as to the time series. That is a change to propose deliberately, not to
+slip in behind a performance sweep.

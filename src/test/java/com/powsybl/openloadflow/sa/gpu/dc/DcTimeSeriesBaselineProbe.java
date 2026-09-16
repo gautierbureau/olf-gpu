@@ -27,7 +27,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.LongAdder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -45,28 +44,57 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class DcTimeSeriesBaselineProbe {
 
+    /** Hands one {@link CountingWriter} to each partition and adds their counts up at the end. */
+    private static final class RowCounter implements NetworkResultWriterFactory {
+
+        private final List<CountingWriter> writers = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+
+        @Override
+        public NetworkResultWriter create(int partitionIndex) {
+            CountingWriter writer = new CountingWriter();
+            writers.add(writer);
+            return writer;
+        }
+
+        long rows() {
+            long total = 0;
+            synchronized (writers) {
+                for (CountingWriter writer : writers) {
+                    total += writer.rows;
+                }
+            }
+            return total;
+        }
+    }
+
     private static final Path CASE_FILE = Path.of("rte6515_full.xiidm.gz");
     private static final Path PARAMS_FILE = Path.of("rte-loadflow-default-parameters.json");
 
-    /** Counts rows without storing them: the emit walk without the writer's own cost. */
+    /**
+     * Counts rows without storing them: the emit walk without a writer's own cost.
+     *
+     * <p>One instance per PARTITION, handed out by {@link RowCounter}, so the count is a plain field
+     * add on a thread-confined object. A single shared writer with a {@code LongAdder} was measured
+     * at 11% of all execution samples, which inflated the emission figure on both arms.
+     */
     private static final class CountingWriter implements NetworkResultWriter {
-        private final LongAdder rows = new LongAdder();
+        private long rows;
 
         @Override
         public void writeBranchResult(String stateId, String subStateId, String status, String branchId,
                                       double p1, double q1, double i1, double p2, double q2, double i2, double flowTransfer) {
-            rows.increment();
+            rows++;
         }
 
         @Override
         public void writeBusResult(String stateId, String subStateId, String status, String busId, double v, double angle) {
-            rows.increment();
+            rows++;
         }
 
         @Override
         public void writeGeneratorResult(String stateId, String subStateId, String status, String generatorId,
                                          double targetP, double p) {
-            rows.increment();
+            rows++;
         }
 
         @Override
@@ -113,7 +141,7 @@ class DcTimeSeriesBaselineProbe {
         double restoreOnly = run(network, plan, lfParameters, threads, false, false, false, null, NO_SOLVE);
         double solveOnly = run(network, plan, lfParameters, threads, false, false, false, null);
         double withBranches = run(network, plan, lfParameters, threads, true, false, false, null);
-        CountingWriter counter = new CountingWriter();
+        RowCounter counter = new RowCounter();
         double withAll = run(network, plan, lfParameters, threads, true, true, true, counter);
 
         System.out.printf("DC-TS restore+setpoints (no solve) %8.1f ms total | %7.2f ms/step%n", restoreOnly, restoreOnly / steps);
@@ -122,7 +150,7 @@ class DcTimeSeriesBaselineProbe {
         System.out.printf("DC-TS + branch rows                %8.1f ms total | %7.2f ms/step | branch emit %6.2f ms/step%n",
                 withBranches, withBranches / steps, (withBranches - solveOnly) / steps);
         System.out.printf("DC-TS + bus and generator rows     %8.1f ms total | %7.2f ms/step | all emit    %6.2f ms/step | %,d rows%n",
-                withAll, withAll / steps, (withAll - solveOnly) / steps, counter.rows.sum());
+                withAll, withAll / steps, (withAll - solveOnly) / steps, counter.rows());
         System.out.printf("DC-TS share removable by a device solve: %.0f%%%n", 100 * solveOnly / withAll);
 
         // the device engine: same streams, same writer
@@ -132,12 +160,12 @@ class DcTimeSeriesBaselineProbe {
             com.powsybl.openloadflow.dc.gpu.GpuTimeSeriesDcEngine.LAST_DEVICE_STEP_COUNT.set(-1);
             com.powsybl.openloadflow.dc.gpu.GpuTimeSeriesDcEngine.LAST_DEVICE_LOOP_REGROUPINGS.set(0);
             double gpuSolveOnly = run(network, plan, lfParameters, threads, false, false, false, null, provider);
-            CountingWriter gpuCounter = new CountingWriter();
+            RowCounter gpuCounter = new RowCounter();
             double gpuAll = run(network, plan, lfParameters, threads, true, true, true, gpuCounter, provider);
             System.out.printf("DC-TS GPU restore+setpoints+solve   %8.1f ms total | %7.2f ms/step | x%.2f%n",
                     gpuSolveOnly, gpuSolveOnly / steps, solveOnly / gpuSolveOnly);
             System.out.printf("DC-TS GPU with all rows            %8.1f ms total | %7.2f ms/step | x%.2f | %,d rows | %d steps on the device%n",
-                    gpuAll, gpuAll / steps, withAll / gpuAll, gpuCounter.rows.sum(),
+                    gpuAll, gpuAll / steps, withAll / gpuAll, gpuCounter.rows(),
                     com.powsybl.openloadflow.dc.gpu.GpuTimeSeriesDcEngine.LAST_DEVICE_STEP_COUNT.get());
             System.out.printf("DC-TS outer loop: %d AC-emulation configuration(s) applied and re-solved over the run%n",
                     com.powsybl.openloadflow.dc.gpu.GpuTimeSeriesDcEngine.LAST_DEVICE_LOOP_REGROUPINGS.get());
@@ -178,13 +206,13 @@ class DcTimeSeriesBaselineProbe {
     };
 
     private static double run(Network network, List<DoubleTimeSeries> plan, LoadFlowParameters lfParameters, int threads,
-                              boolean branches, boolean buses, boolean generators, NetworkResultWriter writer) {
+                              boolean branches, boolean buses, boolean generators, RowCounter writer) {
         return run(network, plan, lfParameters, threads, branches, buses, generators, writer,
                 TimeSeriesLoadFlow.EnginePlanProvider.DEFAULT);
     }
 
     private static double run(Network network, List<DoubleTimeSeries> plan, LoadFlowParameters lfParameters, int threads,
-                              boolean branches, boolean buses, boolean generators, NetworkResultWriter writer,
+                              boolean branches, boolean buses, boolean generators, RowCounter writer,
                               TimeSeriesLoadFlow.EnginePlanProvider provider) {
         TimeSeriesLoadFlowParameters parameters = new TimeSeriesLoadFlowParameters()
                 .setLoadFlowParameters(lfParameters)
@@ -192,7 +220,7 @@ class DcTimeSeriesBaselineProbe {
                 .setStreamBranchResults(branches)
                 .setStreamBusResults(buses)
                 .setStreamGeneratorResults(generators);
-        NetworkResultWriterFactory factory = writer != null ? partition -> writer : NetworkResultWriterFactory.NO_OP;
+        NetworkResultWriterFactory factory = writer != null ? writer : NetworkResultWriterFactory.NO_OP;
         long t0 = System.nanoTime();
         TimeSeriesLoadFlowResult result = TimeSeriesLoadFlow.run(network, plan, parameters, factory, provider);
         long t1 = System.nanoTime();

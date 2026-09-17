@@ -604,9 +604,20 @@ final class GpuBatchChunkSolver {
                                         // on an ALREADY-PQ bus losing fixed-Q gens (#21)
                                         overrides.add(s * n + go.vRow(), go.qTarget());
                                     }
+                                    if (go.killsPilotVoltageIdentity()) {
+                                        // The pilot's voltage identity goes NOW, with the member's
+                                        // mode-4 row, so the two halves of the dead control land in
+                                        // the same fill.
+                                        int[] row = rowModePerScenario[s] == baseRowMode
+                                                ? baseRowMode.clone() : rowModePerScenario[s];
+                                        row[go.deadPilotVRow()] = 1;
+                                        rowModePerScenario[s] = row;
+                                        overrides.add(s * n + go.deadPilotVRow(), go.deadPilotQTarget());
+                                    }
                                     if (go.toPq()) {
                                         int[] row = rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rowModePerScenario[s];
-                                        row[go.vRow()] = 1;  // BUS_V row becomes the reactive-power equation (PV→PQ)
+                                        row[go.vRow()] = go.pqRowModeOrDefault();   // BUS_V row becomes the
+                                                                                    // reactive-power equation (PV→PQ)
                                         rowModePerScenario[s] = row;
                                     }
                                     if (go.silencesReactiveLimitEntry()) {

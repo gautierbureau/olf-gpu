@@ -30,7 +30,8 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                         int rlEntry, double minQDelta, double maxQDelta, boolean allGensLost,
                         java.util.Set<String> lostGenIds, double lostFactorSum, double pStep, double loadQDelta,
                         int inactiveDqMember, int[] pilotGroupSurvivorRlEntries,
-                        int[] dqTargetRows, double[] dqTargetValues) {
+                        int[] dqTargetRows, double[] dqTargetValues, int pqRowMode,
+                        int deadPilotVRow, double deadPilotQTarget) {
     // lostGenIds / lostFactorSum exist for the reactive-capability CURVE channel, which evaluates each
     // generator's curve at its OWN post-distribution active power, reconstructed from the bus's row
     // target by participation share. Losing a generator skews that reconstruction three ways — the lost
@@ -71,6 +72,31 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      * every member row of the group with the renormalized value; when the reactive-limits kernel does
      * run it recomputes the same expression from the live pin states and supersedes them.
      */
+    /**
+     * The row mode the PV-&gt;PQ flip installs on this bus's BUS_V row: 1 (a plain reactive-power
+     * equation) for an ordinary bus, 4 for a REMOTE GROUP MEMBER whose control dies with it. Mode 4
+     * means "this row hosts its own Q balance", which is what OLF re-activates there — and it is also
+     * what makes the group's relocation mode-scan skip the row, so the pilot's own reactive balance
+     * falls back to the pilot's row and {@code updatePilotVeqBatch} drops its now-meaningless voltage
+     * identity. Installing mode 1 instead would leave the row looking like a live carrier, and the
+     * pilot's balance would land on top of the member's own.
+     */
+    /**
+     * When this outage kills the group's control, the PILOT loses its voltage identity and goes back
+     * to solving its own reactive balance — {@code deadPilotVRow} is its BUS_V row and
+     * {@code deadPilotQTarget} that balance's target. It has to be installed at SETUP, not left to
+     * {@code updatePilotVeqBatch} in the reactive-limits phase: this bus's row is mode 4 from the
+     * first fill, so the group's mode scan already sends the pilot's q to the pilot's own row, and a
+     * row that still carries the voltage identity would receive both.
+     */
+    public boolean killsPilotVoltageIdentity() {
+        return deadPilotVRow >= 0;
+    }
+
+    public int pqRowModeOrDefault() {
+        return pqRowMode == 0 ? 1 : pqRowMode;
+    }
+
     public boolean seedsDqTargets() {
         return dqTargetRows.length > 0;
     }

@@ -139,6 +139,9 @@ final class GpuBatchInjectionOutages {
         // losing the bus's LAST controller restructures the group -> CPU.
         boolean distrQBus = es.getEquation(busNum, AcEquationType.DISTR_Q).isPresent();
         boolean vcSurvives = false;
+        boolean deadRemoteMember = false;
+        int deadPilotVRow = -1;
+        double deadPilotQTarget = 0;
         if (distrQBus) {
             java.util.Set<LfGenerator> lostHere = new java.util.HashSet<>(lost);
             boolean keepsController = bus.getGenerators().stream()
@@ -203,7 +206,32 @@ final class GpuBatchInjectionOutages {
                         return survivors > 0 && !(pilotIsController && isFree && survivors > 1);
                     })
                     .orElse(false);
-            if ((!keepsController && !vcSurvives) || !lostLoads.isEmpty()) {
+            // The group's control DIES with this bus (no controller anywhere keeps a VOLTAGE
+            // generator). OLF then deactivates the pilot's BUS_TARGET_V and re-activates a reactive
+            // balance at BOTH the pilot and this member. The device reaches the same layout through
+            // the relocation it already has, provided this row goes to mode 4 rather than mode 1:
+            // mode 4 means "this row hosts its own Q balance", and it is also what makes the group's
+            // mode scan skip the row, so the pilot's balance falls back to the pilot's own row and
+            // updatePilotVeqBatch drops the voltage identity. Needs a pilot that is NOT one of its own
+            // controllers — that shape has no relocation table for the fallback to land in.
+            boolean controlDies = !keepsController && bus.getGeneratorVoltageControl()
+                    .map(vc -> vc.getMergedControllerElements().stream()
+                                    .noneMatch(cb -> cb.getGenerators().stream()
+                                            .anyMatch(g -> !lostHere.contains(g)
+                                                    && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE))
+                            && !vc.getMergedControllerElements().contains(vc.getControlledBus())
+                            && vc.getControlledBus() != bus)
+                    .orElse(false);
+            if (controlDies && lostLoads.isEmpty()) {
+                deadRemoteMember = true;
+                LfBus pilot = bus.getGeneratorVoltageControl().orElseThrow().getControlledBus();
+                var pilotV = es.getVariableSet().getVariable(pilot.getNum(), AcVariableType.BUS_V);
+                if (pilotV == null || pilotV.getRow() < 0) {
+                    return reject("DEAD_CONTROL_PILOT_NO_V_ROW", bus);
+                }
+                deadPilotVRow = pilotV.getRow();
+                deadPilotQTarget = pilot.getTargetQ();
+            } else if ((!keepsController && !vcSurvives) || !lostLoads.isEmpty()) {
                 // BOTH halves are load-bearing, and 2026-09-17 they turned out to be ONE root cause.
                 // Lifting them on rte6515's full sets: the 9 generator cases land wrong (0.067 up to
                 // 3.157 kV at GEN-1522) and LOAD-1263 lands 0.105 kV out.
@@ -502,6 +530,7 @@ final class GpuBatchInjectionOutages {
         return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
                 dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum,
                 lostLoadP - lostP, loadQDelta, inactiveDqMember, pilotSurvivorRlEntries,
-                dqTargetRows, dqTargetValues);
+                dqTargetRows, dqTargetValues, deadRemoteMember ? 4 : 1,
+                deadPilotVRow, deadPilotQTarget);
     }
 }

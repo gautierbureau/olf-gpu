@@ -69,6 +69,13 @@ public final class GpuBatchRlCurves {
         if (!distributedSlack) {
             return null;                                     // P never moves — the base snapshot is exact
         }
+        // OLF_GPU_NO_CURVES=1: pack no curve limits, so every reactive limit stays at its BASE
+        // snapshot. A bisection lever only — it makes curve buses WRONG by design. What it answers is
+        // whether a given contingency's error involves the curve channel at all: an error that does
+        // not move when the channel is gone is not the channel's.
+        if ("1".equals(System.getenv("OLF_GPU_NO_CURVES"))) {
+            return null;
+        }
         List<int[]> cvIdx = new ArrayList<>();
         List<double[]> cvIn = new ArrayList<>();
         List<Double> cvPts = new ArrayList<>();

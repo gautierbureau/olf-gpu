@@ -526,6 +526,11 @@ final class GpuBatchChunkSolver {
                             }
                             disabledIdx[s] = eis;
                             nActive[s] -= frozenRowsByIndex[ci].length;  // islanded buses' equations leave the CPU index
+                            if (System.getenv("OLF_GPU_SA_RESID") != null) {
+                                System.err.printf("DEV_NACTIVE ctg=%s n=%d frozen=%d nActive=%d%n",
+                                        contingencies.get(ci).contingencyId(), n,
+                                        frozenRowsByIndex[ci].length, nActive[s]);
+                            }
                             for (LfBranch branch : branches) {           // var-carrying outaged branches: the CPU drops
                                 int eIdx = elementMapper.getElementIndex(branch);   // the rho/a1 identity equations too
                                 if (eIdx >= 0 && eIdx < elementMapper.getClosedBranchCount()) {
@@ -768,6 +773,25 @@ final class GpuBatchChunkSolver {
                                     dsOvMaxDelta.length > 0 ? dsOvMaxDelta[s] : 0,
                                     dsOvMinDelta.length > 0 ? dsOvMinDelta[s] : 0, islandedDs,
                                     lostSlotsOf(dsLostGenList, s));
+                            // OLF_GPU_SEED_DUMP=<file>: the per-bus SHARE the host-side loss
+                            // pre-distribution seeds, against OLF's own pre-distribution section in
+                            // OLF_DS_SPLIT. The two totals can agree while the SPLIT does not, and the
+                            // split is what the first solve sees — so the mismatch the DS loop then
+                            // measures, and everything after it, inherits the difference.
+                            if (System.getenv("OLF_GPU_SEED_DUMP") != null && shares != null) {
+                                try (java.io.PrintWriter w = new java.io.PrintWriter(
+                                        new java.io.FileWriter(System.getenv("OLF_GPU_SEED_DUMP"), true))) {
+                                    w.printf("# SEED ctg=%s%n",
+                                            contingencies.get(group.get(chunkStart + s)).contingencyId());
+                                    for (int i = 0; i < nds; i++) {
+                                        if (shares[i] != 0) {
+                                            w.printf("%d %.12f%n", i, shares[i]);
+                                        }
+                                    }
+                                } catch (java.io.IOException e) {
+                                    throw new java.io.UncheckedIOException(e);
+                                }
+                            }
                             if (System.getenv("OLF_GPU_PRELOSS_TRACE") != null) {
                                 double absorbed = 0;
                                 if (shares != null) {

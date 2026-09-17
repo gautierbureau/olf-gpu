@@ -605,6 +605,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         var tv = context.getTargetVector();
         ev.minus(tv);
         double[] fx = ev.getArray();
+        System.err.printf("SA_RESID ctg=%s olfActiveEquations=%d%n", contingencyId, fx.length);
         Integer[] order = new Integer[fx.length];
         for (int i = 0; i < fx.length; i++) {
             order[i] = i;

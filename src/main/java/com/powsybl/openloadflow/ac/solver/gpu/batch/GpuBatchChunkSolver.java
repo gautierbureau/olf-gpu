@@ -607,6 +607,11 @@ final class GpuBatchChunkSolver {
                                         dqInactList.add(s);
                                         dqInactList.add(go.inactiveDqMember());
                                     }
+                                    if (go.seedsDqTargets()) {
+                                        for (int t = 0; t < go.dqTargetRows().length; t++) {
+                                            overrides.add(s * n + go.dqTargetRows()[t], go.dqTargetValues()[t]);
+                                        }
+                                    }
                                     if (go.needsPilotPinCheck()) {
                                         pilotPinCheck.put(s, go.pilotGroupSurvivorRlEntries());
                                     }
@@ -1283,6 +1288,20 @@ final class GpuBatchChunkSolver {
                     // Post-RL host orchestrators below: SVC(4), Monitoring(5), Phase(7), TVC(8), TRPC(9), Shunt(10).
 
                     tOrchestratorNs += System.nanoTime() - tOrch0;
+                    // OLF_GPU_FINAL_TARGET_ROW=<row>: the target the device ENDED UP solving that row
+                    // against, after every per-scenario kernel and orchestrator. The base+override
+                    // view (OLF_GPU_TARGET_ROW) shows what was UPLOADED; this shows what survived.
+                    if (System.getenv("OLF_GPU_FINAL_TARGET_ROW") != null) {
+                        int probe = Integer.parseInt(System.getenv("OLF_GPU_FINAL_TARGET_ROW"));
+                        double[] ftp = GpuAcNewtonSolver.readBatchTargets(handle);
+                        for (int s = 0; s < realCount; s++) {
+                            System.err.printf("FINAL_TARGET ctg=%s row=%d base=%.9f final=%.9f mode=%d%n",
+                                    contingencies.get(group.get(chunkStart + s)).contingencyId(), probe,
+                                    baseTargets[probe], ftp[s * n + probe],
+                                    rowModePerScenario != null && rowModePerScenario[s] != null
+                                            ? rowModePerScenario[s][probe] : baseRowMode[probe]);
+                        }
+                    }
                     if (System.getenv("OLF_GPU_DS_TARGET_DUMP") != null && nds > 0) {
                         // The FINAL distributed target on every participant row, after every
                         // orchestrator. Both arms are converged, so if their reported states differ

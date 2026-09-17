@@ -48,6 +48,17 @@ final class GpuBatchInjectionOutages {
                 ? limit.applyAsDouble(g) : g.getTargetQ();
     }
 
+    /** OLF's {@code updateReactiveKeys} rule, plus THIS scenario's loss: a controller that is
+     *  disabled, has its voltage control off, or is the member the outage deactivates takes no share
+     *  of the group's reactive dispatch, and its key leaves the renormalization denominator. */
+    private static boolean memberKeepsKey(LfBus anyMember, int memberBusNum, int member, int inactiveMember) {
+        if (member == inactiveMember) {
+            return false;
+        }
+        LfBus mb = anyMember.getNetwork().getBus(memberBusNum);
+        return mb != null && !mb.isDisabled() && mb.isGeneratorVoltageControlEnabled();
+    }
+
     /** WHY one bus's injection outage could not be represented. All twelve exits share the
      *  PLAN:INJECTION_OUTAGE_SHAPE census tag, which is too coarse to pick the next thing to fix;
      *  OLF_GPU_GENOUT_REJECT=1 names the exit and the bus. */
@@ -92,6 +103,23 @@ final class GpuBatchInjectionOutages {
                 return reject("MULTI_DS_BUS", e.getKey());
             }
             out[k++] = go;
+        }
+        // Two buses of the SAME remote group deactivated by one contingency: each bus's seeded
+        // DISTR_Q targets renormalize over its own loss alone, so neither accounts for the other and
+        // both are wrong. The kernel's mask handles the matrix side for any number of them; only the
+        // plan-time seed is per-bus. Rather than make the seed a group-wide computation for a shape
+        // rte6515 never produces (its generator contingencies are single-generator), route it.
+        for (int a = 0; a < out.length; a++) {
+            if (!out[a].deactivatesDqMember()) {
+                continue;
+            }
+            int ga = gpuData.dqMemberGroupStart()[out[a].inactiveDqMember()];
+            for (int b = a + 1; b < out.length; b++) {
+                if (out[b].deactivatesDqMember()
+                        && gpuData.dqMemberGroupStart()[out[b].inactiveDqMember()] == ga) {
+                    return reject("DISTR_Q_TWO_MEMBERS_LOST", null);
+                }
+            }
         }
         return out;
     }
@@ -146,11 +174,34 @@ final class GpuBatchInjectionOutages {
             // With qPct renormalized to 1 on the survivors, DISTR_Q (qPct_k·Σq − q_k) on this bus's own
             // row degenerates to q = targetQ: precisely the reactive balance OLF re-activates here.
             vcSurvives = !keepsController && bus.getGeneratorVoltageControl()
-                    .map(vc -> vc.getMergedControllerElements().stream()
-                                    .anyMatch(cb -> cb != bus && cb.getGenerators().stream()
-                                            .anyMatch(g -> !lostHere.contains(g)
-                                                    && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE))
-                            && vc.getControlledBus().getLoadTargetQ() == 0)
+                    .map(vc -> {
+                        List<LfBus> members = vc.getMergedControllerElements();
+                        long survivors = members.stream()
+                                .filter(cb -> cb != bus && cb.getGenerators().stream()
+                                        .anyMatch(g -> !lostHere.contains(g)
+                                                && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE))
+                                .count();
+                        // The group's FREE member — the first enabled controller, whose row does NOT
+                        // hold a DISTR_Q: it carries the pilot's relocated reactive balance instead,
+                        // or, for a pilot that is one of its own controllers, nothing at all, since
+                        // while it controls it has no reactive balance to relocate.
+                        boolean isFree = members.stream().filter(vc::isControllerEnabled)
+                                .findFirst().map(m -> m == bus).orElse(false);
+                        boolean pilotIsController = members.contains(vc.getControlledBus());
+                        // Losing the FREE member moves the free role, and with it the row OLF puts the
+                        // pilot's reactive balance on. Where the pilot is NOT one of its controllers
+                        // the group has a relocation table and the mode scan re-picks the carrier, so
+                        // any number of survivors is fine (measured: rte6515 GEN-5958, 3 members and 2
+                        // survivors, 3.8e-11; reproducer deviceRemoteGroupLosingFreeMemberMatchesCpu).
+                        // Where the pilot IS one of its controllers there is no table, and the pilot's
+                        // newly acquired reactive balance has nowhere to go — unless exactly ONE
+                        // controller survives, in which case its DISTR_Q row renormalizes to qPct = 1,
+                        // which IS that balance. With two or more survivors the two systems genuinely
+                        // differ, so the scenario routes to the CPU: see
+                        // devicePilotControllerLosingItsOwnGeneratorMatchesCpu (0.149 kV, and OLF's own
+                        // residual at that state is 0.200 pu on the pilot's BUS_TARGET_Q).
+                        return survivors > 0 && !(pilotIsController && isFree && survivors > 1);
+                    })
                     .orElse(false);
             if ((!keepsController && !vcSurvives) || !lostLoads.isEmpty()) {
                 // BOTH halves are load-bearing, and 2026-09-17 they turned out to be ONE root cause.
@@ -177,6 +228,27 @@ final class GpuBatchInjectionOutages {
                 //
                 // If you come back to lift either, diff BUSES (OLF_GPU_SA_BUSDIFF=1). Violation parity
                 // is a threshold test: of the 8 wrong generator cases it caught exactly ONE.
+                if (System.getenv("OLF_GPU_GENOUT_SHAPE") != null) {
+                    var vcO = bus.getGeneratorVoltageControl();
+                    LfBus pilot = vcO.map(vc -> vc.getControlledBus()).orElse(null);
+                    long alive = vcO.map(vc -> vc.getMergedControllerElements().stream()
+                            .filter(cb -> cb.getGenerators().stream().anyMatch(g -> !lostHere.contains(g)
+                                    && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE))
+                            .count()).orElse(0L);
+                    System.err.printf("GENOUT_SHAPE bus=%s pilot=%s pilotIsCtl=%b members=%d alive=%d "
+                            + "pilotLoadQ=%.4f keepsCtl=%b lostLoads=%d%n",
+                            bus.getId(), pilot == null ? "?" : pilot.getId(),
+                            vcO.map(vc -> vc.getMergedControllerElements().contains(vc.getControlledBus())).orElse(false),
+                            vcO.map(vc -> vc.getMergedControllerElements().size()).orElse(0), alive,
+                            pilot == null ? 0.0 : pilot.getLoadTargetQ(), keepsController, lostLoads.size());
+                    double postGenQ = bus.getGenerators().stream().filter(g -> !lostHere.contains(g))
+                            .mapToDouble(LfGenerator::getTargetQ).sum();
+                    System.err.printf("GENOUT_SHAPE   bus=%s baseTargetQ=%.9f postTargetQ=%.9f delta=%.9f "
+                            + "frozen=%b genTargetQ=%.9f loadQ=%.9f%n",
+                            bus.getId(), bus.getTargetQ(), postGenQ - bus.getLoadTargetQ(),
+                            (postGenQ - bus.getLoadTargetQ()) - bus.getTargetQ(),
+                            bus.isGenerationTargetQFrozen(), bus.getGenerationTargetQ(), bus.getLoadTargetQ());
+                }
                 return reject(keepsController ? "DISTR_Q_BUS_WITH_LOAD_LOSS" : "DISTR_Q_LAST_CONTROLLER", bus);
             }
         }
@@ -369,6 +441,44 @@ final class GpuBatchInjectionOutages {
                 return reject("DISTR_Q_MEMBER_NOT_PACKED", bus);
             }
         }
+        // The group's DISTR_Q row targets, renormalized over the survivors exactly as OLF does
+        // (updateReactiveKeys zeroes a non-enabled controller's key and renormalizes; AcTargetVector
+        // then reads qPct_k * sum_j targetQ_j - targetQ_k). Seeded per scenario because the kernel that
+        // maintains these targets runs only inside the reactive-limits phase — see GenOutage.
+        int[] dqTargetRows = new int[0];
+        double[] dqTargetValues = new double[0];
+        if (vcSurvives) {
+            // Read the DEVICE's own member tables rather than recomputing the group: which member
+            // OWNS a DISTR_Q row (the base free member's row carries the pilot's relocated balance
+            // instead) and which device row it is were both decided at extraction, and a predicate
+            // re-derived here would seed the wrong rows the moment the two disagreed.
+            int gs = gpuData.dqMemberGroupStart()[inactiveDqMember];
+            int gc = gpuData.dqMemberGroupCount()[inactiveDqMember];
+            int[] mBusNum = gpuData.dqMemberBusNum();
+            double[] mKey = gpuData.dqMemberKey();
+            double[] mTargetQ = gpuData.dqMemberTargetQ();
+            byte[] mHasRow = gpuData.dqMemberHasRow();
+            int[] mRow = gpuData.dqMemberRow();
+            double keySum = 0;
+            double sumTargetQ = 0;
+            for (int m = gs; m < gs + gc; m++) {
+                keySum += memberKeepsKey(bus, mBusNum[m], m, inactiveDqMember) ? mKey[m] : 0;
+                sumTargetQ += mTargetQ[m];
+            }
+            List<Integer> rows = new ArrayList<>();
+            List<Double> values = new ArrayList<>();
+            for (int m = gs; m < gs + gc; m++) {
+                if (mHasRow[m] == 0 || mRow[m] < 0) {
+                    continue;
+                }
+                double qpk = keySum == 0 || !memberKeepsKey(bus, mBusNum[m], m, inactiveDqMember)
+                        ? 0 : mKey[m] / keySum;
+                rows.add(mRow[m]);
+                values.add(qpk * sumTargetQ - mTargetQ[m]);
+            }
+            dqTargetRows = rows.stream().mapToInt(Integer::intValue).toArray();
+            dqTargetValues = values.stream().mapToDouble(Double::doubleValue).toArray();
+        }
         int[] pilotSurvivorRlEntries = new int[0];
         if (vcSurvives) {
             java.util.List<Integer> entries = new ArrayList<>();
@@ -391,6 +501,7 @@ final class GpuBatchInjectionOutages {
         double lostFactorSum = lost.stream().mapToDouble(dsParams::factor).sum();
         return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
                 dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum,
-                lostLoadP - lostP, loadQDelta, inactiveDqMember, pilotSurvivorRlEntries);
+                lostLoadP - lostP, loadQDelta, inactiveDqMember, pilotSurvivorRlEntries,
+                dqTargetRows, dqTargetValues);
     }
 }

@@ -1246,6 +1246,129 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
 
     /** PROBE: remote generator voltage control (DISTR_Q — three generators regulating one pilot bus)
      *  under batched SA: parallel-line outage keeps all controllers live. DS+RL on. */
+    /** The group's FREE member loses its last voltage-controlling generator while TWO others survive,
+     *  on a group whose pilot is NOT one of its controllers. OLF moves the free role — it deactivates
+     *  the new first-enabled controller's DISTR_Q and re-activates the dead member's own reactive
+     *  balance — and the device follows because the pilot HAS a relocation table here: the in-kernel
+     *  mode scan re-picks the carrier. The pilot and the dead member both carry reactive load, so a
+     *  mis-assembled row would show. This is the shape rte6515 GEN-5958 has (3 members, 2 survivors,
+     *  3.8e-11), and the reason the gate's exclusion is narrowed to pilot-IS-controller groups: an
+     *  earlier, wider rule refused this one too and cost a contingency for nothing. */
+    @org.junit.jupiter.api.Test
+    void deviceRemoteGroupLosingFreeMemberMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory
+                .createWithGeneratorRemoteControl();
+        network.newLine().setId("L14")
+                .setVoltageLevel1("vl1").setBus1("b1").setVoltageLevel2("vl4").setBus2("b4")
+                .setR(1.5).setX(40).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        for (String id : List.of("g1", "g2", "g3")) {
+            network.getGenerator(id).setMaxP(500);
+        }
+        network.getVoltageLevel("vl1").newLoad()
+                .setId("l1q").setBus("b1").setConnectableBus("b1").setP0(10).setQ0(60).add();
+        List<Contingency> ctgs = List.of(
+                new Contingency("g1", new com.powsybl.contingency.GeneratorContingency("g1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
+    }
+
+    /** rte6515 GEN-1263 / GEN-1264, reduced: a remote group of exactly TWO controllers whose PILOT is
+     *  one of them, and the pilot carries reactive load. Losing either controller deactivates it, and
+     *  the survivor's DISTR_Q row renormalizes to qPct = 1 — which IS the deactivated bus's reactive
+     *  balance, so the device solves OLF's equation. Its TARGET has to renormalize with it, and the
+     *  kernel that maintains DISTR_Q targets runs only inside the reactive-limits phase: with no pin in
+     *  the scenario the row was left solving against the BASE target. The pilot's 60 MVAr load is what
+     *  makes the two targets differ (a group whose buses carry no reactive load has base == renormalized,
+     *  which is why the earlier gate's "pilot load Q is zero" proxy looked like a rule).
+     *
+     *  <p>VERIFIED by disabling the seeded targets (GenOutage.seedsDqTargets) and watching both
+     *  contingencies fail: on rte6515 the same defect is 0.247 kV (GEN-1263) and 0.134 kV (GEN-1264),
+     *  and OLF's own residual at the device's state is 0.076 pu on exactly one equation — the
+     *  deactivated bus's reactive balance. */
+    @org.junit.jupiter.api.Test
+    void deviceTwoMemberPilotControllerLosingAControllerMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = twoMemberPilotIsControllerNetwork();
+        List<Contingency> ctgs = List.of(
+                new Contingency("g1", new com.powsybl.contingency.GeneratorContingency("g1")),
+                new Contingency("g2", new com.powsybl.contingency.GeneratorContingency("g2")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
+    }
+
+    private static Network twoMemberPilotIsControllerNetwork() {
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory
+                .createWithGeneratorRemoteControl();
+        network.newLine().setId("L14")
+                .setVoltageLevel1("vl1").setBus1("b1").setVoltageLevel2("vl4").setBus2("b4")
+                .setR(1.5).setX(40).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        // g1 and g2 regulate b1: the pilot is one of its own TWO controllers. g3 holds its own bus, so
+        // it is a separate (local) control and leaves the remote group at exactly two members.
+        for (String id : List.of("g1", "g2")) {
+            network.getGenerator(id)
+                    .setRegulatingTerminal(network.getGenerator("g1").getTerminal())
+                    .setTargetV(21.0).setMaxP(500);
+        }
+        network.getGenerator("g3")
+                .setRegulatingTerminal(network.getGenerator("g3").getTerminal())
+                .setTargetV(20.5).setMaxP(500);
+        // Reactive load on BOTH member buses, so the base and renormalized DISTR_Q targets differ
+        // whichever of the two is lost.
+        network.getVoltageLevel("vl1").newLoad()
+                .setId("l1q").setBus("b1").setConnectableBus("b1").setP0(10).setQ0(60).add();
+        network.getVoltageLevel("vl2").newLoad()
+                .setId("l2q").setBus("b2").setConnectableBus("b2").setP0(10).setQ0(40).add();
+        return network;
+    }
+
+    /** THE pilot-is-also-a-controller shape, reduced from rte6515's GEN-1263/GEN-1264/GEN-646/GEN-4714
+     *  (all four leave the batch through DISTR_Q_LAST_CONTROLLER). Every generator regulates b1, so the
+     *  group's PILOT is b1 and b1 is ALSO one of its three controllers — the shape ExtractionColumns
+     *  deliberately keeps out of the Q-relocation table, because while it controls it has no reactive
+     *  balance of its own to relocate. Losing g1 makes b1 stop controlling while b2 and b3 still hold
+     *  its voltage, so b1 ACQUIRES a Q balance mid-scenario with no table entry to carry it. b1 also
+     *  carries reactive load, which is the half of the gate that makes that balance non-trivial. */
+    @org.junit.jupiter.api.Test
+    void devicePilotControllerLosingItsOwnGeneratorMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = pilotIsControllerNetwork();
+        List<Contingency> ctgs = List.of(
+                new Contingency("g1", new com.powsybl.contingency.GeneratorContingency("g1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        // TWO survivors: the free role moves to b2 and OLF deactivates ITS DISTR_Q to put the pilot's
+        // reactive balance there, which the device has no relocation entry to express — so the
+        // scenario is EXPECTED on the CPU. Verified wrong when forced onto the device: b2 lands
+        // 0.149 kV out, and OLF's own residual at that state is 0.200 pu on exactly one equation,
+        // BUS_TARGET_Q of the pilot (OLF_GPU_SA_RESID).
+        assertGpuMatchesCpuNoEngage(network, ctgs, 1e-11, lfp);
+    }
+
+    private static Network pilotIsControllerNetwork() {
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory
+                .createWithGeneratorRemoteControl();
+        network.newLine().setId("L14")
+                .setVoltageLevel1("vl1").setBus1("b1").setVoltageLevel2("vl4").setBus2("b4")
+                .setR(1.5).setX(40).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        // Everyone regulates b1: the pilot becomes one of its own controllers.
+        for (String id : List.of("g1", "g2", "g3")) {
+            network.getGenerator(id)
+                    .setRegulatingTerminal(network.getGenerator("g1").getTerminal())
+                    .setTargetV(21.0)
+                    .setMaxP(500);                           // headroom: a saturated slack distribution
+        }                                                    // is a CPU route by design and would prove nothing
+        network.getVoltageLevel("vl1").newLoad()
+                .setId("l1q").setBus("b1").setConnectableBus("b1")
+                .setP0(10).setQ0(60).add();                  // the pilot carries reactive load
+        return network;
+    }
+
     @org.junit.jupiter.api.Test
     void deviceRemoteGeneratorControlMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -2986,6 +3109,9 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         try {
             SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, monitors, sap);
+            if (System.getenv("OLF_GPU_DBG_CENSUS") != null) {
+                System.err.println("CENSUS " + com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.snapshot());
+            }
             if (requireEngage) {
                 assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() > 0,
                         "the batch must ENGAGE (fallen-back run proves nothing)");

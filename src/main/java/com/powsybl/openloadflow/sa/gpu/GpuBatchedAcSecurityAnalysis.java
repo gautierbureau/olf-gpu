@@ -596,6 +596,28 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                         0.0)));
     }
 
+    /** OLF's residual at the injected device state, worst rows first — see {@code OLF_GPU_SA_RESID}. */
+    private static void reportOlfResidual(AcLoadFlowContext context,
+                                          com.powsybl.openloadflow.equations.EquationSystem<com.powsybl.openloadflow.ac.equations.AcVariableType,
+                                                  com.powsybl.openloadflow.ac.equations.AcEquationType> es,
+                                          String contingencyId, int topN) {
+        var ev = context.getEquationVector();
+        var tv = context.getTargetVector();
+        ev.minus(tv);
+        double[] fx = ev.getArray();
+        Integer[] order = new Integer[fx.length];
+        for (int i = 0; i < fx.length; i++) {
+            order[i] = i;
+        }
+        java.util.Arrays.sort(order, (a, b) -> Double.compare(Math.abs(fx[b]), Math.abs(fx[a])));
+        for (int i = 0; i < Math.min(topN, order.length); i++) {
+            int row = order[i];
+            var eq = es.getIndex().getEquationAtColumn(row);
+            System.err.printf("SA_RESID ctg=%s row=%d |F|=%.9e eq=%s elem=%d%n",
+                    contingencyId, row, Math.abs(fx[row]), eq.getType(), eq.getElementNum());
+        }
+    }
+
     @Override
     protected PostContingencyResult runPostContingencySimulation(LfNetwork network, AcLoadFlowContext context, Contingency contingency,
                                                                  LfContingency lfContingency, LimitViolationManager preContingencyLimitViolationManager,
@@ -622,6 +644,15 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         long tUpd = System.nanoTime();
         PHASE_NS.computeIfAbsent("   injectState()", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(tUpd - tInj);
+        // OLF_GPU_SA_RESID=<n>: OLF's OWN residual at the state the device returned, on OLF's
+        // CONTINGENCY-updated equation system (lfContingency.apply() ran above). The batched path's
+        // analogue of OLF_GPU_RESIDUAL_TRACE: a large value on a row means the device solved a
+        // DIFFERENT equation there — a row-assembly bug — not that it failed to converge. Prints the
+        // n worst rows with the equation OLF has on each, which names the family to look at.
+        if (System.getenv("OLF_GPU_SA_RESID") != null) {
+            reportOlfResidual(context, precomputed.equationSystem(), contingency.getId(),
+                    Integer.parseInt(System.getenv("OLF_GPU_SA_RESID")));
+        }
         AcSolverUtil.updateNetwork(network, precomputed.equationSystem());
         PHASE_NS.computeIfAbsent("   AcSolverUtil.updateNetwork()", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tUpd);

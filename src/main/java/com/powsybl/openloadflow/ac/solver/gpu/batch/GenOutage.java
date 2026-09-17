@@ -29,7 +29,8 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                         int dsBus, double dsFactorDelta, double dsBaseDelta, double dsMaxDelta, double dsMinDelta,
                         int rlEntry, double minQDelta, double maxQDelta, boolean allGensLost,
                         java.util.Set<String> lostGenIds, double lostFactorSum, double pStep, double loadQDelta,
-                        int inactiveDqMember, int[] pilotGroupSurvivorRlEntries) {
+                        int inactiveDqMember, int[] pilotGroupSurvivorRlEntries,
+                        int[] dqTargetRows, double[] dqTargetValues) {
     // lostGenIds / lostFactorSum exist for the reactive-capability CURVE channel, which evaluates each
     // generator's curve at its OWN post-distribution active power, reconstructed from the bus's row
     // target by participation share. Losing a generator skews that reconstruction three ways — the lost
@@ -56,6 +57,22 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      */
     public boolean deactivatesDqMember() {
         return inactiveDqMember >= 0;
+    }
+
+    /**
+     * Deactivating a DISTR_Q member renormalizes qPct over the survivors, and the row's TARGET
+     * (qPct_k * sum_j targetQ_j - targetQ_k, AcTargetVector.getGeneratorReactivePowerDistributionTarget)
+     * moves with it. {@code fillDistrQBatch} applies the mask to the MATRIX unconditionally, but the
+     * kernel that maintains the targets runs only inside the reactive-limits phase and only for a
+     * scenario the limits are live on — so a scenario with no pin left the renormalized row solving
+     * against the BASE target. Measured on rte6515 GEN-1263/GEN-1264: the surviving row solved against
+     * 0.016 where OLF's is -0.060 and 0.092, and OLF's own residual at the device's state was 0.076 on
+     * exactly one equation, the deactivated member's reactive balance. These (row, target) pairs seed
+     * every member row of the group with the renormalized value; when the reactive-limits kernel does
+     * run it recomputes the same expression from the live pin states and supersedes them.
+     */
+    public boolean seedsDqTargets() {
+        return dqTargetRows.length > 0;
     }
 
     /**

@@ -225,12 +225,20 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         }
         // OLF_GPU_SA_MAX_CTG=<n>: run only the first n — a DIAGNOSTIC slice, so a parity question can be
         // iterated in seconds instead of the full 9042. Never quote a slice as the scope result.
+        // OLF_GPU_SA_CTG_FROM=<i> slides that slice, so BUS-LEVEL diffing can cover a whole kind in
+        // windows. It has to: the bus diff monitors every voltage level of both arms, and rte6515
+        // holds ~29832 bus results per contingency — 1389 generator contingencies at once is tens of
+        // GB and dies with an OutOfMemoryError before it reports anything. Windows of a few hundred
+        // fit, and together they are the full set.
         String max = System.getenv("OLF_GPU_SA_MAX_CTG");
-        if (max != null) {
-            int n = Integer.parseInt(max);
-            if (n > 0 && n < all.size()) {
-                System.out.printf("  DIAGNOSTIC SLICE: first %d of %d contingencies%n", n, all.size());
-                return all.subList(0, n);
+        int from = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_CTG_FROM", "0"));
+        if (max != null || from > 0) {
+            int n = max != null ? Integer.parseInt(max) : all.size();
+            int lo = Math.min(Math.max(from, 0), all.size());
+            int hi = n > 0 ? Math.min(lo + n, all.size()) : all.size();
+            if (lo > 0 || hi < all.size()) {
+                System.out.printf("  DIAGNOSTIC SLICE: contingencies [%d, %d) of %d%n", lo, hi, all.size());
+                return all.subList(lo, hi);
             }
         }
         return all;

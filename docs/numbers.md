@@ -157,3 +157,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-17 | e42e2bd+dirty | 18.97 | 15.55 | 26.76 | x1.72 | 0/0/0 | 7.70 | 4.43 | 499/500 | 122/133 (92%) | DISTR_Q inactive mask becomes context state; pilot-load cause narrowed to assembly |
 | 2026-09-17 | f5817b0+dirty | 18.96 | 15.96 | 28.36 | x1.78 | 0/0/0 | 7.58 | 4.60 | 499/500 | 122/133 (92%) | DISTR_Q row targets renormalize when a scenario deactivates a controller |
 | 2026-09-17 | 5a35c75+dirty | 19.06 | 15.73 | 28.40 | x1.81 | 0/0/0 | 7.59 | 4.45 | 499/500 | 122/133 (92%) | Curve limits read each generator's own P from the slack water-fill |
+| 2026-09-17 | 7ab448b+dirty | 18.81 | 15.83 | 28.84 | x1.82 | 0/0/0 | 7.63 | 4.45 | 499/500 | 122/133 (92%) | Outage identity in the water-fill + seed: rte6515 generators ALL at machine precision |

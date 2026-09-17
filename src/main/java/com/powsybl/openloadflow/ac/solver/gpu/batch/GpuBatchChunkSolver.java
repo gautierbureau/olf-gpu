@@ -109,6 +109,19 @@ final class GpuBatchChunkSolver {
         }
     }
 
+    /** The DS generator slots one scenario's outage removes, out of the flat (scenario, slot) pairs.
+     *  The host seed needs the same identity the kernel has, or the two model the outaged bus
+     *  differently and the seed stops being the function it is meant to replay. */
+    private static int[] lostSlotsOf(java.util.List<Integer> pairs, int scenario) {
+        java.util.List<Integer> out = new java.util.ArrayList<>();
+        for (int k = 0; k + 1 < pairs.size(); k += 2) {
+            if (pairs.get(k) == scenario) {
+                out.add(pairs.get(k + 1));
+            }
+        }
+        return out.stream().mapToInt(Integer::intValue).toArray();
+    }
+
     private static int countTrue(boolean[] flags) {
         if (flags == null) {
             return 0;
@@ -742,7 +755,8 @@ final class GpuBatchChunkSolver {
                                     dsOvFactorDelta.length > 0 ? dsOvFactorDelta[s] : 0,
                                     dsOvBaseDelta.length > 0 ? dsOvBaseDelta[s] : 0,
                                     dsOvMaxDelta.length > 0 ? dsOvMaxDelta[s] : 0,
-                                    dsOvMinDelta.length > 0 ? dsOvMinDelta[s] : 0, islandedDs);
+                                    dsOvMinDelta.length > 0 ? dsOvMinDelta[s] : 0, islandedDs,
+                                    lostSlotsOf(dsLostGenList, s));
                             if (System.getenv("OLF_GPU_PRELOSS_TRACE") != null) {
                                 double absorbed = 0;
                                 if (shares != null) {

@@ -55,7 +55,8 @@ final class GpuBatchLossPreDistribution {
      */
     static double[] distribute(GpuAcData gpuData, double mismatch,
                                int ovBus, double ovFactorDelta, double ovBaseDelta,
-                               double ovMaxDelta, double ovMinDelta, boolean[] islanded) {
+                               double ovMaxDelta, double ovMinDelta, boolean[] islanded,
+                               int[] lostGenSlots) {
         int nds = gpuData.dsPhiRow().length;
         if (nds == 0 || mismatch == 0) {
             return null;
@@ -115,15 +116,21 @@ final class GpuBatchLossPreDistribution {
             for (int g = 0; g < ngen; g++) {
                 fWork[g] = genFactor(gpuData, dirUp, g);
             }
-            // The bus that lost a generator stays on the AGGREGATE treatment, exactly as the kernel
-            // does: the override channel carries {factor, base, headroom, footroom} deltas for the
-            // BUS, not the identity of the generator, so no per-generator entry can express it. It
-            // joins the SAME denominator, so every other bus stays per-generator.
+            // The bus that lost a generator is treated PER GENERATOR, exactly as the kernel does
+            // since the outage carries the identity of what it removed: the lost generators are marked
+            // out and the survivors take part like any others, with the outage's own move of the row
+            // target carried by the anchor rather than by an aggregate participant. The aggregate
+            // remains only for a bus whose loss has no identity to remove (a load-only outage).
+            boolean ovPerGen = ovBus >= 0;
+            for (int k = 0; lostGenSlots != null && k < lostGenSlots.length; k++) {
+                removed[lostGenSlots[k]] = true;
+                fWork[lostGenSlots[k]] = 0.0;
+            }
             double ovCum = 0.0;
             for (int iter = 0; iter < ngen && Math.abs(rem) > P_RESIDUE_EPS; iter++) {
                 double fsumActive = 0.0;
                 for (int g = 0; g < ngen; g++) {
-                    if (removed[g] || gpuData.dgBus()[g] == ovBus
+                    if (removed[g] || (gpuData.dgBus()[g] == ovBus && !ovPerGen)
                             || islanded != null && islanded[gpuData.dgBus()[g]]) {
                         continue;
                     }
@@ -133,7 +140,7 @@ final class GpuBatchLossPreDistribution {
                 double ovMaxD = 0.0;
                 double ovMinD = 0.0;
                 boolean ovActive = false;
-                if (ovBus >= 0 && (islanded == null || !islanded[ovBus])) {
+                if (ovBus >= 0 && !ovPerGen && (islanded == null || !islanded[ovBus])) {
                     ovMaxD = gpuData.dsMaxDelta()[ovBus] - ovMaxDelta;
                     ovMinD = gpuData.dsMinDelta()[ovBus] - ovMinDelta;
                     // The kernel does NOT take the factor delta off a REMAINING_MARGIN factor; mirror
@@ -152,7 +159,7 @@ final class GpuBatchLossPreDistribution {
                 }
                 double done = 0.0;
                 for (int g = 0; g < ngen; g++) {
-                    if (removed[g] || gpuData.dgBus()[g] == ovBus
+                    if (removed[g] || (gpuData.dgBus()[g] == ovBus && !ovPerGen)
                             || islanded != null && islanded[gpuData.dgBus()[g]]) {
                         continue;
                     }
@@ -196,7 +203,7 @@ final class GpuBatchLossPreDistribution {
                 if (islanded != null && islanded[i]) {
                     continue;
                 }
-                if (i == ovBus) {
+                if (i == ovBus && !ovPerGen) {
                     cum[i] = ovCum;
                     continue;
                 }

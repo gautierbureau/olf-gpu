@@ -3016,16 +3016,19 @@ __device__ double rlCurveEval(double pMW, const double* pts, int npts, int sel, 
 // participating curve gen's delta eval(p_now) - eval(p_base). p_now = basePpu + share * (the bus's
 // DS-moved row target - its base) — exact while intra-bus proportionality holds (the pack's DS
 // model). At the base point the delta is bit-zero (same formula both sides).
-// OLF_GPU_CURVE_GENCUM=1: feed rlCurveLimitsBatch each generator's OWN cumulative P from the
-// distributed-slack water-fill (dGenCum) instead of splitting its bus's movement by the pack's fixed
-// share. DEFAULT OFF, and the default is not a preference — the substitution is incomplete. It fixes
-// the worst case outright (rte6515 GEN-6172, 3.790e-02 kV -> 3.257e-11) and regresses GEN-6139 by
-// four orders (3.253e-07 -> 5.116e-03), which is what a CURRENCY mismatch looks like: genCum is a
-// snapshot from the last DS pass while target[pRow] is live, so this trades "wrong split, current
-// targets" for "right split, possibly stale targets". Closing it needs the generator's share of the
-// LIVE bus movement — genCum for the split, target for the level — not one or the other.
+// rlCurveLimitsBatch reads each generator's OWN cumulative P from the distributed-slack water-fill
+// (dGenCum), which clamps PER GENERATOR, instead of splitting its bus's movement by the share fixed
+// at pack time. The share is exact only while the intra-bus split stays proportional, and a clamp
+// breaks that: on rte6515 GEN-6172 at VL-6139_0 the 451 MW unit takes +0.0442 where its share says
+// +0.0890, which puts the bus's Q box out by 2.67 MVAr and the bus 0.0379 kV off.
+// DEFAULT ON since the full validation; OLF_GPU_CURVE_GENCUM=0 restores the share reconstruction.
+static bool envIs(const char* name, const char* value) {
+    const char* v = std::getenv(name);
+    return v != nullptr && std::string(v) == value;
+}
+
 static bool curveGenCum() {
-    static const bool on = std::getenv("OLF_GPU_CURVE_GENCUM") != nullptr;
+    static const bool on = !envIs("OLF_GPU_CURVE_GENCUM", "0");
     return on;
 }
 

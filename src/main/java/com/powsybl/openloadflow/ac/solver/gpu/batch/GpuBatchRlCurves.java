@@ -33,7 +33,7 @@ import java.util.List;
  * ({@code rlCurveLimitsBatch}) re-evaluates the bus limits at the CURRENT targets before every RL
  * decision. Non-participating curve gens never move — their base snapshot stays exact, no entry.
  *
- * <p>Channel layout (setBatchRlCurves): cvIdx stride 4 {rlIdx, pRow, ptsOff, npts}; cvIn stride 5
+ * <p>Channel layout (setBatchRlCurves): cvIdx stride 5 {rlIdx, pRow, ptsOff, npts, dsGenSlot}; cvIn stride 5
  * {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu}; cvPts stride 3
  * {p_MW, minQ_MW, maxQ_MW} sorted by p.
  *
@@ -105,7 +105,7 @@ public final class GpuBatchRlCurves {
                 // possible but its own P participation is the same as a local bus's) — fall through to
                 // the same per-generator curve packing below.
                 packBusCurves(bus, rlIdx, es, dsParams, baseTargets, cvIdx, cvIn, cvPts,
-                        cvGenId, cvBusFactor);
+                        cvGenId, cvBusFactor, gpuData.dgGenId());
                 rlIdx++;
                 continue;
             }
@@ -121,7 +121,7 @@ public final class GpuBatchRlCurves {
                         + bus.getId() + ")");
             }
             packBusCurves(bus, rlIdx, es, dsParams, baseTargets, cvIdx, cvIn, cvPts,
-                    cvGenId, cvBusFactor);
+                    cvGenId, cvBusFactor, gpuData.dgGenId());
             rlIdx++;
         }
         if (cvIdx.isEmpty()) {
@@ -139,8 +139,9 @@ public final class GpuBatchRlCurves {
                     int[] ix = cvIdx.get(g);
                     StringBuilder sb = new StringBuilder(String.format(
                             "%s rlIdx=%d baseP=%.12f share=%.12f baseRowTarget=%.12f busFactor=%.12f "
-                            + "baseEvalMin=%.12f baseEvalMax=%.12f npts=%d pts=",
-                            cvGenId.get(g), ix[0], in[0], in[1], in[2], cvBusFactor.get(g), in[3], in[4], ix[3]));
+                            + "baseEvalMin=%.12f baseEvalMax=%.12f dsSlot=%d npts=%d pts=",
+                            cvGenId.get(g), ix[0], in[0], in[1], in[2], cvBusFactor.get(g), in[3], in[4],
+                            ix[4], ix[3]));
                     for (int k = 0; k < ix[3]; k++) {        // cvPts stride 3 {p_MW, minQ_MW, maxQ_MW}
                         int o = (ix[2] + k) * 3;
                         sb.append(String.format("%s%.9f:%.9f:%.9f", k == 0 ? "" : ",",
@@ -161,10 +162,23 @@ public final class GpuBatchRlCurves {
     }
 
     @SuppressWarnings("java:S107")
+    /** The generator's index in the distributed-slack GENERATOR pack, or -1 when it is not in it. */
+    private static int dsSlotOf(String[] dgGenId, String genId) {
+        if (dgGenId == null) {
+            return -1;
+        }
+        for (int i = 0; i < dgGenId.length; i++) {
+            if (dgGenId[i].equals(genId)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     private static void packBusCurves(LfBus bus, int rlIdx, EquationSystem<AcVariableType, AcEquationType> es,
                                       GpuDsParams dsParams, double[] baseTargets,
                                       List<int[]> cvIdx, List<double[]> cvIn, List<Double> cvPts,
-                                      List<String> cvGenId, List<Double> cvBusFactor) {
+                                      List<String> cvGenId, List<Double> cvBusFactor, String[] dgGenId) {
         double busFactor = bus.getGenerators().stream().mapToDouble(dsParams::factor).sum();
         for (LfGenerator gen : bus.getGenerators()) {
             var curve = gen instanceof AbstractLfGenerator alg
@@ -182,7 +196,13 @@ public final class GpuBatchRlCurves {
                 cvPts.add(pt.getMaxQ());
             }
             int pRow = es.getVariableSet().getVariable(bus.getNum(), AcVariableType.BUS_PHI).getRow();
-            cvIdx.add(new int[] {rlIdx, pRow, ptsOff, points.size()});
+            // ...and WHICH generator this is in the distributed-slack generator pack. The kernel reads
+            // that generator's own cumulative P movement (genCum) instead of splitting its bus's
+            // movement by a fixed share: the share is exact only while the intra-bus split stays
+            // proportional, and OLF's water-fill clamps PER GENERATOR, which breaks it the moment one
+            // generator on the bus saturates. -1 when the generator is not in the pack (then the share
+            // reconstruction is the only thing available).
+            cvIdx.add(new int[] {rlIdx, pRow, ptsOff, points.size(), dsSlotOf(dgGenId, gen.getId())});
             cvIn.add(new double[] {gen.getTargetP(), dsParams.factor(gen) / busFactor, baseTargets[pRow],
                 gen.getMinQ(), gen.getMaxQ()});              // base evals AT base targetP (bit-zero delta at base)
             cvGenId.add(gen.getId());                        // host-side only: which generator this entry is,

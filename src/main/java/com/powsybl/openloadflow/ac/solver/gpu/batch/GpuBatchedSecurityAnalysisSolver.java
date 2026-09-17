@@ -329,8 +329,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         config.rlCurveExtrapolate())
                 : null;
         int[] curvePRows = rlCurves != null
-                ? java.util.stream.IntStream.range(0, rlCurves.cvIdx().length / 4)
-                        .map(g -> rlCurves.cvIdx()[g * 4 + 1]).toArray()
+                ? java.util.stream.IntStream.range(0, rlCurves.cvIdx().length / 5)
+                        .map(g -> rlCurves.cvIdx()[g * 5 + 1]).toArray()
                 : null;
         GpuBatchQualification.ScenarioPlan plan = GpuBatchQualification.planScenarios(contingencies, qualifications,
                 elementMapper, gpuData, equationSystem, dsSum, slackParticipates, dsParams, distrRhoControllers,

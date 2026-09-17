@@ -177,7 +177,7 @@ final class GpuBatchChunkSolver {
         if (rlCurves != null) {
             java.util.Map<Integer, List<Integer>> acc = new java.util.HashMap<>();
             for (int e = 0; e < rlCurves.cvGenId().length; e++) {
-                acc.computeIfAbsent(rlCurves.cvIdx()[e * 4 + 1], k -> new ArrayList<>()).add(e);
+                acc.computeIfAbsent(rlCurves.cvIdx()[e * 5 + 1], k -> new ArrayList<>()).add(e);
             }
             acc.forEach((row, es) -> curveEntriesByPRow.put(row, es.stream().mapToInt(Integer::intValue).toArray()));
         }

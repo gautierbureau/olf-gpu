@@ -3016,12 +3016,26 @@ __device__ double rlCurveEval(double pMW, const double* pts, int npts, int sel, 
 // participating curve gen's delta eval(p_now) - eval(p_base). p_now = basePpu + share * (the bus's
 // DS-moved row target - its base) — exact while intra-bus proportionality holds (the pack's DS
 // model). At the base point the delta is bit-zero (same formula both sides).
+// OLF_GPU_CURVE_GENCUM=1: feed rlCurveLimitsBatch each generator's OWN cumulative P from the
+// distributed-slack water-fill (dGenCum) instead of splitting its bus's movement by the pack's fixed
+// share. DEFAULT OFF, and the default is not a preference — the substitution is incomplete. It fixes
+// the worst case outright (rte6515 GEN-6172, 3.790e-02 kV -> 3.257e-11) and regresses GEN-6139 by
+// four orders (3.253e-07 -> 5.116e-03), which is what a CURRENCY mismatch looks like: genCum is a
+// snapshot from the last DS pass while target[pRow] is live, so this trades "wrong split, current
+// targets" for "right split, possibly stale targets". Closing it needs the generator's share of the
+// LIVE bus movement — genCum for the split, target for the level — not one or the other.
+static bool curveGenCum() {
+    static const bool on = std::getenv("OLF_GPU_CURVE_GENCUM") != nullptr;
+    return on;
+}
+
 __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int cvExtrapolate,
                                    const int* cvIdx, const double* cvIn, const double* cvPts,
                                    const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
                                    const double* target,
                                    int nQOv, const int* qOvSlotEntry, const double* qOvMinMax,
                                    const int* cvOvPtr, const int* cvOvEntry, const double* cvOvVal,
+                                   const double* genCum, const char* genCumValid, int ngen,
                                    double* minQDyn, double* maxQDyn, double* loadQDyn) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
@@ -3033,7 +3047,7 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
     int ovLo = cvOvPtr != nullptr ? cvOvPtr[s] : 0;           // this scenario's curve repairs, if any
     int ovHi = cvOvPtr != nullptr ? cvOvPtr[s + 1] : 0;       // (CSR by scenario: a handful of entries)
     for (int g = 0; g < ncv; g++) {
-        if (cvIdx[g * 4] != i) continue;
+        if (cvIdx[g * 5] != i) continue;
         // A generator outage at this bus skews the p_now reconstruction below. pStep is the part of
         // the row target the OUTAGE moved (the lost P, and any shed load) — not slack power, so it
         // moves nobody's curve; shareScale renormalizes this generator's slack share over the
@@ -3049,11 +3063,25 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
             }
         }
         if (shareScale < 0) continue;
-        int pRow = cvIdx[g * 4 + 1];
-        const double* pts = cvPts + cvIdx[g * 4 + 2] * 3;
-        int npts = cvIdx[g * 4 + 3];
-        double pNow = cvIn[g * 5]
-                + cvIn[g * 5 + 1] * shareScale * (target[(size_t) s * n + pRow] - cvIn[g * 5 + 2] - pStep);
+        int pRow = cvIdx[g * 5 + 1];
+        const double* pts = cvPts + cvIdx[g * 5 + 2] * 3;
+        int npts = cvIdx[g * 5 + 3];
+        int slot = cvIdx[g * 5 + 4];
+        // This generator's OWN movement, straight from the distributed-slack water-fill, which clamps
+        // PER GENERATOR. Splitting its bus's movement by a fixed share is exact only while the
+        // intra-bus split stays proportional, and a clamp breaks that: measured on rte6515 GEN-6172 at
+        // VL-6139_0, the 451 MW unit takes +0.0442 where its share says +0.0890 and the remainder goes
+        // to its four siblings. The share reconstruction stays as the fallback for an entry with no
+        // slot, and for the outaged bus's own entries, whose pStep/shareScale repair is expressed in
+        // those terms.
+        double pNow;
+        if (genCum != nullptr && genCumValid != nullptr && genCumValid[s]
+                && slot >= 0 && pStep == 0 && shareScale == 1) {
+            pNow = cvIn[g * 5] + genCum[(size_t) s * ngen + slot];
+        } else {
+            pNow = cvIn[g * 5]
+                    + cvIn[g * 5 + 1] * shareScale * (target[(size_t) s * n + pRow] - cvIn[g * 5 + 2] - pStep);
+        }
         mn += rlCurveEval(pNow * 100.0, pts, npts, 0, cvExtrapolate) / 100.0 - cvIn[g * 5 + 3];
         mx += rlCurveEval(pNow * 100.0, pts, npts, 1, cvExtrapolate) / 100.0 - cvIn[g * 5 + 4];
     }
@@ -3828,7 +3856,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                                               const double* dgMaxDelta, const double* dgMinDelta,
                                               const double* dgMarginUp, const double* dgMarginDown,
                                               const int* busGenStart, const int* busGenEnd,
-                                              double* genCum, char* genRemoved, double* genFactorWork,
+                                              double* genCum, char* genCumValid, char* genRemoved, double* genFactorWork,
                                               double* target, char* switched, char* dsResidual, double* retainApplied, int dbgTrace) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
@@ -3949,6 +3977,9 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         }
     }
     bool perGen = ngen > 0 && !anchored;
+    if (genCumValid != nullptr) {
+        genCumValid[s] = perGen ? 1 : 0;
+    }
     if (perGen) {
         for (int g = 0; g < ngen; g++) {                     // fresh list, fresh cumulative deltas
             genCum[(size_t) s * ngen + g] = 0.0;
@@ -4359,7 +4390,7 @@ struct BatchSolverContext {
     int nDqInact = 0;                                            // {slot, dqMember} pairs: a controller
     DeviceBuf dDqInact;                                          // that stops controlling in ONE scenario
     // Reactive capability CURVES at runtime P (setBatchRlCurves): per participating curve gen —
-    // cvIdx {rlIdx, pRow, ptsOff, npts}, cvIn {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu},
+    // cvIdx {rlIdx, pRow, ptsOff, npts, dsGenSlot}, cvIn {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu},
     // cvPts {p_MW, minQ_MW, maxQ_MW} sorted by p; dRlMinQDyn/dRlMaxQDyn = nS*nrl evaluated limits.
     int ncv = 0;
     int cvExtrapolate = 0;                                 // OLF extrapolateReactiveLimits for curve gens
@@ -4605,6 +4636,11 @@ struct BatchSolverContext {
     DeviceBuf dSvdGrpStep, dSvdMemState, dSvdMemContB, dSvdSubPos, dSvdSaved;
 
     DeviceBuf dGenCum, dGenRemoved;
+    DeviceBuf dGenCumValid;                                // per scenario: the PER-GENERATOR water-fill ran, so
+                                                           // dGenCum holds each generator's own movement. The
+                                                           // anchored path distributes per BUS and leaves it zero,
+                                                           // which a reader cannot tell from "nothing moved".
+
     // The WORKING factors, normalized IN PLACE each iteration exactly as OLF's
     // normalizeParticipationFactors mutates ParticipatingElement.factor: by iteration k a survivor's
     // factor has been divided k times. f/Sigma_survivors(raw) is the same number algebraically and a
@@ -6768,6 +6804,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
+                        curveGenCum() && ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
+                        curveGenCum() && ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
                         ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
                         ctx->dRlLoadQDyn.as<double>());
             }
@@ -6803,6 +6841,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             if (ctx->ngen > 0 && ctx->dGenCum.p) {           // per-solve too: the write-back reads it even when
                 CUDA_CHECK(cudaMemsetAsync(ctx->dGenCum.p, 0,   // the DS phase never fired (NaN targetP otherwise)
                         static_cast<size_t>(ctx->ngen) * nS * sizeof(double), ctx->stream));
+                CUDA_CHECK(cudaMemsetAsync(ctx->dGenCumValid.p, 0, (size_t) nS * sizeof(char), ctx->stream));
             }
         }
         if (ctx->nmon > 0) {                                 // per-SOLVE state, like the RL limit types:
@@ -8189,7 +8228,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dgMaxDelta.as<double>(), ctx->dgMinDelta.as<double>(),
                     ctx->dgMarginUp.as<double>(), ctx->dgMarginDown.as<double>(),
                     ctx->dBusGenStart.as<int>(), ctx->dBusGenEnd.as<int>(),
-                    ctx->dGenCum.as<double>(), ctx->dGenRemoved.as<char>(), ctx->dGenFactorWork.as<double>(),
+                    ctx->dGenCum.as<double>(), ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr,
+                    ctx->dGenRemoved.as<char>(), ctx->dGenFactorWork.as<double>(),
                     ctx->dTarget.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>(),
                     ctx->dDsRetainApplied.as<double>(),
                     getenv("OLF_GPU_DS_DEBUG") != nullptr ? 1 : 0);
@@ -8206,6 +8246,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
+                        curveGenCum() && ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
+                        curveGenCum() && ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
                         ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
                         ctx->dRlLoadQDyn.as<double>());
             }
@@ -9268,7 +9310,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 }
 
 // Reactive-capability CURVES at runtime P: install (or clear, with nulls) the per-gen curve channel
-// on a batch context — see rlCurveLimitsBatch. cvIdx stride 4 {rlIdx, pRow, ptsOff, npts}; cvIn
+// on a batch context — see rlCurveLimitsBatch. cvIdx stride 5 {rlIdx, pRow, ptsOff, npts, dsGenSlot}; cvIn
 // stride 5 {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu}; cvPts stride 3
 // {p_MW, minQ_MW, maxQ_MW} sorted by p.
 extern "C" JNIEXPORT void JNICALL
@@ -9283,7 +9325,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
         ctx->ncv = 0;
         return;
     }
-    int ncv = env->GetArrayLength(jCvIdx) / 4;
+    int ncv = env->GetArrayLength(jCvIdx) / 5;   // stride 5: {rlIdx, pRow, ptsOff, npts, dsGenSlot}
     if (ncv == 0) {
         ctx->ncv = 0;
         return;
@@ -9291,7 +9333,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     jint* cvIdx = env->GetIntArrayElements(jCvIdx, nullptr);
     jdouble* cvIn = env->GetDoubleArrayElements(jCvIn, nullptr);
     jdouble* cvPts = env->GetDoubleArrayElements(jCvPts, nullptr);
-    ctx->dCvIdx.upload(cvIdx, static_cast<size_t>(ncv) * 4 * sizeof(int));
+    ctx->dCvIdx.upload(cvIdx, static_cast<size_t>(ncv) * 5 * sizeof(int));
     ctx->dCvIn.upload(cvIn, static_cast<size_t>(ncv) * 5 * sizeof(double));
     ctx->dCvPts.upload(cvPts, static_cast<size_t>(env->GetArrayLength(jCvPts)) * sizeof(double));
     ctx->dRlMinQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
@@ -9646,6 +9688,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     upI(jBusGenStart, ctx->dBusGenStart);
     upI(jBusGenEnd, ctx->dBusGenEnd);
     ctx->dGenCum.alloc((size_t) ctx->nScenarios * ngen * sizeof(double));
+    ctx->dGenCumValid.alloc((size_t) ctx->nScenarios * sizeof(char));
     ctx->dGenFactorWork.alloc((size_t) ctx->nScenarios * ngen * sizeof(double));
     ctx->dGenRemoved.alloc((size_t) ctx->nScenarios * ngen * sizeof(char));
     ctx->ngen = ngen;

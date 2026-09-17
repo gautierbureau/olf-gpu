@@ -426,6 +426,30 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 gpuWarmMs, gpuWarmMs / (double) n, (double) cpuMs / gpuWarmMs);
         System.out.printf("  pre-ctg: CPU=%s GPU=%s%n",
                 cpu.getPreContingencyResult().getStatus(), gpuCold.getPreContingencyResult().getStatus());
+        // The BASE load flow, bus by bus. Every post-contingency state is computed FROM the base, so a
+        // base that differs puts a floor under every contingency — and comparing only post-contingency
+        // states cannot see it, because both arms' bases are their own. Relevant because the device
+        // anchors its reactive-capability CURVE pack BEFORE the base load flow's own slack
+        // distribution, which on rte6515 moves -28.26 pu, the same size as the contingency
+        // redistributions that break the pack's proportional-share model.
+        {
+            Map<String, Double> gpuBaseV = new TreeMap<>();
+            gpuCold.getPreContingencyResult().getNetworkResult().getBusResults()
+                    .forEach(b -> gpuBaseV.put(b.getBusId(), b.getV()));
+            var cpuBase = cpu.getPreContingencyResult().getNetworkResult().getBusResults().stream()
+                    .filter(b -> gpuBaseV.containsKey(b.getBusId())).toList();
+            long above = cpuBase.stream().filter(b -> Math.abs(b.getV() - gpuBaseV.get(b.getBusId())) > 1e-12).count();
+            double worst = cpuBase.stream()
+                    .mapToDouble(b -> Math.abs(b.getV() - gpuBaseV.get(b.getBusId()))).max().orElse(0);
+            System.out.printf("  BASE BUSDIFF buses>1e-12kV=%d of %d | worst abs=%.3e kV%n",
+                    above, cpuBase.size(), worst);
+            cpuBase.stream()
+                    .sorted(java.util.Comparator.comparingDouble(
+                            (com.powsybl.security.results.BusResult b) -> -Math.abs(b.getV() - gpuBaseV.get(b.getBusId()))))
+                    .limit(4)
+                    .forEach(b -> System.out.printf("      %s %.9f vs %.9f (%.3e)%n", b.getBusId(), b.getV(),
+                            gpuBaseV.get(b.getBusId()), b.getV() - gpuBaseV.get(b.getBusId())));
+        }
 
         long cpuViolations = violationCount(cpu);
         long gpuViolations = violationCount(gpuCold);

@@ -337,6 +337,16 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         sap.addExtension(OpenSecurityAnalysisParameters.class,
                 new OpenSecurityAnalysisParameters().setThreadCount(cpuThreads));
 
+        // ONE NETWORK PER ARM. The three runs used to share a single Network object, which is fine for
+        // branch/generator/load outages but NOT for busbar-section ones: those open switches, and any
+        // switch state the restore does not put back is inherited by whichever arm runs next. The GPU
+        // arm runs second, so it started from a progressively more perturbed topology the more busbar
+        // contingencies had already executed — which is exactly the shape of the "busbar 8.176e-06 kV
+        // on a 0%-batched kind" that stood recorded as a GPU/CPU difference. Read before timing, so a
+        // second parse never lands inside a measured region.
+        Network networkGpuCold = Network.read(CASE_FILE);
+        Network networkGpuWarm = Network.read(CASE_FILE);
+
         long cpuT0 = System.nanoTime();
         // With a single contingency under the lens, monitor every voltage level: whether the two arms
         // differ LOCALLY or network-wide is the first thing that splits the candidate causes.
@@ -395,7 +405,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
 
             GpuBatchScopeCensus.reset();
             long g0 = System.nanoTime();
-            gpuCold = runSecurityAnalysis(network, contingencies, monitors, sapGpu);
+            gpuCold = runSecurityAnalysis(networkGpuCold, contingencies, monitors, sapGpu);
             gpuColdMs = (System.nanoTime() - g0) / 1_000_000;
 
             // Check census: how many contingencies fell back to CPU?
@@ -407,7 +417,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
 
             GpuBatchScopeCensus.reset();
             long g1 = System.nanoTime();
-            gpuWarm = runSecurityAnalysis(network, contingencies, monitors, sapGpu);
+            gpuWarm = runSecurityAnalysis(networkGpuWarm, contingencies, monitors, sapGpu);
             gpuWarmMs = (System.nanoTime() - g1) / 1_000_000;
             Map<String, Long> censusWarm = GpuBatchScopeCensus.snapshot();
             System.out.printf("  GPU CENSUS (warm): %s%n", censusWarm);
@@ -441,8 +451,26 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             long above = cpuBase.stream().filter(b -> Math.abs(b.getV() - gpuBaseV.get(b.getBusId())) > 1e-12).count();
             double worst = cpuBase.stream()
                     .mapToDouble(b -> Math.abs(b.getV() - gpuBaseV.get(b.getBusId()))).max().orElse(0);
-            System.out.printf("  BASE BUSDIFF buses>1e-12kV=%d of %d | worst abs=%.3e kV%n",
-                    above, cpuBase.size(), worst);
+            // The comparison can only cover buses BOTH arms reported. Say so out loud: a run whose two
+            // arms name their buses differently (busbar-section outages re-split the bus view) used to
+            // print "0 of 1" and read like a clean result, when it meant 29831 buses went uncompared.
+            int cpuAll = cpu.getPreContingencyResult().getNetworkResult().getBusResults().size();
+            System.out.printf("  BASE BUSDIFF buses>1e-12kV=%d of %d | worst abs=%.3e kV"
+                            + " | uncompared: cpu-only=%d gpu-only=%d%n",
+                    above, cpuBase.size(), worst, cpuAll - cpuBase.size(), gpuBaseV.size() - cpuBase.size());
+            if (cpuAll != cpuBase.size() || gpuBaseV.size() != cpuBase.size()) {
+                // NOT APPLES TO APPLES. OLF's multi-threaded SA builds a partitionTopoConfig PER
+                // PARTITION and takes the pre-contingency result from one of them ("all pre contingency
+                // are the same" — which does not hold when the partitions retain different switches).
+                // The GPU arm is forced single-threaded (threadCount > 1 SIGSEGVs in cuLaunchKernel), so
+                // with busbar-section contingencies the two arms can end up on DIFFERENT bus
+                // decompositions entirely: measured at 60 busbar outages, CPU 29832 buses vs GPU 6877
+                // with ONE in common, which the intersection-only print rendered as a clean 1.4e-13.
+                // At matched thread counts the same cases agree BIT-IDENTICALLY (worst 0.0e+00).
+                System.out.printf("  BASE BUSDIFF: *** NOT COMPARABLE *** the arms disagree on the bus "
+                        + "decomposition (cpu=%d gpu=%d buses). Re-run with OLF_GPU_SA_CPU_THREADS=1 "
+                        + "before reading any number above.%n", cpuAll, gpuBaseV.size());
+            }
             cpuBase.stream()
                     .sorted(java.util.Comparator.comparingDouble(
                             (com.powsybl.security.results.BusResult b) -> -Math.abs(b.getV() - gpuBaseV.get(b.getBusId()))))

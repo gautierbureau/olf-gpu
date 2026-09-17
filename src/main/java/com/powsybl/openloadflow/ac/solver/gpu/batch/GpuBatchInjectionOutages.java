@@ -125,13 +125,14 @@ final class GpuBatchInjectionOutages {
             // the CPU, as does a Q-carrying load loss here.
             // Admit exactly the shape the degeneration argument covers, and no more:
             //  (a) another controller survives, so the group still holds this bus's voltage;
-            //  (b) this bus OWNS a DISTR_Q row — it is not the group's FREE member. The algebra says
-            //      the free-member case should work too (with qPct 1 on the survivor the row becomes
-            //      q_dead = targetQ_dead, which IS its balance) and it DOES NOT: rte6515 GEN-1522
-            //      stays 3.2 kV out with the mask applied, against 3.157 kV without it — so the
-            //      renormalization is not what dominates there and a SECOND cause is in play. Measured,
-            //      not assumed: row 3292 keeps mode 0 and its 1.122 V target, row 3294 stays mode 1,
-            //      and the error lands on VL-1525/VL-1524 with the GPU injecting MORE reactive power;
+            //  (b) the survivors must not ALL pin — but that is a RUNTIME property, so it is checked
+            //      after the solve instead (needsPilotPinCheck) and such a scenario is replayed on the
+            //      CPU. The Q probe named it: when the surviving controller pins, the reactive-limit
+            //      machinery repossesses its row for its own pinned balance, and the row carrying THIS
+            //      bus's q = targetQ goes with it (GEN-1522: q 0.601 vs OLF's 0, distrQResid -0.601,
+            //      every equation still converging). Where the survivors keep headroom the degeneration
+            //      holds exactly — GEN-1523 at overMaxBy -0.149 and GEN-5958 at -0.900 both land at
+            //      ~4e-11 kV;
             //  (c) the pilot carries no reactive load, because the pilot's load Q rides the relocation
             //      path (qBuf/pilotQ) that the per-scenario load-Q channel does not reach — the same
             //      defect that keeps LOAD-1263 gated.
@@ -142,8 +143,6 @@ final class GpuBatchInjectionOutages {
                                     .anyMatch(cb -> cb != bus && cb.getGenerators().stream()
                                             .anyMatch(g -> !lostHere.contains(g)
                                                     && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE))
-                            && vc.getMergedControllerElements().stream()
-                                    .filter(vc::isControllerEnabled).findFirst().map(m -> m != bus).orElse(false)
                             && vc.getControlledBus().getLoadTargetQ() == 0)
                     .orElse(false);
             if ((!keepsController && !vcSurvives) || !lostLoads.isEmpty()) {
@@ -363,11 +362,28 @@ final class GpuBatchInjectionOutages {
                 return reject("DISTR_Q_MEMBER_NOT_PACKED", bus);
             }
         }
+        int[] pilotSurvivorRlEntries = new int[0];
+        if (vcSurvives) {
+            java.util.List<Integer> entries = new ArrayList<>();
+            for (LfBus cb : bus.getGeneratorVoltageControl().orElseThrow().getMergedControllerElements()) {
+                if (cb == bus || cb.getGenerators().stream().noneMatch(g -> !lostSet.contains(g)
+                        && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE)) {
+                    continue;
+                }
+                for (int i = 0; rlBusNum != null && i < rlBusNum.length; i++) {
+                    if (rlBusNum[i] == cb.getNum()) {
+                        entries.add(i);
+                        break;
+                    }
+                }
+            }
+            pilotSurvivorRlEntries = entries.stream().mapToInt(Integer::intValue).toArray();
+        }
         java.util.Set<String> lostGenIds = lost.stream().map(LfGenerator::getId)
                 .collect(java.util.stream.Collectors.toUnmodifiableSet());
         double lostFactorSum = lost.stream().mapToDouble(dsParams::factor).sum();
         return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
                 dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum,
-                lostLoadP - lostP, loadQDelta, inactiveDqMember);
+                lostLoadP - lostP, loadQDelta, inactiveDqMember, pilotSurvivorRlEntries);
     }
 }

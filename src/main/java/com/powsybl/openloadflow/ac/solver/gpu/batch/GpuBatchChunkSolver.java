@@ -395,6 +395,9 @@ final class GpuBatchChunkSolver {
                     // scenario. Its key has to leave the renormalization denominator on the TARGET
                     // side, which the qPct override channel does not reach.
                     List<Integer> dqInactList = new ArrayList<>();
+                    // slot -> the RL entries of the controllers still holding a deactivated pilot's
+                    // voltage. All pinned = its Q balance lost its row; the CPU replays that scenario.
+                    java.util.Map<Integer, int[]> pilotPinCheck = new java.util.HashMap<>();
                     List<Integer> dqOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_Q reweight)
                     List<Double> dqOvWList = new ArrayList<>();
                     List<Integer> drOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_RHO renorm, plan A5)
@@ -603,6 +606,9 @@ final class GpuBatchChunkSolver {
                                     if (go.deactivatesDqMember()) {
                                         dqInactList.add(s);
                                         dqInactList.add(go.inactiveDqMember());
+                                    }
+                                    if (go.needsPilotPinCheck()) {
+                                        pilotPinCheck.put(s, go.pilotGroupSurvivorRlEntries());
                                     }
                                     if (go.shrinksReactiveLimits()) {
                                         // The bus KEEPS voltage control, so its reactive-limit entry is
@@ -935,6 +941,7 @@ final class GpuBatchChunkSolver {
                     boolean svcActive = phases.secondaryVc() != null && !phases.secondaryVc().ctls().isEmpty();
                     boolean monActive = phases.monitoring() != null && !phases.monitoring().isEmpty();
                     int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl || svcActive || monActive
+                            || !pilotPinCheck.isEmpty()
                             || System.getenv("OLF_GPU_RL_TRACE") != null) && nrl > 0 ? new int[chunkSize * nrl] : null;
                     // DISTR_Q weight overrides: per-chunk context state (orchestrator re-solves keep
                     // the slot assignment); cleared when the chunk has none.
@@ -1307,6 +1314,31 @@ final class GpuBatchChunkSolver {
                             }
                             System.err.printf("GPU_RL_FINAL ctg=%s pinnedTotal=%d%s%n",
                                     contingencies.get(group.get(chunkStart + s)).contingencyId(), pinned, ids);
+                        }
+                    }
+                    // A deactivated pilot keeps its Q balance on a SURVIVING controller's row. If every
+                    // one of those controllers pinned, the reactive-limit machinery took their rows for
+                    // their own pinned balances and the pilot's balance is no longer enforced anywhere —
+                    // the solve still converges, on an equation system missing a row. Whether they pin is
+                    // a runtime outcome, so it is caught here and the CPU replays the scenario.
+                    if (!pilotPinCheck.isEmpty() && rlStateOut != null) {
+                        for (var e : pilotPinCheck.entrySet()) {
+                            int s = e.getKey();
+                            if (s >= realCount || chunkResults[s] == null) {
+                                continue;
+                            }
+                            boolean allPinned = true;
+                            for (int entry : e.getValue()) {
+                                if ((rlStateOut[s * nrl + entry] & 7) == 0) {
+                                    allPinned = false;
+                                    break;
+                                }
+                            }
+                            if (allPinned) {
+                                chunkResults[s][n + 2] = GpuBatchStatus.STATUS_REJECTED;
+                                com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus
+                                        .record("RUNTIME:DISTR_Q_PILOT_ALL_PINNED");
+                            }
                         }
                     }
                     for (int s = 0; s < realCount; s++) {

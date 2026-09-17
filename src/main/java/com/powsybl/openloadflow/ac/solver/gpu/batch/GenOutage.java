@@ -29,7 +29,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                         int dsBus, double dsFactorDelta, double dsBaseDelta, double dsMaxDelta, double dsMinDelta,
                         int rlEntry, double minQDelta, double maxQDelta, boolean allGensLost,
                         java.util.Set<String> lostGenIds, double lostFactorSum, double pStep, double loadQDelta,
-                        int inactiveDqMember) {
+                        int inactiveDqMember, int[] pilotGroupSurvivorRlEntries) {
     // lostGenIds / lostFactorSum exist for the reactive-capability CURVE channel, which evaluates each
     // generator's curve at its OWN post-distribution active power, reconstructed from the bus's row
     // target by participation share. Losing a generator skews that reconstruction three ways — the lost
@@ -56,6 +56,18 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      */
     public boolean deactivatesDqMember() {
         return inactiveDqMember >= 0;
+    }
+
+    /**
+     * The reactive-limit entries of the controllers still holding this bus's voltage. If they ALL pin,
+     * the reactive-limit machinery repossesses their rows for their own pinned balances — including the
+     * row that was carrying THIS bus's Q balance, which then goes unenforced (measured on rte6515
+     * GEN-1522: q = 0.601 pu where OLF has 0, distrQResid -0.601, every equation still converging).
+     * The device cannot know at plan time whether they will pin, so the chunk solver checks after the
+     * solve and replays such a scenario on the CPU.
+     */
+    public boolean needsPilotPinCheck() {
+        return inactiveDqMember >= 0 && pilotGroupSurvivorRlEntries.length > 0;
     }
 
     /** The bus keeps NO generator: its reactive-limit entry is not a controller in this scenario. */

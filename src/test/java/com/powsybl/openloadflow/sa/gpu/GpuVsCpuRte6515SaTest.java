@@ -512,6 +512,19 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                         cp.getContingency().getId(), above, cp.getNetworkResult().getBusResults().size(),
                         worstAbs, worstRel);
                 worst.forEach(w -> System.out.printf("      %s%n", w));
+                // OLF_GPU_SA_MON_BUS=<id>[,<id>]: both arms' voltage at NAMED buses, whether or not they
+                // are among the worst. A bus the two arms disagree about because one PINNED it and the
+                // other did not shows up here as a target-V vs off-target pair, which the worst-8 list
+                // will not surface when the pin's effect lands somewhere else in the network.
+                String monBus = System.getenv("OLF_GPU_SA_MON_BUS");
+                if (monBus != null) {
+                    java.util.Set<String> want = java.util.Set.of(monBus.split(","));
+                    cp.getNetworkResult().getBusResults().stream()
+                            .filter(b -> want.contains(b.getBusId()) && gpuV.containsKey(b.getBusId()))
+                            .forEach(b -> System.out.printf("      MONBUS ctg=%s bus=%s cpu=%.9f gpu=%.9f d=%.3e%n",
+                                    cp.getContingency().getId(), b.getBusId(), b.getV(),
+                                    gpuV.get(b.getBusId()), b.getV() - gpuV.get(b.getBusId())));
+                }
             }
         }
         for (String ctgId : cpuViolByCtg.keySet()) {

@@ -1309,10 +1309,21 @@ final class GpuBatchChunkSolver {
                         double[] ft = GpuAcNewtonSolver.readBatchTargets(handle);
                         for (int s = 0; s < realCount; s++) {
                             String id = contingencies.get(group.get(chunkStart + s)).contingencyId();
+                            double tot = 0;
                             for (int i = 0; i < nds; i++) {
-                                System.err.printf("GPU_DS_TARGET ctg=%s i=%d target=%s%n",
-                                        id, i, Double.toString(ft[s * n + gpuData.dsPhiRow()[i]]));
+                                int row = gpuData.dsPhiRow()[i];
+                                double effBase = baseTargets[row] - (dsOvBus[s] == i ? dsOvBaseDelta[s] : 0.0);
+                                tot += ft[s * n + row] - effBase;
+                                System.err.printf("GPU_DS_TARGET ctg=%s i=%d target=%s delta=%s%n",
+                                        id, i, Double.toString(ft[s * n + row]),
+                                        Double.toString(ft[s * n + row] - effBase));
                             }
+                            // The CUMULATIVE distributed active power. OLF's own DS re-distributes the
+                            // cumulative amount from the INITIAL target P on every pass, so this total is
+                            // directly comparable to the LAST `effective` OLF_DS_TRACE reports for the
+                            // same contingency.
+                            System.err.printf("GPU_DS_TOTAL ctg=%s distributed=%.9f%n", id, tot)
+;
                         }
                     }
                     if (System.getenv("OLF_GPU_RL_TRACE") != null && rlStateOut != null) {

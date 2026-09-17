@@ -136,8 +136,17 @@ public final class GpuBatchRlCurves {
             try (java.io.PrintWriter w = new java.io.PrintWriter(new java.io.FileWriter(dump))) {
                 for (int g = 0; g < cvGenId.size(); g++) {
                     double[] in = cvIn.get(g);
-                    w.printf("%s rlIdx=%d baseP=%.12f share=%.12f baseRowTarget=%.12f busFactor=%.12f%n",
-                            cvGenId.get(g), cvIdx.get(g)[0], in[0], in[1], in[2], cvBusFactor.get(g));
+                    int[] ix = cvIdx.get(g);
+                    StringBuilder sb = new StringBuilder(String.format(
+                            "%s rlIdx=%d baseP=%.12f share=%.12f baseRowTarget=%.12f busFactor=%.12f "
+                            + "baseEvalMin=%.12f baseEvalMax=%.12f npts=%d pts=",
+                            cvGenId.get(g), ix[0], in[0], in[1], in[2], cvBusFactor.get(g), in[3], in[4], ix[3]));
+                    for (int k = 0; k < ix[3]; k++) {        // cvPts stride 3 {p_MW, minQ_MW, maxQ_MW}
+                        int o = (ix[2] + k) * 3;
+                        sb.append(String.format("%s%.9f:%.9f:%.9f", k == 0 ? "" : ",",
+                                cvPts.get(o), cvPts.get(o + 1), cvPts.get(o + 2)));
+                    }
+                    w.println(sb);
                 }
             } catch (java.io.IOException e) {
                 throw new java.io.UncheckedIOException(e);

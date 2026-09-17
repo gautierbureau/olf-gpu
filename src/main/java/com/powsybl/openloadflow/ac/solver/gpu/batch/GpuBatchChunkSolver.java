@@ -323,8 +323,6 @@ final class GpuBatchChunkSolver {
         // factor sum shrink by the lost gen's share. Only allocated when the network has distributed slack.
         boolean hasDs = gpuData.dsPhiRow().length > 0;
         int[] dsOvBus = hasDs ? new int[chunkSize] : new int[0];
-        // (scenario, DS generator slot) pairs for the generators an outage removes — see below.
-        List<Integer> dsLostGenList = new ArrayList<>();
         double[] dsOvFactorDelta = hasDs ? new double[chunkSize] : new double[0];
         double[] dsOvBaseDelta = hasDs ? new double[chunkSize] : new double[0];
         double[] dsOvMaxDelta = hasDs ? new double[chunkSize] : new double[0];
@@ -410,6 +408,13 @@ final class GpuBatchChunkSolver {
                     // scenario. Its key has to leave the renormalization denominator on the TARGET
                     // side, which the qPct override channel does not reach.
                     List<Integer> dqInactList = new ArrayList<>();
+                    // PER CHUNK, like dqInactList above: the scenario index in every one of these is a
+                    // SLOT in this chunk, so a list that outlives the chunk applies chunk N's entries to
+                    // chunk N+1's slots. That is invisible to any validation run in windows of one chunk.
+                    List<Integer> dsLostGenList = new ArrayList<>();
+                    List<Integer> frozenSeedSlot = new ArrayList<>();
+                    List<Integer> frozenSeedRow = new ArrayList<>();
+                    List<Double> frozenSeedValue = new ArrayList<>();
                     // slot -> the RL entries of the controllers still holding a deactivated pilot's
                     // voltage. All pinned = its Q balance lost its row; the CPU replays that scenario.
                     java.util.Map<Integer, int[]> pilotPinCheck = new java.util.HashMap<>();
@@ -551,6 +556,25 @@ final class GpuBatchChunkSolver {
                                     // ...held at a CLEAN flat state (V=1, phi=0) via the target override, NOT the base
                                     // equation target (a P/Q value that gives a nonsensical islanded voltage/angle).
                                     overrides.add(s * n + frozen[k], frozenTargets[k]);
+                                    // ...and START that row AT its target. It is an identity row, so its
+                                    // solution IS the target and seeding it costs nothing — but leaving it
+                                    // at the base state hands the convergence test a residual OLF never
+                                    // sees, because OLF REMOVES an islanded bus's equations rather than
+                                    // freezing them. Measured on rte6515 LINE-4413-5: the islanded bus's
+                                    // angle row sits at -1.050832654 rad against a frozen target of 0, and
+                                    // that 1.050832654 IS the device's whole initial |F|inf for the solve,
+                                    // against OLF's 0.1296557068. The device then needs an extra Newton
+                                    // iteration, lands at 1.68e-06 where OLF stops at 8.04e-04, and the
+                                    // distributed-slack loop reads a slack mismatch 7.43e-04 different —
+                                    // which is the entire branch-family error (8.328e-05 kV).
+                                    frozenSeedSlot.add(s);
+                                    frozenSeedRow.add(frozen[k]);
+                                    frozenSeedValue.add(frozenTargets[k]);
+                                    if (System.getenv("OLF_GPU_SA_RESID") != null) {
+                                        System.err.printf("FROZEN ctg=%s row=%d target=%.9f base=%.9f |F0|=%.9f%n",
+                                                contingencies.get(ci).contingencyId(), frozen[k], frozenTargets[k],
+                                                baseState[frozen[k]], Math.abs(baseState[frozen[k]] - frozenTargets[k]));
+                                    }
                                 }
                                 rowModePerScenario[s] = row;
                             }
@@ -896,6 +920,15 @@ final class GpuBatchChunkSolver {
                     // Pair phase: warm continuation from each parent contingency's state + RL pinning.
                     double[] x0Full = null;
                     int[] rlStateIn = null;
+                    if (!frozenSeedSlot.isEmpty()) {         // islanding in this chunk: seed the frozen rows
+                        x0Full = new double[chunkSize * n];
+                        for (int s = 0; s < chunkSize; s++) {
+                            System.arraycopy(baseState, 0, x0Full, s * n, n);
+                        }
+                        for (int k = 0; k < frozenSeedSlot.size(); k++) {
+                            x0Full[frozenSeedSlot.get(k) * n + frozenSeedRow.get(k)] = frozenSeedValue.get(k);
+                        }
+                    }
                     // Strategy-leg DS re-anchoring: OLF's processContingency calls
                     // setGeneratorsInitialTargetPToTargetP() before the strategy re-solve, so the CPU's strategy
                     // leg distributes only the INCREMENT from the parent contingency's already-distributed
@@ -939,6 +972,11 @@ final class GpuBatchChunkSolver {
                             }
                             for (int i = 0; i < n; i++) {
                                 x0Full[s * n + i] = parent != null ? parent[i] : baseState[i];
+                            }
+                            for (int k = 0; k < frozenSeedSlot.size(); k++) {
+                                if (frozenSeedSlot.get(k) == s) {   // a frozen row stays AT its frozen state
+                                    x0Full[s * n + frozenSeedRow.get(k)] = frozenSeedValue.get(k);
+                                }
                             }
                             if (rlStateIn != null) {
                                 System.arraycopy(parentRl != null ? parentRl : baseRlSeed, 0, rlStateIn, s * nrl, nrl);
@@ -1020,6 +1058,12 @@ final class GpuBatchChunkSolver {
                     // controller's key back in the denominator, clobbering the right target).
                     GpuAcNewtonSolver.setBatchDqInactiveMembers(handle,
                             dqInactList.isEmpty() ? null : dqInactList.stream().mapToInt(Integer::intValue).toArray());
+                    GpuAcNewtonSolver.setBatchFrozenRows(handle,
+                            frozenSeedSlot.isEmpty() ? null : java.util.stream.IntStream
+                                    .range(0, frozenSeedSlot.size())
+                                    .flatMap(k -> java.util.stream.IntStream.of(
+                                            frozenSeedSlot.get(k), frozenSeedRow.get(k)))
+                                    .toArray());
                     GpuAcNewtonSolver.setBatchDsLostGenerators(handle,
                             dsLostGenList.isEmpty() ? null
                                     : dsLostGenList.stream().mapToInt(Integer::intValue).toArray());

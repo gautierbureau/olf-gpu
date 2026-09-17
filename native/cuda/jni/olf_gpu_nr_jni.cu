@@ -2608,6 +2608,17 @@ __global__ void fillHvdcBatchF(int ne, int nScenarios, int n, int nnz, int nElem
 // generator while the group's other controllers survive). OLF's updateReactiveKeys zeroes its key
 // and renormalizes over the rest — the same treatment a PINNED member gets, except its target
 // contribution stays its own targetQ instead of a reactive limit.
+// A row an islanding outage FROZE to a flat identity state. Its target is not the outer loops' to
+// write: OLF removes an islanded bus's equations altogether, so nothing there re-derives a target.
+// Measured on rte6515 LINE-1525-590: the DISTR_Q target writer stamped 0.0 over a frozen voltage row
+// still holding 1.0, which is an exact 1.0 residual on an identity row and the whole 1.192e-06 kV.
+__device__ __forceinline__ bool rowIsFrozen(int nFrozen, const int* frozenSlotRow, int s, int row) {
+    for (int k = 0; k < nFrozen; k++) {
+        if (frozenSlotRow[2 * k] == s && frozenSlotRow[2 * k + 1] == row) return true;
+    }
+    return false;
+}
+
 __device__ __forceinline__ bool dqMemberInactive(int nInact, const int* inactSlotMember, int s, int m) {
     for (int k = 0; k < nInact; k++) {
         if (inactSlotMember[2 * k] == s && inactSlotMember[2 * k + 1] == m) {
@@ -3112,7 +3123,8 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                                          double* target, const char* rlActive, const double* mTargetQ,
                                          const int* mQrGroup, const int* qrPtr, const int* qrRows,
                                          const int* mode, const double* pilotQ, int nQr,
-                                         int nDqInact, const int* dqInactSlotMember) {
+                                         int nDqInact, const int* dqInactSlotMember,
+                                         int nFrozen, const int* frozenSlotRow) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nMembers * nScenarios) return;
     int k = tid % nMembers;
@@ -3121,6 +3133,9 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     int qg = mQrGroup != nullptr ? mQrGroup[k] : -1;
     if (!mHasRow[k] && qg < 0) return;                       // only members owning a packed DISTR_Q row
                                                              // (or linked to a relocation group, plan-B4)
+    if (mRow[k] >= 0 && rowIsFrozen(nFrozen, frozenSlotRow, s, mRow[k])) {
+        return;                                              // islanded: the row is frozen, not ours to write
+    }
     int reK = mRlEntry[k];
     if (reK >= 0 && limitType[(size_t) s * nrl + reK] != 0) return;   // pinned: the RL kernel owns its row
     if (qg >= 0) {
@@ -4250,6 +4265,27 @@ __global__ void axpy1BatchScaled(int n, int total, const double* dx, const doubl
 // exact vs the host loop; the ssq PARALLEL summation order differs from the host's sequential
 // sum by last-ulp amounts — borderline ||F||2 stopping decisions can flip at ulp level (same
 // class of effect as any reduction-order change; the criterion itself is unchanged).
+// OLF_GPU_WORST_ROW=1 (with OLF_GPU_BATCH_TRACE): name the row carrying the largest residual at a
+// solve's start. A norm says HOW FAR the state is; only the row says WHY — an identity row sitting at
+// an exact 1.0 is a different animal from a power row at 1.0.
+__global__ void worstRowBatch(int n, const double* F, const int* mode, const double* target,
+                              const double* x, int s) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    int bi = -1;
+    double bv = -1.0;
+    for (int i = 0; i < n; i++) {
+        double v = fabs(F[(size_t) s * n + i]);
+        if (v > bv) {
+            bv = v;
+            bi = i;
+        }
+    }
+    if (bi >= 0) {
+        printf("[WORST_ROW] s=%d row=%d |F|=%.12f mode=%d target=%.9f x=%.9f\n",
+               s, bi, bv, mode[(size_t) s * n + bi], target[(size_t) s * n + bi], x[(size_t) s * n + bi]);
+    }
+}
+
 __global__ void residualNormsBatch(int n, const double* F, const char* active, double* out,
                                    const double* thrIdent, const double* thrPower, const int* mode) {
     int s = blockIdx.x;
@@ -4649,6 +4685,8 @@ struct BatchSolverContext {
     DeviceBuf dSvdGrpStep, dSvdMemState, dSvdMemContB, dSvdSubPos, dSvdSaved;
 
     DeviceBuf dGenCum, dGenRemoved;
+    DeviceBuf dFrozenRow;                                  // (scenario, row) pairs: rows an islanding
+    int nFrozenRow = 0;                                    // outage froze to a flat identity state
     DeviceBuf dDsLostGen;                                  // (scenario, DS generator slot) pairs: the
     int nDsLostGen = 0;                                    // generators an outage removes, by identity
     DeviceBuf dGenCumValid;                                // per scenario: the PER-GENERATOR water-fill ran, so
@@ -7755,6 +7793,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 if (forceFirstStep && it == 0) {
                     converged = false;
                 }
+                if (std::getenv("OLF_GPU_WORST_ROW") != nullptr && s == 0 && it == 0) {
+                    worstRowBatch<<<1, 1, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dMode.as<int>(),
+                            ctx->dTarget.as<double>(), ctx->dX.as<double>(), s);
+                    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                }
                 if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
                     std::fprintf(stderr, "BATCH_TRACE s=%d it=%d infnorm=%.17e norm2=%.17e thr=%.17e conv=%d\n",
                                  s, it, norm, std::sqrt(ssq), thr2Of(s), converged ? 1 : 0);
@@ -8323,7 +8366,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr,
                         ctx->dMode.as<int>(),
                         ctx->hasDqQrGroups ? ctx->dQrPilotQ.as<double>() : nullptr, ctx->st->nQr,
-                        ctx->nDqInact, ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr);
+                        ctx->nDqInact, ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
+                        ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr);
             }
             if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {    // all-pinned corner: pilot vEq flip/restore
                 updatePilotVeqBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
@@ -9643,6 +9687,24 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->dDqInact.upload(sm, static_cast<size_t>(n2) * sizeof(int));
     env->ReleaseIntArrayElements(jSlotMember, sm, JNI_ABORT);
     ctx->nDqInact = n2 / 2;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchFrozenRows(
+        JNIEnv* env, jclass, jlong handle, jintArray jSlotRow) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jSlotRow == nullptr || env->GetArrayLength(jSlotRow) == 0) {
+        ctx->nFrozenRow = 0;
+        return;
+    }
+    int n2 = env->GetArrayLength(jSlotRow);
+    jint* sr = env->GetIntArrayElements(jSlotRow, nullptr);
+    ctx->dFrozenRow.upload(sr, static_cast<size_t>(n2) * sizeof(int));
+    env->ReleaseIntArrayElements(jSlotRow, sr, JNI_ABORT);
+    ctx->nFrozenRow = n2 / 2;
 }
 
 extern "C" JNIEXPORT void JNICALL

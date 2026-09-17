@@ -662,6 +662,11 @@ public final class GpuAcNewtonSolver {
      *  reads it, the reactive-capability curve channel above all. */
     public static native void setBatchDsLostGenerators(long handle, int[] slotGen);
 
+    /** Rows an islanding outage froze to a flat identity state, as (scenario, row) pairs. Their targets
+     *  are not the outer loops' to write — OLF removes an islanded bus's equations, so nothing there
+     *  re-derives a target for them. */
+    public static native void setBatchFrozenRows(long handle, int[] slotRow);
+
     public static native void setBatchDqWeightOverrides(long handle, int[] idx, double[] w);
 
     /** Install (or clear, with nulls) per-scenario DISTR_RHO coefficient overrides on a batch

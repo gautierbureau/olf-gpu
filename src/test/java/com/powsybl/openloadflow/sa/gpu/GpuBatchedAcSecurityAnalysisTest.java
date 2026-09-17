@@ -1369,6 +1369,81 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         return network;
     }
 
+    /** An ISLANDING outage that strands a WHOLE remote gen-VC group — pilot AND every controller.
+     *  OLF removes those buses' equations outright; the device freezes their rows to a flat identity
+     *  instead, and updatePilotVeqBatch then read the frozen member modes as "no carrier left" and
+     *  flipped the frozen PILOT row from its voltage identity into a power row. The frozen target
+     *  override re-stamps the voltage value over that power row on the next pass, so the row carries
+     *  a residual of exactly 1.0 that no Newton step can clear — and the whole batch then spends
+     *  iterations on it that OLF never runs, moving the SURVIVING component off the CPU answer.
+     *  Reduced from rte6515 LINE-3938-646, where it cost 8.777e-08 kV across 22985 buses with both
+     *  arms running the identical three post-contingency solves. */
+    @org.junit.jupiter.api.Test
+    void deviceIslandedRemoteControlGroupMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = islandableRemoteControlGroupNetwork();
+        List<Contingency> ctgs = List.of(new Contingency("LTIE", new BranchContingency("LTIE")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        // The surviving component must hold the slack, or the "island" is the part OLF keeps and the
+        // group is never frozen at all.
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vlm1_0"));   // OLF names BUS-VIEW buses <vlId>_<n>
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
+    /** The remote-control group (b1/b2/b3 regulating pilot b4) hung off a meshed main component by the
+     *  single tie LTIE, so outaging LTIE islands the entire group — pilot included. */
+    private static Network islandableRemoteControlGroupNetwork() {
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory
+                .createWithGeneratorRemoteControl();
+        com.powsybl.iidm.network.Substation sm = network.newSubstation().setId("sm").add();
+        // FIVE main buses against the group's four: the validator requires the surviving side to be
+        // the LARGEST connected component, not merely the one holding the slack.
+        for (String vl : List.of("vlm1", "vlm2", "vlm3", "vlm4", "vlm5")) {
+            com.powsybl.iidm.network.VoltageLevel v = sm.newVoltageLevel().setId(vl).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            v.getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        network.getVoltageLevel("vlm1").newGenerator().setId("gm").setBus("vlm1_b").setConnectableBus("vlm1_b")
+                .setMinP(0).setMaxP(2000).setTargetP(700).setTargetV(400).setVoltageRegulatorOn(true).add();
+        // A SURVIVING-side controller the outage drives over its reactive limit: the post-contingency
+        // ReactiveLimits pass then owes a genuine re-solve, which is the solve the frozen pilot row's
+        // permanent residual lengthens by an iteration. Without it the main component is already at
+        // 1e-14 when the spurious pass runs and the extra step cannot move any bus.
+        network.getVoltageLevel("vlm3").newGenerator().setId("gm3").setBus("vlm3_b").setConnectableBus("vlm3_b")
+                .setMinP(0).setMaxP(500).setTargetP(200).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getGenerator("gm3").newMinMaxReactiveLimits().setMinQ(-15).setMaxQ(15).add();
+        network.getVoltageLevel("vlm2").newLoad().setId("lm2").setBus("vlm2_b").setConnectableBus("vlm2_b")
+                .setP0(300).setQ0(120).add();
+        network.getVoltageLevel("vlm3").newLoad().setId("lm3").setBus("vlm3_b").setConnectableBus("vlm3_b")
+                .setP0(250).setQ0(90).add();
+        network.getVoltageLevel("vlm4").newLoad().setId("lm4").setBus("vlm4_b").setConnectableBus("vlm4_b")
+                .setP0(180).setQ0(70).add();
+        network.getVoltageLevel("vlm5").newLoad().setId("lm5").setBus("vlm5_b").setConnectableBus("vlm5_b")
+                .setP0(140).setQ0(50).add();
+        mainLine(network, "LM12", "vlm1", "vlm2");
+        mainLine(network, "LM23", "vlm2", "vlm3");
+        mainLine(network, "LM13", "vlm1", "vlm3");
+        mainLine(network, "LM34", "vlm3", "vlm4");
+        mainLine(network, "LM45", "vlm4", "vlm5");
+        mainLine(network, "LM15", "vlm1", "vlm5");
+        network.newLine().setId("LTIE")
+                .setVoltageLevel1("vlm1").setBus1("vlm1_b").setConnectableBus1("vlm1_b")
+                .setVoltageLevel2("vl4").setBus2("b4").setConnectableBus2("b4")
+                .setR(0.5).setX(12).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        return network;
+    }
+
+    private static void mainLine(Network n, String id, String vlA, String vlB) {
+        n.newLine().setId(id)
+                .setVoltageLevel1(vlA).setBus1(vlA + "_b").setConnectableBus1(vlA + "_b")
+                .setVoltageLevel2(vlB).setBus2(vlB + "_b").setConnectableBus2(vlB + "_b")
+                .setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+    }
+
     @org.junit.jupiter.api.Test
     void deviceRemoteGeneratorControlMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -3114,7 +3189,8 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
             }
             if (requireEngage) {
                 assertTrue(GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get() > 0,
-                        "the batch must ENGAGE (fallen-back run proves nothing)");
+                        "the batch must ENGAGE (fallen-back run proves nothing); census="
+                                + com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.snapshot());
             }
             assertEquals(cpu.getPostContingencyResults().size(), gpu.getPostContingencyResults().size());
             for (int i = 0; i < cpu.getPostContingencyResults().size(); i++) {

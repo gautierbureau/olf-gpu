@@ -3211,13 +3211,22 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
                                     const int* qrPtr, const int* qrRows, const char* qrGenVc,
                                     const double* pilotQ, int* mode, double* target,
                                     char* veqOff, double* savedVTarget,
-                                    const char* rlActive, char* switched) {
+                                    const char* rlActive, char* switched,
+                                    int nFrozen, const int* frozenSlotRow) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nQr * nScenarios) return;
     int g = tid % nQr;
     int s = tid / nQr;
     if (!rlActive[s] || !qrGenVc[g]) return;
     int pilotRow = qrRows[qrPtr[g]];
+    // An ISLANDED pilot has no equation at all on the CPU: OLF removes the bus. Its row here is
+    // frozen to a flat voltage identity, and every member row is frozen to identity too, so the
+    // mode scan below finds no carrier and reads that as "control lost" — flipping the frozen
+    // identity into a power row. The target override then re-stamps the frozen VOLTAGE value over
+    // that power row, leaving a residual of exactly 1.0 that no Newton step can ever clear, so
+    // every later re-solve buys iterations OLF does not run. Measured on LINE-3938-646: the whole
+    // network moved 8.8e-08 kV off the CPU answer with identical solve counts.
+    if (rowIsFrozen(nFrozen, frozenSlotRow, s, pilotRow)) return;
     size_t pi = (size_t) s * n + pilotRow;
     size_t fi = (size_t) s * nQr + g;
     bool lost = relocChoose(g, qrPtr, qrRows, mode + (size_t) s * n) == 0;
@@ -7541,7 +7550,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), ctx->dQrGenVc.as<char>(),
                     ctx->dQrPilotQ.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
                     ctx->dQrVeqOff.as<char>(), ctx->dQrSavedVT.as<double>(),
-                    ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
+                    ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(),
+                    ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr);
         }
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         std::vector<char> rej(nS);
@@ -8375,7 +8385,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), ctx->dQrGenVc.as<char>(),
                         ctx->dQrPilotQ.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
                         ctx->dQrVeqOff.as<char>(), ctx->dQrSavedVT.as<double>(),
-                        ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
+                        ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(),
+                        ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr);
             }
         }
     }

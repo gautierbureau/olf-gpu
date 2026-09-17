@@ -687,6 +687,15 @@ final class GpuBatchQualification {
                 // set and derives BOTH the shares and the stopping gate from it.
                 islandedDsByIndex[i] = islandedDsParticipants(fi.rows(), gpuData);
                 islandedRlByIndex[i] = islandedRlControllers(fi.rows(), gpuData);
+                if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP")) && fi.rows().length > 0) {
+                    // Which reactive-limits ENTRIES the island masks, and which frozen rows are an
+                    // rlVrow at all: an unmasked frozen controller row is a row the RL pass can pin,
+                    // and a pin on a frozen row survives every later target override.
+                    System.err.println("ISLANDED-RL '" + c.contingencyId() + "' frozenRows="
+                            + java.util.Arrays.toString(fi.rows()) + " maskedEntries="
+                            + java.util.Arrays.toString(islandedRlByIndex[i]) + " rlVrowOfMasked="
+                            + java.util.Arrays.stream(islandedRlByIndex[i]).map(e -> gpuData.rlVrow()[e]).boxed().toList());
+                }
                 if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP")) && q.islandedBuses().size() > 0) {
                     // The count that must match OLF's participant drop: OLF re-runs
                     // filterParticipatingBuses on the surviving component, so if it loses N buses and

@@ -154,3 +154,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-17 | 6db188d+dirty | 19.29 | 15.66 | 28.11 | x1.80 | 0/0/0 | 7.42 | 4.41 | 499/500 | 122/133 (92%) | Loss pre-distribution clamps per generator when a generator is lost |
 | 2026-09-17 | b4ff206+dirty | 18.52 | 15.65 | 26.36 | x1.68 | 0/0/0 | 7.72 | 4.44 | 499/500 | 122/133 (92%) | DISTR_Q target renormalizes over a controller a scenario deactivates |
 | 2026-09-17 | 530d93f+dirty | 18.98 | 15.69 | 26.97 | x1.72 | 0/0/0 | 7.64 | 4.44 | 499/500 | 122/133 (92%) | A deactivated pilot whose controllers all pin is caught at runtime |
+| 2026-09-17 | e42e2bd+dirty | 18.97 | 15.55 | 26.76 | x1.72 | 0/0/0 | 7.70 | 4.43 | 499/500 | 122/133 (92%) | DISTR_Q inactive mask becomes context state; pilot-load cause narrowed to assembly |

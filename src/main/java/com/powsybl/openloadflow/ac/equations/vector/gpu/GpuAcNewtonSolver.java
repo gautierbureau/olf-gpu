@@ -277,7 +277,6 @@ public final class GpuAcNewtonSolver {
                                                        int[] rlVtOvSlotIdx, double[] rlVtOvVal,
                                                        int[] rlQOvSlotEntry, double[] rlQOvMinMax,
                                                        int[] cvOvSlotEntry, double[] cvOvStepScale,
-                                                       int[] dqInactiveSlotMember,
                                                        int maxIter, double tol,
                                                        double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                                                        int lsMode, double maxDv, double maxDphi, int[] varType,
@@ -649,6 +648,14 @@ public final class GpuAcNewtonSolver {
     /** Install (or clear, with nulls) per-scenario DISTR_Q weight overrides on a batch context —
      *  {@code idx} = flat {scenario, contribution} pairs, {@code w} = the renormalized weight (a gen
      *  outage at a remote-VC controller bus re-runs updateReactiveKeys on the CPU). Per-chunk state. */
+    /** {@code {slot, dqMember}} pairs: DISTR_Q controllers a scenario DEACTIVATES (their bus lost its
+     *  last voltage generator while the group survives). Context state, not a solve parameter — a
+     *  monitoring or secondary-VC re-solve on the same context must not silently drop it, which is
+     *  exactly what happened while this was a parameter: the re-solve passed null and
+     *  updateDistrQTargetsBatch recomputed the DISTR_Q target with the dead controller's key back in
+     *  the denominator, clobbering the right target with the base one. Cleared when the chunk has none. */
+    public static native void setBatchDqInactiveMembers(long handle, int[] slotMember);
+
     public static native void setBatchDqWeightOverrides(long handle, int[] idx, double[] w);
 
     /** Install (or clear, with nulls) per-scenario DISTR_RHO coefficient overrides on a batch
@@ -735,7 +742,7 @@ public final class GpuAcNewtonSolver {
                 setBatchRlElection(handle, new double[rlVrow.length], pRow, new double[rlVrow.length], idRank);
                 // one-shot: no per-scenario gen-override flips, so any scenario's row mode IS the base row mode
                 return solveBatchContext(handle, x0Base, targetBase, rowMode, rowMode[0], disabledElementMask,
-                        new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null, null, null, null, null, null,
+                        new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null, null, null, null, null,
                         maxIter, tol, reactiveLimitTol, slackDistTol, 0.0, 0, 0.0, 0.0, null, null, null, null, null, null, null, null, 0, 0, 0, 0, 0, null, null);
             } finally {
                 destroyBatchContext(handle);

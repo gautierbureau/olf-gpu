@@ -133,9 +133,16 @@ final class GpuBatchInjectionOutages {
             //      every equation still converging). Where the survivors keep headroom the degeneration
             //      holds exactly — GEN-1523 at overMaxBy -0.149 and GEN-5958 at -0.900 both land at
             //      ~4e-11 kV;
-            //  (c) the pilot carries no reactive load, because the pilot's load Q rides the relocation
-            //      path (qBuf/pilotQ) that the per-scenario load-Q channel does not reach — the same
-            //      defect that keeps LOAD-1263 gated.
+            //  (c) the pilot carries no reactive load. Lifting this leaves GEN-1264 at 0.134 kV and
+            //      GEN-1263 at 0.247 kV, and every INPUT to that row has been verified correct:
+            //        weights  - dqOv never fires here (nDqOv=0); the inactive mask supplies them and
+            //                   they are exactly right (w=0 from the survivor, w=-1 from the dead bus);
+            //        target   - computed AND persisted: final -0.060 against a base of 0.016, mode 1.
+            //      The converged state still violates that row by 0.076 (the probe's distrQResid), so
+            //      the row as ASSEMBLED is not the equation those inputs describe. The next layer is
+            //      what F contributions actually land on a mode-1 row here — not the inputs, which are
+            //      settled. Same unidentified cause as LOAD-1263 (0.105 kV), a pure load loss on this
+            //      same group, where both buses carry reactive load (-0.092 and -0.060).
             // With qPct renormalized to 1 on the survivors, DISTR_Q (qPct_k·Σq − q_k) on this bus's own
             // row degenerates to q = targetQ: precisely the reactive balance OLF re-activates here.
             vcSurvives = !keepsController && bus.getGeneratorVoltageControl()

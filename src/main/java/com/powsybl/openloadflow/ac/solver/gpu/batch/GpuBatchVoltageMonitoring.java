@@ -180,7 +180,7 @@ public final class GpuBatchVoltageMonitoring {
                 vtSlotIdx.stream().mapToInt(Integer::intValue).toArray(),
                 vtVal.stream().mapToDouble(Double::doubleValue).toArray(),
                 null, null,
-                null, null, null,
+                null, null,
                 parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                 config.lsMode(), config.maxDv(), config.maxDphi(),
                 config.lsMode() == 2 ? varType : null, x0Full,

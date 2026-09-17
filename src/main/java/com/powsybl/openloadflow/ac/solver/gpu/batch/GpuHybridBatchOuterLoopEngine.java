@@ -1224,7 +1224,7 @@ public final class GpuHybridBatchOuterLoopEngine {
                     ovIdx.stream().mapToInt(Integer::intValue).toArray(), ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
                     new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null,
                     null, null,
-                    null, null, null,
+                    null, null,
                     // the RUN's inner-solve stopping criteria — convEpsPerEq drives the norm-2 stop, matching the
                     // CPU (RL/DS tols are moot here: the packs are empty and OLF's Java loops do DS/RL).
                     in.maxIterations(), in.tol(), in.reactiveLimitTol(), in.slackDistTol(), in.convEpsPerEq(),

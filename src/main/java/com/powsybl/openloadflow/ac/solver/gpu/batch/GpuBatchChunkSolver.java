@@ -945,6 +945,12 @@ final class GpuBatchChunkSolver {
                             || System.getenv("OLF_GPU_RL_TRACE") != null) && nrl > 0 ? new int[chunkSize * nrl] : null;
                     // DISTR_Q weight overrides: per-chunk context state (orchestrator re-solves keep
                     // the slot assignment); cleared when the chunk has none.
+                    // Context state, like the qPct overrides beside it: a monitoring or secondary-VC
+                    // re-solve on this context must not drop it (as a solve PARAMETER it did — the
+                    // re-solve passed null and the DISTR_Q target was recomputed with the dead
+                    // controller's key back in the denominator, clobbering the right target).
+                    GpuAcNewtonSolver.setBatchDqInactiveMembers(handle,
+                            dqInactList.isEmpty() ? null : dqInactList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchDqWeightOverrides(handle,
                             dqOvIdxList.isEmpty() ? null : dqOvIdxList.stream().mapToInt(Integer::intValue).toArray(),
                             dqOvWList.isEmpty() ? null : dqOvWList.stream().mapToDouble(Double::doubleValue).toArray());
@@ -1006,8 +1012,7 @@ final class GpuBatchChunkSolver {
                             rlQOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                             cvOvSlot.stream().mapToInt(Integer::intValue).toArray(),
                             cvOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                            dqInactList.stream().mapToInt(Integer::intValue).toArray(),
-                            parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                                        parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                             config.lsMode(), config.maxDv(), config.maxDphi(),
                             config.lsMode() == 2 ? varType : null, x0Full,
                             shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
@@ -1058,8 +1063,7 @@ final class GpuBatchChunkSolver {
                                     rlQOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                                     cvOvSlot.stream().mapToInt(Integer::intValue).toArray(),
                                     cvOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                                    dqInactList.stream().mapToInt(Integer::intValue).toArray(),
-                                    parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                                                        parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                                     config.lsMode(), config.maxDv(), config.maxDphi(),
                                     config.lsMode() == 2 ? varType : null, x0Full,
                                     shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),

@@ -6512,7 +6512,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
                               int nRlQOv, const int* rlQOvSlotEntry, const double* rlQOvMinMax,
                               int nCvOv, const int* cvOvSlotEntry, const double* cvOvStepScale,
-                              int nDqInact, const int* dqInactSlotMember,
                               int maxIter, double tol,
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                               int lsMode, double maxDv, double maxDphi, const int* varType,
@@ -6690,10 +6689,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         dCvOvEntry.upload(entry.data(), entry.size() * sizeof(int));
         dCvOvVal.upload(val.data(), val.size() * sizeof(double));
     }
-    if (nDqInact > 0) {
-        ctx->dDqInact.upload(dqInactSlotMember, static_cast<size_t>(nDqInact) * 2 * sizeof(int));
-    }
-    ctx->nDqInact = nDqInact;
     bool useDynRlLimits = ctx->nrl > 0 && (ctx->ncv > 0 || nRlQOv > 0);
     if (useDynRlLimits && (!ctx->dRlMinQDyn.p || !ctx->dRlLoadQDyn.p)) {   // curves allocate these on their own
                                                             // table upload; a Q override alone must too, and a
@@ -8802,8 +8797,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jdoubleArray jdsOverrideMaxDelta, jdoubleArray jdsOverrideMinDelta, jdoubleArray jdsAnchorShift,
         jdoubleArray jdsSlackShift, jintArray jrlVtOvSlotIdx, jdoubleArray jrlVtOvVal,
         jintArray jrlQOvSlotEntry, jdoubleArray jrlQOvMinMax,
-        jintArray jcvOvSlotEntry, jdoubleArray jcvOvStepScale, jintArray jdqInactSlotMember,
-        jint maxIter, jdouble tol,
+        jintArray jcvOvSlotEntry, jdoubleArray jcvOvStepScale, jint maxIter, jdouble tol,
         jdouble reactiveLimitTol, jdouble slackDistTol, jdouble convEpsPerEq,
         jint lsMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType, jdoubleArray jx0Full,
         jintArray jShuntOvSlotElem, jdoubleArray jShuntOvGb,
@@ -8970,11 +8964,6 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
             rlQOvMinMaxVec.resize(env->GetArrayLength(jrlQOvMinMax));
             env->GetDoubleArrayRegion(jrlQOvMinMax, 0, static_cast<jsize>(rlQOvMinMaxVec.size()), rlQOvMinMaxVec.data());
         }
-        std::vector<int> dqInactVec;
-        if (jdqInactSlotMember != nullptr) {
-            dqInactVec.resize(env->GetArrayLength(jdqInactSlotMember));
-            env->GetIntArrayRegion(jdqInactSlotMember, 0, static_cast<jsize>(dqInactVec.size()), dqInactVec.data());
-        }
         std::vector<int> cvOvSlotEntryVec;
         std::vector<double> cvOvStepScaleVec;
         if (jcvOvSlotEntry != nullptr && jcvOvStepScale != nullptr) {
@@ -9008,9 +8997,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
                                 rlQOvMinMaxVec.empty() ? nullptr : rlQOvMinMaxVec.data(),
                                 static_cast<int>(cvOvStepScaleVec.size() / 2),
                                 cvOvSlotEntryVec.empty() ? nullptr : cvOvSlotEntryVec.data(),
-                                cvOvStepScaleVec.empty() ? nullptr : cvOvStepScaleVec.data(),
-                                static_cast<int>(dqInactVec.size() / 2),
-                                dqInactVec.empty() ? nullptr : dqInactVec.data(), maxIter, tol,
+                                cvOvStepScaleVec.empty() ? nullptr : cvOvStepScaleVec.data(), maxIter, tol,
                                 reactiveLimitTol, slackDistTol, convEpsPerEq,
                                 lsMode, maxDv, maxDphi, varTypeVec.empty() ? nullptr : varTypeVec.data(),
                                 x0FullVec.empty() ? nullptr : x0FullVec.data(),
@@ -9582,6 +9569,24 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 
 // DISTR_Q weight overrides: install (or clear, with nulls) the per-scenario qPct renormalization
 // pairs {s, contrib} + new weights on a batch context (gen outage at a remote-VC controller bus).
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDqInactiveMembers(
+        JNIEnv* env, jclass, jlong handle, jintArray jSlotMember) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jSlotMember == nullptr || env->GetArrayLength(jSlotMember) == 0) {
+        ctx->nDqInact = 0;
+        return;
+    }
+    int n2 = env->GetArrayLength(jSlotMember);
+    jint* sm = env->GetIntArrayElements(jSlotMember, nullptr);
+    ctx->dDqInact.upload(sm, static_cast<size_t>(n2) * sizeof(int));
+    env->ReleaseIntArrayElements(jSlotMember, sm, JNI_ABORT);
+    ctx->nDqInact = n2 / 2;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDqWeightOverrides(
         JNIEnv* env, jclass, jlong handle, jintArray jIdx, jdoubleArray jW) {

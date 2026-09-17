@@ -125,8 +125,13 @@ final class GpuBatchInjectionOutages {
             // the CPU, as does a Q-carrying load loss here.
             // Admit exactly the shape the degeneration argument covers, and no more:
             //  (a) another controller survives, so the group still holds this bus's voltage;
-            //  (b) this bus OWNS a DISTR_Q row — it is not the group's FREE member, whose q is the
-            //      reactive slack and which therefore has no row for its Q balance to degenerate into;
+            //  (b) this bus OWNS a DISTR_Q row — it is not the group's FREE member. The algebra says
+            //      the free-member case should work too (with qPct 1 on the survivor the row becomes
+            //      q_dead = targetQ_dead, which IS its balance) and it DOES NOT: rte6515 GEN-1522
+            //      stays 3.2 kV out with the mask applied, against 3.157 kV without it — so the
+            //      renormalization is not what dominates there and a SECOND cause is in play. Measured,
+            //      not assumed: row 3292 keeps mode 0 and its 1.122 V target, row 3294 stays mode 1,
+            //      and the error lands on VL-1525/VL-1524 with the GPU injecting MORE reactive power;
             //  (c) the pilot carries no reactive load, because the pilot's load Q rides the relocation
             //      path (qBuf/pilotQ) that the per-scenario load-Q channel does not reach — the same
             //      defect that keeps LOAD-1263 gated.

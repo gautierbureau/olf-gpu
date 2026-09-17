@@ -205,6 +205,26 @@ final class GpuBatchPrecomputer {
             // self-consistent with the plain mapper below — a base-open branch simply maps to no
             // element and falls back to the host scan.
             GpuAcData screenData = GpuAcDataCache.extract(net, es, distributedSlack, reactiveLimits, config.dsParams());
+            // OLF_GPU_DS_BUSMAP=<file>: DS-pack index -> bus id, written at BASE state. The chunk
+            // solver dumps the distributed power per DS index (GPU_DS_TARGET) but has no network
+            // handle to name the bus; OLF's own side (OLF_DS_SPLIT) is keyed by bus id. This map is
+            // what joins the two, which is the only way to compare the SPLIT rather than the total.
+            String dsBusMap = System.getenv("OLF_GPU_DS_BUSMAP");
+            if (dsBusMap != null && screenData != null && screenData.dsPhiRow() != null) {
+                java.util.Map<Integer, String> busByPhiRow = new java.util.HashMap<>();
+                for (var b : net.getBuses()) {
+                    var v = es.getVariableSet().getVariable(b.getNum(), AcVariableType.BUS_PHI);
+                    if (v != null && v.getRow() >= 0) {
+                        busByPhiRow.put(v.getRow(), b.getId());
+                    }
+                }
+                try (java.io.PrintWriter w = new java.io.PrintWriter(new java.io.FileWriter(dsBusMap))) {
+                    int[] rows = screenData.dsPhiRow();
+                    for (int i = 0; i < rows.length; i++) {
+                        w.printf("%d %s%n", i, busByPhiRow.getOrDefault(rows[i], "?row" + rows[i]));
+                    }
+                }
+            }
             GpuBatchElementMapper screenMapper = new GpuBatchElementMapper(net);
 
             List<BatchScenarioResult> results = config.outerLoopMode() == OuterLoopMode.JAVA

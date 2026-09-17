@@ -3017,21 +3017,12 @@ __device__ double rlCurveEval(double pMW, const double* pts, int npts, int sel, 
 // DS-moved row target - its base) — exact while intra-bus proportionality holds (the pack's DS
 // model). At the base point the delta is bit-zero (same formula both sides).
 // rlCurveLimitsBatch reads each generator's OWN cumulative P from the distributed-slack water-fill
-// (dGenCum), which clamps PER GENERATOR, instead of splitting its bus's movement by the share fixed
-// at pack time. The share is exact only while the intra-bus split stays proportional, and a clamp
-// breaks that: on rte6515 GEN-6172 at VL-6139_0 the 451 MW unit takes +0.0442 where its share says
-// +0.0890, which puts the bus's Q box out by 2.67 MVAr and the bus 0.0379 kV off.
-// DEFAULT ON since the full validation; OLF_GPU_CURVE_GENCUM=0 restores the share reconstruction.
-static bool envIs(const char* name, const char* value) {
-    const char* v = std::getenv(name);
-    return v != nullptr && std::string(v) == value;
-}
-
-static bool curveGenCum() {
-    static const bool on = !envIs("OLF_GPU_CURVE_GENCUM", "0");
-    return on;
-}
-
+// (dGenCum), which clamps PER GENERATOR, instead of splitting its bus's movement by a share fixed at
+// pack time. The share is exact only while the intra-bus split stays proportional, and a clamp breaks
+// that: on rte6515 GEN-6172 at VL-6139_0 the 451 MW unit takes +0.0442 where its share says +0.0890,
+// which puts the bus's Q box out by 2.67 MVAr and the bus 0.0379 kV off. The share reconstruction
+// survives ONLY as the fallback for entries genCum cannot serve (no DS slot, the per-generator
+// water-fill did not run, or the outaged bus's own entries) — there is no switch back to it.
 __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int cvExtrapolate,
                                    const int* cvIdx, const double* cvIn, const double* cvPts,
                                    const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
@@ -6807,8 +6798,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
-                        curveGenCum() && ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
-                        curveGenCum() && ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
+                        ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
+                        ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
                         ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
                         ctx->dRlLoadQDyn.as<double>());
             }
@@ -8249,8 +8240,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
                         nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
-                        curveGenCum() && ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
-                        curveGenCum() && ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
+                        ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
+                        ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
                         ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
                         ctx->dRlLoadQDyn.as<double>());
             }

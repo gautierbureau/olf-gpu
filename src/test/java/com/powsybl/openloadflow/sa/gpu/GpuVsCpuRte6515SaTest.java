@@ -299,7 +299,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         }
         // OLF_GPU_SA_SEQ_SOLVER=1: run the GPU arm's contingencies through the ORDINARY load flow on
         // the GPU (the sequential GpuNewtonRaphson) instead of OLF's CPU solver. Paired with
-        // OLF_GPU_SA_NO_BATCH=1 this is the manual-single-contingency debug path: it takes one
+        // -Dolf.gpu.sa.disableBatch=true this is the manual-single-contingency debug path: it takes one
         // contingency out of the batch and solves it like any other load flow, which is where the
         // LF-level instruments live (OLF_GPU_RESIDUAL_TRACE above all). If a contingency is wrong
         // batched and right here, the defect is in the BATCH; if it is wrong both ways it reproduces
@@ -374,7 +374,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             SecurityAnalysisParameters sapGpu = new SecurityAnalysisParameters();
             // OLF_GPU_SA_SEQ_SOLVER=1: run the GPU arm's contingencies through the ORDINARY load flow
             // on the GPU (the sequential GpuNewtonRaphson) instead of OLF's CPU solver. Paired with
-            // OLF_GPU_SA_NO_BATCH=1 this is the manual-single-contingency debug path: it takes a
+            // -Dolf.gpu.sa.disableBatch=true this is the manual-single-contingency debug path: it takes a
             // contingency out of the batch and solves it like any other load flow, which is where the
             // LF-level instruments live (OLF_GPU_RESIDUAL_TRACE above all). A contingency wrong batched
             // and right here is a BATCH defect; wrong both ways reproduces at load-flow level.

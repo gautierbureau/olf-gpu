@@ -68,6 +68,14 @@ final class GpuBatchPrecomputer {
                                        List<Action> actions, boolean distributedSlack, boolean reactiveLimits,
                                        double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                                        BatchConfig config, ReportNode reportNode) {
+        // OLF_GPU_SA_NO_BATCH=1: batch NOTHING, so every contingency goes through the ordinary
+        // per-contingency path. With the run configured for the sequential GPU solver
+        // (OLF_GPU_SA_SEQ_SOLVER=1 in the rte6515 test) that solves each contingency as a plain load
+        // flow on the device — the manual debug path for a contingency the batch gets wrong, and the
+        // only way to reach the load-flow instruments (OLF_GPU_RESIDUAL_TRACE) on it.
+        if ("1".equals(System.getenv("OLF_GPU_SA_NO_BATCH"))) {
+            return PrecomputedBatch.empty();
+        }
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {   // the network the batch starts from
             for (var b : net.getBuses()) {
                 for (var g : b.getGenerators()) {

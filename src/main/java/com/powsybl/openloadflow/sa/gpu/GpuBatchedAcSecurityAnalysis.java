@@ -613,8 +613,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         for (int i = 0; i < Math.min(topN, order.length); i++) {
             int row = order[i];
             var eq = es.getIndex().getEquationAtColumn(row);
-            System.err.printf("SA_RESID ctg=%s row=%d |F|=%.9e eq=%s elem=%d%n",
-                    contingencyId, row, Math.abs(fx[row]), eq.getType(), eq.getElementNum());
+            var elem = context.getNetwork().getElement(eq.getType().getElementType(), eq.getElementNum());
+            System.err.printf("SA_RESID ctg=%s row=%d |F|=%.9e eq=%s elem=%d id=%s%n",
+                    contingencyId, row, Math.abs(fx[row]), eq.getType(), eq.getElementNum(),
+                    elem == null ? "?" : elem.getId());
         }
     }
 

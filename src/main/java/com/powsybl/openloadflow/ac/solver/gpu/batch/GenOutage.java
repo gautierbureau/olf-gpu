@@ -28,7 +28,8 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, boolean toPq, boolean qOverride,
                         int dsBus, double dsFactorDelta, double dsBaseDelta, double dsMaxDelta, double dsMinDelta,
                         int rlEntry, double minQDelta, double maxQDelta, boolean allGensLost,
-                        java.util.Set<String> lostGenIds, double lostFactorSum, double pStep, double loadQDelta) {
+                        java.util.Set<String> lostGenIds, double lostFactorSum, double pStep, double loadQDelta,
+                        int inactiveDqMember) {
     // lostGenIds / lostFactorSum exist for the reactive-capability CURVE channel, which evaluates each
     // generator's curve at its OWN post-distribution active power, reconstructed from the bus's row
     // target by participation share. Losing a generator skews that reconstruction three ways — the lost
@@ -45,6 +46,18 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      * generator's own share). {@code rlEntry < 0} when there is nothing to correct — the bus goes to PQ,
      * or it is not a reactive-limit controller at all.
      */
+    /**
+     * This bus was a DISTR_Q controller and stops being one in this scenario, while the group's OTHER
+     * controllers survive. Its reactive key must leave the renormalization denominator on the TARGET
+     * side too — {@code fillDistrQBatch} gets that from the qPct override channel, but
+     * {@code updateDistrQTargetsBatch} had no equivalent and kept using the dead controller's key.
+     * -1 when nothing changes. See the DISTR_Q gate in GpuBatchInjectionOutages for why the bus keeps
+     * its BUS_TARGET_V while this happens.
+     */
+    public boolean deactivatesDqMember() {
+        return inactiveDqMember >= 0;
+    }
+
     /** The bus keeps NO generator: its reactive-limit entry is not a controller in this scenario. */
     public boolean silencesReactiveLimitEntry() {
         return rlEntry >= 0 && allGensLost;

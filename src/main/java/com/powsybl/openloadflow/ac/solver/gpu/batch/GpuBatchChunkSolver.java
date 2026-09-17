@@ -391,6 +391,10 @@ final class GpuBatchChunkSolver {
                     // is the lost generator's own and stops evaluating).
                     List<Integer> cvOvSlot = new ArrayList<>();
                     List<Double> cvOvVal = new ArrayList<>();
+                    // {slot, dqMember} pairs: a DISTR_Q controller that stops controlling in this
+                    // scenario. Its key has to leave the renormalization denominator on the TARGET
+                    // side, which the qPct override channel does not reach.
+                    List<Integer> dqInactList = new ArrayList<>();
                     List<Integer> dqOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_Q reweight)
                     List<Double> dqOvWList = new ArrayList<>();
                     List<Integer> drOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_RHO renorm, plan A5)
@@ -595,6 +599,10 @@ final class GpuBatchChunkSolver {
                                         // BACK to PV with its only generator gone.
                                         rlIslandedList.add(s);
                                         rlIslandedList.add(go.rlEntry());
+                                    }
+                                    if (go.deactivatesDqMember()) {
+                                        dqInactList.add(s);
+                                        dqInactList.add(go.inactiveDqMember());
                                     }
                                     if (go.shrinksReactiveLimits()) {
                                         // The bus KEEPS voltage control, so its reactive-limit entry is
@@ -991,6 +999,7 @@ final class GpuBatchChunkSolver {
                             rlQOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                             cvOvSlot.stream().mapToInt(Integer::intValue).toArray(),
                             cvOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
+                            dqInactList.stream().mapToInt(Integer::intValue).toArray(),
                             parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                             config.lsMode(), config.maxDv(), config.maxDphi(),
                             config.lsMode() == 2 ? varType : null, x0Full,
@@ -1042,6 +1051,7 @@ final class GpuBatchChunkSolver {
                                     rlQOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                                     cvOvSlot.stream().mapToInt(Integer::intValue).toArray(),
                                     cvOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
+                                    dqInactList.stream().mapToInt(Integer::intValue).toArray(),
                                     parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                                     config.lsMode(), config.maxDv(), config.maxDphi(),
                                     config.lsMode() == 2 ? varType : null, x0Full,

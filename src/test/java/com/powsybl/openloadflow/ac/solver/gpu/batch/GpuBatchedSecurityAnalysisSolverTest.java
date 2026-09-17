@@ -30,7 +30,7 @@ class GpuBatchedSecurityAnalysisSolverTest {
             new double[0], new int[0], new double[0], new int[0],
             new int[0], new int[0], new double[0], new int[0], new int[0],
             new int[0], new int[0], new double[0], new int[0], new int[0], new int[0],
-            new int[0], new byte[0], new int[0], new double[0],
+            new int[0], new byte[0], new int[0], new double[0], new int[0],
             new double[0], new int[0],
             new int[0], new int[0], new double[0],
             new int[0], new int[0], new double[0],

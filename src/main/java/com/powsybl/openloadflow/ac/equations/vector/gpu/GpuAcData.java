@@ -74,7 +74,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                         int[] dqKMember, int[] dqJMember, double[] dqMemberKey, int[] dqMemberRlEntry,
                         int[] dqMemberGroupStart, int[] dqMemberGroupCount, int[] dqMemberRow, byte[] dqMemberHasRow,
-                        int[] dqMemberQrGroup, double[] dqMemberTargetQ,
+                        int[] dqMemberQrGroup, double[] dqMemberTargetQ, int[] dqMemberBusNum,
                         double[] ziIn, int[] ziIdx,
                         int[] drRow, int[] drCol, double[] drCoef,
                         int[] dbRow, int[] dbCol, double[] dbCoef,
@@ -187,6 +187,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(dqMemberHasRow, other.dqMemberHasRow)
                 && java.util.Arrays.equals(dqMemberQrGroup, other.dqMemberQrGroup)
                 && java.util.Arrays.equals(dqMemberTargetQ, other.dqMemberTargetQ)
+                && java.util.Arrays.equals(dqMemberBusNum, other.dqMemberBusNum)
                 && java.util.Arrays.equals(rmqRow, other.rmqRow) && java.util.Arrays.equals(rmqElem, other.rmqElem)
                 && java.util.Arrays.equals(rmqSide, other.rmqSide) && java.util.Arrays.equals(rmqKind, other.rmqKind)
                 && java.util.Arrays.equals(rmqWeight, other.rmqWeight)

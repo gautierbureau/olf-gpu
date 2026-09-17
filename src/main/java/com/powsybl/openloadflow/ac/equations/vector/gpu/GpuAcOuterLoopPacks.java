@@ -44,7 +44,8 @@ public final class GpuAcOuterLoopPacks {
     record DqPack(int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                   int[] dqKMember, int[] dqJMember,
                   double[] dqMemberKey, int[] dqMemberRlEntry, int[] dqMemberGroupStart, int[] dqMemberGroupCount,
-                  int[] dqMemberRow, byte[] dqMemberHasRow, int[] dqMemberQrGroup, double[] dqMemberTargetQ) {
+                  int[] dqMemberRow, byte[] dqMemberHasRow, int[] dqMemberQrGroup, double[] dqMemberTargetQ,
+                  int[] dqMemberBusNum) {
     }
 
     /** Per-group member table for the IN-KERNEL reactive-key renormalization on a remote RL pin
@@ -56,7 +57,8 @@ public final class GpuAcOuterLoopPacks {
     private record MemberTables(java.util.Map<Integer, Integer> memberIdxByBusNum,
                                 List<Double> key, List<Integer> rlEntry,
                                 List<Integer> groupStart, List<Integer> groupCount,
-                                List<Integer> row, List<Byte> hasRow, List<Double> targetQ) {
+                                List<Integer> row, List<Byte> hasRow, List<Double> targetQ,
+                                List<Integer> busNum) {
     }
 
     /** DISTR_RHO contributions in the flat device layout: {@code {drRow, drCol}} per row + coefficient. */
@@ -176,7 +178,8 @@ public final class GpuAcOuterLoopPacks {
                              ExtractionColumns columns, GpuAcFamilyPacker.Packs family, RlPack rl) {
         // member tables (plan-B3): raw keys + RL-entry mapping + group ranges, in group member order
         MemberTables mt = new MemberTables(new java.util.HashMap<>(), new ArrayList<>(), new ArrayList<>(),
-                new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>());
+                new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(),
+                new ArrayList<>());
         java.util.Map<Integer, Integer> rlEntryByBusNum = new java.util.HashMap<>();
         for (int i = 0; i < rl.rlBusNum().length; i++) {
             rlEntryByBusNum.put(rl.rlBusNum()[i], i);
@@ -213,6 +216,7 @@ public final class GpuAcOuterLoopPacks {
                 // AcTargetVector reads for every member the RL loop has not frozen; a frozen
                 // member's targetQ is its q limit and the kernel derives that from the RL tables.
                 mt.targetQ().add(m.getTargetQ());
+                mt.busNum().add(m.getNum());
                 qrGroupList.add(qrGroup);
             }
             for (int i = 0; i < controllers.size(); i++) {
@@ -250,7 +254,7 @@ public final class GpuAcOuterLoopPacks {
                 GpuAcArrays.toDoubleArray(mt.key()), GpuAcArrays.toIntArray(mt.rlEntry()),
                 GpuAcArrays.toIntArray(mt.groupStart()), GpuAcArrays.toIntArray(mt.groupCount()),
                 GpuAcArrays.toIntArray(mt.row()), hasRow, GpuAcArrays.toIntArray(qrGroupList),
-                GpuAcArrays.toDoubleArray(mt.targetQ()));
+                GpuAcArrays.toDoubleArray(mt.targetQ()), GpuAcArrays.toIntArray(mt.busNum()));
     }
 
     static DrPack distrRhoPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,

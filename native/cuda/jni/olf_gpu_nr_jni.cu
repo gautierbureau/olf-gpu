@@ -2604,6 +2604,19 @@ __global__ void fillHvdcBatchF(int ne, int nScenarios, int n, int nnz, int nElem
     scatterAddF(2, dest + e * HVDC_NOUT, pos, o, F + (size_t) s * n);
 }
 
+// A DISTR_Q controller that stops controlling in ONE scenario (its bus lost its last voltage
+// generator while the group's other controllers survive). OLF's updateReactiveKeys zeroes its key
+// and renormalizes over the rest — the same treatment a PINNED member gets, except its target
+// contribution stays its own targetQ instead of a reactive limit.
+__device__ __forceinline__ bool dqMemberInactive(int nInact, const int* inactSlotMember, int s, int m) {
+    for (int k = 0; k < nInact; k++) {
+        if (inactSlotMember[2 * k] == s && inactSlotMember[2 * k + 1] == m) {
+            return true;
+        }
+    }
+    return false;
+}
+
 __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nElements,
                                 int cbOffset, int obOffset,
                                 const int* dqElem, const int* dqSide, const int* dqKind,
@@ -2614,6 +2627,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
                                 const char* disabled, const char* active,
                                 int nDqOv, const int* dqOvIdx, const double* dqOvW,
                                 const int* mode,
+                                int nDqInact, const int* dqInactSlotMember,
                                 const int* dqKMember, const int* dqJMember, const double* mKey,
                                 const int* mRlEntry, const int* mGroupStart, const int* mGroupCount,
                                 const char* limitType, int nrl,
@@ -2655,7 +2669,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
         for (int m = gs; m < gs + gc; m++) {
             int re = mRlEntry[m];
             bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != 0;
-            sum += pinned ? 0.0 : mKey[m];
+            sum += (pinned || dqMemberInactive(nDqInact, dqInactSlotMember, s, m)) ? 0.0 : mKey[m];
         }
         // the PINNED member's q terms STAY in every survivor's row (weight = the renormalized
         // qPct of the ROW OWNER); the pin is balanced on the TARGET side instead — OLF's
@@ -2663,7 +2677,8 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
         // (updateDistrQTargetsBatch keeps the per-scenario targets in step with the pin states)
         int reK = mRlEntry[kM];
         bool kPinned = reK >= 0 && limitType[(size_t) s * nrl + reK] != 0;
-        double qpk = (sum == 0.0 || kPinned) ? 0.0 : mKey[kM] / sum;
+        double qpk = (sum == 0.0 || kPinned || dqMemberInactive(nDqInact, dqInactSlotMember, s, kM))
+                ? 0.0 : mKey[kM] / sum;
         w = qpk - (dqJMember[c] == kM ? 1.0 : 0.0);
     }
     for (int k = 0; k < nDqOv; k++) {                        // per-scenario qPct renormalization (gen outage)
@@ -3071,7 +3086,8 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                                          const double* rlLoadQ, const char* limitType, int cvStride,
                                          double* target, const char* rlActive, const double* mTargetQ,
                                          const int* mQrGroup, const int* qrPtr, const int* qrRows,
-                                         const int* mode, const double* pilotQ, int nQr) {
+                                         const int* mode, const double* pilotQ, int nQr,
+                                         int nDqInact, const int* dqInactSlotMember) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nMembers * nScenarios) return;
     int k = tid % nMembers;
@@ -3101,7 +3117,8 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     for (int m = gs; m < gs + gc; m++) {
         int re = mRlEntry[m];
         bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != 0;
-        sum += pinned ? 0.0 : mKey[m];
+        bool inactive = dqMemberInactive(nDqInact, dqInactSlotMember, s, m);
+        sum += (pinned || inactive) ? 0.0 : mKey[m];
         if (pinned) {
             // a FROZEN member's targetQ IS its q limit: OLF's RL switch calls setGenerationTargetQ(limit),
             // so getTargetQ() = limit - loadTargetQ. Unpinned members keep their packed targetQ.
@@ -3112,7 +3129,8 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
             sumTargetQ += mTargetQ[m];
         }
     }
-    double qpk = sum == 0.0 ? 0.0 : mKey[k] / sum;
+    double qpk = (sum == 0.0 || dqMemberInactive(nDqInact, dqInactSlotMember, s, k))
+            ? 0.0 : mKey[k] / sum;
     // AcTargetVector.getGeneratorReactivePowerDistributionTarget, verbatim:
     //   (qPct_k - 1) * targetQ_k + qPct_k * sum_{j != k} targetQ_j
     // which is qPct_k * sum_over_ALL_j targetQ_j - targetQ_k. k is never pinned here (the RL kernel
@@ -4338,6 +4356,8 @@ struct BatchSolverContext {
     int nrl = 0;
     DeviceBuf dRlVrow, dRlMinQ, dRlMaxQ, dRlLoadQ, dRlVtarget;   // per controller (nrl)
     DeviceBuf dRlLoadQDyn;                                       // per (scenario, controller) — shed load Q
+    int nDqInact = 0;                                            // {slot, dqMember} pairs: a controller
+    DeviceBuf dDqInact;                                          // that stops controlling in ONE scenario
     // Reactive capability CURVES at runtime P (setBatchRlCurves): per participating curve gen —
     // cvIdx {rlIdx, pRow, ptsOff, npts}, cvIn {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu},
     // cvPts {p_MW, minQ_MW, maxQ_MW} sorted by p; dRlMinQDyn/dRlMaxQDyn = nS*nrl evaluated limits.
@@ -6492,6 +6512,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                               int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
                               int nRlQOv, const int* rlQOvSlotEntry, const double* rlQOvMinMax,
                               int nCvOv, const int* cvOvSlotEntry, const double* cvOvStepScale,
+                              int nDqInact, const int* dqInactSlotMember,
                               int maxIter, double tol,
                               double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                               int lsMode, double maxDv, double maxDphi, const int* varType,
@@ -6669,6 +6690,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         dCvOvEntry.upload(entry.data(), entry.size() * sizeof(int));
         dCvOvVal.upload(val.data(), val.size() * sizeof(double));
     }
+    if (nDqInact > 0) {
+        ctx->dDqInact.upload(dqInactSlotMember, static_cast<size_t>(nDqInact) * 2 * sizeof(int));
+    }
+    ctx->nDqInact = nDqInact;
     bool useDynRlLimits = ctx->nrl > 0 && (ctx->ncv > 0 || nRlQOv > 0);
     if (useDynRlLimits && (!ctx->dRlMinQDyn.p || !ctx->dRlLoadQDyn.p)) {   // curves allocate these on their own
                                                             // table upload; a Q override alone must too, and a
@@ -7128,7 +7153,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 fillHvdcBatch<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
             }
         }
-        if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr);
+        if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqInact,
+                ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
+                ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr);
         if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr, ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
         if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, ziRelocOf(ctx->st.get()));
@@ -8242,7 +8269,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr,
                         ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr,
                         ctx->dMode.as<int>(),
-                        ctx->hasDqQrGroups ? ctx->dQrPilotQ.as<double>() : nullptr, ctx->st->nQr);
+                        ctx->hasDqQrGroups ? ctx->dQrPilotQ.as<double>() : nullptr, ctx->st->nQr,
+                        ctx->nDqInact, ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr);
             }
             if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {    // all-pinned corner: pilot vEq flip/restore
                 updatePilotVeqBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
@@ -8774,7 +8802,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jdoubleArray jdsOverrideMaxDelta, jdoubleArray jdsOverrideMinDelta, jdoubleArray jdsAnchorShift,
         jdoubleArray jdsSlackShift, jintArray jrlVtOvSlotIdx, jdoubleArray jrlVtOvVal,
         jintArray jrlQOvSlotEntry, jdoubleArray jrlQOvMinMax,
-        jintArray jcvOvSlotEntry, jdoubleArray jcvOvStepScale, jint maxIter, jdouble tol,
+        jintArray jcvOvSlotEntry, jdoubleArray jcvOvStepScale, jintArray jdqInactSlotMember,
+        jint maxIter, jdouble tol,
         jdouble reactiveLimitTol, jdouble slackDistTol, jdouble convEpsPerEq,
         jint lsMode, jdouble maxDv, jdouble maxDphi, jintArray jvarType, jdoubleArray jx0Full,
         jintArray jShuntOvSlotElem, jdoubleArray jShuntOvGb,
@@ -8941,6 +8970,11 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
             rlQOvMinMaxVec.resize(env->GetArrayLength(jrlQOvMinMax));
             env->GetDoubleArrayRegion(jrlQOvMinMax, 0, static_cast<jsize>(rlQOvMinMaxVec.size()), rlQOvMinMaxVec.data());
         }
+        std::vector<int> dqInactVec;
+        if (jdqInactSlotMember != nullptr) {
+            dqInactVec.resize(env->GetArrayLength(jdqInactSlotMember));
+            env->GetIntArrayRegion(jdqInactSlotMember, 0, static_cast<jsize>(dqInactVec.size()), dqInactVec.data());
+        }
         std::vector<int> cvOvSlotEntryVec;
         std::vector<double> cvOvStepScaleVec;
         if (jcvOvSlotEntry != nullptr && jcvOvStepScale != nullptr) {
@@ -8974,7 +9008,9 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
                                 rlQOvMinMaxVec.empty() ? nullptr : rlQOvMinMaxVec.data(),
                                 static_cast<int>(cvOvStepScaleVec.size() / 2),
                                 cvOvSlotEntryVec.empty() ? nullptr : cvOvSlotEntryVec.data(),
-                                cvOvStepScaleVec.empty() ? nullptr : cvOvStepScaleVec.data(), maxIter, tol,
+                                cvOvStepScaleVec.empty() ? nullptr : cvOvStepScaleVec.data(),
+                                static_cast<int>(dqInactVec.size() / 2),
+                                dqInactVec.empty() ? nullptr : dqInactVec.data(), maxIter, tol,
                                 reactiveLimitTol, slackDistTol, convEpsPerEq,
                                 lsMode, maxDv, maxDphi, varTypeVec.empty() ? nullptr : varTypeVec.data(),
                                 x0FullVec.empty() ? nullptr : x0FullVec.data(),
@@ -9092,7 +9128,9 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
     if (ctx->st->hv.ne) {
         fillHvdcBatch<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
     }
-    if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr);
+    if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqInact,
+                ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
+                ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr);
     if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr, ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
     if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
     if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, ziRelocOf(ctx->st.get()));

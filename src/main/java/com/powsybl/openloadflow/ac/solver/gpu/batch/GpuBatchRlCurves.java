@@ -127,6 +127,22 @@ public final class GpuBatchRlCurves {
         if (cvIdx.isEmpty()) {
             return null;
         }
+        // OLF_GPU_CURVE_DUMP=<file>: what the channel packs per curve generator — the generator, its
+        // base P and the SHARE the kernel uses to reconstruct its own P from its bus's row target.
+        // Joined against OLF's per-generator movement (OLF_DS_SPLIT's G lines) this says directly
+        // whether the proportional-share model holds for a given scenario.
+        String dump = System.getenv("OLF_GPU_CURVE_DUMP");
+        if (dump != null) {
+            try (java.io.PrintWriter w = new java.io.PrintWriter(new java.io.FileWriter(dump))) {
+                for (int g = 0; g < cvGenId.size(); g++) {
+                    double[] in = cvIn.get(g);
+                    w.printf("%s rlIdx=%d baseP=%.12f share=%.12f baseRowTarget=%.12f busFactor=%.12f%n",
+                            cvGenId.get(g), cvIdx.get(g)[0], in[0], in[1], in[2], cvBusFactor.get(g));
+                }
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        }
         return new Channel(
                 cvIdx.stream().flatMapToInt(java.util.stream.IntStream::of).toArray(),
                 cvIn.stream().flatMapToDouble(java.util.stream.DoubleStream::of).toArray(),

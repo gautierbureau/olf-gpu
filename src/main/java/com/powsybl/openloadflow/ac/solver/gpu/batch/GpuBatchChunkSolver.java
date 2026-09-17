@@ -1302,6 +1302,32 @@ final class GpuBatchChunkSolver {
                                             ? rowModePerScenario[s][probe] : baseRowMode[probe]);
                         }
                     }
+                    // OLF_GPU_GENCUM_DUMP=<file>: each GENERATOR's own cumulative P movement as the
+                    // device computed it, which is what the curve channel now evaluates its capability
+                    // at. Joined against OLF's per-generator movement (OLF_DS_SPLIT's G lines) it says
+                    // whether the device and OLF put the same power on the same machine — the question
+                    // the per-bus totals cannot answer.
+                    if (System.getenv("OLF_GPU_GENCUM_DUMP") != null && gpuData.dgGenId() != null) {
+                        double[] gc = GpuAcNewtonSolver.readBatchDsGenCum(handle);
+                        String[] ids = gpuData.dgGenId();
+                        if (gc != null && ids.length > 0) {
+                            try (java.io.PrintWriter w = new java.io.PrintWriter(
+                                    new java.io.FileWriter(System.getenv("OLF_GPU_GENCUM_DUMP"), true))) {
+                                for (int s2 = 0; s2 < realCount; s2++) {
+                                    w.printf("# GENCUM ctg=%s%n",
+                                            contingencies.get(group.get(chunkStart + s2)).contingencyId());
+                                    for (int g = 0; g < ids.length; g++) {
+                                        double v = gc[s2 * ids.length + g];
+                                        if (v != 0) {
+                                            w.printf("%s %.12f%n", ids[g], v);
+                                        }
+                                    }
+                                }
+                            } catch (java.io.IOException e) {
+                                throw new java.io.UncheckedIOException(e);
+                            }
+                        }
+                    }
                     if (System.getenv("OLF_GPU_DS_TARGET_DUMP") != null && nds > 0) {
                         // The FINAL distributed target on every participant row, after every
                         // orchestrator. Both arms are converged, so if their reported states differ

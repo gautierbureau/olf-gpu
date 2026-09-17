@@ -310,6 +310,8 @@ final class GpuBatchChunkSolver {
         // factor sum shrink by the lost gen's share. Only allocated when the network has distributed slack.
         boolean hasDs = gpuData.dsPhiRow().length > 0;
         int[] dsOvBus = hasDs ? new int[chunkSize] : new int[0];
+        // (scenario, DS generator slot) pairs for the generators an outage removes — see below.
+        List<Integer> dsLostGenList = new ArrayList<>();
         double[] dsOvFactorDelta = hasDs ? new double[chunkSize] : new double[0];
         double[] dsOvBaseDelta = hasDs ? new double[chunkSize] : new double[0];
         double[] dsOvMaxDelta = hasDs ? new double[chunkSize] : new double[0];
@@ -653,6 +655,19 @@ final class GpuBatchChunkSolver {
                                         dsOvBaseDelta[s] = go.dsBaseDelta();
                                         dsOvMaxDelta[s] = go.dsMaxDelta();
                                         dsOvMinDelta[s] = go.dsMinDelta();
+                                        // ...and WHICH generators left, as slots in the DS generator pack. With the
+                                        // identity the outaged bus's SURVIVORS can take part in the per-generator
+                                        // water-fill like any others, instead of the bus riding on one aggregate
+                                        // entry — which is what leaves their own P unknown (genCum stays zero
+                                        // there) and sends the curve channel back to the share model that
+                                        // per-generator clamping breaks.
+                                        String[] dgIds = gpuData.dgGenId();
+                                        for (int g = 0; dgIds != null && g < dgIds.length; g++) {
+                                            if (go.lostGenIds().contains(dgIds[g])) {
+                                                dsLostGenList.add(s);
+                                                dsLostGenList.add(g);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -956,6 +971,9 @@ final class GpuBatchChunkSolver {
                     // controller's key back in the denominator, clobbering the right target).
                     GpuAcNewtonSolver.setBatchDqInactiveMembers(handle,
                             dqInactList.isEmpty() ? null : dqInactList.stream().mapToInt(Integer::intValue).toArray());
+                    GpuAcNewtonSolver.setBatchDsLostGenerators(handle,
+                            dsLostGenList.isEmpty() ? null
+                                    : dsLostGenList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchDqWeightOverrides(handle,
                             dqOvIdxList.isEmpty() ? null : dqOvIdxList.stream().mapToInt(Integer::intValue).toArray(),
                             dqOvWList.isEmpty() ? null : dqOvWList.stream().mapToDouble(Double::doubleValue).toArray());

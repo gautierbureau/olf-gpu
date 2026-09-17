@@ -656,6 +656,12 @@ public final class GpuAcNewtonSolver {
      *  the denominator, clobbering the right target with the base one. Cleared when the chunk has none. */
     public static native void setBatchDqInactiveMembers(long handle, int[] slotMember);
 
+    /** The generators an outage REMOVES, as (scenario, DS generator slot) pairs. With the identity the
+     *  outaged bus's survivors take part in the per-generator slack water-fill like any others, instead
+     *  of the bus riding on one aggregate entry — which leaves their own P unknown to everything that
+     *  reads it, the reactive-capability curve channel above all. */
+    public static native void setBatchDsLostGenerators(long handle, int[] slotGen);
+
     public static native void setBatchDqWeightOverrides(long handle, int[] idx, double[] w);
 
     /** Install (or clear, with nulls) per-scenario DISTR_RHO coefficient overrides on a batch

@@ -3069,8 +3069,11 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
         // slot, and for the outaged bus's own entries, whose pStep/shareScale repair is expressed in
         // those terms.
         double pNow;
-        if (genCum != nullptr && genCumValid != nullptr && genCumValid[s]
-                && slot >= 0 && pStep == 0 && shareScale == 1) {
+        // genCum already reflects the outage — the lost generator is marked out of the water-fill and
+        // the bus's anchor carries its P — so pStep and shareScale, which exist only to repair the
+        // share reconstruction on the outaged bus, are not needed when it is available. The lost
+        // generator's OWN entry never reaches here (shareScale < 0 continues above).
+        if (genCum != nullptr && genCumValid != nullptr && genCumValid[s] && slot >= 0) {
             pNow = cvIn[g * 5] + genCum[(size_t) s * ngen + slot];
         } else {
             pNow = cvIn[g * 5]
@@ -3851,6 +3854,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                                               const double* dgMarginUp, const double* dgMarginDown,
                                               const int* busGenStart, const int* busGenEnd,
                                               double* genCum, char* genCumValid, char* genRemoved, double* genFactorWork,
+                                              int nDsLostGen, const int* dsLostGen,
                                               double* target, char* switched, char* dsResidual, double* retainApplied, int dbgTrace) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
@@ -3975,17 +3979,30 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         genCumValid[s] = perGen ? 1 : 0;
     }
     if (perGen) {
+        // The outaged bus's SURVIVORS join the water-fill like any others, with the generators this
+        // scenario removes marked out by identity below. The gate is the BUS, not the lost unit: a
+        // lost generator outside the DS pack never participated and has nothing to remove, but its
+        // participating siblings still need their own P — leaving them on the aggregate entry is what
+        // keeps their genCum at zero and sends the curve channel back to the share model.
+        bool ovPerGen = ov >= 0;
         for (int g = 0; g < ngen; g++) {                     // fresh list, fresh cumulative deltas
             genCum[(size_t) s * ngen + g] = 0.0;
-            genRemoved[(size_t) s * ngen + g] = 0;
-            genFactorWork[(size_t) s * ngen + g] =
-                    dsMode == 1 ? (dirUp ? dgMarginUp[g] : dgMarginDown[g]) : dgFactor[g];
+            bool lost = false;
+            for (int k = 0; k < nDsLostGen; k++) {
+                if (dsLostGen[2 * k] == s && dsLostGen[2 * k + 1] == g) {
+                    lost = true;
+                    break;
+                }
+            }
+            genRemoved[(size_t) s * ngen + g] = lost ? 1 : 0;
+            genFactorWork[(size_t) s * ngen + g] = lost ? 0.0
+                    : (dsMode == 1 ? (dirUp ? dgMarginUp[g] : dgMarginDown[g]) : dgFactor[g]);
         }
         for (int iter = 0; iter < ngen && fabs(rem) > residueEps; iter++) {
             double fsumActive = 0.0;                         // normalizeParticipationFactors, over the remaining
             for (int g = 0; g < ngen; g++) {
                 int i = dgBus[g];
-                if (genRemoved[(size_t) s * ngen + g] || ov == i
+                if (genRemoved[(size_t) s * ngen + g] || (ov == i && !ovPerGen)
                         || (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i])) {
                     continue;
                 }
@@ -4000,7 +4017,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
             double ovMaxD = 0.0;
             double ovMinD = 0.0;
             bool ovActive = false;
-            if (ov >= 0 && (dsIslanded == nullptr || !dsIslanded[(size_t) s * nds + ov])) {
+            if (ov >= 0 && !ovPerGen && (dsIslanded == nullptr || !dsIslanded[(size_t) s * nds + ov])) {
                 ovBase = dsBaseTargetP[ov] - dsOvBaseDelta[s];
                 ovMaxD = dsMaxDelta[ov] - dsOvMaxDelta[s];
                 ovMinD = dsMinDelta[ov] - dsOvMinDelta[s];
@@ -4018,7 +4035,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
             double done = 0.0;
             for (int g = 0; g < ngen; g++) {
                 int i = dgBus[g];
-                if (genRemoved[(size_t) s * ngen + g] || ov == i
+                if (genRemoved[(size_t) s * ngen + g] || (ov == i && !ovPerGen)
                         || (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i])) {
                     continue;
                 }
@@ -4059,14 +4076,16 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
             }
             // The bus rows: anchor + Σ over the bus's generators, whose slice is contiguous.
             for (int i = 0; i < nds; i++) {
-                if (ov == i || (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i])) {
+                if ((ov == i && !ovPerGen) || (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + i])) {
                     continue;                                // ov keeps its own value; a frozen row is not written
                 }
                 double sum = 0.0;
                 for (int g = busGenStart[i]; g < busGenEnd[i]; g++) {
                     sum += genCum[(size_t) s * ngen + g];
                 }
-                target[(size_t) s * n + dsPhiRow[i]] = dsBaseTargetP[i] + sum;
+                // The outage's own move of the row target is not slack power: it shifts the anchor.
+                target[(size_t) s * n + dsPhiRow[i]] =
+                        dsBaseTargetP[i] - (ov == i ? dsOvBaseDelta[s] : 0.0) + sum;
             }
             if (dbgTrace && s == 0) {
                 printf("[DS-WF] iter=%d fsumActive=%.9f rem=%.9f done=%.9f (per-generator)\n",
@@ -4630,6 +4649,8 @@ struct BatchSolverContext {
     DeviceBuf dSvdGrpStep, dSvdMemState, dSvdMemContB, dSvdSubPos, dSvdSaved;
 
     DeviceBuf dGenCum, dGenRemoved;
+    DeviceBuf dDsLostGen;                                  // (scenario, DS generator slot) pairs: the
+    int nDsLostGen = 0;                                    // generators an outage removes, by identity
     DeviceBuf dGenCumValid;                                // per scenario: the PER-GENERATOR water-fill ran, so
                                                            // dGenCum holds each generator's own movement. The
                                                            // anchored path distributes per BUS and leaves it zero,
@@ -8224,6 +8245,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dBusGenStart.as<int>(), ctx->dBusGenEnd.as<int>(),
                     ctx->dGenCum.as<double>(), ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr,
                     ctx->dGenRemoved.as<char>(), ctx->dGenFactorWork.as<double>(),
+                    ctx->nDsLostGen, ctx->nDsLostGen > 0 ? ctx->dDsLostGen.as<int>() : nullptr,
                     ctx->dTarget.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>(),
                     ctx->dDsRetainApplied.as<double>(),
                     getenv("OLF_GPU_DS_DEBUG") != nullptr ? 1 : 0);
@@ -9621,6 +9643,24 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->dDqInact.upload(sm, static_cast<size_t>(n2) * sizeof(int));
     env->ReleaseIntArrayElements(jSlotMember, sm, JNI_ABORT);
     ctx->nDqInact = n2 / 2;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDsLostGenerators(
+        JNIEnv* env, jclass, jlong handle, jintArray jSlotGen) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jSlotGen == nullptr || env->GetArrayLength(jSlotGen) == 0) {
+        ctx->nDsLostGen = 0;
+        return;
+    }
+    int n2 = env->GetArrayLength(jSlotGen);
+    jint* sg = env->GetIntArrayElements(jSlotGen, nullptr);
+    ctx->dDsLostGen.upload(sg, static_cast<size_t>(n2) * sizeof(int));
+    env->ReleaseIntArrayElements(jSlotGen, sg, JNI_ABORT);
+    ctx->nDsLostGen = n2 / 2;
 }
 
 extern "C" JNIEXPORT void JNICALL

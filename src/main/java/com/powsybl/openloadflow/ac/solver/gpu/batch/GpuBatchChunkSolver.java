@@ -1351,8 +1351,9 @@ final class GpuBatchChunkSolver {
                         for (int s = 0; s < realCount; s++) {
                             String id = contingencies.get(group.get(chunkStart + s)).contingencyId();
                             for (int i = 0; i < nds; i++) {
-                                System.err.printf("GPU_DS_TARGET ctg=%s i=%d target=%s%n",
-                                        id, i, Double.toString(ft[s * n + gpuData.dsPhiRow()[i]]));
+                                System.err.printf("GPU_DS_TARGET ctg=%s i=%d row=%d target=%s%n",
+                                        id, i, gpuData.dsPhiRow()[i],
+                                        Double.toString(ft[s * n + gpuData.dsPhiRow()[i]]));
                             }
                         }
                     }

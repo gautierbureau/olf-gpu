@@ -145,6 +145,19 @@ final class GpuBatchPrecomputer {
                     // Name the zero-impedance branches and their two ends. A busbar outage that opens
                     // a COUPLER is the shape that separates the batched busbars from the CPU-routed
                     // ones, and "zi=1" alone does not say which coupler or which buses it merged.
+                    // Each lost load as the DEVICE will apply it, next to the RAW PowerShift OLF
+                    // propagated. A busbar outage loses its loads through the propagation rather than
+                    // by naming them, and "loads=1" does not say whether the bus, the active part or
+                    // the reactive part is the one that differs.
+                    for (var ll : loads == null ? List.<LoadLoss>of() : loads) {
+                        System.err.printf("QUALIFY_TRACE   load bus=%s p=%.9f q=%.9f%n",
+                                ll.bus() == null ? "?" : ll.bus().getId(), ll.p(), ll.q());
+                    }
+                    for (var e : pc.getLoadIdsToLose().entrySet()) {
+                        System.err.printf("QUALIFY_TRACE   olfShift load=%s active=%.9f variableActive=%.9f"
+                                + " reactive=%.9f%n", e.getKey(), e.getValue().getActive(),
+                                e.getValue().getVariableActive(), e.getValue().getReactive());
+                    }
                     for (var zi : ziOutages) {
                         LfBranch br = net.getBranchById(zi.toString());
                         if (br == null) {
@@ -264,14 +277,15 @@ final class GpuBatchPrecomputer {
             // here and nowhere else — `getEquationAtColumn` resolves against an activation-dependent
             // index and has named the wrong element three times.
             java.util.Set<Integer> nameRows = new java.util.HashSet<>();
-            if (System.getenv("OLF_GPU_NAME_ROW") != null) {
+            boolean nameAll = "all".equals(System.getenv("OLF_GPU_NAME_ROW"));
+            if (System.getenv("OLF_GPU_NAME_ROW") != null && !nameAll) {
                 for (String t : System.getenv("OLF_GPU_NAME_ROW").split(",")) {
                     nameRows.add(Integer.parseInt(t.trim()));
                 }
             }
             for (var v : es.getIndex().getSortedVariablesToFind()) {
                 baseVariableRows.put(v, v.getRow());
-                if (nameRows.contains(v.getRow())) {
+                if (nameAll || nameRows.contains(v.getRow())) {
                     var el = net.getElement(v.getType().getElementType(), v.getElementNum());
                     System.err.printf("NAME_ROW %d: var=%s elementNum=%d id=%s%n",
                             v.getRow(), v.getType(), v.getElementNum(), el == null ? "?" : el.getId());

@@ -165,3 +165,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-18 | 5332863+dirty | 19.30 | 16.24 | 27.02 | x1.66 | 0/0/0 | 7.59 | 4.50 | 499/500 | 122/133 (92%) | LOAD-1263/1264 batch: DISTR_Q targets follow a member's own load-Q change |
 | 2026-09-18 | f79ae90+dirty | 18.70 | 15.63 | 28.32 | x1.81 | 0/0/0 | 7.60 | 4.43 | 499/500 | 122/133 (92%) | qOverride asks if the bus is voltage CONTROLLED, not if it controls |
 | 2026-09-18 | 88561cf+dirty | 19.05 | 15.83 | 27.55 | x1.74 | 0/0/0 | 7.72 | 4.46 | 499/500 | 122/133 (92%) | Linear-residual + first-step J/F/dx dumps on both arms; base-LF gap is conditioning, not a defect |
+| 2026-09-18 | 7fd44c6+dirty | 18.68 | 15.85 | 27.58 | x1.74 | 0/0/0 | 7.69 | 4.41 | 499/500 | 122/133 (92%) | Busbar outage islanding its own load: the lost load was charged twice to the loss pre-distribution |

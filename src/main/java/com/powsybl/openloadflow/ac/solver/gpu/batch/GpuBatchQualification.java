@@ -379,10 +379,28 @@ final class GpuBatchQualification {
 
     private static double scheduledActivePowerLoss(BatchContingency c, List<LfBus> islandedBuses) {
         double loss = 0;
+        // An ISLANDED bus contributes its WHOLE injection below (generation minus load), so anything
+        // the contingency also names individually on that bus must not be added again. A busbar
+        // outage does exactly that: the propagation names the bus's load as a lost load AND the
+        // connectivity pass finds the bus islanded, and charging both doubled the scheduled loss —
+        // rte6515 BUS-1004_BBS pre-distributed -1.110 pu for a 0.555 pu load. The device's DS loop
+        // then claws most of it back during the solve and lands at a different point inside the
+        // slack band, which is why the error was a fixed ~0.13% of the lost load rather than the
+        // whole of it. A plain load contingency islands nothing, so loads alone were never wrong.
+        java.util.Set<Integer> islandedNums = new java.util.HashSet<>();
+        for (LfBus bus : islandedBuses) {
+            islandedNums.add(bus.getNum());
+        }
         for (com.powsybl.openloadflow.network.LfGenerator g : c.lostGenerators()) {
+            if (g.getBus() != null && islandedNums.contains(g.getBus().getNum())) {
+                continue;
+            }
             loss += g.getTargetP();
         }
         for (LoadLoss ll : c.lostLoads()) {
+            if (ll.bus() != null && islandedNums.contains(ll.bus().getNum())) {
+                continue;
+            }
             loss -= ll.p();
         }
         for (LfBus bus : islandedBuses) {

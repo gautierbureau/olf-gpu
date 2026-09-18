@@ -212,6 +212,24 @@ final class GpuContingencyMapper {
                         branch.getBus1() == bus ? 1 : 2));
             }
         }
+        // Does the side-open set actually COVER the disconnection? Freezing a lost bus's rows makes
+        // its own equations trivial; it does NOT stop a branch from injecting into the LIVE bus at the
+        // far end. So every branch incident to a lost bus needs a side-open, and any shortfall leaves
+        // a phantom flow into the surviving network.
+        if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+            int incident = 0;
+            for (String busId : pc.getBusIdsToLose()) {
+                var b = net.getBusById(busId);
+                if (b != null) {
+                    incident += b.getBranches().size();
+                }
+            }
+            System.err.printf("QUALIFY_TRACE sideOpen-cover %s: busIdsToLose=%d resolved=%d"
+                            + " incidentBranches=%d sideOpens=%d branchIdsToOpen=%d%n",
+                    pc.getContingency().getId(), pc.getBusIdsToLose().size(),
+                    (int) pc.getBusIdsToLose().stream().filter(id -> net.getBusById(id) != null).count(),
+                    incident, out.size(), pc.getBranchIdsToOpen().size());
+        }
         return out;
     }
 

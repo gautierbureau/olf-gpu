@@ -1444,6 +1444,36 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
     }
 
+    /** SIDE-OPEN reproducer, small and fast — the rte6515 busbar failure in 9 buses.
+     *
+     *  <p>A busbar-section contingency that disconnects ONE terminal of a line (not both) leaves OLF
+     *  with a DANGLING branch whose connected-side charging still injects: OLF's own
+     *  testLineOpenOneSideContingency measures q2 = -55.873 MVAr on exactly this shape. The device
+     *  applies a SideOpen as a FULL element disable, so that injection vanishes.
+     *
+     *  <p>Measured on rte6515 BUS-1003_BBS the error is EXACTLY -2 x b_side x v^2 at every bus
+     *  bordering the opened side (six buses, ratios -1.994 to -2.004): b1 in parallel with
+     *  (series (+) b2) is the equivalent shunt OLF keeps and the device deletes. Iterating that on
+     *  rte6515 costs minutes a run; this costs seconds. */
+    @org.junit.jupiter.api.Test
+    void deviceLineOpenOneSideMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.NodeBreakerNetworkFactory.create();
+        // ...the same three lines OLF's own one-side-open test uses: break the internal connection
+        // and re-make it through a breaker, so the busbar outage opens L1 at side 1 ONLY.
+        com.powsybl.iidm.network.VoltageLevel vl1 = network.getVoltageLevel("VL1");
+        vl1.getNodeBreakerView().removeInternalConnections(0, 5);
+        vl1.getNodeBreakerView().newBreaker().setId("NBR").setNode1(0).setNode2(5).setOpen(false).add();
+        List<Contingency> ctgs = List.of(Contingency.busbarSection("BBS1"));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("VL1_1"));
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
     /** BOUNDARY LINES — a coverage hole, not a suspected bug: rte6515 contains ZERO BoundaryLine
      *  and ZERO TieLine (OLF_GPU_SA_INVENTORY), and the GPU main path has no reference to either, so
      *  nothing in this project has ever solved one. OLF models a boundary line as a boundary BUS plus

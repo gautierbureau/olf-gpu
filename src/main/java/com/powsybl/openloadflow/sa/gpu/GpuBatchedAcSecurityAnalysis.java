@@ -600,7 +600,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     private static void reportOlfResidual(AcLoadFlowContext context,
                                           com.powsybl.openloadflow.equations.EquationSystem<com.powsybl.openloadflow.ac.equations.AcVariableType,
                                                   com.powsybl.openloadflow.ac.equations.AcEquationType> es,
-                                          String contingencyId, int topN) {
+                                          String contingencyId, int topN,
+                                          Map<com.powsybl.openloadflow.equations.Variable<com.powsybl.openloadflow.ac.equations.AcVariableType>,
+                                                  Integer> baseVariableRows,
+                                          int[] islandedBusNums) {
         var ev = context.getEquationVector();
         var tv = context.getTargetVector();
         ev.minus(tv);
@@ -615,9 +618,55 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             int row = order[i];
             var eq = es.getIndex().getEquationAtColumn(row);
             var elem = context.getNetwork().getElement(eq.getType().getElementType(), eq.getElementNum());
-            System.err.printf("SA_RESID ctg=%s row=%d |F|=%.9e eq=%s elem=%d id=%s%n",
-                    contingencyId, row, Math.abs(fx[row]), eq.getType(), eq.getElementNum(),
-                    elem == null ? "?" : elem.getId());
+            // OLF's own TARGET for that row, and the DEVICE row the same quantity lives on. A residual
+            // is (state - target): printing OLF's target next to the device row lets the two be
+            // compared directly (point OLF_GPU_FINAL_TARGET_ROW at devRow), which separates "the
+            // device solved a different TARGET" from "the device assembled a different EQUATION" —
+            // indistinguishable from the residual alone.
+            int devRow = -1;
+            if (baseVariableRows != null && eq != null) {
+                var vr = es.getVariableSet().getVariable(eq.getElementNum(),
+                        eq.getType() == com.powsybl.openloadflow.ac.equations.AcEquationType.BUS_TARGET_P
+                                ? com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_PHI
+                                : com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_V);
+                Integer r = vr == null ? null : baseVariableRows.get(vr);
+                devRow = r == null ? -1 : r;
+            }
+            // SIGNED, not |F|. Two buses whose residuals are equal and OPPOSITE are the two ends of a
+            // branch whose flow term is missing from both balances; two buses off the same way are not.
+            // The magnitude alone cannot tell those apart.
+            // Is this bus a NEIGHBOUR OF THE ISLAND? The island is frozen at a flat 1<0 while the live
+            // network sits at its real voltages, so any branch still bridging the two would push power
+            // into the live side. If the erring buses turn out NOT to touch the island, that whole
+            // explanation is dead and the injection comes from somewhere else entirely.
+            int toIsland = 0;
+            int degree = 0;
+            double islandShunt = Double.NaN;
+            if (islandedBusNums != null && elem instanceof com.powsybl.openloadflow.network.LfBus b) {
+                java.util.Set<Integer> isl = new java.util.HashSet<>();
+                for (int bn : islandedBusNums) {
+                    isl.add(bn);
+                }
+                for (var br : b.getBranches()) {
+                    degree++;
+                    var other = br.getBus1() == b ? br.getBus2() : br.getBus1();
+                    if (other != null && isl.contains(other.getNum())) {
+                        toIsland++;
+                        // The QUANTITATIVE test of "the device dropped the dangling half": if that is
+                        // what happened, the residual should be this branch's connected-side shunt
+                        // term, b_side * v^2, which OLF keeps and the device deletes with the element.
+                        var pi = br.getPiModel();
+                        double bSide = br.getBus1() == b ? pi.getB1() : pi.getB2();
+                        double v = b.getV();
+                        islandShunt = bSide * v * v;
+                    }
+                }
+            }
+            System.err.printf("SA_RESID ctg=%s row=%d F=%+.9e eq=%s elem=%d id=%s olfTarget=%.9f devRow=%d"
+                            + " degree=%d toIsland=%d islandBranchShunt=%+.9f%n",
+                    contingencyId, row, fx[row], eq.getType(), eq.getElementNum(),
+                    elem == null ? "?" : elem.getId(), tv.getArray()[row], devRow, degree, toIsland,
+                    islandShunt);
         }
     }
 
@@ -654,7 +703,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // n worst rows with the equation OLF has on each, which names the family to look at.
         if (System.getenv("OLF_GPU_SA_RESID") != null) {
             reportOlfResidual(context, precomputed.equationSystem(), contingency.getId(),
-                    Integer.parseInt(System.getenv("OLF_GPU_SA_RESID")));
+                    Integer.parseInt(System.getenv("OLF_GPU_SA_RESID")), precomputed.baseVariableRows(),
+                    precomputed.islandedBuses().get(contingency.getId()));
         }
         AcSolverUtil.updateNetwork(network, precomputed.equationSystem());
         PHASE_NS.computeIfAbsent("   AcSolverUtil.updateNetwork()", k -> new java.util.concurrent.atomic.LongAdder())

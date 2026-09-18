@@ -571,9 +571,17 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                         .max().orElse(0);
                 // Absolute AND relative: 1e-12 kV is below one ulp of a 400 kV bus (~5.7e-14), so an
                 // absolute bar alone cannot tell a real divergence from accumulated round-off.
-                System.out.printf("  BUSDIFF ctg=%s buses>1e-12kV=%d of %d | worst abs=%.3e kV rel=%.3e%n",
+                // Same uncompared counters as the BASE diff. For a topology-changing outage the first
+                // question is whether the two arms even agree on WHICH BUSES SURVIVE it — a bus one arm
+                // disabled and the other kept is a different network, and every neighbouring bus's
+                // balance shifts. The intersection-only view cannot show that.
+                long cpuOnly = cp.getNetworkResult().getBusResults().stream()
+                        .filter(b -> !gpuV.containsKey(b.getBusId())).count();
+                long gpuOnly = gpuV.size() - (cp.getNetworkResult().getBusResults().size() - cpuOnly);
+                System.out.printf("  BUSDIFF ctg=%s buses>1e-12kV=%d of %d | worst abs=%.3e kV rel=%.3e"
+                                + " | uncompared: cpu-only=%d gpu-only=%d%n",
                         cp.getContingency().getId(), above, cp.getNetworkResult().getBusResults().size(),
-                        worstAbs, worstRel);
+                        worstAbs, worstRel, cpuOnly, gpuOnly);
                 worst.forEach(w -> System.out.printf("      %s%n", w));
                 // OLF_GPU_SA_MON_BUS=<id>[,<id>]: both arms' voltage at NAMED buses, whether or not they
                 // are among the worst. A bus the two arms disagree about because one PINNED it and the

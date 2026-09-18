@@ -517,12 +517,33 @@ final class GpuBatchChunkSolver {
                             int[] eis = new int[branches.size() + shunts.size() + hvdcs.size() + sideOpens.size()];
                             int ei = 0;
                             for (BatchContingency.SideOpen so : sideOpens) {
-                                // OLF's AC path treats a side-opened branch as FULLY out (measured:
-                                // a bus loss is bit-identical to the full outage of its incident
-                                // branches — the dangling half carries no model); mask the element.
-                                int cbIdx2 = elementMapper.getElementIndex(so.branch());   // qualification guarantees >= 0
-                                disabledMask[s][cbIdx2] = true;
-                                eis[ei++] = cbIdx2;
+                                // A side-opened branch is NOT fully out. OLF keeps it DANGLING, and the
+                                // dangling half's charging still injects at the connected bus — OLF's own
+                                // testLineOpenOneSideContingency measures -55.873 MVAr on exactly this
+                                // shape. Masking the element deletes that injection: measured on rte6515
+                                // BUS-1003_BBS as EXACTLY -2 x b_side x v^2 at every bus bordering the
+                                // opened side (six buses, ratios -1.994..-2.004), and on the 9-bus
+                                // reproducer as VL2 374.62 kV against the CPU's 379.85.
+                                //
+                                // A branch open at one end is, seen from the live bus, a PURE SHUNT: the
+                                // far side's series+shunt reduces to one equivalent admittance. So keep
+                                // the element LIVE and override its pi row to that shunt — y = 0 kills the
+                                // series coupling (so the frozen far bus contributes nothing and receives
+                                // nothing), and the connected side's g/b carry the equivalent. No new
+                                // kernel: this is the per-scenario pi-model override the tap channel
+                                // already uses, and the cb evaluation reads it through findTapOverride.
+                                double[] cbRow = GpuBatchSideOpen.danglingCbRow(so.branch(), so.side());
+                                if (cbRow == null) {         // not expressible -> keep the old behaviour
+                                    int cbIdx2 = elementMapper.getElementIndex(so.branch());
+                                    disabledMask[s][cbIdx2] = true;
+                                    eis[ei++] = cbIdx2;
+                                } else {
+                                    r1OvSlotElemList.add(s);
+                                    r1OvSlotElemList.add(elementMapper.getElementIndex(so.branch()));
+                                    for (double v : cbRow) {
+                                        r1OvValList.add(v);
+                                    }
+                                }
                             }
                             for (LfBranch branch : branches) {
                                 int idx = elementMapper.getElementIndex(branch);          // qualification guarantees >= 0

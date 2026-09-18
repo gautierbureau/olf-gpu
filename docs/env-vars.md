@@ -33,7 +33,7 @@ Solves one contingency as an ordinary load flow on the device, which is where th
 instruments live. A contingency wrong batched and right there is a BATCH defect.
 
 
-## Diagnostics (77) — print only, cannot change a result
+## Diagnostics (78) — print only, cannot change a result
 
 Safe to add. These are the instruments; several are the only reason a defect was found at all.
 
@@ -42,6 +42,7 @@ Safe to add. These are the instruments; several are the only reason a defect was
 | `OLF_GPU_BATCH_TRACE` | src/main/java/com/powsybl/openloadflow/sa/gpu/GpuBatchPrecomputer.java:71 +35 |
 | `OLF_GPU_DBG_ROW` | src/main/java/com/powsybl/openloadflow/ac/equations/vector/gpu/GpuAcFamilyPacker.java — pack-time dump of the zero-impedance branch and both buses' vCol/qRow/qRowAlt behind a given row |
 | `OLF_GPU_NAME_ROW` | src/main/java/com/powsybl/openloadflow/sa/gpu/GpuBatchPrecomputer.java — turns a DEVICE row index (from `OLF_GPU_WORST_ROW` / `OLF_GPU_PROBE_ROWS`) back into its variable and element; row indices are NOT portable between runs with different contingency sets |
+| `OLF_EQ_DUMP` | OLF patch, NewtonRaphson — writes the equation system OLF is about to solve as text (variable rows, column->equation map, `writeToString(true)`). The one question a residual cannot answer is WHICH equation sits on a row, and OLF will simply print it |
 | `OLF_GPU_CB_PROBE` | native/cuda/jni/olf_gpu_nr_jni.cu — the pi row the device ACTUALLY evaluates for one closed-branch element in every slot, after findTapOverride; says what the kernel read, not what the host meant to send |
 | `OLF_GPU_DX_DUMP` | native/cuda/jni/olf_gpu_nr_jni.cu (first batch solve, it=0, slot 0) — writes J/F/dx as text; pair with `OLF_NR_DX_DUMP` on the CPU arm and read both with `JacobianDumpCompareTest` |
 | `OLF_GPU_LIN_RESID` | native/cuda/jni/olf_gpu_nr_jni.cu (both the sequential and the batched solve) — prints `\|\|J.dx-F\|\|inf` per iteration, i.e. how exactly cuDSS solved the system it was handed |

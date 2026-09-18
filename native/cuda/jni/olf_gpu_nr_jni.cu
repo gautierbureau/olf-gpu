@@ -8028,7 +8028,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 if (forceFirstStep && it == 0) {
                     converged = false;
                 }
-                if (std::getenv("OLF_GPU_WORST_ROW") != nullptr && s == 0 && it == 0) {
+                static const char* wrEnv = std::getenv("OLF_GPU_WORST_ROW");
+                if (wrEnv != nullptr && s == 0 && it <= std::atoi(wrEnv)) {
                     worstRowBatch<<<1, 1, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dMode.as<int>(),
                             ctx->dTarget.as<double>(), ctx->dX.as<double>(), s);
                     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));

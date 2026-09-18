@@ -166,3 +166,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-18 | f79ae90+dirty | 18.70 | 15.63 | 28.32 | x1.81 | 0/0/0 | 7.60 | 4.43 | 499/500 | 122/133 (92%) | qOverride asks if the bus is voltage CONTROLLED, not if it controls |
 | 2026-09-18 | 88561cf+dirty | 19.05 | 15.83 | 27.55 | x1.74 | 0/0/0 | 7.72 | 4.46 | 499/500 | 122/133 (92%) | Linear-residual + first-step J/F/dx dumps on both arms; base-LF gap is conditioning, not a defect |
 | 2026-09-18 | 7fd44c6+dirty | 18.68 | 15.85 | 27.58 | x1.74 | 0/0/0 | 7.69 | 4.41 | 499/500 | 122/133 (92%) | Busbar outage islanding its own load: the lost load was charged twice to the loss pre-distribution |
+| 2026-09-18 | bd03a13+dirty | 18.97 | 15.95 | 28.50 | x1.79 | 0/0/0 | 7.55 | 4.43 | 499/500 | 122/133 (92%) | cbRowProbe + CPU_CTG markers; BUS-1017 is an outer-loop target difference, not the side-open |

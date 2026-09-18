@@ -2358,6 +2358,28 @@ __device__ inline bool findTapOverride(int nTapOv, const int* tapOvSlotElem, con
     return false;
 }
 
+// OLF_GPU_CB_PROBE=<cb element index>: the pi row the device ACTUALLY evaluates for that closed
+// branch in EVERY slot, after findTapOverride, alongside its disabled/active bits. The host knows
+// what it MEANT to send (GpuBatchSideOpen.danglingCbRow); this says what the kernel read. A
+// side-open that reduces to a pure shunt must show y = 0 with the equivalent on the live side's
+// g/b — anything else and the override never reached the fill.
+__global__ void cbRowProbe(int nS, int e, const double* cbIn, int nR1Ov,
+                           const int* r1OvSlotElem, const double* r1OvVal,
+                           int nElements, int elemOffset, const char* disabled, const char* active) {
+    for (int s = 0; s < nS; s++) {
+        const double* p = cbIn + (size_t) e * 8;
+        double pOv[8];
+        bool ov = findTapOverride(nR1Ov, r1OvSlotElem, r1OvVal, s, e, pOv);
+        if (ov) {
+            p = pOv;
+        }
+        printf("[CB_ROW] s=%d e=%d ov=%d dis=%d act=%d y=%.12e g1=%.12e g2=%.12e b1=%.12e b2=%.12e "
+               "ksi=%.12e r1=%.12f a1=%.12f\n",
+               s, e, ov ? 1 : 0, (int) disabled[(size_t) s * nElements + elemOffset + e], (int) active[s],
+               p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+    }
+}
+
 __global__ void fillClosedBranchBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                       const double* in, const int* ix, const int* dest,
                                       const double* x, double* vals, double* F,
@@ -7413,6 +7435,17 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 fillClosedBranchBatchF<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->st->cbTrig.as<double>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0, ctx->st->cb.phaseCtl ? ctx->st->cb.pcDest.as<int>() : nullptr, ctx->st->cb.phaseCtl ? ctx->st->cb.pcSel.as<int>() : nullptr, relocOf(ctx->st->cb, ctx->st.get()));
             } else {
                 fillClosedBranchBatch<<<grid(ctx->st->cb.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->cb.ne, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->cb.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->st->cb.altDest.as<int>(), ctx->st->cb.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->cb.dynReloc ? 1 : 0, ctx->st->cb.phaseCtl ? ctx->st->cb.pcDest.as<int>() : nullptr, ctx->st->cb.phaseCtl ? ctx->st->cb.pcSel.as<int>() : nullptr, relocOf(ctx->st->cb, ctx->st.get()));
+            }
+        }
+        {
+            static const char* cbProbe = std::getenv("OLF_GPU_CB_PROBE");
+            static bool cbProbed = false;
+            if (cbProbe != nullptr && !cbProbed && nS > 1 && ctx->st->cb.ne) {
+                cbProbed = true;
+                cbRowProbe<<<1, 1, 0, ctx->stream>>>(nS, std::atoi(cbProbe), ctx->st->cb.in.as<double>(),
+                        ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
+                        ctx->nElements, ctx->cbOffset, ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
             }
         }
         if (ctx->st->ob.ne) {

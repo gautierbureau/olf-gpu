@@ -552,9 +552,14 @@ final class GpuBatchChunkSolver {
                                                 hits++;
                                             }
                                         }
-                                        System.err.printf("SIDEOPEN_DQ ctg=%s branch=%s side=%d elem=%d dqContribs=%d%n",
+                                        var sopi = so.branch().getPiModel();
+                                        System.err.printf("SIDEOPEN_DQ ctg=%s branch=%s side=%d elem=%d"
+                                                        + " dqContribs=%d base(g1=%.9e b1=%.9e g2=%.9e b2=%.9e)"
+                                                        + " eq(g1=%.9e b1=%.9e g2=%.9e b2=%.9e)%n",
                                                 contingencies.get(ci).contingencyId(), so.branch().getId(),
-                                                so.side(), soElem, hits);
+                                                so.side(), soElem, hits,
+                                                sopi.getG1(), sopi.getB1(), sopi.getG2(), sopi.getB2(),
+                                                cbRow[1], cbRow[3], cbRow[2], cbRow[4]);
                                     }
                                     r1OvSlotElemList.add(s);
                                     r1OvSlotElemList.add(soElem);

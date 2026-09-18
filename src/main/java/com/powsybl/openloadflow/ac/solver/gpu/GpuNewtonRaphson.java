@@ -1194,6 +1194,22 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             invalidation.structureDirty = true;
             if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                 System.err.println("GPU_BASE_FALLBACK " + e);   // test logback is broken — stderr lever
+                // "equation row N has no diagonal pairing" names a row INDEX, which on its own says
+                // nothing about which equation could not be paired. Resolve it against the CURRENT
+                // active index -- and read it as a hint, not an identification: activation changes
+                // between solves, so the same row index is a different equation on a later fallback.
+                java.util.regex.Matcher m = java.util.regex.Pattern
+                        .compile("equation row (\\d+) has no diagonal pairing").matcher(String.valueOf(e.getMessage()));
+                if (m.find()) {
+                    int row = Integer.parseInt(m.group(1));
+                    var eq = equationSystem.getIndex().getEquationAtColumn(row);
+                    var elem = eq == null ? null
+                            : network.getElement(eq.getType().getElementType(), eq.getElementNum());
+                    System.err.printf("GPU_BASE_FALLBACK   row=%d of n=%d eq=%s elem=%d id=%s"
+                            + " (activation-dependent: verify before trusting)%n", row, n,
+                            eq == null ? "?" : eq.getType(), eq == null ? -1 : eq.getElementNum(),
+                            elem == null ? "?" : elem.getId());
+                }
                 e.printStackTrace();
             }
             if (Boolean.parseBoolean(System.getProperty(CPU_FALLBACK_PROPERTY, "true"))) {

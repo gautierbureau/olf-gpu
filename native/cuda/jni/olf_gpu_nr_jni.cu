@@ -1270,15 +1270,56 @@ std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const in
     // Zero-impedance branch: claim its DUMMY_P / DUMMY_Q rows (ZERO_V/ZERO_PHI or DUMMY_TARGET identities)
     // and, defensively, its bus P/Q rows (a coupler-only bus has no closed/open branch to claim them).
     for (int e = 0; e < nzi; e++) {
-        const int* ix = ziIdx + e * 11;                      // b1P b1Q b2P b2Q dpRow dqRow ...
+        const int* ix = ziIdx + e * 11;                      // b1P b1Q b2P b2Q dpRow dqRow v1 v2 ...
         for (int s = 0; s < 6; s++) {
             pairRc(ix[s], ix[s]);
         }
+        // ...and the MOVED-V identities, exactly as the closed-branch, open-branch and shunt loops
+        // already do. Slot 1/3 is the bus's Q ROW, which for an ordinary bus IS its V col — but a
+        // remote gen-VC CONTROLLER has Qrow = -1 and a PILOT has Qrow = another bus's row, so its own
+        // V col (slots 6/7) is a distinct row that nothing else claims. A zero-impedance branch
+        // touching such a bus therefore left its V row unpaired and buildStructure rejected the whole
+        // system. That is why busbar-section contingencies never reached the GPU: retaining switches
+        // creates zero-impedance branches, and past ~20 retained sections one of them lands on a
+        // remote-voltage-control bus (rte6515: row 2200 of 13048, appearing ONLY in zi[slot 6]).
+        claimMovedV(ix[1], ix[6]);
+        claimMovedV(ix[3], ix[7]);
     }
     std::vector<char> colUsed(n, 0);
     for (int r = 0; r < n; r++) {
         if (rowMap[r] < 0) {                                 // every index in [0,n) is an active equation
-            throw std::runtime_error("equation row " + std::to_string(r) + " has no diagonal pairing");
+            // Say WHERE the row appears. "row 2200 has no diagonal pairing" is a row index and nothing
+            // else; resolving it back to an equation on the Java side is unreliable because the active
+            // index shifts between solves. The builder, though, knows exactly which family arrays
+            // mention the row and in which SLOT, and that is the whole diagnosis: a row no array
+            // mentions was never packed, while a row some array mentions at a slot no pairing loop
+            // reads is a GAP in that loop (e.g. the open-branch loop pairs only its Q slots, on the
+            // assumption that "P rows pair via closed branches").
+            auto where = [r](const char* name, const int* a, int count, int stride) {
+                std::string out;
+                for (int e = 0; e < count && a != nullptr; e++) {
+                    for (int sl = 0; sl < stride; sl++) {
+                        if (a[(size_t) e * stride + sl] == r) {
+                            out += std::string(out.empty() ? "" : ",") + name + "[slot " + std::to_string(sl) + "]";
+                            break;
+                        }
+                    }
+                }
+                return out;
+            };
+            std::string seen = where("cb", cbIdx, ncb, 12) + where("ob", obIdx, nob, 6)
+                    + where("sh", shIdx, nsh, 5) + where("hv", hvIdx, nhv, 4)
+                    + where("zi", ziIdx, nzi, 11);
+            int dqHits = 0;
+            for (int c = 0; c < ndq && dqRow != nullptr; c++) {
+                if (dqRow[c] == r) {
+                    dqHits++;
+                }
+            }
+            throw std::runtime_error("equation row " + std::to_string(r) + " of " + std::to_string(n)
+                                     + " has no diagonal pairing (appears in: "
+                                     + (seen.empty() ? std::string("NOTHING") : seen)
+                                     + ", dqRow hits " + std::to_string(dqHits) + ")");
         }
         if (colUsed[rowMap[r]]) {
             throw std::runtime_error("diagonal pairing is not a bijection (column "

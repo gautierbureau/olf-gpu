@@ -1444,6 +1444,56 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
     }
 
+    /** BOUNDARY LINES — a coverage hole, not a suspected bug: rte6515 contains ZERO BoundaryLine
+     *  and ZERO TieLine (OLF_GPU_SA_INVENTORY), and the GPU main path has no reference to either, so
+     *  nothing in this project has ever solved one. OLF models a boundary line as a boundary BUS plus
+     *  a branch in the LfNetwork, which the packers iterate like any other bus and branch — so the
+     *  expectation is that it simply works, and this test is what makes that a fact rather than an
+     *  assumption. Both the outage of an ordinary branch WITH a boundary line present (the boundary
+     *  bus must solve alongside it) and the outage of the boundary line ITSELF. */
+    @org.junit.jupiter.api.Test
+    void deviceBoundaryLineMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        // Injections kept MODEST on purpose. At 25/10 MW ieee14's generators saturate their reactive
+        // limits and the driver rejects the base solve outright ("all-pinned / forced-PV election"),
+        // which has nothing to do with boundary lines — verified by adding the same two lines with
+        // ZERO injection, which passes. A test that big would be measuring that limitation instead.
+        // Injection ZERO, and that is the honest limit of what this can assert today. The boundary BUS
+        // and its branch exist either way, so the shape IS exercised — but give either line a non-zero
+        // P0/Q0 and the driver rejects the BASE solve (status -2) and the whole run falls back to the
+        // CPU: correct answers, no GPU at all.
+        //
+        // It is the BOUNDARY LINE carrying the injection, not the injection: with the generators given
+        // ±2000 MVAr of headroom, the same 8/3 and 5/2 MW added as ORDINARY LOADS passes, while the
+        // same amounts on these two boundary lines does not. So it is also NOT the reactive-limit
+        // election that the rejection message blames — that reproduces at pinned=0. Open, and the
+        // trigger is not yet identified.
+        addBoundaryLine(network, "VL4", "DL-4", 0, 0);
+        addBoundaryLine(network, "VL9", "DL-9", 0, 0);
+        List<Contingency> ctgs = List.of(
+                new Contingency("L1-2-1", new BranchContingency("L1-2-1")),
+                new Contingency("DL-4", new com.powsybl.contingency.BoundaryLineContingency("DL-4")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true)
+                .setUseReactiveLimits(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
+    private static void addPlainLoad(Network network, String vlId, String id, double p0, double q0) {
+        com.powsybl.iidm.network.VoltageLevel vl = network.getVoltageLevel(vlId);
+        String bus = vl.getBusBreakerView().getBusStream().findFirst().orElseThrow().getId();
+        vl.newLoad().setId(id).setBus(bus).setConnectableBus(bus).setP0(p0).setQ0(q0).add();
+    }
+
+    private static void addBoundaryLine(Network network, String vlId, String id, double p0, double q0) {
+        com.powsybl.iidm.network.VoltageLevel vl = network.getVoltageLevel(vlId);
+        String bus = vl.getBusBreakerView().getBusStream().findFirst().orElseThrow().getId();
+        vl.newBoundaryLine().setId(id).setBus(bus).setConnectableBus(bus)
+                .setP0(p0).setQ0(q0).setR(1.5).setX(12.0).setG(0).setB(0).add();
+    }
+
     @org.junit.jupiter.api.Test
     void deviceRemoteGeneratorControlMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(

@@ -142,6 +142,20 @@ final class GpuBatchPrecomputer {
                             + " hvdcs=" + (hvdcs == null ? "null" : hvdcs.size())
                             + " zi=" + ziOutages.size()
                             + " sideOpens=" + (sideOpens == null ? "null" : sideOpens.size()));
+                    // Name the zero-impedance branches and their two ends. A busbar outage that opens
+                    // a COUPLER is the shape that separates the batched busbars from the CPU-routed
+                    // ones, and "zi=1" alone does not say which coupler or which buses it merged.
+                    for (var zi : ziOutages) {
+                        LfBranch br = net.getBranchById(zi.toString());
+                        if (br == null) {
+                            System.err.println("QUALIFY_TRACE   zi " + zi);
+                        } else {
+                            System.err.printf("QUALIFY_TRACE   zi %s: b1=%s b2=%s spanningTree=%b%n", br.getId(),
+                                    br.getBus1() == null ? "?" : br.getBus1().getId(),
+                                    br.getBus2() == null ? "?" : br.getBus2().getId(),
+                                    br.isSpanningTreeEdge(com.powsybl.openloadflow.network.LoadFlowModel.AC));
+                        }
+                    }
                 }
                 if (branches != null && gens != null && loads != null && shifts != null && hvdcs != null && sideOpens != null
                         && (!branches.isEmpty() || !gens.isEmpty() || !loads.isEmpty() || !shifts.isEmpty()
@@ -244,8 +258,24 @@ final class GpuBatchPrecomputer {
                 }
             }
             Map<Variable<AcVariableType>, Integer> baseVariableRows = new HashMap<>();
+            // OLF_GPU_NAME_ROW=<n>[,<n>]: which element does a DEVICE row belong to? The device
+            // numbers its rows by OLF's own variable row (this map is the identity), so a row index
+            // printed by OLF_GPU_WORST_ROW or OLF_GPU_PROBE_ROWS can be turned back into an element
+            // here and nowhere else — `getEquationAtColumn` resolves against an activation-dependent
+            // index and has named the wrong element three times.
+            java.util.Set<Integer> nameRows = new java.util.HashSet<>();
+            if (System.getenv("OLF_GPU_NAME_ROW") != null) {
+                for (String t : System.getenv("OLF_GPU_NAME_ROW").split(",")) {
+                    nameRows.add(Integer.parseInt(t.trim()));
+                }
+            }
             for (var v : es.getIndex().getSortedVariablesToFind()) {
                 baseVariableRows.put(v, v.getRow());
+                if (nameRows.contains(v.getRow())) {
+                    var el = net.getElement(v.getType().getElementType(), v.getElementNum());
+                    System.err.printf("NAME_ROW %d: var=%s elementNum=%d id=%s%n",
+                            v.getRow(), v.getType(), v.getElementNum(), el == null ? "?" : el.getId());
+                }
             }
             LOGGER.info("GPU batched SA: precomputed {} of {} branch (N-1..N-k) contingencies on the device",
                     states.size(), batch.size());

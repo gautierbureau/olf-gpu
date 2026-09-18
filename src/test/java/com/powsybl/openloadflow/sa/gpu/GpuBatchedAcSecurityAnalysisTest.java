@@ -1511,6 +1511,39 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** A RETAINED SWITCH carrying real power, across MORE THAN ONE solve — the smallest network
+     *  that exhibits the carried-dummy divergence. OLF's {@code AcSolverUtil.initStateVector}
+     *  re-zeroes every DUMMY_P/DUMMY_Q at the start of each solve (v and phi carry over); the
+     *  in-kernel driver never returns to the host between passes and carries them instead, so the
+     *  two arms ENTER every solve after the first from different states. On the L2 outage here,
+     *  measured: the CPU enters solve 2 at {@code ||F||2 = 6.51796067833562400e+00} — exactly
+     *  VL1_1's whole target, its injection reading zero because the dummy was cleared — while the
+     *  device enters at {@code 4.56467216750267163e-02}. On rte6515 the same shape appears at the
+     *  second solve of nearly every busbar outage, at exactly 2.7e-02 on the two ends of
+     *  BUS-1014_COUPLER_1.
+     *
+     *  <p>BE HONEST ABOUT WHAT THIS ASSERTS: the final states agree here to 1e-12 with or without
+     *  the device-side reset, because this system converges to round-off (1e-15) and squeezes the
+     *  trajectory difference out. rte6515 stops at 1.7e-05 and does not. So this test is COVERAGE
+     *  for the shape, not a regression test for the reset — the divergence is only visible in the
+     *  per-solve entry residuals (OLF_NR_ITER_TRACE against OLF_GPU_BATCH_TRACE). */
+    @org.junit.jupiter.api.Test
+    void deviceRetainedSwitchCarryingPowerMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.NodeBreakerNetworkFactory.create();
+        // B3 (VL2 node 0-1) is declared RETAINED, but a switch is only actually retained when the
+        // SA needs the breaker view - with branch contingencies alone OLF merges it away and there
+        // is no zero-impedance branch to carry anything. The busbar-section outage in the list is
+        // what forces retention; L2's outage is then the one that pushes every MW of LD through B3.
+        List<Contingency> ctgs = List.of(
+                Contingency.busbarSection("BBS1"),
+                new Contingency("L2", new BranchContingency("L2")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
     private static void addPlainLoad(Network network, String vlId, String id, double p0, double q0) {
         com.powsybl.iidm.network.VoltageLevel vl = network.getVoltageLevel(vlId);
         String bus = vl.getBusBreakerView().getBusStream().findFirst().orElseThrow().getId();

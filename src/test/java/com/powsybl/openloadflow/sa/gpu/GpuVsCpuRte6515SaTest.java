@@ -223,6 +223,17 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             all.forEach(c -> describeContingency(network, c.getId()));
             return all;
         }
+        // OLF_GPU_SA_CTG_SHUFFLE=<seed>: shuffle the list before slicing, DETERMINISTICALLY. The list is
+        // assembled kind by kind, so every chunk is homogeneous except at the two or three kind
+        // boundaries — which makes "all kinds at once" a much weaker test than it looks: a batch of 500
+        // branch outages exercises none of the interaction between an injection outage's per-scenario
+        // target overrides and a branch outage's disabled-element mask in the SAME chunk. Shuffling puts
+        // every kind in every chunk. Seeded so a failure is reproducible.
+        String shuffle = System.getenv("OLF_GPU_SA_CTG_SHUFFLE");
+        if (shuffle != null) {
+            java.util.Collections.shuffle(all, new java.util.Random(Long.parseLong(shuffle)));
+            System.out.printf("  SHUFFLED %d contingencies with seed %s%n", all.size(), shuffle);
+        }
         // OLF_GPU_SA_MAX_CTG=<n>: run only the first n — a DIAGNOSTIC slice, so a parity question can be
         // iterated in seconds instead of the full 9042. Never quote a slice as the scope result.
         // OLF_GPU_SA_CTG_FROM=<i> slides that slice, so BUS-LEVEL diffing can cover a whole kind in

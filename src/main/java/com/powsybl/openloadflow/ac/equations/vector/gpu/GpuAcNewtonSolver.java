@@ -377,6 +377,15 @@ public final class GpuAcNewtonSolver {
      */
     public static native void setBatchRlIslanded(long handle, int[] slotControllerPairs);
 
+    /** Pilot-row flip entries: one per (scenario, pilot) where the outage made the pilot stop being one
+     *  of its OWN controllers. While the survivors hold its voltage the pilot keeps BUS_TARGET_V and its
+     *  acquired reactive balance rides one of THEIR rows; when every survivor pins, those rows take their
+     *  own pinned balances and the pilot's is evicted. The kernel then puts it on the pilot's freed row,
+     *  as OLF does. {@code rlCounts} sizes each entry's slice of {@code rlPool} (the surviving
+     *  controllers' reactive-limit entries). Nulls clear. */
+    public static native void setBatchPilotAllPinnedFlip(long handle, int[] slots, int[] rows,
+                                                         double[] qTargets, int[] rlCounts, int[] rlPool);
+
     /**
      * Install the HVDC AC-emulation outer loops' tables and their per-scenario starting state, so
      * FreezingHvdcACEmulation and AcHvdcAcEmulationLimits run as DRIVER PHASES in OLF's order —

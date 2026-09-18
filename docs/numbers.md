@@ -161,3 +161,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-17 | 11ce77e+dirty | 18.94 | 15.69 | 27.08 | x1.73 | 0/0/0 | 7.84 | 4.44 | 499/500 | 122/133 (92%) | Dead remote control batches: rte6515 generators 1388/1389, all at machine precision |
 | 2026-09-17 | 7d64f6f+dirty | 18.84 | 15.95 | 27.55 | x1.73 | 0/0/0 | 7.67 | 4.52 | 499/500 | 122/133 (92%) | Islanded frozen rows fixed: rte6515 branch violation diff 2 -> 0, the two long-standing lines gone |
 | 2026-09-18 | 8f14a4c+dirty | 18.94 | 15.98 | 27.32 | x1.71 | 0/0/0 | 7.70 | 4.48 | 499/500 | 122/133 (92%) | Frozen pilot row no longer flipped by updatePilotVeqBatch |
+| 2026-09-18 | 78f5081+dirty | 18.83 | 15.92 | 28.18 | x1.77 | 0/0/0 | 7.51 | 4.43 | 499/500 | 122/133 (92%) | GEN-1522 batches: pilot-is-own-controller gets the member alternate dest |

@@ -30,7 +30,7 @@ import java.util.List;
  */
 record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] branchAlphaCol,
                          int[] dummyPCol, int[] dummyQCol, int[] shuntBCol, int[] qRow, int[] qRowAlt,
-                         int[] qrPtr, int[] qrRows) {
+                         int[] qrPtr, int[] qrRows, int[] qrGroupOfPilot) {
 
     static ExtractionColumns of(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es) {
         // Cache each bus's BUS_PHI/BUS_V column once: a bus appears in several branches (degree ~3),
@@ -161,8 +161,43 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                 qRowAlt[bn] = vCol[bn];
             }
         }
+        // A pilot that is ALSO one of its own controllers. computeQRow already suppressed its per-bus
+        // Q scatter (qRow = -1 — its reactive injection feeds the group's DISTR_Q rows), and its own
+        // comment names the move that is missing: "if the controller is switched to PQ by reactive
+        // limits, BUS_TARGET_Q becomes active again and the bus must recover its own BUS_V-backed Q
+        // row". That recovery is the member ALTERNATE dest + row mode 4, which this bus never got
+        // because isRemoteGenVcMember is defined as controlledBus != bus and so excludes a pilot by
+        // construction. Give it the alternate; without one, a row put in mode 4 assembles EMPTY (no q
+        // contributions were ever routed to it), which is measurably a no-op: on rte6515 GEN-1522 the
+        // solve was unchanged to 10 digits and the answer stayed 3.2 kV out.
+        // INERT IN THE BASE: the alternate is read only when the row is mode 4, and while the pilot
+        // controls, its row is a mode-0 BUS_TARGET_V identity.
+        for (LfBus bus : network.getBuses()) {
+            int bn = bus.getNum();
+            if (vCol[bn] >= 0 && qRow[bn] < 0 && qRowAlt[bn] < 0
+                    && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
+                    && bus.getGeneratorVoltageControl()
+                            .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                            .map(c -> c.getControlledBus() == bus).orElse(false)) {
+                qRowAlt[bn] = vCol[bn];
+            }
+        }
+        // Which relocation group a pilot OWNS, as its own channel. qRowAlt = -2-g has always meant two
+        // separate things at once: "route this pilot's Q through the relocation carrier" AND "this
+        // pilot has a candidate table". Consumers that want only the second (the member -> group link
+        // that gates the gen-VC kernels) had to decode the first, which makes it impossible to give a
+        // group a table WITHOUT also re-routing its Q — exactly what a pilot that is one of its own
+        // controllers needs, since its q already feeds the group's DISTR_Q rows. Derived here from the
+        // final qRowAlt, so this commit is bit-identical to the decode it replaces.
+        int[] qrGroupOfPilot = new int[nBuses];
+        java.util.Arrays.fill(qrGroupOfPilot, -1);
+        for (int b = 0; b < nBuses; b++) {
+            if (qRowAlt[b] <= -2) {
+                qrGroupOfPilot[b] = -2 - qRowAlt[b];
+            }
+        }
         return new ExtractionColumns(phiCol, vCol, branchRhoCol, branchAlphaCol, dummyPCol, dummyQCol, shuntBCol, qRow, qRowAlt,
-                GpuAcArrays.toIntArray(qrPtr), GpuAcArrays.toIntArray(qrRows));
+                GpuAcArrays.toIntArray(qrPtr), GpuAcArrays.toIntArray(qrRows), qrGroupOfPilot);
     }
 
 }

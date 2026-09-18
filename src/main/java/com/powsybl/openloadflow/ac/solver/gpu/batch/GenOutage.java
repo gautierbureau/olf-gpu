@@ -31,7 +31,8 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                         java.util.Set<String> lostGenIds, double lostFactorSum, double pStep, double loadQDelta,
                         int inactiveDqMember, int[] pilotGroupSurvivorRlEntries,
                         int[] dqTargetRows, double[] dqTargetValues, int pqRowMode,
-                        int deadPilotVRow, double deadPilotQTarget) {
+                        int deadPilotVRow, double deadPilotQTarget,
+                        int pinnedPilotVRow, double pinnedPilotQTarget) {
     // lostGenIds / lostFactorSum exist for the reactive-capability CURVE channel, which evaluates each
     // generator's curve at its OWN post-distribution active power, reconstructed from the bus's row
     // target by participation share. Losing a generator skews that reconstruction three ways — the lost
@@ -111,6 +112,20 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      */
     public boolean needsPilotPinCheck() {
         return inactiveDqMember >= 0 && pilotGroupSurvivorRlEntries.length > 0;
+    }
+
+    /**
+     * The RUNTIME half of {@link #needsPilotPinCheck()}: the pilot's own BUS_V row and the reactive
+     * balance it must carry once every surviving controller has pinned. While the group still holds
+     * the pilot's voltage, setup correctly leaves this row a mode-0 BUS_TARGET_V identity and the
+     * balance rides a survivor's row. When the last survivor pins, that row takes its own pinned
+     * balance and the pilot's is evicted; OLF drops the now-uncontrollable BUS_TARGET_V and activates
+     * the pilot's own BUS_TARGET_Q on the freed row. The device makes the same move IN the solve, by
+     * putting the row in mode 4 — which reaches the pilot's q only because the extraction now gives a
+     * pilot-that-is-its-own-controller the member ALTERNATE dest.
+     */
+    public boolean flipsPilotRowWhenAllPinned() {
+        return pinnedPilotVRow >= 0 && pilotGroupSurvivorRlEntries.length > 0;
     }
 
     /** The bus keeps NO generator: its reactive-limit entry is not a controller in this scenario. */

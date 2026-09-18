@@ -198,10 +198,11 @@ public final class GpuAcOuterLoopPacks {
                     controllers, com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.VOLTAGE);
             int start = mt.key().size();
             LfBus freeMember = controllers.stream().filter(gvc::isControllerEnabled).findFirst().orElse(null);
-            // the pilot's relocation group (plan-B4, encoded -2-g in qRowAlt by the extraction):
-            // the kernels re-pick the pilot-Q carrier by mode-scan, so the CURRENT carrier's
-            // DISTR_Q row is suppressed and its target carries the pilot's Q instead
-            int qrGroup = columns.qRowAlt()[pilot.getNum()] <= -2 ? -2 - columns.qRowAlt()[pilot.getNum()] : -1;
+            // the pilot's relocation group: the kernels re-pick the pilot-Q carrier by mode-scan, so
+            // the CURRENT carrier's DISTR_Q row is suppressed and its target carries the pilot's Q
+            // instead. Read from qrGroupOfPilot, NOT decoded from qRowAlt: table membership and Q
+            // re-routing are separate facts that happened to share one encoding.
+            int qrGroup = columns.qrGroupOfPilot()[pilot.getNum()];
             for (int i = 0; i < controllers.size(); i++) {
                 LfBus m = controllers.get(i);
                 mt.memberIdxByBusNum().put(m.getNum(), mt.key().size());

@@ -418,6 +418,14 @@ final class GpuBatchChunkSolver {
                     // slot -> the RL entries of the controllers still holding a deactivated pilot's
                     // voltage. All pinned = its Q balance lost its row; the CPU replays that scenario.
                     java.util.Map<Integer, int[]> pilotPinCheck = new java.util.HashMap<>();
+                    // Pilot-row flip entries: the scenarios that used to be REJECTED by that check are
+                    // FIXED in the solve instead. Per chunk, like every other list here — the scenario
+                    // index is a chunk SLOT.
+                    List<Integer> pfSlot = new ArrayList<>();
+                    List<Integer> pfRow = new ArrayList<>();
+                    List<Double> pfQTarget = new ArrayList<>();
+                    List<Integer> pfRlCount = new ArrayList<>();
+                    List<Integer> pfRlPool = new ArrayList<>();
                     List<Integer> dqOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_Q reweight)
                     List<Double> dqOvWList = new ArrayList<>();
                     List<Integer> drOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_RHO renorm, plan A5)
@@ -667,7 +675,17 @@ final class GpuBatchChunkSolver {
                                             overrides.add(s * n + go.dqTargetRows()[t], go.dqTargetValues()[t]);
                                         }
                                     }
-                                    if (go.needsPilotPinCheck()) {
+                                    if (go.flipsPilotRowWhenAllPinned()) {
+                                        pfSlot.add(s);                     // handled IN the solve
+                                        pfRow.add(go.pinnedPilotVRow());
+                                        pfQTarget.add(go.pinnedPilotQTarget());
+                                        pfRlCount.add(go.pilotGroupSurvivorRlEntries().length);
+                                        for (int rl : go.pilotGroupSurvivorRlEntries()) {
+                                            pfRlPool.add(rl);
+                                        }
+                                    } else if (go.needsPilotPinCheck()) {
+                                        // No pilot row to move the balance onto (the outaged bus is not
+                                        // the pilot): still a runtime reject.
                                         pilotPinCheck.put(s, go.pilotGroupSurvivorRlEntries());
                                     }
                                     if (go.shrinksReactiveLimits()) {
@@ -1080,6 +1098,12 @@ final class GpuBatchChunkSolver {
                             dsIslandedList.isEmpty() ? null : dsIslandedList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchRlIslanded(handle,
                             rlIslandedList.isEmpty() ? null : rlIslandedList.stream().mapToInt(Integer::intValue).toArray());
+                    GpuAcNewtonSolver.setBatchPilotAllPinnedFlip(handle,
+                            pfSlot.isEmpty() ? null : pfSlot.stream().mapToInt(Integer::intValue).toArray(),
+                            pfSlot.isEmpty() ? null : pfRow.stream().mapToInt(Integer::intValue).toArray(),
+                            pfSlot.isEmpty() ? null : pfQTarget.stream().mapToDouble(Double::doubleValue).toArray(),
+                            pfSlot.isEmpty() ? null : pfRlCount.stream().mapToInt(Integer::intValue).toArray(),
+                            pfSlot.isEmpty() ? null : pfRlPool.stream().mapToInt(Integer::intValue).toArray());
                     // The two HVDC AC-emulation loops run as DRIVER PHASES, in OLF's own position
                     // between DistributedSlack and ReactiveLimits. Running them instead as host
                     // orchestrators after the whole solve put them out of OLF's order and left one

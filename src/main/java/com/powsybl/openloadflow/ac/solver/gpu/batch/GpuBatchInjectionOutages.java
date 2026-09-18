@@ -537,6 +537,22 @@ final class GpuBatchInjectionOutages {
             }
             pilotSurvivorRlEntries = entries.stream().mapToInt(Integer::intValue).toArray();
         }
+        // The pilot's OWN row, for the runtime flip when every survivor pins. Only when the outaged
+        // bus IS the pilot: that is the case where losing its generators makes the pilot stop being
+        // one of its own controllers and ACQUIRE a reactive balance. See
+        // GenOutage.flipsPilotRowWhenAllPinned.
+        int pinnedPilotVRow = -1;
+        double pinnedPilotQTarget = 0;
+        if (vcSurvives && pilotSurvivorRlEntries.length > 0
+                && bus.getGeneratorVoltageControl().orElseThrow().getControlledBus() == bus) {
+            var pilotV = es.getVariableSet().getVariable(bus.getNum(), AcVariableType.BUS_V);
+            if (pilotV != null && pilotV.getRow() >= 0) {
+                pinnedPilotVRow = pilotV.getRow();
+                // generationTargetQ - loadTargetQ. A VOLTAGE generator contributes 0 to
+                // generationTargetQ, so losing one leaves this unchanged.
+                pinnedPilotQTarget = bus.getTargetQ();
+            }
+        }
         java.util.Set<String> lostGenIds = lost.stream().map(LfGenerator::getId)
                 .collect(java.util.stream.Collectors.toUnmodifiableSet());
         double lostFactorSum = lost.stream().mapToDouble(dsParams::factor).sum();
@@ -544,6 +560,6 @@ final class GpuBatchInjectionOutages {
                 dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum,
                 lostLoadP - lostP, loadQDelta, inactiveDqMember, pilotSurvivorRlEntries,
                 dqTargetRows, dqTargetValues, deadRemoteMember ? 4 : 1,
-                deadPilotVRow, deadPilotQTarget);
+                deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget);
     }
 }

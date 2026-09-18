@@ -3244,6 +3244,54 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
     }
 }
 
+// A pilot that STOPPED being one of its OWN controllers (this scenario outaged its generators) keeps
+// its BUS_TARGET_V while the surviving controllers still hold its voltage — the reactive balance it
+// just acquired rides one of THEIR rows. When every survivor PINS, each of those rows flips to mode 4
+// to host its own pinned balance, and the pilot's balance is evicted with nowhere left to go: the
+// solve converges happily on a system one equation short (rte6515 GEN-1522: OLF's residual 0.601 pu
+// on BUS_TARGET_Q of the pilot, every device equation converged). OLF drops the now-uncontrollable
+// BUS_TARGET_V and activates the pilot's own BUS_TARGET_Q on the freed row; this makes the same move
+// INSIDE the solve, so the re-solve sees it.
+//
+// Mode 4 is "row hosts its own Q balance" via the member ALTERNATE dest. It only reaches the pilot's
+// q because the extraction now gives a pilot-that-is-its-own-controller that alternate; without it
+// the row assembles EMPTY and the flip is a measured no-op (state unchanged to 10 digits).
+// Reversible: if a later pass unpins a survivor, the V identity and its target come back.
+__global__ void pilotRowAllPinnedBatch(int nEntries, int nScenarios, int n, int nrl,
+                                       const int* entSlot, const int* entRow, const double* entQTarget,
+                                       const int* entOff, const int* entCount, const int* entRlPool,
+                                       const char* limitType, int* mode, double* target,
+                                       char* flipped, double* savedVTarget,
+                                       const char* rlActive, char* switched) {
+    int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= nEntries) return;
+    int s = entSlot[e];
+    if (s < 0 || s >= nScenarios || !rlActive[s]) return;
+    int row = entRow[e];
+    if (row < 0 || row >= n) return;
+    size_t ri = (size_t) s * n + row;
+    bool allPinned = entCount[e] > 0;
+    for (int k = 0; k < entCount[e]; k++) {
+        int rl = entRlPool[entOff[e] + k];
+        if (rl < 0 || rl >= nrl || limitType[(size_t) s * nrl + rl] == 0) {
+            allPinned = false;                              // this one still carries its DISTR_Q row
+            break;
+        }
+    }
+    if (allPinned && !flipped[e] && mode[ri] == 0) {
+        savedVTarget[e] = target[ri];
+        mode[ri] = 4;
+        target[ri] = entQTarget[e];
+        flipped[e] = 1;
+        switched[s] = 1;
+    } else if (!allPinned && flipped[e]) {
+        mode[ri] = 0;
+        target[ri] = savedVTarget[e];
+        flipped[e] = 0;
+        switched[s] = 1;
+    }
+}
+
 // Remote-member OWN reactive injection (plan-B3): accumulate each remote member's own bus q into
 // the diagnostic Q buffer at its OWN row (suppressed by the main qBuf fill), so the RL kernel's
 // q = qBuf[row] + loadQ works verbatim for remote entries. Same family evaluation as fillDistrQBatch
@@ -4718,6 +4766,15 @@ struct BatchSolverContext {
     // synchronous component in this scenario, so the loop must not look at it.
     int nRlIslanded = 0;
     DeviceBuf dRlIslanded;
+    int nPilotFlip = 0;                                    // pilot-row flip entries (all-survivors-pinned)
+    DeviceBuf dPfSlot;
+    DeviceBuf dPfRow;
+    DeviceBuf dPfQTarget;
+    DeviceBuf dPfOff;
+    DeviceBuf dPfCount;
+    DeviceBuf dPfRlPool;
+    DeviceBuf dPfFlipped;
+    DeviceBuf dPfSavedVT;
     // HVDC AC-emulation outer loops (FreezingHvdcACEmulation + AcHvdcAcEmulationLimits) as DRIVER
     // PHASES rather than host orchestrators. OLF runs both BETWEEN DistributedSlack and
     // ReactiveLimits; run from the host after the whole solve they land after RL instead, which is
@@ -8388,6 +8445,15 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(),
                         ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr);
             }
+            if (ctx->nPilotFlip > 0) {                      // pilot stopped controlling AND every survivor pinned
+                pilotRowAllPinnedBatch<<<grid(ctx->nPilotFlip), BLOCK, 0, ctx->stream>>>(
+                        ctx->nPilotFlip, nS, n, ctx->nrl,
+                        ctx->dPfSlot.as<int>(), ctx->dPfRow.as<int>(), ctx->dPfQTarget.as<double>(),
+                        ctx->dPfOff.as<int>(), ctx->dPfCount.as<int>(), ctx->dPfRlPool.as<int>(),
+                        ctx->dRlLimitType.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
+                        ctx->dPfFlipped.as<char>(), ctx->dPfSavedVT.as<double>(),
+                        ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
+            }
         }
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -10577,6 +10643,54 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
     ctx->dRlIslanded.upload(mask.data(), maskLen);
     ctx->nRlIslanded = nPairs;
+}
+
+// Pilot-row flip entries (see pilotRowAllPinnedBatch): one per (scenario, pilot) where the outage
+// made the pilot stop being one of its own controllers. slots/rows/qTargets are per entry; rlCounts
+// says how many surviving-controller RL entries each one owns and rlPool concatenates them in order.
+// Nulls clear. Flip state (flipped/savedVTarget) is allocated zeroed here, so each solve starts with
+// every pilot row unflipped.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchPilotAllPinnedFlip(
+        JNIEnv* env, jclass, jlong handle, jintArray jSlots, jintArray jRows, jdoubleArray jQTargets,
+        jintArray jRlCounts, jintArray jRlPool) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jSlots == nullptr || env->GetArrayLength(jSlots) == 0) {
+        ctx->nPilotFlip = 0;
+        return;
+    }
+    int ne = env->GetArrayLength(jSlots);
+    jint* slots = env->GetIntArrayElements(jSlots, nullptr);
+    jint* rows = env->GetIntArrayElements(jRows, nullptr);
+    jdouble* qt = env->GetDoubleArrayElements(jQTargets, nullptr);
+    jint* cnt = env->GetIntArrayElements(jRlCounts, nullptr);
+    jint* pool = env->GetIntArrayElements(jRlPool, nullptr);
+    int poolLen = env->GetArrayLength(jRlPool);
+    std::vector<int> off(ne);
+    int acc = 0;
+    for (int i = 0; i < ne; i++) {
+        off[i] = acc;
+        acc += cnt[i];
+    }
+    ctx->dPfSlot.upload(slots, static_cast<size_t>(ne) * sizeof(int));
+    ctx->dPfRow.upload(rows, static_cast<size_t>(ne) * sizeof(int));
+    ctx->dPfQTarget.upload(qt, static_cast<size_t>(ne) * sizeof(double));
+    ctx->dPfCount.upload(cnt, static_cast<size_t>(ne) * sizeof(int));
+    ctx->dPfOff.upload(off.data(), static_cast<size_t>(ne) * sizeof(int));
+    ctx->dPfRlPool.upload(pool, static_cast<size_t>(poolLen > 0 ? poolLen : 1) * sizeof(int));
+    std::vector<char> zeroC(ne, 0);
+    std::vector<double> zeroD(ne, 0.0);
+    ctx->dPfFlipped.upload(zeroC.data(), static_cast<size_t>(ne) * sizeof(char));
+    ctx->dPfSavedVT.upload(zeroD.data(), static_cast<size_t>(ne) * sizeof(double));
+    ctx->nPilotFlip = ne;
+    env->ReleaseIntArrayElements(jSlots, slots, JNI_ABORT);
+    env->ReleaseIntArrayElements(jRows, rows, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jQTargets, qt, JNI_ABORT);
+    env->ReleaseIntArrayElements(jRlCounts, cnt, JNI_ABORT);
+    env->ReleaseIntArrayElements(jRlPool, pool, JNI_ABORT);
 }
 
 // Distributed-slack participants STRANDED in another synchronous component: install (or clear, with

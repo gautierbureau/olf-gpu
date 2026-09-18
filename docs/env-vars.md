@@ -33,13 +33,17 @@ Solves one contingency as an ordinary load flow on the device, which is where th
 instruments live. A contingency wrong batched and right there is a BATCH defect.
 
 
-## Diagnostics (71) — print only, cannot change a result
+## Diagnostics (75) — print only, cannot change a result
 
 Safe to add. These are the instruments; several are the only reason a defect was found at all.
 
 | variable | read at |
 |---|---|
 | `OLF_GPU_BATCH_TRACE` | src/main/java/com/powsybl/openloadflow/sa/gpu/GpuBatchPrecomputer.java:71 +35 |
+| `OLF_GPU_DBG_ROW` | src/main/java/com/powsybl/openloadflow/ac/equations/vector/gpu/GpuAcFamilyPacker.java — pack-time dump of the zero-impedance branch and both buses' vCol/qRow/qRowAlt behind a given row |
+| `OLF_GPU_DX_DUMP` | native/cuda/jni/olf_gpu_nr_jni.cu (first batch solve, it=0, slot 0) — writes J/F/dx as text; pair with `OLF_NR_DX_DUMP` on the CPU arm and read both with `JacobianDumpCompareTest` |
+| `OLF_GPU_LIN_RESID` | native/cuda/jni/olf_gpu_nr_jni.cu (both the sequential and the batched solve) — prints `\|\|J.dx-F\|\|inf` per iteration, i.e. how exactly cuDSS solved the system it was handed |
+| `OLF_DUMP_DIR` | src/test/java/com/powsybl/openloadflow/ac/equations/vector/gpu/JacobianDumpCompareTest.java — directory holding `cpu.step0` / `gpu.step0` |
 | `OLF_GPU_CENSUS_BASE_VIOLATIONS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:300 |
 | `OLF_GPU_CENSUS_BUS_DUMP` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:309 |
 | `OLF_GPU_CENSUS_CASE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuRteScopeCensusTest.java:69 |

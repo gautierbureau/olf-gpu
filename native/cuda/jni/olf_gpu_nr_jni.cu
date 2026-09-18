@@ -1067,6 +1067,43 @@ __global__ void fillDistrShuntB(int ndb, const int* dbCol, const double* dbCoef,
 // mismatch overwritten with x - target. The fill kernels may have scattered into it —
 // this runs after them and overwrites, which is what keeps the structure (and cuDSS's
 // analysis) immutable across PV->PQ activation switching.
+// OLF_GPU_LIN_RESID=1: how accurately did the LINEAR solve actually solve? Per row,
+// r_i = (J.dx)_i -/+ F_i. This is the measurement that separates "the two arms assemble DIFFERENT
+// Jacobians" from "they assemble the same one and the SOLVER lands elsewhere": if ||r|| is at
+// round-off relative to ||F||, the solve is exact and any step difference must come from J itself;
+// if ||r|| is large, the solve is inaccurate and iterative refinement is the remedy. It is also
+// refinement's own first step, so the cost buys both answers.
+__global__ void linResidRow(int n, const int* rowPtr, const int* colIdx, const double* vals,
+                            const double* dx, const double* F, double* rPlus, double* rMinus) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    double acc = 0.0;
+    for (int k = rowPtr[i]; k < rowPtr[i + 1]; k++) {
+        acc += vals[k] * dx[colIdx[k]];
+    }
+    rPlus[i] = acc - F[i];                                   // sign convention settled by taking the
+    rMinus[i] = acc + F[i];                                  // smaller of the two on the host
+}
+
+// Batched twin of linResidRow: every scenario has its OWN values block (stride nnz) and its own
+// dx / F block (stride n), over the SHARED sparsity pattern.
+__global__ void linResidRowBatch(int n, int nS, int nnz, const int* rowPtr, const int* colIdx,
+                                 const double* vals, const double* dx, const double* F,
+                                 double* rPlus, double* rMinus) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n * nS) return;
+    int s = t / n;
+    int i = t - s * n;
+    const double* v = vals + (size_t) s * nnz;
+    const double* d = dx + (size_t) s * n;
+    double acc = 0.0;
+    for (int k = rowPtr[i]; k < rowPtr[i + 1]; k++) {
+        acc += v[k] * d[colIdx[k]];
+    }
+    rPlus[t] = acc - F[t];
+    rMinus[t] = acc + F[t];
+}
+
 __global__ void applyRowMode(int n, const int* mode, const int* rowPtr, const int* diagPos,
                              const double* x, const double* target, double* vals, double* F) {
     int r = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2139,6 +2176,38 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
                 (ctx->analyzed ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION) | CUDSS_PHASE_SOLVE,
                 ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
         ctx->analyzed = true;
+        static const bool linResidSeqOn = std::getenv("OLF_GPU_LIN_RESID") != nullptr;
+        if (linResidSeqOn) {
+            DeviceBuf rp;
+            DeviceBuf rm;
+            std::vector<double> hrp(n);
+            std::vector<double> hrm(n);
+            std::vector<double> hf(n);
+            rp.alloc(n * sizeof(double));
+            rm.alloc(n * sizeof(double));
+            linResidRow<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->st->dRowPtr.as<int>(),
+                    ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
+                    ctx->dF.as<double>(), rp.as<double>(), rm.as<double>());
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            CUDA_CHECK(cudaMemcpy(hrp.data(), rp.p, n * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(hrm.data(), rm.p, n * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(hf.data(), ctx->dF.p, n * sizeof(double), cudaMemcpyDeviceToHost));
+            double mp = 0;
+            double mm = 0;
+            double mf = 0;
+            int argw = -1;
+            for (int i = 0; i < n; i++) {
+                mp = std::max(mp, std::fabs(hrp[i]));
+                if (std::fabs(hrm[i]) > mm) {
+                    mm = std::fabs(hrm[i]);
+                    argw = i;
+                }
+                mf = std::max(mf, std::fabs(hf[i]));
+            }
+            double best = std::min(mp, mm);
+            std::fprintf(stderr, "LIN_RESID n=%d ||J.dx-F||inf=%.6e ||F||inf=%.6e ratio=%.3e worstRow=%d\n",
+                         n, best, mf, mf > 0 ? best / mf : 0.0, argw);
+        }
         CUDA_CHECK(cudaMemcpyAsync(ctx->dXprev.p, ctx->dX.p, n * sizeof(double), cudaMemcpyDeviceToDevice, ctx->stream));
         if (lsMode == 2) {
             // MAX_VOLTAGE_CHANGE: one global step factor so the largest |Δv| / |Δφ| stays within
@@ -8153,6 +8222,87 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             scatterScenarios<<<grid(n * nReal), BLOCK, 0, ctx->stream>>>(n, nReal, ctx->dMapC.as<int>(), ctx->dDxC.as<double>(), ctx->dDx.as<double>());
         } else {
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, ubPhase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+        }
+        // OLF_GPU_DX_DUMP=<path>: the FIRST solve's first Newton step, written out whole — the
+        // assembled Jacobian (CSR triplets), the mismatch F it was built at, and the step dx it
+        // produced. The CPU arm writes the same three under OLF_NR_DX_DUMP, and the two are
+        // comparable WITHOUT a row map: the device's COLUMN index is OLF's own variable row
+        // (GpuBatchPrecomputer stores v.getRow() verbatim), so dx compares term by term, and a
+        // per-variable-column fingerprint of |J| localises any Jacobian difference to a variable.
+        // Only F needs the row map, and its sorted multiset is permutation-invariant anyway.
+        {
+            static const char* dxPath = std::getenv("OLF_GPU_DX_DUMP");   // read once, not per iteration
+            static bool dumped = false;
+            if (dxPath != nullptr && !dumped && it == 0) {
+                dumped = true;
+                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                std::vector<double> hv(nnz);
+                std::vector<double> hd(n);
+                std::vector<double> hff(n);
+                std::vector<int> hrp(n + 1);
+                std::vector<int> hci(nnz);
+                std::vector<int> hmode(n);
+                CUDA_CHECK(cudaMemcpy(hv.data(), ctx->dVals.p, (size_t) nnz * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(hd.data(), ctx->dDx.p, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(hff.data(), ctx->dF.p, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(hrp.data(), ctx->st->dRowPtr.p, (size_t) (n + 1) * sizeof(int), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(hci.data(), ctx->st->dColIdx.p, (size_t) nnz * sizeof(int), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(hmode.data(), ctx->dMode.p, (size_t) n * sizeof(int), cudaMemcpyDeviceToHost));
+                FILE* f = std::fopen(dxPath, "w");
+                if (f != nullptr) {
+                    std::fprintf(f, "N %d %d\n", n, nnz);
+                    for (int i = 0; i < n; i++) {
+                        std::fprintf(f, "F %d %.17e\n", i, hff[i]);
+                        std::fprintf(f, "DX %d %.17e\n", i, hd[i]);
+                        std::fprintf(f, "MODE %d %d\n", i, hmode[i]);
+                        for (int k = hrp[i]; k < hrp[i + 1]; k++) {
+                            std::fprintf(f, "J %d %d %.17e\n", i, hci[k], hv[k]);
+                        }
+                    }
+                    std::fclose(f);
+                    std::fprintf(stderr, "OLF_GPU_DX_DUMP wrote %s (n=%d nnz=%d)\n", dxPath, n, nnz);
+                }
+            }
+        }
+        static const bool linResidOn = std::getenv("OLF_GPU_LIN_RESID") != nullptr;
+        if (linResidOn) {
+            DeviceBuf rp;
+            DeviceBuf rm;
+            rp.alloc((size_t) n * nS * sizeof(double));
+            rm.alloc((size_t) n * nS * sizeof(double));
+            linResidRowBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(),
+                    ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
+                    ctx->dF.as<double>(), rp.as<double>(), rm.as<double>());
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            std::vector<double> hrp((size_t) n * nS);
+            std::vector<double> hrm((size_t) n * nS);
+            std::vector<double> hf((size_t) n * nS);
+            std::vector<double> hdx((size_t) n * nS);
+            CUDA_CHECK(cudaMemcpy(hrp.data(), rp.p, (size_t) n * nS * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(hrm.data(), rm.p, (size_t) n * nS * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(hf.data(), ctx->dF.p, (size_t) n * nS * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(hdx.data(), ctx->dDx.p, (size_t) n * nS * sizeof(double), cudaMemcpyDeviceToHost));
+            for (int s = 0; s < nS; s++) {
+                if (!active[s]) continue;
+                double mp = 0;
+                double mm = 0;
+                double mf = 0;
+                double mdx = 0;
+                int argp = -1;
+                int argm = -1;
+                for (int i = 0; i < n; i++) {
+                    size_t t = (size_t) s * n + i;
+                    if (std::fabs(hrp[t]) > mp) { mp = std::fabs(hrp[t]); argp = i; }
+                    if (std::fabs(hrm[t]) > mm) { mm = std::fabs(hrm[t]); argm = i; }
+                    mf = std::max(mf, std::fabs(hf[t]));
+                    mdx = std::max(mdx, std::fabs(hdx[t]));
+                }
+                double best = std::min(mp, mm);
+                int argw = mp < mm ? argp : argm;
+                std::fprintf(stderr, "LIN_RESID it=%d slot=%d n=%d ||J.dx-F||inf=%.6e ||F||inf=%.6e "
+                             "||dx||inf=%.6e ratio=%.3e worstRow=%d\n",
+                             it, s, n, best, mf, mdx, mf > 0 ? best / mf : 0.0, argw);
+            }
         }
         if (ctx->clampStep) {
             maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dVarType.as<int>(), ctx->dActive.as<char>(), ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>());

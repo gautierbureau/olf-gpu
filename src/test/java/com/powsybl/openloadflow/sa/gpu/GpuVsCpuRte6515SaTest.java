@@ -488,6 +488,26 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                     .limit(4)
                     .forEach(b -> System.out.printf("      %s %.9f vs %.9f (%.3e)%n", b.getBusId(), b.getV(),
                             gpuBaseV.get(b.getBusId()), b.getV() - gpuBaseV.get(b.getBusId())));
+
+            // The SAME arm against ITSELF. The cold and warm GPU runs solve the identical problem on
+            // identical fresh networks, so any difference between them is the device's own
+            // reproducibility floor — the fill kernels scatter with atomicAdd, whose summation order
+            // is not fixed, and on rte6515 with switches retained the Jacobian carries diagonals of
+            // 3.3e+04 (a retained switch is x ~ 3e-05 pu), where one ulp is 4e-12 absolute. Print it
+            // next to the CPU-vs-GPU number: a CPU-vs-GPU gap NO LARGER than the GPU-vs-GPU gap is
+            // arithmetic noise and there is no defect underneath it to find. A gap that is larger is
+            // a real disagreement and must be chased.
+            Map<String, Double> warmBaseV = new TreeMap<>();
+            gpuWarm.getPreContingencyResult().getNetworkResult().getBusResults()
+                    .forEach(b -> warmBaseV.put(b.getBusId(), b.getV()));
+            var selfPairs = gpuCold.getPreContingencyResult().getNetworkResult().getBusResults().stream()
+                    .filter(b -> warmBaseV.containsKey(b.getBusId())).toList();
+            double selfWorst = selfPairs.stream()
+                    .mapToDouble(b -> Math.abs(b.getV() - warmBaseV.get(b.getBusId()))).max().orElse(0);
+            long selfAbove = selfPairs.stream()
+                    .filter(b -> Math.abs(b.getV() - warmBaseV.get(b.getBusId())) > 1e-12).count();
+            System.out.printf("  BASE GPU-vs-GPU (cold vs warm, same arm) buses>1e-12kV=%d of %d"
+                            + " | worst abs=%.3e kV%n", selfAbove, selfPairs.size(), selfWorst);
         }
 
         long cpuViolations = violationCount(cpu);

@@ -9189,6 +9189,27 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
     return out;
 }
 
+// The per-scenario ROW MODES as the device ENDED with them, the companion to readBatchTargets.
+// A row's equation is (mode, target) together, and the outer-loop kernels rewrite BOTH: the host's
+// rowModePerScenario is only what SETUP asked for, so reading a target without its final mode can
+// say "the target is right" about a row that is no longer the equation it was set up to be. That is
+// the whole failure shape of the device-target-writer class, where a wrong row converges cleanly and
+// nothing flags it.
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchRowModes(
+        JNIEnv* env, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return nullptr;
+    }
+    size_t nTot = static_cast<size_t>(ctx->n) * ctx->nScenarios;
+    std::vector<int> host(nTot);
+    cudaMemcpy(host.data(), ctx->dMode.p, nTot * sizeof(int), cudaMemcpyDeviceToHost);
+    jintArray out = env->NewIntArray(static_cast<jsize>(nTot));
+    env->SetIntArrayRegion(out, 0, static_cast<jsize>(nTot), host.data());
+    return out;
+}
+
 // Batched SENSITIVITY solve for the incremental outer-loop family (device port of OLF's
 // SensitivityContext): J at the given per-scenario states (the same forward system the Newton
 // solves — OLF's "solveTransposed" IS the forward direction in powsybl-math's transposed

@@ -1403,14 +1403,24 @@ final class GpuBatchChunkSolver {
                     // against, after every per-scenario kernel and orchestrator. The base+override
                     // view (OLF_GPU_TARGET_ROW) shows what was UPLOADED; this shows what survived.
                     if (System.getenv("OLF_GPU_FINAL_TARGET_ROW") != null) {
-                        int probe = Integer.parseInt(System.getenv("OLF_GPU_FINAL_TARGET_ROW"));
+                        // Comma-separated rows, so a shape that spans a group (pilot + its members)
+                        // is read in ONE run instead of one run per row.
                         double[] ftp = GpuAcNewtonSolver.readBatchTargets(handle);
-                        for (int s = 0; s < realCount; s++) {
-                            System.err.printf("FINAL_TARGET ctg=%s row=%d base=%.9f final=%.9f mode=%d%n",
-                                    contingencies.get(group.get(chunkStart + s)).contingencyId(), probe,
-                                    baseTargets[probe], ftp[s * n + probe],
-                                    rowModePerScenario != null && rowModePerScenario[s] != null
-                                            ? rowModePerScenario[s][probe] : baseRowMode[probe]);
+                        int[] fmode = GpuAcNewtonSolver.readBatchRowModes(handle);
+                        for (String tok : System.getenv("OLF_GPU_FINAL_TARGET_ROW").split(",")) {
+                            int probe = Integer.parseInt(tok.trim());
+                            for (int s = 0; s < realCount; s++) {
+                                // setupMode is what the HOST asked for; devMode is what the device
+                                // ENDED with. They differ exactly when an outer-loop kernel rewrote the
+                                // row -- which is the thing worth seeing.
+                                int setupMode = rowModePerScenario != null && rowModePerScenario[s] != null
+                                        ? rowModePerScenario[s][probe] : baseRowMode[probe];
+                                System.err.printf("FINAL_TARGET ctg=%s row=%d base=%.9f final=%.9f"
+                                                + " setupMode=%d devMode=%d%n",
+                                        contingencies.get(group.get(chunkStart + s)).contingencyId(), probe,
+                                        baseTargets[probe], ftp[s * n + probe], setupMode,
+                                        fmode == null ? -99 : fmode[s * n + probe]);
+                            }
                         }
                     }
                     // OLF_GPU_GENCUM_DUMP=<file>: each GENERATOR's own cumulative P movement as the

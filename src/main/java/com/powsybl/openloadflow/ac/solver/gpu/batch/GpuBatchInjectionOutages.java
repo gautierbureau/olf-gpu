@@ -269,6 +269,19 @@ final class GpuBatchInjectionOutages {
                             vcO.map(vc -> vc.getMergedControllerElements().contains(vc.getControlledBus())).orElse(false),
                             vcO.map(vc -> vc.getMergedControllerElements().size()).orElse(0), alive,
                             pilot == null ? 0.0 : pilot.getLoadTargetQ(), keepsController, lostLoads.size());
+                    // The DEVICE rows of the pilot and of every member, so a post-solve readback
+                    // (OLF_GPU_FINAL_TARGET_ROW) can be pointed at this group without guessing which
+                    // row index the equation landed on.
+                    if (pilot != null) {
+                        StringBuilder mr = new StringBuilder();
+                        vcO.ifPresent(vc -> vc.getMergedControllerElements().forEach(m -> {
+                            var mv = es.getVariableSet().getVariable(m.getNum(), AcVariableType.BUS_V);
+                            mr.append(m.getId()).append('=').append(mv == null ? -1 : mv.getRow()).append(' ');
+                        }));
+                        var pv = es.getVariableSet().getVariable(pilot.getNum(), AcVariableType.BUS_V);
+                        System.err.printf("GENOUT_SHAPE   rows pilot=%s:%d members: %s%n",
+                                pilot.getId(), pv == null ? -1 : pv.getRow(), mr.toString().trim());
+                    }
                     double postGenQ = bus.getGenerators().stream().filter(g -> !lostHere.contains(g))
                             .mapToDouble(LfGenerator::getTargetQ).sum();
                     System.err.printf("GENOUT_SHAPE   bus=%s baseTargetQ=%.9f postTargetQ=%.9f delta=%.9f "

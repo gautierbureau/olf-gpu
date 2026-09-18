@@ -292,6 +292,12 @@ public final class GpuAcNewtonSolver {
      *  PARENT contingency's final distributed targets (OLF's setGeneratorsInitialTargetPToTargetP). */
     public static native double[] readBatchTargets(long handle);
 
+    /** The per-scenario ROW MODES the device ended with — the companion to {@link #readBatchTargets}.
+     *  A row's equation is (mode, target) TOGETHER, and the outer-loop kernels rewrite both; the host's
+     *  {@code rowModePerScenario} is only what setup asked for. Reading a target without its final mode
+     *  can say "the target is right" about a row that is no longer the equation it was set up to be. */
+    public static native int[] readBatchRowModes(long handle);
+
     /** VALUES refresh addressed by the SHARED STRUCTURE handle: same semantics as
      *  {@link #refreshContextValues} (tap r1/a1 or shunt-b moves with an unchanged pattern), but
      *  usable when the caller holds a BATCH context — one extraction has ONE value set, every

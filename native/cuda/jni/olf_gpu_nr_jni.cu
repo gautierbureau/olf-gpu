@@ -245,7 +245,16 @@ constexpr OlfReorderAlg REORDER_ALGS[] = {CUDSS_ALG_DEFAULT, CUDSS_ALG_1, CUDSS_
 // large entries onto the diagonal first. Override with OLF_GPU_MATCHING_ALG=<0..6>
 // (0 disables; see cudssMatchingAlg_t), mainly to reproduce the failure above.
 // ---------------------------------------------------------------------------------
-inline void applyAdjointMatching(cudssConfig_t config) {
+// MATCHING IS NOT OPTIONAL ON THESE JACOBIANS. A bus fed ONLY through a zero-impedance branch
+// leaves four rows with a numerically ZERO diagonal — the branch's ZERO_V / ZERO_PHI (which carry
+// v1-v2 and phi1-phi2, never their own dummy) and the dead-end bus's P / Q balances (which carry
+// only -DUMMY_P / -DUMMY_Q). The matrix is non-singular, but factoring it needs the rows matched to
+// other columns. Without matching cuDSS perturbs the zero pivot and the reciprocal propagates:
+// measured on deviceRemoteZeroImpMemberPin as DUMMY_P = -1.220703125e+09 and, through the chained
+// second pivot, phi = -1.220703125e+22 (1.220703125e-04 is 2^-13, so these are 1e13 and (1e13)^2
+// scaled) where the exact answers are -0.05 and 0. The solve then "converges" somewhere else or
+// diverges, and on the base load flow it was masked by the device-broken-solve safety net.
+inline void applyMatchingAlg(cudssConfig_t config) {
 #if CUDSS_VERSION >= 800
     const char* e = std::getenv("OLF_GPU_MATCHING_ALG");
     // Treat an EMPTY value as unset, like applyReorderAlg: atoi("") is 0, which is
@@ -2363,6 +2372,19 @@ __device__ inline bool findTapOverride(int nTapOv, const int* tapOvSlotElem, con
 // what it MEANT to send (GpuBatchSideOpen.danglingCbRow); this says what the kernel read. A
 // side-open that reduces to a pure shunt must show y = 0 with the equivalent on the live side's
 // g/b — anything else and the override never reached the fill.
+// OLF_GPU_STATE_DUMP=<maxIt>: for slot 0 and iterations 0..maxIt, EVERY row's mode, target, state
+// and residual. Only usable on a small system, which is exactly where a reproducer lives — on a
+// 16-row network it shows at a glance which variable ran away and which equation let it.
+__global__ void stateDumpBatch(int n, const double* F, const int* mode, const double* target,
+                               const double* x, int s, int it) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    for (int i = 0; i < n; i++) {
+        size_t k = (size_t) s * n + i;
+        printf("[STATE] it=%d row=%d mode=%d target=%.9e x=%.9e F=%.9e\n",
+               it, i, mode[k], target[k], x[k], F[k]);
+    }
+}
+
 __global__ void cbRowProbe(int nS, int e, const double* cbIn, int nR1Ov,
                            const int* r1OvSlotElem, const double* r1OvVal,
                            int nElements, int elemOffset, const char* disabled, const char* active) {
@@ -8028,6 +8050,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 if (forceFirstStep && it == 0) {
                     converged = false;
                 }
+                static const char* sdEnv = std::getenv("OLF_GPU_STATE_DUMP");
+                if (sdEnv != nullptr && s == 0 && it <= std::atoi(sdEnv) && n <= 64) {
+                    stateDumpBatch<<<1, 1, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dMode.as<int>(),
+                            ctx->dTarget.as<double>(), ctx->dX.as<double>(), s, it);
+                    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                }
                 static const char* wrEnv = std::getenv("OLF_GPU_WORST_ROW");
                 if (wrEnv != nullptr && s == 0 && it <= std::atoi(wrEnv)) {
                     worstRowBatch<<<1, 1, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dMode.as<int>(),
@@ -11543,7 +11571,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveTra
         CUDSS_CHECK(cudssCreate(&ds.handle));
         CUDSS_CHECK(cudssConfigCreate(&ds.config));
         applyReorderAlg(ds.config);
-        applyAdjointMatching(ds.config);
+        applyMatchingAlg(ds.config);
         CUDSS_CHECK(cudssDataCreate(ds.handle, &ds.data));
         CUDSS_CHECK(cudssMatrixCreateCsr(&ds.matA, nn, nn, nnz, dRowPtr.as<int>(), nullptr,
                                          dColIdx.as<int>(), dVals.as<double>(), OLF_CUDSS_CSR_TYPES,

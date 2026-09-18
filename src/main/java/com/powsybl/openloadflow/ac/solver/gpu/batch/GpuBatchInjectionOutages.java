@@ -51,6 +51,22 @@ final class GpuBatchInjectionOutages {
     /** OLF's {@code updateReactiveKeys} rule, plus THIS scenario's loss: a controller that is
      *  disabled, has its voltage control off, or is the member the outage deactivates takes no share
      *  of the group's reactive dispatch, and its key leaves the renormalization denominator. */
+    /** The bus's own slot in the device's packed DISTR_Q member tables, or -1 when it is not a member
+     *  of any group. Used both to locate the group for target seeding and to decide whether a load
+     *  loss on it is expressible as a per-scenario member targetQ override. */
+    private static int dqMemberSlot(GpuAcData gpuData, LfBus bus) {
+        int[] busNums = gpuData.dqMemberBusNum();
+        if (busNums == null) {
+            return -1;
+        }
+        for (int m = 0; m < busNums.length; m++) {
+            if (busNums[m] == bus.getNum()) {
+                return m;
+            }
+        }
+        return -1;
+    }
+
     private static boolean memberKeepsKey(LfBus anyMember, int memberBusNum, int member, int inactiveMember) {
         if (member == inactiveMember) {
             return false;
@@ -290,7 +306,19 @@ final class GpuBatchInjectionOutages {
                             (postGenQ - bus.getLoadTargetQ()) - bus.getTargetQ(),
                             bus.isGenerationTargetQFrozen(), bus.getGenerationTargetQ(), bus.getLoadTargetQ());
                 }
-                return reject(keepsController ? "DISTR_Q_BUS_WITH_LOAD_LOSS" : "DISTR_Q_LAST_CONTROLLER", bus);
+                // A PURE reactive-LOAD loss on a packed DISTR_Q member, with the group's control
+                // untouched, IS expressible: the member's own targetQ moves (targetQ = generation -
+                // load) and every DISTR_Q target in the group follows it through the per-scenario
+                // member-targetQ override (setBatchDqMemberTargetQOverrides), which the device's
+                // target kernel reads instead of the base value. Deliberately narrow — no generator
+                // may be lost on the bus in the same scenario, because a frozen generation target Q
+                // makes the surviving-generator sum the wrong post-contingency value (see the
+                // qOverride note above), and that case has not been measured.
+                boolean pureLoadLossOnPackedMember = keepsController && lostHere.isEmpty()
+                        && !lostLoads.isEmpty() && dqMemberSlot(gpuData, bus) >= 0;
+                if (!pureLoadLossOnPackedMember) {
+                    return reject(keepsController ? "DISTR_Q_BUS_WITH_LOAD_LOSS" : "DISTR_Q_LAST_CONTROLLER", bus);
+                }
             }
         }
         if (bus.hasGeneratorsWithSlope()) {               // slope-SVC bus outage: the mode-2 row's fate on a
@@ -488,13 +516,28 @@ final class GpuBatchInjectionOutages {
         // maintains these targets runs only inside the reactive-limits phase — see GenOutage.
         int[] dqTargetRows = new int[0];
         double[] dqTargetValues = new double[0];
-        if (vcSurvives) {
+        // The outaged bus's OWN member slot in the device's DISTR_Q tables, so the group can be located
+        // even when no controller is deactivated (a pure reactive-load loss on a member bus).
+        int ownDqMember = dqMemberSlot(gpuData, bus);
+        // targetQ = generation - load, so losing reactive load MOVES this member's own targetQ, and
+        // every DISTR_Q target in the group reads it twice (shared sum + own subtracted term).
+        // Measured on rte6515 LOAD-1263: OLF's residual is EXACTLY 4.600000000e-02 on the DISTR_Q row
+        // of VL-1263_1 = qPct (0.5, two equal-key members) x the pilot's 0.092 pu of lost load Q.
+        int dqTargetQOvMember = -1;
+        double dqTargetQOvValue = 0;
+        if (ownDqMember >= 0 && lostLoadQ != 0 && gpuData.dqMemberTargetQ() != null) {
+            dqTargetQOvMember = ownDqMember;
+            dqTargetQOvValue = gpuData.dqMemberTargetQ()[ownDqMember] + lostLoadQ;
+        }
+        int dqAnchor = vcSurvives ? inactiveDqMember : ownDqMember;
+        double dqOwnTargetQDelta = vcSurvives ? 0 : lostLoadQ;
+        if (dqAnchor >= 0 && (vcSurvives || lostLoadQ != 0)) {
             // Read the DEVICE's own member tables rather than recomputing the group: which member
             // OWNS a DISTR_Q row (the base free member's row carries the pilot's relocated balance
             // instead) and which device row it is were both decided at extraction, and a predicate
             // re-derived here would seed the wrong rows the moment the two disagreed.
-            int gs = gpuData.dqMemberGroupStart()[inactiveDqMember];
-            int gc = gpuData.dqMemberGroupCount()[inactiveDqMember];
+            int gs = gpuData.dqMemberGroupStart()[dqAnchor];
+            int gc = gpuData.dqMemberGroupCount()[dqAnchor];
             int[] mBusNum = gpuData.dqMemberBusNum();
             double[] mKey = gpuData.dqMemberKey();
             double[] mTargetQ = gpuData.dqMemberTargetQ();
@@ -504,7 +547,7 @@ final class GpuBatchInjectionOutages {
             double sumTargetQ = 0;
             for (int m = gs; m < gs + gc; m++) {
                 keySum += memberKeepsKey(bus, mBusNum[m], m, inactiveDqMember) ? mKey[m] : 0;
-                sumTargetQ += mTargetQ[m];
+                sumTargetQ += mTargetQ[m] + (mBusNum[m] == bus.getNum() ? dqOwnTargetQDelta : 0);
             }
             List<Integer> rows = new ArrayList<>();
             List<Double> values = new ArrayList<>();
@@ -515,7 +558,8 @@ final class GpuBatchInjectionOutages {
                 double qpk = keySum == 0 || !memberKeepsKey(bus, mBusNum[m], m, inactiveDqMember)
                         ? 0 : mKey[m] / keySum;
                 rows.add(mRow[m]);
-                values.add(qpk * sumTargetQ - mTargetQ[m]);
+                values.add(qpk * sumTargetQ
+                        - (mTargetQ[m] + (mBusNum[m] == bus.getNum() ? dqOwnTargetQDelta : 0)));
             }
             dqTargetRows = rows.stream().mapToInt(Integer::intValue).toArray();
             dqTargetValues = values.stream().mapToDouble(Double::doubleValue).toArray();
@@ -560,6 +604,7 @@ final class GpuBatchInjectionOutages {
                 dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum,
                 lostLoadP - lostP, loadQDelta, inactiveDqMember, pilotSurvivorRlEntries,
                 dqTargetRows, dqTargetValues, deadRemoteMember ? 4 : 1,
-                deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget);
+                deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget,
+                dqTargetQOvMember, dqTargetQOvValue);
     }
 }

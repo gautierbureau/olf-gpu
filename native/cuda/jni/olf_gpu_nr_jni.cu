@@ -3114,6 +3114,26 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
 // FROZEN member (pinned at a limit). Recompute every UNPINNED member row's target from the
 // per-scenario limitType so an in-flight pin/unpin keeps the targets consistent with the live
 // renormalized weights. Idempotent per pass; one thread per (member, scenario).
+// Per-scenario member targetQ. A member bus that loses reactive LOAD changes its own targetQ
+// (targetQ = generation - load), and every DISTR_Q target in its group reads that value twice: once
+// inside the shared sum and once as its own subtracted term. Seeding the row targets host-side is not
+// enough, because this kernel RECOMPUTES them from mTargetQ on every reactive-limits pass and would
+// put the base value straight back (measured on rte6515 LOAD-1263: the seeded row came back at
+// final = base = 0.016, residual still 4.6e-02). The override list is tiny — one entry per outaged
+// member bus — so a linear scan per lookup costs nothing.
+__device__ inline double dqTargetQOf(int nTqOv, const int* tqOvKey, const double* tqOvVal,
+                                     int s, int nMembers, int idx, const double* mTargetQ) {
+    if (nTqOv > 0) {
+        int want = s * nMembers + idx;
+        for (int i = 0; i < nTqOv; i++) {
+            if (tqOvKey[i] == want) {
+                return tqOvVal[i];
+            }
+        }
+    }
+    return mTargetQ[idx];
+}
+
 __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, int nrl,
                                          const double* mKey, const int* mRlEntry,
                                          const int* mGroupStart, const int* mGroupCount,
@@ -3124,7 +3144,8 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                                          const int* mQrGroup, const int* qrPtr, const int* qrRows,
                                          const int* mode, const double* pilotQ, int nQr,
                                          int nDqInact, const int* dqInactSlotMember,
-                                         int nFrozen, const int* frozenSlotRow) {
+                                         int nFrozen, const int* frozenSlotRow,
+                                         int nTqOv, const int* tqOvKey, const double* tqOvVal) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nMembers * nScenarios) return;
     int k = tid % nMembers;
@@ -3166,7 +3187,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
             char lt = limitType[(size_t) s * nrl + re];
             sumTargetQ += (lt == 1 ? rlMinQ[li] : rlMaxQ[li]) - rlLoadQ[li];
         } else {
-            sumTargetQ += mTargetQ[m];
+            sumTargetQ += dqTargetQOf(nTqOv, tqOvKey, tqOvVal, s, nMembers, m, mTargetQ);
         }
     }
     double qpk = (sum == 0.0 || dqMemberInactive(nDqInact, dqInactSlotMember, s, k))
@@ -3180,7 +3201,8 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     // targetQ; anywhere else the device solved the row against a target short by exactly
     // qPct_k * sum_unpinned targetQ_j - targetQ_k, and drove the members to equal reactive
     // injections instead of equally-shared DEVIATIONS from their targets.
-    target[(size_t) s * n + mRow[k]] = qpk * sumTargetQ - mTargetQ[k];
+    target[(size_t) s * n + mRow[k]] = qpk * sumTargetQ
+            - dqTargetQOf(nTqOv, tqOvKey, tqOvVal, s, nMembers, k, mTargetQ);
 }
 
 // plan-B4: capture, per (scenario, relocation group), the pilot's Q target from the BASE carrier's
@@ -4766,6 +4788,9 @@ struct BatchSolverContext {
     // synchronous component in this scenario, so the loop must not look at it.
     int nRlIslanded = 0;
     DeviceBuf dRlIslanded;
+    int nDqTqOv = 0;                                       // per-scenario member targetQ overrides
+    DeviceBuf dDqTqOvKey;
+    DeviceBuf dDqTqOvVal;
     int nPilotFlip = 0;                                    // pilot-row flip entries (all-survivors-pinned)
     DeviceBuf dPfSlot;
     DeviceBuf dPfRow;
@@ -8434,7 +8459,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->dMode.as<int>(),
                         ctx->hasDqQrGroups ? ctx->dQrPilotQ.as<double>() : nullptr, ctx->st->nQr,
                         ctx->nDqInact, ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
-                        ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr);
+                        ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
+                        ctx->nDqTqOv, ctx->nDqTqOv ? ctx->dDqTqOvKey.as<int>() : nullptr,
+                        ctx->nDqTqOv ? ctx->dDqTqOvVal.as<double>() : nullptr);
             }
             if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {    // all-pinned corner: pilot vEq flip/restore
                 updatePilotVeqBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
@@ -10643,6 +10670,30 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
     ctx->dRlIslanded.upload(mask.data(), maskLen);
     ctx->nRlIslanded = nPairs;
+}
+
+// Per-scenario member targetQ overrides for the DISTR_Q target kernel: {key, value} where key is
+// slot * nDqMembers + memberIndex. Set when an outaged bus is a packed group member whose own targetQ
+// moved (a reactive LOAD loss). Nulls clear.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDqMemberTargetQOverrides(
+        JNIEnv* env, jclass, jlong handle, jintArray jKeys, jdoubleArray jVals) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jKeys == nullptr || env->GetArrayLength(jKeys) == 0) {
+        ctx->nDqTqOv = 0;
+        return;
+    }
+    int ne = env->GetArrayLength(jKeys);
+    jint* keys = env->GetIntArrayElements(jKeys, nullptr);
+    jdouble* vals = env->GetDoubleArrayElements(jVals, nullptr);
+    ctx->dDqTqOvKey.upload(keys, static_cast<size_t>(ne) * sizeof(int));
+    ctx->dDqTqOvVal.upload(vals, static_cast<size_t>(ne) * sizeof(double));
+    ctx->nDqTqOv = ne;
+    env->ReleaseIntArrayElements(jKeys, keys, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jVals, vals, JNI_ABORT);
 }
 
 // Pilot-row flip entries (see pilotRowAllPinnedBatch): one per (scenario, pilot) where the outage

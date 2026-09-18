@@ -32,7 +32,8 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                         int inactiveDqMember, int[] pilotGroupSurvivorRlEntries,
                         int[] dqTargetRows, double[] dqTargetValues, int pqRowMode,
                         int deadPilotVRow, double deadPilotQTarget,
-                        int pinnedPilotVRow, double pinnedPilotQTarget) {
+                        int pinnedPilotVRow, double pinnedPilotQTarget,
+                        int dqTargetQOvMember, double dqTargetQOvValue) {
     // lostGenIds / lostFactorSum exist for the reactive-capability CURVE channel, which evaluates each
     // generator's curve at its OWN post-distribution active power, reconstructed from the bus's row
     // target by participation share. Losing a generator skews that reconstruction three ways — the lost
@@ -126,6 +127,14 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      */
     public boolean flipsPilotRowWhenAllPinned() {
         return pinnedPilotVRow >= 0 && pilotGroupSurvivorRlEntries.length > 0;
+    }
+
+    /** This outage moved a packed DISTR_Q member's OWN targetQ (a reactive LOAD loss on a group member).
+     *  Every target in the group reads that value twice — inside the shared sum and as its own
+     *  subtracted term — and the device's target kernel recomputes them from the base value on every
+     *  reactive-limits pass, so the new value has to travel as an override rather than a row seed. */
+    public boolean overridesDqMemberTargetQ() {
+        return dqTargetQOvMember >= 0;
     }
 
     /** The bus keeps NO generator: its reactive-limit entry is not a controller in this scenario. */

@@ -377,6 +377,12 @@ public final class GpuAcNewtonSolver {
      */
     public static native void setBatchRlIslanded(long handle, int[] slotControllerPairs);
 
+    /** Per-scenario member targetQ overrides for the DISTR_Q target kernel, as {@code key = slot *
+     *  nDqMembers + memberIndex} with the member's post-contingency targetQ. Needed because that kernel
+     *  RECOMPUTES the group's row targets from the base member targetQ on every reactive-limits pass, so
+     *  a host-side row seed alone is put straight back. Nulls clear. */
+    public static native void setBatchDqMemberTargetQOverrides(long handle, int[] keys, double[] values);
+
     /** Pilot-row flip entries: one per (scenario, pilot) where the outage made the pilot stop being one
      *  of its OWN controllers. While the survivors hold its voltage the pilot keeps BUS_TARGET_V and its
      *  acquired reactive balance rides one of THEIR rows; when every survivor pins, those rows take their

@@ -421,6 +421,8 @@ final class GpuBatchChunkSolver {
                     // Pilot-row flip entries: the scenarios that used to be REJECTED by that check are
                     // FIXED in the solve instead. Per chunk, like every other list here — the scenario
                     // index is a chunk SLOT.
+                    List<Integer> dqTqOvKey = new ArrayList<>();     // slot*nDqMembers + member
+                    List<Double> dqTqOvVal = new ArrayList<>();
                     List<Integer> pfSlot = new ArrayList<>();
                     List<Integer> pfRow = new ArrayList<>();
                     List<Double> pfQTarget = new ArrayList<>();
@@ -669,6 +671,11 @@ final class GpuBatchChunkSolver {
                                     if (go.deactivatesDqMember()) {
                                         dqInactList.add(s);
                                         dqInactList.add(go.inactiveDqMember());
+                                    }
+                                    if (go.overridesDqMemberTargetQ() && gpuData.dqMemberBusNum() != null) {
+                                        dqTqOvKey.add(s * gpuData.dqMemberBusNum().length
+                                                + go.dqTargetQOvMember());
+                                        dqTqOvVal.add(go.dqTargetQOvValue());
                                     }
                                     if (go.seedsDqTargets()) {
                                         for (int t = 0; t < go.dqTargetRows().length; t++) {
@@ -1098,6 +1105,9 @@ final class GpuBatchChunkSolver {
                             dsIslandedList.isEmpty() ? null : dsIslandedList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchRlIslanded(handle,
                             rlIslandedList.isEmpty() ? null : rlIslandedList.stream().mapToInt(Integer::intValue).toArray());
+                    GpuAcNewtonSolver.setBatchDqMemberTargetQOverrides(handle,
+                            dqTqOvKey.isEmpty() ? null : dqTqOvKey.stream().mapToInt(Integer::intValue).toArray(),
+                            dqTqOvKey.isEmpty() ? null : dqTqOvVal.stream().mapToDouble(Double::doubleValue).toArray());
                     GpuAcNewtonSolver.setBatchPilotAllPinnedFlip(handle,
                             pfSlot.isEmpty() ? null : pfSlot.stream().mapToInt(Integer::intValue).toArray(),
                             pfSlot.isEmpty() ? null : pfRow.stream().mapToInt(Integer::intValue).toArray(),

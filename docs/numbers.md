@@ -163,3 +163,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-18 | 8f14a4c+dirty | 18.94 | 15.98 | 27.32 | x1.71 | 0/0/0 | 7.70 | 4.48 | 499/500 | 122/133 (92%) | Frozen pilot row no longer flipped by updatePilotVeqBatch |
 | 2026-09-18 | 78f5081+dirty | 18.83 | 15.92 | 28.18 | x1.77 | 0/0/0 | 7.51 | 4.43 | 499/500 | 122/133 (92%) | GEN-1522 batches: pilot-is-own-controller gets the member alternate dest |
 | 2026-09-18 | 5332863+dirty | 19.30 | 16.24 | 27.02 | x1.66 | 0/0/0 | 7.59 | 4.50 | 499/500 | 122/133 (92%) | LOAD-1263/1264 batch: DISTR_Q targets follow a member's own load-Q change |
+| 2026-09-18 | f79ae90+dirty | 18.70 | 15.63 | 28.32 | x1.81 | 0/0/0 | 7.60 | 4.43 | 499/500 | 122/133 (92%) | qOverride asks if the bus is voltage CONTROLLED, not if it controls |

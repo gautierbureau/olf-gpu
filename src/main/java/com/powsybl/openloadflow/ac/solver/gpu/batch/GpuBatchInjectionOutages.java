@@ -365,6 +365,13 @@ final class GpuBatchInjectionOutages {
         double lostLoadQ = lostLoads.stream().mapToDouble(LoadLoss::q).sum();
         double pTarget = bus.getTargetP() - lostP + lostLoadP;   // shedding load RAISES the P target
         boolean busPv = bus.isGeneratorVoltageControlEnabled();
+        // The bus is the CONTROLLED bus of an enabled, non-local generator voltage control: its V row
+        // holds BUS_TARGET_V that some OTHER bus's generators maintain. Same predicate the extraction
+        // uses to decide a pilot's row layout.
+        boolean remotelyControlled = bus.getGeneratorVoltageControl()
+                .filter(c -> c.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN)
+                .filter(c -> bus.isGeneratorVoltageControlled() && !c.isLocalControl())
+                .isPresent();
         boolean lostControls = lost.stream()
                 .anyMatch(g -> g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE);
         boolean otherController = bus.getGenerators().stream()
@@ -380,7 +387,18 @@ final class GpuBatchInjectionOutages {
         // equation in the scenario: on the PV->PQ flip AND on an ALREADY-PQ bus losing fixed-Q
         // generation (task #21 — the flip-only version silently kept the lost Q injected; measured
         // 0.27 kV voltage divergence on ieee14 for a 15-MVAr fixed-Q gen loss).
-        boolean qOverride = toPq || !busPv;
+        // ...and `!busPv` alone is the WRONG proxy for that. busPv asks "is this bus a CONTROLLER",
+        // but a bus REMOTELY controlled by a generator group elsewhere (a pilot) owns no generators, so
+        // busPv is false while its V row still holds BUS_TARGET_V — it does not solve a reactive
+        // equation at all. Stamping a Q target over that identity leaves mode 0 with target 0 against a
+        // state of 1.111 pu, and the Newton then drives the bus's VOLTAGE toward zero: measured on
+        // rte6515 LOAD-5958, the solve oscillates (1.111 -> 0.995 -> 0.880 -> 0.765 -> 1.598 -> 1.410
+        // ...) and exhausts its iterations instead of converging.
+        // REMOTELY is the operative word, and the narrower test is load-bearing: a LOCALLY controlled
+        // bus that the base pinned PV->PQ also has busPv false, and its V row DOES solve the reactive
+        // equation, so it must keep shedding the lost Q. Suppressing it there moves
+        // devicePinnedBusLosingReactiveLoadMatchesCpu's B4 by 1.0e-08 kV.
+        boolean qOverride = toPq || (!busPv && !remotelyControlled);
         double qTarget = 0;
         if (qOverride) {
             // A bus the BASE loadflow pinned at a reactive limit has its generation target Q FROZEN at

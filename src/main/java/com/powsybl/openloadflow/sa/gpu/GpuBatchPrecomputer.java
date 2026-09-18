@@ -158,6 +158,20 @@ final class GpuBatchPrecomputer {
                                 + " reactive=%.9f%n", e.getKey(), e.getValue().getActive(),
                                 e.getValue().getVariableActive(), e.getValue().getReactive());
                     }
+                    // Each SIDE-OPEN with the side and the pi-model the dangling reduction will use.
+                    // r1 != 1 or a1 != 0 means danglingCbRow takes its TRANSFORMER path, where r1^2
+                    // multiplies OLF's whole open-side-2 bracket and side-1-open uses the constant R2 —
+                    // analytically verified but, until something prints this, never known to have run.
+                    for (var so : sideOpens == null ? List.<BatchContingency.SideOpen>of() : sideOpens) {
+                        var pi = so.branch().getPiModel();
+                        var vcO = so.branch().getVoltageControl();
+                        System.err.printf("QUALIFY_TRACE   sideOpen %s side=%d r1=%.9f a1=%.9f y=%.6e ksi=%.6e"
+                                        + " vcCtl=%b vc=%s members=%d%n",
+                                so.branch().getId(), so.side(), pi.getR1(), pi.getA1(), pi.getY(), pi.getKsi(),
+                                so.branch().isVoltageController(),
+                                vcO.map(vc -> vc.getControlledBus().getId()).orElse("-"),
+                                vcO.map(vc -> vc.getMergedControllerElements().size()).orElse(0));
+                    }
                     for (var zi : ziOutages) {
                         LfBranch br = net.getBranchById(zi.toString());
                         if (br == null) {

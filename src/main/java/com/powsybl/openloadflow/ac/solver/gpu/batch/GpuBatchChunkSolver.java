@@ -538,8 +538,26 @@ final class GpuBatchChunkSolver {
                                     disabledMask[s][cbIdx2] = true;
                                     eis[ei++] = cbIdx2;
                                 } else {
+                                    int soElem = elementMapper.getElementIndex(so.branch());
+                                    if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                                        // Does this branch also feed a DISTR_Q row? fillDistrQBatch reads
+                                        // cbIn with NO r1Ov parameters, so it cannot see the per-scenario
+                                        // pi override: a side-opened branch that contributes to a remote
+                                        // voltage-control group's reactive distribution would be counted
+                                        // there with its FULL series admittance instead of the dangling
+                                        // equivalent.
+                                        int hits = 0;
+                                        for (int k = 0; k < gpuData.dqElem().length; k++) {
+                                            if (gpuData.dqElem()[k] == soElem) {
+                                                hits++;
+                                            }
+                                        }
+                                        System.err.printf("SIDEOPEN_DQ ctg=%s branch=%s side=%d elem=%d dqContribs=%d%n",
+                                                contingencies.get(ci).contingencyId(), so.branch().getId(),
+                                                so.side(), soElem, hits);
+                                    }
                                     r1OvSlotElemList.add(s);
-                                    r1OvSlotElemList.add(elementMapper.getElementIndex(so.branch()));
+                                    r1OvSlotElemList.add(soElem);
                                     for (double v : cbRow) {
                                         r1OvValList.add(v);
                                     }

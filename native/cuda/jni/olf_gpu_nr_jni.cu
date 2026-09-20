@@ -193,9 +193,25 @@ namespace {
 constexpr int IR_N_STEPS = 0;
 constexpr int BLOCK = 64;
 
-inline int irSteps() {
+// IR IS REQUIRED WHEN THE SYSTEM HAS ZERO-IMPEDANCE BRANCHES. Each one puts ZERO_V / ZERO_PHI on
+// the DUMMY_P / DUMMY_Q rows carrying v1-v2 and phi1-phi2, never their own dummy — two zero
+// diagonals apiece — and AMD, a SYMMETRIC ordering that assumes a non-zero diagonal, then carries
+// real FORWARD error there. LIN_RESID stays ~1e-14 throughout, because that is the BACKWARD
+// residual; with kappa ~ 5e8 the forward error in dx is what moves, and two refinement steps
+// recover it. Measured on rte6515's busbar outages: base 1.225e-07 -> 3.831e-11 and BUS-1017
+// 2.302e-06 -> 2.454e-11, which is also exactly where nested dissection lands, two unrelated
+// mechanisms agreeing on the accurate answer.
+//
+// NESTED DISSECTION WAS TRIED FIRST AND IS NOT USABLE: it reaches the same accuracy but COLLAPSES
+// the batch at scale — 80 busbar outages give 0/80 scenarios batched against AMD's 60/80, most
+// blowing up to ~1e14. That regression was invisible on the 20-contingency window it was validated
+// on. IR keeps AMD's ordering, so batching share is unchanged (60/80 either way).
+inline int irSteps(bool hasZeroImpedance) {
     const char* e = std::getenv("OLF_GPU_IR_STEPS");
-    return e ? std::atoi(e) : IR_N_STEPS;
+    if (e != nullptr && *e != '\0') {
+        return std::atoi(e);
+    }
+    return hasZeroImpedance ? 2 : IR_N_STEPS;
 }
 
 // ---------------------------------------------------------------------------------
@@ -286,9 +302,8 @@ inline void applyReorderAlg(cudssConfig_t config, bool hasZeroImpedance) {
     const char* e = std::getenv("OLF_GPU_REORDER_ALG");
     if (e == nullptr || *e == '\0') {
 #if CUDSS_VERSION >= 800
-        OlfReorderAlg alg = hasZeroImpedance ? CUDSS_REORDERING_ALG_NESTED_DISSECTION
-                                             : CUDSS_REORDERING_ALG_AMD;
-        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_REORDERING_ALG, &alg, sizeof(alg)));
+            OlfReorderAlg amd = CUDSS_REORDERING_ALG_AMD;        // sweep winner; ND collapses the
+        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_REORDERING_ALG, &amd, sizeof(amd)));
 #endif
         return;                                              // 0.7.1: library default, untouched
     }
@@ -2122,7 +2137,7 @@ SolverContext* createContext(const SharedStructurePtr& st) {
     CUDSS_CHECK(cudssCreate(&ctx->ds.handle));
     CUDSS_CHECK(cudssSetStream(ctx->ds.handle, ctx->stream));
     CUDSS_CHECK(cudssConfigCreate(&ctx->ds.config));
-    int ir = irSteps();
+    int ir = irSteps(ctx->st->nzi > 0);
     CUDSS_CHECK(cudssConfigSet(ctx->ds.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
     applyReorderAlg(ctx->ds.config, ctx->st->nzi > 0);
     CUDSS_CHECK(cudssDataCreate(ctx->ds.handle, &ctx->ds.data));
@@ -5306,7 +5321,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     CUDSS_CHECK(cudssCreate(&ctx->ds.handle));
     CUDSS_CHECK(cudssSetStream(ctx->ds.handle, ctx->stream));
     CUDSS_CHECK(cudssConfigCreate(&ctx->ds.config));
-    int ir = irSteps();
+    int ir = irSteps(ctx->st->nzi > 0);
     CUDSS_CHECK(cudssConfigSet(ctx->ds.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
     applyReorderAlg(ctx->ds.config, ctx->st->nzi > 0);
     CUDSS_CHECK(cudssDataCreate(ctx->ds.handle, &ctx->ds.data));
@@ -8290,7 +8305,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 CUDSS_CHECK(cudssSetStream(ctx->dsC.handle, ctx->stream));
                 CUDSS_CHECK(cudssConfigCreate(&ctx->dsC.config));
                 applyReorderAlg(ctx->dsC.config, ctx->st->nzi > 0);
-                int irC = irSteps();
+                int irC = irSteps(ctx->st->nzi > 0);
                 CUDSS_CHECK(cudssConfigSet(ctx->dsC.config, CUDSS_CONFIG_IR_N_STEPS, &irC, sizeof(irC)));
                 CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->matUbC, n, n, nnz,
                         ctx->st->dRowPtr.as<int>(), nullptr, ctx->st->dColIdx.as<int>(), ctx->dValsC.as<double>(),

@@ -269,15 +269,30 @@ inline void applyMatchingAlg(cudssConfig_t config) {
 #endif
 }
 
-inline void applyReorderAlg(cudssConfig_t config) {
+// AMD IS NOT SAFE WHEN THE SYSTEM HAS ZERO-IMPEDANCE BRANCHES. AMD is a SYMMETRIC (approximate
+// minimum degree) ordering and assumes a non-zero diagonal; a zero-impedance branch always breaks
+// that, because ZERO_V / ZERO_PHI sit on the DUMMY_P / DUMMY_Q rows and carry v1-v2 and phi1-phi2,
+// never their own dummy. The DEAD-END STUB case, where four such rows chain, is repaired
+// structurally by the row relocation (GpuAcRowIndexing#ziDeadEndSide) — but the ordinary two per
+// branch remain, and AMD loses accuracy on them: on rte6515's busbar outages it left BUS-1017 at
+// 2.302e-06 kV and BUS-1003 at 1.142e-07 where nested dissection gives 4.074e-09 and 9.572e-11.
+// That those are ALSO the numbers cuDSS iterative refinement converges to (OLF_GPU_IR_STEPS=2 and
+// 4 both reproduce them, and the base likewise) is what identifies them as the accurate solve
+// rather than merely a different one: two unrelated mechanisms agreeing on an answer AMD misses.
+// AMD is kept where it is safe and was measured to pay — the 2026-07-16 sweep won on
+// case9241pegase (LU_NNZ 260076 vs 304772, warm SA -11%), a network with no retained switches and
+// therefore no zero-impedance branch, so it never exercised a zero diagonal.
+inline void applyReorderAlg(cudssConfig_t config, bool hasZeroImpedance) {
     const char* e = std::getenv("OLF_GPU_REORDER_ALG");
     if (e == nullptr || *e == '\0') {
 #if CUDSS_VERSION >= 800
-        OlfReorderAlg amd = CUDSS_REORDERING_ALG_AMD;        // sweep winner (see block comment)
-        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_REORDERING_ALG, &amd, sizeof(amd)));
+        OlfReorderAlg alg = hasZeroImpedance ? CUDSS_REORDERING_ALG_NESTED_DISSECTION
+                                             : CUDSS_REORDERING_ALG_AMD;
+        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_REORDERING_ALG, &alg, sizeof(alg)));
 #endif
         return;                                              // 0.7.1: library default, untouched
     }
+    (void) hasZeroImpedance;
     static const char* const NAMES[] = {"default", "btf_colamd", "colamd", "amd", "nd", "none"};
     for (size_t i = 0; i < sizeof(NAMES) / sizeof(NAMES[0]); i++) {
         if (std::string(e) == NAMES[i]) {
@@ -2000,7 +2015,7 @@ double luBytesPerScenario(SharedStructure& st) {
         CudssCtx ds;
         CUDSS_CHECK(cudssCreate(&ds.handle));
         CUDSS_CHECK(cudssConfigCreate(&ds.config));
-        applyReorderAlg(ds.config);
+        applyReorderAlg(ds.config, st.nzi > 0);
         CUDSS_CHECK(cudssDataCreate(ds.handle, &ds.data));
         CUDSS_CHECK(cudssMatrixCreateCsr(&ds.matA, n, n, st.nnz, st.dRowPtr.as<int>(), nullptr,
                                          st.dColIdx.as<int>(), dVals.as<double>(), OLF_CUDSS_CSR_TYPES,
@@ -2102,7 +2117,7 @@ SolverContext* createContext(const SharedStructurePtr& st) {
     CUDSS_CHECK(cudssConfigCreate(&ctx->ds.config));
     int ir = irSteps();
     CUDSS_CHECK(cudssConfigSet(ctx->ds.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
-    applyReorderAlg(ctx->ds.config);
+    applyReorderAlg(ctx->ds.config, ctx->st->nzi > 0);
     CUDSS_CHECK(cudssDataCreate(ctx->ds.handle, &ctx->ds.data));
     CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->ds.matA, n, n, ctx->nnz,
                                      st->dRowPtr.as<int>(), nullptr, st->dColIdx.as<int>(), ctx->dVals.as<double>(),
@@ -5276,7 +5291,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     CUDSS_CHECK(cudssConfigCreate(&ctx->ds.config));
     int ir = irSteps();
     CUDSS_CHECK(cudssConfigSet(ctx->ds.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
-    applyReorderAlg(ctx->ds.config);
+    applyReorderAlg(ctx->ds.config, ctx->st->nzi > 0);
     CUDSS_CHECK(cudssDataCreate(ctx->ds.handle, &ctx->ds.data));
 
     if (mode == 1) {
@@ -8257,7 +8272,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 CUDSS_CHECK(cudssCreate(&ctx->dsC.handle));
                 CUDSS_CHECK(cudssSetStream(ctx->dsC.handle, ctx->stream));
                 CUDSS_CHECK(cudssConfigCreate(&ctx->dsC.config));
-                applyReorderAlg(ctx->dsC.config);
+                applyReorderAlg(ctx->dsC.config, ctx->st->nzi > 0);
                 int irC = irSteps();
                 CUDSS_CHECK(cudssConfigSet(ctx->dsC.config, CUDSS_CONFIG_IR_N_STEPS, &irC, sizeof(irC)));
                 CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->matUbC, n, n, nnz,
@@ -11596,7 +11611,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveTra
         CudssCtx ds;
         CUDSS_CHECK(cudssCreate(&ds.handle));
         CUDSS_CHECK(cudssConfigCreate(&ds.config));
-        applyReorderAlg(ds.config);
+        applyReorderAlg(ds.config, false);   // adjoint: its own matrix, matching enabled
         applyMatchingAlg(ds.config);
         CUDSS_CHECK(cudssDataCreate(ds.handle, &ds.data));
         CUDSS_CHECK(cudssMatrixCreateCsr(&ds.matA, nn, nn, nnz, dRowPtr.as<int>(), nullptr,

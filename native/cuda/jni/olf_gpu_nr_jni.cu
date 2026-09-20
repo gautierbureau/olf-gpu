@@ -2893,6 +2893,16 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
         double qpk = (sum == 0.0 || kPinned || dqMemberInactive(nDqInact, dqInactSlotMember, s, kM))
                 ? 0.0 : mKey[kM] / sum;
         w = qpk - (dqJMember[c] == kM ? 1.0 : 0.0);
+        if (kind == 3 && dqSide[c] != 0) {
+            // The host folds the SIDE SIGN into a kind-3 weight (+dummyQ where the controller is
+            // bus1, -dummyQ where it is bus2 — exactly createReactiveTerms' term); this live
+            // recomputation rebuilds qPct_k - delta_jk and must put that sign back. Without it a
+            // coupler whose BOTH ends are controllers of the same group cancels to zero at
+            // qPct = 0.5: measured on rte6515 BUS-1014_COUPLER_1, where DUMMY_Q then appeared in NO
+            // equation at all and the Jacobian had a structurally zero column, against OLF's
+            // coefficient of +1.0 in DISTR_Q of VL-1014_1.
+            w = -w;
+        }
     }
     for (int k = 0; k < nDqOv; k++) {                        // per-scenario qPct renormalization (gen outage)
         if (dqOvIdx[k * 2] == s && dqOvIdx[k * 2 + 1] == c) {

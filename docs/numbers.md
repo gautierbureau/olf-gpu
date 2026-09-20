@@ -169,3 +169,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-18 | bd03a13+dirty | 18.97 | 15.95 | 28.50 | x1.79 | 0/0/0 | 7.55 | 4.43 | 499/500 | 122/133 (92%) | cbRowProbe + CPU_CTG markers; BUS-1017 is an outer-loop target difference, not the side-open |
 | 2026-09-20 | 0784e3a+dirty | 18.17 | 15.41 | 28.00 | x1.82 | 0/0/0 | 7.74 | 4.46 | 499/500 | 122/133 (92%) | Dead-end zero-impedance stub: relocate the four rows so none has a zero diagonal |
 | 2026-09-20 | f9b06dd+dirty | 17.93 | 15.65 | 28.24 | x1.80 | 0/0/0 | 7.61 | 4.57 | 499/500 | 122/133 (92%) | Nested dissection when the system has zero-impedance branches: AMD loses accuracy on their zero diagonals |
+| 2026-09-20 | 33e29be+dirty | 18.03 | 15.85 | 27.55 | x1.74 | 0/0/0 | 7.53 | 4.48 | 499/500 | 122/133 (92%) | DISTR_Q kind-3 live weight recompute dropped the side sign: rte6515 busbars now all at machine precision |

@@ -739,6 +739,14 @@ public final class GpuAcOuterLoopPacks {
             List<LfBus> controllers = gvc.getMergedControllerElements();
             LfBus freeCtl = controllers.stream()
                     .filter(b -> gvc.isControllerEnabled(b)).findFirst().orElse(null);
+            if (System.getenv("OLF_GPU_FREECTL_TRACE") != null) {
+                System.err.printf("FREECTL pilot=%s members=%s freeCtl=%s olfHasDistrQ=%s%n",
+                        gvc.getControlledBus().getId(),
+                        controllers.stream().map(LfBus::getId).toList(),
+                        freeCtl == null ? "-" : freeCtl.getId(),
+                        controllers.stream().map(b -> b.getId() + "="
+                                + !es.getEquation(b.getNum(), AcEquationType.DISTR_Q).isEmpty()).toList());
+            }
             for (LfBus gk : controllers) {
                 // EXISTENCE-keyed (the A1 lesson): pack every non-free member whose DISTR_Q equation
                 // EXISTS — a base-PINNED member's row is inactive (mode 4, own Q) but an in-flight
@@ -790,6 +798,12 @@ public final class GpuAcOuterLoopPacks {
                             if (dqCol < 0) {
                                 throw new PowsyblException("GPU AC solver: DISTR_Q controller " + gj.getId()
                                         + " has a zero-impedance branch " + brj.getId() + " without a DUMMY_Q variable");
+                            }
+                            if (System.getenv("OLF_GPU_DQ3_TRACE") != null
+                                    && dqCol == Integer.parseInt(System.getenv("OLF_GPU_DQ3_TRACE"))) {
+                                System.err.printf("DQ3 gk=%s qpk=%.9f gj=%s side=%d dqRow=%d weight=%.9f"
+                                        + " signed=%.9f%n", gk.getId(), qpk, gj.getId(), side, dqRow,
+                                        weight, weight * (side == 0 ? 1.0 : -1.0));
                             }
                             out.add(new int[] {dqCol, side, dqRow, 3, kIdx, jIdx});  // elem = the DUMMY_Q var column
                             weights.add(weight * (side == 0 ? 1.0 : -1.0));

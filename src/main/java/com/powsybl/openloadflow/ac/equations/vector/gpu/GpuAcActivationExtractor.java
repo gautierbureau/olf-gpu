@@ -13,8 +13,10 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.SingleEquation;
 import com.powsybl.openloadflow.equations.Variable;
+import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.LoadFlowModel;
 
 /**
  * Extracts what ACTIVATION decides — the per-row power-equation/identity mode, the
@@ -98,21 +100,47 @@ public final class GpuAcActivationExtractor {
             vCol[bus.getNum()] = GpuAcRowIndexing.col(es, bus.getNum(), AcVariableType.BUS_V);
         }
         int[] qRow = GpuAcRowIndexing.computeQRow(network, es, vCol, branchRhoCol, shuntBCol);
+        int[] phiCol = new int[network.getBuses().size()];
         for (LfBus bus : network.getBuses()) {
+            phiCol[bus.getNum()] = GpuAcRowIndexing.col(es, bus.getNum(), AcVariableType.BUS_PHI);
+        }
+        // DEAD-END STUB relocation, the other half of the one in GpuAcFamilyPacker: both sides must
+        // name the SAME row for each equation. assign() refuses a double write, so a disagreement
+        // fails loudly here instead of silently dropping a constraint.
+        int[] dummyPCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.DUMMY_P);
+        int[] dummyQCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.DUMMY_Q);
+        int[] stubBranchOfBus = new int[network.getBuses().size()];
+        int[] stubBusOfBranch = new int[nBranches];
+        java.util.Arrays.fill(stubBranchOfBus, -1);
+        java.util.Arrays.fill(stubBusOfBranch, -1);
+        for (LfBranch br : network.getBranches()) {
+            if (!br.isZeroImpedance(LoadFlowModel.AC)) {
+                continue;
+            }
+            int side = GpuAcRowIndexing.ziDeadEndSide(es, br, phiCol, vCol, qRow);
+            if (side != 0) {
+                LfBus stub = side == 1 ? br.getBus1() : br.getBus2();
+                stubBranchOfBus[stub.getNum()] = br.getNum();
+                stubBusOfBranch[br.getNum()] = stub.getNum();
+            }
+        }
+        for (LfBus bus : network.getBuses()) {
+            int stubBr = stubBranchOfBus[bus.getNum()];
             int p = GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_P);
             if (p >= 0) {
-                assign(es, targetMap, GpuAcRowIndexing.col(es, bus.getNum(), AcVariableType.BUS_PHI), p,
+                assign(es, targetMap, stubBr >= 0 ? dummyPCol[stubBr] : phiCol[bus.getNum()], p,
                         AcEquationType.BUS_TARGET_P, bus.getNum());
             }
             int q = GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_Q);
             if (q >= 0) {
-                // Q row = V row, or the controlling rho row
-                assign(es, targetMap, qRow[bus.getNum()], q, AcEquationType.BUS_TARGET_Q, bus.getNum());
+                // Q row = V row, the controlling rho row, or the DUMMY_Q row on a dead-end stub
+                int qr = stubBr >= 0 ? dummyQCol[stubBr] : qRow[bus.getNum()];
+                assign(es, targetMap, qr, q, AcEquationType.BUS_TARGET_Q, bus.getNum());
                 // ACTIVE own-Q balance at a (non-free) remote gen-VC member = the RL-PINNED state:
                 // row mode 4, so the family fills route the member's own q here (the frozen dest is
                 // canonically SUPPRESSED) and the DISTR_Q emissions at this row gate off (plan-B2).
                 if (GpuAcRowIndexing.isRemoteGenVcMember(bus) && !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) {
-                    mode[qRow[bus.getNum()]] = 4;
+                    mode[qr] = 4;
                 }
             }
         }
@@ -140,6 +168,15 @@ public final class GpuAcActivationExtractor {
                     }
                 }
                 assign(es, targetMap, distrRow, e.getColumn(), AcEquationType.DISTR_Q, e.getElementNum());
+                continue;
+            }
+            // ZERO_V / ZERO_PHI move off the dummy rows onto the STUB's own v / phi rows when this
+            // branch feeds a dead end — the other two legs of the same four-way relocation.
+            if ((e.getType() == AcEquationType.ZERO_V || e.getType() == AcEquationType.ZERO_PHI)
+                    && stubBusOfBranch[e.getElementNum()] >= 0) {
+                int stub = stubBusOfBranch[e.getElementNum()];
+                assign(es, targetMap, e.getType() == AcEquationType.ZERO_V ? vCol[stub] : phiCol[stub],
+                        e.getColumn(), e.getType(), e.getElementNum());
                 continue;
             }
             AcVariableType powerRowVar = switch (e.getType()) {

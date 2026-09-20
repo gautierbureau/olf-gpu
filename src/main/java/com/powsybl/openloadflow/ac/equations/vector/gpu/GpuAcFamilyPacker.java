@@ -129,9 +129,19 @@ final class GpuAcFamilyPacker {
                 }
                 ziNums.add(br.getNum());
                 ziIn.add(new double[] {PiModel.R2 / pi.getR1()});
-                ziIdx.add(new int[] {phiCol[b1n], qRow[b1n], phiCol[b2n], qRow[b2n], dpRow, dqRow,
+                // DEAD-END STUB relocation: the stub's P/Q balances move onto the DUMMY_P/DUMMY_Q
+                // rows, where ∓DUMMY_P / ∓DUMMY_Q is their diagonal, and ZERO_V/ZERO_PHI move onto
+                // the stub's own v/phi rows. Slots 4/5 stay the dummy COLUMNS (the kernel reads the
+                // dummy values through them), so the relocated ZERO_V/ZERO_PHI ROWS are derived
+                // natively from the side encoded in slot 10.
+                int deadSide = columns.ziDeadEnd()[br.getNum()];
+                int p1Row = deadSide == 1 ? dpRow : phiCol[b1n];
+                int q1Row = deadSide == 1 ? dqRow : qRow[b1n];
+                int p2Row = deadSide == 2 ? dpRow : phiCol[b2n];
+                int q2Row = deadSide == 2 ? dqRow : qRow[b2n];
+                ziIdx.add(new int[] {p1Row, q1Row, p2Row, q2Row, dpRow, dqRow,
                     vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n],
-                    br.isSpanningTreeEdge(LoadFlowModel.AC) ? 1 : 0});
+                    (br.isSpanningTreeEdge(LoadFlowModel.AC) ? 1 : 0) | (deadSide << 1)});
                 ziQAlt.add(new int[] {qRowAlt[b1n], qRowAlt[b2n]});
                 continue;
             }

@@ -167,3 +167,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-18 | 88561cf+dirty | 19.05 | 15.83 | 27.55 | x1.74 | 0/0/0 | 7.72 | 4.46 | 499/500 | 122/133 (92%) | Linear-residual + first-step J/F/dx dumps on both arms; base-LF gap is conditioning, not a defect |
 | 2026-09-18 | 7fd44c6+dirty | 18.68 | 15.85 | 27.58 | x1.74 | 0/0/0 | 7.69 | 4.41 | 499/500 | 122/133 (92%) | Busbar outage islanding its own load: the lost load was charged twice to the loss pre-distribution |
 | 2026-09-18 | bd03a13+dirty | 18.97 | 15.95 | 28.50 | x1.79 | 0/0/0 | 7.55 | 4.43 | 499/500 | 122/133 (92%) | cbRowProbe + CPU_CTG markers; BUS-1017 is an outer-loop target difference, not the side-open |
+| 2026-09-20 | 0784e3a+dirty | 18.17 | 15.41 | 28.00 | x1.82 | 0/0/0 | 7.74 | 4.46 | 499/500 | 122/133 (92%) | Dead-end zero-impedance stub: relocate the four rows so none has a zero diagonal |

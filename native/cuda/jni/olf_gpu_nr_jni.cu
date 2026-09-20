@@ -1028,7 +1028,7 @@ __global__ void fillZeroImp(int nzi, const double* in, const int* ix, const int*
     addAt(d[5], -1.0, vals, F);                              // J(bus2 P, dummyP)
     addAt(d6, 1.0, vals, F);                                 // J(bus1 Q, dummyQ)
     addAt(d7, -1.0, vals, F);                                // J(bus2 Q, dummyQ)
-    if (q[10]) {                                             // spanning-tree edge: voltage/angle coupling
+    if (q[10] & 1) {                                         // spanning-tree edge: voltage/angle coupling
         double v1 = x[q[6]], v2 = x[q[7]], ph1 = x[q[8]], ph2 = x[q[9]];
         addAt(d[8], v1 - rho * v2, vals, F);                 // F[ZERO_V row] += v1 - rho*v2
         addAt(d[9], 1.0, vals, F);                           // J(ZERO_V, v1)
@@ -1239,6 +1239,25 @@ struct Result {
 // Choosing the ordering ourselves — a bus-ordered J — fixes any
 // numbering. The mismatch/targets are permuted the same way; columns are untouched, so
 // the solution dx needs no back-permutation.
+// ziIdx slot 10 packs two things: bit 0 = spanning-tree edge, bits 1-2 = which side is a DEAD-END
+// STUB (0 = none, see GpuAcRowIndexing#ziDeadEndSide). On a stub the four rows around the branch
+// would all have a ZERO DIAGONAL — ZERO_V and ZERO_PHI never depend on their own dummy, and the
+// stub's P/Q balances carry only -DUMMY_P / -DUMMY_Q — and cuDSS's symmetric AMD ordering
+// mis-factors that chain, perturbing the zero pivot and propagating its reciprocal. The Java packer
+// therefore moves the stub's P/Q balances onto the dummy rows (slots 0..3 already carry them) and
+// ZERO_V / ZERO_PHI onto the stub's own v / phi rows, which is what these two derive. Slots 4/5
+// stay the dummy COLUMNS, because the kernel reads the dummy values through them.
+inline int ziSpan(const int* z) { return z[10] & 1; }
+inline int ziDeadSide(const int* z) { return (z[10] >> 1) & 3; }
+inline int ziZeroVRow(const int* z) {
+    int d = ziDeadSide(z);
+    return d == 0 ? z[4] : (d == 1 ? z[6] : z[7]);           // the stub's own v row
+}
+inline int ziZeroPhiRow(const int* z) {
+    int d = ziDeadSide(z);
+    return d == 0 ? z[5] : (d == 1 ? z[8] : z[9]);           // the stub's own phi row
+}
+
 std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const int* obIdx,
                              int nsh, const int* shIdx, int nhv, const int* hvIdx,
                              int ndq, const int* dqRow, int nzi, const int* ziIdx) {
@@ -1330,6 +1349,13 @@ std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const in
         // remote-voltage-control bus (rte6515: row 2200 of 13048, appearing ONLY in zi[slot 6]).
         claimMovedV(ix[1], ix[6]);
         claimMovedV(ix[3], ix[7]);
+        if (ziDeadSide(ix)) {
+            // The stub's P/Q balances already sit on the dummy rows, where slots 0..3 self-pair and
+            // -DUMMY_P / -DUMMY_Q is the diagonal. ZERO_V landed on the stub's v row, which
+            // claimMovedV has just claimed (slot 1/3 no longer equals slot 6/7). ZERO_PHI's row is
+            // the one nothing else names.
+            pairRc(ziZeroPhiRow(ix), ziZeroPhiRow(ix));
+        }
     }
     std::vector<char> colUsed(n, 0);
     for (int r = 0; r < n; r++) {
@@ -1419,12 +1445,12 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
         pat.emplace_back(b2P, z[4]);
         if (b1Q >= 0) pat.emplace_back(b1Q, z[5]);
         if (b2Q >= 0) pat.emplace_back(b2Q, z[5]);
-        if (z[10]) {
-            int dpRow = rowMap[z[4]], dqRow2 = rowMap[z[5]];
-            pat.emplace_back(dpRow, z[6]);
-            pat.emplace_back(dpRow, z[7]);
-            pat.emplace_back(dqRow2, z[8]);
-            pat.emplace_back(dqRow2, z[9]);
+        if (ziSpan(z)) {
+            int zvRow = rowMap[ziZeroVRow(z)], zpRow = rowMap[ziZeroPhiRow(z)];
+            pat.emplace_back(zvRow, z[6]);
+            pat.emplace_back(zvRow, z[7]);
+            pat.emplace_back(zpRow, z[8]);
+            pat.emplace_back(zpRow, z[9]);
         }
     }
 }
@@ -1587,14 +1613,14 @@ static void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const s
                     anyDyn = true;
                 }
             }
-            if (z[10]) {                                     // spanning-tree edge
-                int dpRow = rowMap[z[4]], dqRow2 = rowMap[z[5]];
-                dd[8] = -2 - dpRow;                          // F ZERO_V row
-                dd[9] = pos.at(dpRow, z[6]);                 // J(ZERO_V, v1)
-                dd[10] = pos.at(dpRow, z[7]);                // J(ZERO_V, v2)
-                dd[11] = -2 - dqRow2;                        // F ZERO_PHI row
-                dd[12] = pos.at(dqRow2, z[8]);               // J(ZERO_PHI, ph1)
-                dd[13] = pos.at(dqRow2, z[9]);               // J(ZERO_PHI, ph2)
+            if (ziSpan(z)) {                                 // spanning-tree edge
+                int zvRow = rowMap[ziZeroVRow(z)], zpRow = rowMap[ziZeroPhiRow(z)];
+                dd[8] = -2 - zvRow;                          // F ZERO_V row
+                dd[9] = pos.at(zvRow, z[6]);                 // J(ZERO_V, v1)
+                dd[10] = pos.at(zvRow, z[7]);                // J(ZERO_V, v2)
+                dd[11] = -2 - zpRow;                         // F ZERO_PHI row
+                dd[12] = pos.at(zpRow, z[8]);                // J(ZERO_PHI, ph1)
+                dd[13] = pos.at(zpRow, z[9]);                // J(ZERO_PHI, ph2)
             }
         }
         st->dZiIn.upload(ziIn, nzi * sizeof(double));
@@ -3010,7 +3036,7 @@ __global__ void fillZeroImpBatch(int nzi, int nScenarios, int n, int nnz,
     addAt(d[5], -1.0, valsS, FS);                            // J(bus2 P, dummyP)
     addAt(d6, 1.0, valsS, FS);                               // J(bus1 Q, dummyQ)
     addAt(d7, -1.0, valsS, FS);                              // J(bus2 Q, dummyQ)
-    if (q[10]) {                                             // spanning-tree edge: voltage/angle coupling
+    if (q[10] & 1) {                                         // spanning-tree edge: voltage/angle coupling
         double v1 = xs[q[6]], v2 = xs[q[7]], ph1 = xs[q[8]], ph2 = xs[q[9]];
         addAt(d[8], v1 - rho * v2, valsS, FS);               // F[ZERO_V row]
         addAt(d[9], 1.0, valsS, FS);                         // J(ZERO_V, v1)

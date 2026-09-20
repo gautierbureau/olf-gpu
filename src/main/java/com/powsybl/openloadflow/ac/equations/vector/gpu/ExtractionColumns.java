@@ -10,8 +10,10 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.equations.EquationSystem;
+import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.LoadFlowModel;
 import com.powsybl.openloadflow.network.VoltageControl;
 
 import java.util.ArrayList;
@@ -30,7 +32,7 @@ import java.util.List;
  */
 record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] branchAlphaCol,
                          int[] dummyPCol, int[] dummyQCol, int[] shuntBCol, int[] qRow, int[] qRowAlt,
-                         int[] qrPtr, int[] qrRows, int[] qrGroupOfPilot) {
+                         int[] qrPtr, int[] qrRows, int[] qrGroupOfPilot, int[] ziDeadEnd) {
 
     static ExtractionColumns of(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es) {
         // Cache each bus's BUS_PHI/BUS_V column once: a bus appears in several branches (degree ~3),
@@ -196,8 +198,17 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                 qrGroupOfPilot[b] = -2 - qRowAlt[b];
             }
         }
+        // Per zero-impedance branch, which side is a DEAD-END STUB safe to relocate (0 = none):
+        // GpuAcRowIndexing#ziDeadEndSide. GpuAcActivationExtractor derives the same answer from the
+        // same helper, so the scatter destinations and the target map name the same rows.
+        int[] ziDeadEnd = new int[nBranches];
+        for (LfBranch br : network.getBranches()) {
+            if (br.isZeroImpedance(LoadFlowModel.AC)) {
+                ziDeadEnd[br.getNum()] = GpuAcRowIndexing.ziDeadEndSide(es, br, phiCol, vCol, qRow);
+            }
+        }
         return new ExtractionColumns(phiCol, vCol, branchRhoCol, branchAlphaCol, dummyPCol, dummyQCol, shuntBCol, qRow, qRowAlt,
-                GpuAcArrays.toIntArray(qrPtr), GpuAcArrays.toIntArray(qrRows), qrGroupOfPilot);
+                GpuAcArrays.toIntArray(qrPtr), GpuAcArrays.toIntArray(qrRows), qrGroupOfPilot, ziDeadEnd);
     }
 
 }

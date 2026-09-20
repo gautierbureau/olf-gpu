@@ -17,6 +17,7 @@ import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfShunt;
+import com.powsybl.openloadflow.network.LoadFlowModel;
 import com.powsybl.openloadflow.network.ShuntVoltageControl;
 import com.powsybl.openloadflow.network.TransformerVoltageControl;
 import com.powsybl.openloadflow.network.VoltageControl;
@@ -260,4 +261,71 @@ final class GpuAcRowIndexing {
         }
         return alt;
     }
+    /**
+     * Which side of a zero-impedance branch is a DEAD-END STUB that is SAFE to relocate: a bus whose
+     * only branch is this one, with no shunt, no generator and no voltage-dependent load, and with a
+     * plain P/Q balance of its own. 1 = side 1, 2 = side 2, 0 = neither (or both, which would be a
+     * two-bus island and is left alone).
+     *
+     * <p>Why relocate at all: a zero-impedance branch puts ZERO_V (v1−rho·v2) on the DUMMY_P row and
+     * ZERO_PHI (ph1−ph2) on the DUMMY_Q row, and neither depends on its own dummy — two structurally
+     * zero diagonals, harmless while isolated. A dead-end stub adds two more, because its P and Q
+     * balances then carry ONLY ∓DUMMY_P / ∓DUMMY_Q, and the four zero pivots CHAIN. cuDSS's AMD
+     * ordering is symmetric and assumes a non-zero diagonal; on that chain it perturbs the pivot and
+     * propagates the reciprocal (measured DUMMY_P = -1.220703125e+09 and phi = -1.220703125e+22
+     * against exact answers of -0.05 and 0). Pairing the same four equations with different columns
+     * — the stub's P balance on the DUMMY_P row, its Q balance on the DUMMY_Q row, ZERO_V on the
+     * stub's v row and ZERO_PHI on its phi row — makes every diagonal non-zero and the factorization
+     * well behaved, with AMD retained.
+     *
+     * <p>WHY THE CONDITIONS ARE THIS STRICT. Moving a bus's P balance off {@code phiCol} is only safe
+     * when NOTHING ELSE is keyed on that row, and several packs are: {@code dsPhiRow} writes each
+     * distributed-slack participant's target at {@code phiCol[bn]}, the reactive-capability curve
+     * pack has its own P rows, the HVDC family scatters into both ends' P rows, and a load model
+     * emits a vdl term at the bus's P and Q rows. Excluding generators covers DS, the curves and
+     * HVDC at once, because OLF models a converter station as an {@code LfGenerator}. A first,
+     * looser version of this test (branch count + shunt only) fired on rte6515 buses that carry
+     * those packs and moved the base error from 3.9e-08 to 5.0e-05.
+     */
+    static int ziDeadEndSide(EquationSystem<AcVariableType, AcEquationType> es, LfBranch br,
+                             int[] phiCol, int[] vCol, int[] qRow) {
+        if (!br.isSpanningTreeEdge(LoadFlowModel.AC)) {
+            return 0;                                        // no ZERO_V/ZERO_PHI to relocate
+        }
+        boolean s1 = isZiDeadEnd(es, br.getBus1(), br, phiCol, vCol, qRow);
+        boolean s2 = isZiDeadEnd(es, br.getBus2(), br, phiCol, vCol, qRow);
+        if (s1 == s2) {
+            return 0;                                        // neither, or a two-bus island
+        }
+        return s1 ? 1 : 2;
+    }
+
+    private static boolean isZiDeadEnd(EquationSystem<AcVariableType, AcEquationType> es, LfBus bus,
+                                       LfBranch br, int[] phiCol, int[] vCol, int[] qRow) {
+        if (bus == null) {
+            return false;
+        }
+        int bn = bus.getNum();
+        // Exactly one incident branch, counted regardless of state: a base-open branch still packs an
+        // open-branch view that scatters into this bus's Q row, and a contingency can reclose one,
+        // while the STRUCTURE is built once.
+        if (bus.getBranches().size() != 1 || bus.getBranches().get(0) != br) {
+            return false;
+        }
+        if (bus.getShunt().isPresent() || bus.getControllerShunt().isPresent() || bus.getSvcShunt().isPresent()) {
+            return false;                                    // a shunt scatters into this bus's Q row
+        }
+        if (!bus.getGenerators().isEmpty()) {
+            return false;                                    // DS rows, curve P rows, HVDC stations
+        }
+        for (com.powsybl.openloadflow.network.LfLoad load : bus.getLoads()) {
+            if (load.getLoadModel().isPresent()) {
+                return false;                                // vdl term at this bus's P and Q rows
+            }
+        }
+        return phiCol[bn] >= 0 && vCol[bn] >= 0 && qRow[bn] == vCol[bn]
+                && row(es, bn, AcEquationType.BUS_TARGET_P) >= 0
+                && row(es, bn, AcEquationType.BUS_TARGET_Q) >= 0;
+    }
+
 }

@@ -31,6 +31,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSo
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfContingency;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LoadFlowModel;
@@ -660,6 +661,46 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                         double v = b.getV();
                         islandShunt = bSide * v * v;
                     }
+                }
+            }
+            // WHAT IS ATTACHED to the bus whose equation is violated. A residual that is the same
+            // round number in every contingency is a fixed missing TERM, not a solve difference,
+            // and only the bus's own inventory says which term: a shunt's b, the generators' and
+            // loads' reactive, and whether OLF considers the bus disabled at all.
+            if (elem instanceof LfBus rb) {
+                double shB = rb.getShunt().map(sh -> sh.getB()).orElse(0.0)
+                        + rb.getControllerShunt().map(sh -> sh.getB()).orElse(0.0)
+                        + rb.getSvcShunt().map(sh -> sh.getB()).orElse(0.0);
+                double genQ = 0;
+                for (LfGenerator g : rb.getGenerators()) {
+                    genQ += g.getTargetQ();
+                }
+                System.err.printf("SA_RESID_BUS ctg=%s id=%s disabled=%s v=%.9f shuntB=%.9f"
+                        + " nGen=%d genTargetQ=%.9f loadTargetQ=%.9f vcEnabled=%s%n",
+                        contingencyId, rb.getId(), rb.isDisabled(), rb.getV(), shB,
+                        rb.getGenerators().size(), genQ, rb.getLoadTargetQ(),
+                        rb.isGeneratorVoltageControlEnabled());
+            }
+            // The TERMS of the violated equation, each with its element and its value at the
+            // device's state. A bus with no branches and no shunt should have a Q balance with no
+            // terms at all; when it evaluates to a round non-zero number something IS in there, and
+            // only the term list says what.
+            {
+                int shown = 0;
+                for (var t : eq.<com.powsybl.openloadflow.equations.EquationTerm<AcVariableType,
+                        AcEquationType>>getTerms()) {
+                    if (!t.isActive() || shown++ >= 12) {
+                        continue;
+                    }
+                    double termVal;
+                    try {
+                        termVal = t.eval();
+                    } catch (RuntimeException ex) {
+                        termVal = Double.NaN;
+                    }
+                    System.err.printf("SA_RESID_TERM ctg=%s row=%d term=%s elemType=%s elem=%d"
+                            + " value=%.9f%n", contingencyId, row, t.getClass().getSimpleName(),
+                            t.getElementType(), t.getElementNum(), termVal);
                 }
             }
             // For a violated DISTR_Q, OLF's own q for EVERY member of the group, evaluated at the

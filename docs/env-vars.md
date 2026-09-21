@@ -33,7 +33,7 @@ Solves one contingency as an ordinary load flow on the device, which is where th
 instruments live. A contingency wrong batched and right there is a BATCH defect.
 
 
-## Diagnostics (82) — print only, cannot change a result
+## Diagnostics (87) — print only, cannot change a result
 
 Safe to add. These are the instruments; several are the only reason a defect was found at all.
 

@@ -415,12 +415,23 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 ? java.util.Set.of()
                 : java.util.Arrays.stream(System.getenv("OLF_GPU_SA_MON_BRANCH").split(","))
                         .map(String::trim).collect(Collectors.toSet());
+        java.util.Set<String> monVls = busDiff
+                ? network.getVoltageLevelStream().map(com.powsybl.iidm.network.VoltageLevel::getId)
+                        .collect(Collectors.toSet())
+                : java.util.Set.of();
+        // TWO monitors, not one. ContingencyContext.all() left the PRE-contingency network result
+        // EMPTY, so "BASE BUSDIFF buses>1e-12kV=0 of 0 | uncompared: cpu-only=0 gpu-only=0" was not
+        // a clean base - it was no base compared at all, in every run this test has ever done. A
+        // post-contingency difference cannot be attributed to the contingency until the BASE states
+        // are known to agree, so add an explicit N-state monitor.
         List<com.powsybl.security.monitor.StateMonitor> monitors = !busDiff && monBranches.isEmpty()
                 ? Collections.emptyList()
                 : List.of(new com.powsybl.security.monitor.StateMonitor(
-                        com.powsybl.contingency.ContingencyContext.all(), monBranches,
-                        busDiff ? network.getVoltageLevelStream().map(com.powsybl.iidm.network.VoltageLevel::getId)
-                                .collect(Collectors.toSet()) : java.util.Set.of(), java.util.Set.of()));
+                                com.powsybl.contingency.ContingencyContext.all(), monBranches,
+                                monVls, java.util.Set.of()),
+                        new com.powsybl.security.monitor.StateMonitor(
+                                com.powsybl.contingency.ContingencyContext.none(), monBranches,
+                                monVls, java.util.Set.of()));
         SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, monitors, sap);
         long cpuMs = (System.nanoTime() - cpuT0) / 1_000_000;
 

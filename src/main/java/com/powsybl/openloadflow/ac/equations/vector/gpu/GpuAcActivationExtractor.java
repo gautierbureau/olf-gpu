@@ -139,7 +139,19 @@ public final class GpuAcActivationExtractor {
                 // ACTIVE own-Q balance at a (non-free) remote gen-VC member = the RL-PINNED state:
                 // row mode 4, so the family fills route the member's own q here (the frozen dest is
                 // canonically SUPPRESSED) and the DISTR_Q emissions at this row gate off (plan-B2).
-                if (GpuAcRowIndexing.isRemoteGenVcMember(bus) && !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) {
+                // The SAME predicate computeQRow used to hand this bus its own Q row. It used
+                // isRemoteGenVcControllerElement, which INCLUDES a controller that is also the
+                // group's controlled bus (its javadoc says so); this used isRemoteGenVcMember,
+                // which is controlledBus != bus and therefore EXCLUDES the pilot. For a PINNED
+                // pilot-that-is-also-a-controller the two disagreed: computeQRow gave it its own Q
+                // row, this left the row at mode 1, so the mode-4 gate in fillDistrQBatch never
+                // fired and the existence-keyed DISTR_Q kind-3 terms stayed live ALONGSIDE the
+                // zero-impedance family's direct +-DUMMY_Q into the same row. The two cancel: on
+                // rte6515 BUS-24_COUPLER_1 the kind-3 pair summed to +1.0 against the zi coupling's
+                // -1.0, leaving the coupler's DUMMY_Q in NO equation. 45 such columns at 2000
+                // busbar sections, which is what collapsed batching above ~1000.
+                if (GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
+                        && !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) {
                     mode[qr] = 4;
                 }
             }

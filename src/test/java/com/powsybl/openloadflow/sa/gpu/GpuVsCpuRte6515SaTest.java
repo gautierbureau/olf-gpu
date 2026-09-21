@@ -463,6 +463,40 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         }
     }
 
+    /**
+     * {@code getDistributedActivePower()} of every post-contingency result, CPU against GPU. Neither the
+     * status nor the violation checks look at it, and the two arms do not build it the same way: the CPU
+     * reports the contingency's pre-distributed loss PLUS its load flow's own slack distribution, the
+     * GPU path the pre-distributed loss only. {@code OLF_GPU_SA_DAP_DUMP=<file>} writes both values per
+     * contingency with {@code Double.toString}, so a change on either arm diffs exactly.
+     */
+    private static void reportDistributedActivePower(SecurityAnalysisResult cpu, SecurityAnalysisResult gpu) throws java.io.IOException {
+        Map<String, Double> gpuDap = new TreeMap<>();
+        gpu.getPostContingencyResults().forEach(p -> gpuDap.put(p.getContingency().getId(), p.getDistributedActivePower()));
+        Map<String, double[]> pairs = new TreeMap<>();
+        cpu.getPostContingencyResults().forEach(p -> {
+            Double g = gpuDap.get(p.getContingency().getId());
+            if (g != null) {
+                pairs.put(p.getContingency().getId(), new double[] {p.getDistributedActivePower(), g});
+            }
+        });
+        long differing = pairs.values().stream().filter(v -> Math.abs(v[0] - v[1]) > 1e-9).count();
+        double worst = pairs.values().stream().mapToDouble(v -> Math.abs(v[0] - v[1])).max().orElse(0);
+        System.out.printf("  distributedActivePower: %d of %d contingencies differ by > 1e-9 MW | worst %.6e MW%n",
+                differing, pairs.size(), worst);
+        pairs.entrySet().stream()
+                .sorted(java.util.Comparator.comparingDouble((Map.Entry<String, double[]> e) ->
+                        -Math.abs(e.getValue()[0] - e.getValue()[1])))
+                .limit(5)
+                .forEach(e -> System.out.printf("      %s cpu=%.9f gpu=%.9f MW%n", e.getKey(), e.getValue()[0], e.getValue()[1]));
+        String dump = System.getenv("OLF_GPU_SA_DAP_DUMP");
+        if (dump != null) {
+            try (java.io.PrintWriter w = new java.io.PrintWriter(Files.newBufferedWriter(Path.of(dump)))) {
+                pairs.forEach((id, v) -> w.println(id + "\t" + Double.toString(v[0]) + "\t" + Double.toString(v[1])));
+            }
+        }
+    }
+
     @Test
     void gpuSaMatchesCpuOnRte6515Full() throws Exception {
         Network network = Network.read(CASE_FILE);
@@ -860,6 +894,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         }
         {
         }
+
+        reportDistributedActivePower(cpu, gpuCold);
 
         long cpuViolations = violationCount(cpu);
         long gpuViolations = violationCount(gpuCold);

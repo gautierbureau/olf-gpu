@@ -19,7 +19,9 @@ host thread vs CPU 118.6 s (8 threads, warm) / 68.5 s (16), 0 differing violatio
 (14.9 s), the per-contingency host loss redistribution the device already did (4.6 s), full branch
 recompute on state injection (6.1 s), connectivity copies in qualification (2.55 s), … Chunk size is
 closed (flat above ~2000). Leads L1–L9, their constraints, gains, risks and the order to do them in:
-**`docs/gpu-sa-host-overhead-assessment.md`** — read it before touching any of them.
+**`docs/gpu-sa-host-overhead-assessment.md`** — read it before touching any of them. It also records L10, a
+RESULT defect: `getDistributedActivePower()` differs on 5,095 contingencies (up to 124.5 MW) — the GPU path
+omits its own DS pass's distributed amount.
 
 ### #60 — Generator and load contingencies on rte6515: first fold (2026-09-16)
 

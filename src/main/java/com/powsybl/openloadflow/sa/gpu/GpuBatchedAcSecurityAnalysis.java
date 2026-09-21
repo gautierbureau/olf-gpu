@@ -122,6 +122,11 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     static final java.util.concurrent.atomic.AtomicInteger LAST_GPU_PRECOMPUTED_COUNT =
             new java.util.concurrent.atomic.AtomicInteger(-1);
 
+    /** How many contingencies of the last run had their loss distribution answered from the batch's replay
+     *  instead of OLF's host call ({@link ReplayedLossDistribution}); reset with the counter above. */
+    static final java.util.concurrent.atomic.AtomicInteger LAST_REPLAYED_LOSS_COUNT =
+            new java.util.concurrent.atomic.AtomicInteger();
+
     /** Separator inside the precomputed-state key of a (contingency, strategy) pair — the SOLVER's
      *  constant, which also drives its two-phase warm-continuation ordering. */
     private static final char STRATEGY_KEY_SEP = GpuBatchStatus.STRATEGY_KEY_SEP;
@@ -134,6 +139,81 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      *  lfNetwork/context and LOAD STATES INTO B's equation system while B was mid-solve — one
      *  corrupted scenario (the 19/1 MAX_ITERATION flake) or an NPE inside B's JacobianMatrix on
      *  pure CPU stacks (both observed, threadCountAboveOneRunsSafelyOnGpuProvider). */
+    /** System property: answer OLF's per-contingency loss distribution from the batch's replay for
+     *  device-solved contingencies instead of running it on the host (default on). Set to false for the
+     *  A/B: the reported distributed active power must agree to rounding (see OLF_GPU_PRELOSS_CHECK). */
+    public static final String REPLAY_LOSS_DISTRIBUTION_PROPERTY = "olf.gpu.sa.replayLossDistribution";
+
+    private static boolean replayLossDistributionEnabled() {
+        return Boolean.parseBoolean(System.getProperty(REPLAY_LOSS_DISTRIBUTION_PROPERTY, "true"));
+    }
+
+    /**
+     * OLF's contingency loss distribution, answered from the batch where that is exact. For a device-solved
+     * contingency the device state already embodies the distribution (the batch replays it to seed the
+     * solve), and all the host call still contributes is its RETURN value — the amount every
+     * PostContingencyResult reports — which the replay carries too (6e-14 pu worst on rte6515). Running it
+     * anyway rescanned every bus per contingency and changed participating generators' target P, which
+     * the next base-state restore then had to set back through the network listeners.
+     *
+     * <p>OLF's call still runs for a contingency: not solved on the device (CPU route); without a replayed
+     * value; with contingency-specific load flow parameters (the replay used the run's); or targeted by any
+     * operator strategy, because a strategy condition on an injection's ACTIVE_POWER reads the target P it sets
+     * ({@code ThresholdConditionEvaluator}; the batch's own strategy composition reads IIDM base targets and does
+     * not depend on it). The report OLF adds is reproduced.
+     */
+    private final class ReplayedLossDistribution implements ContingencyActivePowerLossDistribution {
+
+        private final ContingencyActivePowerLossDistribution delegate;
+
+        private ReplayedLossDistribution(ContingencyActivePowerLossDistribution delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public String getName() {
+            return delegate.getName();
+        }
+
+        @Override
+        public double run(LfNetwork network, com.powsybl.openloadflow.network.LfContingency lfContingency,
+                          com.powsybl.contingency.Contingency contingency, SecurityAnalysisParameters securityAnalysisParameters,
+                          com.powsybl.openloadflow.LoadFlowParametersOverride loadFlowParametersOverride,
+                          com.powsybl.commons.report.ReportNode reportNode) {
+            RunState rs = runState.get();
+            Double replayed = rs.precomputed.states().containsKey(contingency.getId())
+                    ? rs.precomputed.preDistributedActivePower().get(contingency.getId())
+                    : null;
+            if (replayed == null || loadFlowParametersOverride != null
+                    || targetedByOperatorStrategy(rs.operatorStrategies, contingency.getId())) {
+                return delegate.run(network, lfContingency, contingency, securityAnalysisParameters,
+                        loadFlowParametersOverride, reportNode);
+            }
+            double mismatch = lfContingency.getActivePowerLoss();
+            if (Math.abs(mismatch) > 0) {                    // a replayed value exists only with distributed slack on
+                com.powsybl.openloadflow.util.Reports.reportContingencyActivePowerLossDistribution(reportNode,
+                        mismatch * PerUnit.SB, (mismatch - replayed) * PerUnit.SB);
+            }
+            LAST_REPLAYED_LOSS_COUNT.incrementAndGet();
+            return replayed;
+        }
+    }
+
+    private static boolean targetedByOperatorStrategy(List<OperatorStrategy> strategies, String contingencyId) {
+        for (OperatorStrategy strategy : strategies) {
+            var ctx = strategy.getContingencyContext();
+            boolean targets = switch (ctx.getContextType()) {
+                case ALL, ONLY_CONTINGENCIES -> true;
+                case SPECIFIC -> contingencyId.equals(ctx.getContingencyId());
+                case NONE -> false;
+            };
+            if (targets) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
      * {@code OLF_GPU_PRELOSS_CHECK=1}: runs OLF's own contingency loss distribution UNCHANGED and compares,
      * per device-solved contingency, the amount it returns with the one the batch replayed
@@ -361,9 +441,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // pre-contingency state only.
         List<PropagatedContingency> toSimulate = "1".equals(System.getenv("OLF_GPU_SA_BASE_ONLY"))
                 ? List.of() : propagatedContingencies;
-        ContingencyActivePowerLossDistribution lossDistribution = System.getenv("OLF_GPU_PRELOSS_CHECK") != null
-                ? new LossDistributionCheck(contingencyActivePowerLossDistribution)
-                : contingencyActivePowerLossDistribution;
+        ContingencyActivePowerLossDistribution lossDistribution;
+        if (System.getenv("OLF_GPU_PRELOSS_CHECK") != null) {
+            lossDistribution = new LossDistributionCheck(contingencyActivePowerLossDistribution);
+        } else if (replayLossDistributionEnabled()) {
+            lossDistribution = new ReplayedLossDistribution(contingencyActivePowerLossDistribution);
+        } else {
+            lossDistribution = contingencyActivePowerLossDistribution;
+        }
         try {
             return super.runSimulations(lfNetwork, toSimulate, acParameters, securityAnalysisParameters,
                     operatorStrategies, actions, limitReductions, lossDistribution);

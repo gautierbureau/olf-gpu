@@ -58,8 +58,8 @@ final class GpuBatchChunkSolver {
                                                List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
-                                               double convEpsPerEq, double[][] resultsByIndex, int[] varType,
-                                               GpuBatchPhases.Built phases,
+                                               double convEpsPerEq, double[][] resultsByIndex, double[] preDistributedByIndex,
+                                               int[] varType, GpuBatchPhases.Built phases,
                                                List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers,
                                                BatchConfig config) {
         int nb = batchedIndices.size();
@@ -78,7 +78,7 @@ final class GpuBatchChunkSolver {
                         dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
                         islandedRlByIndex, islandedHvdcsByIndex,
                         n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
-                        varType, phases, hvdcControllers, config);
+                        preDistributedByIndex, varType, phases, hvdcControllers, config);
                 return;
             } catch (RuntimeException e) {
                 if (chunkSize <= 1 || !isDeviceAllocFailure(e)) {
@@ -159,8 +159,8 @@ final class GpuBatchChunkSolver {
                                                List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
-                                               double convEpsPerEq, double[][] resultsByIndex, int[] varType,
-                                               GpuBatchPhases.Built phases,
+                                               double convEpsPerEq, double[][] resultsByIndex, double[] preDistributedByIndex,
+                                               int[] varType, GpuBatchPhases.Built phases,
                                                List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers,
                                                BatchConfig config) {
         int nb = batchedIndices.size();
@@ -844,10 +844,15 @@ final class GpuBatchChunkSolver {
                         // (GpuBatchLossPreDistribution) and hand it to the device as the strategy-pair
                         // trio: participant target overrides + anchor shifts + the slack's own share.
                         for (int s = 0; s < realCount; s++) {
+                            // The amount OLF's DefaultContingencyActivePowerLossDistribution returns for this
+                            // contingency (mismatch - remaining, pu), as the replay below distributes it.
+                            int preIdx = group.get(chunkStart + s);
                             if (preLossBySlot[s] == 0) {
+                                preDistributedByIndex[preIdx] = 0.0;
                                 continue;
                             }
                             if (!hasDs) {
+                                preDistributedByIndex[preIdx] = preLossBySlot[s];   // the slack generator takes it all
                                 // SLACK-ONLY (the slack bus is the only participant): OLF distributes
                                 // the whole scheduled loss into the slack generator's own target, so
                                 // its target for this scenario is base + loss. The device has no
@@ -950,8 +955,14 @@ final class GpuBatchChunkSolver {
                                         countTrue(islandedDs));
                             }
                             if (shares == null) {
+                                preDistributedByIndex[preIdx] = 0.0;
                                 continue;
                             }
+                            double preDistributed = 0;
+                            for (double share : shares) {                 // participants + the slack's own share
+                                preDistributed += share;
+                            }
+                            preDistributedByIndex[preIdx] = preDistributed;
                             // The pre-distribution is a DISPLACEMENT from the anchor, not a new anchor.
                             // OLF's post-contingency DS calls resetToInitialState, which UNDOES it and
                             // returns it as previousMismatch, then water-fills

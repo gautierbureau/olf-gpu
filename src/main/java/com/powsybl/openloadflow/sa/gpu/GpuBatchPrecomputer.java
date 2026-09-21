@@ -298,6 +298,7 @@ final class GpuBatchPrecomputer {
             Map<String, double[]> states = new HashMap<>();
             Map<String, int[]> islandedBuses = new HashMap<>();
             java.util.Set<String> exhausted = new java.util.HashSet<>();
+            Map<String, Double> preDistributed = new HashMap<>();
             for (BatchScenarioResult r : results) {
                 if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                     System.err.println("QUALIFY_TRACE result " + r.contingencyId() + " status=" + r.convergenceStatus()
@@ -305,6 +306,9 @@ final class GpuBatchPrecomputer {
                 }
                 if (r.hasConverged()) {
                     states.put(r.contingencyId(), r.state());
+                    if (!Double.isNaN(r.preDistributedActivePower())) {
+                        preDistributed.put(r.contingencyId(), r.preDistributedActivePower());
+                    }
                     if (r.islandedBusNums().length > 0) {
                         islandedBuses.put(r.contingencyId(), r.islandedBusNums());
                     }
@@ -350,7 +354,8 @@ final class GpuBatchPrecomputer {
             LOGGER.info("GPU batched SA: precomputed {} of {} branch (N-1..N-k) contingencies on the device",
                     states.size(), batch.size());
 
-            return new PrecomputedBatch(states, islandedBuses, exhausted, baseVariableRows, es, screenData, screenMapper);
+            return new PrecomputedBatch(states, islandedBuses, exhausted, baseVariableRows, es, screenData, screenMapper,
+                    preDistributed);
         } catch (Exception e) {
             // full stack at WARN: a swallowed exception here silently un-accelerates the whole run —
             // the 2026-09-06 bridge AIOOBE hid behind the message-only log for days

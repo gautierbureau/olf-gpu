@@ -3554,7 +3554,8 @@ __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nEle
                                        const double* x, double* qBuf,
                                        const char* disabled, const char* rlActive,
                                        int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
-                                       int nShOv, const int* shOvSlotElem, const double* shOvGb) {
+                                       int nShOv, const int* shOvSlotElem, const double* shOvGb,
+                                       int traceRow) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrmq * nScenarios) return;
     int c = tid % nrmq;
@@ -3575,10 +3576,17 @@ __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nEle
         int vcol = shIx[e * 5 + 2];
         double so[SH_NOUT];
         evalShunt(xs[vcol], g, b, 0, so + 0, so + 1, so + 2, so + 3, so + 4);
+        if (rmqRow[c] == traceRow) {
+            printf("RMQ s=%d c=%d kind=1(shunt) elem=%d w=%.6f contrib=%.9f\n", s, c, e, w, w * so[2]);
+        }
         atomicAdd(q, w * so[2]);
         return;
     }
     if (kind == 3) {                                         // zero-impedance DUMMY_Q linear term
+        if (rmqRow[c] == traceRow) {
+            printf("RMQ s=%d c=%d kind=3(ziDummyQ) dqCol=%d w=%.6f dummyQ=%.9f contrib=%.9f\n",
+                   s, c, e, w, xs[e], w * xs[e]);
+        }
         atomicAdd(q, w * xs[e]);
         return;
     }
@@ -3591,6 +3599,10 @@ __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nEle
         double oo[OB_NOUT];
         evalOpenBranch(op[0], op[1], op[2], op[3], op[4], op[5], v1, op[6], v2, 0,
                        oo + 0, oo + 1, oo + 2, oo + 3, oo + 4, oo + 5, oo + 6, oo + 7);
+        if (rmqRow[c] == traceRow) {
+            printf("RMQ s=%d c=%d kind=2(halfOpen) elem=%d side=%d w=%.6f contrib=%.9f\n",
+                   s, c, e, rmqSide[c], w, w * oo[rmqSide[c] == 0 ? 6 : 2]);
+        }
         atomicAdd(q, w * oo[rmqSide[c] == 0 ? 6 : 2]);
         return;
     }
@@ -3618,6 +3630,10 @@ __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nEle
                      o + 0, o + 1, o + 2, o + 3, o + 4, o + 5, o + 6, o + 7, o + 8, o + 9,
                      o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
                      o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
+    if (rmqRow[c] == traceRow) {
+        printf("RMQ s=%d c=%d kind=0(closed) elem=%d side=%d w=%.6f contrib=%.9f\n",
+               s, c, e, rmqSide[c], w, w * o[rmqSide[c] == 0 ? 7 : 21]);
+    }
     atomicAdd(q, w * o[rmqSide[c] == 0 ? 7 : 21]);           // q1 / q2 residual outputs
     return;
 }
@@ -8540,6 +8556,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // Remote-member OWN q (plan-B3): fill each member's own reactive injection into its (suppressed,
     // hence free) qBuf row so the RL kernel evaluates remote entries like local ones.
     if (ctx->nRmq > 0) {
+        // OLF_GPU_RMQ_TRACE=<deviceRow>: every contribution this kernel adds to that member's
+        // diagnostic q row, named by kind and element. The RL check pins on q = qBuf[row] + loadQ,
+        // so a q that disagrees with OLF is answered here and nowhere else.
+        static const char* rmqTraceEnv = std::getenv("OLF_GPU_RMQ_TRACE");
+        int rmqTraceRow = rmqTraceEnv != nullptr ? std::atoi(rmqTraceEnv) : -1;
         fillRemoteMemberQBatch<<<grid(ctx->nRmq * nS), BLOCK, 0, ctx->stream>>>(ctx->nRmq, nS, n,
                 ctx->nElements, ctx->cbOffset, ctx->obOffset,
                 ctx->dRmqRow.as<int>(), ctx->dRmqElem.as<int>(), ctx->dRmqSide.as<int>(),
@@ -8548,7 +8569,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(),
                 ctx->dX.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(),
                 ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
-                ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>());
+                ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(),
+                rmqTraceRow);
     }
     CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitched.p, 0, nS * sizeof(char), ctx->stream));
     // Apply ONLY the current phase's outer loop this pass (sequential, like OLF) — never both at once.

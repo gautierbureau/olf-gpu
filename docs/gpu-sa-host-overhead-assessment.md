@@ -177,6 +177,20 @@ lives, gain, risk, and how to verify. Ordered by expected gain.
 - **Gain:** the 33 s host loop spread over N threads, whatever L1–L3 leave of it. **Risk: medium**
   (thread-safety of the shared device structure / context caches). GPU repo.
 
+### L10 — RESULT DEFECT found while preparing L2: `getDistributedActivePower()` differs between the arms
+
+- **Measured (before any L2 change):** 5,095 of 14,260 contingencies differ by > 1e-9 MW, worst 124.5 MW
+  (`LINE-4678-3180`: CPU 124.54, GPU 0; `GEN-6353`: CPU 1,430.06, GPU 1,307.61 = 122.45 MW apart).
+  Statuses and violations are identical, so no existing check saw it (`GpuVsCpuRte6515SaTest` now prints it;
+  `OLF_GPU_SA_DAP_DUMP=<file>` dumps both values per contingency).
+- **Mechanism (code):** the CPU reports `preDistributedActivePower + result.getDistributedActivePower()` — the
+  contingency's pre-distributed loss plus what its own load flow's distributed slack spread
+  (`AbstractSecurityAnalysis.java:727`); the GPU path reports `preDistributedActivePower` only
+  (`GpuBatchedAcSecurityAnalysis.java:805`). The device's own DS pass does distribute; the amount is never
+  brought back.
+- **Change:** return the per-scenario amount the device DS pass distributed and add it. GPU repo.
+- **Not a speed lead — a correctness one.** Independent of L2 (which must leave the GPU values unchanged).
+
 ## 5. Interactions and projection
 
 - **L1 x L2 coupled:** skipping the redistribution removes most CHANGED generator targets, the expensive

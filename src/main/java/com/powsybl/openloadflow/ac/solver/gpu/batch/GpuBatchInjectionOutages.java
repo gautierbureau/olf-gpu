@@ -67,6 +67,69 @@ final class GpuBatchInjectionOutages {
         return -1;
     }
 
+    /** RENORMALIZE through an ISLAND: the group's DISTR_Q controllers the contingency puts in another
+     *  synchronous component stop controlling, and their keys leave the renormalization exactly as a
+     *  lost generator's do. The qPct override channel (distrQWeightOverrides) carries the survivors'
+     *  WEIGHTS; this carries the two things a generator outage also seeds and this path never did:
+     *  the survivors' DISTR_Q row TARGETS renormalized over the members keeping their keys (OLF's
+     *  qPct_k * sum_j targetQ_j - targetQ_k, summed over every merged controller as AcTargetVector
+     *  does), and one inactive-member entry per islanded packed member so updateDistrQTargetsBatch
+     *  keeps it out of the denominator in the reactive-limits passes. Without the target the device
+     *  solved the renormalized weights against the BASE target: invisible while the pilot carries no
+     *  reactive load (target 0 either way), 8.5e-2 kV on rte6515 BUS-1359_BBS_2 whose pilot has one.
+     *  Empty when no islanded controller is a packed member. */
+    static List<GenOutage> islandedDistrQEntries(GpuAcData gpuData, List<LfBus> islandedControllers) {
+        List<GenOutage> out = new ArrayList<>();
+        int[] mBusNum = gpuData.dqMemberBusNum();
+        if (mBusNum == null || islandedControllers.isEmpty()) {
+            return out;
+        }
+        java.util.Set<Integer> inactive = new java.util.LinkedHashSet<>();
+        for (LfBus b : islandedControllers) {
+            int m = dqMemberSlot(gpuData, b);
+            if (m >= 0) {
+                inactive.add(m);
+            }
+        }
+        int[] groupStart = gpuData.dqMemberGroupStart();
+        int[] groupCount = gpuData.dqMemberGroupCount();
+        double[] mKey = gpuData.dqMemberKey();
+        double[] mTargetQ = gpuData.dqMemberTargetQ();
+        byte[] mHasRow = gpuData.dqMemberHasRow();
+        int[] mRow = gpuData.dqMemberRow();
+        LfBus any = islandedControllers.get(0);
+        java.util.Set<Integer> groupsDone = new java.util.HashSet<>();
+        for (int im : inactive) {
+            int gs = groupStart[im];
+            int gc = groupCount[im];
+            int[] rows = new int[0];
+            double[] values = new double[0];
+            if (groupsDone.add(gs)) {                        // the group's targets once, on its first entry
+                double keySum = 0;
+                double sumTargetQ = 0;
+                for (int m = gs; m < gs + gc; m++) {
+                    keySum += !inactive.contains(m) && memberKeepsKey(any, mBusNum[m], m, -1) ? mKey[m] : 0;
+                    sumTargetQ += mTargetQ[m];
+                }
+                List<Integer> r = new ArrayList<>();
+                List<Double> v = new ArrayList<>();
+                for (int m = gs; m < gs + gc; m++) {
+                    if (mHasRow[m] == 0 || mRow[m] < 0 || inactive.contains(m)) {
+                        continue;                            // an islanded member's own row is frozen
+                    }
+                    double qpk = keySum == 0 || !memberKeepsKey(any, mBusNum[m], m, -1) ? 0 : mKey[m] / keySum;
+                    r.add(mRow[m]);
+                    v.add(qpk * sumTargetQ - mTargetQ[m]);
+                }
+                rows = r.stream().mapToInt(Integer::intValue).toArray();
+                values = v.stream().mapToDouble(Double::doubleValue).toArray();
+            }
+            out.add(new GenOutage(-1, 0, -1, 0, false, false, -1, 0, 0, 0, 0, -1, 0, 0, false,
+                    java.util.Set.of(), 0, 0, 0, im, new int[0], rows, values, 0, -1, 0, -1, 0, -1, 0));
+        }
+        return out;
+    }
+
     private static boolean memberKeepsKey(LfBus anyMember, int memberBusNum, int member, int inactiveMember) {
         if (member == inactiveMember) {
             return false;

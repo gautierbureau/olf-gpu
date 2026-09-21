@@ -733,6 +733,10 @@ final class GpuBatchQualification {
                                 gos.length - (live.size() - deadControlBuses.size()),
                                 deadControlBuses.stream().map(LfBus::getId).toList());
                     }
+                    // RENORMALIZE: the islanded controllers' keys leave the group (weights below,
+                    // through the rediff); their DISTR_Q row targets and inactive-member entries go
+                    // the way a generator outage's do.
+                    live.addAll(GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, islandLostVcControllers));
                     gos = live.toArray(new GenOutage[0]);
                     frozenRowsByIndex[i] = fi.rows();
                     frozenTargetsByIndex[i] = fi.targets();
@@ -840,6 +844,16 @@ final class GpuBatchQualification {
                     }
                     dqOvContribByIndex[i] = java.util.Arrays.stream(vcOv[0]).mapToInt(d -> (int) d).toArray();
                     dqOvWByIndex[i] = vcOv[1];
+                    // and the survivors' DISTR_Q row TARGETS + the islanded members' inactive entries
+                    List<GenOutage> dq = GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, lostVcControllers);
+                    if (!dq.isEmpty()) {
+                        List<GenOutage> merged = new ArrayList<>();
+                        if (genOutagesByIndex[i] != null) {
+                            merged.addAll(java.util.Arrays.asList(genOutagesByIndex[i]));
+                        }
+                        merged.addAll(dq);
+                        genOutagesByIndex[i] = merged.toArray(new GenOutage[0]);
+                    }
                 }
                 double[][] drOv = distrRhoOverrides(es, gpuData, distrRhoControllers, c.outagedBranches());
                 if (drOv == null) {

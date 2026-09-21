@@ -1575,6 +1575,78 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         return network;
     }
 
+    /** Three busbar sections in a chain (bbs0 - c01 - bbs1 - c12 - bbs2), each with its own line out;
+     *  g0 on bbs0 regulates bbs0 locally, g1 and g2 regulate bbs0 REMOTELY, and bbs0 carries a
+     *  reactive load. Losing the MIDDLE section leaves g0 and g2 sharing the pilot's Q through
+     *  DISTR_Q while no longer zero-impedance-connected (rte6515 BUS-1359_BBS_2, 8.5e-2 kV): the
+     *  survivors' keys renormalize 1/3 -> 1/2 AND the DISTR_Q target moves with them, because the
+     *  pilot's load makes the target key-dependent (a group without load has target 0 either way and
+     *  cannot see this). */
+    private static Network middleSectionLossNetwork() {
+        Network network = Network.create("middle-section-loss", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vl3", "vl4")) {
+            com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(vl).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            v.getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        com.powsybl.iidm.network.VoltageLevel vl12 = s.newVoltageLevel().setId("vl12").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.NODE_BREAKER).add();
+        vl12.getNodeBreakerView().newBusbarSection().setId("bbs0").setNode(0).add();
+        vl12.getNodeBreakerView().newBusbarSection().setId("bbs1").setNode(1).add();
+        vl12.getNodeBreakerView().newBusbarSection().setId("bbs2").setNode(2).add();
+        vl12.getNodeBreakerView().newBreaker().setId("c01").setNode1(0).setNode2(1).setRetained(true).setOpen(false).add();
+        vl12.getNodeBreakerView().newBreaker().setId("c12").setNode1(1).setNode2(2).setRetained(true).setOpen(false).add();
+        // Feeders as in a real substation: a disconnector to the section, then a BREAKER before the
+        // equipment. OLF's trip stops at the breaker and disconnects the terminal behind it, so a
+        // LINE on the lost section is opened on THAT side only (rte6515's sideOpens=1); a feeder with
+        // the disconnector alone lets the trip cross the line and open both ends, which composes as a
+        // full branch outage and routes the plan to the branch-combo path instead of this one.
+        int node = 10;
+        for (String[] eq : new String[][] {{"g0", "0"}, {"ldp", "0"}, {"l0", "0"}, {"g1", "1"}, {"l1", "1"}, {"g2", "2"}, {"l2", "2"}}) {
+            vl12.getNodeBreakerView().newDisconnector().setId("d_" + eq[0]).setNode1(Integer.parseInt(eq[1])).setNode2(node + 10).setOpen(false).add();
+            vl12.getNodeBreakerView().newBreaker().setId("b_" + eq[0]).setNode1(node + 10).setNode2(node).setOpen(false).add();
+            node++;
+        }
+        vl12.newGenerator().setId("g0").setNode(10)
+                .setMinP(0).setMaxP(500).setTargetP(100).setTargetQ(0).setTargetV(405).setVoltageRegulatorOn(true).add();
+        vl12.newLoad().setId("ldp").setNode(11).setP0(30).setQ0(40).add();          // the pilot's reactive load
+        vl12.newGenerator().setId("g1").setNode(13)
+                .setMinP(0).setMaxP(500).setTargetP(100).setTargetQ(0).setTargetV(405).setVoltageRegulatorOn(true)
+                .setRegulatingTerminal(network.getBusbarSection("bbs0").getTerminal()).add();
+        vl12.newGenerator().setId("g2").setNode(15)
+                .setMinP(0).setMaxP(500).setTargetP(100).setTargetQ(0).setTargetV(405).setVoltageRegulatorOn(true)
+                .setRegulatingTerminal(network.getBusbarSection("bbs0").getTerminal()).add();
+        for (String g : List.of("g0", "g1", "g2")) {
+            network.getGenerator(g).newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(300).add();
+        }
+        network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(500).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl0").newLoad().setId("ld0").setBus("vl0_b").setConnectableBus("vl0_b").setP0(500).setQ0(100).add();
+        network.getVoltageLevel("vl3").newLoad().setId("ld3").setBus("vl3_b").setConnectableBus("vl3_b").setP0(150).setQ0(50).add();
+        network.getVoltageLevel("vl4").newLoad().setId("ld4").setBus("vl4_b").setConnectableBus("vl4_b").setP0(150).setQ0(50).add();
+        java.util.function.BiConsumer<String[], Integer> line = (ends, n) -> network.newLine().setId(ends[0])
+                .setVoltageLevel1("vl12").setNode1(n)
+                .setVoltageLevel2(ends[1]).setBus2(ends[1] + "_b").setConnectableBus2(ends[1] + "_b")
+                .setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        line.accept(new String[] {"l0", "vl0"}, 12);
+        line.accept(new String[] {"l1", "vl3"}, 14);
+        line.accept(new String[] {"l2", "vl4"}, 16);
+        network.newLine().setId("l34").setVoltageLevel1("vl3").setBus1("vl3_b").setConnectableBus1("vl3_b")
+                .setVoltageLevel2("vl4").setBus2("vl4_b").setConnectableBus2("vl4_b").setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        network.newLine().setId("l04").setVoltageLevel1("vl0").setBus1("vl0_b").setConnectableBus1("vl0_b")
+                .setVoltageLevel2("vl4").setBus2("vl4_b").setConnectableBus2("vl4_b").setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        return network;
+    }
+
+    @org.junit.jupiter.api.Test
+    void deviceMiddleSectionLossRenormalizesDistrQTargetMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertMergedPilotLossMatchesCpu(middleSectionLossNetwork(),
+                List.of(new Contingency("bus-mid", new com.powsybl.contingency.BusbarSectionContingency("bbs1"))));
+    }
+
     private void assertMergedPilotLossMatchesCpu(Network network, List<Contingency> ctgs) {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true);

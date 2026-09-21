@@ -805,8 +805,12 @@ public final class GpuAcOuterLoopPacks {
                                 throw new PowsyblException("GPU AC solver: DISTR_Q controller " + gj.getId()
                                         + " has a zero-impedance branch " + brj.getId() + " without a DUMMY_Q variable");
                             }
-                            if (System.getenv("OLF_GPU_DQ3_TRACE") != null
-                                    && dqCol == Integer.parseInt(System.getenv("OLF_GPU_DQ3_TRACE"))) {
+                            // Keyed by dummy-Q column OR, with a leading 'r', by dqROW - when the
+                            // question is "what lands in THIS equation" the column is not known yet.
+                            String dq3 = System.getenv("OLF_GPU_DQ3_TRACE");
+                            if (dq3 != null && (dq3.startsWith("r")
+                                    ? dqRow == Integer.parseInt(dq3.substring(1))
+                                    : dqCol == Integer.parseInt(dq3))) {
                                 System.err.printf("DQ3 gk=%s qpk=%.9f gj=%s side=%d dqRow=%d weight=%.9f"
                                         + " signed=%.9f%n", gk.getId(), qpk, gj.getId(), side, dqRow,
                                         weight, weight * (side == 0 ? 1.0 : -1.0));

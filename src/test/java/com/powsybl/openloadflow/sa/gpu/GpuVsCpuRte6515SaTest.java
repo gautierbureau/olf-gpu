@@ -516,6 +516,19 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             // The comparison can only cover buses BOTH arms reported. Say so out loud: a run whose two
             // arms name their buses differently (busbar-section outages re-split the bus view) used to
             // print "0 of 1" and read like a clean result, when it meant 29831 buses went uncompared.
+            // OLF_GPU_SA_MON_BUS also applies to the BASE. A post-contingency value that equals the
+            // base one to the last bit is a variable that never MOVED - which is what an
+            // unconstrained column looks like, and is indistinguishable from a solved value unless
+            // the base is printed next to it.
+            String monBase = System.getenv("OLF_GPU_SA_MON_BUS");
+            if (monBase != null) {
+                java.util.Set<String> wantBase = java.util.Set.of(monBase.split(","));
+                cpu.getPreContingencyResult().getNetworkResult().getBusResults().stream()
+                        .filter(b -> wantBase.contains(b.getBusId()) && gpuBaseV.containsKey(b.getBusId()))
+                        .forEach(b -> System.out.printf("  MONBUS-BASE bus=%s cpu=%.9f gpu=%.9f d=%.3e%n",
+                                b.getBusId(), b.getV(), gpuBaseV.get(b.getBusId()),
+                                b.getV() - gpuBaseV.get(b.getBusId())));
+            }
             int cpuAll = cpu.getPreContingencyResult().getNetworkResult().getBusResults().size();
             System.out.printf("  BASE BUSDIFF buses>1e-12kV=%d of %d | worst abs=%.3e kV"
                             + " | uncompared: cpu-only=%d gpu-only=%d%n",

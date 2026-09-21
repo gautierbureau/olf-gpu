@@ -8475,6 +8475,42 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 }
             }
         }
+        // OLF_GPU_ROW_PROBE=<row>: that row in EVERY scenario at EVERY iteration - its residual,
+        // its own state, and its non-zero Jacobian entries by column. The DX dump answers "what is
+        // the shared base structure" and the state dump only fits a toy system; neither says what
+        // one row of a 13000-row SCENARIO looks like at convergence, which is the question when a
+        // bus's voltage has not moved by a single bit from the base while the CPU's has.
+        {
+            static const char* rowProbeEnv = std::getenv("OLF_GPU_ROW_PROBE");
+            static int rowProbe = rowProbeEnv != nullptr ? std::atoi(rowProbeEnv) : -1;
+            if (rowProbe >= 0 && rowProbe < n) {
+                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                std::vector<int> hrp(n + 1);
+                CUDA_CHECK(cudaMemcpy(hrp.data(), ctx->st->dRowPtr.p, (size_t) (n + 1) * sizeof(int), cudaMemcpyDeviceToHost));
+                int k0 = hrp[rowProbe];
+                int k1 = hrp[rowProbe + 1];
+                std::vector<int> hci(k1 - k0);
+                CUDA_CHECK(cudaMemcpy(hci.data(), ctx->st->dColIdx.as<int>() + k0, (size_t) (k1 - k0) * sizeof(int), cudaMemcpyDeviceToHost));
+                std::vector<int> hmode(nS);
+                for (int s2 = 0; s2 < nS; s2++) {
+                    double fv = 0;
+                    double xv = 0;
+                    int mv = 0;
+                    CUDA_CHECK(cudaMemcpy(&fv, ctx->dF.as<double>() + (size_t) s2 * n + rowProbe, sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(&xv, ctx->dX.as<double>() + (size_t) s2 * n + rowProbe, sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(&mv, ctx->dMode.as<int>() + (size_t) s2 * n + rowProbe, sizeof(int), cudaMemcpyDeviceToHost));
+                    std::vector<double> hv(k1 - k0);
+                    CUDA_CHECK(cudaMemcpy(hv.data(), ctx->dVals.as<double>() + (size_t) s2 * nnz + k0, (size_t) (k1 - k0) * sizeof(double), cudaMemcpyDeviceToHost));
+                    std::fprintf(stderr, "ROW_PROBE it=%d s=%d row=%d mode=%d F=%.12e x=%.12e nnz=%d :", it, s2, rowProbe, mv, fv, xv, k1 - k0);
+                    for (int k = 0; k < k1 - k0; k++) {
+                        if (hv[k] != 0.0) {
+                            std::fprintf(stderr, " [%d]=%.6e", hci[k], hv[k]);
+                        }
+                    }
+                    std::fprintf(stderr, "\n");
+                }
+            }
+        }
         static const bool linResidOn = std::getenv("OLF_GPU_LIN_RESID") != nullptr;
         if (linResidOn) {
             DeviceBuf rp;

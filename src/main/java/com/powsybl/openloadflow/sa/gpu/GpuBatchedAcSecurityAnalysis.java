@@ -681,6 +681,20 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                         rb.getGenerators().size(), genQ, rb.getLoadTargetQ(),
                         rb.isGeneratorVoltageControlEnabled());
             }
+            // EVERY branch of the network incident to this bus, disabled ones included. getBranches()
+            // is the bus's LIVE list and came back empty while the equation still evaluated non-zero,
+            // so one of the two is lying; this says which, and names the branch either way.
+            if (elem instanceof LfBus ib) {
+                for (LfBranch nb : context.getNetwork().getBranches()) {
+                    if (nb.getBus1() == ib || nb.getBus2() == ib) {
+                        System.err.printf("SA_RESID_INC ctg=%s bus=%s branch=%s num=%d disabled=%s"
+                                + " zeroImp=%s side=%d%n", contingencyId, ib.getId(), nb.getId(),
+                                nb.getNum(), nb.isDisabled(),
+                                nb.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC),
+                                nb.getBus1() == ib ? 1 : 2);
+                    }
+                }
+            }
             // The TERMS of the violated equation, each with its element and its value at the
             // device's state. A bus with no branches and no shunt should have a Q balance with no
             // terms at all; when it evaluates to a round non-zero number something IS in there, and
@@ -698,9 +712,27 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     } catch (RuntimeException ex) {
                         termVal = Double.NaN;
                     }
-                    System.err.printf("SA_RESID_TERM ctg=%s row=%d term=%s elemType=%s elem=%d"
-                            + " value=%.9f%n", contingencyId, row, t.getClass().getSimpleName(),
-                            t.getElementType(), t.getElementNum(), termVal);
+                    // Name the term by its VARIABLES. The element number of an
+                    // EquationTermArrayElementImpl is the array wrapper's, not the branch's, so it
+                    // identifies nothing; the variable list distinguishes a branch flow (v/phi of
+                    // two buses) from a zero-impedance DUMMY_Q, which is the whole question when a
+                    // bus has no branches left.
+                    StringBuilder vars = new StringBuilder();
+                    try {
+                        for (var vv : t.getVariables()) {
+                            vars.append(' ').append(vv.getType()).append('#').append(vv.getElementNum());
+                            if (vv.getType() == AcVariableType.BUS_V || vv.getType() == AcVariableType.BUS_PHI) {
+                                LfBus vb = context.getNetwork().getBus(vv.getElementNum());
+                                vars.append('(').append(vb == null ? "?" : vb.getId())
+                                        .append(vb != null && vb.isDisabled() ? ",DISABLED" : "").append(')');
+                            }
+                        }
+                    } catch (RuntimeException ex) {
+                        vars.append(" <unavailable>");
+                    }
+                    System.err.printf("SA_RESID_TERM ctg=%s row=%d term=%s elemType=%s value=%.9f vars:%s%n",
+                            contingencyId, row, t.getClass().getSimpleName(),
+                            t.getElementType(), termVal, vars);
                 }
             }
             // For a violated DISTR_Q, OLF's own q for EVERY member of the group, evaluated at the

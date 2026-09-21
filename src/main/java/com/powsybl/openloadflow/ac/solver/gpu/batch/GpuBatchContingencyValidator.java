@@ -186,6 +186,16 @@ public final class GpuBatchContingencyValidator {
             // PropagatedContingency does (setMainComponentVertex + getVerticesRemovedFromMainComponent).
             connectivity.setMainComponentVertex(slack);
             Set<LfBus> islanded = connectivity.getVerticesRemovedFromMainComponent();
+            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                // What this pass CUT and what it FOUND. The CPU derives its lost buses from the same
+                // kind of pass on its own per-contingency topology; when the two disagree on a bus,
+                // the edge lists are the only way to see whether the graphs differ or the cuts do.
+                System.err.printf("QUALIFY_TRACE islanding %s: cut=%s -> islanded=%s%n",
+                        contingency.contingencyId(),
+                        closed.stream().map(b -> b.getId() + "(" + (b.getBus1() == null ? "-" : b.getBus1().getId())
+                                + "," + (b.getBus2() == null ? "-" : b.getBus2().getId()) + ")").toList(),
+                        islanded.stream().map(LfBus::getId).toList());
+            }
             for (LfBranch zi : contingency.outagedZiBranches()) {
                 if (!islanded.contains(zi.getBus1()) && !islanded.contains(zi.getBus2())) {
                     LOGGER.debug("Contingency {} rejected: switch outage {} leaves both sides energized "

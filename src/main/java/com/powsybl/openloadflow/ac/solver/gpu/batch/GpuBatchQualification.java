@@ -233,10 +233,25 @@ final class GpuBatchQualification {
                 }
                 continue;
             }
-            var vc = bus.getGeneratorVoltageControl().orElse(null);
+            // The MAIN control, and its MERGED element list. A bus whose control was merged into
+            // another's is DEPENDENT: its own object describes only itself, and a MAIN control's
+            // own controllerElements omits the members merged into it - so on either object a
+            // merged survivor is invisible, and a pilot that loses its only local generator looks
+            // like a whole group leaving with the island. rte6515 BUS-1115_BBS_1: pilot VL-1115_0
+            // islanded, merged survivor VL-1115_1 left with a DISTR_Q row and no Q balance of its
+            // own, V frozen at the base value, 0.373 kV.
+            var vc = bus.getGeneratorVoltageControl()
+                    .<com.powsybl.openloadflow.network.GeneratorVoltageControl>map(
+                            com.powsybl.openloadflow.network.VoltageControl::getMainVoltageControl)
+                    .orElse(null);
+            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                System.err.printf("QUALIFY_TRACE vcSplit-enter bus=%s hasVc=%b distrQ=%b merge=%s%n", bus.getId(),
+                        vc != null, es.getEquation(bus.getNum(), AcEquationType.DISTR_Q).isPresent(),
+                        vc == null ? "-" : vc.getMergeStatus());
+            }
             boolean remoteGroupMember = es.getEquation(bus.getNum(), AcEquationType.DISTR_Q).isPresent()
                     || vc != null && (vc.getControlledBus() != bus
-                            || vc.getControllerElements().stream().anyMatch(cb -> cb != bus));
+                            || vc.getMergedControllerElements().stream().anyMatch(cb -> cb != bus));
             if (!remoteGroupMember) {
                 continue;
             }
@@ -244,9 +259,20 @@ final class GpuBatchQualification {
                 return VcSplit.UNMODELED;                    // DISTR_Q row with no reachable control handle
             }
             boolean pilotIslanded = islanded.contains(vc.getControlledBus());
-            List<LfBus> surviving = vc.getControllerElements().stream()
+            List<LfBus> surviving = vc.getMergedControllerElements().stream()
                     .filter(cb -> !islanded.contains(cb))
                     .toList();
+            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                // The group decision, with BOTH element lists: a MAIN control's own controllerElements
+                // omits the members that were MERGED into it, so a survivor that lives only in the
+                // merged list is invisible to this decision.
+                System.err.printf("QUALIFY_TRACE vcSplit bus=%s merge=%s pilot=%s pilotIslanded=%b"
+                                + " controllers=%s merged=%s surviving=%s%n",
+                        bus.getId(), vc.getMergeStatus(), vc.getControlledBus().getId(), pilotIslanded,
+                        vc.getControllerElements().stream().map(LfBus::getId).toList(),
+                        vc.getMergedControllerElements().stream().map(LfBus::getId).toList(),
+                        surviving.stream().map(LfBus::getId).toList());
+            }
             if (pilotIslanded && surviving.isEmpty()) {
                 continue;                                    // the whole group left with the island
             }
@@ -599,6 +625,70 @@ final class GpuBatchQualification {
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ZI_OUTAGE_SHAPE");
                         continue;
                     }
+                    frozenRowsByIndex[i] = fi.rows();
+                    frozenTargetsByIndex[i] = fi.targets();
+                    if (fi.rows().length > 0) {
+                        islandingCount++;
+                    }
+                } else if (!q.islandedBuses().isEmpty()) {
+                    // An injection outage whose propagation ISLANDS buses without any full branch
+                    // outage: a busbar section whose loss is expressed as a switch outage plus a
+                    // side-open (busIdsToLose is EMPTY - the bus is lost by connectivity alone). This
+                    // tail used to drop the island on the floor: no frozen rows, no control-death
+                    // check, the islanded pilot's voltage identity left live and its group
+                    // renormalised as if alive. OLF disables the islanded bus and, when it was a
+                    // group's pilot, kills the control and hands every surviving member its own
+                    // reactive balance. Do the same here, with the machinery the branch-outage tail
+                    // already has.
+                    List<LfBus> lostVcControllers = new ArrayList<>();
+                    List<LfBus> deadControlBuses = new ArrayList<>();
+                    List<com.powsybl.openloadflow.network.LfHvdc> islandedHvdcs = new ArrayList<>();
+                    VcSplit vcSplit = classifyVcSplit(es, q.islandedBuses(), lostVcControllers, deadControlBuses,
+                            islandedHvdcs);
+                    if (vcSplit == VcSplit.UNMODELED || vcSplit == VcSplit.RENORMALIZE || !islandedHvdcs.isEmpty()) {
+                        // RENORMALIZE would have to compose with this path's own generator-outage
+                        // rediff - conservative, CPU. Same tag the branch tail uses, so the census
+                        // keeps counting the shape in one place.
+                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");
+                        continue;
+                    }
+                    FrozenIsland fi = islandedFrozen(es, q.islandedBuses());
+                    islandedNumsByIndex[i] = q.islandedBuses().stream().mapToInt(LfBus::getNum).toArray();
+                    java.util.Set<Integer> frozenSet = java.util.Arrays.stream(fi.rows()).boxed()
+                            .collect(java.util.stream.Collectors.toSet());
+                    // A generator outage ON the island is moot: the bus's rows are frozen, its scheduled
+                    // active power is already excluded from the loss (scheduledActivePowerLoss skips
+                    // islanded buses), and its group effect is the control death handled below. Keep
+                    // only the entries that act on live rows.
+                    List<GenOutage> live = new ArrayList<>();
+                    for (GenOutage go : gos) {
+                        if (!frozenSet.contains(go.pRow()) && !frozenSet.contains(go.vRow())) {
+                            live.add(go);
+                        }
+                    }
+                    if (!deadControlBuses.isEmpty()) {
+                        for (LfBus sb : deadControlBuses) {
+                            var vVar = es.getVariableSet().getVariable(sb.getNum(), AcVariableType.BUS_V);
+                            if (vVar == null || vVar.getRow() < 0 || frozenSet.contains(vVar.getRow())) {
+                                live = null;
+                                break;
+                            }
+                            live.add(new GenOutage(-1, 0, vVar.getRow(), sb.getTargetQ(), true, true,
+                                    -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
+                                    new int[0], new double[0], 1, -1, 0, -1, 0, -1, 0));
+                        }
+                        if (live == null) {
+                            com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");
+                            continue;
+                        }
+                    }
+                    if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                        System.err.printf("QUALIFY_TRACE island-injection %s: split=%s frozenRows=%d dropped=%d"
+                                + " deadControl=%s%n", c.contingencyId(), vcSplit, fi.rows().length,
+                                gos.length - (live.size() - deadControlBuses.size()),
+                                deadControlBuses.stream().map(LfBus::getId).toList());
+                    }
+                    gos = live.toArray(new GenOutage[0]);
                     frozenRowsByIndex[i] = fi.rows();
                     frozenTargetsByIndex[i] = fi.targets();
                     if (fi.rows().length > 0) {

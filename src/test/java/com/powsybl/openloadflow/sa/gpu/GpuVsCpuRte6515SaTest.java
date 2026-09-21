@@ -586,6 +586,11 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // second parse never lands inside a measured region.
         Network networkGpuCold = Network.read(CASE_FILE);
         Network networkGpuWarm = Network.read(CASE_FILE);
+        // OLF_GPU_SA_CPU_WARM=1: time the CPU arm TWICE, like the GPU arm. The first CPU run is the
+        // JVM's first SA and pays JIT compilation the GPU arms never see, so the cold-vs-cold ratio
+        // flatters the GPU. The ratios are then quoted against CPU warm.
+        boolean cpuWarmRun = "1".equals(System.getenv("OLF_GPU_SA_CPU_WARM"));
+        Network networkCpuWarm = cpuWarmRun ? Network.read(CASE_FILE) : null;
 
         long cpuT0 = System.nanoTime();
         // With a single contingency under the lens, monitor every voltage level: whether the two arms
@@ -670,6 +675,17 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 return;
             }
         }
+        // OLF_GPU_SA_CPU_WARM=1: time the CPU arm TWICE, like the GPU arm. The first CPU run is the JVM's first SA
+        // and pays JIT compilation the GPU arms never see, so the cold-vs-cold ratio flatters the GPU. The ratios
+        // are quoted against CPU warm. Not available with a loaded (separate-JVM) CPU arm.
+        long cpuWarmMs = -1;
+        if (cpuWarmRun && !"load".equals(cpuArmMode) && networkCpuWarm != null) {
+            long cpuT1 = System.nanoTime();
+            SecurityAnalysisResult cpuWarm = runSecurityAnalysis(networkCpuWarm, contingencies, monitors, sap);
+            cpuWarmMs = (System.nanoTime() - cpuT1) / 1_000_000;
+            System.out.printf("  CPU warm run: violations=%d statuses=%s%n", violationCount(cpuWarm), statusCounts(cpuWarm));
+        }
+        long cpuRefMs = cpuWarmMs > 0 ? cpuWarmMs : cpuMs;
 
         // GPU arm: single-thread, cold + warm runs
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(new SparseMatrixFactory(),
@@ -702,6 +718,14 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             // GPU runs host-single-threaded (threadCount > 1 → SIGSEGV in cuLaunchKernel)
 
             GpuBatchScopeCensus.reset();
+            // OLF_GPU_SA_JFR=<file.jfr>: a Flight Recorder profile of the COLD GPU run only — network
+            // reading, the CPU arm and the warm run stay out of the samples.
+            String jfrOut = System.getenv("OLF_GPU_SA_JFR");
+            jdk.jfr.Recording jfr = null;
+            if (jfrOut != null) {
+                jfr = new jdk.jfr.Recording(jdk.jfr.Configuration.getConfiguration("profile"));
+                jfr.start();
+            }
             long g0 = System.nanoTime();
             {
                 SecurityAnalysisResult raw = runSecurityAnalysis(networkGpuCold, contingencies, monitors, sapGpu);
@@ -709,6 +733,12 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 gpuCold = gpuSpill != null ? gpuSpill.spill(raw) : raw;
                 raw = null;
                 System.gc();
+            }
+            if (jfr != null) {
+                jfr.stop();
+                jfr.dump(Path.of(jfrOut));
+                jfr.close();
+                System.out.printf("  JFR profile of the cold GPU run written to %s%n", jfrOut);
             }
 
             // Check census: how many contingencies fell back to CPU?
@@ -737,11 +767,16 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // Report timing
         int n = contingencies.size();
         System.out.printf("%nRTE6515 SA BENCHMARK | %d contingencies | RTE production params%n", n);
-        System.out.printf("  CPU  (%2d threads) : %6d ms | %.2f ms/ctg%n", cpuThreads, cpuMs, cpuMs / (double) n);
+        System.out.printf("  CPU  (%2d threads) : %6d ms | %.2f ms/ctg%s%n", cpuThreads, cpuMs, cpuMs / (double) n,
+                cpuWarmMs > 0 ? " (COLD)" : "");
+        if (cpuWarmMs > 0) {
+            System.out.printf("  CPU  (%2d threads) : %6d ms | %.2f ms/ctg (warm) — the reference below%n",
+                    cpuThreads, cpuWarmMs, cpuWarmMs / (double) n);
+        }
         System.out.printf("  GPU  (COLD)       : %6d ms | %.2f ms/ctg | vs CPU x%.2f%n",
-                gpuColdMs, gpuColdMs / (double) n, (double) cpuMs / gpuColdMs);
+                gpuColdMs, gpuColdMs / (double) n, (double) cpuRefMs / gpuColdMs);
         System.out.printf("  GPU  (warm)       : %6d ms | %.2f ms/ctg | vs CPU x%.2f%n",
-                gpuWarmMs, gpuWarmMs / (double) n, (double) cpuMs / gpuWarmMs);
+                gpuWarmMs, gpuWarmMs / (double) n, (double) cpuRefMs / gpuWarmMs);
         System.out.printf("  pre-ctg: CPU=%s GPU=%s%n",
                 cpu.getPreContingencyResult().getStatus(), gpuCold.getPreContingencyResult().getStatus());
         // The BASE load flow, bus by bus. Every post-contingency state is computed FROM the base, so a

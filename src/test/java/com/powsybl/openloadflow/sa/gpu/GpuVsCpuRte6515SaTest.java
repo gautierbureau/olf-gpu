@@ -304,6 +304,45 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // OLF_GPU_DBG_CONV_EPS: tighten the inner-Newton criterion on BOTH arms. The only honest way to
         // tell a real state difference from convergence slack is to squeeze the slack and watch what
         // survives — see the standing rule against calling a difference a tolerance artefact unproven.
+        // OLF_GPU_DBG_RL: TRACE the CPU arm's ReactiveLimitsOuterLoop, so every PV<->PQ switch it
+        // makes (bus id, q, qLimit) can be diffed against the device's GPU_RL / GPU_RL_FINAL pin
+        // list. A pin the device makes and OLF does not is invisible in any residual - the device
+        // converges cleanly against the WRONG equation - so the two switch lists are the only
+        // direct evidence. Ported from GpuVsCpuProductionSaBenchmarkTest; the harness has no
+        // appender configured (core/classic version mismatch), so attach one.
+        if (System.getenv("OLF_GPU_DBG_RL") != null) {
+            ch.qos.logback.classic.Logger rlLog = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                    .getLogger("com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop");
+            rlLog.setLevel(ch.qos.logback.classic.Level.TRACE);
+            ch.qos.logback.classic.Logger root = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                    .getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+            if (!root.iteratorForAppenders().hasNext()) {
+                ch.qos.logback.classic.encoder.PatternLayoutEncoder enc =
+                        new ch.qos.logback.classic.encoder.PatternLayoutEncoder();
+                enc.setContext(root.getLoggerContext());
+                enc.setPattern("CPU_RL %msg%n");
+                enc.start();
+                ch.qos.logback.core.ConsoleAppender<ch.qos.logback.classic.spi.ILoggingEvent> ca =
+                        new ch.qos.logback.core.ConsoleAppender<>();
+                ca.setContext(root.getLoggerContext());
+                ca.setEncoder(enc);
+                ca.start();
+                rlLog.addAppender(ca);
+            }
+        }
+        // OLF_GPU_SA_NO_RL / OLF_GPU_SA_NO_DS: disable an outer loop on BOTH arms. Stage isolation -
+        // inner Newton only, vs +DS, vs +DS+RL - to find which stage first introduces a divergence.
+        // Decisive for a suspected PIN mismatch: if the arms agree with reactive limits OFF, the
+        // underlying power flow (and every bus q) agrees and the fault is in the pin DECISION; if
+        // they still disagree, q itself is wrong and the pin is only reporting it.
+        if ("1".equals(System.getenv("OLF_GPU_SA_NO_RL"))) {
+            lfp.setUseReactiveLimits(false);
+            System.out.println("  reactive limits DISABLED on both arms (OLF_GPU_SA_NO_RL=1)");
+        }
+        if ("1".equals(System.getenv("OLF_GPU_SA_NO_DS"))) {
+            lfp.setDistributedSlack(false);
+            System.out.println("  distributed slack DISABLED on both arms (OLF_GPU_SA_NO_DS=1)");
+        }
         String convEpsEnv = System.getenv("OLF_GPU_DBG_CONV_EPS");
         if (convEpsEnv != null) {
             com.powsybl.openloadflow.OpenLoadFlowParameters.get(lfp)

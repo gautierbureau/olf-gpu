@@ -484,9 +484,15 @@ public final class GpuAcOuterLoopPacks {
         }
         if (System.getenv("OLF_GPU_RL_PACK_DUMP") != null) {
             for (int i = 0; i < rlBusNum.size(); i++) {
-                System.err.printf("RL_PACK entry=%d bus=%s vRow=%d minQ=%.9f maxQ=%.9f remote=%d monitored=%d%n",
+                // cmpVrow is the row whose V the switch condition reads - for a REMOTE member that is
+                // the PILOT's row, not the member's own, so a pin that looks unexplainable from the
+                // member alone is often the pilot's V. loadQ and vTarget complete the pin target
+                // (OLF pins at limit - loadTargetQ), which is the other half of any pin mismatch.
+                System.err.printf("RL_PACK entry=%d bus=%s vRow=%d minQ=%.9f maxQ=%.9f remote=%d"
+                        + " monitored=%d cmpVrow=%d loadQ=%.9f vTarget=%.9f%n",
                         i, network.getBus(rlBusNum.get(i)).getId(), rlVrow.get(i), rlMinQ.get(i), rlMaxQ.get(i),
-                        rlRemote.get(i), rlMonitored.get(i));
+                        rlRemote.get(i), rlMonitored.get(i), rlCmpVrow.get(i), rlLoadQ.get(i),
+                        rlVtarget.get(i));
             }
         }
 

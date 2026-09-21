@@ -320,6 +320,11 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             ch.qos.logback.classic.Logger monLog = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
                     .getLogger("com.powsybl.openloadflow.ac.outerloop.MonitoringVoltageOuterLoop");
             monLog.setLevel(ch.qos.logback.classic.Level.TRACE);
+            // ...and the HVDC AC-emulation freeze: its per-contingency setpoint (Reports.reportFreezeHvdc,
+            // INFO) is the third decision that leaves no residual - the frozen P IS the equation.
+            ch.qos.logback.classic.Logger hvLog = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                    .getLogger("com.powsybl.openloadflow.ac.outerloop.FreezingHvdcACEmulationOuterloop");
+            hvLog.setLevel(ch.qos.logback.classic.Level.TRACE);
             ch.qos.logback.classic.Logger root = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
                     .getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
             if (!root.iteratorForAppenders().hasNext()) {
@@ -335,6 +340,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 ca.start();
                 rlLog.addAppender(ca);
                 monLog.addAppender(ca);
+                hvLog.addAppender(ca);
             }
         }
         // OLF_GPU_SA_NO_RL / OLF_GPU_SA_NO_DS: disable an outer loop on BOTH arms. Stage isolation -

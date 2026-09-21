@@ -1100,6 +1100,12 @@ final class GpuBatchChunkSolver {
                         hvAppliedD2 = new double[chunkSize * hvdcControllers.size()];
                         preHvdcOvIdx = new ArrayList<>(overrides.indexList());
                         preHvdcOvVal = new ArrayList<>(overrides.valueList());
+                        if (System.getenv("OLF_GPU_HVDC_TRACE") != null) {
+                            for (int s = 0; s < realCount; s++) {
+                                System.err.println("HVDC_SLOT s=" + s + " ctg="
+                                        + contingencies.get(group.get(chunkStart + s)).contingencyId());
+                            }
+                        }
                         if (config.hvdcFreezing()) {
                             hvdcStatus = GpuBatchHvdcAcEmulation.applyFreeze(chunkSize, realCount, n, hvdcControllers,
                                     baseState, x0Full, disabledMask, baseTargets, overrides.mutableIndexList(),
@@ -1306,6 +1312,17 @@ final class GpuBatchChunkSolver {
                         if (devStatus != null) {
                             for (int s2 = 0; s2 < chunkSize; s2++) {
                                 System.arraycopy(devStatus, s2 * nh, hvdcStatus[s2], 0, nh);
+                            }
+                            if (System.getenv("OLF_GPU_HVDC_TRACE") != null) {
+                                // the status each scenario ENDED with (0 linear, 1/2 saturated, 3 frozen)
+                                for (int s2 = 0; s2 < realCount; s2++) {
+                                    StringBuilder sb = new StringBuilder();
+                                    for (int h = 0; h < nh; h++) {
+                                        sb.append(' ').append(hvdcStatus[s2][h]);
+                                    }
+                                    System.err.println("HVDC_END s=" + s2 + " ctg="
+                                            + contingencies.get(group.get(chunkStart + s2)).contingencyId() + " status:" + sb);
+                                }
                             }
                             // Re-derive the host's OVERRIDE LIST and hv bits from those statuses, on
                             // top of the PRE-FREEZE list. Syncing only the bits is not enough: every

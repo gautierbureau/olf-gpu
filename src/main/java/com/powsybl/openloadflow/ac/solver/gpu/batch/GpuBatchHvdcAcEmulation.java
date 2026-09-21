@@ -177,6 +177,9 @@ public final class GpuBatchHvdcAcEmulation {
 
     /** OLF switchToFrozenState at the given (warm-start) evaluation point: pMax-clamped when the
      *  linear flows overpass the limits, else pinned at the current flows. */
+    private static final int HVDC_TRACE_ROW = System.getenv("OLF_GPU_HVDC_TRACE") == null ? -1
+            : "all".equals(System.getenv("OLF_GPU_HVDC_TRACE")) ? -2 : Integer.parseInt(System.getenv("OLF_GPU_HVDC_TRACE"));
+
     private static double[] frozenDeltas(Ctl c, double p1, double p2) {
         if (p1 > c.pMax12()) {
             return saturationDeltas(c, true);
@@ -247,6 +250,17 @@ public final class GpuBatchHvdcAcEmulation {
                     continue;                                // outaged hvdc — stays as the contingency left it
                 }
                 double[] d = frozenDeltas(c, c.p1At(warm), c.p2At(warm));
+                if (HVDC_TRACE_ROW == -2 || (HVDC_TRACE_ROW >= 0 && (c.bus1PhiRow() == HVDC_TRACE_ROW || c.bus2PhiRow() == HVDC_TRACE_ROW))) {
+                    // OLF_GPU_HVDC_TRACE=<phiRow>: what this scenario's freeze fixed the hvdc at - the
+                    // flows read at the warm-start state and the deltas that go into the two converter
+                    // rows. OLF freezes each contingency at its own restored base angles; a scenario
+                    // whose warm start is not the base freezes at different flows and nothing else
+                    // in the residual will say so (the frozen P IS the equation).
+                    System.err.printf("HVDC_FREEZE s=%d h=%d row1=%d row2=%d warmIsBase=%b p1=%.9f p2=%.9f d1=%.9f d2=%.9f"
+                            + " baseD1=%.9f baseD2=%.9f pMax12=%.6f pMax21=%.6f%n", s, h, c.bus1PhiRow(), c.bus2PhiRow(),
+                            x0PerScenario == null, c.p1At(warm), c.p2At(warm), d[0], d[1], c.baseD1(), c.baseD2(),
+                            c.pMax12(), c.pMax21());
+                }
                 if (appliedD1 != null) {
                     appliedD1[s * ctls.size() + h] = d[0] - c.baseD1();
                     appliedD2[s * ctls.size() + h] = d[1] - c.baseD2();

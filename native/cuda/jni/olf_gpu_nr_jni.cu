@@ -44,6 +44,7 @@
 #include <cublas_v2.h>
 
 #include <algorithm>
+#include <map>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -261,6 +262,10 @@ constexpr OlfReorderAlg REORDER_ALGS[] = {CUDSS_ALG_DEFAULT, CUDSS_ALG_1, CUDSS_
 // large entries onto the diagonal first. Override with OLF_GPU_MATCHING_ALG=<0..6>
 // (0 disables; see cudssMatchingAlg_t), mainly to reproduce the failure above.
 // ---------------------------------------------------------------------------------
+// MATCHING IS NOT AVAILABLE TO THE BATCHED NR: cuDSS 0.8.0 rejects it at the uniform-batch analysis
+// (status 4; the library string reads "Matching is not supported for uniform batches"), so the batched
+// path repairs its zero diagonals itself — see hazRepairVals. What follows is the standalone case.
+//
 // MATCHING IS NOT OPTIONAL ON THESE JACOBIANS. A bus fed ONLY through a zero-impedance branch
 // leaves four rows with a numerically ZERO diagonal — the branch's ZERO_V / ZERO_PHI (which carry
 // v1-v2 and phi1-phi2, never their own dummy) and the dead-end bus's P / Q balances (which carry
@@ -1126,6 +1131,145 @@ __global__ void linResidRow(int n, const int* rowPtr, const int* colIdx, const d
 
 // Batched twin of linResidRow: every scenario has its OWN values block (stride nnz) and its own
 // dx / F block (stride n), over the SHARED sparsity pattern.
+// ---------------------------------------------------------------------------------------------
+// ZERO-DIAGONAL ROW REPAIR. The batched solve runs cuDSS without pivoting or matching (neither is
+// supported for uniform batches), on the promise that the diagonal-pairing row permutation leaves
+// every row a nonzero diagonal. A zero-impedance CLUSTER breaks that promise twice over: the couplers'
+// ZERO_V / ZERO_PHI rows never carry their own dummy, and a section whose only branches are couplers
+// has P and Q rows made of dummies alone — as a plain balance (the dead-end relocation covers that
+// one shape) or, with a generator on every section, as the merged group's DISTR_Q rows, which the
+// relocation must not touch. cuDSS then perturbs the zero pivot and returns a wrong STEP with a
+// converging trajectory: measured on rte6515's 500-busbar structure at VL-1113, ||J.dx-F||inf = 82
+// for ||F||inf = 1.24 on the first step of EVERY scenario, and the answer differs from OLF's wherever
+// OLF stops one iteration short (BUS-1196_BBS, 5.157e-02 kV).
+//
+// The repair is numeric and per scenario, applied to the assembled values right before they are
+// factorized: a row whose diagonal is exactly zero borrows a row that carries its diagonal column,
+//     row_r += s_r * row_d          (values AND right-hand side)
+// which leaves J dx = -F with the same solution (the combination matrix is nonsingular: bus rows
+// borrow with +1, dummy rows with -1, and on a spanning tree the borrowing closes only in 2-cycles,
+// det 2). Candidates are structural — a dummy row's two endpoint rows (and the pilot-Q relocation
+// candidates when an endpoint's Q rides there), an endpoint row's incident couplers' dummy rows —
+// and the choice is numeric, so a coupler switched off or a section pinned to identity this scenario
+// simply is not a donor (an identity row has nothing but its own 1). Every right-hand side handed to
+// those factors goes through the same combination (the unit vectors of the sensitivity solves too).
+// The pattern carries the union of each row with its candidates so the addition lands in place.
+// ---------------------------------------------------------------------------------------------
+__device__ inline int csrFind(const int* rowPtr, const int* colIdx, int row, int col) {
+    int lo = rowPtr[row];
+    int hi = rowPtr[row + 1];
+    while (lo < hi) {
+        int mid = (lo + hi) >> 1;
+        if (colIdx[mid] < col) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return (lo < rowPtr[row + 1] && colIdx[lo] == col) ? lo : -1;
+}
+
+__global__ void hazSnapshotVals(int nHaz, int nS, int nnz, int hazTot, const int* hazRow, const int* hazOff,
+                                const int* rowPtr, const double* vals, double* snap) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nHaz * nS) return;
+    int i = tid % nHaz;
+    int s = tid / nHaz;
+    int r = hazRow[i];
+    const double* v = vals + (size_t) s * nnz;
+    double* o = snap + (size_t) s * hazTot + hazOff[i];
+    for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
+        o[k - rowPtr[r]] = v[k];
+    }
+}
+
+__global__ void hazRepairVals(int nHaz, int nS, int nnz, int hazTot, const int* hazRow, const int* hazOff,
+                              const int* hazDonorPtr, const int* hazDonor, const int* hazDonorHaz,
+                              const char* hazSign, const int* rowPtr, const int* colIdx, const int* diagPos,
+                              const double* snap, double* vals, int* choice) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nHaz * nS) return;
+    int i = tid % nHaz;
+    int s = tid / nHaz;
+    int r = hazRow[i];
+    double* v = vals + (size_t) s * nnz;
+    choice[(size_t) s * nHaz + i] = -1;
+    if (v[diagPos[r]] != 0.0) return;                        // a real (or identity) diagonal: nothing to do
+    const double* sn = snap + (size_t) s * hazTot;
+    double sgn = hazSign[i];
+    for (int j = hazDonorPtr[i]; j < hazDonorPtr[i + 1]; j++) {
+        int d = hazDonor[j];
+        int hd = hazDonorHaz[j];                             // donor's own hazard slot (its ORIGINAL row is in snap)
+        int p = csrFind(rowPtr, colIdx, d, r);
+        if (p < 0) continue;
+        double coef = hd >= 0 ? sn[hazOff[hd] + (p - rowPtr[d])] : v[p];
+        if (coef == 0.0) continue;                           // this donor does not carry my column this scenario
+        for (int k = rowPtr[d]; k < rowPtr[d + 1]; k++) {
+            double dv = hd >= 0 ? sn[hazOff[hd] + (k - rowPtr[d])] : v[k];
+            if (dv == 0.0) continue;
+            int q = csrFind(rowPtr, colIdx, r, colIdx[k]);
+            if (q >= 0) v[q] += sgn * dv;
+        }
+        choice[(size_t) s * nHaz + i] = j;
+        return;
+    }
+}
+
+__global__ void hazSnapshotB(int nHaz, int nS, int n, const int* hazRow, const double* B, double* bsnap) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nHaz * nS) return;
+    int i = tid % nHaz;
+    int s = tid / nHaz;
+    bsnap[tid] = B[(size_t) s * n + hazRow[i]];
+}
+
+__global__ void hazRepairRhs(int nHaz, int nS, int n, const int* hazRow, const int* hazDonor, const int* hazDonorHaz,
+                             const char* hazSign, const int* choice, const double* bsnap, double* B) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nHaz * nS) return;
+    int i = tid % nHaz;
+    int s = tid / nHaz;
+    int j = choice[tid];
+    if (j < 0) return;
+    int d = hazDonor[j];
+    int hd = hazDonorHaz[j];
+    double bd = hd >= 0 ? bsnap[(size_t) s * nHaz + hd] : B[(size_t) s * n + d];
+    B[(size_t) s * n + hazRow[i]] += hazSign[i] * bd;
+}
+
+template <typename Ctx>
+static void hazRepairValues(Ctx* ctx, int nS, double* vals) {
+    auto* st = ctx->st.get();
+    if (st->nHaz == 0) return;
+    if (ctx->hazCap < nS) {
+        ctx->dHazSnap.alloc((size_t) nS * st->hazTot * sizeof(double));
+        ctx->dHazBSnap.alloc((size_t) nS * st->nHaz * sizeof(double));
+        ctx->dHazChoice.alloc((size_t) nS * st->nHaz * sizeof(int));
+        ctx->hazCap = nS;
+    }
+    int nnz = st->nnz;
+    hazSnapshotVals<<<((st->nHaz * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nHaz, nS, nnz, st->hazTot,
+            st->dHazRow.template as<int>(), st->dHazOff.template as<int>(), st->dRowPtr.template as<int>(), vals, ctx->dHazSnap.template as<double>());
+    hazRepairVals<<<((st->nHaz * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nHaz, nS, nnz, st->hazTot,
+            st->dHazRow.template as<int>(), st->dHazOff.template as<int>(), st->dHazDonorPtr.template as<int>(), st->dHazDonor.template as<int>(),
+            st->dHazDonorHaz.template as<int>(), st->dHazSign.template as<char>(), st->dRowPtr.template as<int>(), st->dColIdx.template as<int>(),
+            st->dDiagPos.template as<int>(), ctx->dHazSnap.template as<double>(), vals, ctx->dHazChoice.template as<int>());
+}
+
+/** The same combination on a right-hand side (nS scenarios from {@code B}, choices from the last
+ *  hazRepairValues on this context; {@code sOff} selects the scenario block for a per-scenario call). */
+template <typename Ctx>
+static void hazRepairRightHandSide(Ctx* ctx, int nS, double* B, int sOff = 0) {
+    auto* st = ctx->st.get();
+    if (st->nHaz == 0 || ctx->hazCap < sOff + nS) return;
+    int n = st->n;
+    double* bsnap = ctx->dHazBSnap.template as<double>() + (size_t) sOff * st->nHaz;
+    hazSnapshotB<<<((st->nHaz * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nHaz, nS, n, st->dHazRow.template as<int>(), B, bsnap);
+    hazRepairRhs<<<((st->nHaz * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nHaz, nS, n, st->dHazRow.template as<int>(),
+            st->dHazDonor.template as<int>(), st->dHazDonorHaz.template as<int>(), st->dHazSign.template as<char>(),
+            ctx->dHazChoice.template as<int>() + (size_t) sOff * st->nHaz, bsnap, B);
+}
+
 __global__ void linResidRowBatch(int n, int nS, int nnz, const int* rowPtr, const int* colIdx,
                                  const double* vals, const double* dx, const double* F,
                                  double* rPlus, double* rMinus) {
@@ -1544,6 +1688,9 @@ struct SharedStructure {
     std::vector<int> hQrPtr, hQrRows;                        // tables [fallback row, member rows...] per group
     DeviceBuf dQrPtr, dQrRows;                               // (rows in DEVICE row space, rowMap applied)
     DeviceBuf dRowPtr, dColIdx, dDiagPos;                    // device CSR pattern + guaranteed-diagonal slots
+    int nHaz = 0, hazTot = 0;                                // zero-diagonal repair: hazard rows and their
+    std::vector<int> hHazRow;                                // donor candidates (see hazRepairVals)
+    DeviceBuf dHazRow, dHazOff, dHazDonorPtr, dHazDonor, dHazDonorHaz, dHazSign;
     double luBytes = 0.0;                                    // cached LU-probe footprint (0 = not probed yet)
 };
 
@@ -1875,6 +2022,74 @@ SharedStructure* buildStructure(int n,
     for (int e = 0; e < nvdl; e++) {                         // voltage-dependent load: (row, own-V) slot
         pat.emplace_back(vdlIdx[e * 2], vdlIdx[e * 2 + 1]);
     }
+    // ---- zero-diagonal repair tables (hazRepairVals): hazard rows + donor candidates, then the
+    //      pattern union so a borrowed row lands in place ----
+    std::vector<int> hazRows;
+    std::vector<std::vector<int>> hazDonors;
+    std::vector<char> hazSigns;
+    {
+        std::map<int, int> hazSlot;                          // physical row -> hazard slot
+        auto slotOf = [&](int row, char sign) {
+            auto it = hazSlot.find(row);
+            if (it != hazSlot.end()) return it->second;
+            int i = static_cast<int>(hazRows.size());
+            hazSlot[row] = i;
+            hazRows.push_back(row);
+            hazDonors.emplace_back();
+            hazSigns.push_back(sign);
+            return i;
+        };
+        auto addDonor = [&](int slot, int donor) {
+            if (donor < 0 || donor == hazRows[slot]) return;
+            auto& v = hazDonors[slot];
+            if (std::find(v.begin(), v.end(), donor) == v.end()) v.push_back(donor);
+        };
+        for (int e = 0; e < nzi; e++) {
+            const int* z = ziIdx + static_cast<size_t>(e) * 11;
+            if (!ziSpan(z) || ziDeadSide(z) != 0) continue;  // loop edge: identity dummies; stub: relocated
+            int dP = rowMap[ziZeroPhiRow(z)];
+            int dQ = rowMap[ziZeroVRow(z)];
+            int pa = z[0] >= 0 ? rowMap[z[0]] : -1;
+            int pb = z[2] >= 0 ? rowMap[z[2]] : -1;
+            int qaRow = z[1] >= 0 ? z[1] : z[6];             // suppressed Q balance: the V slot hosts DISTR_Q
+            int qbRow = z[3] >= 0 ? z[3] : z[7];
+            int qa = qaRow >= 0 ? rowMap[qaRow] : -1;
+            int qb = qbRow >= 0 ? rowMap[qbRow] : -1;
+            int sP = slotOf(dP, -1);
+            int sQ = slotOf(dQ, -1);
+            addDonor(sP, pa);
+            addDonor(sP, pb);
+            addDonor(sQ, qa);
+            addDonor(sQ, qb);
+            for (int side = 0; side < 2; side++) {           // endpoint Q riding a relocation group
+                int alt = ziQAlt[e * 2 + side];
+                if (alt <= -2 && !st->hQrPtr.empty()) {
+                    int g = -2 - alt;
+                    for (int c = st->hQrPtr[g]; c < st->hQrPtr[g + 1]; c++) addDonor(sQ, st->hQrRows[c]);
+                }
+            }
+            if (pa >= 0) addDonor(slotOf(pa, 1), dP);
+            if (pb >= 0) addDonor(slotOf(pb, 1), dP);
+            if (qa >= 0) addDonor(slotOf(qa, 1), dQ);
+            if (qb >= 0) addDonor(slotOf(qb, 1), dQ);
+        }
+        if (!hazRows.empty()) {
+            std::vector<std::pair<int, int>> sorted(pat);
+            std::sort(sorted.begin(), sorted.end());
+            sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+            std::vector<int> rp(n + 1, 0);
+            for (auto& rc : sorted) rp[rc.first + 1]++;
+            for (int r = 0; r < n; r++) rp[r + 1] += rp[r];
+            for (size_t i = 0; i < hazRows.size(); i++) {
+                for (int d : hazDonors[i]) {
+                    for (int k = rp[d]; k < rp[d + 1]; k++) {
+                        pat.emplace_back(hazRows[i], sorted[k].second);
+                    }
+                    pat.emplace_back(d, hazRows[i]);         // the coefficient the numeric choice reads
+                }
+            }
+        }
+    }
     for (int r = 0; r < n; r++) {
         pat.emplace_back(r, r);                              // guaranteed diagonal: the per-solve
     }                                                        // row-mode mask writes 1.0 there
@@ -1891,6 +2106,35 @@ SharedStructure* buildStructure(int n,
     }
     for (int r = 0; r < n; r++) st->rowPtr[r + 1] += st->rowPtr[r];
     CsrPattern pos{st->rowPtr.data(), st->colIdx.data()};    // (row,col) -> slot by binary search
+    st->nHaz = static_cast<int>(hazRows.size());
+    if (st->nHaz > 0) {
+        std::vector<int> hazOff(st->nHaz + 1, 0);
+        std::vector<int> donorPtr(st->nHaz + 1, 0);
+        std::vector<int> donor;
+        std::vector<int> donorHaz;
+        std::map<int, int> hazSlot;
+        for (int i = 0; i < st->nHaz; i++) hazSlot[hazRows[i]] = i;
+        for (int i = 0; i < st->nHaz; i++) {
+            hazOff[i + 1] = hazOff[i] + (st->rowPtr[hazRows[i] + 1] - st->rowPtr[hazRows[i]]);
+            for (int d : hazDonors[i]) {
+                donor.push_back(d);
+                auto it = hazSlot.find(d);
+                donorHaz.push_back(it == hazSlot.end() ? -1 : it->second);
+            }
+            donorPtr[i + 1] = static_cast<int>(donor.size());
+        }
+        st->hazTot = hazOff[st->nHaz];
+        st->hHazRow = hazRows;
+        st->dHazRow.upload(hazRows.data(), hazRows.size() * sizeof(int));
+        st->dHazOff.upload(hazOff.data(), hazOff.size() * sizeof(int));
+        st->dHazDonorPtr.upload(donorPtr.data(), donorPtr.size() * sizeof(int));
+        st->dHazDonor.upload(donor.data(), donor.size() * sizeof(int));
+        st->dHazDonorHaz.upload(donorHaz.data(), donorHaz.size() * sizeof(int));
+        st->dHazSign.upload(hazSigns.data(), hazSigns.size() * sizeof(char));
+        if (std::getenv("OLF_GPU_TRACE") != nullptr) {
+            std::fprintf(stderr, "zero-diagonal repair: %d hazard rows, %zu donor candidates\n", st->nHaz, donor.size());
+        }
+    }
     st->dRowPtr.upload(st->rowPtr.data(), (n + 1) * sizeof(int));
     st->dColIdx.upload(st->colIdx.data(), st->nnz * sizeof(int));
 
@@ -2098,6 +2342,8 @@ struct SolverContext {
     int ndq = 0, nzi = 0, ndr = 0, ndb = 0;                  // copies of the structure counts
     std::vector<double> hF;                                  // host mismatch buffer
     DeviceBuf dX, dTarget, dF, dB, dDx, dVals, dMode;
+    DeviceBuf dHazSnap, dHazBSnap, dHazChoice;               // zero-diagonal repair scratch (lazy)
+    int hazCap = 0;
     DeviceBuf dXprev;                                        // state before the last full step (line search)
     CudssCtx ds;
     bool analyzed = false;                                   // ANALYSIS+first FACTORIZATION done
@@ -2177,6 +2423,7 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
         if (ctx->ndr) fillDistrRho<<<grid(ctx->ndr), BLOCK, 0, ctx->stream>>>(ctx->ndr, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
         if (ctx->ndb) fillDistrShuntB<<<grid(ctx->ndb), BLOCK, 0, ctx->stream>>>(ctx->ndb, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         applyRowMode<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        hazRepairValues(ctx, 1, ctx->dVals.as<double>());
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         CUDA_CHECK(cudaMemcpy(ctx->hF.data(), ctx->dF.p, n * sizeof(double), cudaMemcpyDeviceToHost));
         double infn = 0.0;
@@ -2238,6 +2485,7 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
         // J dx = -F on the device (analyze ONCE per structure, refactorize after —
         // including across solver runs reusing this context)
         negateInto<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dB.as<double>());
+        hazRepairRightHandSide(ctx, 1, ctx->dB.as<double>());
         if (!ctx->analyzed) {
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
             traceLuNnz(ctx->ds.handle, ctx->ds.data, "base");
@@ -2259,7 +2507,7 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
             rm.alloc(n * sizeof(double));
             linResidRow<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->st->dRowPtr.as<int>(),
                     ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
-                    ctx->dF.as<double>(), rp.as<double>(), rm.as<double>());
+                    ctx->dB.as<double>(), rp.as<double>(), rm.as<double>());   // B = the (repaired) RHS
             CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
             CUDA_CHECK(cudaMemcpy(hrp.data(), rp.p, n * sizeof(double), cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(hrm.data(), rm.p, n * sizeof(double), cudaMemcpyDeviceToHost));
@@ -4793,6 +5041,8 @@ struct BatchSolverContext {
     int cbOffset = 0, obOffset = 0, shOffset = 0, hvOffset = 0;   // element-mask offsets per family
     int ndq = 0, ndr = 0, ndb = 0, nzi = 0;                  // copies of the structure counts
     DeviceBuf dX, dTarget, dF, dB, dDx, dVals, dMode;        // per-scenario (n or nnz strided)
+    DeviceBuf dHazSnap, dHazBSnap, dHazChoice;               // zero-diagonal repair scratch (lazy)
+    int hazCap = 0;
     bool clampStep = false;                                  // MAX_VOLTAGE_CHANGE per-scenario step clamp (set per solve)
     double maxDv = 0.0, maxDphi = 0.0;
     DeviceBuf dVarType, dStepFactor;                         // n ints / nS factors (lazy, first clamped solve)
@@ -7663,6 +7913,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, ziRelocOf(ctx->st.get()));
         applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>());
+        hazRepairValues(ctx, nS, ctx->dVals.as<double>());
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: stream-ordered into the solve, no host sync
     };
     // ---- IncrementalTransformerVoltageControl as a DRIVER PHASE (OLF order 8). OLF's own rule, per
@@ -7715,6 +7966,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             int row = ctx->st->rowMap[ctx->hTvcRhoRow[c]];
             if (row < 0) continue;                           // rho row not an active equation: stays insensitive
             setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
+            hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
             int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
             first = false;
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
@@ -7812,6 +8064,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             int row = ctx->st->rowMap[ctx->hShcBRow[c]];
             if (row < 0) continue;
             setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
+            hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
             int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
             first = false;
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
@@ -7882,6 +8135,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             int row = ctx->st->rowMap[ctx->hFlcPinRow[c]];
             if (row < 0) continue;
             setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
+            hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
             int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
             first = false;
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
@@ -8019,6 +8273,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             int row = ctx->st->rowMap[ctx->hSvcCtldVRow[i]];
             if (row < 0) continue;                           // controlled bus not a live identity: insensitive
             setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
+            hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
             int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
             first = false;
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
@@ -8210,6 +8465,31 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 if (forceFirstStep && it == 0) {
                     converged = false;
                 }
+                // OLF_GPU_CONV_TRACE=<slot>|all: the stopping DECISION itself - the 2-norm, the
+                // threshold it is held against and the active row count behind that threshold. Two
+                // arms that agree on every residual and still stop one Newton step apart differ
+                // here and nowhere else, and the exit norms alone cannot show it.
+                static const char* convTraceEnv = std::getenv("OLF_GPU_CONV_TRACE");
+                static const int convTraceSlot = convTraceEnv == nullptr ? -1
+                        : (std::string(convTraceEnv) == "all" ? -2 : std::atoi(convTraceEnv));
+                if (convTraceSlot == -2 || convTraceSlot == s) {
+                    std::fprintf(stderr, "CONV_TRACE s=%d it=%d norm2=%.17e thr2=%.17e nActive=%d inf=%.17e perRow=%d maxRatio=%.6e forceFirst=%d converged=%d\n",
+                                 s, it, std::sqrt(ssq), thr2Of(s), ctx->hNActive.empty() ? n : ctx->hNActive[s], norm,
+                                 ctx->perRowCriteria ? 1 : 0, maxRatio, (forceFirstStep && it == 0) ? 1 : 0, converged ? 1 : 0);
+                    // the eight worst rows, by index: WHERE the residual sits, so a step that lands
+                    // two orders of magnitude from the other arm's can be traced to its rows
+                    std::vector<double> hFs(n);
+                    CUDA_CHECK(cudaMemcpy(hFs.data(), ctx->dF.as<double>() + (size_t) s * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
+                    std::vector<int> ord(n);
+                    for (int i = 0; i < n; i++) ord[i] = i;
+                    std::partial_sort(ord.begin(), ord.begin() + std::min(n, 8), ord.end(),
+                                      [&](int a, int b) { return std::fabs(hFs[a]) > std::fabs(hFs[b]); });
+                    std::fprintf(stderr, "CONV_TOP s=%d it=%d :", s, it);
+                    for (int k = 0; k < std::min(n, 8); k++) {
+                        std::fprintf(stderr, " [%d]=%.9e", ord[k], hFs[ord[k]]);
+                    }
+                    std::fprintf(stderr, "\n");
+                }
                 static const char* sdEnv = std::getenv("OLF_GPU_STATE_DUMP");
                 if (sdEnv != nullptr && s == 0 && it <= std::atoi(sdEnv) && n <= 64) {
                     stateDumpBatch<<<1, 1, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dMode.as<int>(),
@@ -8294,6 +8574,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         writeIdentityForInactive<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(),
                 ctx->st->dDiagPos.as<int>(), ctx->dActive.as<char>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
+        hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
         if (!ctx->analyzed) {
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch));
             traceLuNnz(ctx->ds.handle, ctx->ds.data, "batch-api", ctx->nScenarios);
@@ -8315,6 +8596,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         writeIdentityForInactive<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(),
                 ctx->st->dDiagPos.as<int>(), ctx->dActive.as<char>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
+        hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
         if (!ctx->analyzed) {
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matBig, ctx->matBigX, ctx->matBigB));
             traceLuNnz(ctx->ds.handle, ctx->ds.data, "blkdiag", ctx->nScenarios);
@@ -8342,6 +8624,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         writeIdentityForInactive<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(),
                 ctx->st->dDiagPos.as<int>(), ctx->dActive.as<char>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
+        hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
         if (!ctx->analyzed) {
             bool timeIt = std::getenv("OLF_GPU_TRACE") != nullptr;
             long long t0 = 0;
@@ -8510,9 +8793,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     CUDA_CHECK(cudaMemcpy(&fv, ctx->dF.as<double>() + (size_t) s2 * n + rowProbe, sizeof(double), cudaMemcpyDeviceToHost));
                     CUDA_CHECK(cudaMemcpy(&xv, ctx->dX.as<double>() + (size_t) s2 * n + rowProbe, sizeof(double), cudaMemcpyDeviceToHost));
                     CUDA_CHECK(cudaMemcpy(&mv, ctx->dMode.as<int>() + (size_t) s2 * n + rowProbe, sizeof(int), cudaMemcpyDeviceToHost));
+                    double tv = 0;
+                    CUDA_CHECK(cudaMemcpy(&tv, ctx->dTarget.as<double>() + (size_t) s2 * n + rowProbe, sizeof(double), cudaMemcpyDeviceToHost));
                     std::vector<double> hv(k1 - k0);
                     CUDA_CHECK(cudaMemcpy(hv.data(), ctx->dVals.as<double>() + (size_t) s2 * nnz + k0, (size_t) (k1 - k0) * sizeof(double), cudaMemcpyDeviceToHost));
-                    std::fprintf(stderr, "ROW_PROBE it=%d s=%d row=%d mode=%d F=%.12e x=%.12e nnz=%d :", it, s2, rowProbe, mv, fv, xv, k1 - k0);
+                    std::fprintf(stderr, "ROW_PROBE it=%d s=%d row=%d mode=%d F=%.12e x=%.12e target=%.12e nnz=%d :", it, s2, rowProbe, mv, fv, xv, tv, k1 - k0);
                     for (int k = 0; k < k1 - k0; k++) {
                         if (hv[k] != 0.0) {
                             std::fprintf(stderr, " [%d]=%.6e", hci[k], hv[k]);
@@ -8530,7 +8815,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             rm.alloc((size_t) n * nS * sizeof(double));
             linResidRowBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(),
                     ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
-                    ctx->dF.as<double>(), rp.as<double>(), rm.as<double>());
+                    ctx->dB.as<double>(), rp.as<double>(), rm.as<double>());   // B = the (repaired) RHS
             CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
             std::vector<double> hrp((size_t) n * nS);
             std::vector<double> hrm((size_t) n * nS);
@@ -8578,6 +8863,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             double* dxS = ctx->dDx.as<double>() + (size_t) s * n;
             double* fS = ctx->dF.as<double>() + (size_t) s * n;
             negateIntoOne<<<grid(n), BLOCK, 0, ctx->stream>>>(n, fS, bS);
+            hazRepairRightHandSide(ctx, 1, bS, s);
             CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matA, valsS));
             CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matB, bS));
             CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matX, dxS));
@@ -9813,6 +10099,7 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
     if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
     if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, ziRelocOf(ctx->st.get()));
     applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>());
+    hazRepairValues(ctx, nS, ctx->dVals.as<double>());
 
     if (!ctx->analyzed) {
         CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
@@ -9827,6 +10114,7 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
             throw std::runtime_error("solveBatchSensitivities: unit row not an active equation");
         }
         setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
+        hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
         int phase = CUDSS_PHASE_SOLVE | (ki == 0 ? CUDSS_PHASE_FACTORIZATION : 0);
         CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
         gatherSensiBatch<<<grid(nS * m), BLOCK, 0, ctx->stream>>>(n, nS, k, m, ki, dObs.as<int>(),

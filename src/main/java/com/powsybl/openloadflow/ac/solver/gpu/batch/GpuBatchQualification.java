@@ -627,6 +627,9 @@ final class GpuBatchQualification {
                     }
                     frozenRowsByIndex[i] = fi.rows();
                     frozenTargetsByIndex[i] = fi.targets();
+                    // same masks as the two other islanding paths: a frozen row is not a participant
+                    islandedDsByIndex[i] = islandedDsParticipants(fi.rows(), gpuData);
+                    islandedRlByIndex[i] = islandedRlControllers(fi.rows(), gpuData);
                     if (fi.rows().length > 0) {
                         islandingCount++;
                     }
@@ -691,6 +694,17 @@ final class GpuBatchQualification {
                     gos = live.toArray(new GenOutage[0]);
                     frozenRowsByIndex[i] = fi.rows();
                     frozenTargetsByIndex[i] = fi.targets();
+                    // The island's distributed-slack participants and reactive-limit controllers are
+                    // NOT participants for this scenario (OLF distributes over the main synchronous
+                    // component and disables the island's buses). The branch-outage tail masks them;
+                    // this path froze the rows but left the masks unset, so the water-fill read each
+                    // frozen P row's identity target (an ANGLE) as absorbed power, reset it to the
+                    // base P and handed the island shares of the mismatch that never reached the grid.
+                    // Measured on rte6515 BUS-1238_BBS: absorbed -0.305 pu where OLF pre-distributed
+                    // +0.155, a second DS round OLF never runs (+0.471 pu reappearing at the slack)
+                    // and 1.18e-03 kV at the end.
+                    islandedDsByIndex[i] = islandedDsParticipants(fi.rows(), gpuData);
+                    islandedRlByIndex[i] = islandedRlControllers(fi.rows(), gpuData);
                     if (fi.rows().length > 0) {
                         islandingCount++;
                     }
@@ -853,6 +867,11 @@ final class GpuBatchQualification {
                 }
             }
         }
+        int maskedDs = 0;
+        for (int[] m : islandedDsByIndex) {
+            maskedDs += m == null ? 0 : m.length;
+        }
+        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.LAST_ISLANDED_DS_MASKED.set(maskedDs);
         return new ScenarioPlan(batchedIndices, frozenRowsByIndex, islandedNumsByIndex,
                 frozenTargetsByIndex, genOutagesByIndex, islandingCount, activePowerLossByIndex,
                 dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,

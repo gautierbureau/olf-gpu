@@ -33,7 +33,7 @@ Solves one contingency as an ordinary load flow on the device, which is where th
 instruments live. A contingency wrong batched and right there is a BATCH defect.
 
 
-## Diagnostics (89) — print only, cannot change a result
+## Diagnostics (92) — print only, cannot change a result
 
 Safe to add. These are the instruments; several are the only reason a defect was found at all.
 
@@ -96,6 +96,9 @@ Safe to add. These are the instruments; several are the only reason a defect was
 | `OLF_GPU_ITER_TRACE` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchChunkSolver.java:1136 |
 | `OLF_GPU_LIN_RESID` | native/cuda/jni/olf_gpu_nr_jni.cu (both the sequential and the batched solve) — prints `\|\|J.dx-F\|\|inf` per iteration, i.e. how exactly cuDSS solved the system it was handed |
 | `OLF_GPU_CONV_TRACE` | native/cuda/jni/olf_gpu_nr_jni.cu (batched solve) — `<slot>` or `all`: the stopping DECISION per iteration (norm2, its threshold, the active row count, inf-norm, per-row flag) plus `CONV_TOP`, the eight worst rows by index; OLF's `OLF_NR_ITER_TRACE` prints `NR_TOP` with the same shape, so the two lists name the rows where a step differs |
+| `OLF_GPU_LOOP_TRACE` | native/cuda/jni/olf_gpu_nr_jni.cu (driver) — `<slot>`: `LOOP_PASS` per pass, the device side of OLF's `OLF_OL_TRACE` `OL_CHECK`: which loop ran, whether the slot was found UNSTABLE, whether the phase is still unstable |
+| `OLF_GPU_RL_TRACE_VROW` | native/cuda/jni/olf_gpu_nr_jni.cu — `<v row>`: `RL_VROW`, one LOCAL reactive-limits entry's q / live limits / row target / mode at every check (the remote-only RL_TRACE never names it) |
+| `OLF_GPU_DS_DEBUG_SLOT` | native/cuda/jni/olf_gpu_nr_jni.cu — with `OLF_GPU_DS_DEBUG`: which slot the kernel-level water-fill prints (`[DS-GATE]`/`[DS-WF]`/`[DS-SAT]`, device printf → surefire dumpstream) follow; default 0 |
 | `OLF_GPU_HVDC_TRACE` | GpuBatchHvdcAcEmulation / GpuBatchChunkSolver — `<phiRow>` or `all`: `HVDC_SLOT` (slot -> contingency), `HVDC_FREEZE` (the flows each scenario's freeze fixed an hvdc at, vs the base deltas) and `HVDC_END` (the status each scenario ended with) |
 | `OLF_GPU_MON_TRACE` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchVoltageMonitoring.java:59 |
 | `OLF_GPU_NAME_ROW` | src/main/java/com/powsybl/openloadflow/sa/gpu/GpuBatchPrecomputer.java — turns a DEVICE row index (from `OLF_GPU_WORST_ROW` / `OLF_GPU_PROBE_ROWS`) back into its variable and element; row indices are NOT portable between runs with different contingency sets |

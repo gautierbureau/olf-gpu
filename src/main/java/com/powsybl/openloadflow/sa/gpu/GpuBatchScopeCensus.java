@@ -38,6 +38,13 @@ import java.util.concurrent.atomic.LongAdder;
  */
 public final class GpuBatchScopeCensus {
 
+    /** Test hook: how many distributed-slack participants the last scenario plan masked out as
+     *  stranded in another synchronous component (summed over the plan's contingencies). The
+     *  bus-loss path once froze the island's rows without setting this mask, and the water-fill then
+     *  read the frozen rows as live participants; a test that islands a participant asserts > 0. */
+    public static final java.util.concurrent.atomic.AtomicInteger LAST_ISLANDED_DS_MASKED =
+            new java.util.concurrent.atomic.AtomicInteger();
+
     private static final Map<String, LongAdder> COUNTS = new ConcurrentHashMap<>();
 
     private GpuBatchScopeCensus() {

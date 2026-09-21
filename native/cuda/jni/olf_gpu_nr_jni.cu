@@ -4402,6 +4402,14 @@ __global__ void monitoringLoopBatch(int nmon, int nScenarios, int n,
     switched[s] = 1;
 }
 
+// OLF_GPU_DS_DEBUG: the kernel-level water-fill prints ([DS-GATE]/[DS-WF]/[DS-SAT]) follow ONE slot,
+// OLF_GPU_DS_DEBUG_SLOT (default 0); returns slot+1, 0 = off.
+static int dsDebugTraceSlot() {
+    if (std::getenv("OLF_GPU_DS_DEBUG") == nullptr) return 0;
+    const char* e = std::getenv("OLF_GPU_DS_DEBUG_SLOT");
+    return (e != nullptr ? std::atoi(e) : 0) + 1;
+}
+
 __global__ void slackOnlyDsCheck(int nScenarios, int n, int slackPhiRow, double slackTargetP,
                                  double slackDistTol, const double* qBuf, const char* rlActive,
                                  double* absorbed, char* switched) {
@@ -4567,7 +4575,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                 ? fsActive
                 : (fsActive + rho > 0 ? fsActive / (fsActive + rho) : 0.0);
     }
-    if (dbgTrace && s == 0) {
+    if (dbgTrace && s == dbgTrace - 1) {
         printf("[DS-GATE] slackMismatch=%.9f retain=%.9f rem=%.9f fsGlobal=%.9f tol=%.9f slackTgt=%.9f fire=%d\n",
                qBuf[(size_t) s * n + slackPhiRow] - slackTgt, dsRetain[s], rem, fsGlobal, slackDistTol, slackTgt,
                (fsGlobal > 0.0 && fabs(rem) > fsGlobal * slackDistTol) ? 1 : 0);
@@ -4598,7 +4606,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         target[idx] = base;                                 // reset to the anchor
     }
     rem = fsGlobal * ((qBuf[(size_t) s * n + slackPhiRow] - slackTgt) + absorbedNow);
-    if (dbgTrace && s == 0) {
+    if (dbgTrace && s == dbgTrace - 1) {
         printf("[DS-WF] entry slackMismatch=%.9f absorbedNow=%.9f fsGlobal=%.9f rem=%.9f nds=%d ngen=%d anchorShift=%d\n",
                qBuf[(size_t) s * n + slackPhiRow] - slackTgt, absorbedNow, fsGlobal, rem, nds, ngen,
                dsAnchorShift != nullptr ? 1 : 0);
@@ -4710,7 +4718,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                     done += newCum - cum;
                     changed = true;
                 }
-                if (dbgTrace && s == 0 && genRemoved[(size_t) s * ngen + g]
+                if (dbgTrace && s == dbgTrace - 1 && genRemoved[(size_t) s * ngen + g]
                         && (newCum == dgMaxDelta[g] || newCum == dgMinDelta[g])) {
                     printf("[DS-SAT] iter=%d gen=%d newCum=%.9f maxD=%.9f minD=%.9f\n",
                            iter, g, newCum, dgMaxDelta[g], dgMinDelta[g]);
@@ -4739,7 +4747,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                 target[(size_t) s * n + dsPhiRow[i]] =
                         dsBaseTargetP[i] - (ov == i ? dsOvBaseDelta[s] : 0.0) + sum;
             }
-            if (dbgTrace && s == 0) {
+            if (dbgTrace && s == dbgTrace - 1) {
                 printf("[DS-WF] iter=%d fsumActive=%.9f rem=%.9f done=%.9f (per-generator)\n",
                        iter, fsumActive, rem, done);
             }
@@ -4789,7 +4797,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                 changed = true;
             }
         }
-        if (dbgTrace && s == 0) {
+        if (dbgTrace && s == dbgTrace - 1) {
             printf("[DS-WF] iter=%d fsumActive=%.9f rem=%.9f done=%.9f\n", iter, fsumActive, rem, done);
         }
         rem -= done;
@@ -9124,7 +9132,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->nDsLostGen, ctx->nDsLostGen > 0 ? ctx->dDsLostGen.as<int>() : nullptr,
                     ctx->dTarget.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>(),
                     ctx->dDsRetainApplied.as<double>(),
-                    getenv("OLF_GPU_DS_DEBUG") != nullptr ? 1 : 0);
+                    dsDebugTraceSlot());
         }
     } else {                                               // reactive-limits outer loop: switch PV->PQ over Q limit
         if (loopKind == LOOP_RL && ctx->nrl > 0 && !skipRlPhase) {                  // skipRlPhase: a monitoring interleave solve — the
@@ -9237,7 +9245,13 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             loopRejected[s] = 0;
         }
     }
-    if (!inDsPhase && (ctx->nRlRemote > 0 || nS == 1) && ctx->nrl > 0 && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {   // RL trace
+    // OLF_GPU_RL_TRACE_VROW=<v row>: one LOCAL entry's pin state at every check (the trace below
+    // otherwise names remote entries only) - with its live limits and row target, which is what a
+    // curve-limit drift moves.
+    static const char* rlTraceVrowEnv = std::getenv("OLF_GPU_RL_TRACE_VROW");
+    static const int rlTraceVrow = rlTraceVrowEnv != nullptr ? std::atoi(rlTraceVrowEnv) : -1;
+    if (!inDsPhase && (ctx->nRlRemote > 0 || nS == 1 || rlTraceVrow >= 0) && ctx->nrl > 0
+            && (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr || rlTraceVrow >= 0)) {   // RL trace
         std::vector<char> lt(static_cast<size_t>(ctx->nrl) * nS);
         std::vector<char> rem(ctx->nrl);
         std::vector<int> vr(ctx->nrl);
@@ -9261,9 +9275,21 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         // same quantity at a different V is not evidence of a wrong formula.
         std::vector<double> hXrl(static_cast<size_t>(n) * nS);
         CUDA_CHECK(cudaMemcpy(hXrl.data(), ctx->dX.p, hXrl.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        std::vector<double> hMinQ(hMaxQ.size());
+        CUDA_CHECK(cudaMemcpy(hMinQ.data(), ctx->ncv > 0 ? ctx->dRlMinQDyn.p : ctx->dRlMinQ.p, hMinQ.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        std::vector<double> hTgt(static_cast<size_t>(n) * nS);
+        CUDA_CHECK(cudaMemcpy(hTgt.data(), ctx->dTarget.p, hTgt.size() * sizeof(double), cudaMemcpyDeviceToHost));
         for (int s2 = 0; s2 < nS; s2++) {
             for (int i2 = 0; i2 < ctx->nrl; i2++) {
-                if (rem[i2] || nS == 1) {
+                if (rlTraceVrow >= 0 && vr[i2] == rlTraceVrow) {
+                    std::fprintf(stderr, "RL_VROW s=%d entry=%d lt=%d q=%.9f minQ=%.9f maxQ=%.9f target=%.9f mode=%d v=%.9f loadQ=%.9f\n",
+                                 s2, i2, (int) lt[(size_t) s2 * ctx->nrl + i2], qb[(size_t) s2 * n + vr[i2]] + lq[i2],
+                                 hMinQ[ctx->ncv > 0 ? (size_t) s2 * ctx->nrl + i2 : (size_t) i2],
+                                 hMaxQ[ctx->ncv > 0 ? (size_t) s2 * ctx->nrl + i2 : (size_t) i2],
+                                 hTgt[(size_t) s2 * n + vr[i2]], hMode[(size_t) s2 * n + vr[i2]],
+                                 hXrl[(size_t) s2 * n + vr[i2]], lq[i2]);
+                }
+                if ((rem[i2] || nS == 1) && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
                     std::fprintf(stderr, "RL_TRACE s=%d entry=%d remote=%d lt=%d switched=%d q=%.9f mode=%d tol=%.3e maxQ=%.6f ncv=%d rlActive=%d v=%.9f qbuf=%.9f\n",
                                  s2, i2, (int) rem[i2], (int) lt[(size_t) s2 * ctx->nrl + i2], (int) rlSwitched[s2],
                                  qb[(size_t) s2 * n + vr[i2]] + lq[i2], hMode[(size_t) s2 * n + vr[i2]], reactiveLimitTol,
@@ -9314,6 +9340,16 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (rlSwitched[s]) {
             nChanged++;
         }
+    }
+    // OLF_GPU_LOOP_TRACE=<slot>: the device side of OLF's OL_CHECK - which loop this pass ran, whether
+    // it found the slot UNSTABLE (a re-solve follows) and whether the whole phase is still unstable.
+    // Two arms that agree on every residual and still stop apart differ in this SEQUENCE.
+    static const char* loopTraceEnv = std::getenv("OLF_GPU_LOOP_TRACE");
+    static const int loopTraceSlot = loopTraceEnv != nullptr ? std::atoi(loopTraceEnv) : -1;
+    if (loopTraceSlot >= 0 && loopTraceSlot < nS) {
+        std::fprintf(stderr, "LOOP_PASS s=%d outer=%d loopIdx=%d kind=%d solved=%d switched=%d nChanged=%d live=%d status=%d\n",
+                     loopTraceSlot, outer, loopIdx, loopOrder[loopIdx], solvePass ? 1 : 0,
+                     (int) rlSwitched[loopTraceSlot], nChanged, (int) live[loopTraceSlot], res.status[loopTraceSlot]);
     }
     if (nChanged > 0) {                                     // this outer loop is still unstable
         for (int s = 0; s < nS; s++) {

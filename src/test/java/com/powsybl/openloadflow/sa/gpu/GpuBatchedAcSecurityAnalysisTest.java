@@ -1394,6 +1394,68 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** BUS loss that ISLANDS a distributed-slack participant (rte6515 BUS-1238_BBS in 10 buses): the
+     *  lost bus vlm5_b takes the stub bus vlm6 and its participating generator gm6 with it. The bus-loss
+     *  (injection) qualification path froze the island's rows but never set the islanded-DS/RL masks
+     *  the branch-outage tail sets, so the water-fill read the frozen P rows' identity targets (angles)
+     *  as absorbed power, reset them to the base P and gave the island shares of the mismatch that
+     *  never reached the grid — a second DS round OLF does not run, 1.18e-03 kV on rte6515. */
+    @org.junit.jupiter.api.Test
+    void deviceBusLossIslandingDsParticipantMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = islandableRemoteControlGroupNetwork();
+        com.powsybl.iidm.network.VoltageLevel v6 = network.getSubstation("sm").newVoltageLevel().setId("vlm6")
+                .setNominalV(400).setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        v6.getBusBreakerView().newBus().setId("vlm6_b").add();
+        // Large enough that re-dispatching its loss moves the network losses past the 1 MW slack gate,
+        // so the post-contingency DistributedSlack round actually runs (at 150 MW it did not, and the
+        // masks' absence was invisible).
+        v6.newGenerator().setId("gm6").setBus("vlm6_b").setConnectableBus("vlm6_b")
+                .setMinP(0).setMaxP(2000).setTargetP(900).setTargetV(400).setVoltageRegulatorOn(true).add();
+        v6.newLoad().setId("lm6").setBus("vlm6_b").setConnectableBus("vlm6_b").setP0(40).setQ0(10).add();
+        // Two hops behind the lost bus (rte6515: VL-1238 -> VL-5242 -> VL-4263 -> VL-6494): the island
+        // is found by connectivity, not by the contingency's own element list.
+        com.powsybl.iidm.network.VoltageLevel v7 = network.getSubstation("sm").newVoltageLevel().setId("vlm7")
+                .setNominalV(400).setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        v7.getBusBreakerView().newBus().setId("vlm7_b").add();
+        v7.newLoad().setId("lm7").setBus("vlm7_b").setConnectableBus("vlm7_b").setP0(60).setQ0(20).add();
+        v7.newGenerator().setId("gm7").setBus("vlm7_b").setConnectableBus("vlm7_b")
+                .setMinP(0).setMaxP(1000).setTargetP(300).setTargetV(400).setVoltageRegulatorOn(true).add();
+        // A generator ON the lost bus: a lost generator is what routes the plan through the bus-loss
+        // (injection) qualification branch, as rte6515's busbars are — a lost load alone rides the
+        // side-open cover and takes the branch-outage tail, where the masks were always set.
+        network.getVoltageLevel("vlm5").newGenerator().setId("gm5").setBus("vlm5_b").setConnectableBus("vlm5_b")
+                .setMinP(0).setMaxP(300).setTargetP(100).setTargetV(400).setVoltageRegulatorOn(true).add();
+        mainLine(network, "LM57", "vlm5", "vlm7");
+        mainLine(network, "LM76", "vlm7", "vlm6");
+        // The bus loss PLUS a lost generator on the surviving side: a lost injection is what routes the
+        // plan through the injection qualification branch (rte6515's busbar sections carry them), and
+        // the islanding then takes its island-injection path. A bare bus loss rides the side-open
+        // cover through the branch-outage tail instead, where the masks were always set.
+        List<Contingency> ctgs = List.of(new Contingency("bus-vlm5",
+                new com.powsybl.contingency.BusContingency("vlm5_b"),
+                new com.powsybl.contingency.GeneratorContingency("gm3")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vlm1_0"))
+                // The pre-distribution leaves ~0.5 MW at the slack after the post-contingency solve;
+                // the DistributedSlack round that exposes the unmasked participant must actually run.
+                .setSlackBusPMaxMismatch(0.01);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the islanding bus loss must batch on-device (or the test proves nothing)");
+        // The plan must have taken gm6 AND gm7 out of the distribution. On this fixture the state
+        // comparison alone does not catch a missing mask (the host pre-distribution derives its own
+        // islanded set from the frozen rows and the residual mismatch is small); on rte6515
+        // BUS-1238_BBS the missing mask was 1.18e-03 kV.
+        assertTrue(GpuBatchScopeCensus.LAST_ISLANDED_DS_MASKED.get() >= 2,
+                "the island's two participating generators must be masked out of the slack distribution, got "
+                        + GpuBatchScopeCensus.LAST_ISLANDED_DS_MASKED.get());
+    }
+
     /** The remote-control group (b1/b2/b3 regulating pilot b4) hung off a meshed main component by the
      *  single tie LTIE, so outaging LTIE islands the entire group — pilot included. */
     private static Network islandableRemoteControlGroupNetwork() {

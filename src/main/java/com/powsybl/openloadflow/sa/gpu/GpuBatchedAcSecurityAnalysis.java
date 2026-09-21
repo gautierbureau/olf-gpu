@@ -662,6 +662,20 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     }
                 }
             }
+            // For a violated DISTR_Q, OLF's own q for EVERY member of the group, evaluated at the
+            // DEVICE's state. The device believes its sharing equation is satisfied there; if OLF
+            // disagrees, these are the numbers that say which member's q the two compute
+            // differently - the equation residual alone cannot.
+            if (eq.getType() == AcEquationType.DISTR_Q && elem instanceof LfBus db) {
+                db.getGeneratorVoltageControl().ifPresent(vc -> {
+                    for (LfBus m : vc.getMergedControllerElements()) {
+                        System.err.printf("SA_RESID_Q ctg=%s member=%s qPercent=%.9f qAtDeviceState=%.9f"
+                                + " loadQ=%.9f v=%.9f%n", contingencyId, m.getId(),
+                                m.getRemoteControlReactivePercent(), m.getQ().eval(),
+                                m.getLoadTargetQ(), m.getV());
+                    }
+                });
+            }
             System.err.printf("SA_RESID ctg=%s row=%d F=%+.9e eq=%s elem=%d id=%s olfTarget=%.9f devRow=%d"
                             + " degree=%d toIsland=%d islandBranchShunt=%+.9f%n",
                     contingencyId, row, fx[row], eq.getType(), eq.getElementNum(),

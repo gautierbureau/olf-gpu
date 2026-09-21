@@ -3563,8 +3563,18 @@ __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nEle
     if (!rlActive[s]) return;
     int e = rmqElem[c];
     int kind = rmqKind[c];
-    if (kind == 0 && disabled[s * nElements + cbOffset + e]) return;
-    if (kind == 2 && disabled[s * nElements + obOffset + e]) return;
+    if (kind == 0 && disabled[s * nElements + cbOffset + e]) {
+        if (rmqRow[c] == traceRow) {
+            printf("RMQ s=%d c=%d kind=0(closed) elem=%d SKIPPED disabled\n", s, c, e);
+        }
+        return;
+    }
+    if (kind == 2 && disabled[s * nElements + obOffset + e]) {
+        if (rmqRow[c] == traceRow) {
+            printf("RMQ s=%d c=%d kind=2(halfOpen) elem=%d SKIPPED disabled\n", s, c, e);
+        }
+        return;
+    }
     double w = rmqWeight[c];
     const double* xs = x + (size_t) s * n;
     double* q = qBuf + (size_t) s * n + rmqRow[c];
@@ -3631,8 +3641,10 @@ __global__ void fillRemoteMemberQBatch(int nrmq, int nScenarios, int n, int nEle
                      o + 10, o + 11, o + 12, o + 13, o + 14, o + 15, o + 16, o + 17, o + 18,
                      o + 19, o + 20, o + 21, o + 22, o + 23, o + 24, o + 25, o + 26, o + 27);
     if (rmqRow[c] == traceRow) {
-        printf("RMQ s=%d c=%d kind=0(closed) elem=%d side=%d w=%.6f contrib=%.9f\n",
-               s, c, e, rmqSide[c], w, w * o[rmqSide[c] == 0 ? 7 : 21]);
+        printf("RMQ s=%d c=%d kind=0(closed) elem=%d side=%d w=%.6f v1=%.9f v2=%.9f"
+               " ph1=%.9f ph2=%.9f r1=%.6f y=%.6f b1=%.6f b2=%.6f contrib=%.9f\n",
+               s, c, e, rmqSide[c], w, v1, v2, ph1, ph2, r1, p[0], p[3], p[4],
+               w * o[rmqSide[c] == 0 ? 7 : 21]);
     }
     atomicAdd(q, w * o[rmqSide[c] == 0 ? 7 : 21]);           // q1 / q2 residual outputs
     return;
@@ -3741,7 +3753,8 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                                     const double* rlSvcBmin, const double* rlSvcBmax, const double* rlV2Base,
                                     const char* rlIslanded,
                                     const double* rlInitTgtQ, double vLoRobust, double vHiRobust,
-                                    int robust) {
+                                    int robust,
+                                    int noPinRow) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -3785,6 +3798,10 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         double rliMax = rlMaxQ[rli] + (svcLim ? rlSvcBmax[i] * rdv2 : 0.0);
         if (limitType[rst] == 0) {
             if (mode[ridx] != 1) return;                     // islanded / frozen this scenario
+            // OLF_GPU_RL_NOPIN_ROW=<deviceRow>: never pin THIS row. Isolates one pin so the solve
+            // it would have interrupted can be compared against the CPU on its own - the only way
+            // to tell "the pin is wrong" from "the state the pin was taken at was already wrong".
+            if (ridx % n == (size_t) noPinRow) return;
             double q = qBuf[ridx] + rlLoadQ[rli];            // own q via fillRemoteMemberQBatch
             // voltageRemoteControlRobustMode (ReactiveLimitsOuterLoop.checkControllerBus): the criteria
             // below test this REMOTE controller's OWN voltage — the same x row the quadratic SVC delta
@@ -8751,6 +8768,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->dRlLoadQDyn.as<double>());
             }
             CUDA_CHECK(cudaMemsetAsync(ctx->dRlPassSwitched.p, 0, static_cast<size_t>(ctx->nrl) * nS, ctx->stream));
+            static const char* noPinEnv = std::getenv("OLF_GPU_RL_NOPIN_ROW");
+            int rlNoPinRow = noPinEnv != nullptr ? std::atoi(noPinEnv) : -1;
             reactiveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(
                     ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
                     ctx->nrl, nS, n, REACTIVE_LIMIT_TOL, RL_MAX_SWITCH,
@@ -8770,7 +8789,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dRlSvcBmin.as<double>(), ctx->dRlSvcBmax.as<double>(), ctx->dRlV2Base.as<double>(),
                     ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
                     ctx->rlRobust ? ctx->dRlInitTgtQ.as<double>() : nullptr,
-                    ctx->rlVLoRobust, ctx->rlVHiRobust, ctx->rlRobust);
+                    ctx->rlVLoRobust, ctx->rlVHiRobust, ctx->rlRobust, rlNoPinRow);
             if (ctx->rlRobust && ctx->nRlRemote > 0) {       // "set V to a safe 1 pu", as its own pass
                 rlRobustVResetBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(
                         ctx->nrl, nS, n, ctx->dRlVrow.as<int>(), ctx->dRlRemote.as<char>(),
@@ -8861,13 +8880,19 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         CUDA_CHECK(cudaMemcpy(hMaxQ.data(), ctx->ncv > 0 ? ctx->dRlMaxQDyn.p : ctx->dRlMaxQ.p, hMaxQ.size() * sizeof(double), cudaMemcpyDeviceToHost));
         std::vector<char> hRlAct(nS);
         CUDA_CHECK(cudaMemcpy(hRlAct.data(), ctx->dRlActive.p, nS, cudaMemcpyDeviceToHost));
+        // The STATE the pin decision is taken at. Without it, a q that disagrees with OLF cannot be
+        // told apart from a q evaluated at a different (or not yet converged) operating point - the
+        // same quantity at a different V is not evidence of a wrong formula.
+        std::vector<double> hXrl(static_cast<size_t>(n) * nS);
+        CUDA_CHECK(cudaMemcpy(hXrl.data(), ctx->dX.p, hXrl.size() * sizeof(double), cudaMemcpyDeviceToHost));
         for (int s2 = 0; s2 < nS; s2++) {
             for (int i2 = 0; i2 < ctx->nrl; i2++) {
                 if (rem[i2] || nS == 1) {
-                    std::fprintf(stderr, "RL_TRACE s=%d entry=%d remote=%d lt=%d switched=%d q=%.6f mode=%d tol=%.3e maxQ=%.6f ncv=%d rlActive=%d\n",
+                    std::fprintf(stderr, "RL_TRACE s=%d entry=%d remote=%d lt=%d switched=%d q=%.9f mode=%d tol=%.3e maxQ=%.6f ncv=%d rlActive=%d v=%.9f qbuf=%.9f\n",
                                  s2, i2, (int) rem[i2], (int) lt[(size_t) s2 * ctx->nrl + i2], (int) rlSwitched[s2],
                                  qb[(size_t) s2 * n + vr[i2]] + lq[i2], hMode[(size_t) s2 * n + vr[i2]], reactiveLimitTol,
-                                 hMaxQ[ctx->ncv > 0 ? (size_t) s2 * ctx->nrl + i2 : (size_t) i2], ctx->ncv, (int) hRlAct[s2]);
+                                 hMaxQ[ctx->ncv > 0 ? (size_t) s2 * ctx->nrl + i2 : (size_t) i2], ctx->ncv, (int) hRlAct[s2],
+                                 hXrl[(size_t) s2 * n + vr[i2]], qb[(size_t) s2 * n + vr[i2]]);
                 }
             }
         }

@@ -7,3 +7,9 @@ native/local-env.sh
 .idea/
 *.iml
 __pycache__/
+
+# JVM crash logs
+hs_err_pid*.log
+# Large network cases kept at the repo root for local benchmarks (GpuVsCpuRte6515SaTest reads rte6515_full from here)
+/rte6515_full.xiidm.gz
+/pegase9241_full.xiidm.gz

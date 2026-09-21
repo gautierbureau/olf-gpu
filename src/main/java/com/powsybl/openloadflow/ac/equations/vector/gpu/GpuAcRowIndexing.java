@@ -179,13 +179,31 @@ final class GpuAcRowIndexing {
                 .orElse(false);
     }
 
-    /** True when the bus is a CONTROLLER ELEMENT of a remote (non-local) MAIN generator voltage
-     *  control — INCLUDING the case where it is also that control's CONTROLLED bus (a generator
-     *  regulating its own bus, merged with remote controllers). Such a bus's reactive injection
-     *  feeds the group's DISTR_Q rows, never a plain per-bus Q scatter. */
+    /** True when the bus is a CONTROLLER ELEMENT of a remote (non-local) generator voltage control
+     *  — INCLUDING the case where it is also that control's CONTROLLED bus (a generator regulating
+     *  its own bus, merged with remote controllers). Such a bus's reactive injection feeds the
+     *  group's DISTR_Q rows, never a plain per-bus Q scatter.
+     *
+     *  <p>Resolved on the MAIN control via {@link VoltageControl#getMainVoltageControl()}, NOT by
+     *  filtering {@code getMergeStatus() == MAIN}. A control that has been MERGED into another is
+     *  DEPENDENT, and on the dependent object both tests below read the wrong thing: its
+     *  {@code controllerElements} is just itself, so {@code isLocalControl()} is TRUE (it appears to
+     *  be a generator regulating its own bus alone) and the merged element list is not reachable.
+     *  Filtering DEPENDENT away therefore answered FALSE for a bus that really is a controller, and
+     *  {@link #computeQRow} then left its Q balance on its own BUS_V row — a row that already hosts
+     *  the bus's DISTR_Q equation. The zero-impedance family's direct +-DUMMY_Q coupling landed
+     *  there alongside the DISTR_Q derivative and the two CANCELLED: measured on rte6515
+     *  BUS-24_COUPLER_1 as kind-3 terms summing +1.0 against the zi coupling's -1.0, leaving the
+     *  coupler's DUMMY_Q in NO equation at all — a STRUCTURALLY ZERO COLUMN, which is invisible in
+     *  every residual (the free variable perturbs nothing, so |F| looks healthy while the whole
+     *  Newton step is polluted). 45 such columns at 2000 busbar sections.
+     *
+     *  <p>Generator voltage controls merge exactly when their buses are joined by ZERO-IMPEDANCE
+     *  branches, which is why the whole population is busbar couplers and why the defect only
+     *  appears once enough busbar-section contingencies retain enough switches. */
     static boolean isRemoteGenVcControllerElement(LfBus bus) {
         return bus.getGeneratorVoltageControl()
-                .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                .<GeneratorVoltageControl>map(VoltageControl::getMainVoltageControl)
                 .filter(c -> !c.isLocalControl())
                 .map(c -> c.getMergedControllerElements().contains(bus))
                 .orElse(false);

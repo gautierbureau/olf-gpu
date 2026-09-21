@@ -171,3 +171,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-20 | f9b06dd+dirty | 17.93 | 15.65 | 28.24 | x1.80 | 0/0/0 | 7.61 | 4.57 | 499/500 | 122/133 (92%) | Nested dissection when the system has zero-impedance branches: AMD loses accuracy on their zero diagonals |
 | 2026-09-20 | 33e29be+dirty | 18.03 | 15.85 | 27.55 | x1.74 | 0/0/0 | 7.53 | 4.48 | 499/500 | 122/133 (92%) | DISTR_Q kind-3 live weight recompute dropped the side sign: rte6515 busbars now all at machine precision |
 | 2026-09-20 | e89abac+dirty | 18.11 | 15.55 | 27.76 | x1.79 | 0/0/0 | 7.56 | 4.48 | 499/500 | 122/133 (92%) | Iterative refinement (not nested dissection) when the system has zero-impedance branches |
+| 2026-09-21 | 13c309c+dirty | 18.23 | 15.83 | 27.78 | x1.75 | 0/0/0 | 7.66 | 4.46 | 499/500 | 122/133 (92%) | Merged (DEPENDENT) gen-VC controllers keep no own Q row: 45 zero coupler DUMMY_Q columns -> 0, busbar 2000 batching 0/2000 -> 1500/2000 |

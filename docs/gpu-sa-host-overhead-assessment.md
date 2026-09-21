@@ -1,7 +1,7 @@
 # GPU security analysis — where the time goes, and which leads are worth pursuing
 
 Assessment of 2026-09-21, written BEFORE any modification, to trace the leads and their evidence.
-Nothing below has been implemented yet; every "gain" is an estimate unless it says "measured".
+Every "gain" is an estimate unless it says "measured"; a lead marked **DONE** records its measured outcome.
 
 ## 1. Setup and method
 
@@ -109,16 +109,36 @@ lives, gain, risk, and how to verify. Ordered by expected gain.
   that is then injected already embodies it.
 - **Constraints (checked in code).** (a) The returned scalar `preDistributedActivePower` IS used: it goes
   into every `PostContingencyResult` — the precompute must supply it. (b) Generator target P IS read later
-  by operator-strategy conditions (`ThresholdConditionEvaluator`) and by the GPU strategy composer's
-  generator-action deltas (`GpuStrategyComposer`): **skip only for contingencies without an operator
-  strategy.** (c) CPU-routed contingencies need the real distribution. (d) The benchmark case has no
-  operator strategies, so it cannot exercise (b) — a dedicated test must.
+  by operator-strategy conditions: `ThresholdConditionEvaluator` on an `InjectionThresholdCondition` with
+  `ACTIVE_POWER` — **skip only for contingencies without an operator strategy.** (First written as "and by
+  `GpuStrategyComposer`'s generator-action deltas": WRONG — the composer reads the IIDM base target at
+  precompute time and never sees the host distribution; a mutation test proved relative AND absolute actions
+  insensitive to it.) (c) CPU-routed contingencies need the real distribution. (d) The benchmark case has no
+  operator strategies, so it cannot exercise (b) — `GpuBatchedAcSecurityAnalysisTest#replayedLossDistribution
+  KeepsResultsAndSparesStrategyContingencies` does, and fails on its RESULTS (the strategy stops firing) when
+  the precondition is removed.
 - **Change.** GPU repo only: `runSimulations` receives the distribution as an interface
   (`ContingencyActivePowerLossDistribution`); wrap it to return the precomputed scalar for device-solved,
   strategy-free contingencies and delegate otherwise. No OLF change.
 - **Gain (estimate):** ~4.5 s, plus part of L1's `restoreGenerators` (targets no longer changed).
 - **Risk: low–medium** (the scalar's exact value; the strategy precondition).
 - **Verify:** as L1, plus a test with an operator strategy on a generator/load contingency.
+- **DONE (2026-09-21) — measured outcome.**
+  - Replay vs OLF's return value (`OLF_GPU_PRELOSS_CHECK=1`, no behaviour change): all 14,258 device-solved
+    contingencies carry a replayed value, worst |difference| 6.2e-14 pu (6e-12 MW) — rounding, and on the
+    samples OLF's own value is the one carrying it.
+  - With the switch (`olf.gpu.sa.replayLossDistribution`, default true): statuses identical, 906,447
+    violations with 0 differing, reported GPU `distributedActivePower` within 9.3e-12 MW of before (the
+    run-to-run floor is ~2e-11 MW, see below). Host loss distribution in the GPU arm 4.6 s -> 25 ms.
+  - **Wall gain smaller than the 4.6 s removed:** GPU cold 47.0 -> 45.8 s, warm 45.9 -> 43.6 s (CPU-8t
+    123.1 s: x2.69 cold / x2.82 warm), because `NetworkState.restore` got ~2.2 s SLOWER (14.9 -> 17.1 s).
+    Most likely memory traffic: the distribution's scan over every bus used to warm the caches for the
+    restore's walk right after it. Part of L2's apparent cost was really the O(network) walk — which only
+    goes away if nothing walks the network: **L1 matters more than the table above says.**
+  - Reproducibility floors met on the way: the GPU arm's reported value moves by up to 1.6e-11 MW between
+    two runs (the base load flow on the device sums with atomicAdd, moving the base's distributed targets by
+    an ulp); the CPU arm's by up to 5.3e-9 MW between 30 and 8 threads (4 contingencies — per-partition
+    network copies).
 
 ### L3 — state injection recomputes EVERY branch — 6.1 s (+0.7 s index update)
 
@@ -191,6 +211,18 @@ lives, gain, risk, and how to verify. Ordered by expected gain.
 - **Change:** return the per-scenario amount the device DS pass distributed and add it. GPU repo.
 - **Not a speed lead — a correctness one.** Independent of L2 (which must leave the GPU values unchanged).
 
+### L11 — UPSTREAM OLF inconsistency found while testing L2: injection threshold conditions compare per-unit
+
+- `ThresholdConditionEvaluator.evaluateGeneratorCondition` compares `gen.getTargetP()` / `getInitialTargetP()`
+  — **per-unit** — with the condition's threshold as given, while branch and three-winding-transformer
+  conditions convert their value to SI first (`* PerUnit.SB`, `* PerUnit.ib(...)`). A user's "generator above
+  150 MW" is compared with ~1.5: it fires almost always.
+- OLF's own test (`OpenSecurityAnalysisWithActionsTest`, lines 213–217) builds the threshold from
+  `lfNetwork.getGeneratorById(...).getTargetP()` — per-unit — so it mirrors the implementation and cannot see it.
+- **Change (OLF, upstream candidate):** `* PerUnit.SB` in `evaluateGeneratorCondition`, and a test with an SI
+  threshold. NOT done: it changes stock OLF behaviour; decision pending. The L2 test states its threshold in
+  per-unit (documented there) and must follow if this is fixed.
+
 ## 5. Interactions and projection
 
 - **L1 x L2 coupled:** skipping the redistribution removes most CHANGED generator targets, the expensive
@@ -201,7 +233,7 @@ lives, gain, risk, and how to verify. Ordered by expected gain.
 
 ## 6. Proposed order (one commit per step, measured after each)
 
-1. **L2** (GPU repo) — lowest risk, no OLF change, and it changes L1's cost profile.
+1. **L2** (GPU repo) — lowest risk, no OLF change, and it changes L1's cost profile. **DONE**: see L2.
 2. **L6, L7, L4** (GPU repo) — small, independent, low risk.
 3. **L1** — OLF hook (upstreamable patch) + GPU-side partial restore; the most verification.
 4. **L3** (GPU repo).

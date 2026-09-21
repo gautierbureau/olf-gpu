@@ -4114,6 +4114,107 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         }
     }
 
+    @Test
+    void replayedLossDistributionKeepsResultsAndSparesStrategyContingencies() {
+        // The batch answers OLF's per-contingency loss distribution from its replay (lead L2 of
+        // docs/gpu-sa-host-overhead-assessment.md) — EXCEPT for a contingency an operator strategy targets:
+        // an InjectionThresholdCondition on ACTIVE_POWER reads the post-contingency generator target P, which
+        // only OLF's host distribution sets (ThresholdConditionEvaluator). IEEE 14 as shipped cannot show it:
+        // B3/B6/B8 are at 0 MW (excluded from distribution) and B1-G's ~9,999 MW maxP takes nearly all of any
+        // share. So B3-G, B6-G and B8-G get 20 MW each and B1-G is taken out of the distribution. Losing B2-G
+        // (40 MW) then spreads over B3/B6/B8, and the
+        // strategy fires only if B6-G's target is then more than 5 MW above its base one (read from a plain CPU
+        // load flow: a non-slack generator's P is its target). B8-G's outage carries no strategy and is
+        // device-solved (its small loss spreads UP over B3/B6's headroom — a load outage here would drive
+        // B3/B6/B8 to their minimum, and a saturating distribution is routed to the CPU by design). The replay
+        // must answer B8-G alone, and turning it off must change nothing.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        java.util.function.Supplier<Network> fixture = () -> {
+            Network n = IeeeCdfNetworkFactory.create14();
+            for (String g : List.of("B3-G", "B6-G", "B8-G")) {
+                n.getGenerator(g).setTargetP(20);
+            }
+            n.getGenerator("B1-G").newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                    .withParticipate(false).add();
+            return n;
+        };
+        Network network = fixture.get();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        Network base = fixture.get();
+        assertTrue(new com.powsybl.loadflow.LoadFlow.Runner(new com.powsybl.openloadflow.OpenLoadFlowProvider(
+                new com.powsybl.math.matrix.DenseMatrixFactory())).run(base, lfp).isFullyConverged());
+        // PER-UNIT: OLF's ThresholdConditionEvaluator compares an injection's target P in per-unit with the
+        // threshold as given, where branch and three-winding conditions convert to MW (assessment L11).
+        double threshold = (-base.getGenerator("B6-G").getTerminal().getP() + 5) / com.powsybl.openloadflow.util.PerUnit.SB;
+        List<Contingency> contingencies = List.of(
+                new Contingency("B2-G", new com.powsybl.contingency.GeneratorContingency("B2-G")),
+                new Contingency("B8-G", new com.powsybl.contingency.GeneratorContingency("B8-G")));
+        List<com.powsybl.action.Action> actions = List.of(
+                new com.powsybl.action.GeneratorActionBuilder().withId("redispatch3")
+                        .withGeneratorId("B3-G").withActivePowerRelativeValue(true).withActivePowerValue(10).build());
+        List<com.powsybl.contingency.strategy.OperatorStrategy> strategies = List.of(
+                new com.powsybl.contingency.strategy.OperatorStrategy("sB6High",
+                        com.powsybl.contingency.ContingencyContext.specificContingency("B2-G"),
+                        new com.powsybl.contingency.strategy.condition.InjectionThresholdCondition("B6-G",
+                                com.powsybl.contingency.strategy.condition.AbstractThresholdCondition.Variable.ACTIVE_POWER,
+                                com.powsybl.contingency.strategy.condition.AbstractThresholdCondition.ComparisonType.GREATER_THAN,
+                                threshold),
+                        List.of("redispatch3")));
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.addExtension(OpenSecurityAnalysisParameters.class,
+                new OpenSecurityAnalysisParameters().setContingencyPropagation(false));
+        sap.setLoadFlowParameters(lfp);
+        java.util.Set<String> allVls = network.getVoltageLevelStream().map(vl -> vl.getId())
+                .collect(java.util.stream.Collectors.toSet());
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), allVls, java.util.Set.of()));
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, monitors, sap, strategies, actions,
+                com.powsybl.commons.report.ReportNode.NO_OP);
+        assertEquals(1, cpu.getOperatorStrategyResults().size(),
+                "the condition must hold on the CPU: B6-G above " + threshold + " pu once B2-G's loss is distributed");
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            SecurityAnalysisResult replayed = runSecurityAnalysis(network, contingencies, monitors, sap, strategies, actions,
+                    com.powsybl.commons.report.ReportNode.NO_OP);
+            assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_REPLAYED_LOSS_COUNT.get(),
+                    "the replay answers B8-G only: B2-G is targeted by a strategy");
+            assertEquals(1, replayed.getOperatorStrategyResults().size(), "the strategy must fire on the GPU too");
+            SecurityAnalysisResult host;
+            System.setProperty(GpuBatchedAcSecurityAnalysis.REPLAY_LOSS_DISTRIBUTION_PROPERTY, "false");
+            try {
+                host = runSecurityAnalysis(network, contingencies, monitors, sap, strategies, actions,
+                        com.powsybl.commons.report.ReportNode.NO_OP);
+                assertEquals(0, GpuBatchedAcSecurityAnalysis.LAST_REPLAYED_LOSS_COUNT.get());
+            } finally {
+                System.clearProperty(GpuBatchedAcSecurityAnalysis.REPLAY_LOSS_DISTRIBUTION_PROPERTY);
+            }
+            for (int c = 0; c < contingencies.size(); c++) {
+                var r = replayed.getPostContingencyResults().get(c);
+                var h = host.getPostContingencyResults().get(c);
+                assertEquals(h.getStatus(), r.getStatus());
+                org.junit.jupiter.api.Assertions.assertEquals(h.getDistributedActivePower(), r.getDistributedActivePower(), 1e-9,
+                        "distributed active power of " + r.getContingency().getId());
+                var hb = h.getNetworkResult().getBusResults();
+                var rb = r.getNetworkResult().getBusResults();
+                assertEquals(hb.size(), rb.size());
+                for (int b = 0; b < hb.size(); b++) {
+                    org.junit.jupiter.api.Assertions.assertEquals(hb.get(b).getV(), rb.get(b).getV(), 1e-10,
+                            r.getContingency().getId() + " bus voltage " + hb.get(b).getBusId());
+                }
+            }
+            var hs = host.getOperatorStrategyResults().get(0).getConditionalActionsResults().get(0).getNetworkResult().getBusResults();
+            var rs = replayed.getOperatorStrategyResults().get(0).getConditionalActionsResults().get(0).getNetworkResult().getBusResults();
+            for (int b = 0; b < hs.size(); b++) {
+                org.junit.jupiter.api.Assertions.assertEquals(hs.get(b).getV(), rs.get(b).getV(), 1e-10,
+                        "strategy bus voltage " + hs.get(b).getBusId());
+            }
+        } finally {
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
     private static void printReport(com.powsybl.commons.report.ReportNode node, int depth) {
         System.err.println("CPU-REPORT " + "  ".repeat(depth) + node.getMessage());
         for (com.powsybl.commons.report.ReportNode c : node.getChildren()) {

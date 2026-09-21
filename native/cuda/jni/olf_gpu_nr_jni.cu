@@ -3743,6 +3743,15 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     if (mRow[k] >= 0 && rowIsFrozen(nFrozen, frozenSlotRow, s, mRow[k])) {
         return;                                              // islanded: the row is frozen, not ours to write
     }
+    if (mRow[k] >= 0 && mode[(size_t) s * n + mRow[k]] == 4) {
+        // The row hosts its OWN reactive balance this scenario (mode 4): an RL pin (the RL kernel
+        // owns the target) or a control the contingency KILLED (the injection override owns it,
+        // OLF's BUS_TARGET_Q). A DISTR_Q target has no business here — fillDistrQBatch already
+        // skips the row's DISTR_Q emissions for the same reason. Measured on rte6515 BUS-1055_BBS_1:
+        // the dead control's survivor converged at target 0, then this pass put the base DISTR_Q
+        // target (0.02 pu) back and the re-solve balanced 2 MVar the CPU never asked for (0.65 kV).
+        return;
+    }
     int reK = mRlEntry[k];
     if (reK >= 0 && limitType[(size_t) s * nrl + reK] != 0) return;   // pinned: the RL kernel owns its row
     if (qg >= 0) {
@@ -3797,13 +3806,13 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
 // whichever member row currently carries the relocated pilot Q. Runs BEFORE the RL mode seeding so
 // a warm-continuation pin cannot overwrite the value first.
 __global__ void capturePilotQBatch(int nQr, int nScenarios, int n, const int* qrPtr, const int* qrRows,
-                                   const int* baseMode, const double* target, double* pilotQ) {
+                                   const int* baseMode, const double* targetBase, double* pilotQ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nQr * nScenarios) return;
     int g = tid % nQr;
     int s = tid / nQr;
     int row = qrRows[qrPtr[g] + relocChoose(g, qrPtr, qrRows, baseMode)];
-    pilotQ[(size_t) s * nQr + g] = target[(size_t) s * n + row];
+    pilotQ[(size_t) s * nQr + g] = targetBase[row];          // the BASE carrier's BASE target (n, untiled)
 }
 
 // DEVICE all-pinned corner (plan-B4 follow-up): when the LAST live member of a remote gen-VC
@@ -5112,6 +5121,7 @@ struct BatchSolverContext {
     int cbOffset = 0, obOffset = 0, shOffset = 0, hvOffset = 0;   // element-mask offsets per family
     int ndq = 0, ndr = 0, ndb = 0, nzi = 0;                  // copies of the structure counts
     DeviceBuf dX, dTarget, dF, dB, dDx, dVals, dMode;        // per-scenario (n or nnz strided)
+    DeviceBuf dTargetBase;                                   // the base targets (n), before tiling/overrides
     DeviceBuf dHazSnap, dHazBSnap, dHazChoice;               // zero-diagonal repair scratch (lazy)
     int hazCap = 0;
     bool clampStep = false;                                  // MAX_VOLTAGE_CHANGE per-scenario step clamp (set per solve)
@@ -7392,6 +7402,14 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             CUDA_CHECK(cudaMemcpy(ctx->dX.p, x0, n * sizeof(double), cudaMemcpyHostToDevice));
         }
         CUDA_CHECK(cudaMemcpy(ctx->dTarget.p, target, n * sizeof(double), cudaMemcpyHostToDevice));
+        // The BASE targets, kept aside before tiling and the per-scenario overrides: the pilot-Q
+        // capture below reads the base carrier's row, and a scenario may have overridden that row
+        // (a member islanded by a bus loss freezes it to a flat voltage identity). Capturing from the
+        // base keeps the captured value the pilot's reactive target whatever the scenario did to the
+        // row. (The carrier's target itself is stamped host-side when the base carrier is frozen -
+        // GpuBatchChunkSolver - because the device stamp runs only inside the outer-loop passes.)
+        if (!ctx->dTargetBase.p) ctx->dTargetBase.alloc((size_t) n * sizeof(double));
+        CUDA_CHECK(cudaMemcpy(ctx->dTargetBase.p, target, n * sizeof(double), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(ctx->dMode.p, rowMode, nTot * sizeof(int), cudaMemcpyHostToDevice));
         if (x0Full == nullptr) {
             tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dX.as<double>());
@@ -7537,7 +7555,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     static_cast<size_t>(ctx->st->nQr) * nS * sizeof(char), ctx->stream));
             capturePilotQBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nQr, nS, n,
                     ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), dBaseMode.as<int>(),
-                    ctx->dTarget.as<double>(), ctx->dQrPilotQ.as<double>());
+                    ctx->dTargetBase.as<double>(), ctx->dQrPilotQ.as<double>());
             if (nS == 1 && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
                 CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
                 int nQr = ctx->st->nQr;

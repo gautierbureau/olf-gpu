@@ -380,6 +380,22 @@ final class GpuBatchQualification {
         return count == 0 ? NO_ISLANDED_DS : java.util.Arrays.copyOf(found, count);
     }
 
+    /** The row mode a surviving member of a DEAD voltage control gets on its BUS_V row. A DISTR_Q
+     *  member's row must be mode 4 ("hosts its own reactive balance"): fillDistrQBatch skips every
+     *  contribution whose F row is mode 4 and the member's own q rides its alternate dest, which is
+     *  keyed on mode 4. Mode 1 left the DISTR_Q family writing into the row on top of nothing that
+     *  balanced the bus: rte6515 BUS-1055_BBS_1 (pilot VL-1055_0 islanded, merged section VL-1055_1
+     *  surviving) - OLF's BUS_TARGET_Q at the survivor off by 0.039 pu, 1.3 kV. A survivor that is
+     *  not a packed DISTR_Q member keeps the plain reactive row. */
+    static int deadControlRowMode(GpuAcData gpuData, LfBus survivor) {
+        int slot = GpuBatchInjectionOutages.dqMemberSlot(gpuData, survivor);
+        if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+            System.err.println("QUALIFY_TRACE deadControlRowMode survivor=" + survivor.getId() + " dqMemberSlot=" + slot
+                    + " -> mode " + (slot >= 0 ? 4 : 1));
+        }
+        return slot >= 0 ? 4 : 1;
+    }
+
     private static final int[] NO_ISLANDED_DS = new int[0];
 
     /** The reactive-limits controllers this contingency puts in another synchronous component: their
@@ -561,8 +577,23 @@ final class GpuBatchQualification {
                     com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:SHUNT_UNPACKED_OR_DISTRQ");
                     continue;                                // unpacked / DISTR_Q-contributing shunt — CPU
                 }
+                // A lost generator whose bus the contingency ISLANDS is not an injection outage: the
+                // island's rows are frozen whole and its group effect is classifyVcSplit's verdict
+                // (CONTROL_DIES / RENORMALIZE below). Handing it to the composer made a DISTR_Q member
+                // "lose its last controller" and rejected the scenario (rte6515: 17 of the 500 busbar
+                // sections, VL-1014_0, VL-1113_0, ... - every one a section OLF simply disables).
+                java.util.Set<Integer> islandedNumSet = new java.util.HashSet<>();
+                for (LfBus ib : q.islandedBuses()) {
+                    islandedNumSet.add(ib.getNum());
+                }
+                List<com.powsybl.openloadflow.network.LfGenerator> liveLostGens = c.lostGenerators().stream()
+                        .filter(g -> g.getBus() == null || !islandedNumSet.contains(g.getBus().getNum()))
+                        .toList();
+                List<LoadLoss> liveLostLoads = c.lostLoads().stream()
+                        .filter(ll -> ll.bus() == null || !islandedNumSet.contains(ll.bus().getNum()))
+                        .toList();
                 GenOutage[] gos = GpuBatchInjectionOutages.computeInjectionOutages(es, gpuData, dsSum, slackParticipates,
-                        dsParams, c.lostGenerators(), c.lostLoads());
+                        dsParams, liveLostGens, liveLostLoads);
                 if (gos == null) {                           // slack / >1 DS bus / remote gen — route to CPU
                     // (was tagged SHUNT_SHAPE, a copy-paste from the block above: this is the INJECTION
                     // outage shape, and the census is how we pick what to fix — a tag that lies about
@@ -584,6 +615,7 @@ final class GpuBatchQualification {
                     com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:PAIR_CURVE_LINKAGE");
                     continue;                                // same reason as the other arm: one tag
                 }
+                List<LfBus> islandLostVcControllers = new ArrayList<>();   // filled by the island-injection path
                 if (!c.outagedBranches().isEmpty()) {        // COMBO: the branch part must also qualify
                     // COMBO (generator + branch): stay conservative — this path already carries the
                     // generator outage's own DISTR_Q rediff, so a SECOND one from an islanded
@@ -648,10 +680,16 @@ final class GpuBatchQualification {
                     List<com.powsybl.openloadflow.network.LfHvdc> islandedHvdcs = new ArrayList<>();
                     VcSplit vcSplit = classifyVcSplit(es, q.islandedBuses(), lostVcControllers, deadControlBuses,
                             islandedHvdcs);
-                    if (vcSplit == VcSplit.UNMODELED || vcSplit == VcSplit.RENORMALIZE || !islandedHvdcs.isEmpty()) {
-                        // RENORMALIZE would have to compose with this path's own generator-outage
-                        // rediff - conservative, CPU. Same tag the branch tail uses, so the census
-                        // keeps counting the shape in one place.
+                    islandLostVcControllers.addAll(lostVcControllers);
+                    if (!islandedHvdcs.isEmpty()) {
+                        islandedHvdcsByIndex[i] = islandedHvdcs;   // masked in the chunk solver, as on the tail
+                    }
+                    if (vcSplit == VcSplit.UNMODELED) {
+                        if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                            System.err.printf("QUALIFY_TRACE reject %s tag=ISLANDS_REMOTE_VC_MEMBER site=injection split=%s"
+                                    + " islandedHvdcs=%d lostControllers=%s%n", c.contingencyId(), vcSplit, islandedHvdcs.size(),
+                                    lostVcControllers.stream().map(LfBus::getId).toList());
+                        }
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");
                         continue;
                     }
@@ -678,9 +716,13 @@ final class GpuBatchQualification {
                             }
                             live.add(new GenOutage(-1, 0, vVar.getRow(), sb.getTargetQ(), true, true,
                                     -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
-                                    new int[0], new double[0], 1, -1, 0, -1, 0, -1, 0));
+                                    new int[0], new double[0], deadControlRowMode(gpuData, sb), -1, 0, -1, 0, -1, 0));
                         }
                         if (live == null) {
+                            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                                System.err.printf("QUALIFY_TRACE reject %s tag=ISLANDS_REMOTE_VC_MEMBER site=injection-deadControl-frozenV"
+                                        + " deadControl=%s%n", c.contingencyId(), deadControlBuses.stream().map(LfBus::getId).toList());
+                            }
                             com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");
                             continue;
                         }
@@ -712,9 +754,16 @@ final class GpuBatchQualification {
                     frozenRowsByIndex[i] = NO_FROZEN_ROWS;
                     frozenTargetsByIndex[i] = NO_FROZEN_TARGETS;
                 }
-                if (c.lostGenerators().stream().anyMatch(g -> g.getBus() != null
+                // Reactive-key rediff over EVERY controller this scenario removes from its group: the
+                // lost generators the composer saw AND the controllers the island took (RENORMALIZE,
+                // the tail's channel). One call, so the two compose instead of one excluding the other.
+                List<com.powsybl.openloadflow.network.LfGenerator> goneForKeys = new ArrayList<>(c.lostGenerators());
+                for (LfBus lb : islandLostVcControllers) {
+                    goneForKeys.addAll(lb.getGenerators());
+                }
+                if (goneForKeys.stream().anyMatch(g -> g.getBus() != null
                         && es.getEquation(g.getBus().getNum(), AcEquationType.DISTR_Q).isPresent())) {
-                    double[][] ov = distrQWeightOverrides(es, gpuData, c.lostGenerators());
+                    double[][] ov = distrQWeightOverrides(es, gpuData, goneForKeys);
                     if (ov == null) {
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:DISTR_Q_WEIGHT_REDIFF");
                         continue;                            // weight rediff unavailable — CPU
@@ -741,6 +790,12 @@ final class GpuBatchQualification {
                     islandedHvdcsByIndex[i] = islandedHvdcs;
                 }
                 if (vcSplit == VcSplit.UNMODELED) {
+                    if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                        System.err.printf("QUALIFY_TRACE reject %s tag=ISLANDS_REMOTE_VC_MEMBER site=tail-unmodeled"
+                                + " lostControllers=%s deadControl=%s%n", c.contingencyId(),
+                                lostVcControllers.stream().map(LfBus::getId).toList(),
+                                deadControlBuses.stream().map(LfBus::getId).toList());
+                    }
                     com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");
                     continue;                                // an islanded HVDC endpoint — CPU
                 }
@@ -758,9 +813,13 @@ final class GpuBatchQualification {
                         }
                         vcOff.add(new GenOutage(-1, 0, vVar.getRow(), sb.getTargetQ(), true, true,
                                 -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
-                                new int[0], new double[0], 1, -1, 0, -1, 0, -1, 0));
+                                new int[0], new double[0], deadControlRowMode(gpuData, sb), -1, 0, -1, 0, -1, 0));
                     }
                     if (vcOff == null) {
+                        if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                            System.err.printf("QUALIFY_TRACE reject %s tag=ISLANDS_REMOTE_VC_MEMBER site=tail-deadControl-noVrow"
+                                    + " deadControl=%s%n", c.contingencyId(), deadControlBuses.stream().map(LfBus::getId).toList());
+                        }
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");
                         continue;                            // no V row to flip — CPU
                     }

@@ -54,7 +54,7 @@ final class GpuBatchInjectionOutages {
     /** The bus's own slot in the device's packed DISTR_Q member tables, or -1 when it is not a member
      *  of any group. Used both to locate the group for target seeding and to decide whether a load
      *  loss on it is expressible as a per-scenario member targetQ override. */
-    private static int dqMemberSlot(GpuAcData gpuData, LfBus bus) {
+    static int dqMemberSlot(GpuAcData gpuData, LfBus bus) {
         int[] busNums = gpuData.dqMemberBusNum();
         if (busNums == null) {
             return -1;

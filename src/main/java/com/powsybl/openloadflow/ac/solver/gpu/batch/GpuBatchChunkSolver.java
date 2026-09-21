@@ -633,6 +633,40 @@ final class GpuBatchChunkSolver {
                                                 baseState[frozen[k]], Math.abs(baseState[frozen[k]] - frozenTargets[k]));
                                     }
                                 }
+                                // A frozen row that was a remote gen-VC group's BASE CARRIER (the free
+                                // member's row hosting the pilot's reactive balance): the device's mode scan
+                                // moves that balance to the next live member's row from the first Newton
+                                // solve on, but that row's TARGET is its own DISTR_Q one (0) - the kernel
+                                // that stamps the pilot's target on the carrier runs only inside the
+                                // outer-loop passes, and the host re-applies its overrides at every pass.
+                                // Stamp it here, by the kernel's own rule (relocChoose: first candidate
+                                // whose mode is neither identity nor pinned). Measured on the remote-control
+                                // fixture, b1 islanded: OLF's BUS_TARGET_Q at the pilot off by exactly its
+                                // load, b2 0.45 kV; rte6515: five busbar sections up to 1.3 kV.
+                                int[] qrPtr = gpuData.qrPtr();
+                                int[] qrRows = gpuData.qrRows();
+                                for (int g = 0; qrPtr != null && g + 1 < qrPtr.length; g++) {
+                                    int baseCarrier = -1;
+                                    int newCarrier = -1;
+                                    for (int c = qrPtr[g] + 1; c < qrPtr[g + 1]; c++) {
+                                        int r = qrRows[c];
+                                        if (baseCarrier < 0 && baseRowMode[r] != 0 && baseRowMode[r] != 4) {
+                                            baseCarrier = r;
+                                        }
+                                        if (newCarrier < 0 && row[r] != 0 && row[r] != 4) {
+                                            newCarrier = r;
+                                        }
+                                    }
+                                    if (baseCarrier >= 0 && newCarrier >= 0 && newCarrier != baseCarrier
+                                            && row[baseCarrier] == 0 && baseRowMode[baseCarrier] != 0) {
+                                        overrides.add(s * n + newCarrier, baseTargets[baseCarrier]);
+                                        if (System.getenv("OLF_GPU_SA_RESID") != null) {
+                                            System.err.printf("CARRIER_MOVED ctg=%s group=%d from=%d to=%d pilotQ=%.9f%n",
+                                                    contingencies.get(ci).contingencyId(), g, baseCarrier, newCarrier,
+                                                    baseTargets[baseCarrier]);
+                                        }
+                                    }
+                                }
                                 rowModePerScenario[s] = row;
                             }
                             for (LfBranch ziOut : contingencies.get(ci).outagedZiBranches()) {

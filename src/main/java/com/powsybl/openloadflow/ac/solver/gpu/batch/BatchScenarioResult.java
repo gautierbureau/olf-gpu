@@ -11,15 +11,25 @@ import java.util.Objects;
 
 /**
  * The per-scenario outcome: the converged state, iteration count, final mismatch and
- * the convergence status (see the {@code STATUS_*} constants in {@link GpuBatchStatus}).
+ * the convergence status (see the {@code STATUS_*} constants in {@link GpuBatchStatus}), and the
+ * contingency's active power loss pre-distribution as the batch replayed it ({@code preDistributedActivePower},
+ * pu, what OLF's {@code DefaultContingencyActivePowerLossDistribution} returns; NaN when not replayed).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public record BatchScenarioResult(String contingencyId, double[] state, int iterations,
-                                  double finalMismatch, int convergenceStatus, int[] islandedBusNums) {
+                                  double finalMismatch, int convergenceStatus, int[] islandedBusNums,
+                                  double preDistributedActivePower) {
     public BatchScenarioResult {
         Objects.requireNonNull(contingencyId);
         Objects.requireNonNull(state);
+    }
+
+    /** A result whose contingency loss pre-distribution was not replayed ({@code preDistributedActivePower}
+     *  NaN: whoever needs it must ask OLF's own distribution). */
+    public BatchScenarioResult(String contingencyId, double[] state, int iterations,
+                               double finalMismatch, int convergenceStatus, int[] islandedBusNums) {
+        this(contingencyId, state, iterations, finalMismatch, convergenceStatus, islandedBusNums, Double.NaN);
     }
 
     public boolean hasConverged() {

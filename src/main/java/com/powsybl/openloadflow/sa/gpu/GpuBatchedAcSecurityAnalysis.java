@@ -134,6 +134,70 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      *  lfNetwork/context and LOAD STATES INTO B's equation system while B was mid-solve — one
      *  corrupted scenario (the 19/1 MAX_ITERATION flake) or an NPE inside B's JacobianMatrix on
      *  pure CPU stacks (both observed, threadCountAboveOneRunsSafelyOnGpuProvider). */
+    /**
+     * {@code OLF_GPU_PRELOSS_CHECK=1}: runs OLF's own contingency loss distribution UNCHANGED and compares,
+     * per device-solved contingency, the amount it returns with the one the batch replayed
+     * ({@link PrecomputedBatch#preDistributedActivePower()}). Measures whether the replay could stand in
+     * for the host call (assessment lead L2) before anything relies on it.
+     */
+    private final class LossDistributionCheck implements ContingencyActivePowerLossDistribution {
+
+        private final ContingencyActivePowerLossDistribution delegate;
+        private long compared;
+        private long differing;
+        private long missing;
+        private double worst;
+        private String worstId = "-";
+        private final java.util.List<String> samples = new java.util.ArrayList<>();
+
+        private LossDistributionCheck(ContingencyActivePowerLossDistribution delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public String getName() {
+            return delegate.getName();
+        }
+
+        @Override
+        public double run(LfNetwork network, com.powsybl.openloadflow.network.LfContingency lfContingency,
+                          com.powsybl.contingency.Contingency contingency, SecurityAnalysisParameters securityAnalysisParameters,
+                          com.powsybl.openloadflow.LoadFlowParametersOverride loadFlowParametersOverride,
+                          com.powsybl.commons.report.ReportNode reportNode) {
+            double olf = delegate.run(network, lfContingency, contingency, securityAnalysisParameters,
+                    loadFlowParametersOverride, reportNode);
+            PrecomputedBatch precomputed = runState.get().precomputed;
+            if (precomputed.states().containsKey(contingency.getId())) {
+                Double replayed = precomputed.preDistributedActivePower().get(contingency.getId());
+                if (replayed == null) {
+                    missing++;
+                } else {
+                    compared++;
+                    double d = Math.abs(olf - replayed);
+                    if (d != 0) {
+                        differing++;
+                        if (samples.size() < 5) {
+                            samples.add(String.format("%s olf=%s replayed=%s pu", contingency.getId(),
+                                    Double.toString(olf), Double.toString(replayed)));
+                        }
+                    }
+                    if (d > worst) {
+                        worst = d;
+                        worstId = contingency.getId();
+                    }
+                }
+            }
+            return olf;
+        }
+
+        private void print() {
+            System.err.printf("PRELOSS_CHECK device-solved contingencies compared=%d bit-identical=%d differing=%d "
+                    + "no-replayed-value=%d | worst |olf - replayed| = %.3e pu (%.3e MW) on %s%n",
+                    compared, compared - differing, differing, missing, worst, worst * PerUnit.SB, worstId);
+            samples.forEach(x -> System.err.println("PRELOSS_CHECK   " + x));
+        }
+    }
+
     private static final class RunState {
         private List<PropagatedContingency> contingencies = List.of();
         private List<OperatorStrategy> operatorStrategies = List.of();
@@ -297,10 +361,16 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // pre-contingency state only.
         List<PropagatedContingency> toSimulate = "1".equals(System.getenv("OLF_GPU_SA_BASE_ONLY"))
                 ? List.of() : propagatedContingencies;
+        ContingencyActivePowerLossDistribution lossDistribution = System.getenv("OLF_GPU_PRELOSS_CHECK") != null
+                ? new LossDistributionCheck(contingencyActivePowerLossDistribution)
+                : contingencyActivePowerLossDistribution;
         try {
             return super.runSimulations(lfNetwork, toSimulate, acParameters, securityAnalysisParameters,
-                    operatorStrategies, actions, limitReductions, contingencyActivePowerLossDistribution);
+                    operatorStrategies, actions, limitReductions, lossDistribution);
         } finally {
+            if (lossDistribution instanceof LossDistributionCheck check) {
+                check.print();
+            }
             runState.remove();                               // pooled partition threads must not leak a run's state
             if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
                 // CUMULATIVE over the JVM, never cleared: threadCount > 1 runs one partition per

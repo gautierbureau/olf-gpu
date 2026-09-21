@@ -33,6 +33,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -618,7 +619,23 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 }
             }
         }
-        for (String ctgId : cpuViolByCtg.keySet()) {
+        // The UNION of both key sets, not just the CPU's. The violation-diff metric is a TOTAL
+        // (|cpuViolations - gpuViolations|), so a contingency present in ONE arm's results and not
+        // the other contributes to it while an iteration over cpuViolByCtg alone never visits it —
+        // measured at 500 busbar sections as "violation diff: 1" with no VIOL-DIFF line printed,
+        // which reads as "nothing differs" and is the same intersection-only trap the bus diff's
+        // uncompared counters exist to close.
+        java.util.Set<String> allCtgIds = new TreeSet<>(cpuViolByCtg.keySet());
+        allCtgIds.addAll(gpuViolByCtg.keySet());
+        for (String ctgId : allCtgIds) {
+            boolean cpuHas = cpuViolByCtg.containsKey(ctgId);
+            boolean gpuHas = gpuViolByCtg.containsKey(ctgId);
+            if (cpuHas != gpuHas) {
+                System.out.printf("  VIOL-DIFF ctg=%s *** RESULT PRESENT IN ONLY ONE ARM *** cpu=%s gpu=%s"
+                        + " (violations cpu=%d gpu=%d)%n", ctgId, cpuHas, gpuHas,
+                        cpuViolByCtg.getOrDefault(ctgId, List.of()).size(),
+                        gpuViolByCtg.getOrDefault(ctgId, List.of()).size());
+            }
             int cpuCount = cpuViolByCtg.getOrDefault(ctgId, List.of()).size();
             int gpuCount = gpuViolByCtg.getOrDefault(ctgId, List.of()).size();
             if (cpuCount != gpuCount) {
@@ -658,10 +675,28 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // With powsybl's 0-default thresholds every solver-tolerance flicker re-reports; the
         // increased-violations thresholds above suppress most, but a few (measured: 2 out of 583k)
         // remain at the criterion's slack. Assert the diff is under 0.01% of the total.
-        long violDiff = Math.abs(cpuViolations - gpuViolations);
+        // |cpuViolations - gpuViolations| is a SIGNED NET over the whole run and lets real
+        // disagreements CANCEL: measured at 500 busbar sections as "violation diff: 1 (0.0027%)",
+        // which reads as clean, while the per-contingency lines showed TEN differing contingencies
+        // including one at +6. Sum the ABSOLUTE per-contingency deltas instead, so nothing cancels,
+        // and report the differing-contingency count next to it - the same lesson as the
+        // intersection-only bus diff, one level up.
+        long violDiff = 0;
+        int differingCtg = 0;
+        for (String ctgId : allCtgIds) {
+            int d = gpuViolByCtg.getOrDefault(ctgId, List.of()).size()
+                    - cpuViolByCtg.getOrDefault(ctgId, List.of()).size();
+            if (d != 0) {
+                violDiff += Math.abs(d);
+                differingCtg++;
+            }
+        }
+        long netDiff = Math.abs(cpuViolations - gpuViolations);
         double violDiffPct = cpuViolations > 0 ? 100.0 * violDiff / cpuViolations : 0;
-        System.out.printf("  violation diff: %d (%.4f%%)%n", violDiff, violDiffPct);
+        System.out.printf("  violation diff: %d over %d contingencies (%.4f%%) | signed net %d%n",
+                violDiff, differingCtg, violDiffPct, netDiff);
         assertTrue(violDiffPct < 0.01,
-                "violation diff " + violDiff + " (" + violDiffPct + "%) exceeds 0.01% threshold");
+                "violation diff " + violDiff + " over " + differingCtg + " contingencies ("
+                        + violDiffPct + "%) exceeds 0.01% threshold");
     }
 }

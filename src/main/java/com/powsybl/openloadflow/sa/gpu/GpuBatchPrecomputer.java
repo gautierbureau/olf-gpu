@@ -313,6 +313,14 @@ final class GpuBatchPrecomputer {
             // full stack at WARN: a swallowed exception here silently un-accelerates the whole run —
             // the 2026-09-06 bridge AIOOBE hid behind the message-only log for days
             LOGGER.warn("GPU batched SA precompute failed; falling back to per-contingency CPU solves", e);
+            // ...and ONE LINE on stderr unconditionally. This failure silently un-accelerates the
+            // WHOLE run - every contingency reverts to a CPU solve and the only outward sign is a
+            // precomputed count of -1 - and it has now hidden twice behind a log nobody saw: the
+            // 2026-09-06 bridge AIOOBE, and again at 6876 busbar sections where the run reported
+            // matching statuses and a zero violation diff that were vacuous because NOTHING ran on
+            // the device. The test harness's logback appenders are broken (core/classic version
+            // mismatch), so the WARN above does not reach anyone here.
+            System.err.println("GPU_PRECOMPUTE_FAILED " + e);
             if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                 e.printStackTrace();                         // the test harness's logback appenders are broken
             }                                                // (core/classic version mismatch) — surface it here

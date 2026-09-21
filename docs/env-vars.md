@@ -194,7 +194,7 @@ Each selects a different computation. Several disable an outer loop or loosen a 
 | `OLF_GPU_FORCE_FIRST_STEP` | native/cuda/jni/olf_gpu_nr_jni.cu:7630 |
 | `OLF_GPU_HOST_LOOP_NOOP` | native/cuda/jni/olf_gpu_nr_jni.cu:8137 |
 | `OLF_GPU_HYBRID_N` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuHybridBatchValidationTest.java:132 |
-| `OLF_GPU_IR_STEPS` | native/cuda/jni/olf_gpu_nr_jni.cu:197 |
+| `OLF_GPU_IR_STEPS` | native/cuda/jni/olf_gpu_nr_jni.cu (`irSteps`) — cuDSS iterative-refinement steps; default 2 when the structure has a zero-impedance branch, 0 otherwise. Re-measured 2026-09-21 after the zero-diagonal row repair and STILL needed: IR=0 leaves ‖J.dx−F‖∞ 3.8e-4 on the repaired coupler/controller rows (2.6e-8 kV vs 2.6e-9 with IR=2 on rte6515's 500 busbars) |
 | `OLF_GPU_MATCHING_ALG` | native/cuda/jni/olf_gpu_nr_jni.cu:250 |
 | `OLF_GPU_MAXBATCH` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:83 +5 |
 | `OLF_GPU_NO_DIST_SLACK` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuCpuOuterLoopTrajectoryProbe.java:55 |

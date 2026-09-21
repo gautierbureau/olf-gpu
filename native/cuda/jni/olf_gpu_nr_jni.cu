@@ -207,6 +207,16 @@ constexpr int BLOCK = 64;
 // the batch at scale — 80 busbar outages give 0/80 scenarios batched against AMD's 60/80, most
 // blowing up to ~1e14. That regression was invisible on the 20-contingency window it was validated
 // on. IR keeps AMD's ordering, so batching share is unchanged (60/80 either way).
+// RE-MEASURED 2026-09-21 AFTER THE ZERO-DIAGONAL ROW REPAIR (hazRepairVals): still needed. The repair
+// makes every row nonsingular, but a borrowed +-1 diagonal sits among O(100) admittance entries and
+// static pivoting is still inaccurate there. rte6515, 500 busbar outages, same code either way:
+//   IR=2: worst ||J.dx-F||inf 1.5e-11 over every scenario and iteration; buses vs CPU worst 2.6e-9 kV,
+//         3 contingencies above 1e-9 kV.
+//   IR=0: worst ||J.dx-F||inf 3.8e-4 (ratio 1.5e-3 to ||F||), on the REPAIRED rows (VL-132_1,
+//         VL-1113_1/2/3, a coupler DUMMY_Q); buses worst 2.6e-8 kV, 12 above 1e-9 kV.
+// The open lever, if the two refinement solves per iteration ever matter for wall time, is to SCALE
+// the borrowed row so the repaired diagonal is commensurate with the row's other entries rather than
+// to drop the refinement.
 inline int irSteps(bool hasZeroImpedance) {
     const char* e = std::getenv("OLF_GPU_IR_STEPS");
     if (e != nullptr && *e != '\0') {

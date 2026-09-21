@@ -11,6 +11,16 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #61 — GPU SA host overhead: the GPU is no longer the bottleneck (2026-09-21)
+
+H100, rte6515, 14,260 contingencies (all kinds but busbar sections), RTE params: GPU arm ~47–51 s on one
+host thread vs CPU 118.6 s (8 threads, warm) / 68.5 s (16), 0 differing violations. Of the GPU arm, only
+~8 s is device solve: the rest is single-threaded host code — full `NetworkState.restore` per contingency
+(14.9 s), the per-contingency host loss redistribution the device already did (4.6 s), full branch
+recompute on state injection (6.1 s), connectivity copies in qualification (2.55 s), … Chunk size is
+closed (flat above ~2000). Leads L1–L9, their constraints, gains, risks and the order to do them in:
+**`docs/gpu-sa-host-overhead-assessment.md`** — read it before touching any of them.
+
 ### #60 — Generator and load contingencies on rte6515: first fold (2026-09-16)
 
 Both kinds have been batchable and unit-tested for a while; what had never been run is a REAL set.

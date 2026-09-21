@@ -94,7 +94,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         int[] dsBusNum, String[] dgGenId,
                         int[] baseOpenCbElements, int[] baseOpenZiElements, int[] baseOpenZiBranchNums,
                         int[] ziBranchNums, double[] vdlIn, int[] vdlIdx, int[] qrPtr, int[] qrRows,
-                        int[] obQAlt, int[] ziQAlt) {
+                        int[] obQAlt, int[] ziQAlt, byte[] rlBaseQLimitType) {
 
     /**
      * Content equality over every array — true means a cached solver context built from
@@ -176,6 +176,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(obQAlt, other.obQAlt) && java.util.Arrays.equals(ziQAlt, other.ziQAlt)
                 && java.util.Arrays.equals(rlMonitored, other.rlMonitored)
                 && java.util.Arrays.equals(rlRemote, other.rlRemote)
+                && java.util.Arrays.equals(rlBaseQLimitType, other.rlBaseQLimitType)
                 && java.util.Arrays.equals(rlCmpVrow, other.rlCmpVrow)
                 && java.util.Arrays.equals(rlInitTargetQ, other.rlInitTargetQ)
                 && java.util.Arrays.equals(dqKMember, other.dqKMember) && java.util.Arrays.equals(dqJMember, other.dqJMember)

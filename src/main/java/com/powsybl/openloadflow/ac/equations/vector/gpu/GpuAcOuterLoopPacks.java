@@ -78,7 +78,7 @@ public final class GpuAcOuterLoopPacks {
                   double[] rlSvcBmin, double[] rlSvcBmax, double[] rlV2Base,
                   byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow, int[] rlBusNum,
                   double[] rlNominalV, int[] rlPRow, double[] rlTargetP, int[] rlIdRank,
-                  double[] rlInitTargetQ) {
+                  double[] rlInitTargetQ, byte[] rlBaseQLimitType) {
     }
 
     /** Remote-member OWN reactive-injection contributors (plan-B3): per contribution, the member's
@@ -382,6 +382,13 @@ public final class GpuAcOuterLoopPacks {
         // bus generators' targetQ, which is what OLF freezes a REMOTE controller at when its own voltage
         // leaves the realistic band while its Q is still inside its limits.
         List<Double> rlInitTargetQ = new ArrayList<>();
+        // OLF's OWN reason for a base pin (LfBus.getQLimitType): 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V,
+        // 4 MAX_REALISTIC_V, 0 none. The device used to guess the KIND of a base pin from which Q
+        // limit the row's target was nearest to - which turns a realistic-voltage pin (target = the
+        // generation targetQ, nowhere near a limit) into a MIN_Q/MAX_Q pin, and the curve-limit drift
+        // then legitimately re-freezes that "limit pin" AT the limit. rte6515 VL-1251_1: OLF pins it
+        // at -0.0035 (V < 16 kV), the device at -1.0000, in every one of 366 contingencies.
+        List<Byte> rlBaseQLimitType = new ArrayList<>();
         // A never-solved network has NaN bus voltages, and an SVC's reactive limits are Bmin/Bmax·V²:
         // packing them (and the quadratic reference v²) at NaN left the entry's limits NaN and the
         // device never pinned it (the base load flow on the driver; a chunk extracts after a solve).
@@ -422,6 +429,7 @@ public final class GpuAcOuterLoopPacks {
                         rlTargetP.add(bus.getTargetP());
                         rlBusId.add(bus.getId());
                         rlInitTargetQ.add(initialGenerationTargetQ(bus));
+                        rlBaseQLimitType.add(qLimitTypeCode(bus));
                     }
                     continue;                                  // never let a base-pinned remote member
                 }                                              // masquerade as a LOCAL basePqCapable entry
@@ -468,6 +476,7 @@ public final class GpuAcOuterLoopPacks {
                     rlTargetP.add(bus.getTargetP());
                     rlBusId.add(bus.getId());
                     rlInitTargetQ.add(initialGenerationTargetQ(bus));
+                        rlBaseQLimitType.add(qLimitTypeCode(bus));
                 }
             }
         }
@@ -489,13 +498,17 @@ public final class GpuAcOuterLoopPacks {
                 // member alone is often the pilot's V. loadQ and vTarget complete the pin target
                 // (OLF pins at limit - loadTargetQ), which is the other half of any pin mismatch.
                 System.err.printf("RL_PACK entry=%d bus=%s vRow=%d minQ=%.9f maxQ=%.9f remote=%d"
-                        + " monitored=%d cmpVrow=%d loadQ=%.9f vTarget=%.9f%n",
+                        + " monitored=%d cmpVrow=%d loadQ=%.9f vTarget=%.9f baseQLimitType=%d%n",
                         i, network.getBus(rlBusNum.get(i)).getId(), rlVrow.get(i), rlMinQ.get(i), rlMaxQ.get(i),
                         rlRemote.get(i), rlMonitored.get(i), rlCmpVrow.get(i), rlLoadQ.get(i),
-                        rlVtarget.get(i));
+                        rlVtarget.get(i), rlBaseQLimitType.get(i));
             }
         }
 
+        byte[] baseLt = new byte[rlBaseQLimitType.size()];
+        for (int i = 0; i < baseLt.length; i++) {
+            baseLt[i] = rlBaseQLimitType.get(i);
+        }
         return new RlPack(GpuAcArrays.toIntArray(rlVrow), GpuAcArrays.toDoubleArray(rlMinQ),
                 GpuAcArrays.toDoubleArray(rlMaxQ), GpuAcArrays.toDoubleArray(rlLoadQ),
                 GpuAcArrays.toDoubleArray(rlVtarget), GpuAcArrays.toDoubleArray(rlSvcBmin),
@@ -503,10 +516,19 @@ public final class GpuAcOuterLoopPacks {
                 mon, rem, GpuAcArrays.toIntArray(rlCmpVrow),
                 GpuAcArrays.toIntArray(rlBusNum),
                 GpuAcArrays.toDoubleArray(rlNominalV), GpuAcArrays.toIntArray(rlPRow), GpuAcArrays.toDoubleArray(rlTargetP),
-                idRanks(rlBusId), GpuAcArrays.toDoubleArray(rlInitTargetQ));
+                idRanks(rlBusId), GpuAcArrays.toDoubleArray(rlInitTargetQ), baseLt);
     }
 
     /** {@code ReactiveLimitsOuterLoop.getInitialGenerationTargetQ}, verbatim. */
+    static byte qLimitTypeCode(LfBus bus) {
+        return bus.getQLimitType().map(t -> switch (t) {
+            case MIN_Q -> (byte) 1;
+            case MAX_Q -> (byte) 2;
+            case MIN_REALISTIC_V -> (byte) 3;
+            case MAX_REALISTIC_V -> (byte) 4;
+        }).orElse((byte) 0);
+    }
+
     private static double initialGenerationTargetQ(LfBus bus) {
         return bus.getGenerators().stream().mapToDouble(LfGenerator::getTargetQ).sum();
     }

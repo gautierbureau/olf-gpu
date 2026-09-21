@@ -358,14 +358,17 @@ final class GpuBatchChunkSolver {
             // The pilot's V equals the group target at the base (degenerate) — key the direction on
             // WHICH limit the extracted BUS_TARGET_Q target equals instead.
             boolean remote = gpuData.rlRemote().length > i && gpuData.rlRemote()[i] != 0;
+            byte olfKind = gpuData.rlBaseQLimitType().length > i ? gpuData.rlBaseQLimitType()[i] : 0;
             if (remote) {
                 double tgt = baseTargets[vrow];
                 baseRlSeed[i] = baseRowMode[vrow] == 4
-                        ? (Math.abs(tgt - (gpuData.rlMaxQ()[i] - gpuData.rlLoadQ()[i]))
-                           <= Math.abs(tgt - (gpuData.rlMinQ()[i] - gpuData.rlLoadQ()[i])) ? 2 : 1)
+                        ? (olfKind != 0 ? olfKind
+                           : (Math.abs(tgt - (gpuData.rlMaxQ()[i] - gpuData.rlLoadQ()[i]))
+                              <= Math.abs(tgt - (gpuData.rlMinQ()[i] - gpuData.rlLoadQ()[i])) ? 2 : 1))
                         : 0;
             } else {
-                baseRlSeed[i] = baseRowMode[vrow] == 1 ? (baseState[vrow] < gpuData.rlVtarget()[i] ? 2 : 1) : 0;
+                baseRlSeed[i] = baseRowMode[vrow] == 1
+                        ? (olfKind != 0 ? olfKind : (baseState[vrow] < gpuData.rlVtarget()[i] ? 2 : 1)) : 0;
             }
         }
         try {

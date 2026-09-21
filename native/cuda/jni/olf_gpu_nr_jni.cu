@@ -3203,7 +3203,7 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
                                      int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal, const double* svcRlVt,
                                      const char* rlRemote, const int* rlCmpVrow,
                                      const double* target, const double* rlMinQb, const double* rlMaxQb,
-                                     const double* rlLoadQb) {
+                                     const double* rlLoadQb, const char* rlBaseLt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -3211,6 +3211,11 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
     int vrow = rlVrow[i];
     size_t idx = (size_t) s * n + vrow;
     size_t st = (size_t) s * nrl + i;
+    // OLF's own reason for the base pin, when the host carried it: it distinguishes a
+    // realistic-voltage pin (3/4, target = generation targetQ) from a Q-limit pin (1/2, target =
+    // the limit). The nearest-limit guess below turns the former into the latter, and the
+    // curve-limit drift then re-freezes it AT the limit (rte6515 VL-1251_1: -0.0035 -> -1.0000).
+    char olfKind = rlBaseLt != nullptr ? rlBaseLt[i] : 0;
     if (rlRemote != nullptr && rlRemote[i]) {
         // REMOTE group member (plan-B3): base mode 1 at its row is the UNPINNED DISTR_Q share —
         // only the canonical mode 4 marks a base pin. The pilot's V equals the group target at the
@@ -3220,8 +3225,8 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
         limitType[st] = 0;
         if (baseMode[vrow] == 4) {
             double tgt = target[idx];
-            limitType[st] = fabs(tgt - (rlMaxQb[i] - rlLoadQb[i])) <= fabs(tgt - (rlMinQb[i] - rlLoadQb[i]))
-                    ? 2 : 1;
+            limitType[st] = olfKind != 0 ? olfKind
+                    : (fabs(tgt - (rlMaxQb[i] - rlLoadQb[i])) <= fabs(tgt - (rlMinQb[i] - rlLoadQb[i])) ? 2 : 1);
         }
         return;
     }
@@ -3233,7 +3238,8 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
         // NOT a monitoring SVC standing by: that one seeds UNPINNED so only the VoltageMonitoring
         // orchestrator may activate it, exactly like the CPU's null qLimitType)
         double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]);
-        limitType[st] = (x[idx] < vt) ? 2 : 1;              // v below target ⇒ maxQ pinned; above ⇒ minQ pinned
+        limitType[st] = olfKind != 0 ? olfKind
+                : ((x[idx] < vt) ? 2 : 1);                  // v below target ⇒ maxQ pinned; above ⇒ minQ pinned
     } else {
         limitType[st] = 0;                                  // base PV (incl. a per-scenario gen-override flip)
     }
@@ -3942,16 +3948,18 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         // OLF never back-switches a slope-SVC bus: checkPqBus runs with
         // canSwitchToPv = !bus.hasGeneratorsWithSlope() ("we don't support switching PQ to PV
         // for bus with one controller with slope") — once pinned, a slope row stays PQ.
+        bool maxPin = limitType[st] == 2 || limitType[st] == 4;       // LfBus.QLimitType.isMaxLimit()
+        bool minPin = limitType[st] == 1 || limitType[st] == 3;       // LfBus.QLimitType.isMinLimit()
         bool back = !slopeRow
-                && ((limitType[st] == 2 && v > vt)                   // maxQ-pinned but v above target
-                 || (limitType[st] == 1 && v < vt));                 // minQ-pinned but v below target
+                && ((maxPin && v > vt)                               // maxQ-pinned but v above target
+                 || (minPin && v < vt));                             // minQ-pinned but v below target
         if (back) {
             mode[idx] = 0;                                  // PQ → PV: resume voltage control
             target[idx] = vt;
             limitType[st] = 0;
             switched[s] = 1;
             passSwitched[st] = 2;
-        } else if (cvStride || svcLim) {
+        } else if ((cvStride || svcLim) && limitType[st] <= 2) {   // a realistic-V freeze keeps its target Q
             // Q-limit UPDATE while pinned (OLF checkPqBusWithQLimitType): a CURVE limit that moved
             // (DS moved the gen's P) or an SVC limit that moved (B*v^2 at the live V) re-freezes
             // the pinned Q at the NEW limit when it drifted by more than the mismatch tol.
@@ -4845,6 +4853,8 @@ struct BatchSolverContext {
     DeviceBuf dRowSlope;                                   // per row: SLOPE-SVC slope (mode-2 V rows), 0 elsewhere
     int nRlRemote = 0;                                     // remote-member RL entries present (plan-B1/B3)
     DeviceBuf dRlRemote;                                   // per-entry remote kind (1 = remote group member)
+    DeviceBuf dRlBaseLimitType;                            // OLF's base pin kind per entry (0..4); see hasRlBaseLt
+    int hasRlBaseLt = 0;
     DeviceBuf dRlCmpVrow;                                  // per-entry compare row (PILOT v col for remote members)
     DeviceBuf dRlSvcBmin, dRlSvcBmax, dRlV2Base;           // per-entry SVC quadratic limit coefs + packed base v^2
                                                            // (limit(v) = static + b*(v^2 - v2Base)); zeroed default
@@ -7274,7 +7284,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
                         ctx->nRlRemote > 0 ? ctx->dRlCmpVrow.as<int>() : nullptr,
                         ctx->dTarget.as<double>(), ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(),
-                        ctx->dRlLoadQ.as<double>());
+                        ctx->dRlLoadQ.as<double>(),
+                        ctx->hasRlBaseLt ? ctx->dRlBaseLimitType.as<char>() : nullptr);
             }
         }
         if (ctx->nds > 0) {                                  // slack-retained share: 0 until frozen at the first pass
@@ -10094,6 +10105,29 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     env->ReleaseDoubleArrayElements(jBmin, bmin, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jBmax, bmax, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jV2Base, v2b, JNI_ABORT);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlBaseLimitType(
+        JNIEnv* env, jclass, jlong handle, jbyteArray jKinds) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jKinds == nullptr || env->GetArrayLength(jKinds) == 0) {
+        ctx->hasRlBaseLt = 0;
+        return;
+    }
+    if (env->GetArrayLength(jKinds) != ctx->nrl) {
+        env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
+                      "setBatchRlBaseLimitType: array length != nrl");
+        return;
+    }
+    jbyte* kinds = env->GetByteArrayElements(jKinds, nullptr);
+    ctx->dRlBaseLimitType.alloc(static_cast<size_t>(ctx->nrl));
+    CUDA_CHECK(cudaMemcpy(ctx->dRlBaseLimitType.p, kinds, static_cast<size_t>(ctx->nrl), cudaMemcpyHostToDevice));
+    env->ReleaseByteArrayElements(jKinds, kinds, JNI_ABORT);
+    ctx->hasRlBaseLt = 1;
 }
 
 extern "C" JNIEXPORT void JNICALL

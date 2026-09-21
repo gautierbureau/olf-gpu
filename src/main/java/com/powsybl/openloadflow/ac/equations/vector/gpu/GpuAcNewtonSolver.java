@@ -649,6 +649,11 @@ public final class GpuAcNewtonSolver {
     public static native void setBatchRealisticCheck(long handle, byte[] rowChecked, double minV, double maxV,
                                                      int enabled, int fixingLoop);
 
+    /** OLF's own base pin kind per RL entry (0 none, 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V,
+     *  4 MAX_REALISTIC_V); null clears it on a cached context and the device falls back to its
+     *  nearest-limit guess. */
+    public static native void setBatchRlBaseLimitType(long handle, byte[] rlBaseQLimitType);
+
     public static native void setBatchRlRemote(long handle, byte[] rlRemote, int[] rlCmpVrow,
                                                int[] rmqRow, int[] rmqElem, int[] rmqSide, int[] rmqKind,
                                                double[] rmqWeight,

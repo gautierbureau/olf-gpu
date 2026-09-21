@@ -282,6 +282,10 @@ final class GpuBatchPrecomputer {
                     }
                 } else {
                     GpuBatchScopeCensus.record("RUNTIME:status=" + r.convergenceStatus());
+                    if (System.getenv("OLF_GPU_REJECT_TRACE") != null) {
+                        // pairs with the kernel's GPU_REJECT slot= reason= lines (same switch)
+                        System.err.println("GPU_REJECT_CTG ctg=" + r.contingencyId() + " status=" + r.convergenceStatus());
+                    }
                 }
             }
             Map<Variable<AcVariableType>, Integer> baseVariableRows = new HashMap<>();

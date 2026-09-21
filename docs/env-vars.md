@@ -33,7 +33,7 @@ Solves one contingency as an ordinary load flow on the device, which is where th
 instruments live. A contingency wrong batched and right there is a BATCH defect.
 
 
-## Diagnostics (92) — print only, cannot change a result
+## Diagnostics (94) — print only, cannot change a result
 
 Safe to add. These are the instruments; several are the only reason a defect was found at all.
 
@@ -85,7 +85,7 @@ Safe to add. These are the instruments; several are the only reason a defect was
 | `OLF_GPU_DS_GEN_TRACE` | src/main/java/com/powsybl/openloadflow/ac/equations/vector/gpu/GpuAcOuterLoopPacks.java:558 +2 |
 | `OLF_GPU_DS_PACK_TRACE` | src/main/java/com/powsybl/openloadflow/ac/equations/vector/gpu/GpuAcOuterLoopPacks.java:598 |
 | `OLF_GPU_DS_TARGET_DUMP` | src/main/java/com/powsybl/openloadflow/ac/equations/vector/gpu/GpuAcOuterLoopPacks.java:607 +2 |
-| `OLF_GPU_DX_DUMP` | native/cuda/jni/olf_gpu_nr_jni.cu (first batch solve, it=0, slot 0) — writes J/F/dx as text; pair with `OLF_NR_DX_DUMP` on the CPU arm and read both with `JacobianDumpCompareTest` |
+| `OLF_GPU_DX_DUMP` | native/cuda/jni/olf_gpu_nr_jni.cu — `<path>`: the first solve’s assembled Jacobian (CSR), the mismatch F, the step dx and, since 2026-09-21, `B`, the right-hand side as solved after the zero-diagonal row repair (so J·dx = B is checkable offline; F stays the pre-repair mismatch); slot 0 only | native/cuda/jni/olf_gpu_nr_jni.cu (first batch solve, it=0, slot 0) — writes J/F/dx as text; pair with `OLF_NR_DX_DUMP` on the CPU arm and read both with `JacobianDumpCompareTest` |
 | `OLF_GPU_E2E` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedN1FixedIterTest.java:176 +1 |
 | `OLF_GPU_E2E_WARMJIT` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedN1FixedIterTest.java:176 |
 | `OLF_GPU_FINAL_TARGET_ROW` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchChunkSolver.java:1294 +1 |
@@ -96,6 +96,8 @@ Safe to add. These are the instruments; several are the only reason a defect was
 | `OLF_GPU_ITER_TRACE` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchChunkSolver.java:1136 |
 | `OLF_GPU_LIN_RESID` | native/cuda/jni/olf_gpu_nr_jni.cu (both the sequential and the batched solve) — prints `\|\|J.dx-F\|\|inf` per iteration, i.e. how exactly cuDSS solved the system it was handed |
 | `OLF_GPU_CONV_TRACE` | native/cuda/jni/olf_gpu_nr_jni.cu (batched solve) — `<slot>` or `all`: the stopping DECISION per iteration (norm2, its threshold, the active row count, inf-norm, per-row flag) plus `CONV_TOP`, the eight worst rows by index; OLF's `OLF_NR_ITER_TRACE` prints `NR_TOP` with the same shape, so the two lists name the rows where a step differs |
+| `OLF_GPU_HAZ_TRACE` | native/cuda/jni/olf_gpu_nr_jni.cu (`hazRepairVals`) — device printf `HAZ_NODONOR s= row= donors=`: a zero-diagonal row none of its candidate donors could repair this scenario (lands in the surefire dumpstream) |
+| `OLF_GPU_REJECT_TRACE` | native/cuda/jni/olf_gpu_nr_jni.cu (`traceReject`, every status −2 gate) + GpuBatchPrecomputer — `GPU_REJECT slot= reason=` (host-loop-outer-budget, straggler-exit, unrealistic-state, device-loop-routed, tvd-kernel-reject, svc-kernel-reject, ds-residual-saturated, outer-loop-budget) and `GPU_REJECT_CTG ctg=` so the census's one RUNTIME tag gets a reason per contingency |
 | `OLF_GPU_LOOP_TRACE` | native/cuda/jni/olf_gpu_nr_jni.cu (driver) — `<slot>`: `LOOP_PASS` per pass, the device side of OLF's `OLF_OL_TRACE` `OL_CHECK`: which loop ran, whether the slot was found UNSTABLE, whether the phase is still unstable |
 | `OLF_GPU_RL_TRACE_VROW` | native/cuda/jni/olf_gpu_nr_jni.cu — `<v row>`: `RL_VROW`, one LOCAL reactive-limits entry's q / live limits / row target / mode at every check (the remote-only RL_TRACE never names it) |
 | `OLF_GPU_DS_DEBUG_SLOT` | native/cuda/jni/olf_gpu_nr_jni.cu — with `OLF_GPU_DS_DEBUG`: which slot the kernel-level water-fill prints (`[DS-GATE]`/`[DS-WF]`/`[DS-SAT]`, device printf → surefire dumpstream) follow; default 0 |

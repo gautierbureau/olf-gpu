@@ -45,6 +45,7 @@
 
 #include <algorithm>
 #include <map>
+#include <cstring>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -1156,9 +1157,9 @@ __global__ void linResidRow(int n, const int* rowPtr, const int* colIdx, const d
 // The repair is numeric and per scenario, applied to the assembled values right before they are
 // factorized: a row whose diagonal is exactly zero borrows a row that carries its diagonal column,
 //     row_r += s_r * row_d          (values AND right-hand side)
-// which leaves J dx = -F with the same solution (the combination matrix is nonsingular: bus rows
-// borrow with +1, dummy rows with -1, and on a spanning tree the borrowing closes only in 2-cycles,
-// det 2). Candidates are structural — a dummy row's two endpoint rows (and the pilot-Q relocation
+// which leaves J dx = -F with the same solution (the combination matrix is nonsingular: P rows
+// borrow with +1, Q rows and dummy rows with -1; on a spanning tree the borrowing closes only in
+// 4-cycles P -> ZERO_PHI -> Q -> ZERO_V -> P, whose determinant 1 - (+1)(-1)(-1)(-1) is 2). Candidates are structural — a dummy row's two endpoint rows (and the pilot-Q relocation
 // candidates when an endpoint's Q rides there), an endpoint row's incident couplers' dummy rows —
 // and the choice is numeric, so a coupler switched off or a section pinned to identity this scenario
 // simply is not a donor (an identity row has nothing but its own 1). Every right-hand side handed to
@@ -1196,7 +1197,7 @@ __global__ void hazSnapshotVals(int nHaz, int nS, int nnz, int hazTot, const int
 __global__ void hazRepairVals(int nHaz, int nS, int nnz, int hazTot, const int* hazRow, const int* hazOff,
                               const int* hazDonorPtr, const int* hazDonor, const int* hazDonorHaz,
                               const char* hazSign, const int* rowPtr, const int* colIdx, const int* diagPos,
-                              const double* snap, double* vals, int* choice) {
+                              const double* snap, double* vals, int* choice, int traceNoDonor) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nHaz * nS) return;
     int i = tid % nHaz;
@@ -1222,6 +1223,10 @@ __global__ void hazRepairVals(int nHaz, int nS, int nnz, int hazTot, const int* 
         }
         choice[(size_t) s * nHaz + i] = j;
         return;
+    }
+    if (traceNoDonor) {                                      // a zero diagonal nobody could repair: the
+        printf("HAZ_NODONOR s=%d row=%d donors=%d\n", s, r,   // pivot cuDSS will perturb (device printf)
+               hazDonorPtr[i + 1] - hazDonorPtr[i]);
     }
 }
 
@@ -1263,7 +1268,8 @@ static void hazRepairValues(Ctx* ctx, int nS, double* vals) {
     hazRepairVals<<<((st->nHaz * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nHaz, nS, nnz, st->hazTot,
             st->dHazRow.template as<int>(), st->dHazOff.template as<int>(), st->dHazDonorPtr.template as<int>(), st->dHazDonor.template as<int>(),
             st->dHazDonorHaz.template as<int>(), st->dHazSign.template as<char>(), st->dRowPtr.template as<int>(), st->dColIdx.template as<int>(),
-            st->dDiagPos.template as<int>(), ctx->dHazSnap.template as<double>(), vals, ctx->dHazChoice.template as<int>());
+            st->dDiagPos.template as<int>(), ctx->dHazSnap.template as<double>(), vals, ctx->dHazChoice.template as<int>(),
+            std::getenv("OLF_GPU_HAZ_TRACE") != nullptr ? 1 : 0);
 }
 
 /** The same combination on a right-hand side (nS scenarios from {@code B}, choices from the last
@@ -1278,6 +1284,16 @@ static void hazRepairRightHandSide(Ctx* ctx, int nS, double* B, int sOff = 0) {
     hazRepairRhs<<<((st->nHaz * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nHaz, nS, n, st->dHazRow.template as<int>(),
             st->dHazDonor.template as<int>(), st->dHazDonorHaz.template as<int>(), st->dHazSign.template as<char>(),
             ctx->dHazChoice.template as<int>() + (size_t) sOff * st->nHaz, bsnap, B);
+}
+
+// OLF_GPU_REJECT_TRACE=1: WHY a scenario left the batch for the CPU replay (status -2). The census
+// counts them under one tag ("RUNTIME:status=-2"); this names the gate, per slot, so the Java side
+// can pair it with the contingency id (GpuBatchPrecomputer prints the id under the same switch).
+static inline void traceReject(int slot, const char* reason, int outer, int it) {
+    static const bool on = std::getenv("OLF_GPU_REJECT_TRACE") != nullptr;
+    if (on) {
+        std::fprintf(stderr, "GPU_REJECT slot=%d reason=%s outer=%d it=%d\n", slot, reason, outer, it);
+    }
 }
 
 __global__ void linResidRowBatch(int n, int nS, int nnz, const int* rowPtr, const int* colIdx,
@@ -2057,8 +2073,13 @@ SharedStructure* buildStructure(int n,
         for (int e = 0; e < nzi; e++) {
             const int* z = ziIdx + static_cast<size_t>(e) * 11;
             if (!ziSpan(z) || ziDeadSide(z) != 0) continue;  // loop edge: identity dummies; stub: relocated
-            int dP = rowMap[ziZeroPhiRow(z)];
-            int dQ = rowMap[ziZeroVRow(z)];
+            // ZERO_V sits on the DUMMY_P row (its diagonal column is dummy-P, carried by the endpoint
+            // P rows); ZERO_PHI on the DUMMY_Q row (dummy-Q, carried by the endpoint Q rows). The first
+            // cut had these two swapped, so no dummy row ever found a donor: invisible at 28 couplers
+            // (cuDSS still coped, with IR=2), fatal at rte6515's full 366 (the base solve's linear
+            // residual was 1e9 and Newton never moved).
+            int dP = rowMap[ziZeroVRow(z)];                  // hosts ZERO_V, diagonal column = dummy-P
+            int dQ = rowMap[ziZeroPhiRow(z)];                // hosts ZERO_PHI, diagonal column = dummy-Q
             int pa = z[0] >= 0 ? rowMap[z[0]] : -1;
             int pb = z[2] >= 0 ? rowMap[z[2]] : -1;
             int qaRow = z[1] >= 0 ? z[1] : z[6];             // suppressed Q balance: the V slot hosts DISTR_Q
@@ -2078,12 +2099,44 @@ SharedStructure* buildStructure(int n,
                     for (int c = st->hQrPtr[g]; c < st->hQrPtr[g + 1]; c++) addDonor(sQ, st->hQrRows[c]);
                 }
             }
-            if (pa >= 0) addDonor(slotOf(pa, 1), dP);
-            if (pb >= 0) addDonor(slotOf(pb, 1), dP);
-            if (qa >= 0) addDonor(slotOf(qa, 1), dQ);
-            if (qb >= 0) addDonor(slotOf(qb, 1), dQ);
+            // Signs: the borrowing closes in 4-cycles P(a) -> ZERO_PHI -> Q(a) -> ZERO_V -> P(a) (a tree
+            // allows no other cycle), and det(I + C) on such a cycle is 1 - (product of the four
+            // signs): P rows +1, Q rows -1, dummy rows -1 gives det 2. All-bus-rows-+1 gave det 0 - a
+            // singular, CONSISTENT system cuDSS solved to 1e-11 with the wrong answer (rte6515 500
+            // busbars: 175 contingencies above 1e-9 kV where the tree-only borrowing had 3).
+            if (pa >= 0) addDonor(slotOf(pa, 1), dQ);       // phi_a is carried by ZERO_PHI
+            if (pb >= 0) addDonor(slotOf(pb, 1), dQ);
+            if (qa >= 0) addDonor(slotOf(qa, -1), dP);      // v_a is carried by ZERO_V
+            if (qb >= 0) addDonor(slotOf(qb, -1), dP);
         }
         if (!hazRows.empty()) {
+            // DONOR ORDER decides LU stability without pivoting. The kernel takes the FIRST candidate
+            // with a nonzero coefficient, and two rows borrowing the SAME donor come out near-identical
+            // (a three-section bus: both couplers' ZERO_PHI rows plus the middle bus's Q row) -
+            // nonsingular, but their elimination cancels to a pivot cuDSS's static pivoting cannot
+            // survive (rte6515 full busbar structure: the repaired system solved to 9e-13 by a pivoted
+            // LU, to 2.5e6 by cuDSS). So: a dummy row prefers the endpoint with the FEWEST incident
+            // tree couplers (a leaf is unique to its coupler) and, among equals, the one no other
+            // dummy row has taken; a bus row prefers a ZERO row no other bus row has taken.
+            std::map<int, int> ziDeg;                        // bus row -> incident tree couplers
+            for (int e = 0; e < nzi; e++) {
+                const int* z = ziIdx + static_cast<size_t>(e) * 11;
+                if (!ziSpan(z) || ziDeadSide(z) != 0) continue;
+                for (int slot : {z[0], z[2], z[1] >= 0 ? z[1] : z[6], z[3] >= 0 ? z[3] : z[7]}) {
+                    if (slot >= 0) ziDeg[rowMap[slot]]++;
+                }
+            }
+            std::map<int, int> used;
+            for (size_t i = 0; i < hazRows.size(); i++) {
+                auto& v = hazDonors[i];
+                std::stable_sort(v.begin(), v.end(), [&](int a, int b) {
+                    int da = ziDeg.count(a) ? ziDeg[a] : 0;
+                    int db = ziDeg.count(b) ? ziDeg[b] : 0;
+                    if (da != db) return da < db;
+                    return used[a] < used[b];
+                });
+                if (!v.empty()) used[v[0]]++;
+            }
             std::vector<std::pair<int, int>> sorted(pat);
             std::sort(sorted.begin(), sorted.end());
             sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
@@ -7838,6 +7891,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             // 2000-contingency rte6515 slice with SecondaryVoltageControl did not finish in 28 min).
             for (int s = 0; s < nS; s++) {
                 if (active[s] && ++prodIters[s] >= RL_MAX_OUTER) {
+                    traceReject(s, "host-loop-outer-budget", -1, 0);
                     res.status[s] = -2;                      // budget exhausted -> CPU replays it
                     live[s] = 0;
                     active[s] = 0;
@@ -8235,7 +8289,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         std::vector<char> rej(nS);
         CUDA_CHECK(cudaMemcpy(rej.data(), ctx->dTvdReject.p, nS, cudaMemcpyDeviceToHost));
-        for (int s2 = 0; s2 < nS; s2++) if (rej[s2]) loopRejected[s2] = 1;
+        for (int s2 = 0; s2 < nS; s2++) if (rej[s2]) { loopRejected[s2] = 1; traceReject(s2, "tvd-kernel-reject", outer, 0); }
         tvcRebuildOverrides(ctx);
         if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
             size_t nsm = static_cast<size_t>(nS) * ctx->nTvd;
@@ -8337,7 +8391,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         CUDA_CHECK(cudaMemcpy(rej.data(), ctx->dSvcReject.p, nS, cudaMemcpyDeviceToHost));
         int nRej = 0;
         for (int s2 = 0; s2 < nS; s2++) {
-            if (rej[s2]) { loopRejected[s2] = 1; nRej++; }
+            if (rej[s2]) { loopRejected[s2] = 1; nRej++; traceReject(s2, "svc-kernel-reject", outer, 0); }
         }
         if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
             int nNeed = 0;
@@ -8566,6 +8620,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             // (it >= maxIter/2) get offloaded.
             for (int s = 0; s < nS; s++) {
                 if (active[s]) {
+                    traceReject(s, "straggler-exit", outer, it);
                     res.status[s] = -2;
                     res.iters[s] = it;
                     active[s] = 0;
@@ -8765,6 +8820,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 std::vector<int> hrp(n + 1);
                 std::vector<int> hci(nnz);
                 std::vector<int> hmode(n);
+                std::vector<double> hb(n);                   // the RHS as SOLVED (row-repaired, see hazRepairRhs)
+                CUDA_CHECK(cudaMemcpy(hb.data(), ctx->dB.p, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
                 CUDA_CHECK(cudaMemcpy(hv.data(), ctx->dVals.p, (size_t) nnz * sizeof(double), cudaMemcpyDeviceToHost));
                 CUDA_CHECK(cudaMemcpy(hd.data(), ctx->dDx.p, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
                 CUDA_CHECK(cudaMemcpy(hff.data(), ctx->dF.p, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
@@ -8777,6 +8834,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     for (int i = 0; i < n; i++) {
                         std::fprintf(f, "F %d %.17e\n", i, hff[i]);
                         std::fprintf(f, "DX %d %.17e\n", i, hd[i]);
+                        std::fprintf(f, "B %d %.17e\n", i, hb[i]);
                         std::fprintf(f, "MODE %d %d\n", i, hmode[i]);
                         for (int k = hrp[i]; k < hrp[i + 1]; k++) {
                             std::fprintf(f, "J %d %d %.17e\n", i, hci[k], hv[k]);
@@ -8931,6 +8989,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     std::fprintf(stderr, "GPU_UNREALISTIC_SWEEP slot=%d outer=%d loop=%d band=[%.4f, %.4f]\n",
                                  s, outer, loopOrder[loopIdx], ctx->realisticMinV, ctx->realisticMaxV);
                 }
+                traceReject(s, "unrealistic-state", outer, 0);
                 res.status[s] = -2;                          // STATUS_REJECTED -> the CPU replays it
                 live[s] = 0;
                 active[s] = 0;
@@ -9248,6 +9307,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     CUDA_CHECK(cudaMemcpy(rlSwitched.data(), ctx->dRlSwitched.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
     for (int s = 0; s < nS; s++) {
         if (loopRejected[s]) {                              // a device loop routed the scenario to the CPU fallback
+            traceReject(s, "device-loop-routed", outer, 0);
             res.status[s] = -2;
             live[s] = 0;
             active[s] = 0;
@@ -9338,6 +9398,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         CUDA_CHECK(cudaMemcpy(dsResidual.data(), ctx->dDsResidual.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
         for (int s = 0; s < nS; s++) {
             if (dsResidual[s] && live[s]) {
+                traceReject(s, "ds-residual-saturated", outer, 0);
                 res.status[s] = -2;
                 active[s] = 0;
                 live[s] = 0;
@@ -9367,6 +9428,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 // This scenario exhausted ITS outer-iteration budget mid-sequence. Never report it
                 // converged on a half-finished RL/DS fixpoint — reject to the CPU fallback, which
                 // replays it under OLF's own maxOuterLoopIterations/UNSTABLE handling.
+                traceReject(s, "outer-loop-budget", outer, 0);
                 res.status[s] = -2;
                 rlSwitched[s] = 0;
                 live[s] = 0;

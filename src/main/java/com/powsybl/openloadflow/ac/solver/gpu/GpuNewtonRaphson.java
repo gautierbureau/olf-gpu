@@ -1029,7 +1029,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // GLOBAL "strongest stays PV" election, which the kernel does not run). The chunk
                 // solver routes such a scenario to the CPU; the batch-of-one does the same — the
                 // CPU Newton-Raphson reruns it and OLF's loops (deferred by the engine) decide.
-                throw new PowsyblException("GPU driver rejected the base solve (all-pinned / forced-PV election)");
+                throw new PowsyblException("GPU driver rejected the base solve (status -2: straggler exit, outer-loop budget, unrealistic state or a device-loop reject - OLF_GPU_REJECT_TRACE=1 names the gate)");
             }
             LOGGER.debug("GPU Newton-Raphson timing: prepare {} ms (context {}), solve {} ms",
                     (t1 - t0) / 1_000_000, rebuilt ? "rebuilt" : "reused", (t2 - t1) / 1_000_000);

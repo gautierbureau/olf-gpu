@@ -314,6 +314,12 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             ch.qos.logback.classic.Logger rlLog = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
                     .getLogger("com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop");
             rlLog.setLevel(ch.qos.logback.classic.Level.TRACE);
+            // The voltage-MONITORING loop too (standby SVC automata): its PQ->PV activations are the
+            // other per-contingency DECISION the two arms can disagree on, and like a pin they leave
+            // no residual - only the two decision logs tell them apart.
+            ch.qos.logback.classic.Logger monLog = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                    .getLogger("com.powsybl.openloadflow.ac.outerloop.MonitoringVoltageOuterLoop");
+            monLog.setLevel(ch.qos.logback.classic.Level.TRACE);
             ch.qos.logback.classic.Logger root = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
                     .getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
             if (!root.iteratorForAppenders().hasNext()) {
@@ -328,6 +334,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 ca.setEncoder(enc);
                 ca.start();
                 rlLog.addAppender(ca);
+                monLog.addAppender(ca);
             }
         }
         // OLF_GPU_SA_NO_RL / OLF_GPU_SA_NO_DS: disable an outer loop on BOTH arms. Stage isolation -

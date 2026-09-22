@@ -230,6 +230,22 @@ lives, gain, risk, and how to verify. Ordered by expected gain.
   end to end both ~20-21 s cold, inside the ±1 s run noise. One chunk still spends ~0.45 s more outside the JNI
   call (other per-chunk-width arrays, not profiled). Parity 0 diff in both modes, suite 275/0.
 - Further device gains need fewer iterations or cheaper factorizations — not a lead at today's share.
+- **Convergence criterion comparison (2026-09-22).** `-Dolf.gpu.sa.deviceCriterion=infnorm` (||F||inf < 1e-8) and
+  `-Dolf.gpu.sa.fixedInnerIters=K` (K steps per inner solve, criterion tested after the last, outer loops kept),
+  rte6515 GPU cold, CPU parity at 30 threads:
+
+  | device inner criterion | GPU cold | device solve | scenario-iterations | on device | violations differing |
+  |---|---|---|---|---|---|
+  | default (OLF uniform 1e-4, per-iteration retirement) | 17.4 s | 7.8 s | 49k | 14,258 | 0 |
+  | infinity norm 1e-8 | 22.4 s | 12.0 s | 99k | 14,258 | 189 |
+  | fixed K=3 | 23.7 s | 13.2 s | 134k | 14,256 | 189 |
+  | fixed K=4 | 28.0 s | 16.6 s | 178k | 14,258 | 189 |
+  | fixed K=5 | 30.8 s | 20.2 s | 223k | 14,258 | 189 |
+
+  The default is fastest: retirement lets the many warm outer-loop re-solves stop after 1-2 steps, where fixed K
+  pays K on every one (the per-iteration norm readback it saves is nS*4 doubles). Both alternatives converge past
+  the CPU's stopping point and flip the same threshold-borderline outer-loop decisions (189 violations,
+  distributed power up to 1.87 MW on ~150 contingencies) — the reason the device uses OLF's exact criterion.
 
 ### L9 — the host loop is single-threaded (known bug) — multiplies everything above
 

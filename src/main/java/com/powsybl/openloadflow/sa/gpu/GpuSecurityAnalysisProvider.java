@@ -79,6 +79,7 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
     public static void resetLastGpuPrecomputedCount() {
         GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.set(-1);
         GpuBatchedAcSecurityAnalysis.LAST_REPLAYED_LOSS_COUNT.set(0);
+        GpuBatchedAcSecurityAnalysis.LAST_TARGETED_RESTORE_COUNT.set(0);
     }
 
     /** System property: allow the GPU provider to honour {@code threadCount > 1} again. Off by

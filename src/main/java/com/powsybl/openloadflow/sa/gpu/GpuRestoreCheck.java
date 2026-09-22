@@ -106,6 +106,7 @@ final class GpuRestoreCheck {
             fp.add(id + " generatorVoltageControlEnabled", b.isGeneratorVoltageControlEnabled());
             fp.add(id + " generatorReactivePowerControlEnabled", b.isGeneratorReactivePowerControlEnabled());
             fp.add(id + " generationTargetQ", b.getGenerationTargetQ());
+            fp.add(id + " generationTargetQFrozen", b.isGenerationTargetQFrozen());
             fp.add(id + " qLimitType", b.getQLimitType().map(Enum::ordinal).orElse(-1));
             shunt(fp, id + " shunt", b.getShunt());
             shunt(fp, id + " controllerShunt", b.getControllerShunt());

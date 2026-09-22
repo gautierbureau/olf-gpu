@@ -289,6 +289,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         private PrecomputedBatch precomputed = PrecomputedBatch.empty();
         /** The state injector's row permutation, kept across this partition's contingencies. */
         private final GpuStateInjector.Remap remap = new GpuStateInjector.Remap();
+        /** Per bus num: does the realistic-voltage band apply (not fictitious, nominal V at or above the
+         *  check's minimum)? Built once for {@link #realisticBandNetwork}. */
+        private boolean[] realisticBandApplies;
+        private LfNetwork realisticBandNetwork;
         // The run's actual outer loops, captured in runSimulations: the device must run the distributed-slack /
         // reactive-limits passes ONLY when OLF would (i.e. when the outer loop is in the configured list), never
         // unconditionally from network capability. Default to OLF's defaults until runSimulations sets them.
@@ -975,7 +979,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     Integer.parseInt(System.getenv("OLF_GPU_SA_RESID")), precomputed.baseVariableRows(),
                     precomputed.islandedBuses().get(contingency.getId()));
         }
-        AcSolverUtil.updateNetwork(network, precomputed.equationSystem());
+        boolean unrealistic = updateNetworkAndCheckRealistic(precomputed.equationSystem(), network,
+                context.getParameters(), runState.get());
         PHASE_NS.computeIfAbsent("   AcSolverUtil.updateNetwork()", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tUpd);
         PHASE_NS.computeIfAbsent("  state injection + network update", k -> new java.util.concurrent.atomic.LongAdder())
@@ -1055,8 +1060,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // rejected result reports NO violations at all. Skipping that check does not make the GPU
         // arm optimistic by a violation or two — it makes it report a full violation set where the
         // CPU reports none.
-        PostContingencyComputationStatus status = isStateUnrealistic(precomputed.equationSystem(), network,
-                context.getParameters())
+        PostContingencyComputationStatus status = unrealistic
                 ? PostContingencyComputationStatus.FAILED
                 : PostContingencyComputationStatus.CONVERGED;
         var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions,
@@ -1159,6 +1163,59 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      *
      * <p>{@code OLF_GPU_UNREALISTIC_TRACE} names the offending buses.
      */
+    /**
+     * {@code AcSolverUtil.updateNetwork} and {@link #isStateUnrealistic} in ONE walk over the variables. Both
+     * walked the ~13k variables of rte6515 once per contingency (2.9 s of the GPU arm, nearly all of it memory
+     * traffic), the second one with two bus lookups per variable. Only BUS_V / BUS_PHI are handled here —
+     * the only kinds the batch solves — so any other kind in the system falls back to the two original
+     * calls. Which buses the realistic-voltage band applies to is a per-network constant, cached per run.
+     */
+    private static boolean updateNetworkAndCheckRealistic(EquationSystem<AcVariableType, AcEquationType> es,
+                                                          LfNetwork network, AcLoadFlowParameters parameters,
+                                                          RunState rs) {
+        List<Variable<AcVariableType>> vars = es.getIndex().getSortedVariablesToFind();
+        for (Variable<AcVariableType> v : vars) {
+            if (v.getType() != AcVariableType.BUS_V && v.getType() != AcVariableType.BUS_PHI) {
+                AcSolverUtil.updateNetwork(network, es);
+                return isStateUnrealistic(es, network, parameters);
+            }
+        }
+        if (rs.realisticBandApplies == null || rs.realisticBandNetwork != network) {
+            double minNominalV = parameters.getMinNominalVoltageRealisticVoltageCheck();
+            boolean[] applies = new boolean[network.getBuses().size()];
+            for (LfBus b : network.getBuses()) {
+                applies[b.getNum()] = !b.isFictitious() && b.getNominalV() >= minNominalV;
+            }
+            rs.realisticBandApplies = applies;
+            rs.realisticBandNetwork = network;
+        }
+        boolean[] applies = rs.realisticBandApplies;
+        double minV = parameters.getMinRealisticVoltage();
+        double maxV = parameters.getMaxRealisticVoltage();
+        boolean trace = System.getenv("OLF_GPU_UNREALISTIC_TRACE") != null;
+        com.powsybl.openloadflow.equations.StateVector sv = es.getStateVector();
+        boolean unrealistic = false;
+        for (Variable<AcVariableType> v : vars) {
+            double value = sv.get(v.getRow());
+            LfBus bus = network.getBus(v.getElementNum());
+            if (v.getType() == AcVariableType.BUS_PHI) {
+                bus.setAngle(value);
+                continue;
+            }
+            bus.setV(value);
+            if (!unrealistic || trace) {
+                if ((value < minV || value > maxV) && applies[v.getElementNum()]) {
+                    unrealistic = true;
+                    if (trace) {
+                        System.err.printf("UNREALISTIC bus=%s v=%.9f nominalV=%.3f band=[%.3f, %.3f]%n",
+                                bus.getId(), value, bus.getNominalV(), minV, maxV);
+                    }
+                }
+            }
+        }
+        return unrealistic;
+    }
+
     private static boolean isStateUnrealistic(EquationSystem<AcVariableType, AcEquationType> es,
                                               LfNetwork network, AcLoadFlowParameters parameters) {
         double minNominalV = parameters.getMinNominalVoltageRealisticVoltageCheck();

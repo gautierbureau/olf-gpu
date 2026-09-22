@@ -8,9 +8,10 @@
 // arithmetic over data the device already holds — 34714 limit groups and 138817 thresholds per
 // contingency on that network.
 //
-// This kernel SCREENS, it does not decide. It compares against a RELAXED threshold and emits EVERY
-// exceeded entry of a group rather than stopping at the first, so it can only ever hand the host
-// MORE candidates than OLF would report. The host then re-tests each with OLF's exact `>` on OLF's
+// This kernel SCREENS, it does not decide. It compares against a RELAXED threshold and keeps emitting a
+// group's exceeded entries until one is exceeded BEYOND the band (certain to confirm on the host, which
+// reports the first confirmed entry of a group), so it can only ever hand the host MORE candidates than
+// OLF would report. The host then re-tests each with OLF's exact `>` on OLF's
 // own value (GpuLimitScanner.detectFromCandidates). That is deliberate: a value computed here
 // differs from the host's in the last bits (FMA contraction, a different sin/cos), and violations of
 // an element that already violates at base are decided with ZERO tolerance — so the arithmetic here
@@ -190,6 +191,12 @@ __global__ void screenBranches(int nBranches, int nScenarios, int n, int capacit
             double threshold = limThreshold[l];
             if (value > threshold - fabs(threshold) * band) {
                 emit(records, counts, s, capacity, l);
+                // Exceeded BEYOND the band: the host's exact re-test (its value differs from ours by ~1e-16
+                // relative, the band is 1e-9) confirms this limit, and it reports the first confirmed limit of a
+                // group and never looks further — so the group's remaining limits can never be reported.
+                if (value > threshold + fabs(threshold) * band) {
+                    break;
+                }
             }
         }
     }

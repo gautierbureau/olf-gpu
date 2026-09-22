@@ -342,7 +342,13 @@ x1.2–1.3 vs 30).
 GPU kernels (6.2 s): cuDSS factorization 2.6, forward/backward solve 1.1, analysis 0.61 (1.2 before D1), Jacobian
 fill 1.1 (D2, parked), identity rows 0.3, outer-loop passes 0.3, violation screen 0.02, other 0.3.
 
-Next cold-path candidates: the candidate sort (~1 s: sort on the device, or do without the order); bus V/angle
+Next cold-path candidates: the candidate sort (~1 s: sort on the device, or do without the order — **DONE**: the
+sort was a symptom of ~415 candidates per contingency against ~64 reported violations; the screen now stops a
+limit group at the first limit exceeded BEYOND the band, which the host is certain to confirm and after which it
+never looks. Candidates ~415 -> about the violation count, 31 buffer overflows -> 0; violation detection 2.40 ->
+1.64 s cold, the sort 0.99 -> 0.35 s. `OLF_GPU_VIOL_CROSSCHECK=1` against OLF's stock detection: 14,255 / 14,255
+identical, same order. A new lead from the same profile: 0.55 s of `LinkedHashMap.get` in OLF's
+`LimitViolationManager.addLimitViolation` — the base-case lookup of the increased-violation rule); bus V/angle
 from arrays instead of OLF's variable objects (up to ~1.5 s — **DONE**: per-bus V/angle rows of the device state,
 disabled buses skipped; `OLF_GPU_BUS_ARRAY_CHECK=1` against the variable walk: 14,258 / 14,258 bit-identical;
 1.88 s -> 0.80 s cold; GPU 20.1 s cold vs CPU-8t 134.8 s this run, 906,447 violations 0 differing); OLF's variable-index re-sort after `apply()` (~1 s);

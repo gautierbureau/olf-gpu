@@ -267,6 +267,10 @@ public final class GpuAcNewtonSolver {
      * @return {@code [nScenarios][n + 3]}: per-scenario [state(n), iterations, finalMismatch, convergenceStatus]
      *         where convergenceStatus is: 0 = converged, 1 = max_iter, -1 = diverged/NaN
      */
+    /** Starting values for the next batch solve that is given no full per-scenario state: {@code s * n + row} ->
+     *  value, written over the base state the device tiles; consumed by that solve. Null clears. */
+    public static native void setBatchX0Seeds(long handle, int[] flatIndex, double[] value);
+
     public static native double[][] solveBatchContext(long handle, double[] x0Base, double[] targetBase,
                                                        int[][] rowMode, int[] baseRowMode, boolean[][] disabledElementMask,
                                                        int[] targetOverrideIndex, double[] targetOverrideValue,

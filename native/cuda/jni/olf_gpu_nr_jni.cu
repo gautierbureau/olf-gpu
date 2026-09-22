@@ -54,6 +54,7 @@
 #include <string>
 #include <utility>
 #include <map>
+#include <cstring>
 #include <vector>
 
 #include "closed_branch.cuh"
@@ -5299,6 +5300,15 @@ __global__ void tileBaseRow(int total, int n, T* d) {
     }
 }
 
+// Put nRows compact rows (src, row-major, n each) at their scenario slots of a [nS][n] buffer.
+__global__ void scatterRowsInt(int nRows, int n, const int* slots, const int* src, int* dst) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < nRows * n) {
+        int r = idx / n;
+        dst[(size_t) slots[r] * n + idx % n] = src[idx];
+    }
+}
+
 // Make a RETIRED scenario's system an identity (diagonal 1, mismatch 0) so it stays
 // well-posed inside the uniform batched factorization (a singular sub-block would fail the
 // whole batch) and its state is frozen (dx = 0). A scenario retired THIS iteration still
@@ -5370,6 +5380,10 @@ struct BatchSolverContext {
     // buffers belong to the batch size it was analyzed at, but a width seen before -- the next chunk walks the
     // same tiers, and so does the next run on this context -- can reuse its analysis instead of redoing it.
     std::map<int, cudssData_t> compactData;
+    // setBatchX0Seeds: per-scenario starting values (flat s*n+row -> value) written over the tiled BASE state by
+    // the next solve that is given no full per-scenario state; consumed (cleared) by that solve.
+    std::vector<int> x0SeedIdx;
+    std::vector<double> x0SeedVal;
     DeviceBuf dDisabled, dActive;                            // per-scenario masks
     // Reactive limits (full-loadflow PV→PQ outer loop): per local-PV controller bus, its (rowMap-mapped)
     // BUS_V row + reactive limits + load Q. dQbuf holds Σ branch q at every row (a fill into a zeroed
@@ -7571,7 +7585,8 @@ static SvcTables svcTables(BatchSolverContext* ctx) {
 
 
 BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const double* target,
-                              const int* rowMode, const int* baseRowMode, const char* disabled,
+                              const int* rowMode, const int* rowModeSlots, int nRowModeSlots,
+                              const int* baseRowMode, const char* disabled,
                               int nOv, const int* ovIndex, const double* ovValue,
                               const int* dsOvBus, const double* dsOvFactorDelta, const double* dsOvBaseDelta,
                               const double* dsOvMaxDelta, const double* dsOvMinDelta, const double* dsAnchorShift,
@@ -7598,6 +7613,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     size_t nTot = static_cast<size_t>(n) * nS;
     DeviceBuf dOvIndex, dOvValue;                            // function-scoped: outlive the async override kernel
     DeviceBuf dBaseMode;                                     // the contingency-free base row mode (length n)
+    DeviceBuf dModeSlots, dModeRows;                         // compact row modes: the scenarios that differ from the base
+    DeviceBuf dX0SeedIdx, dX0SeedVal;                        // setBatchX0Seeds, function-scoped like the overrides
     // Per-scenario distributed-slack reweight (generator loss at a DS-participant bus): one affected DS bus per
     // scenario (dsOvBus[s], -1 if none) whose factor/base/headroom/footroom shrink by the lost gen's share, and
     // a per-scenario factor-sum drop so the other buses pick up that share. nullptr when no DS scenarios.
@@ -7654,10 +7671,32 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         // GpuBatchChunkSolver - because the device stamp runs only inside the outer-loop passes.)
         if (!ctx->dTargetBase.p) ctx->dTargetBase.alloc((size_t) n * sizeof(double));
         CUDA_CHECK(cudaMemcpy(ctx->dTargetBase.p, target, n * sizeof(double), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(ctx->dMode.p, rowMode, nTot * sizeof(int), cudaMemcpyHostToDevice));
+        if (rowModeSlots == nullptr) {
+            CUDA_CHECK(cudaMemcpy(ctx->dMode.p, rowMode, nTot * sizeof(int), cudaMemcpyHostToDevice));
+        } else {
+            // COMPACT: every scenario starts from the base row mode, then only those that differ (islanded buses,
+            // switch outages, ...) get their own row — a few rows instead of nS * n ints through PCIe.
+            CUDA_CHECK(cudaMemcpy(ctx->dMode.p, baseRowMode, n * sizeof(int), cudaMemcpyHostToDevice));
+            tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dMode.as<int>());
+            if (nRowModeSlots > 0) {
+                dModeSlots.upload(rowModeSlots, nRowModeSlots * sizeof(int));
+                dModeRows.upload(rowMode, (size_t) nRowModeSlots * n * sizeof(int));
+                scatterRowsInt<<<grid(nRowModeSlots * n), BLOCK, 0, ctx->stream>>>(nRowModeSlots, n,
+                        dModeSlots.as<int>(), dModeRows.as<int>(), ctx->dMode.as<int>());
+            }
+        }
         if (x0Full == nullptr) {
             tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dX.as<double>());
+            int nSeeds = static_cast<int>(ctx->x0SeedIdx.size());
+            if (nSeeds > 0) {                                // a few per-scenario starting values over the base
+                dX0SeedIdx.upload(ctx->x0SeedIdx.data(), nSeeds * sizeof(int));
+                dX0SeedVal.upload(ctx->x0SeedVal.data(), nSeeds * sizeof(double));
+                applyTargetOverrideBatch<<<grid(nSeeds), BLOCK, 0, ctx->stream>>>(nSeeds, dX0SeedIdx.as<int>(),
+                        dX0SeedVal.as<double>(), ctx->dX.as<double>());
+            }
         }
+        ctx->x0SeedIdx.clear();                              // consumed by this solve either way
+        ctx->x0SeedVal.clear();
         tileBaseRow<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, n, ctx->dTarget.as<double>());
         if (nOv > 0) {                                       // per-scenario target overrides (generator loss)
             dOvIndex.upload(ovIndex, nOv * sizeof(int));
@@ -10637,27 +10676,39 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         std::vector<double> target(n);
         env->GetDoubleArrayRegion(jx0Base, 0, n, x0.data());
         env->GetDoubleArrayRegion(jtargetBase, 0, n, target.data());
-        std::vector<int> rowMode(static_cast<size_t>(n) * nS);
+        // COMPACT row modes: a scenario whose row IS the base array (the Java side shares that one array for
+        // every scenario it does not modify) is not copied; only the others travel, with their slots.
+        std::vector<int> rowModeSlots;
+        std::vector<int> rowMode;
         for (int s = 0; s < nS; s++) {
             auto mRow = (jintArray) env->GetObjectArrayElement(jrowMode, s);
+            if (env->IsSameObject(mRow, jbaseRowMode)) {
+                env->DeleteLocalRef(mRow);
+                continue;
+            }
             if (env->GetArrayLength(mRow) != n) {
                 env->DeleteLocalRef(mRow);
                 throw std::runtime_error("rowMode row length mismatch with batch context");
             }
-            env->GetIntArrayRegion(mRow, 0, n, rowMode.data() + (size_t) s * n);
+            rowModeSlots.push_back(s);
+            rowMode.resize(rowModeSlots.size() * (size_t) n);
+            env->GetIntArrayRegion(mRow, 0, n, rowMode.data() + (rowModeSlots.size() - 1) * (size_t) n);
             env->DeleteLocalRef(mRow);
         }
         std::vector<int> baseRowMode(n);                     // contingency-free base row mode (length n)
         env->GetIntArrayRegion(jbaseRowMode, 0, n, baseRowMode.data());
-        std::vector<char> disabled(static_cast<size_t>(nElem) * nS, 0);
+        // One region copy per scenario: a jboolean is an unsigned byte holding 0 or 1, the mask's own encoding.
+        std::unique_ptr<char[]> disabledBuf(new char[static_cast<size_t>(nElem) * nS]);
+        char* disabledData = disabledBuf.get();
         for (int s = 0; s < nS; s++) {
             auto dRow = (jbooleanArray) env->GetObjectArrayElement(jdisabledMask, s);
-            jboolean* d = env->GetBooleanArrayElements(dRow, nullptr);
             int dLen = env->GetArrayLength(dRow);
-            for (int e = 0; e < dLen && e < nElem; e++) {
-                disabled[(size_t) s * nElem + e] = d[e] ? 1 : 0;
+            int len = dLen < nElem ? dLen : nElem;
+            char* dst = disabledData + (size_t) s * nElem;
+            env->GetBooleanArrayRegion(dRow, 0, len, reinterpret_cast<jboolean*>(dst));
+            if (len < nElem) {
+                std::memset(dst + len, 0, nElem - len);
             }
-            env->ReleaseBooleanArrayElements(dRow, d, JNI_ABORT);
             env->DeleteLocalRef(dRow);
         }
 
@@ -10720,7 +10771,10 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
             marshalNs += nowNs() - tMarshal0;
         }
         long long tSolve0 = jniPhaseTime() ? nowNs() : 0;
-        res = solveBatchContext(ctx, x0.data(), target.data(), rowMode.data(), baseRowMode.data(), disabled.data(),
+        static const int kNoModeSlots[1] = {0};              // non-null: COMPACT mode even when no scenario differs
+        res = solveBatchContext(ctx, x0.data(), target.data(), rowMode.data(),
+                                rowModeSlots.empty() ? kNoModeSlots : rowModeSlots.data(),
+                                static_cast<int>(rowModeSlots.size()), baseRowMode.data(), disabledData,
                                 nOv, ovIndex.data(), ovValue.data(),
                                 nDsOv > 0 ? dsOvBus.data() : nullptr, dsOvFactorDelta.data(),
                                 dsOvBaseDelta.data(), dsOvMaxDelta.data(), dsOvMinDelta.data(),
@@ -11004,6 +11058,28 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
 // LINE_SEARCH backtracking parameters for a batch context (OLF LineSearchStateVectorScaling's
 // maxIteration and stepFold): consumed by solves called with lsMode == 1. Context-scoped like
 // setBatchRowCriteria, so the solveBatchContext signature stays unchanged.
+// Per-scenario starting values for the next solve given no full per-scenario state: flat index s*n+row -> value,
+// written over the base state tiled on the device. Replaces sending nScenarios * n doubles when only a few rows
+// differ (the frozen rows of islanded buses). Null or empty arrays clear them.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchX0Seeds(
+        JNIEnv* env, jclass, jlong handle, jintArray jIdx, jdoubleArray jVal) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->x0SeedIdx.clear();
+    ctx->x0SeedVal.clear();
+    if (jIdx == nullptr || jVal == nullptr) {
+        return;
+    }
+    jsize k = env->GetArrayLength(jIdx);
+    ctx->x0SeedIdx.resize(k);
+    ctx->x0SeedVal.resize(k);
+    env->GetIntArrayRegion(jIdx, 0, k, ctx->x0SeedIdx.data());
+    env->GetDoubleArrayRegion(jVal, 0, k, ctx->x0SeedVal.data());
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchLineSearch(
         JNIEnv*, jclass, jlong handle, jint lsMaxIter, jdouble lsStepFold) {

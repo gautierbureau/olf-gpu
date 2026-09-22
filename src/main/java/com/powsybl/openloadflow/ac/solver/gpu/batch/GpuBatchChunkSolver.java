@@ -45,6 +45,9 @@ final class GpuBatchChunkSolver {
      * results are discarded.
      */
 
+    /** OLF_GPU_X0_SEEDS=0: send islanded scenarios' starting state as full chunkSize * n arrays again (A/B). */
+    private static final boolean X0_SEEDS = !"0".equals(System.getenv("OLF_GPU_X0_SEEDS"));
+
     static void solveQualifiedInChunks(List<Integer> batchedIndices, List<BatchContingency> contingencies,
                                                GpuBatchElementMapper elementMapper, GpuAcData gpuData,
                                                double[] baseState, double[] baseTargets, int[] baseRowMode,
@@ -1037,13 +1040,36 @@ final class GpuBatchChunkSolver {
                     // Pair phase: warm continuation from each parent contingency's state + RL pinning.
                     double[] x0Full = null;
                     int[] rlStateIn = null;
+                    int[] x0SeedIdx = null;
+                    double[] x0SeedVal = null;
                     if (!frozenSeedSlot.isEmpty()) {         // islanding in this chunk: seed the frozen rows
-                        x0Full = new double[chunkSize * n];
-                        for (int s = 0; s < chunkSize; s++) {
-                            System.arraycopy(baseState, 0, x0Full, s * n, n);
+                        // Only the frozen rows differ from the base state: send them as seeds the device writes over
+                        // its own tiling of the base, instead of chunkSize * n doubles (372 MB per chunk on rte6515).
+                        // The HVDC freeze reads each scenario's converter-bus angles from x0Full, so a seed on one
+                        // of those rows keeps the full array.
+                        java.util.Set<Integer> hvdcRows = new java.util.HashSet<>();
+                        if (hvdcControllers != null) {
+                            for (GpuBatchHvdcAcEmulation.Ctl c : hvdcControllers) {
+                                hvdcRows.add(c.bus1PhiRow());
+                                hvdcRows.add(c.bus2PhiRow());
+                            }
                         }
-                        for (int k = 0; k < frozenSeedSlot.size(); k++) {
-                            x0Full[frozenSeedSlot.get(k) * n + frozenSeedRow.get(k)] = frozenSeedValue.get(k);
+                        boolean seedOnHvdcRow = frozenSeedRow.stream().anyMatch(hvdcRows::contains);
+                        if (X0_SEEDS && !seedOnHvdcRow) {
+                            x0SeedIdx = new int[frozenSeedSlot.size()];
+                            x0SeedVal = new double[frozenSeedSlot.size()];
+                            for (int k = 0; k < frozenSeedSlot.size(); k++) {
+                                x0SeedIdx[k] = frozenSeedSlot.get(k) * n + frozenSeedRow.get(k);
+                                x0SeedVal[k] = frozenSeedValue.get(k);
+                            }
+                        } else {
+                            x0Full = new double[chunkSize * n];
+                            for (int s = 0; s < chunkSize; s++) {
+                                System.arraycopy(baseState, 0, x0Full, s * n, n);
+                            }
+                            for (int k = 0; k < frozenSeedSlot.size(); k++) {
+                                x0Full[frozenSeedSlot.get(k) * n + frozenSeedRow.get(k)] = frozenSeedValue.get(k);
+                            }
                         }
                     }
                     // Strategy-leg DS re-anchoring: OLF's processContingency calls
@@ -1263,6 +1289,8 @@ final class GpuBatchChunkSolver {
                     boolean svcAsDriverPause = svcActive && rlStateOut != null && !svcHostFallback && !svcInKernel;
                     GpuAcNewtonSolver.setBatchHostLoop(handle, svcAsDriverPause ? 1 : 0);
                     long solveCountBefore = GpuAcNewtonSolver.readBatchSolveCount(handle);
+                    // Seeds only where no full per-scenario state goes (the pair phase builds its own from the parents).
+                    GpuAcNewtonSolver.setBatchX0Seeds(handle, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null);
                     long tSolve0 = System.nanoTime();
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,

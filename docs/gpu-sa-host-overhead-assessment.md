@@ -158,6 +158,8 @@ lives, gain, risk, and how to verify. Ordered by expected gain.
   `isStateUnrealistic` 1.4 s (walks every variable with a bus lookup). Both could be one pass, or the
   realistic-voltage check could run on the device beside the violation screen.
 - **Gain (estimate):** ~1.5–2 s. **Risk: low.** GPU repo.
+- **DONE (2026-09-22, `5663190`):** one walk writes V/angle and checks the band (BUS_V/BUS_PHI only, other
+  kinds fall back to the two calls). JFR, cold GPU run: 2.85 s -> 2.02 s — the walk itself is the floor.
 
 ### L5 — violation detection — 1.8 s
 
@@ -172,12 +174,17 @@ lives, gain, risk, and how to verify. Ordered by expected gain.
 - **Change.** Ask the connectivity for component count/size instead of materializing the set (GPU repo),
   or cache/avoid the copy in OLF's graph class (possible upstream).
 - **Gain (estimate):** ~2.4 s. **Risk: low.**
+- **DONE (2026-09-22, `15b0a67`):** `getComponentNumber(slack) != 0` (component 0 is the largest in both
+  OLF implementations). JFR, cold GPU run: 2.55 s -> 0.09 s.
 
 ### L7 — override composition and HVDC `indexOf` — 1.8 s
 
 - `GpuBatchOverrides.compose` 0.94 s (HashMap traffic); `GpuBatchHvdcAcEmulation.indexOf` 0.88 s rebuilds a
   `HashMap<Integer,Integer>` on every call (`applyStatusOverrides`, `applyFreeze`).
 - **Gain:** ~1.5 s. **Risk: low.** GPU repo.
+- **DONE (2026-09-22, `824f873`):** both indexes are trove `TIntIntHashMap`s (already on the classpath via
+  OLF), bit-identical override lists. JFR, cold GPU run: 1.82 s -> 1.01 s; the boxed `ArrayList` storage behind
+  the orchestrators' `List` API is what remains.
 
 ### L8 — the device solve itself — 7.8 s + 1.6 s JNI
 
@@ -251,7 +258,9 @@ lives, gain, risk, and how to verify. Ordered by expected gain.
 ## 6. Proposed order (one commit per step, measured after each)
 
 1. **L2** (GPU repo) — lowest risk, no OLF change, and it changes L1's cost profile. **DONE**: see L2.
-2. **L6, L7, L4** (GPU repo) — small, independent, low risk.
+2. **L6, L7, L4** (GPU repo) — small, independent, low risk. **DONE**: −4.1 s of the cold GPU run by JFR
+   (precompute 16.3 -> 13.9 s). Full run after L2 + L10 + L6/L7/L4: GPU 38.7 s cold / 39.3 s warm vs CPU-8t
+   125.9 s (x3.25; wall times move by several seconds between identical runs — read the per-method numbers).
 3. **L1** — OLF hook (upstreamable patch) + GPU-side partial restore; the most verification.
 4. **L3** (GPU repo).
 5. **L9** (GPU repo) — last: it multiplies whatever is left, and profits from a smaller host loop.

@@ -3539,6 +3539,70 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         // the automaton fired, and the state still matches the CPU at 1e-12.
     }
 
+    /** A bus pinned at a reactive limit that MOVES, once it has used up its PV-PQ switch budget. OLF
+     *  caps the SWITCH (maxPqPvSwitch, applied in switchPqPv) but keeps re-freezing a pinned bus at its
+     *  current limit every check; the device gated its whole pinned-bus block on that cap, so a capped
+     *  bus stopped following its limit. The limit here is a reactive-capability CURVE, which moves with
+     *  the generator's targetP as the distributed slack shifts it - exactly the real case
+     *  (network.xiidm / GBMK: CQEM_0 and CQEM_5 stayed at -0.181175517 / -0.184950765 where OLF had
+     *  re-frozen at -0.181173957 / -0.184949017, 2.079e-05 kV network-wide and invariant to the
+     *  convergence criterion). The cap is set to 1 so a single pin exhausts it. GPU SA == CPU SA at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceCappedPinStillFollowsItsMovingLimitMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = Network.create("capped-pin-moving-limit", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vlp", "vlc", "vlg")) {
+            com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(vl).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            v.getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        network.getVoltageLevel("vl0").newGenerator().setId("g0").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(200).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vlp").newLoad().setId("ldp").setBus("vlp_b").setConnectableBus("vlp_b").setP0(300).setQ0(150).add();
+        // the load whose loss makes the distributed slack move gc's P by tens of MW, which MOVES gc's
+        // capability curve while it is pinned; it sits far from gc so the reactive picture there barely
+        // changes and the pin holds
+        network.getVoltageLevel("vlg").newLoad().setId("ld1").setBus("vlg_b").setConnectableBus("vlg_b").setP0(200).setQ0(0).add();
+        // the curve generator: minQ rises steeply with P, so the distributed slack MOVES its limit
+        // a reactive load at the generator's own bus and a target it cannot reach: gc saturates at
+        // MAX_Q and its voltage stays BELOW target, so it never wants to unpin - the case that must
+        // keep following the moving limit
+        network.getVoltageLevel("vlc").newLoad().setId("ldc").setBus("vlc_b").setConnectableBus("vlc_b").setP0(100).setQ0(130).add();
+        network.getVoltageLevel("vlc").newGenerator().setId("gc").setBus("vlc_b").setConnectableBus("vlc_b")
+                .setMinP(0).setMaxP(400).setTargetP(150).setTargetV(404).setVoltageRegulatorOn(true).add()
+                .newReactiveCapabilityCurve()
+                .beginPoint().setP(0).setMinQ(-60).setMaxQ(60).endPoint()
+                .beginPoint().setP(400).setMinQ(-4).setMaxQ(90).endPoint()
+                .add();
+        java.util.function.BiConsumer<String, String[]> line = (id, ends) -> network.newLine().setId(id)
+                .setVoltageLevel1(ends[0]).setBus1(ends[0] + "_b").setConnectableBus1(ends[0] + "_b")
+                .setVoltageLevel2(ends[1]).setBus2(ends[1] + "_b").setConnectableBus2(ends[1] + "_b")
+                .setR(0.5).setX(12).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        line.accept("l0p", new String[] {"vl0", "vlp"});
+        line.accept("l0p_BIS", new String[] {"vl0", "vlp"});
+        line.accept("lpc", new String[] {"vlp", "vlc"});
+        line.accept("l0c", new String[] {"vl0", "vlc"});
+        line.accept("l0g", new String[] {"vl0", "vlg"});     // g1 on its own bus: not the slack's
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setReactiveLimitsMaxPqPvSwitch(1)           // one pin exhausts the budget
+                .setSlackBusPMaxMismatch(1e-4)               // a slack round fires AFTER the pin, moving the curve
+                // UNIFORM_CRITERIA ties the reactive-limit tolerance to this value on BOTH arms
+                // (AbstractAcOuterLoopConfig.createReactiveLimitsOuterLoop), and the post-pin curve
+                // drift is ~1e-5 pu: at the default 1e-4 neither arm re-freezes and the path under
+                // test never runs. The comparison tolerance below is untouched.
+                .setNewtonRaphsonConvEpsPerEq(1e-8)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0_0"));
+        assertGpuMatchesCpu(network, List.of(new Contingency("l0c", new com.powsybl.contingency.LineContingency("l0c"))),
+                1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the contingency must batch (or the test proves nothing)");
+    }
+
     /** Losing a STATIC VAR COMPENSATOR that carries a stand-by automaton shunt: OLF's
      *  processLostGenerators zeroes that shunt's susceptance with the compensator, and the device's
      *  generator-outage channel did not, so the b0 kept injecting into every later solve. Measured on

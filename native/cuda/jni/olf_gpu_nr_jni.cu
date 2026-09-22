@@ -4328,19 +4328,27 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             // OLF also sets the controller's V to a safe 1 pu for the next computation, under BOTH
             // robust criteria. That WRITES the state vector every other entry is still reading here,
             // so it runs as its own pass (rlRobustVResetBatch) once this one has finished.
-        } else if (switchCount[rst] < maxSwitch) {           // pinned — switch-back tests the PILOT
+        } else {                                            // pinned — switch-back tests the PILOT
             double v = x[(size_t) s * n + rlCmpVrow[i]];
             double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]);
             bool minPin = limitType[rst] == 1 || limitType[rst] == 3;   // LfBus.QLimitType.isMinLimit()
+            // OLF's checkPqBusWithQLimitType PROPOSES the unpin whenever the pilot's voltage asks for
+            // it; the per-bus cap (maxPqPvSwitch) then blocks the switch itself in switchPqPv. Only
+            // the ELSE of that test re-freezes a moved limit — so a capped bus that still WANTS to
+            // unpin re-freezes on neither arm, while a capped bus that does not must still follow its
+            // limit. Gating this whole block on the cap froze such a bus's target at a stale limit:
+            // network.xiidm / GBMK, CQEM_0 and CQEM_5 kept -0.181175517 / -0.184950765 where OLF had
+            // re-frozen at -0.181173957 / -0.184949017 (a reactive-capability curve moving with the
+            // distributed slack), 2.079e-05 kV network-wide.
             bool wantsBack = (!minPin && v > vt) || (minPin && v < vt);
-            bool back = wantsBack;
+            bool back = wantsBack && switchCount[rst] < maxSwitch;
             if (back) {
                 mode[ridx] = pvForm;                         // back to the DISTR_Q share row (the V identity for a pilot)
                 target[ridx] = savedTarget[rst];
                 limitType[rst] = 0;
                 switched[s] = 1;
                 passSwitched[rst] = 2;
-            } else if ((cvStride || svcLim) && limitType[rst] <= 2) {   // curve/SVC limit drift while pinned
+            } else if (!wantsBack && (cvStride || svcLim) && limitType[rst] <= 2) {   // curve/SVC limit drift while pinned
                 // OLF re-freezes at a moved limit only for MIN_Q/MAX_Q (checkPqBusWithQLimitType tests
                 // the type explicitly); a realistic-V freeze holds its initial target Q.
                 double lim = limitType[rst] == 1 ? rliMin : rliMax;
@@ -4382,7 +4390,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             switched[s] = 1;
             passSwitched[st] = 1;
         }
-    } else if (limitType[st] != 0 && switchCount[st] < maxSwitch) {   // pinned at a limit — check switchback
+    } else if (limitType[st] != 0) {                    // pinned at a limit — check switchback
         double v = x[idx];
         double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]);
         // OLF never back-switches a slope-SVC bus: checkPqBus runs with
@@ -4390,17 +4398,18 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         // for bus with one controller with slope") — once pinned, a slope row stays PQ.
         bool maxPin = limitType[st] == 2 || limitType[st] == 4;       // LfBus.QLimitType.isMaxLimit()
         bool minPin = limitType[st] == 1 || limitType[st] == 3;       // LfBus.QLimitType.isMinLimit()
+        // the cap bounds the SWITCH, not the limit refresh below (see the remote branch)
         bool wantsBack = !slopeRow
                 && ((maxPin && v > vt)                               // maxQ-pinned but v above target
                  || (minPin && v < vt));                             // minQ-pinned but v below target
-        bool back = wantsBack;
+        bool back = wantsBack && switchCount[st] < maxSwitch;
         if (back) {
             mode[idx] = 0;                                  // PQ → PV: resume voltage control
             target[idx] = vt;
             limitType[st] = 0;
             switched[s] = 1;
             passSwitched[st] = 2;
-        } else if ((cvStride || svcLim) && limitType[st] <= 2) {   // a realistic-V freeze keeps its target Q
+        } else if (!wantsBack && (cvStride || svcLim) && limitType[st] <= 2) {   // a realistic-V freeze keeps its target Q
             // Q-limit UPDATE while pinned (OLF checkPqBusWithQLimitType): a CURVE limit that moved
             // (DS moved the gen's P) or an SVC limit that moved (B*v^2 at the live V) re-freezes
             // the pinned Q at the NEW limit when it drifted by more than the mismatch tol.
@@ -5055,7 +5064,7 @@ __global__ void rlPilotSelfMixedGate(int nrl, int nScenarios, const char* rlRemo
 __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* rlVrow,
                                     const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
                                     const char* limitType, int* mode, double* target, int cvStride,
-                                    const char* rlRemote) {
+                                    const char* rlRemote, double* savedTarget, char* savedMode) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -5064,6 +5073,15 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
     if (lt != 0) {
         size_t idx = (size_t) s * n + rlVrow[i];
         size_t li = cvStride ? (size_t) s * nrl + i : (size_t) i;
+        // What the row looked like BEFORE this seed is what a later switch-back restores. Leaving it
+        // unwritten let the restore read whatever the previous solve left in this slot: the buffers are
+        // per (entry, SLOT) and a context is reused chunk after chunk, so an entry pinned at seed time
+        // and unpinned during the contingency took another scenario's target. Invisible wherever the
+        // row's target is recomputed right after (a DISTR_Q share), a small wrong answer where it is
+        // not — measured on network.xiidm as an intermittent 8.178e-05 kV shared by every scenario the
+        // stale slot reached (the KUMF / KUMD pair swapping reactive power).
+        savedTarget[(size_t) s * nrl + i] = target[idx];
+        savedMode[(size_t) s * nrl + i] = static_cast<char>(mode[idx]);
         // a pinned REMOTE member's row is mode 4 (own Q balance), a pinned local one mode 1
         mode[idx] = (rlRemote != nullptr && rlRemote[i]) ? 4 : 1;
         target[idx] = (lt == 1 ? rlMinQ[li] : rlMaxQ[li]) - rlLoadQ[li];
@@ -7765,7 +7783,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
                     useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(),
                     ctx->dMode.as<int>(), ctx->dTarget.as<double>(), useDynRlLimits ? 1 : 0,
-                    ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr);
+                    ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
+                    ctx->dRlSavedTarget.as<double>(), ctx->dRlSavedMode.as<char>());
         } else {
             CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitchCount.p, 0, static_cast<size_t>(ctx->nrl) * nS * sizeof(char), ctx->stream));
             if (ctx->nrl > 0) {                              // seed the pinned limit for base-PQ controllers (else all PV)

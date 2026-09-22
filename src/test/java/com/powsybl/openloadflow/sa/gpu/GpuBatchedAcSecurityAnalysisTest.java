@@ -3301,8 +3301,8 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .setR(rx[0]).setX(rx[1]).setG1(0).setB1(0).setG2(0).setB2(0).add();
         line.accept(new String[] {"l12", "b1", "b2"}, new double[] {0, 0.1});
         line.accept(new String[] {"l12_BIS", "b1", "b2"}, new double[] {0, 0.2});
-        line.accept(new String[] {"l1h", "b1", "b1h"}, new double[] {0.002, 0.02});
-        line.accept(new String[] {"l2h", "b2", "b2h"}, new double[] {0.002, 0.02});
+        line.accept(new String[] {"ln1h", "b1", "b1h"}, new double[] {0.002, 0.02});
+        line.accept(new String[] {"ln2h", "b2", "b2h"}, new double[] {0.002, 0.02});
         // PQ converter buses: a voltage-controlled converter bus pins |V| and the lost increment
         // then moves only the ANGLES, which the bus-voltage comparison does not see
         for (String[] st : new String[][] {{"cs1", "b1h", "false"}, {"cs2", "b2h", "false"}, {"cs1b", "b1h", "false"}, {"cs2b", "b2h", "false"}}) {

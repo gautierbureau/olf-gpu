@@ -454,3 +454,19 @@ bus-level diff on slices for steps touching state (L1, L2, L3); CPU arm time unc
   derived from `GpuBatchLossPreDistribution`'s remaining mismatch?
 - CPU arm: 3.0 ms per restore vs 1.05 ms on the GPU arm — confirm it is the larger changed set (CPU load
   flow outer loops) before quoting it upstream.
+
+## Reconciled onto origin/test_inteliji (2026-09-22)
+
+This work (34 commits, kept as `test_inteliji-h100`) was cherry-picked onto `origin/test_inteliji` at `fbea785`
+(28 commits of DISTR_Q / zero-impedance / islanding-busbar correctness work). Conflicts in 5 commits, all resolved
+keeping both sides; one semantic fix: the device now reports an exhausted Newton budget as MAX_ITERATION_REACHED
+(`exhausted` set), so under `-Dolf.gpu.sa.fixedInnerIters` running out of the K steps is REJECTED (-2, CPU replay)
+instead. Their `fbea785` also closes this document's "2 CPU-routed contingencies" lead (the two max-iteration cases
+are reported from the device; straggler exit off by default).
+
+Validation on the rebased tip: every commit compiles on its own; suite 284/0; checkstyle 189 = the remote tip's.
+Parity: our set (14,260) 906,447 violations 0 differing, statuses identical; 500 busbar sections 37,384 violations
+0 differing, statuses 480/5 identical. Gates on both sets: RESTORE_CHECK (14,256 and 478 targeted restores, all
+identical — run it WITHOUT OLF_GPU_PRELOSS_CHECK, which swaps the replay out and so disables targeted restores),
+PARTIAL_FLOW_CHECK, BUS_ARRAY_CHECK, VIOL_CROSSCHECK (14,255 and 480) all clean; PRELOSS worst 1e-11 MW.
+Benchmark: CPU 8 threads warm 129.2 s vs GPU 18.3 s cold (x7.06) / 15.9 s warm (x8.12).

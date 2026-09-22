@@ -11,7 +11,6 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * The invariants the batched SA's per-chunk override list must hold. These are the ones a
@@ -65,28 +64,67 @@ class GpuBatchOverridesTest {
         assertArrayEquals(new double[] {0.5, 3.5}, ov.valueArray(), 0.0);
     }
 
-    /** Appends made through the raw lists (the orchestrators' pre-solve hooks take plain lists)
-     *  must not leave the index believing stale positions. */
+    /** A restored snapshot is the whole list again, with its index: a later composition finds its rows. */
     @Test
-    void appendsThroughTheRawListsInvalidateTheIndex() {
+    void restoreRebuildsTheIndex() {
         GpuBatchOverrides ov = new GpuBatchOverrides();
         ov.add(10, 1.0);
+        ov.add(20, 2.0);
+        GpuBatchOverrides.Snapshot before = ov.snapshot();
+        ov.compose(10, 0.0, 5.0);
+        ov.add(30, 3.0);
 
-        ov.mutableIndexList().add(20);                       // bypasses add()
-        ov.mutableValueList().add(2.0);
-
-        ov.compose(20, 100.0, 1.0);                          // must find the row appended behind our back
+        ov.restore(before);
         assertArrayEquals(new int[] {10, 20}, ov.indexArray());
-        assertArrayEquals(new double[] {1.0, 3.0}, ov.valueArray(), 0.0,
-                "composing onto an externally appended row must add to it, not re-create it");
+        assertArrayEquals(new double[] {1.0, 2.0}, ov.valueArray(), 0.0);
+        ov.compose(20, 100.0, 1.0);
+        assertArrayEquals(new double[] {1.0, 3.0}, ov.valueArray(), 0.0, "composing onto a restored row adds to it");
     }
 
+    /** The fast restore (value updates and appends of new rows since the snapshot) and the rebuild (a row appended
+     *  twice since) must both give back exactly the snapshot, with a working index. */
     @Test
-    void readOnlyViewsCannotBeMutated() {
+    void restoreAfterUpdatesAppendsAndDuplicates() {
         GpuBatchOverrides ov = new GpuBatchOverrides();
         ov.add(1, 1.0);
-        assertThrows(UnsupportedOperationException.class, () -> ov.indexList().add(2));
-        assertThrows(UnsupportedOperationException.class, () -> ov.valueList().add(2.0));
-        assertEquals(1, ov.indexArray().length);
+        ov.add(2, 2.0);
+        GpuBatchOverrides.Snapshot s = ov.snapshot();
+        ov.merge(1, 0.0, 0.5, 0.25);                         // update an existing row
+        ov.merge(3, 3.0, 0.0, 1.0);                          // append a new row
+        ov.restore(s);                                       // fast path
+        assertArrayEquals(new int[] {1, 2}, ov.indexArray());
+        assertArrayEquals(new double[] {1.0, 2.0}, ov.valueArray(), 0.0);
+        ov.compose(3, 10.0, 1.0);                            // row 3 must be gone from the index
+        assertArrayEquals(new int[] {1, 2, 3}, ov.indexArray());
+        assertArrayEquals(new double[] {1.0, 2.0, 11.0}, ov.valueArray(), 0.0);
+
+        GpuBatchOverrides.Snapshot t = ov.snapshot();
+        ov.add(2, 9.0);                                      // row 2 appended twice: the index forgot position 1
+        ov.restore(t);                                       // rebuild path
+        ov.compose(2, 0.0, 1.0);
+        assertArrayEquals(new int[] {1, 2, 3}, ov.indexArray());
+        assertArrayEquals(new double[] {1.0, 3.0, 11.0}, ov.valueArray(), 0.0, "row 2 resolves to its original entry");
+    }
+
+    /** The HVDC freeze's merge: (existing override, else the base target) - baseD + d, in that order. */
+    @Test
+    void mergeUsesTheExistingOverrideOrTheBaseTarget() {
+        GpuBatchOverrides ov = new GpuBatchOverrides();
+        ov.add(7, 4.0);
+        ov.merge(7, 100.0, 1.0, 0.5);                        // existing: 4 - 1 + 0.5
+        ov.merge(8, 10.0, 2.0, 0.25);                        // new: 10 - 2 + 0.25
+        assertArrayEquals(new int[] {7, 8}, ov.indexArray());
+        assertArrayEquals(new double[] {4.0 - 1.0 + 0.5, 10.0 - 2.0 + 0.25}, ov.valueArray(), 0.0);
+    }
+
+    /** A row appended twice resolves to its LAST entry, as the rebuilt index it replaces decided. */
+    @Test
+    void aDuplicatedRowResolvesToItsLastEntry() {
+        GpuBatchOverrides ov = new GpuBatchOverrides();
+        ov.add(5, 1.0);
+        ov.add(5, 2.0);
+        ov.compose(5, 0.0, 1.0);
+        assertArrayEquals(new double[] {1.0, 3.0}, ov.valueArray(), 0.0);
+        assertEquals(2, ov.size());
     }
 }

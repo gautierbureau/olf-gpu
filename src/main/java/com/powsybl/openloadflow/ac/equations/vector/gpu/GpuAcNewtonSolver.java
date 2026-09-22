@@ -271,6 +271,10 @@ public final class GpuAcNewtonSolver {
      *  value, written over the base state the device tiles; consumed by that solve. Null clears. */
     public static native void setBatchX0Seeds(long handle, int[] flatIndex, double[] value);
 
+    /** Fixed inner iterations for the context's batch solves: {@code k > 0} = exactly k Newton steps per inner solve,
+     *  the convergence criterion tested after the last one only (outer loops unchanged); 0 = test every iteration. */
+    public static native void setBatchFixedIter(long handle, int k);
+
     public static native double[][] solveBatchContext(long handle, double[] x0Base, double[] targetBase,
                                                        int[][] rowMode, int[] baseRowMode, boolean[][] disabledElementMask,
                                                        int[] targetOverrideIndex, double[] targetOverrideValue,

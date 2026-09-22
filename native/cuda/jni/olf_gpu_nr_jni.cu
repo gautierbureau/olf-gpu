@@ -5384,6 +5384,10 @@ struct BatchSolverContext {
     // the next solve that is given no full per-scenario state; consumed (cleared) by that solve.
     std::vector<int> x0SeedIdx;
     std::vector<double> x0SeedVal;
+    // setBatchFixedIter: K > 0 makes every inner Newton solve of this context take exactly K steps and test
+    // convergence (the configured criterion) only after the last one — no per-iteration norm readback or
+    // retirement; outer loops unchanged. 0 = the per-iteration test. Kept until set again.
+    int fixedInnerIters = 0;
     DeviceBuf dDisabled, dActive;                            // per-scenario masks
     // Reactive limits (full-loadflow PV→PQ outer loop): per local-PV controller bus, its (rowMap-mapped)
     // BUS_V row + reactive limits + load Q. dQbuf holds Σ branch q at every row (a fill into a zeroed
@@ -7606,6 +7610,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     int n = ctx->n;
     int nnz = ctx->nnz;
     int nS = ctx->nScenarios;
+    // Fixed inner iterations (setBatchFixedIter): K steps per inner solve, tested once at the end. A scenario not
+    // converged then is reported max_iter, exactly like one exhausting maxIter.
+    const bool checkOnlyAtEnd = ctx->fixedInnerIters > 0 && tol > 0.0;
+    if (checkOnlyAtEnd) {
+        maxIter = ctx->fixedInnerIters;
+    }
     // MAX_VOLTAGE_CHANGE (lsMode 2): per-scenario step clamp, same rule as the base solver's
     // (varType 1 = V vs maxDv, 0 = PHI vs maxDphi; whole step scaled). Buffers allocated lazily.
     uploadBatchOverrides(ctx, lsMode, maxDv, maxDphi, varType, nShOv, shOvSlotElem, shOvGb,
@@ -7747,7 +7757,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // extra iterations do (rte6515, 500 busbar sections: +1.2 s of 16 warm, 5/5 statuses agree).
     // OLF_GPU_STRAGGLER_FRAC=<frac> re-enables the exit as a perf switch.
     int stragglerExit = 0;
-    if (!deviceFixedIter) {
+    // Not with fixed inner iterations either: the active count only drops after the last step, so a late outer pass
+    // re-solving a few dozen scenarios would trip it mid-solve and reject them all.
+    if (!deviceFixedIter && !checkOnlyAtEnd) {
         double stragglerFrac = 0.0;
         if (const char* e = std::getenv("OLF_GPU_STRAGGLER_FRAC")) {
             stragglerFrac = std::atof(e);
@@ -8764,7 +8776,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         // copy of the full batched mismatch. Tradeoff: a scenario going non-finite is not
         // isolated, so it can poison a uniform-batched factorization — use tol > 0 if
         // scenarios may diverge.
-        if (!deviceFixedIter || it == maxIter) {
+        // Fixed inner iterations: the same test, on the last step only (a LINE_SEARCH backtrack, which needs the
+        // per-step norms, does not run in that mode).
+        if ((!deviceFixedIter && !checkOnlyAtEnd) || it == maxIter) {
             std::vector<double> hNorms;
             if (!deviceFixedIter) {
                 // Device-side reduction: read back nS*4 norms, not the 70-MB mismatch.
@@ -8912,7 +8926,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     nActive--;                               // just-flipped identity row (PV target) unpinned — one
                     anyChanged = true;                       // Newton step pins it. Retiring at it==0 skips that solve.
                 } else if (it == maxIter) {
-                    res.status[s] = 1;                       // exhausted iterations
+                    // exhausted iterations. With fixed inner iterations those are the K steps asked for, not OLF's
+                    // Newton budget, so the scenario is REJECTED (the CPU replays it) rather than reported
+                    // MAX_ITERATION_REACHED from the device.
+                    res.status[s] = checkOnlyAtEnd ? -2 : 1;
                     active[s] = 0;
                     live[s] = 0;                             // did not converge: stop iterating its outer loops
                     nActive--;
@@ -11078,6 +11095,17 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->x0SeedVal.resize(k);
     env->GetIntArrayRegion(jIdx, 0, k, ctx->x0SeedIdx.data());
     env->GetDoubleArrayRegion(jVal, 0, k, ctx->x0SeedVal.data());
+}
+
+// Fixed inner iterations for this context's batch solves: k > 0 = exactly k Newton steps per inner solve, the
+// convergence criterion tested after the last one only; 0 = test every iteration (the default).
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchFixedIter(
+        JNIEnv*, jclass, jlong handle, jint k) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx != nullptr) {
+        ctx->fixedInnerIters = k > 0 ? k : 0;
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL

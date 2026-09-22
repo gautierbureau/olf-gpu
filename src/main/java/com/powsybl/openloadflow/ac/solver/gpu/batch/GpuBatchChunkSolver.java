@@ -1277,6 +1277,9 @@ final class GpuBatchChunkSolver {
                     long solveCountBefore = GpuAcNewtonSolver.readBatchSolveCount(handle);
                     // Seeds only where no full per-scenario state goes (the pair phase builds its own from the parents).
                     GpuAcNewtonSolver.setBatchX0Seeds(handle, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null);
+                    // -Dolf.gpu.sa.fixedInnerIters=K: K Newton steps per inner solve, tested once at the end (a
+                    // performance comparison against the per-iteration test; unconverged scenarios go to the CPU).
+                    GpuAcNewtonSolver.setBatchFixedIter(handle, Integer.getInteger("olf.gpu.sa.fixedInnerIters", 0));
                     long tSolve0 = System.nanoTime();
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,

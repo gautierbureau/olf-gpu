@@ -607,6 +607,12 @@ public final class GpuAcNewtonSolver {
     /** Release a violation table (idempotent for handle 0). */
     public static native void destroyViolationTable(long tableHandle);
 
+    /** EXPERIMENTAL: decide the violations of a chunk of states on the device (OLF's strict comparison on the
+     *  device's values). Returns nScenarios counts, then nScenarios * capacity records, then as many values —
+     *  a count above the capacity sends that scenario back to the host. Null on a device failure. */
+    public static native double[] decideViolationsBatch(long tableHandle, double[] states, int nScenarios, int n,
+                                                        int capacity);
+
     /** Release a batch context from {@link #createBatchContext} (idempotent for handle 0). */
     /** Install (or clear, with nulls) the PER_EQUATION_TYPE per-row stopping thresholds on a batch
      *  context: {@code thrIdent[r]} for identity/slope rows, {@code thrPower[r]} for power rows —

@@ -161,6 +161,18 @@ final class GpuBatchPrecomputer {
                         System.err.printf("QUALIFY_TRACE   load bus=%s p=%.9f q=%.9f%n",
                                 ll.bus() == null ? "?" : ll.bus().getId(), ll.p(), ll.q());
                     }
+                    // Each shunt shift as the DEVICE will apply it (dg/db added to the packed g/b) next to
+                    // the RAW AdmittanceShift the propagation carries and the shunt's CURRENT admittance:
+                    // "shifts=1" does not say whether the two arms remove the same susceptance.
+                    for (var sh : shifts == null ? List.<ShuntShift>of() : shifts) {
+                        System.err.printf("QUALIFY_TRACE   shunt=%s dg=%.9f db=%.9f baseG=%.9f baseB=%.9f bus=%s%n",
+                                sh.shunt().getId(), sh.dg(), sh.db(), sh.shunt().getG(), sh.shunt().getB(),
+                                "n/a");
+                    }
+                    for (var e : pc.getShuntIdsToShift().entrySet()) {
+                        System.err.printf("QUALIFY_TRACE   olfShift shunt=%s g=%.9f b=%.9f%n",
+                                e.getKey(), e.getValue().getG(), e.getValue().getB());
+                    }
                     for (var e : pc.getLoadIdsToLose().entrySet()) {
                         System.err.printf("QUALIFY_TRACE   olfShift load=%s active=%.9f variableActive=%.9f"
                                 + " reactive=%.9f%n", e.getKey(), e.getValue().getActive(),

@@ -219,6 +219,16 @@ lives, gain, risk, and how to verify. Ordered by expected gain.
   3565 (auto, the default) -> 48.9, 7130 -> 49.1, 14260 -> 47.2 — flat within ±1.5 s above ~2000. The
   `AUTO_MAX_CHUNK = 4096` cap has no recorded rationale, is not needed for correctness (64-bit offsets,
   a 14,260 chunk allocated fine) and costs nothing measurable.
+- **One chunk vs four, re-examined (2026-09-22).** Device memory: 18.7 GB at the default width 3,565, 67.1 GB
+  for one 14,260 chunk (H100 80 GB). The device solve IS faster in one chunk (6.6 vs 7.8 s: 0.139 vs 0.158 ms per
+  scenario-iteration, fewer analyses, less straggler wait) — the GPU is already saturated at 3,565, so only ~12%.
+  A 1 ms JFR (`OLF_GPU_SA_JFR_PERIOD_MS=1`, Java + native samples; the default settings were too coarse) found the
+  host giving it back in unsampled allocation: (1) a seed on an HVDC converter row made the chunk build the full
+  `chunkSize * n` start state for the HVDC freeze — 1.5 GB in one chunk — fixed by letting the freeze read the
+  seeds (marshal 0.91 -> 0.32 s one chunk, 0.44 -> 0.27 s four); (2) the result assembly copied every state out
+  of its device row (~1.5 GB) — fixed by handing the row over. Batch after: one chunk 9.4-9.6 s vs four ~9.9 s;
+  end to end both ~20-21 s cold, inside the ±1 s run noise. One chunk still spends ~0.45 s more outside the JNI
+  call (other per-chunk-width arrays, not profiled). Parity 0 diff in both modes, suite 275/0.
 - Further device gains need fewer iterations or cheaper factorizations — not a lead at today's share.
 
 ### L9 — the host loop is single-threaded (known bug) — multiplies everything above

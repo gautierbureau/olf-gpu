@@ -85,19 +85,15 @@ final class GpuBatchQualification {
      */
     static boolean canBatchShuntOutage(List<LfShunt> shunts, GpuBatchElementMapper elementMapper,
                                                GpuAcData gpuData) {
-        int shOffset = elementMapper.getClosedBranchCount() + elementMapper.getOpenBranchCount();
-        int[] dqElem = gpuData.dqElem();
-        int[] dqKind = gpuData.dqKind();
+        // A shunt that feeds a DISTR_Q sum used to be refused here ("a mask would not update the
+        // sum"): fillDistrQBatch and the reactive-limits family evaluation both read the shunt's
+        // admittance through applyShuntOverride, the same per-scenario channel the bus fill uses, so
+        // a shifted shunt's share of every DISTR_Q row follows the shift. Measured on the
+        // middle-section fixture: dropping the shift instead leaks the islanded shunt's base
+        // reactive power into the survivors' rows (0.115 kV); keeping it lands at 1e-12.
         for (LfShunt shunt : shunts) {
-            int elementIndex = elementMapper.getElementIndex(shunt);
-            if (elementIndex < 0) {
+            if (elementMapper.getElementIndex(shunt) < 0) {
                 return false;                                // not a packed fixed shunt (controller/SVC shunt)
-            }
-            int packIndex = elementIndex - shOffset;
-            for (int i = 0; i < dqKind.length; i++) {
-                if (dqKind[i] == 1 && dqElem[i] == packIndex) {
-                    return false;                            // shunt feeds a DISTR_Q sum — mask wouldn't update it
-                }
             }
         }
         return true;
@@ -572,20 +568,20 @@ final class GpuBatchQualification {
                     com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:CONTROLLED_OR_UNPACKED_TAP");
                     continue;                                // controlled/unpacked transformer tap — CPU
                 }
+                java.util.Set<Integer> islandedNumSet = new java.util.HashSet<>();
+                for (LfBus ib : q.islandedBuses()) {
+                    islandedNumSet.add(ib.getNum());
+                }
                 if (!c.shuntShifts().isEmpty()
                         && !canBatchShuntOutage(c.shuntShifts().stream().map(ShuntShift::shunt).toList(), elementMapper, gpuData)) {
-                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:SHUNT_UNPACKED_OR_DISTRQ");
-                    continue;                                // unpacked / DISTR_Q-contributing shunt — CPU
+                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:SHUNT_UNPACKED");
+                    continue;                                // unpacked shunt (controller / SVC) — CPU
                 }
                 // A lost generator whose bus the contingency ISLANDS is not an injection outage: the
                 // island's rows are frozen whole and its group effect is classifyVcSplit's verdict
                 // (CONTROL_DIES / RENORMALIZE below). Handing it to the composer made a DISTR_Q member
                 // "lose its last controller" and rejected the scenario (rte6515: 17 of the 500 busbar
                 // sections, VL-1014_0, VL-1113_0, ... - every one a section OLF simply disables).
-                java.util.Set<Integer> islandedNumSet = new java.util.HashSet<>();
-                for (LfBus ib : q.islandedBuses()) {
-                    islandedNumSet.add(ib.getNum());
-                }
                 List<com.powsybl.openloadflow.network.LfGenerator> liveLostGens = c.lostGenerators().stream()
                         .filter(g -> g.getBus() == null || !islandedNumSet.contains(g.getBus().getNum()))
                         .toList();

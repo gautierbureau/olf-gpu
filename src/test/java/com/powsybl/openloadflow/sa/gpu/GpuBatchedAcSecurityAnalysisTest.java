@@ -1582,7 +1582,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
      *  survivors' keys renormalize 1/3 -> 1/2 AND the DISTR_Q target moves with them, because the
      *  pilot's load makes the target key-dependent (a group without load has target 0 either way and
      *  cannot see this). */
-    private static Network middleSectionLossNetwork() {
+    private static Network middleSectionLossNetwork(boolean shuntOnMiddle) {
         Network network = Network.create("middle-section-loss", "code");
         com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
         for (String vl : List.of("vl0", "vl3", "vl4")) {
@@ -1603,7 +1603,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         // the disconnector alone lets the trip cross the line and open both ends, which composes as a
         // full branch outage and routes the plan to the branch-combo path instead of this one.
         int node = 10;
-        for (String[] eq : new String[][] {{"g0", "0"}, {"ldp", "0"}, {"l0", "0"}, {"g1", "1"}, {"l1", "1"}, {"g2", "2"}, {"l2", "2"}}) {
+        for (String[] eq : new String[][] {{"g0", "0"}, {"ldp", "0"}, {"l0", "0"}, {"g1", "1"}, {"l1", "1"}, {"g2", "2"}, {"l2", "2"}, {"sh1", "1"}}) {
             vl12.getNodeBreakerView().newDisconnector().setId("d_" + eq[0]).setNode1(Integer.parseInt(eq[1])).setNode2(node + 10).setOpen(false).add();
             vl12.getNodeBreakerView().newBreaker().setId("b_" + eq[0]).setNode1(node + 10).setNode2(node).setOpen(false).add();
             node++;
@@ -1619,6 +1619,10 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .setRegulatingTerminal(network.getBusbarSection("bbs0").getTerminal()).add();
         for (String g : List.of("g0", "g1", "g2")) {
             network.getGenerator(g).newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(300).add();
+        }
+        if (shuntOnMiddle) {                                 // a fixed shunt on the section the contingency islands
+            vl12.newShuntCompensator().setId("sh1").setNode(17).setSectionCount(1)
+                    .newLinearModel().setBPerSection(30e-6).setMaximumSectionCount(1).add().add();
         }
         network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
                 .setMinP(0).setMaxP(2000).setTargetP(500).setTargetV(400).setVoltageRegulatorOn(true).add();
@@ -1643,7 +1647,19 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     void deviceMiddleSectionLossRenormalizesDistrQTargetMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        assertMergedPilotLossMatchesCpu(middleSectionLossNetwork(),
+        assertMergedPilotLossMatchesCpu(middleSectionLossNetwork(false),
+                List.of(new Contingency("bus-mid", new com.powsybl.contingency.BusbarSectionContingency("bbs1"))));
+    }
+
+    /** The same loss with a fixed SHUNT on the islanded section (rte6515 BUS-1251_BBS_1): the shunt
+     *  feeds the group's DISTR_Q sums, which used to reject the scenario (a masked shunt would not
+     *  update the sums). On an islanded bus the shunt's row is frozen and the member's weights are
+     *  renormalized to zero, so the shift is simply not a shift for the live network. */
+    @org.junit.jupiter.api.Test
+    void deviceMiddleSectionLossWithShuntOnIslandMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertMergedPilotLossMatchesCpu(middleSectionLossNetwork(true),
                 List.of(new Contingency("bus-mid", new com.powsybl.contingency.BusbarSectionContingency("bbs1"))));
     }
 

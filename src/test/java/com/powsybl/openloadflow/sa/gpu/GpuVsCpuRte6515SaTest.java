@@ -396,8 +396,14 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         sap.setIncreasedViolationsParameters(new SecurityAnalysisParameters.IncreasedViolationsParameters(
                 0.5, 0.001, 0.5, 0.001, 0.001));
 
-        // CPU arm: 8 threads (production-realistic)
-        int cpuThreads = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_CPU_THREADS", "8"));
+        // CPU arm: 8 threads (production-realistic) - EXCEPT for busbar sections, which compare
+        // against ONE thread: OLF's partitioning splits the retained switches between threads, so a
+        // multi-threaded CPU arm lands on a different bus decomposition than the device's and the
+        // numbers are not comparable (the base alone differs by 8e-6 kV at 8 threads, bit-identical
+        // at 1). OLF_GPU_SA_CPU_THREADS still overrides.
+        String kindsEnv = System.getenv().getOrDefault("OLF_GPU_SA_CTG_KINDS", "");
+        String defaultThreads = kindsEnv.contains("busbar") ? "1" : "8";
+        int cpuThreads = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_CPU_THREADS", defaultThreads));
         sap.addExtension(OpenSecurityAnalysisParameters.class,
                 new OpenSecurityAnalysisParameters().setThreadCount(cpuThreads));
 

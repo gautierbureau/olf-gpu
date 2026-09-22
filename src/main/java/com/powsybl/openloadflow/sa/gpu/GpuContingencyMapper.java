@@ -150,6 +150,25 @@ final class GpuContingencyMapper {
         return out;
     }
 
+    /** OLF's {@code LfContingency.processLostGenerators}: losing a STATIC VAR COMPENSATOR that carries
+     *  a stand-by automaton shunt also zeroes that shunt ({@code shuntsShift.put(svcShunt, new
+     *  AdmittanceShift(0, svcShunt.getB())); svcShunt.setB(0)}). The device packs the stand-by shunt as
+     *  a plain fixed-shunt element, so the outage is that element's per-scenario admittance override -
+     *  the same channel a section shift uses. Without it the compensator's susceptance kept injecting:
+     *  measured on network.xiidm / HSMC, 59.5 MVar left on HSJF_0 and 3.148 kV network-wide (HPVN:
+     *  28 MVar, 1.058 kV), with four GPU-only HIGH_VOLTAGE violations. */
+    static List<ShuntShift> svcStandbyShuntShifts(List<LfGenerator> lostGenerators) {
+        List<ShuntShift> out = new java.util.ArrayList<>();
+        for (LfGenerator g : lostGenerators) {
+            if (g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator svc) {
+                svc.getStandByAutomatonShunt()
+                        .filter(sh -> !sh.isDisabled() && sh.getB() != 0)
+                        .ifPresent(sh -> out.add(new ShuntShift(sh, -sh.getG(), -sh.getB())));
+            }
+        }
+        return out;
+    }
+
     /** The single fixed shunt a contingency disconnects (which the GPU batch can mask off like a branch), or
      *  null if it is not a clean full disconnection of a packed fixed shunt — a multi-element contingency, a
      *  voltage-controlling/SVC shunt the GPU does not pack, or a multi-compensator aggregate the mask cannot

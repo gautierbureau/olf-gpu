@@ -130,6 +130,14 @@ final class GpuBatchPrecomputer {
                 // section admittance): per-scenario admittance overrides, combinable with everything.
                 List<ShuntShift> shifts =
                         pc.getShuntIdsToShift().isEmpty() ? List.of() : GpuContingencyMapper.shuntShifts(net, pc);
+                // A lost static var compensator takes its stand-by automaton shunt with it (OLF's
+                // processLostGenerators), and that shunt is NOT in the propagation's shift list.
+                if (shifts != null && gens != null && !gens.isEmpty()) {
+                    List<ShuntShift> svcShifts = GpuContingencyMapper.svcStandbyShuntShifts(gens);
+                    if (!svcShifts.isEmpty()) {
+                        shifts = java.util.stream.Stream.concat(shifts.stream(), svcShifts.stream()).toList();
+                    }
+                }
                 // AC-emulation HVDC outage: the hv element's per-scenario disabled bit (the stations'
                 // injection losses ride the generator channel above); unresolvable/setpoint -> CPU.
                 List<com.powsybl.openloadflow.network.LfHvdc> hvdcs = GpuContingencyMapper.hvdcOutages(net, pc);

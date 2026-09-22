@@ -3539,6 +3539,24 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         // the automaton fired, and the state still matches the CPU at 1e-12.
     }
 
+    /** Losing a STATIC VAR COMPENSATOR that carries a stand-by automaton shunt: OLF's
+     *  processLostGenerators zeroes that shunt's susceptance with the compensator, and the device's
+     *  generator-outage channel did not, so the b0 kept injecting into every later solve. Measured on
+     *  network.xiidm / HSMC: 59.5 MVar left on the compensator's own bus, 3.148 kV network-wide and
+     *  four GPU-only HIGH_VOLTAGE violations (HPVN: 28 MVar, 1.058 kV). GPU SA == CPU SA at 1e-12,
+     *  and the outage must BATCH. */
+    @org.junit.jupiter.api.Test
+    void deviceStandbySvcOutageDropsItsShuntMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = hvdcWithStandbySvcNetwork(390, 420);   // thresholds wide: the automaton stands BY
+        assertGpuMatchesCpu(network, List.of(new Contingency("svc4",
+                new com.powsybl.contingency.StaticVarCompensatorContingency("svc4"))),
+                1e-12, hvdcWithStandbySvcParameters());
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the compensator outage must batch (or the test proves nothing)");
+    }
+
     /** {@code deviceHvdcSaturatedBaseMatchesCpu}'s network plus a stand-by SVC on b4 (400 kV). */
     private static Network hvdcWithStandbySvcNetwork(double lowThreshold, double highThreshold) {
         Network network = com.powsybl.openloadflow.network.HvdcNetworkFactory.createHvdcLinkedByTwoLinesAndSwitch(

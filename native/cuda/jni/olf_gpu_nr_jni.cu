@@ -9285,9 +9285,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             static int passProbe = passProbeEnv != nullptr ? std::atoi(passProbeEnv) : -1;
             if (passProbe >= 0 && passProbe < n) {
                 double tv = 0;
+                double fv = 0;
                 CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
                 CUDA_CHECK(cudaMemcpy(&tv, ctx->dTarget.as<double>() + passProbe, sizeof(double), cudaMemcpyDeviceToHost));
-                std::fprintf(stderr, " probeRow=%d target=%.12e", passProbe, tv);
+                CUDA_CHECK(cudaMemcpy(&fv, ctx->dF.as<double>() + passProbe, sizeof(double), cudaMemcpyDeviceToHost));
+                std::fprintf(stderr, " probeRow=%d target=%.12e F=%.12e", passProbe, tv, fv);
             }
         }
         std::fprintf(stderr, "\n");

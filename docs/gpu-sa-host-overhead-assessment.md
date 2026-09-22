@@ -491,9 +491,14 @@ Run in windows of 1,000 (`OLF_GPU_SA_CTG_KINDS=busbar OLF_GPU_SA_BUSBAR_TOP=1000
   at ‖F‖∞ = 49 after 30 iterations (large residuals on IDENTITY rows), while the CPU converges; the remote tip
   `fbea785` fails identically (51.9), so this is not from our work. Blocks [5000,6000) and the full scope.
 - **Gap 2 — the violation screen read side-opened branches closed. FIXED** (see the screen-cut entry).
-- **Gap 3 — distributed active power of a device-reported MAX_ITERATION contingency. OPEN.** The device reports the
-  loss pre-distribution alone, OLF reports what its slack distribution placed before giving up: `BUS-1463_BBS`
-  235.5 vs −29.4 MW, `BUS-2892_BBS` −118.8 vs −197.3 MW. One per ~1,000 sections; statuses and violations agree.
+- **Gap 3 — distributed active power of a device-reported MAX_ITERATION contingency. FIXED.** The device's own total
+  was carried to the SA for CONVERGED scenarios only, so a max-iteration result reported the loss pre-distribution
+  alone where OLF reports what its slack distribution placed before giving up: `BUS-1463_BBS` 264.9 MW out,
+  `BUS-2892_BBS` 78.5 MW. Carrying it for the exhausted ones too brings both to <= 1.2e-8 MW.
+  What is left is NOT comparable: a contingency the device REJECTS and the GPU arm replays on the CPU, ending
+  MAX_ITERATION_REACHED on both arms, distributed 0.59 MW then 0.20 MW apart in two runs of the same binaries — a
+  diverging run's "distributed so far" is path-dependent. The bench asserts the quantity only where both arms
+  CONVERGED and prints the rest apart.
 
 Where the base converges the arms agree: window [0,1000) every bus within 3.6e-8 kV, statuses identical, 75,107
 violations 0 differing (after the gap-2 fix); 500-section window 37,384 violations 0 differing.

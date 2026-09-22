@@ -21,6 +21,7 @@ import com.powsybl.openloadflow.graph.EvenShiloachGraphDecrementalConnectivityFa
 import com.powsybl.openloadflow.sa.AbstractOpenSecurityAnalysisTest;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisParameters;
 import com.powsybl.openloadflow.sa.OpenSecurityAnalysisProvider;
+import com.powsybl.security.PostContingencyComputationStatus;
 import com.powsybl.security.SecurityAnalysisParameters;
 import com.powsybl.security.SecurityAnalysisResult;
 import com.powsybl.security.results.PostContingencyResult;
@@ -477,11 +478,26 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 cpu.getPreContingencyResult().getDistributedActivePower(), gpu.getPreContingencyResult().getDistributedActivePower());
         Map<String, Double> gpuDap = new TreeMap<>();
         gpu.getPostContingencyResults().forEach(p -> gpuDap.put(p.getContingency().getId(), p.getDistributedActivePower()));
+        java.util.Set<String> convergedBoth = new java.util.HashSet<>();
+        gpu.getPostContingencyResults().stream()
+                .filter(p -> p.getStatus() == PostContingencyComputationStatus.CONVERGED)
+                .forEach(p -> convergedBoth.add(p.getContingency().getId()));
         Map<String, double[]> pairs = new TreeMap<>();
+        // A contingency that CONVERGED on neither arm has no comparable distributed power: what a diverging run
+        // "distributed before giving up" is path-dependent — measured on rte6515 BUS-2289_BBS (MAX_ITERATION_REACHED
+        // on both arms, replayed on the CPU inside the GPU arm) as 0.59 MW in one run and 0.20 MW in the next, from
+        // the same binaries. Those are printed apart and never asserted.
+        Map<String, double[]> unconverged = new TreeMap<>();
         cpu.getPostContingencyResults().forEach(p -> {
             Double g = gpuDap.get(p.getContingency().getId());
             if (g != null) {
-                pairs.put(p.getContingency().getId(), new double[] {p.getDistributedActivePower(), g});
+                double[] pair = {p.getDistributedActivePower(), g};
+                if (p.getStatus() == PostContingencyComputationStatus.CONVERGED
+                        && convergedBoth.contains(p.getContingency().getId())) {
+                    pairs.put(p.getContingency().getId(), pair);
+                } else {
+                    unconverged.put(p.getContingency().getId(), pair);
+                }
             }
         });
         long differing = pairs.values().stream().filter(v -> Math.abs(v[0] - v[1]) > 1e-9).count();
@@ -493,10 +509,17 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                         -Math.abs(e.getValue()[0] - e.getValue()[1])))
                 .limit(5)
                 .forEach(e -> System.out.printf("      %s cpu=%.9f gpu=%.9f MW%n", e.getKey(), e.getValue()[0], e.getValue()[1]));
+        if (!unconverged.isEmpty()) {
+            double worstUnconverged = unconverged.values().stream().mapToDouble(v -> Math.abs(v[0] - v[1])).max().orElse(0);
+            System.out.printf("  distributedActivePower (not CONVERGED on both arms, NOT asserted): %d contingencies"
+                    + " | worst %.6e MW%n", unconverged.size(), worstUnconverged);
+        }
         String dump = System.getenv("OLF_GPU_SA_DAP_DUMP");
         if (dump != null) {
             try (java.io.PrintWriter w = new java.io.PrintWriter(Files.newBufferedWriter(Path.of(dump)))) {
                 pairs.forEach((id, v) -> w.println(id + "\t" + Double.toString(v[0]) + "\t" + Double.toString(v[1])));
+                unconverged.forEach((id, v) -> w.println(id + "\t" + Double.toString(v[0]) + "\t" + Double.toString(v[1])
+                        + "\tnot-converged"));
             }
         }
         return Math.max(worst, baseDiff);

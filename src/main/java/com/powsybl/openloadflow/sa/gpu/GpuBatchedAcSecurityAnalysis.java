@@ -1294,7 +1294,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                             lfContingency.getDisconnectedLoadActivePower() * PerUnit.SB,
                             lfContingency.getDisconnectedGenerationActivePower() * PerUnit.SB,
                             lfContingency.getDisconnectedElementIds()),
-                    preDistributedActivePower * PerUnit.SB);
+                    // what the device's own slack passes placed before the budget ran out, as OLF reports for its
+                    // own failed run; the pre-distribution alone where the device did not report a total
+                    precomputed.distributedActivePower()
+                            .getOrDefault(contingency.getId(), preDistributedActivePower) * PerUnit.SB);
         }
         double[] state = precomputed.states().get(contingency.getId());
         if (state == null || !precomputed.isReady()) {

@@ -549,6 +549,15 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
          *  check's minimum)? Built once for {@link #realisticBandNetwork}. */
         private boolean[] realisticBandApplies;
         private LfNetwork realisticBandNetwork;
+        /** Per bus num: its BUS_V / BUS_PHI row in the device state (base layout), for the extraction they were
+         *  built from; null when the base system is not exactly one V and one angle per bus (the walk is used). */
+        private int[] vRowOfBus;
+        private int[] phiRowOfBus;
+        private Map<Variable<AcVariableType>, Integer> busRowsFor;
+        private boolean busRowsUsable;
+        private long busArrayChecked;
+        private long busArrayDiffering;
+        private String busArrayFirstDiff;
         // The run's actual outer loops, captured in runSimulations: the device must run the distributed-slack /
         // reactive-limits passes ONLY when OLF would (i.e. when the outer loop is in the configured list), never
         // unconditionally from network capability. Default to OLF's defaults until runSimulations sets them.
@@ -721,6 +730,12 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             }
             if (PARTIAL_FLOW_CHECK) {
                 runState.get().partialFlowCheck.print();
+            }
+            if (BUS_ARRAY_CHECK) {
+                RunState check = runState.get();
+                System.err.printf("BUS_ARRAY_CHECK contingencies=%d identical=%d differing=%d | array path usable=%b | first difference: %s%n",
+                        check.busArrayChecked, check.busArrayChecked - check.busArrayDiffering, check.busArrayDiffering,
+                        check.busRowsUsable, check.busArrayFirstDiff == null ? "-" : check.busArrayFirstDiff);
             }
             if (DEVICE_VIOLATIONS_CHECK) {
                 runState.get().deviceViolationCheck.print();
@@ -1268,8 +1283,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     Integer.parseInt(System.getenv("OLF_GPU_SA_RESID")), precomputed.baseVariableRows(),
                     precomputed.islandedBuses().get(contingency.getId()));
         }
-        boolean unrealistic = updateNetworkAndCheckRealistic(precomputed.equationSystem(), network,
-                context.getParameters(), runState.get());
+        boolean unrealistic = updateBusesFromState(state, precomputed, network, context.getParameters(), runState.get());
         PHASE_NS.computeIfAbsent("   AcSolverUtil.updateNetwork()", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tUpd);
         PHASE_NS.computeIfAbsent("  state injection + network update", k -> new java.util.concurrent.atomic.LongAdder())
@@ -1464,6 +1478,110 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      *
      * <p>{@code OLF_GPU_UNREALISTIC_TRACE} names the offending buses.
      */
+    /** OLF_GPU_BUS_ARRAY_CHECK=1: after each array update, run the variable walk too and require every bus's V,
+     *  angle and the realistic-voltage verdict to be bit-identical. */
+    private static final boolean BUS_ARRAY_CHECK = System.getenv("OLF_GPU_BUS_ARRAY_CHECK") != null;
+
+    /**
+     * Bus voltages and angles straight from the device state, and the realistic-voltage check, in one loop over the
+     * buses. The device state is in the BASE row layout and every enabled bus keeps its base V and angle variables,
+     * so {@code state[vRowOfBus[b]]} is exactly the value the injection put in the state vector for that bus; a
+     * disabled bus has no variable in the contingency's index, and {@code AcSolverUtil.updateNetwork} never touched
+     * it either. Replaces a walk over OLF's ~13k variable objects per contingency (1.9 s cold on rte6515). Falls
+     * back to {@link #updateNetworkAndCheckRealistic} unless the base system is exactly one BUS_V and one BUS_PHI
+     * per bus.
+     */
+    private static boolean updateBusesFromState(double[] state, PrecomputedBatch precomputed, LfNetwork network,
+                                                AcLoadFlowParameters parameters, RunState rs) {
+        Map<Variable<AcVariableType>, Integer> baseRows = precomputed.baseVariableRows();
+        if (rs.busRowsFor != baseRows) {
+            rs.busRowsFor = baseRows;
+            int nb = network.getBuses().size();
+            int[] vRow = new int[nb];
+            int[] phiRow = new int[nb];
+            java.util.Arrays.fill(vRow, -1);
+            java.util.Arrays.fill(phiRow, -1);
+            boolean usable = true;
+            for (Map.Entry<Variable<AcVariableType>, Integer> e : baseRows.entrySet()) {
+                Variable<AcVariableType> v = e.getKey();
+                if (v.getType() == AcVariableType.BUS_V && v.getElementNum() < nb) {
+                    vRow[v.getElementNum()] = e.getValue();
+                } else if (v.getType() == AcVariableType.BUS_PHI && v.getElementNum() < nb) {
+                    phiRow[v.getElementNum()] = e.getValue();
+                } else {
+                    usable = false;                          // another kind of variable: keep the exact walk
+                }
+            }
+            for (int b = 0; b < nb && usable; b++) {
+                usable = vRow[b] >= 0 && phiRow[b] >= 0;
+            }
+            rs.vRowOfBus = vRow;
+            rs.phiRowOfBus = phiRow;
+            rs.busRowsUsable = usable;
+        }
+        if (!rs.busRowsUsable || state == null) {
+            return updateNetworkAndCheckRealistic(precomputed.equationSystem(), network, parameters, rs);
+        }
+        if (rs.realisticBandApplies == null || rs.realisticBandNetwork != network) {
+            double minNominalV = parameters.getMinNominalVoltageRealisticVoltageCheck();
+            boolean[] applies = new boolean[network.getBuses().size()];
+            for (LfBus b : network.getBuses()) {
+                applies[b.getNum()] = !b.isFictitious() && b.getNominalV() >= minNominalV;
+            }
+            rs.realisticBandApplies = applies;
+            rs.realisticBandNetwork = network;
+        }
+        boolean[] applies = rs.realisticBandApplies;
+        double minV = parameters.getMinRealisticVoltage();
+        double maxV = parameters.getMaxRealisticVoltage();
+        boolean trace = System.getenv("OLF_GPU_UNREALISTIC_TRACE") != null;
+        int[] vRow = rs.vRowOfBus;
+        int[] phiRow = rs.phiRowOfBus;
+        List<LfBus> buses = network.getBuses();
+        boolean unrealistic = false;
+        for (int num = 0; num < vRow.length; num++) {
+            LfBus bus = buses.get(num);
+            if (bus.isDisabled()) {
+                continue;
+            }
+            double value = state[vRow[num]];
+            bus.setV(value);
+            bus.setAngle(state[phiRow[num]]);
+            if ((!unrealistic || trace) && (value < minV || value > maxV) && applies[num]) {
+                unrealistic = true;
+                if (trace) {
+                    System.err.printf("UNREALISTIC bus=%s v=%.9f nominalV=%.3f band=[%.3f, %.3f]%n",
+                            bus.getId(), value, bus.getNominalV(), minV, maxV);
+                }
+            }
+        }
+        if (BUS_ARRAY_CHECK) {
+            double[] v = new double[vRow.length];
+            double[] a = new double[vRow.length];
+            for (int num = 0; num < vRow.length; num++) {
+                v[num] = buses.get(num).getV();
+                a[num] = buses.get(num).getAngle();
+            }
+            boolean walked = updateNetworkAndCheckRealistic(precomputed.equationSystem(), network, parameters, rs);
+            rs.busArrayChecked++;
+            String diff = walked != unrealistic ? "realistic verdict " + unrealistic + " vs " + walked : null;
+            for (int num = 0; num < vRow.length && diff == null; num++) {
+                LfBus bus = buses.get(num);
+                if (Double.doubleToLongBits(v[num]) != Double.doubleToLongBits(bus.getV())
+                        || Double.doubleToLongBits(a[num]) != Double.doubleToLongBits(bus.getAngle())) {
+                    diff = "bus " + bus.getId() + " v " + v[num] + " vs " + bus.getV() + " angle " + a[num] + " vs " + bus.getAngle();
+                }
+            }
+            if (diff != null) {
+                rs.busArrayDiffering++;
+                if (rs.busArrayFirstDiff == null) {
+                    rs.busArrayFirstDiff = diff;
+                }
+            }
+        }
+        return unrealistic;
+    }
+
     /**
      * {@code AcSolverUtil.updateNetwork} and {@link #isStateUnrealistic} in ONE walk over the variables. Both
      * walked the ~13k variables of rte6515 once per contingency (2.9 s of the GPU arm, nearly all of it memory

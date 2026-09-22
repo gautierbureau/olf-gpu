@@ -332,7 +332,9 @@ GPU kernels (6.2 s): cuDSS factorization 2.6, forward/backward solve 1.1, analys
 fill 1.1 (D2, parked), identity rows 0.3, outer-loop passes 0.3, violation screen 0.02, other 0.3.
 
 Next cold-path candidates: the candidate sort (~1 s: sort on the device, or do without the order); bus V/angle
-from arrays instead of OLF's variable objects (up to ~1.5 s); OLF's variable-index re-sort after `apply()` (~1 s);
+from arrays instead of OLF's variable objects (up to ~1.5 s — **DONE**: per-bus V/angle rows of the device state,
+disabled buses skipped; `OLF_GPU_BUS_ARRAY_CHECK=1` against the variable walk: 14,258 / 14,258 bit-identical;
+1.88 s -> 0.80 s cold; GPU 20.1 s cold vs CPU-8t 134.8 s this run, 906,447 violations 0 differing); OLF's variable-index re-sort after `apply()` (~1 s);
 the 2 CPU-routed contingencies (~1 s for 2); JNI marshal/pack (1.5 s) and the boxed override lists (0.6 s).
 
 ## 5c. How gpusim2grid handles the same parts (`github.com/Grid2op/gpusim2grid` @ 957ad32, read 2026-09-22)

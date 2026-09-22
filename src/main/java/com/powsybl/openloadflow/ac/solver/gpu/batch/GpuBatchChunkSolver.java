@@ -59,7 +59,7 @@ final class GpuBatchChunkSolver {
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, double[] preDistributedByIndex,
-                                               int[] varType, GpuBatchPhases.Built phases,
+                                               double[] distributedByIndex, int[] varType, GpuBatchPhases.Built phases,
                                                List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers,
                                                BatchConfig config) {
         int nb = batchedIndices.size();
@@ -78,7 +78,7 @@ final class GpuBatchChunkSolver {
                         dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
                         islandedRlByIndex, islandedHvdcsByIndex,
                         n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
-                        preDistributedByIndex, varType, phases, hvdcControllers, config);
+                        preDistributedByIndex, distributedByIndex, varType, phases, hvdcControllers, config);
                 return;
             } catch (RuntimeException e) {
                 if (chunkSize <= 1 || !isDeviceAllocFailure(e)) {
@@ -160,7 +160,7 @@ final class GpuBatchChunkSolver {
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, double[] preDistributedByIndex,
-                                               int[] varType, GpuBatchPhases.Built phases,
+                                               double[] distributedByIndex, int[] varType, GpuBatchPhases.Built phases,
                                                List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers,
                                                BatchConfig config) {
         int nb = batchedIndices.size();
@@ -1262,6 +1262,7 @@ final class GpuBatchChunkSolver {
                     }
                     boolean svcAsDriverPause = svcActive && rlStateOut != null && !svcHostFallback && !svcInKernel;
                     GpuAcNewtonSolver.setBatchHostLoop(handle, svcAsDriverPause ? 1 : 0);
+                    long solveCountBefore = GpuAcNewtonSolver.readBatchSolveCount(handle);
                     long tSolve0 = System.nanoTime();
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
@@ -1693,6 +1694,11 @@ final class GpuBatchChunkSolver {
                             }
                         }
                     }
+                    if (!pairPhase && (hasDs || dsSlackOnly)
+                            && GpuAcNewtonSolver.readBatchSolveCount(handle) - solveCountBefore == 1) {
+                        recordDistributedActivePower(handle, gpuData, realCount, chunkSize, n, group, chunkStart,
+                                dsSlackOnly, dsOvBus, dsOvBaseDelta, preDistributedByIndex, distributedByIndex);
+                    }
                     for (int s = 0; s < realCount; s++) {
                         resultsByIndex[group.get(chunkStart + s)] = chunkResults[s];
                         // OLF_GPU_CPU_ROUTED=1: name every scenario the device hands back to the CPU, with
@@ -1723,6 +1729,68 @@ final class GpuBatchChunkSolver {
         } catch (RuntimeException e) {
             GpuBatchContextCache.clearContextCache();   // a failed solve may leave the context inconsistent — rebuild next time
             throw e;
+        }
+    }
+
+    /**
+     * The active power the device distributed for each scenario of a chunk — what OLF's security analysis
+     * reports as {@code preDistributedActivePower + loadFlowResult.getDistributedActivePower()}: the
+     * contingency's loss pre-distribution plus every distributed-slack pass of the post-contingency load flow.
+     *
+     * <p>Each device pass re-derives the WHOLE distribution from the anchor (OLF's resetToInitialState), so
+     * after the last pass that fired the participants carry it in their per-generator cumulative shares and
+     * the slack its retained share: Σ genCum + retain — the same two read-backs the base load flow writes
+     * back as targets ({@code GpuNewtonRaphson.writeBackDistributedSlack}). When no pass fired the
+     * distribution is the pre-distribution alone. Slack-only participation keeps everything in the slack's
+     * absorbed total. Only valid when ONE solve covered the chunk (the read-backs are per solve): the caller
+     * checks; a scenario left NaN reports the pre-distribution as before.
+     */
+    private static void recordDistributedActivePower(long handle, GpuAcData gpuData, int realCount, int chunkSize, int n,
+                                                     List<Integer> group, int chunkStart, boolean dsSlackOnly,
+                                                     int[] dsOvBus, double[] dsOvBaseDelta,
+                                                     double[] preDistributedByIndex, double[] distributedByIndex) {
+        if (dsSlackOnly) {
+            double[] absorbed = GpuAcNewtonSolver.readBatchSlackAbsorbed(handle);
+            for (int s = 0; s < realCount && absorbed != null; s++) {
+                distributedByIndex[group.get(chunkStart + s)] = absorbed[s];
+            }
+            return;
+        }
+        double[] retain = GpuAcNewtonSolver.readBatchDsRetain(handle);
+        if (retain == null) {
+            return;
+        }
+        int ngen = gpuData.dgBus() == null ? 0 : gpuData.dgBus().length;
+        double[] genCum = null;
+        double[] targets = null;
+        for (int s = 0; s < realCount; s++) {
+            int idx = group.get(chunkStart + s);
+            if (Double.isNaN(retain[s])) {                   // no pass fired: the pre-distribution alone
+                distributedByIndex[idx] = preDistributedByIndex[idx];
+                continue;
+            }
+            double participants = 0;
+            if (ngen > 0) {
+                if (genCum == null) {
+                    genCum = GpuAcNewtonSolver.readBatchDsGenCum(handle);
+                }
+                if (genCum == null) {
+                    continue;
+                }
+                for (int g = 0; g < ngen; g++) {
+                    participants += genCum[s * ngen + g];
+                }
+            } else {                                         // bus-level participants: targets from the anchor
+                if (targets == null) {
+                    targets = GpuAcNewtonSolver.readBatchTargets(handle);
+                }
+                int ov = dsOvBus != null && dsOvBus.length > 0 ? dsOvBus[s] : -1;
+                for (int i = 0; i < gpuData.dsPhiRow().length; i++) {
+                    double anchor = gpuData.dsBaseTargetP()[i] - (ov == i ? dsOvBaseDelta[s] : 0.0);
+                    participants += targets[s * n + gpuData.dsPhiRow()[i]] - anchor;
+                }
+            }
+            distributedByIndex[idx] = participants + retain[s];
         }
     }
 }

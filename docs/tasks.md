@@ -20,8 +20,9 @@ host thread vs CPU 118.6 s (8 threads, warm) / 68.5 s (16), 0 differing violatio
 recompute on state injection (6.1 s), connectivity copies in qualification (2.55 s), … Chunk size is
 closed (flat above ~2000). Leads L1–L9, their constraints, gains, risks and the order to do them in:
 **`docs/gpu-sa-host-overhead-assessment.md`** — read it before touching any of them. It also records L10, a
-RESULT defect: `getDistributedActivePower()` differs on 5,095 contingencies (up to 124.5 MW) — the GPU path
-omits its own DS pass's distributed amount.
+RESULT defect — `getDistributedActivePower()` differed on 5,095 contingencies (up to 124.5 MW) and the base
+reported 0: the device's own DS passes were never reported — FIXED 2026-09-22 (worst now 2.2e-6 MW); and
+L11, an upstream OLF unit bug in injection threshold conditions — FIXED on olf-local-patches (e97bb4e57).
 
 ### #60 — Generator and load contingencies on rte6515: first fold (2026-09-16)
 

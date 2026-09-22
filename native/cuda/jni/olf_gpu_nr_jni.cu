@@ -5471,6 +5471,8 @@ struct BatchSolverContext {
     DeviceBuf dDsRetain;
     DeviceBuf dDsRetainApplied;                              // per scenario: dsRetain at the last check that FIRED,
                                                              // NaN while no distribution happened in this solve
+    long long solveCount = 0;                                // solveBatchContext calls on this context: the DS
+                                                             // read-backs above describe the LAST solve only
     // Per-GENERATOR participants (setBatchDsGenerators). OLF's water-fill participates and saturates
     // per generator — ParticipatingElement wraps an LfGenerator and step.run clamps each at its OWN
     // limits and REMOVES it — so a bus-level aggregate only reproduces OLF while nothing saturates.
@@ -10492,6 +10494,9 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         jint maxOuterProductive, jint rlMaxSwitch, jint dsRejectResidual, jint skipRlPhase,
         jint nziBase, jintArray jZiOnSlotElem, jintArray jZiOffSlotElem) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx != nullptr) {
+        ctx->solveCount++;
+    }
     // CONTRACT: reactive-limit entries require OLF's forced-PV election keys. switchPvPq never lets
     // a network reach zero PV buses ("all PV buses should switch PQ, strongest one will stay PV"),
     // and rlForcedPvElectBatch is the only thing on the device that reproduces it. A context that
@@ -10922,6 +10927,15 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
     jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(cnt));
     env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(cnt), host.data());
     return out;
+}
+
+// How many solveBatchContext calls this context has run. The per-solve DS read-backs (retain, genCum,
+// slack absorbed) are reset at every solve, so a caller summing them must know they span its solve.
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchSolveCount(
+        JNIEnv*, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    return ctx == nullptr ? -1 : static_cast<jlong>(ctx->solveCount);
 }
 
 extern "C" JNIEXPORT jdoubleArray JNICALL

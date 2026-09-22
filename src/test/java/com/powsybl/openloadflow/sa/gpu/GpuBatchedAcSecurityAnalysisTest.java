@@ -4215,6 +4215,52 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         }
     }
 
+    @Test
+    void distributedActivePowerMatchesCpu() {
+        // What a result reports as distributed active power is OLF's preDistributedActivePower PLUS its load
+        // flow's own distributed-slack passes. The GPU path reported the pre-distribution alone (assessment
+        // L10: 124.5 MW off on rte6515); it now adds what its own passes distributed. B1-G (the slack) is out
+        // of the distribution and B3/B6/B8 carry 20 MW so several generators share every mismatch.
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        for (String g : List.of("B3-G", "B6-G", "B8-G")) {
+            network.getGenerator(g).setTargetP(20);
+        }
+        network.getGenerator("B1-G").newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                .withParticipate(false).add();
+        String lineId = network.getLineStream()
+                .filter(l -> !l.getId().contains("7") && !l.getId().contains("8"))
+                .skip(2).findFirst().orElseThrow().getId();
+        List<Contingency> contingencies = List.of(
+                new Contingency(lineId, new BranchContingency(lineId)),
+                new Contingency("B8-G", new com.powsybl.contingency.GeneratorContingency("B8-G")),
+                new Contingency("B14-L", new com.powsybl.contingency.LoadContingency("B14-L")));
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true));
+        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, List.of(), sap, List.of(), List.of(),
+                com.powsybl.commons.report.ReportNode.NO_OP);
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            SecurityAnalysisResult gpu = runSecurityAnalysis(network, contingencies, List.of(), sap, List.of(), List.of(),
+                    com.powsybl.commons.report.ReportNode.NO_OP);
+            assertEquals(contingencies.size(), GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                    "every contingency must be solved on the device");
+            org.junit.jupiter.api.Assertions.assertEquals(cpu.getPreContingencyResult().getDistributedActivePower(),
+                    gpu.getPreContingencyResult().getDistributedActivePower(), 1e-6, "base case");
+            for (int c = 0; c < contingencies.size(); c++) {
+                var cr = cpu.getPostContingencyResults().get(c);
+                var gr = gpu.getPostContingencyResults().get(c);
+                assertEquals(cr.getContingency().getId(), gr.getContingency().getId());
+                org.junit.jupiter.api.Assertions.assertEquals(cr.getDistributedActivePower(), gr.getDistributedActivePower(), 1e-6,
+                        cr.getContingency().getId());
+            }
+        } finally {
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
     private static void printReport(com.powsybl.commons.report.ReportNode node, int depth) {
         System.err.println("CPU-REPORT " + "  ".repeat(depth) + node.getMessage());
         for (com.powsybl.commons.report.ReportNode c : node.getChildren()) {

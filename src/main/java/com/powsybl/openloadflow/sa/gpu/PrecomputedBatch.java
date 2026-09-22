@@ -22,7 +22,8 @@ import java.util.Map;
  * ({@code baseVariableRows}), and the engine's equation system the states were solved against
  * ({@code equationSystem} — {@code null} when nothing was precomputed, the CPU-fallback signal), and
  * per converged scenario id the contingency loss pre-distribution the batch replayed
- * ({@code preDistributedActivePower}, pu — absent where it was not replayed).
+ * ({@code preDistributedActivePower}, pu — absent where it was not replayed) and the total the device distributed
+ * ({@code distributedActivePower}, pu — pre-distribution plus its own distributed-slack passes; absent where unknown).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -38,11 +39,11 @@ record PrecomputedBatch(Map<String, double[]> states, Map<String, int[]> islande
                         EquationSystem<AcVariableType, AcEquationType> equationSystem,
                         com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData gpuData,
                         com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper elementMapper,
-                        Map<String, Double> preDistributedActivePower) {
+                        Map<String, Double> preDistributedActivePower, Map<String, Double> distributedActivePower) {
 
     /** Nothing precomputed — every contingency falls back to the sequential CPU path. */
     static PrecomputedBatch empty() {
-        return new PrecomputedBatch(Map.of(), Map.of(), java.util.Set.of(), Map.of(), null, null, null, Map.of());
+        return new PrecomputedBatch(Map.of(), Map.of(), java.util.Set.of(), Map.of(), null, null, null, Map.of(), Map.of());
     }
 
     /** True when the batch precompute reached the device solve (an equation system is captured). */

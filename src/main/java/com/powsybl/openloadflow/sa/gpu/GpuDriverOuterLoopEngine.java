@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.sa.gpu;
 
 import com.powsybl.openloadflow.ac.AcLoadFlowContext;
 import com.powsybl.openloadflow.ac.AcloadFlowEngine;
+import com.powsybl.openloadflow.ac.outerloop.AcActivePowerDistributionOuterLoop;
 import com.powsybl.openloadflow.ac.outerloop.AcOuterLoop;
 import com.powsybl.openloadflow.ac.AcOuterLoopContext;
 import com.powsybl.openloadflow.ac.outerloop.DistributedSlackOuterLoop;
@@ -60,6 +61,12 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
         return currentSolver instanceof com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson gpu && gpu.lastRunOnDevice();
     }
 
+    /** What the device's distributed-slack passes placed in the last solve (pu), NaN when nothing / unknown. */
+    double lastDeviceDistributedActivePower() {
+        return currentSolver instanceof com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson gpu
+                ? gpu.lastDistributedActivePower() : Double.NaN;
+    }
+
     /** True for loops the device driver runs itself — in-kernel (DS, RL) or host-paused (SVC,
      *  TVC, Phase, TRPC, Shunt). These must not also run in OLF's engine, or they apply twice. */
     static boolean drivenOnDevice(AcOuterLoop outerLoop) {
@@ -87,8 +94,8 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
      * state the fallback left. Dropping the loop instead left the fallback base without any
      * DistributedSlack/ReactiveLimits (1.3e-4 kV on the zero-impedance member network).
      */
-    static final class DeviceDrivenLoop implements AcOuterLoop {
-        private final GpuDriverOuterLoopEngine engine;
+    static class DeviceDrivenLoop implements AcOuterLoop {
+        protected final GpuDriverOuterLoopEngine engine;
         private final AcOuterLoop real;
         private boolean initialized;
 
@@ -151,12 +158,73 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
         }
     }
 
+    /**
+     * A device-driven DISTRIBUTED-SLACK loop. OLF's engine reads the active power a run distributed from the
+     * loops that are {@link AcActivePowerDistributionOuterLoop}s — a plain {@link DeviceDrivenLoop} is not one,
+     * so every GPU-driven load flow reported 0 (the base case of a GPU security analysis: -60.29 MW on the
+     * CPU, 0.0 on the GPU, IEEE 14). While the device drives, the amount is what its passes placed: each
+     * device solve re-derives the whole distribution from the run's anchor, so the last solve that
+     * distributed carries it, and one that distributed nothing leaves it standing. Once a solve falls back to
+     * the CPU, OLF's real loop ran and holds its own account.
+     */
+    static final class DeviceDrivenDistributionLoop extends DeviceDrivenLoop implements AcActivePowerDistributionOuterLoop {
+        private final AcActivePowerDistributionOuterLoop realDistribution;
+        private double deviceDistributed;
+        private boolean fellBack;
+
+        DeviceDrivenDistributionLoop(GpuDriverOuterLoopEngine engine, AcOuterLoop real,
+                                     AcActivePowerDistributionOuterLoop realDistribution) {
+            super(engine, real);
+            this.realDistribution = realDistribution;
+        }
+
+        @Override
+        public com.powsybl.openloadflow.lf.outerloop.OuterLoopResult check(AcOuterLoopContext context,
+                                                                          com.powsybl.commons.report.ReportNode reportNode) {
+            if (engine.deviceDroveLastSolve()) {
+                double d = engine.lastDeviceDistributedActivePower();
+                if (!Double.isNaN(d)) {
+                    deviceDistributed = d;
+                }
+            } else {
+                fellBack = true;
+            }
+            return super.check(context, reportNode);
+        }
+
+        @Override
+        public double getDistributedActivePower(AcOuterLoopContext context, int numSC) {
+            if (fellBack) {
+                return realDistribution.getDistributedActivePower(context, numSC);
+            }
+            // the device distributes over the main synchronous component only
+            return numSC == context.getNetwork().getSynchronousNetworks().getFirst().getNumSC() ? deviceDistributed : 0.0;
+        }
+
+        @Override
+        public double getDistributedActivePower(AcOuterLoopContext context) {
+            return fellBack ? realDistribution.getDistributedActivePower(context) : deviceDistributed;
+        }
+
+        @Override
+        public double getSlackBusActivePowerMismatch(AcOuterLoopContext context) {
+            return realDistribution.getSlackBusActivePowerMismatch(context);
+        }
+    }
+
     @Override
     protected List<Pair<AcOuterLoop, AcOuterLoopContext>> engineOuterLoopsAndContexts(AcLoadFlowContext context) {
         var all = super.engineOuterLoopsAndContexts(context);
         List<Pair<AcOuterLoop, AcOuterLoopContext>> out = new java.util.ArrayList<>();
         for (var p : all) {
-            out.add(drivenOnDevice(p.getLeft()) ? Pair.of(new DeviceDrivenLoop(this, p.getLeft()), p.getRight()) : p);
+            AcOuterLoop loop = p.getLeft();
+            if (!drivenOnDevice(loop)) {
+                out.add(p);
+            } else if (loop instanceof AcActivePowerDistributionOuterLoop distribution) {
+                out.add(Pair.of(new DeviceDrivenDistributionLoop(this, loop, distribution), p.getRight()));
+            } else {
+                out.add(Pair.of(new DeviceDrivenLoop(this, loop), p.getRight()));
+            }
         }
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
             System.err.println("GPU_DRIVER_ENGINE loops=" + all.stream().map(p -> p.getLeft().getName()).toList()

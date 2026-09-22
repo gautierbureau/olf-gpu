@@ -9,9 +9,7 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
  * A per-scenario target-override list that OWNS its flat-row → position index.
@@ -43,7 +41,9 @@ final class GpuBatchOverrides {
 
     private final List<Integer> index = new ArrayList<>();
     private final List<Double> value = new ArrayList<>();
-    private final Map<Integer, Integer> positionOf = new HashMap<>();
+    /** flat row -> position; primitive (trove) because a chunk holds millions of overrides and the boxed
+     *  HashMap was ~1 s of rte6515's precompute. -1 = absent. */
+    private final gnu.trove.map.hash.TIntIntHashMap positionOf = new gnu.trove.map.hash.TIntIntHashMap(64, 0.5f, -1, -1);
     private boolean indexDirty;
 
     /** Drop every entry — and the index with it, which is the point of this class. */
@@ -66,8 +66,8 @@ final class GpuBatchOverrides {
     /** Add {@code delta} to the row's existing override, or create it at {@code base + delta}. */
     void compose(int flat, double base, double delta) {
         ensureIndex();
-        Integer at = positionOf.get(flat);
-        if (at != null) {
+        int at = positionOf.get(flat);
+        if (at >= 0) {
             value.set(at, value.get(at) + delta);
         } else {
             add(flat, base + delta);
@@ -77,8 +77,8 @@ final class GpuBatchOverrides {
     /** Set the row's override to {@code v} outright, replacing any existing entry. */
     void put(int flat, double v) {
         ensureIndex();
-        Integer at = positionOf.get(flat);
-        if (at != null) {
+        int at = positionOf.get(flat);
+        if (at >= 0) {
             value.set(at, v);
         } else {
             add(flat, v);

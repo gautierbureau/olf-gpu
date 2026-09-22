@@ -307,12 +307,7 @@ final class GpuBatchPrecomputer {
                 }
                 if (r.hasConverged()) {
                     states.put(r.contingencyId(), r.state());
-                    if (!Double.isNaN(r.preDistributedActivePower())) {
-                        preDistributed.put(r.contingencyId(), r.preDistributedActivePower());
-                    }
-                    if (!Double.isNaN(r.distributedActivePower())) {
-                        distributed.put(r.contingencyId(), r.distributedActivePower());
-                    }
+                    recordDistributed(r, preDistributed, distributed);
                     if (r.islandedBusNums().length > 0) {
                         islandedBuses.put(r.contingencyId(), r.islandedBusNums());
                     }
@@ -325,6 +320,10 @@ final class GpuBatchPrecomputer {
                     // straggler exit off: the device's exhausted set is exactly the CPU's five
                     // MAX_ITERATION_REACHED sections. Strategy pairs keep the replay.
                     exhausted.add(r.contingencyId());
+                    // OLF reports on a MAX_ITERATION_REACHED result what its slack distribution placed before
+                    // giving up (AbstractSecurityAnalysis adds the load flow's own distributed power to the loss
+                    // pre-distribution whatever the status), so the device's total is carried for these too.
+                    recordDistributed(r, preDistributed, distributed);
                     GpuBatchScopeCensus.record("DEVICE:MAX_ITERATION_REACHED");
                 } else {
                     GpuBatchScopeCensus.record("RUNTIME:status=" + r.convergenceStatus());
@@ -430,4 +429,14 @@ final class GpuBatchPrecomputer {
         return nrp;
     }
 
+    /** The device's own loss pre-distribution and distributed total for a scenario, where it reported them. */
+    private static void recordDistributed(BatchScenarioResult r, Map<String, Double> preDistributed,
+                                          Map<String, Double> distributed) {
+        if (!Double.isNaN(r.preDistributedActivePower())) {
+            preDistributed.put(r.contingencyId(), r.preDistributedActivePower());
+        }
+        if (!Double.isNaN(r.distributedActivePower())) {
+            distributed.put(r.contingencyId(), r.distributedActivePower());
+        }
+    }
 }

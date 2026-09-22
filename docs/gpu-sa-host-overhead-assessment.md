@@ -317,6 +317,17 @@ solves) is ~3.7 s of it.
   allocations.
 - **D5 — `writeIdentityForInactive` (~0.31 s)** for retired scenarios.
 
+## 5e. Against CPU OLF at 16 and 30 threads (2026-09-22, after the bus-array update; CPU cold AND warm)
+
+| CPU threads | CPU cold | CPU warm | GPU cold | GPU warm | GPU vs CPU warm |
+|---|---|---|---|---|---|
+| 16 | 72.0 s | 69.8 s | 18.9 s | 17.9 s | x3.68 cold / x3.90 warm |
+| 30 (all cores) | 60.1 s | 53.7 s | 19.0 s | 18.1 s | x2.83 cold / x2.96 warm |
+
+GPU arm on ONE host thread. Both runs: statuses identical, 906,447 violations, 0 differing; distributed active
+power within 9e-7 / 2.6e-6 MW. At the start of this assessment the GPU arm was ~47–51 s (x1.4 vs 16 threads,
+x1.2–1.3 vs 30).
+
 ## 5d. Cold-run profile after L1–L4, L6, L7, L10, D1 (2026-09-22; the cold run is the primary case)
 
 `OLF_GPU_SA_COLD_ONLY=1` (GPU arm cold only), JFR + Nsight Systems; cold GPU arm 23.3 s (JFR) / 24.0 s (Nsight).

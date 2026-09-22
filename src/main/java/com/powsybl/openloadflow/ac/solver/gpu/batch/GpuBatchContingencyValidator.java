@@ -170,7 +170,10 @@ public final class GpuBatchContingencyValidator {
             // isolated slack reports the LIVE side as removed (measured: {BBS2, BBS3}), which would
             // freeze the whole energized network instead of the stub.
             LfBus slack = network.getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
-            if (!connectivity.getLargestConnectedComponent().contains(slack)) {
+            // Component 0 IS the largest one (GraphConnectivity numbering, and what getLargestConnectedComponent
+            // returns), and asking for the slack's number looks only through the small components split off by
+            // the outage, where getLargestConnectedComponent() copies every bus of the network into a new set.
+            if (connectivity.getComponentNumber(slack) != 0) {
                 // Isolating the slack necessarily FRAGMENTS the network, so in fixed-iter mode (islanding
                 // handling off) that is the reason to report — it is the mode's primary rejection and what
                 // its contract documents. Only when islanding IS handled does the distinction matter: there

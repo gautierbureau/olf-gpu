@@ -315,6 +315,27 @@ solves) is ~3.7 s of it.
   allocations.
 - **D5 — `writeIdentityForInactive` (~0.31 s)** for retired scenarios.
 
+## 5c. How gpusim2grid handles the same parts (`github.com/Grid2op/gpusim2grid` @ 957ad32, read 2026-09-22)
+
+File:line references are under `gpusim2grid/src/_cpp`.
+- **Analysis:** uniform batch (UBATCH) like ours, ANALYSIS once per `run()` (`batch_pf_driver.cu:279-290`), one
+  fixed batch size per run with the last chunk padded (`contingency_batch.cuh:152-153`, `driver.cuh:58-59`); NOT
+  reused across runs (`contingency_analysis_session.cu:186-187` rebuilds the driver). Base case: its own context,
+  once per session.
+- **Stragglers:** none by construction — a FIXED iteration count (`nb_iter`, default 4), no convergence check, no
+  masking, no compaction (`driver.cuh:60,85`); convergence judged after the loop. Their "one analysis" comes from
+  there, not from a technique we lack: iterating to convergence with outer loops is what makes compaction (and
+  its batch sizes) necessary for us.
+- **Factorization:** default FACTORIZATION once then REFACTORIZATION + SOLVE (`policy_refactor_every.cuh:40-58`);
+  also chord (iter 0 only) and frozen base-case factors.
+- **Round trips:** an always-on `CudaTimer` synchronizes ~5 times per iteration (`cuda_utils.h:650-655`); no pinned
+  memory, CUDA graphs, memory pools or cuDSS memory handler anywhere.
+- **Jacobian fill: no atomics** — one thread per (slot, Ybus nonzero), precomputed nonzero -> J-slot maps, plain
+  stores (`acpf_nr_kernels.cu:408-500`). The idea for D2.
+- **Violations:** fully on the GPU, returned as arrays (type, element, side, value, limit, count, truncated;
+  `violation_kernels.cuh:10-60`); no exactness check against a reference — our L12 experiment, minus the Java
+  violation objects we must build.
+
 ## 5. Interactions and projection
 
 - **L1 x L2 coupled:** skipping the redistribution removes most CHANGED generator targets, the expensive

@@ -373,7 +373,12 @@ sort was a symptom of ~415 candidates per contingency against ~64 reported viola
 limit group at the first limit exceeded BEYOND the band, which the host is certain to confirm and after which it
 never looks. Candidates ~415 -> about the violation count, 31 buffer overflows -> 0; violation detection 2.40 ->
 1.64 s cold, the sort 0.99 -> 0.35 s. `OLF_GPU_VIOL_CROSSCHECK=1` against OLF's stock detection: 14,255 / 14,255
-identical, same order. A new lead from the same profile: 0.55 s of `LinkedHashMap.get` in OLF's
+identical, same order. **CORRECTED 2026-09-22 (gap 2 of the busbar census):** the cut assumed the device value is
+the host's, which fails for a branch a contingency opened at ONE side (bus/busbar loss): the screen evaluates it closed,
+in the base topology. rte6515 BUS-1601_BBS lost LINE-2771-1601's 47.6 MVA violation (device above the top limit, host
+0.4998 pu, the lower limit cut). Such branches now skip their screen records and are scanned in full on the host, in
+place (table order = the stock order); an under-estimating screen was already a latent miss for them, cut or not.
+A new lead from the same profile: 0.55 s of `LinkedHashMap.get` in OLF's
 `LimitViolationManager.addLimitViolation` — the base-case lookup of the increased-violation rule); bus V/angle
 from arrays instead of OLF's variable objects (up to ~1.5 s — **DONE**: per-bus V/angle rows of the device state,
 disabled buses skipped; `OLF_GPU_BUS_ARRAY_CHECK=1` against the variable walk: 14,258 / 14,258 bit-identical;

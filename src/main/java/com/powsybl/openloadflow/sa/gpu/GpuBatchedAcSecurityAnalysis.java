@@ -421,6 +421,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             for (int b : rs.uncoveredBranches) {
                 nums.set(table.branches()[b].getNum());
             }
+            rs.sideOpened.forEach(branch -> nums.set(branch.getNum()));
             return nums.stream().toArray();
         }
         int[] candidates = rs.candidates.get(contingencyId);
@@ -435,7 +436,47 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         for (int b : rs.uncoveredBranches) {
             nums.set(table.branches()[b].getNum());
         }
+        rs.sideOpened.forEach(branch -> nums.set(branch.getNum()));
         return nums.stream().toArray();
+    }
+
+    /** The branches a contingency opened at one side only: still in the network, but in a topology the screen — built
+     *  on the base — does not evaluate (it would read them closed). */
+    private static List<LfBranch> sideOpenedBranches(LfContingency lfContingency) {
+        List<LfBranch> sideOpened = null;
+        for (var e : lfContingency.getDisabledNetwork().getBranchesStatus().entrySet()) {
+            if (e.getValue() != com.powsybl.openloadflow.network.DisabledBranchStatus.BOTH_SIDES) {
+                if (sideOpened == null) {
+                    sideOpened = new java.util.ArrayList<>();
+                }
+                sideOpened.add(e.getKey());
+            }
+        }
+        return sideOpened != null ? sideOpened : List.of();
+    }
+
+    /** The current contingency's side-opened branches as limit-table indices (null when none has limits): their
+     *  screen records are dropped and the host scans them in full, in table order. */
+    private static java.util.BitSet sideOpenedTableIndices(RunState rs, LfNetwork network) {
+        if (rs.sideOpened.isEmpty()) {
+            return null;
+        }
+        GpuLimitTable table = rs.limitTable;
+        if (rs.tableIndexOfBranchNum == null) {
+            rs.tableIndexOfBranchNum = new int[network.getBranches().size()];
+            java.util.Arrays.fill(rs.tableIndexOfBranchNum, -1);
+            for (int b = 0; b < table.branches().length; b++) {
+                rs.tableIndexOfBranchNum[table.branches()[b].getNum()] = b;
+            }
+        }
+        java.util.BitSet sideOpened = new java.util.BitSet();
+        for (LfBranch branch : rs.sideOpened) {
+            int b = rs.tableIndexOfBranchNum[branch.getNum()];
+            if (b >= 0 && table.groupStart(b) != table.groupEnd(b)) {
+                sideOpened.set(b);
+            }
+        }
+        return sideOpened.isEmpty() ? null : sideOpened;
     }
 
     /** True when a state monitor asks for branch or three-windings transformer results, which read flows. */
@@ -592,6 +633,11 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         /** Non-null when the state is screened against the table instead of fully scanned. */
         private GpuViolationScreen violationScreen;
         private int[] uncoveredBranches = new int[0];
+        /** The current contingency's branches opened at ONE side (a bus or busbar loss): the screen evaluates every
+         *  branch in the base topology, so their records are not used and they are scanned on the host. */
+        private List<LfBranch> sideOpened = List.of();
+        /** Limit-table index per branch num, -1 = no limits (built with the table). */
+        private int[] tableIndexOfBranchNum;
         /** Every scenario's screened candidates, computed in one pass over the precomputed states. */
         private Map<String, int[]> candidates = Map.of();
         /** EXPERIMENTAL olf.gpu.sa.deviceViolations: the device's decision per scenario (absent = host path). */
@@ -884,22 +930,23 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             }
         }
         GpuViolationScreen.Decided decision = rs.decided != null ? rs.decided.get(contingencyId) : null;
+        java.util.BitSet sideOpened = rs.violationScreen != null ? sideOpenedTableIndices(rs, network) : null;
         if (decision != null) {
-            rs.limitScanner.reportDecided(network, manager, decision, rs.uncoveredBranches);
+            rs.limitScanner.reportDecided(network, manager, decision, rs.uncoveredBranches, sideOpened);
             if (DEVICE_VIOLATIONS_CHECK) {
                 var es = rs.precomputed.equationSystem();
                 es.getStateVector().setValuesOnly(es.getStateVector().get().clone());   // every flow, same state
                 var host = new LimitViolationManager(reference, limitReductions, saParameters.getIncreasedViolationsParameters());
                 rs.limitScanner.detectFromCandidates(network, host,
                         rs.violationScreen.screen(rs.precomputed.states().get(contingencyId)),
-                        rs.violationScreen, rs.uncoveredBranches);
+                        rs.violationScreen, rs.uncoveredBranches, sideOpened);
                 rs.deviceViolationCheck.compare(contingencyId, manager.getLimitViolations(), host.getLimitViolations());
             }
         } else if (rs.violationScreen != null) {
             int[] candidates = rs.candidates.get(contingencyId);
             rs.limitScanner.detectFromCandidates(network, manager,
                     candidates != null ? candidates : rs.violationScreen.screen(rs.precomputed.states().get(contingencyId)),
-                    rs.violationScreen, rs.uncoveredBranches);
+                    rs.violationScreen, rs.uncoveredBranches, sideOpened);
         } else {
             rs.limitScanner.detectViolations(network, manager);
         }
@@ -1269,6 +1316,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 .getOrDefault(contingency.getId(), preDistributedActivePower);
         long tInj = System.nanoTime();
         runState.get().deviceStateInjectedFor = contingency.getId();
+        runState.get().sideOpened = sideOpenedBranches(lfContingency);
         int[] flowReadSet = flowReadSet(runState.get(), contingency.getId());
         GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
                 runState.get().remap, flowReadSet);

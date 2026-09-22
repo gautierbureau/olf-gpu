@@ -299,10 +299,15 @@ final class GpuSaRunScope {
         };
         // Device inner Newton uses OLF's exact criterion for UNIFORM_CRITERIA (so switch decisions are made at
         // the same convergence depth as the CPU); the device infinity-norm floor otherwise.
+        // -Dolf.gpu.sa.deviceCriterion=infnorm: the device infinity-norm floor (||F||inf < GPU_TOLERANCE) whatever
+        // the criteria type — a performance comparison; the final status is still judged by OLF's criteria.
         double convEpsPerEq = switch (olfParams.getNewtonRaphsonStoppingCriteriaType()) {
             case UNIFORM_CRITERIA -> olfParams.getNewtonRaphsonConvEpsPerEq();
             case PER_EQUATION_TYPE_CRITERIA -> 0.0;
         };
+        if ("infnorm".equals(System.getProperty("olf.gpu.sa.deviceCriterion"))) {
+            convEpsPerEq = 0.0;
+        }
         // MAX_VOLTAGE_CHANGE state-vector scaling: apply the SAME per-step clamp in the batched device
         // solve as the CPU per-contingency Newton (per scenario). Without this the batch takes raw full
         // steps, PV/PQ switch decisions read different intermediate states, and converged states drift

@@ -171,6 +171,61 @@ final class GpuLimitScanner {
         manager.detectVoltageAngleViolations(network);
     }
 
+    /**
+     * EXPERIMENTAL: report the violations the DEVICE decided ({@link GpuViolationScreen#decideAll}) — its records in
+     * table order, each with the value it computed — without reading any branch flow here. Buses compare the
+     * state's own V, which the device read too, so they are decided exactly as before; the branches the device
+     * model does not cover are still scanned on the host.
+     */
+    void reportDecided(LfNetwork network, LimitViolationManager manager, GpuViolationScreen.Decided decided,
+                       int[] uncoveredBranches) {
+        LfBranch[] branches = table.branches();
+        int busBase = table.limitCount();
+        int[] records = decided.records();
+        double[] values = decided.values();
+        for (int k = 0; k < records.length; k++) {
+            int record = records[k];
+            if (record < busBase) {
+                int group = table.limitGroup(record);
+                LfBranch branch = branches[table.groupBranch(group)];
+                if (branch.isDisabled()) {
+                    continue;                                // the contingency took it out
+                }
+                byte side = table.side(group);
+                manager.addBranchLimitViolation(LimitViolationManager.createLimitViolation(branch,
+                        table.groupId(group), table.limit(record), GpuLimitTable.violationType(table.quantity(group)),
+                        table.scale(group), values[k], side == 1 ? TwoSides.ONE : TwoSides.TWO));
+                continue;
+            }
+            int busIndex = GpuViolationScreen.busOf(table, record);
+            LfBus bus = table.buses()[busIndex];
+            if (bus.isDisabled()) {
+                continue;
+            }
+            double v = bus.getV();
+            if (GpuViolationScreen.isHighVoltage(table, record)) {
+                manager.addBusLimitViolation(LimitViolationManager.createBusLimitViolation(bus,
+                        com.powsybl.contingency.violations.LimitViolationType.HIGH_VOLTAGE,
+                        table.busHighLimit(busIndex) * table.busScale(busIndex), v * table.busScale(busIndex)), bus);
+            } else {
+                manager.addBusLimitViolation(LimitViolationManager.createBusLimitViolation(bus,
+                        com.powsybl.contingency.violations.LimitViolationType.LOW_VOLTAGE,
+                        table.busLowLimit(busIndex) * table.busScale(busIndex), v * table.busScale(busIndex)), bus);
+            }
+        }
+        for (int b : uncoveredBranches) {
+            LfBranch branch = branches[b];
+            if (branch.isDisabled()) {
+                continue;
+            }
+            java.util.Arrays.fill(quantityCached, false);
+            for (int g = table.groupStart(b); g < table.groupEnd(b); g++) {
+                scanGroup(branch, g, manager);
+            }
+        }
+        manager.detectVoltageAngleViolations(network);
+    }
+
     /** Re-test one candidate exactly and report it if it holds. */
     private boolean confirm(LfBranch branch, int group, int limit, LimitViolationManager manager) {
         byte side = table.side(group);

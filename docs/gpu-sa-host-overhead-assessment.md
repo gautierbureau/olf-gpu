@@ -272,6 +272,41 @@ lives, gain, risk, and how to verify. Ordered by expected gain.
   value — which fails on the old evaluator (verified). OLF `sa` tests 311/0, checkstyle clean. The GPU project's
   L2 test now states its threshold in MW.
 
+### L12 — EXPERIMENT: the device decides the violations (`olf.gpu.sa.deviceViolations`, off by default)
+
+- **What:** the screen kernel gains a DECIDE mode — OLF's strict `>` against each threshold, the first exceeded
+  limit per group in table order, emitted with the value it reports (signed P); buses compare the state's own V.
+  The host only builds the violation objects (and applies the increased-violation filter, voltage-angle limits
+  and the branches the screen does not cover); the injection refreshes no branch flow.
+- **Accuracy** (`OLF_GPU_DEVICE_VIOLATIONS_CHECK=1`: the host's exact detection on the same state, every
+  contingency): 14,255 / 14,255 identical violation SETS (906,434 violations); values never bit-identical, worst
+  relative difference **2.1e-10** (currents: nearly cancelling terms amplify last-bit differences — not ~1e-16).
+  Against the CPU arm: statuses identical, 906,447 violations both sides, 0 differing.
+- **Speed:** default vs device, two runs each: cold 24.2 / 26.7 vs 23.1 / 23.4 s, warm 21.1 / 21.9 vs 19.0 / 20.2 s
+  — ~1–2 s, within run-to-run noise (two identical default runs differ by 2.5 s). What detection still costs is
+  BUILDING ~906 k violation objects, not the confirm the device replaced.
+- **To make it pay:** decide inside the batch solve context (the screen re-uploads every state, ~1.5 GB per run,
+  that was on the device a moment before) and make building the violation objects cheaper.
+
+## 5b. Device-side leads (profile of 2026-09-22, Nsight Systems, per run)
+
+The batched solve is ~10.8 s of ~21 s, but the linear algebra proper (cuDSS factorization + forward/backward
+solves) is ~3.7 s of it.
+
+- **D1 — compaction re-analyses (~1.2 s).** The main context is analyzed once per chunk size; the straggler
+  compaction path has its own cuDSS context and destroys + re-analyzes it at every width tier change, uncached —
+  ~35 analyses per run instead of 2 (73 `define_superpanel_ker` launches over two runs). A data object cannot
+  change batch size (illegal memory access, 2026-09-16), but one analyzed data object PER WIDTH can be cached and
+  reused across chunks and runs: ~9 analyses per run at most, ~0 warm.
+- **D2 — `fillClosedBranchBatch` (~1.06 s, 410 launches, ~2.6 ms each):** heavy for a fill; atomicAdd scatter is
+  the prime suspect.
+- **D3 — host round trips per Newton iteration:** device-to-host `cudaMemcpyAsync` 3,942 calls over two runs,
+  2.93 s of API time of which 2.91 s waits for the queued kernels (52 MB copied in 0.007 s). Pinned memory would
+  not help (bulk copies are only ~0.3 s of DMA per run); fewer synchronization points per iteration would.
+- **D4 — `cudaMalloc`/`cudaFree` (~0.35 s):** a memory pool / cuDSS device-memory handler instead of per-compaction
+  allocations.
+- **D5 — `writeIdentityForInactive` (~0.31 s)** for retired scenarios.
+
 ## 5. Interactions and projection
 
 - **L1 x L2 coupled:** skipping the redistribution removes most CHANGED generator targets, the expensive

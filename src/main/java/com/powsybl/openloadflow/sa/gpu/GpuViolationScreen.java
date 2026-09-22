@@ -220,6 +220,69 @@ final class GpuViolationScreen {
         return out;
     }
 
+    /** The device's decision for one scenario: the violating limit (or bus) records in table order and the
+     *  value each one reports. */
+    record Decided(int[] records, double[] values) {
+    }
+
+    /**
+     * EXPERIMENTAL ({@code olf.gpu.sa.deviceViolations}): let the DEVICE decide every scenario's violations with
+     * OLF's own strict comparison on its own values, instead of screening candidates for the host to confirm.
+     * The values differ from the host's in the last bits, so a value exactly at a threshold may be decided the
+     * other way, and every reported value carries that difference. A scenario the device cannot decide (buffer
+     * overflow, device failure) is absent from the map and goes through the screen and the host confirm.
+     */
+    java.util.Map<String, Decided> decideAll(java.util.Map<String, double[]> states, int n) {
+        java.util.Map<String, Decided> out = new java.util.HashMap<>();
+        long table = deviceTable();
+        if (table == 0) {
+            return out;
+        }
+        java.util.List<String> ids = new java.util.ArrayList<>(states.keySet());
+        try {
+            for (int from = 0; from < ids.size(); from += DEVICE_CHUNK) {
+                int to = Math.min(from + DEVICE_CHUNK, ids.size());
+                int count = to - from;
+                double[] flat = new double[count * n];
+                for (int i = 0; i < count; i++) {
+                    double[] state = states.get(ids.get(from + i));
+                    System.arraycopy(state, 0, flat, i * n, Math.min(n, state.length));
+                }
+                double[] result = GpuAcNewtonSolver.decideViolationsBatch(table, flat, count, n, DEVICE_CAPACITY);
+                if (result == null) {
+                    continue;
+                }
+                int recordBase = count;
+                int valueBase = count + count * DEVICE_CAPACITY;
+                for (int i = 0; i < count; i++) {
+                    int emitted = (int) result[i];
+                    if (emitted > DEVICE_CAPACITY) {
+                        overflows++;
+                        continue;
+                    }
+                    long[] keyed = new long[emitted];             // (record, slot) sorted by record: table order
+                    for (int k = 0; k < emitted; k++) {
+                        keyed[k] = ((long) (int) result[recordBase + i * DEVICE_CAPACITY + k] << 32) | k;
+                    }
+                    java.util.Arrays.sort(keyed);
+                    int[] records = new int[emitted];
+                    double[] values = new double[emitted];
+                    for (int k = 0; k < emitted; k++) {
+                        int slot = (int) keyed[k];
+                        records[k] = (int) (keyed[k] >>> 32);
+                        values[k] = result[valueBase + i * DEVICE_CAPACITY + slot];
+                    }
+                    out.put(ids.get(from + i), new Decided(records, values));
+                    onDevice++;
+                }
+            }
+        } finally {
+            GpuAcNewtonSolver.destroyViolationTable(table);
+            deviceTable = 0;
+        }
+        return out;
+    }
+
     /** Scenarios whose candidates did not fit the device buffer and were screened on the host. */
     int overflows() {
         return overflows;

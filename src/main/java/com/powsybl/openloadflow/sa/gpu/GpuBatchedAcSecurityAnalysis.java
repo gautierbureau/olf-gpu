@@ -321,6 +321,77 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         }
     }
 
+    /** EXPERIMENTAL system property: the device DECIDES the post-contingency violations with OLF's strict
+     *  comparison on its own values, and the host only builds them — no candidate confirm, no branch flow on the
+     *  host (default off). Reported values then differ from stock OLF's in the last bits. */
+    public static final String DEVICE_VIOLATIONS_PROPERTY = "olf.gpu.sa.deviceViolations";
+
+    private static boolean deviceViolationsEnabled() {
+        return Boolean.parseBoolean(System.getProperty(DEVICE_VIOLATIONS_PROPERTY, "false"));
+    }
+
+    /** OLF_GPU_DEVICE_VIOLATIONS_CHECK=1: after each device decision, run the host's exact detection on the same
+     *  state and compare — the violation SET (subject, type, side, limit) and how far the values are apart. */
+    private static final boolean DEVICE_VIOLATIONS_CHECK = System.getenv("OLF_GPU_DEVICE_VIOLATIONS_CHECK") != null;
+
+    /** Tally of OLF_GPU_DEVICE_VIOLATIONS_CHECK. */
+    static final class DeviceViolationCheck {
+        private long checked;
+        private long setDiffers;
+        private long valuesBitIdentical;
+        private long violations;
+        private double worstRelative;
+        private String worstWhere = "-";
+        private final List<String> samples = new java.util.ArrayList<>();
+
+        void compare(String contingencyId, List<com.powsybl.contingency.violations.LimitViolation> device,
+                     List<com.powsybl.contingency.violations.LimitViolation> host) {
+            checked++;
+            java.util.Map<String, Double> d = new java.util.LinkedHashMap<>();
+            device.forEach(v -> d.put(key(v), v.getValue()));
+            java.util.Map<String, Double> h = new java.util.LinkedHashMap<>();
+            host.forEach(v -> h.put(key(v), v.getValue()));
+            if (!d.keySet().equals(h.keySet())) {
+                setDiffers++;
+                if (samples.size() < 10) {
+                    samples.add(contingencyId + ": device " + d.size() + ", host " + h.size() + " | device-only "
+                            + d.keySet().stream().filter(k -> !h.containsKey(k)).findFirst().orElse("-")
+                            + " | host-only " + h.keySet().stream().filter(k -> !d.containsKey(k)).findFirst().orElse("-"));
+                }
+            }
+            boolean identical = true;
+            for (var e : d.entrySet()) {
+                Double hv = h.get(e.getKey());
+                if (hv == null) {
+                    continue;
+                }
+                violations++;
+                if (Double.doubleToLongBits(hv) != Double.doubleToLongBits(e.getValue())) {
+                    identical = false;
+                    double rel = Math.abs(hv - e.getValue()) / Math.max(1e-300, Math.abs(hv));
+                    if (rel > worstRelative) {
+                        worstRelative = rel;
+                        worstWhere = contingencyId + " " + e.getKey();
+                    }
+                }
+            }
+            if (identical) {
+                valuesBitIdentical++;
+            }
+        }
+
+        private static String key(com.powsybl.contingency.violations.LimitViolation v) {
+            return v.getSubjectId() + "|" + v.getLimitType() + "|" + v.getSide() + "|" + v.getLimitName();
+        }
+
+        void print() {
+            System.err.printf("DEVICE_VIOLATIONS_CHECK contingencies=%d same-set=%d different-set=%d | values bit-identical in %d"
+                            + " | %d violations compared, worst relative value difference %.3e (%s)%n",
+                    checked, checked - setDiffers, setDiffers, valuesBitIdentical, violations, worstRelative, worstWhere);
+            samples.forEach(x -> System.err.println("DEVICE_VIOLATIONS_CHECK   " + x));
+        }
+    }
+
     private static boolean partialFlowsEnabled() {
         return Boolean.parseBoolean(System.getProperty(PARTIAL_FLOWS_PROPERTY, "true"));
     }
@@ -339,12 +410,21 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 || System.getenv("OLF_GPU_Q_PROBE") != null || System.getenv("OLF_GPU_SA_RESID") != null) {
             return null;
         }
+        GpuLimitTable table = rs.limitTable;
+        java.util.BitSet nums = new java.util.BitSet();
+        if (rs.decided != null) {                            // the device decided: only uncovered branches are read
+            if (!rs.decided.containsKey(contingencyId) || DEVICE_VIOLATIONS_CHECK) {
+                return null;
+            }
+            for (int b : rs.uncoveredBranches) {
+                nums.set(table.branches()[b].getNum());
+            }
+            return nums.stream().toArray();
+        }
         int[] candidates = rs.candidates.get(contingencyId);
         if (candidates == null) {
             return null;                                     // the detection would screen it on the host: read all
         }
-        GpuLimitTable table = rs.limitTable;
-        java.util.BitSet nums = new java.util.BitSet();
         for (int c : candidates) {
             if (c < table.limitCount()) {                    // bus records come after the limits: they read bus V only
                 nums.set(table.branches()[table.groupBranch(table.limitGroup(c))].getNum());
@@ -503,6 +583,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         private int[] uncoveredBranches = new int[0];
         /** Every scenario's screened candidates, computed in one pass over the precomputed states. */
         private Map<String, int[]> candidates = Map.of();
+        /** EXPERIMENTAL olf.gpu.sa.deviceViolations: the device's decision per scenario (absent = host path). */
+        private Map<String, GpuViolationScreen.Decided> decided;
+        private final DeviceViolationCheck deviceViolationCheck = new DeviceViolationCheck();
     }
 
     private final ThreadLocal<RunState> runState = ThreadLocal.withInitial(RunState::new);
@@ -639,6 +722,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             if (PARTIAL_FLOW_CHECK) {
                 runState.get().partialFlowCheck.print();
             }
+            if (DEVICE_VIOLATIONS_CHECK) {
+                runState.get().deviceViolationCheck.print();
+            }
             if (GpuRestoreCheck.ENABLED) {
                 runState.get().restoreCheck.print();
                 System.err.println("RESTORE_CHECK targeted restores (cumulative this run): " + LAST_TARGETED_RESTORE_COUNT.get());
@@ -762,8 +848,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 // Screen the WHOLE run at once: the states are all precomputed already, and one
                 // device call per 512 scenarios is what makes the kernel worth its upload.
                 long tScreen = System.nanoTime();
-                rs.candidates = rs.violationScreen.screenAll(rs.precomputed.states(),
-                        rs.precomputed.baseVariableRows().size());
+                if (deviceViolationsEnabled()) {
+                    rs.decided = rs.violationScreen.decideAll(rs.precomputed.states(),
+                            rs.precomputed.baseVariableRows().size());
+                    rs.candidates = new java.util.HashMap<>();   // undecided scenarios screen on the host
+                } else {
+                    rs.candidates = rs.violationScreen.screenAll(rs.precomputed.states(),
+                            rs.precomputed.baseVariableRows().size());
+                }
                 PHASE_NS.computeIfAbsent("  violation screen (all scenarios)",
                         k -> new java.util.concurrent.atomic.LongAdder()).add(System.nanoTime() - tScreen);
                 if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
@@ -774,7 +866,19 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 }
             }
         }
-        if (rs.violationScreen != null) {
+        GpuViolationScreen.Decided decision = rs.decided != null ? rs.decided.get(contingencyId) : null;
+        if (decision != null) {
+            rs.limitScanner.reportDecided(network, manager, decision, rs.uncoveredBranches);
+            if (DEVICE_VIOLATIONS_CHECK) {
+                var es = rs.precomputed.equationSystem();
+                es.getStateVector().setValuesOnly(es.getStateVector().get().clone());   // every flow, same state
+                var host = new LimitViolationManager(reference, limitReductions, saParameters.getIncreasedViolationsParameters());
+                rs.limitScanner.detectFromCandidates(network, host,
+                        rs.violationScreen.screen(rs.precomputed.states().get(contingencyId)),
+                        rs.violationScreen, rs.uncoveredBranches);
+                rs.deviceViolationCheck.compare(contingencyId, manager.getLimitViolations(), host.getLimitViolations());
+            }
+        } else if (rs.violationScreen != null) {
             int[] candidates = rs.candidates.get(contingencyId);
             rs.limitScanner.detectFromCandidates(network, manager,
                     candidates != null ? candidates : rs.violationScreen.screen(rs.precomputed.states().get(contingencyId)),

@@ -1,0 +1,249 @@
+diff --git a/src/main/java/com/powsybl/openloadflow/equations/EquationSystemIndex.java b/src/main/java/com/powsybl/openloadflow/equations/EquationSystemIndex.java
+index a1b76ab52..a17cf84f5 100644
+--- a/src/main/java/com/powsybl/openloadflow/equations/EquationSystemIndex.java
++++ b/src/main/java/com/powsybl/openloadflow/equations/EquationSystemIndex.java
+@@ -30,7 +30,18 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
+     private final Set<SingleEquation<V, E>> sortedSetEquationsToSolve = new TreeSet<>();
+ 
+     // variable reference counting in equation terms
+-    private final Map<Variable<V>, MutableInt> sortedMapVariablesToFindRefCount = new TreeMap<>();
++    private final Map<Variable<V>, MutableInt> variablesToFindRefCount = new HashMap<>();
++
++    // Variable changes since sortedVariablesToFind was built, so that a rebuild merges them into the previous order
++    // instead of re-sorting every variable: an added variable absent from the list, and a removed variable present in
++    // it with the row it had there. A variable removed then added back before the rebuild cancels out.
++    private final Set<Variable<V>> pendingAddedVariables = new HashSet<>();
++
++    private final Map<Variable<V>, Integer> pendingRemovedVariableRows = new HashMap<>();
++
++    // the rows of sortedVariablesToFind are its positions (false after a build separated in two parts, whose next
++    // rebuild re-sorts every variable)
++    private boolean variablesInNaturalOrder = true;
+ 
+     private List<SingleEquation<V, E>> sortedSingleEquationsToSolve = Collections.emptyList();
+ 
+@@ -139,13 +150,20 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
+     }
+ 
+     private void updateVariablesToFind(Predicate<V> isSeparatedInFirstPart) {
+-        sortedVariablesToFind = sortedMapVariablesToFindRefCount.keySet().stream().sorted().toList();
+-        rowCount = 0;
+-        if (isSeparatedInFirstPart == null) {
+-            for (Variable<V> variable : sortedVariablesToFind) {
+-                variable.setRow(rowCount++);
+-            }
++        if (variablesInNaturalOrder) {
++            mergePendingVariables();
+         } else {
++            sortedVariablesToFind = variablesToFindRefCount.keySet().stream().sorted().toList();
++            for (int row = 0; row < sortedVariablesToFind.size(); row++) {
++                sortedVariablesToFind.get(row).setRow(row);
++            }
++        }
++        pendingAddedVariables.clear();
++        pendingRemovedVariableRows.clear();
++        variablesInNaturalOrder = isSeparatedInFirstPart == null;
++        rowCount = sortedVariablesToFind.size();
++        if (isSeparatedInFirstPart != null) {
++            rowCount = 0;
+             // If there is a separating predicate (Used for Fast Decoupled), rows are arranged in two parts :
+             Map<Boolean, List<Variable<V>>> separatedVariables = sortedVariablesToFind.stream()
+                     .collect(Collectors.partitioningBy(v -> isSeparatedInFirstPart.test(v.getType())));
+@@ -160,6 +178,47 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
+         LOGGER.debug("Variables index updated ({} rows)", rowCount);
+     }
+ 
++    /**
++     * Rebuilds the natural-order variable list from the previous one and the pending changes: the variables before the
++     * first change keep their rows, the rest are renumbered in one pass - O(n + k log k) for k changes, where sorting
++     * every variable again was O(n log n) walking a tree.
++     */
++    private void mergePendingVariables() {
++        List<Variable<V>> previous = sortedVariablesToFind;
++        List<Variable<V>> added = new ArrayList<>(pendingAddedVariables);
++        Collections.sort(added);
++        int[] removedRows = pendingRemovedVariableRows.values().stream().mapToInt(Integer::intValue).sorted().toArray();
++        int firstChange = removedRows.length > 0 ? removedRows[0] : previous.size();
++        if (!added.isEmpty()) {
++            int insertion = Collections.binarySearch(previous, added.get(0));
++            firstChange = Math.min(firstChange, -insertion - 1);
++        }
++        List<Variable<V>> merged = new ArrayList<>(previous.size() + added.size() - removedRows.length);
++        merged.addAll(previous.subList(0, firstChange));
++        int removedIndex = 0;
++        int addedIndex = 0;
++        for (int i = firstChange; i < previous.size(); i++) {
++            if (removedIndex < removedRows.length && removedRows[removedIndex] == i) {
++                removedIndex++;
++                continue;
++            }
++            Variable<V> kept = previous.get(i);
++            while (addedIndex < added.size() && added.get(addedIndex).compareTo(kept) < 0) {
++                appendWithRow(merged, added.get(addedIndex++));
++            }
++            appendWithRow(merged, kept);
++        }
++        while (addedIndex < added.size()) {
++            appendWithRow(merged, added.get(addedIndex++));
++        }
++        sortedVariablesToFind = Collections.unmodifiableList(merged);
++    }
++
++    private static <V extends Enum<V> & Quantity> void appendWithRow(List<Variable<V>> variables, Variable<V> variable) {
++        variable.setRow(variables.size());
++        variables.add(variable);
++    }
++
+     private void update() {
+         if (!equationsIndexValid) {
+             updateEquationsToSolve();
+@@ -182,13 +241,24 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
+         addVariables(term.getVariables());
+     }
+ 
++    private boolean noPendingVariableChange() {
++        return pendingAddedVariables.isEmpty() && pendingRemovedVariableRows.isEmpty();
++    }
++
+     private void addVariables(List<Variable<V>> variables) {
+         for (Variable<V> variable : variables) {
+-            MutableInt variableRefCount = sortedMapVariablesToFindRefCount.get(variable);
++            MutableInt variableRefCount = variablesToFindRefCount.get(variable);
+             if (variableRefCount == null) {
+                 variableRefCount = new MutableInt(1);
+-                sortedMapVariablesToFindRefCount.put(variable, variableRefCount);
+-                variablesIndexValid = false;
++                variablesToFindRefCount.put(variable, variableRefCount);
++                Integer previousRow = pendingRemovedVariableRows.remove(variable);
++                if (previousRow != null && variablesInNaturalOrder) {
++                    variable.setRow(previousRow); // back where it was: the change cancels out
++                    variablesIndexValid = noPendingVariableChange();
++                } else {
++                    pendingAddedVariables.add(variable);
++                    variablesIndexValid = false;
++                }
+                 notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.ADDED);
+             } else {
+                 variableRefCount.increment();
+@@ -214,13 +284,16 @@ public class EquationSystemIndex<V extends Enum<V> & Quantity, E extends Enum<E>
+ 
+     private void removeVariables(List<Variable<V>> variables) {
+         for (Variable<V> variable : variables) {
+-            MutableInt variableRefCount = sortedMapVariablesToFindRefCount.get(variable);
++            MutableInt variableRefCount = variablesToFindRefCount.get(variable);
+             if (variableRefCount != null) {
+                 variableRefCount.decrement();
+                 if (variableRefCount.intValue() == 0) {
++                    if (!pendingAddedVariables.remove(variable)) {
++                        pendingRemovedVariableRows.put(variable, variable.getRow());
++                    }
+                     variable.setRow(-1);
+-                    sortedMapVariablesToFindRefCount.remove(variable);
+-                    variablesIndexValid = false;
++                    variablesToFindRefCount.remove(variable);
++                    variablesIndexValid = variablesInNaturalOrder && noPendingVariableChange();
+                     notifyVariableChange(variable, EquationSystemIndexListener.ChangeType.REMOVED);
+                 }
+             }
+diff --git a/src/test/java/com/powsybl/openloadflow/equations/EquationSystemIndexTest.java b/src/test/java/com/powsybl/openloadflow/equations/EquationSystemIndexTest.java
+index ede69d306..2147603a5 100644
+--- a/src/test/java/com/powsybl/openloadflow/equations/EquationSystemIndexTest.java
++++ b/src/test/java/com/powsybl/openloadflow/equations/EquationSystemIndexTest.java
+@@ -16,8 +16,11 @@ import org.mockito.Mockito;
+ 
+ import java.util.ArrayList;
+ import java.util.List;
++import java.util.Random;
++import java.util.TreeSet;
+ 
+ import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertSame;
+ import static org.junit.jupiter.api.Assertions.assertTrue;
+ 
+ /**
+@@ -208,4 +211,85 @@ class EquationSystemIndexTest {
+         assertEquals(List.of(x, y), equationSystem.getIndex().getSortedSingleEquationsToSolve());
+         assertEquals(List.of(a, b, c), equationSystem.getIndex().getSortedVariablesToFind());
+     }
++
++    @Test
++    void incrementalVariableRowsMatchAFullSort() {
++        LfNetwork network = Mockito.mock(LfNetwork.class);
++        EquationSystem<TestVariableType, TestEquationType> equationSystem = new EquationSystem<>(TestEquationType.class, network);
++        int elementCount = 40;
++        List<SingleEquationTerm<TestVariableType, TestEquationType>> terms = new ArrayList<>();
++        for (int num = 0; num < elementCount; num++) {
++            var x = equationSystem.createEquation(num, TestEquationType.X);
++            var y = equationSystem.createEquation(num, TestEquationType.Y);
++            for (TestVariableType type : TestVariableType.values()) {
++                // two terms per variable, so that a variable can lose a reference and stay
++                SingleEquationTerm<TestVariableType, TestEquationType> t1 = equationSystem.getVariableSet().getVariable(num, type).createTerm();
++                SingleEquationTerm<TestVariableType, TestEquationType> t2 = equationSystem.getVariableSet().getVariable((num + 7) % elementCount, type).createTerm();
++                x.addTerm(t1);
++                y.addTerm(t2);
++                terms.add(t1);
++                terms.add(t2);
++            }
++        }
++        EquationSystemIndex<TestVariableType, TestEquationType> index = equationSystem.getIndex();
++        Random random = new Random(42);
++        List<Variable<TestVariableType>> previous = index.getSortedVariablesToFind();
++        TreeSet<Variable<TestVariableType>> previousExpected = expectedVariables(terms);
++        boolean previousSeparated = false;
++        boolean variableEventSinceBuild = false;
++        for (int step = 0; step < 3000; step++) {
++            int changes = random.nextInt(4);
++            for (int c = 0; c < changes; c++) {
++                var before = expectedVariables(terms);
++                var term = terms.get(random.nextInt(terms.size()));
++                term.setActive(!term.isActive());
++                variableEventSinceBuild |= !expectedVariables(terms).equals(before);
++            }
++            if (random.nextInt(3) != 0) {
++                continue; // let changes accumulate, and cancel, between rebuilds
++            }
++            TreeSet<Variable<TestVariableType>> expected = expectedVariables(terms);
++            boolean separated = random.nextInt(10) == 0;
++            if (separated) {
++                index.updateWithSeparation(t -> t == TestEquationType.X, t -> t == TestVariableType.A);
++            }
++            List<Variable<TestVariableType>> variables = index.getSortedVariablesToFind();
++            if (separated || previousSeparated && !variableEventSinceBuild) { // the index stays valid until a variable event
++                List<Variable<TestVariableType>> expectedOrder = new ArrayList<>(expected.stream().filter(v -> v.getType() == TestVariableType.A).toList());
++                expectedOrder.addAll(expected.stream().filter(v -> v.getType() != TestVariableType.A).toList());
++                assertEquals(expectedOrder, variables);
++            } else {
++                assertEquals(List.copyOf(expected), variables);
++                if (expected.equals(previousExpected) && !previousSeparated) {
++                    assertSame(previous, variables); // a change that cancelled out keeps the index
++                }
++            }
++            for (int row = 0; row < variables.size(); row++) {
++                assertEquals(row, variables.get(row).getRow());
++            }
++            for (int num = 0; num < elementCount; num++) {
++                for (TestVariableType type : TestVariableType.values()) {
++                    var v = equationSystem.getVariableSet().getVariable(num, type);
++                    if (!expected.contains(v)) {
++                        assertEquals(-1, v.getRow());
++                    }
++                }
++            }
++            assertEquals(variables.size(), index.getRowCount());
++            previous = variables;
++            previousExpected = expected;
++            previousSeparated = separated || previousSeparated && !variableEventSinceBuild;
++            variableEventSinceBuild = false;
++        }
++    }
++
++    private static TreeSet<Variable<TestVariableType>> expectedVariables(List<SingleEquationTerm<TestVariableType, TestEquationType>> terms) {
++        TreeSet<Variable<TestVariableType>> expected = new TreeSet<>();
++        for (var term : terms) {
++            if (term.isActive() && term.getEquation().isActive()) {
++                expected.addAll(term.getVariables());
++            }
++        }
++        return expected;
++    }
+ }

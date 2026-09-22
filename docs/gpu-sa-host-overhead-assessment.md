@@ -351,7 +351,16 @@ identical, same order. A new lead from the same profile: 0.55 s of `LinkedHashMa
 `LimitViolationManager.addLimitViolation` — the base-case lookup of the increased-violation rule); bus V/angle
 from arrays instead of OLF's variable objects (up to ~1.5 s — **DONE**: per-bus V/angle rows of the device state,
 disabled buses skipped; `OLF_GPU_BUS_ARRAY_CHECK=1` against the variable walk: 14,258 / 14,258 bit-identical;
-1.88 s -> 0.80 s cold; GPU 20.1 s cold vs CPU-8t 134.8 s this run, 906,447 violations 0 differing); OLF's variable-index re-sort after `apply()` (~1 s);
+1.88 s -> 0.80 s cold; GPU 20.1 s cold vs CPU-8t 134.8 s this run, 906,447 violations 0 differing); OLF's variable-index re-sort after `apply()` (~1 s — **LOOKED AT, NOT WORTH IT (2026-09-22)**: 3,935 rebuilds, of
+which 2,568 are contingencies islanding 1-13 buses (their BUS_V/BUS_PHI drop out) and 1,367 the restore bringing the
+base 13,040 back. An incremental `EquationSystemIndex` (HashMap refcount + merge of the pending changes into the
+previous order, rows before the first change untouched, a remove+re-add cancelling out; randomized test against a
+full sort, OLF equations/ac/dc/sensi/sa/network 1268/0, parity 0 diff) took the rebuild from 1.06 to 0.93 s only:
+the cost was never the TreeMap walk but `setRow` on every `Variable` after the change — scattered heap objects, one
+cache miss each (~36 ns) — and `AcNetworkVector.updateVariables` pays the same again reading every variable's row
+(0.85 s). Not committed; kept as `docs/patches/olf-incremental-variable-index.patch`. The only real lever is not
+changing the variable set on the GPU path, and that is closed: the reactive-limit check evaluates
+`bus.getQ().eval()` on the injected state, which needs the contingency's equation system);
 the 2 CPU-routed contingencies (~1 s for 2); JNI marshal/pack (1.5 s) and the boxed override lists (0.6 s).
 - **JNI marshal — partly DONE (2026-09-22).** Measured per chunk (temporary sub-timers): the per-scenario START
   STATE `x0Full` (chunkSize * n doubles, 372 MB, built by the Java side whenever the chunk islands anything, only

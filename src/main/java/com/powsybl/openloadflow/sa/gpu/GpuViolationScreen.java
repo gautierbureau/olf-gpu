@@ -28,8 +28,11 @@ import java.util.Map;
  * <ul>
  *   <li>the comparison uses a RELAXED threshold, so the screen can only ever emit MORE candidates
  *       than OLF would report, never fewer;</li>
- *   <li>it does NOT stop at the first exceeded limit of a group — it emits all of them, so the
- *       consumer is free to reject the first.</li>
+ *   <li>it does NOT stop at the first exceeded limit of a group while that one is AMBIGUOUS — within the
+ *       band, where the exact re-test may reject it — so the consumer is free to reject it and move on. It
+ *       stops at the first limit exceeded BEYOND the band: that one is certain to confirm, and the consumer
+ *       reports the first confirmed limit of a group and never looks further (this cut the candidates from
+ *       ~415 to about the number of violations per contingency on rte6515).</li>
  * </ul>
  * The consumer ({@link GpuLimitScanner#confirm}) then re-tests each candidate with OLF's exact
  * {@code >} on OLF's own value and takes the first that confirms. So a candidate list computed in
@@ -404,6 +407,9 @@ final class GpuViolationScreen {
                             out = java.util.Arrays.copyOf(out, out.length * 2);
                         }
                         out[count++] = l;
+                        if (value > threshold + Math.abs(threshold) * BAND) {
+                            break;                           // certain to confirm: nothing after it is reported
+                        }
                     }
                 }
             }

@@ -989,13 +989,9 @@ final class GpuBatchChunkSolver {
                     // CONTINUOUS phase control: OLF's initialize() enables the CONTROLLER-mode controls
                     // BEFORE the first solve. This is the loop's initialize(), not an orchestrator — the
                     // in-kernel phase expects the activation to already carry it.
-                    List<Integer> prePcOvIdx = null;
-                    List<Double> prePcOvVal = null;
                     if (phases.continuousPhase() != null && !phases.continuousPhase().isEmpty()) {
-                        prePcOvIdx = new ArrayList<>(overrides.indexList());
-                        prePcOvVal = new ArrayList<>(overrides.valueList());
                         GpuBatchContinuousPhase.applyPhaseOn(realCount, n, phases.continuousPhase(),
-                                rowModePerScenario, baseRowMode, disabledMask, overrides.mutableIndexList(), overrides.mutableValueList());
+                                rowModePerScenario, baseRowMode, disabledMask, overrides);
                     }
                     int[] targetOverrideIndex = overrides.indexArray();
                     double[] targetOverrideValue = overrides.valueArray();
@@ -1161,16 +1157,14 @@ final class GpuBatchChunkSolver {
                     // HVDC AC-emulation: snapshot the pre-freeze override lists (the round rebuild base),
                     // then OLF's FreezingHvdcACEmulation freezes every live hvdc at its scenario's
                     // WARM-START flows BEFORE the first solve.
-                    List<Integer> preHvdcOvIdx = null;
-                    List<Double> preHvdcOvVal = null;
+                    GpuBatchOverrides.Snapshot preHvdcOverrides = null;
                     int[][] hvdcStatus = null;
                     double[] hvAppliedD1 = null;
                     double[] hvAppliedD2 = null;
                     if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
                         hvAppliedD1 = new double[chunkSize * hvdcControllers.size()];
                         hvAppliedD2 = new double[chunkSize * hvdcControllers.size()];
-                        preHvdcOvIdx = new ArrayList<>(overrides.indexList());
-                        preHvdcOvVal = new ArrayList<>(overrides.valueList());
+                        preHvdcOverrides = overrides.snapshot();
                         if (System.getenv("OLF_GPU_HVDC_TRACE") != null) {
                             for (int s = 0; s < realCount; s++) {
                                 System.err.println("HVDC_SLOT s=" + s + " ctg="
@@ -1190,8 +1184,7 @@ final class GpuBatchChunkSolver {
                         }
                         if (config.hvdcFreezing()) {
                             hvdcStatus = GpuBatchHvdcAcEmulation.applyFreeze(chunkSize, realCount, n, hvdcControllers,
-                                    baseState, x0Full, disabledMask, baseTargets, overrides.mutableIndexList(),
-                                    overrides.mutableValueList(), hvAppliedD1, hvAppliedD2);
+                                    baseState, x0Full, disabledMask, baseTargets, overrides, hvAppliedD1, hvAppliedD2);
                             targetOverrideIndex = overrides.indexArray();
                             targetOverrideValue = overrides.valueArray();
                         } else {
@@ -1414,15 +1407,10 @@ final class GpuBatchChunkSolver {
                             // orchestrator that runs next rebuilds its targets from this list, so a
                             // stale post-freeze list re-applies a freeze the kernel already lifted
                             // (measured: 566 differing lines over 2000 with only the bits synced).
-                            List<Integer> idx = new ArrayList<>(preHvdcOvIdx);
-                            List<Double> val = new ArrayList<>(preHvdcOvVal);
+                            overrides.restore(preHvdcOverrides);
                             GpuBatchHvdcAcEmulation.applyStatusOverrides(chunkSize, realCount, n,
-                                    hvdcControllers, hvdcStatus, ctgOutOf, disabledMask, baseTargets, idx, val,
+                                    hvdcControllers, hvdcStatus, ctgOutOf, disabledMask, baseTargets, overrides,
                                     hvAppliedD1, hvAppliedD2);
-                            overrides.mutableIndexList().clear();
-                            overrides.mutableIndexList().addAll(idx);
-                            overrides.mutableValueList().clear();
-                            overrides.mutableValueList().addAll(val);
                             targetOverrideIndex = overrides.indexArray();
                             targetOverrideValue = overrides.valueArray();
                         }

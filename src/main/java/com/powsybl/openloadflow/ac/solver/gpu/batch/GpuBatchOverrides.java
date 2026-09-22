@@ -7,9 +7,9 @@
  */
 package com.powsybl.openloadflow.ac.solver.gpu.batch;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import gnu.trove.list.array.TDoubleArrayList;
+import gnu.trove.list.array.TIntArrayList;
+import gnu.trove.map.hash.TIntIntHashMap;
 
 /**
  * A per-scenario target-override list that OWNS its flat-row → position index.
@@ -28,47 +28,55 @@ import java.util.List;
  *       throws or, worse, silently rewrites another row's override.</li>
  * </ul>
  *
- * <p>So the index lives here, {@link #clear()} clears it with the entries by construction, and any
- * append made through the {@link #mutableIndexList() raw lists} (the orchestrator APIs take plain
- * lists) only marks the index DIRTY — it is rebuilt on the next lookup rather than trusted. The
- * failure mode is then unreachable rather than merely untested: the batch solver reuses one
- * instance across chunks and the small networks in the test suite never span a chunk boundary
- * deeply enough to expose a desync.
+ * <p>So the index lives here and every write goes through this class: {@link #clear()} clears it with the
+ * entries, {@link #add} keeps it current (a later entry for the same row wins, as a rebuild would decide),
+ * and {@link #restore} puts a snapshot back — rebuilding the index only when it cannot prove it need not. Storage is primitive (trove): a chunk holds millions of overrides, and
+ * the boxed {@code List<Integer>} / {@code List<Double>} it replaced — with full boxed copies for snapshots
+ * and an index rebuilt on EVERY lookup once a row appeared twice — cost ~0.6 s of a cold rte6515 run.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 final class GpuBatchOverrides {
 
-    private final List<Integer> index = new ArrayList<>();
-    private final List<Double> value = new ArrayList<>();
-    /** flat row -> position; primitive (trove) because a chunk holds millions of overrides and the boxed
-     *  HashMap was ~1 s of rte6515's precompute. -1 = absent. */
-    private final gnu.trove.map.hash.TIntIntHashMap positionOf = new gnu.trove.map.hash.TIntIntHashMap(64, 0.5f, -1, -1);
-    private boolean indexDirty;
+    private final TIntArrayList index = new TIntArrayList();
+    private final TDoubleArrayList value = new TDoubleArrayList();
+    /** flat row -> position of its LAST entry. -1 = absent. */
+    private final TIntIntHashMap positionOf = new TIntIntHashMap(64, 0.5f, -1, -1);
+
+    /** Bumped by {@link #clear} and {@link #restore}: a snapshot taken in an earlier generation cannot assume the
+     *  entries before it are still in place. */
+    private int generation;
+    /** Appends of a row that already had an entry (the index then forgets the earlier position). */
+    private int duplicateAppends;
+
+    /** A copy of the entries, to put back with {@link #restore}. */
+    record Snapshot(int[] index, double[] value, int generation, int duplicateAppends) {
+    }
 
     /** Drop every entry — and the index with it, which is the point of this class. */
     void clear() {
-        index.clear();
-        value.clear();
+        index.resetQuick();
+        value.resetQuick();
         positionOf.clear();
-        indexDirty = false;
+        generation++;
     }
 
     /** Append an override for {@code flat} (the caller guarantees the row is not already there,
      *  or accepts that a later {@link #compose} resolves to this newer entry — the same
      *  "last one wins" a {@code lastIndexOf} scan gave). */
     void add(int flat, double v) {
-        positionOf.put(flat, index.size());
+        if (positionOf.put(flat, index.size()) >= 0) {
+            duplicateAppends++;
+        }
         index.add(flat);
         value.add(v);
     }
 
     /** Add {@code delta} to the row's existing override, or create it at {@code base + delta}. */
     void compose(int flat, double base, double delta) {
-        ensureIndex();
         int at = positionOf.get(flat);
         if (at >= 0) {
-            value.set(at, value.get(at) + delta);
+            value.setQuick(at, value.getQuick(at) + delta);
         } else {
             add(flat, base + delta);
         }
@@ -76,62 +84,71 @@ final class GpuBatchOverrides {
 
     /** Set the row's override to {@code v} outright, replacing any existing entry. */
     void put(int flat, double v) {
-        ensureIndex();
         int at = positionOf.get(flat);
         if (at >= 0) {
-            value.set(at, v);
+            value.setQuick(at, v);
         } else {
             add(flat, v);
         }
     }
 
-    /** The rows, read-only. */
-    List<Integer> indexList() {
-        return Collections.unmodifiableList(index);
+    /** The HVDC freeze's update: the row's current override (or {@code baseTarget}) minus {@code baseD} plus
+     *  {@code d}, in that order — the arithmetic its list-based form used. */
+    void merge(int flat, double baseTarget, double baseD, double d) {
+        int at = positionOf.get(flat);
+        double from = at >= 0 ? value.getQuick(at) : baseTarget;
+        if (at >= 0) {
+            value.setQuick(at, from - baseD + d);
+        } else {
+            add(flat, from - baseD + d);
+        }
     }
 
-    /** The values, read-only. */
-    List<Double> valueList() {
-        return Collections.unmodifiableList(value);
+    int size() {
+        return index.size();
     }
 
-    /** The raw rows for an API that appends to a plain list (the orchestrators' pre-solve hooks).
-     *  Any such append invalidates the index, which is rebuilt on the next lookup. */
-    List<Integer> mutableIndexList() {
-        indexDirty = true;
-        return index;
+    int indexAt(int k) {
+        return index.getQuick(k);
     }
 
-    /** The raw values for the same APIs; see {@link #mutableIndexList()}. */
-    List<Double> mutableValueList() {
-        indexDirty = true;
-        return value;
+    double valueAt(int k) {
+        return value.getQuick(k);
+    }
+
+    Snapshot snapshot() {
+        return new Snapshot(index.toArray(), value.toArray(), generation, duplicateAppends);
+    }
+
+    /**
+     * Replace the entries with a snapshot's. When nothing but value updates and appends of NEW rows happened since
+     * the snapshot — the HVDC freeze between its snapshot and its restore — the entries before it are still in
+     * place: drop the appended rows from the index, truncate, and put the values back, instead of re-inserting
+     * millions of entries into the index. Otherwise (a clear, a restore, or a row appended twice since) rebuild.
+     */
+    void restore(Snapshot snapshot) {
+        int size = snapshot.index().length;
+        if (snapshot.generation() == generation && snapshot.duplicateAppends() == duplicateAppends && index.size() >= size) {
+            for (int k = size; k < index.size(); k++) {
+                positionOf.remove(index.getQuick(k));
+            }
+            index.remove(size, index.size() - size);
+            value.remove(size, value.size() - size);
+            value.set(0, snapshot.value());
+            generation++;
+            return;
+        }
+        clear();
+        for (int k = 0; k < size; k++) {
+            add(snapshot.index()[k], snapshot.value()[k]);
+        }
     }
 
     int[] indexArray() {
-        int[] out = new int[index.size()];
-        for (int i = 0; i < out.length; i++) {
-            out[i] = index.get(i);
-        }
-        return out;
+        return index.toArray();
     }
 
     double[] valueArray() {
-        double[] out = new double[value.size()];
-        for (int i = 0; i < out.length; i++) {
-            out[i] = value.get(i);
-        }
-        return out;
-    }
-
-    private void ensureIndex() {
-        if (!indexDirty && positionOf.size() >= index.size()) {
-            return;
-        }
-        positionOf.clear();
-        for (int k = 0; k < index.size(); k++) {
-            positionOf.put(index.get(k), k);                 // later duplicates win
-        }
-        indexDirty = false;
+        return value.toArray();
     }
 }

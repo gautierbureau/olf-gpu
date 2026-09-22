@@ -138,7 +138,7 @@ public final class GpuBatchContinuousPhase {
      *  becomes the P-flow equation (row mode 3) for the first solve. */
     static void applyPhaseOn(int realCount, int n, List<Ctl> ctls,
                              int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
-                             List<Integer> ovIndexList, List<Double> ovValueList) {
+                             GpuBatchOverrides overrides) {
         for (int slot = 0; slot < realCount; slot++) {
             for (Ctl c : ctls) {
                 if (c.kind() != 0 || disabledMask[slot][c.elemIndex()]) {
@@ -148,8 +148,7 @@ public final class GpuBatchContinuousPhase {
                         ? baseRowMode.clone() : rowModePerScenario[slot];
                 for (int k = 0; k < c.deltaRows().length; k++) {
                     row[c.deltaRows()[k]] = c.deltaModesOn()[k];
-                    ovIndexList.add(slot * n + c.deltaRows()[k]);
-                    ovValueList.add(c.deltaTargetsOn()[k]);
+                    overrides.add(slot * n + c.deltaRows()[k], c.deltaTargetsOn()[k]);
                 }
                 rowModePerScenario[slot] = row;
             }

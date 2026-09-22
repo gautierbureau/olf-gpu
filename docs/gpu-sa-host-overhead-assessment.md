@@ -356,6 +356,11 @@ the 2 CPU-routed contingencies (~1 s for 2); JNI marshal/pack (1.5 s) and the bo
   compact (only the scenarios whose row is not the shared base array). Marshal 0.88/0.75 -> 0.43 s, precompute
   13.2/12.2 -> 11.8/11.9 s. What remains of the marshal is mostly those ~1,100 row-mode rows (per-row deltas from
   the Java side would remove it). Pack (0.45–0.6 s) is the `double[][]` result format the chunk solver consumes.
+- **Boxed override lists — DONE (2026-09-22).** `GpuBatchOverrides` on trove primitive lists; every write through
+  the class (snapshot/restore instead of boxed full-list copies — one of them never read; the HVDC passes merge
+  through its own index instead of rebuilding one per call); the index is kept incrementally — it used to be
+  rebuilt on EVERY lookup once a row appeared twice — and a restore after updates/appends of new rows only
+  truncates. Override-related wall time on the cold run (JFR) 1.00 -> 0.45 s; parity identical.
 
 ## 5c. How gpusim2grid handles the same parts (`github.com/Grid2op/gpusim2grid` @ 957ad32, read 2026-09-22)
 

@@ -347,6 +347,15 @@ from arrays instead of OLF's variable objects (up to ~1.5 s — **DONE**: per-bu
 disabled buses skipped; `OLF_GPU_BUS_ARRAY_CHECK=1` against the variable walk: 14,258 / 14,258 bit-identical;
 1.88 s -> 0.80 s cold; GPU 20.1 s cold vs CPU-8t 134.8 s this run, 906,447 violations 0 differing); OLF's variable-index re-sort after `apply()` (~1 s);
 the 2 CPU-routed contingencies (~1 s for 2); JNI marshal/pack (1.5 s) and the boxed override lists (0.6 s).
+- **JNI marshal — partly DONE (2026-09-22).** Measured per chunk (temporary sub-timers): the per-scenario START
+  STATE `x0Full` (chunkSize * n doubles, 372 MB, built by the Java side whenever the chunk islands anything, only
+  to seed the frozen rows) 160–168 ms; row modes 69–86 ms (~1,100 of 3,565 scenarios differ from the base —
+  islanding is common on rte6515); disabled flags 3–15 ms once copied row by row. Now: the frozen rows travel as
+  seeds (`setBatchX0Seeds`) the device writes over its own tiling of the base state (a seed on an HVDC angle row,
+  which the freeze reads from `x0Full`, keeps the full array; `OLF_GPU_X0_SEEDS=0` for the A/B); row modes go
+  compact (only the scenarios whose row is not the shared base array). Marshal 0.88/0.75 -> 0.43 s, precompute
+  13.2/12.2 -> 11.8/11.9 s. What remains of the marshal is mostly those ~1,100 row-mode rows (per-row deltas from
+  the Java side would remove it). Pack (0.45–0.6 s) is the `double[][]` result format the chunk solver consumes.
 
 ## 5c. How gpusim2grid handles the same parts (`github.com/Grid2op/gpusim2grid` @ 957ad32, read 2026-09-22)
 

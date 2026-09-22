@@ -115,7 +115,7 @@ class GpuBatchedGenOverrideDiagnosticTest {
         BatchScenarioResult rG2 = results.get(0);
         assumeTrue(!rG2.needsCpuFallback() && rG2.hasConverged(),
                 "GPU must solve losing g2 on device (status=" + rG2.convergenceStatus() + ")");
-        double[] gpuState = rG2.state();
+        double[] gpuState = java.util.Arrays.copyOf(rG2.state(), n);
 
         // ---- (override) OLF's own Newton on the GPU's INTENDED system: same es, b2 flipped PV->PQ ----
         // The GPU override values (mirror GpuBatchedSecurityAnalysisSolver.computeGenOutage, no DS):

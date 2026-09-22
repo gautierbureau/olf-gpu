@@ -17,6 +17,11 @@ import java.util.Objects;
  * active power the device distributed in all ({@code distributedActivePower}, pu: that pre-distribution plus its own
  * distributed-slack passes — what OLF reports on a post-contingency result; NaN when not known).
  *
+ * <p>{@code state} holds the {@code n} variable values in its FIRST {@code n} entries and may be longer: a device
+ * scenario's is the solver's own result row, with the iteration count, final mismatch and status after the state,
+ * handed over as is instead of copied (on rte6515 a copy is 14,260 x 13,040 doubles, ~0.5 s of allocation). Read
+ * it by row, or take {@code Arrays.copyOf(state, n)} where a length-{@code n} array is required.
+ *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 public record BatchScenarioResult(String contingencyId, double[] state, int iterations,

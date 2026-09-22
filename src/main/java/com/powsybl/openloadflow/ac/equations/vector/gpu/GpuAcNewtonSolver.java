@@ -326,6 +326,11 @@ public final class GpuAcNewtonSolver {
      *  gives the slack bus's participating generators, which have no device row of their own. */
     public static native double[] readBatchDsRetain(long handle);
 
+    /** How many {@code solveBatchContext} calls the context has run. The distributed-slack read-backs
+     *  ({@link #readBatchDsRetain}, {@link #readBatchDsGenCum}, {@link #readBatchSlackAbsorbed}) are reset at
+     *  every solve: they describe the whole distribution only when one solve covered it. */
+    public static native long readBatchSolveCount(long handle);
+
     /**
      * Upload the run's limit thresholds and the branch model they are compared against, once per
      * run: a contingency cannot change a threshold, so this outlives every chunk. Returns 0 when the

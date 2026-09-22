@@ -464,13 +464,17 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
     }
 
     /**
-     * {@code getDistributedActivePower()} of every post-contingency result, CPU against GPU. Neither the
-     * status nor the violation checks look at it, and the two arms do not build it the same way: the CPU
-     * reports the contingency's pre-distributed loss PLUS its load flow's own slack distribution, the
-     * GPU path the pre-distributed loss only. {@code OLF_GPU_SA_DAP_DUMP=<file>} writes both values per
-     * contingency with {@code Double.toString}, so a change on either arm diffs exactly.
+     * {@code getDistributedActivePower()} of the base and every post-contingency result, CPU against GPU —
+     * the contingency's pre-distributed loss PLUS its load flow's own slack distribution. Neither the status
+     * nor the violation checks look at it; the GPU path used to report the pre-distribution alone (up to
+     * 124.5 MW off, assessment L10). {@code OLF_GPU_SA_DAP_DUMP=<file>} writes both values per contingency with
+     * {@code Double.toString}, so a change on either arm diffs exactly. Returns the worst difference (MW).
      */
-    private static void reportDistributedActivePower(SecurityAnalysisResult cpu, SecurityAnalysisResult gpu) throws java.io.IOException {
+    private static double reportDistributedActivePower(SecurityAnalysisResult cpu, SecurityAnalysisResult gpu) throws java.io.IOException {
+        double baseDiff = Math.abs(cpu.getPreContingencyResult().getDistributedActivePower()
+                - gpu.getPreContingencyResult().getDistributedActivePower());
+        System.out.printf("  distributedActivePower base: cpu=%.9f gpu=%.9f MW%n",
+                cpu.getPreContingencyResult().getDistributedActivePower(), gpu.getPreContingencyResult().getDistributedActivePower());
         Map<String, Double> gpuDap = new TreeMap<>();
         gpu.getPostContingencyResults().forEach(p -> gpuDap.put(p.getContingency().getId(), p.getDistributedActivePower()));
         Map<String, double[]> pairs = new TreeMap<>();
@@ -495,6 +499,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 pairs.forEach((id, v) -> w.println(id + "\t" + Double.toString(v[0]) + "\t" + Double.toString(v[1])));
             }
         }
+        return Math.max(worst, baseDiff);
     }
 
     @Test
@@ -895,7 +900,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         {
         }
 
-        reportDistributedActivePower(cpu, gpuCold);
+        double worstDistributed = reportDistributedActivePower(cpu, gpuCold);
+        assertTrue(worstDistributed < 1e-3, "distributed active power must match the CPU: worst " + worstDistributed + " MW");
 
         long cpuViolations = violationCount(cpu);
         long gpuViolations = violationCount(gpuCold);

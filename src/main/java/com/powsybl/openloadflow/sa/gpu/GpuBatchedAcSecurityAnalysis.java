@@ -954,6 +954,11 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         logPostContingencyStart(network, lfContingency);
         Stopwatch stopwatch = Stopwatch.createStarted();
 
+        // What OLF reports on the result: the pre-distribution PLUS the load flow's own distributed-slack passes
+        // (AbstractSecurityAnalysis: preDistributedActivePower + result.getDistributedActivePower()). The device
+        // total covers both; where it is unknown the pre-distribution alone is reported, as before.
+        double distributedActivePower = precomputed.distributedActivePower()
+                .getOrDefault(contingency.getId(), preDistributedActivePower);
         long tInj = System.nanoTime();
         GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
                 runState.get().remap);
@@ -1073,7 +1078,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                             lfContingency.getDisconnectedLoadActivePower() * PerUnit.SB,
                             lfContingency.getDisconnectedGenerationActivePower() * PerUnit.SB,
                             lfContingency.getDisconnectedElementIds()),
-                    preDistributedActivePower * PerUnit.SB);
+                    distributedActivePower * PerUnit.SB);
         }
         long tRes = System.nanoTime();
         postContingencyNetworkResult.update();
@@ -1103,7 +1108,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 GpuStateInjector.filterIslanded(network, precomputed.islandedBuses().get(contingency.getId()), contingency.getId(),
                         new NetworkResult(postContingencyNetworkResult.getBranchResults(), postContingencyNetworkResult.getBusResults(),
                                 postContingencyNetworkResult.getThreeWindingsTransformerResults())),
-                connectivityResult, preDistributedActivePower * PerUnit.SB);
+                connectivityResult, distributedActivePower * PerUnit.SB);
     }
 
     /**

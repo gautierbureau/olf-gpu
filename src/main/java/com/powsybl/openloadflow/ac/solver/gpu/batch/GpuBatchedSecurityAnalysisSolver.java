@@ -353,6 +353,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
         // The replayed contingency loss pre-distribution per contingency (pu); NaN where none was replayed.
         double[] preDistributedByIndex = new double[contingencies.size()];
         java.util.Arrays.fill(preDistributedByIndex, Double.NaN);
+        // What the device distributed in all (pre-distribution + its own distributed-slack passes, pu); NaN = unknown.
+        double[] distributedByIndex = new double[contingencies.size()];
+        java.util.Arrays.fill(distributedByIndex, Double.NaN);
         if (!batchedIndices.isEmpty()) {
             // PER_EQUATION_TYPE stopping criterion: per-row thresholds from the equation system's
             // variable pairing (null under UNIFORM_CRITERIA — the chunk solver then CLEARS the cached
@@ -389,7 +392,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         plan.drOvContribByIndex(), plan.drOvCByIndex(), plan.islandedDsByIndex(),
                         plan.islandedRlByIndex(), plan.islandedHvdcsByIndex(),
                         n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
-                        preDistributedByIndex, config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
+                        preDistributedByIndex, distributedByIndex, config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
                         phases,
                         config.hvdcFreezing() || config.hvdcLimits()
                                 ? GpuBatchHvdcAcEmulation.buildControllers(network, equationSystem, nElements)
@@ -409,10 +412,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 System.arraycopy(result, 0, state, 0, n);
                 results.add(new BatchScenarioResult(id, state, (int) result[n], result[n + 1], (int) result[n + 2],
                         plan.islandedNumsByIndex()[i] != null ? plan.islandedNumsByIndex()[i] : new int[0],
-                        preDistributedByIndex[i]));
+                        preDistributedByIndex[i], distributedByIndex[i]));
             } else {
                 results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, GpuBatchStatus.STATUS_REJECTED, new int[0],
-                        Double.NaN));
+                        Double.NaN, Double.NaN));
             }
         }
         return results;

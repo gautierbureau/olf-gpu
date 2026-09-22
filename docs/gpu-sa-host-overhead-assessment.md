@@ -210,6 +210,21 @@ lives, gain, risk, and how to verify. Ordered by expected gain.
   brought back.
 - **Change:** return the per-scenario amount the device DS pass distributed and add it. GPU repo.
 - **Not a speed lead — a correctness one.** Independent of L2 (which must leave the GPU values unchanged).
+- **DONE (2026-09-22).** Two defects, one cause (the device's own distributed-slack passes never reported):
+  - *Post-contingency:* each device pass re-derives the whole distribution from the anchor, so after the last
+    pass that fired the total is Σ genCum + the slack's retained share (the base write-back's own sum), or the
+    slack's absorbed total when it is the only participant; no pass fired = the pre-distribution alone. Read
+    per chunk and reported instead of the pre-distribution. The read-backs are reset at every solve, so a new
+    native counter (`readBatchSolveCount`) keeps it to chunks ONE solve covered (the default driver mode);
+    anything else (SVC pause/resume) reports the pre-distribution as before.
+  - *Base case, found by the new unit test:* OLF's engine collects the amount only from outer loops that are
+    `AcActivePowerDistributionOuterLoop`s; the device-driven wrapper was not one, so every GPU-driven SA base
+    reported 0 (IEEE 14: CPU -60.29 MW, GPU 0.0). `DeviceDrivenDistributionLoop` now reports the device's
+    amount (OLF's real loop's when a solve fell back to the CPU). A plain `LoadFlow.run` keeps OLF's loop and
+    was never affected (`GpuLoadFlowTest` now asserts it).
+  - rte6515, 14,260 contingencies: worst difference 124.5 MW -> 2.2e-6 MW; base 14.359916550 vs 14.359916552
+    MW. `GpuVsCpuRte6515SaTest` asserts < 1e-3 MW; `distributedActivePowerMatchesCpu` (branch, generator, load,
+    base) asserts < 1e-6 MW and fails when the post-contingency fix is reverted (verified).
 
 ### L11 — UPSTREAM OLF inconsistency found while testing L2: injection threshold conditions compare per-unit
 

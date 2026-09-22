@@ -89,6 +89,12 @@ class GpuLoadFlowTest {
         assertTrue(compared > 0, "must compare at least one bus");
         assertTrue(worstV < 1e-3, "bus voltages must match (max dV = " + worstV + " kV)");
         assertTrue(worstA < 1e-3, "bus angles must match (max dAngle = " + worstA + " deg)");
+        // The distributed active power the result reports (a GPU-driven security analysis base reported 0 —
+        // assessment L10; a plain LoadFlow.run keeps OLF's own distributed-slack loop and must match too).
+        double cpuDistributed = cpuResult.getComponentResults().get(0).getDistributedActivePower();
+        double gpuDistributed = gpuResult.getComponentResults().get(0).getDistributedActivePower();
+        assertTrue(Math.abs(cpuDistributed - gpuDistributed) < 1e-3,
+                "distributed active power must match: CPU " + cpuDistributed + " MW, GPU " + gpuDistributed + " MW");
     }
 
     @Test

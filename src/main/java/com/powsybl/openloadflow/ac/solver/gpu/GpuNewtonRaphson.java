@@ -255,7 +255,17 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      *  generators, which have no device row, split the slack's retained share by factor — the value
      *  captured at the last check that actually DISTRIBUTED, not the sub-tolerance one a STABLE check
      *  measures. A solve whose DistributedSlack phase never fired leaves the generators alone. */
+    /** Active power the device's distributed-slack passes placed in the last solve, from the run's anchor (pu):
+     *  what OLF's DistributedSlackOuterLoop would have accumulated. NaN when that solve distributed nothing —
+     *  the targets then still hold an earlier solve's distribution, whose amount stands. */
+    private double lastDistributedActivePower = Double.NaN;
+
+    public double lastDistributedActivePower() {
+        return lastDistributedActivePower;
+    }
+
     private void writeBackDistributedSlack(double[] deviceTargets, double[] genCum, double[] retain, GpuAcData data) {
+        lastDistributedActivePower = Double.NaN;
         if (deviceTargets == null || data == null) {
             return;
         }
@@ -275,6 +285,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             double[] absorbed = GpuAcNewtonSolver.readBatchSlackAbsorbed(context.handle.get());
             if (slackBus != null && absorbed != null && absorbed.length > 0 && absorbed[0] != 0) {
                 setAnchoredShare(slackBus, absorbed[0], dsParams);
+                lastDistributedActivePower = absorbed[0];
             }
             return;
         }
@@ -288,8 +299,10 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 genById.put(g.getId(), g);
             }
         }
+        double distributed = retain[0];                     // the slack's retained share + the participants' below
         if (genCum != null && data.dgGenId() != null && genCum.length >= data.dgGenId().length) {
             for (int g = 0; g < data.dgGenId().length; g++) {
+                distributed += genCum[g];
                 LfGenerator gen = genById.get(data.dgGenId()[g]);
                 if (gen != null) {
                     gen.setTargetP(dsParams.anchorTargetP(gen) + genCum[g]);
@@ -302,11 +315,13 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     continue;
                 }
                 LfBus bus = data.dsBusNum() != null && i < data.dsBusNum().length ? network.getBus(data.dsBusNum()[i]) : null;
+                distributed += deviceTargets[row] - data.dsBaseTargetP()[i];
                 if (bus != null) {
                     setAnchoredShare(bus, deviceTargets[row] - data.dsBaseTargetP()[i], dsParams);
                 }
             }
         }
+        lastDistributedActivePower = distributed;
         if (slackBus != null && retain[0] != 0) {
             setAnchoredShare(slackBus, retain[0], dsParams);
         }

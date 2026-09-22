@@ -219,9 +219,11 @@ lives, gain, risk, and how to verify. Ordered by expected gain.
   150 MW" is compared with ~1.5: it fires almost always.
 - OLF's own test (`OpenSecurityAnalysisWithActionsTest`, lines 213–217) builds the threshold from
   `lfNetwork.getGeneratorById(...).getTargetP()` — per-unit — so it mirrors the implementation and cannot see it.
-- **Change (OLF, upstream candidate):** `* PerUnit.SB` in `evaluateGeneratorCondition`, and a test with an SI
-  threshold. NOT done: it changes stock OLF behaviour; decision pending. The L2 test states its threshold in
-  per-unit (documented there) and must follow if this is fixed.
+- **DONE (2026-09-22), OLF `e97bb4e57` on `olf-local-patches`, upstream candidate** (the patch applies cleanly
+  to `origin/main`, whose evaluator is identical): target P / initial target P times `PerUnit.SB`; the unit test
+  builds injection thresholds in MW like the branch/3WT ones and checks that half a generator's MW is below its
+  value — which fails on the old evaluator (verified). OLF `sa` tests 311/0, checkstyle clean. The GPU project's
+  L2 test now states its threshold in MW.
 
 ## 5. Interactions and projection
 

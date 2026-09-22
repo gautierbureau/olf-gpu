@@ -4145,9 +4145,9 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         Network base = fixture.get();
         assertTrue(new com.powsybl.loadflow.LoadFlow.Runner(new com.powsybl.openloadflow.OpenLoadFlowProvider(
                 new com.powsybl.math.matrix.DenseMatrixFactory())).run(base, lfp).isFullyConverged());
-        // PER-UNIT: OLF's ThresholdConditionEvaluator compares an injection's target P in per-unit with the
-        // threshold as given, where branch and three-winding conditions convert to MW (assessment L11).
-        double threshold = (-base.getGenerator("B6-G").getTerminal().getP() + 5) / com.powsybl.openloadflow.util.PerUnit.SB;
+        // MW: needs OLF's ThresholdConditionEvaluator to compare injections in MW like branches (OLF e97bb4e57,
+        // assessment L11); before that fix it compared per-unit and this condition held on BOTH paths.
+        double threshold = -base.getGenerator("B6-G").getTerminal().getP() + 5;
         List<Contingency> contingencies = List.of(
                 new Contingency("B2-G", new com.powsybl.contingency.GeneratorContingency("B2-G")),
                 new Contingency("B8-G", new com.powsybl.contingency.GeneratorContingency("B8-G")));
@@ -4173,7 +4173,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, monitors, sap, strategies, actions,
                 com.powsybl.commons.report.ReportNode.NO_OP);
         assertEquals(1, cpu.getOperatorStrategyResults().size(),
-                "the condition must hold on the CPU: B6-G above " + threshold + " pu once B2-G's loss is distributed");
+                "the condition must hold on the CPU: B6-G above " + threshold + " MW once B2-G's loss is distributed");
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
         try {
             SecurityAnalysisResult replayed = runSecurityAnalysis(network, contingencies, monitors, sap, strategies, actions,

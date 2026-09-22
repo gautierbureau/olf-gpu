@@ -75,6 +75,7 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         int[] dqKMember, int[] dqJMember, double[] dqMemberKey, int[] dqMemberRlEntry,
                         int[] dqMemberGroupStart, int[] dqMemberGroupCount, int[] dqMemberRow, byte[] dqMemberHasRow,
                         int[] dqMemberQrGroup, double[] dqMemberTargetQ, int[] dqMemberBusNum,
+                        int[] dqMemberTgtPtr, int[] dqMemberTgtPeer,
                         double[] ziIn, int[] ziIdx,
                         int[] drRow, int[] drCol, double[] drCoef,
                         int[] dbRow, int[] dbCol, double[] dbCoef,

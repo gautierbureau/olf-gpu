@@ -475,3 +475,25 @@ Parity: our set (14,260) 906,447 violations 0 differing, statuses identical; 500
 identical — run it WITHOUT OLF_GPU_PRELOSS_CHECK, which swaps the replay out and so disables targeted restores),
 PARTIAL_FLOW_CHECK, BUS_ARRAY_CHECK, VIOL_CROSSCHECK (14,255 and 480) all clean; PRELOSS worst 1e-11 MW.
 Benchmark: CPU 8 threads warm 129.2 s vs GPU 18.3 s cold (x7.06) / 15.9 s warm (x8.12).
+
+## Full busbar-section census (6,876 sections, rte6515, 2026-09-22)
+
+Run in windows of 1,000 (`OLF_GPU_SA_CTG_KINDS=busbar OLF_GPU_SA_BUSBAR_TOP=1000000` + `OLF_GPU_SA_CTG_FROM`),
+`OLF_GPU_SA_BUSDIFF=1`, reject/CPU-routed traces on. Three gaps, each reduced to a single contingency:
+
+- **Gap 1a — the DISTR_Q target of a coupler-merged voltage control. FIXED.** A single retained coupler
+  (`BUS-2226_BBS_1` alone) merges two local gen-VC controls; `AcTargetVector` sums targetQ over the member's OWN
+  control's elements (just itself for the DEPENDENT one) while the device summed the whole merged group — the base
+  load flow then failed OLF's own re-test by 1.85 MVar on one DISTR_Q row. The pack now carries the peers per member
+  (CSR) and both the kernel recompute and the injection-outage host override sum those.
+  Sections [1000,2000) and [2000,3000): base CONVERGED, 948/1000 and 950/1000 batched, violations 0 differing.
+- **Gap 1b — a device divergence on some topologies. OPEN, pre-existing.** `BUS-5997_BBS_1` alone leaves the device
+  at ‖F‖∞ = 49 after 30 iterations (large residuals on IDENTITY rows), while the CPU converges; the remote tip
+  `fbea785` fails identically (51.9), so this is not from our work. Blocks [5000,6000) and the full scope.
+- **Gap 2 — the violation screen read side-opened branches closed. FIXED** (see the screen-cut entry).
+- **Gap 3 — distributed active power of a device-reported MAX_ITERATION contingency. OPEN.** The device reports the
+  loss pre-distribution alone, OLF reports what its slack distribution placed before giving up: `BUS-1463_BBS`
+  235.5 vs −29.4 MW, `BUS-2892_BBS` −118.8 vs −197.3 MW. One per ~1,000 sections; statuses and violations agree.
+
+Where the base converges the arms agree: window [0,1000) every bus within 3.6e-8 kV, statuses identical, 75,107
+violations 0 differing (after the gap-2 fix); 500-section window 37,384 violations 0 differing.

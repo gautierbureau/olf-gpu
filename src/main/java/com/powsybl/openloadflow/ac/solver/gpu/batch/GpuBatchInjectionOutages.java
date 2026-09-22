@@ -105,10 +105,8 @@ final class GpuBatchInjectionOutages {
             double[] values = new double[0];
             if (groupsDone.add(gs)) {                        // the group's targets once, on its first entry
                 double keySum = 0;
-                double sumTargetQ = 0;
-                for (int m = gs; m < gs + gc; m++) {
+                for (int m = gs; m < gs + gc; m++) {         // live keys over the whole merged group
                     keySum += !inactive.contains(m) && memberKeepsKey(any, mBusNum[m], m, -1) ? mKey[m] : 0;
-                    sumTargetQ += baseTargetQ(any, mBusNum[m]);
                 }
                 List<Integer> r = new ArrayList<>();
                 List<Double> v = new ArrayList<>();
@@ -118,6 +116,11 @@ final class GpuBatchInjectionOutages {
                     }
                     double qpk = keySum == 0 || !memberKeepsKey(any, mBusNum[m], m, -1) ? 0 : mKey[m] / keySum;
                     r.add(mRow[m]);
+                    // targetQ over THIS member's peers — its own control's elements, as AcTargetVector sums them
+                    double sumTargetQ = 0;
+                    for (int t = gpuData.dqMemberTgtPtr()[m]; t < gpuData.dqMemberTgtPtr()[m + 1]; t++) {
+                        sumTargetQ += baseTargetQ(any, mBusNum[gpuData.dqMemberTgtPeer()[t]]);
+                    }
                     v.add(qpk * sumTargetQ - baseTargetQ(any, mBusNum[m]));
                 }
                 rows = r.stream().mapToInt(Integer::intValue).toArray();
@@ -630,10 +633,8 @@ final class GpuBatchInjectionOutages {
             byte[] mHasRow = gpuData.dqMemberHasRow();
             int[] mRow = gpuData.dqMemberRow();
             double keySum = 0;
-            double sumTargetQ = 0;
-            for (int m = gs; m < gs + gc; m++) {
+            for (int m = gs; m < gs + gc; m++) {             // live keys over the whole merged group
                 keySum += memberKeepsKey(bus, mBusNum[m], m, inactiveDqMember) ? mKey[m] : 0;
-                sumTargetQ += baseTargetQ(bus, mBusNum[m]) + (mBusNum[m] == bus.getNum() ? dqOwnTargetQDelta : 0);
             }
             List<Integer> rows = new ArrayList<>();
             List<Double> values = new ArrayList<>();
@@ -644,6 +645,14 @@ final class GpuBatchInjectionOutages {
                 double qpk = keySum == 0 || !memberKeepsKey(bus, mBusNum[m], m, inactiveDqMember)
                         ? 0 : mKey[m] / keySum;
                 rows.add(mRow[m]);
+                // targetQ over THIS member's peers — the elements of its own control (see the peer CSR):
+                // a member whose control is merged INTO the group sums only its own, as AcTargetVector does.
+                double sumTargetQ = 0;
+                for (int t = gpuData.dqMemberTgtPtr()[m]; t < gpuData.dqMemberTgtPtr()[m + 1]; t++) {
+                    int peer = gpuData.dqMemberTgtPeer()[t];
+                    sumTargetQ += baseTargetQ(bus, mBusNum[peer])
+                            + (mBusNum[peer] == bus.getNum() ? dqOwnTargetQDelta : 0);
+                }
                 values.add(qpk * sumTargetQ
                         - (baseTargetQ(bus, mBusNum[m]) + (mBusNum[m] == bus.getNum() ? dqOwnTargetQDelta : 0)));
             }

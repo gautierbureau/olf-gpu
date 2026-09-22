@@ -138,6 +138,7 @@ public final class GpuAcDataExtractor {
                 dq.dqKMember(), dq.dqJMember(), dq.dqMemberKey(), dq.dqMemberRlEntry(),
                 dq.dqMemberGroupStart(), dq.dqMemberGroupCount(), dq.dqMemberRow(), dq.dqMemberHasRow(),
                 dq.dqMemberQrGroup(), dq.dqMemberTargetQ(), dq.dqMemberBusNum(),
+                dq.dqMemberTgtPtr(), dq.dqMemberTgtPeer(),
                 GpuAcArrays.flatD(family.ziIn(), 1), GpuAcArrays.flatI(family.ziIdx(), 11),
                 dr.drRow(), dr.drCol(), dr.drCoef(),
                 dsb.dbRow(), dsb.dbCol(), dsb.dbCoef(),

@@ -90,16 +90,21 @@ public class GpuBatchElementMapper {
             branchToElementIndex.put(openBranches.get(i), closedBranchCount + i);
         }
 
-        // Map fixed shunts to indices [closedBranchCount + openBranchCount, ...), in the SAME bus
-        // enumeration order GpuAcDataExtractor uses to build the shunt pack (one fixed shunt per bus).
+        // Map shunts to indices [closedBranchCount + openBranchCount, ...), in EXACTLY the enumeration
+        // GpuAcFamilyPacker uses to build the shunt pack: per bus, the fixed shunt, then the
+        // voltage-controlling shunt, then the SVC stand-by shunt. Counting the fixed shunts alone
+        // left every shunt after a controller/stand-by one pointing one pack slot too early — a
+        // shunt outage then masked (or shifted) ANOTHER bus's shunt (measured on network.xiidm /
+        // LITK: a 14 MVar reactor lost on an islanded section came off a live 80 MVar one, 1.2 kV).
         this.shuntToElementIndex = new HashMap<>();
         int shOffset = closedBranchCount + openBranchCount;
         int shIndex = 0;
         for (LfBus bus : network.getBuses()) {
-            var shunt = bus.getShunt();
-            if (shunt.isPresent()) {
-                shuntToElementIndex.put(shunt.get(), shOffset + shIndex);
-                shIndex++;
+            for (var shunt : java.util.List.of(bus.getShunt(), bus.getControllerShunt(), bus.getSvcShunt())) {
+                if (shunt.isPresent()) {
+                    shuntToElementIndex.put(shunt.get(), shOffset + shIndex);
+                    shIndex++;
+                }
             }
         }
         this.shuntCount = shIndex;

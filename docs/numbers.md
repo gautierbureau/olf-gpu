@@ -186,3 +186,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-22 | fbea785+dirty | 19.28 | 15.45 | 27.23 | x1.76 | 0/0/0 | 7.84 | 4.62 | 499/500 | 122/133 (92%) | linear-solve guard + robust retry (mode 6) + all-pinned remote group extractor fix + two-JVM comparison |
 | 2026-09-22 | fbea785+dirty | 18.44 | 15.88 | 28.04 | x1.77 | 0/0/0 | 7.66 | 4.65 | 499/500 | 122/133 (92%) | hvdc unfreeze atomic on shared converter rows |
 | 2026-09-22 | fbea785+dirty | 18.49 | 15.42 | 28.07 | x1.82 | 0/0/0 | 7.82 | 4.53 | 499/500 | 122/133 (92%) | hvdc unfreeze atomic + lost load via OLF's load map |
+| 2026-09-22 | 77b23a0+dirty | 18.01 | 15.88 | 27.99 | x1.76 | 0/0/0 | 7.84 | 4.46 | 499/500 | 122/133 (92%) | shunt element map mirrors the pack (controller + stand-by shunts) |

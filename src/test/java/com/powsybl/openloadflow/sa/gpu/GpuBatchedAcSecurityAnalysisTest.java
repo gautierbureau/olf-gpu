@@ -4363,6 +4363,33 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertStrategyMatchesCpu(network, contingencies, strategies, actions, 2);
     }
 
+    /** A shunt outage must land on ITS pack slot. The pack holds, per bus, the fixed shunt, then the
+     *  voltage-controlling one, then the SVC stand-by one; an element map that counted fixed shunts
+     *  alone pointed every shunt after a controller shunt one slot too early, so the outage of the
+     *  fixed shunt on b4 masked b3's CONTROLLER shunt instead (measured on network.xiidm / LITK:
+     *  a 14 MVar reactor lost on an islanded section came off a live 80 MVar one, 1.2 kV).
+     *  GPU SA == CPU SA at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void shuntOutageAfterControllerShuntKeepsItsPackSlotMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.ShuntNetworkFactory.create();
+        // b4 hangs off b2 and carries a FIXED 80 MVar capacitor; b3's SHUNT (created before it)
+        // is the voltage-controlling one
+        var vl4 = network.newSubstation().setId("S4").add().newVoltageLevel().setId("vl4").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+        vl4.getBusBreakerView().newBus().setId("b4").add();
+        vl4.newLoad().setId("ld4").setConnectableBus("b4").setBus("b4").setP0(40).setQ0(20).add();
+        vl4.newShuntCompensator().setId("SHFIX").setConnectableBus("b4").setBus("b4").setSectionCount(1)
+                .setVoltageRegulatorOn(false).newLinearModel().setBPerSection(5e-4).setMaximumSectionCount(1).add().add();
+        network.newLine().setId("l3").setVoltageLevel1("vl2").setBus1("b2").setVoltageLevel2("vl4").setBus2("b4")
+                .setR(1).setX(3).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setShuntCompensatorVoltageControlOn(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        assertGpuMatchesCpu(network,
+                List.of(new Contingency("SHFIX", new com.powsybl.contingency.ShuntCompensatorContingency("SHFIX"))), 1e-12, lfp);
+    }
+
     @Test
     void shuntShiftBatchMatchesCpu() {
         // #23: shunt disconnection now batches as a per-scenario ADMITTANCE OVERRIDE (the general

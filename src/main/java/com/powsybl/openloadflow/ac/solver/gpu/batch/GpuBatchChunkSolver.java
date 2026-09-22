@@ -1040,18 +1040,10 @@ final class GpuBatchChunkSolver {
                     double[] x0SeedVal = null;
                     if (!frozenSeedSlot.isEmpty()) {         // islanding in this chunk: seed the frozen rows
                         // Only the frozen rows differ from the base state: send them as seeds the device writes over
-                        // its own tiling of the base, instead of chunkSize * n doubles (372 MB per chunk on rte6515).
-                        // The HVDC freeze reads each scenario's converter-bus angles from x0Full, so a seed on one
-                        // of those rows keeps the full array.
-                        java.util.Set<Integer> hvdcRows = new java.util.HashSet<>();
-                        if (hvdcControllers != null) {
-                            for (GpuBatchHvdcAcEmulation.Ctl c : hvdcControllers) {
-                                hvdcRows.add(c.bus1PhiRow());
-                                hvdcRows.add(c.bus2PhiRow());
-                            }
-                        }
-                        boolean seedOnHvdcRow = frozenSeedRow.stream().anyMatch(hvdcRows::contains);
-                        if (X0_SEEDS && !seedOnHvdcRow) {
+                        // its own tiling of the base, instead of chunkSize * n doubles (372 MB per chunk on rte6515,
+                        // 1.5 GB for a single 14,260-scenario chunk). The HVDC freeze reads its warm start from the
+                        // same seeds.
+                        if (X0_SEEDS) {
                             x0SeedIdx = new int[frozenSeedSlot.size()];
                             x0SeedVal = new double[frozenSeedSlot.size()];
                             for (int k = 0; k < frozenSeedSlot.size(); k++) {
@@ -1184,7 +1176,8 @@ final class GpuBatchChunkSolver {
                         }
                         if (config.hvdcFreezing()) {
                             hvdcStatus = GpuBatchHvdcAcEmulation.applyFreeze(chunkSize, realCount, n, hvdcControllers,
-                                    baseState, x0Full, disabledMask, baseTargets, overrides, hvAppliedD1, hvAppliedD2);
+                                    baseState, x0Full, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null,
+                                    disabledMask, baseTargets, overrides, hvAppliedD1, hvAppliedD2);
                             targetOverrideIndex = overrides.indexArray();
                             targetOverrideValue = overrides.valueArray();
                         } else {

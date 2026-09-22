@@ -787,17 +787,23 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             System.out.printf("  GPU precomputed on device: %d / %d contingencies%n",
                     gpuPrecomputed, contingencies.size());
 
-            GpuBatchScopeCensus.reset();
-            long g1 = System.nanoTime();
-            {
-                SecurityAnalysisResult raw = runSecurityAnalysis(networkGpuWarm, contingencies, monitors, sapGpu);
-                gpuWarmMs = (System.nanoTime() - g1) / 1_000_000;
-                gpuWarm = busDiff ? BusVoltageSpill.dropPostBusResults(raw) : raw;   // only its BASE is compared
-                raw = null;
-                System.gc();
+            // OLF_GPU_SA_COLD_ONLY=1: no warm run (a profile of the cold run alone; "warm" then repeats cold).
+            if ("1".equals(System.getenv("OLF_GPU_SA_COLD_ONLY"))) {
+                gpuWarm = gpuCold;
+                gpuWarmMs = gpuColdMs;
+            } else {
+                GpuBatchScopeCensus.reset();
+                long g1 = System.nanoTime();
+                {
+                    SecurityAnalysisResult raw = runSecurityAnalysis(networkGpuWarm, contingencies, monitors, sapGpu);
+                    gpuWarmMs = (System.nanoTime() - g1) / 1_000_000;
+                    gpuWarm = busDiff ? BusVoltageSpill.dropPostBusResults(raw) : raw;   // only its BASE is compared
+                    raw = null;
+                    System.gc();
+                }
+                Map<String, Long> censusWarm = GpuBatchScopeCensus.snapshot();
+                System.out.printf("  GPU CENSUS (warm): %s%n", censusWarm);
             }
-            Map<String, Long> censusWarm = GpuBatchScopeCensus.snapshot();
-            System.out.printf("  GPU CENSUS (warm): %s%n", censusWarm);
         } finally {
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(new SparseMatrixFactory(),
                     new EvenShiloachGraphDecrementalConnectivityFactory<>());

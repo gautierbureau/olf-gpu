@@ -302,9 +302,11 @@ solves) is ~3.7 s of it.
   (base load flow, chunk-size probe, chunk context) + 34 compaction — 73 over cold + warm. With one analyzed data
   object per compact width (`OLF_GPU_COMPACT_CACHE=0` restores the old path): 12 compaction analyses per run (the
   widths 1..1024 and the cap), JNI solve −1.0 s per run in four A/B runs; statuses, 906,447 violations 0 differing.
-  The warm run still pays its 12 + 2: the batch context is rebuilt every run — reusing it is the next step.
+  The warm run still pays its 12 + 2: the batch context is rebuilt every run. **Not pursued:** the COLD run is
+  the primary case (decision 2026-09-22), so cross-run context reuse is warm-only gain.
 - **D2 — `fillClosedBranchBatch` (~1.06 s, 410 launches, ~2.6 ms each):** heavy for a fill; atomicAdd scatter is
-  the prime suspect.
+  the prime suspect. **PARKED (2026-09-22):** already tried — a fused fill was slower, "the fill's floor is its
+  atomics" (`codegen/gpu_benchmark.md` ~L135-182).
 - **D3 — host round trips:** device-to-host `cudaMemcpyAsync` 3,942 calls over two runs, 2.93 s of API time of which
   2.91 s waits for the queued kernels (52 MB copied in 0.007 s). **Corrected:** these are NOT our per-iteration
   syncs — attributed by the kernel preceding each copy, they are cuDSS ANALYSIS internals (34 scalar readbacks per
@@ -314,6 +316,24 @@ solves) is ~3.7 s of it.
 - **D4 — `cudaMalloc`/`cudaFree` (~0.35 s):** a memory pool / cuDSS device-memory handler instead of per-compaction
   allocations.
 - **D5 — `writeIdentityForInactive` (~0.31 s)** for retired scenarios.
+
+## 5d. Cold-run profile after L1–L4, L6, L7, L10, D1 (2026-09-22; the cold run is the primary case)
+
+`OLF_GPU_SA_COLD_ONLY=1` (GPU arm cold only), JFR + Nsight Systems; cold GPU arm 23.3 s (JFR) / 24.0 s (Nsight).
+
+| Part | Time | Detail |
+|---|---|---|
+| Setup before the SA loop | ~1.2 s | network loading |
+| Base load flow | 0.9 s | |
+| Precompute | 12.7 s | JNI solve 9.6 s (GPU kernels 6.2 s, marshal 0.9, pack 0.6, syncs/gaps ~1.6); override lists 0.6; planning, qualification and the rest ~2.5 |
+| Per-contingency loop | 8.4 s | detection 2.3 (host `Arrays.sort` of the screen's candidates 1.05, confirm 0.9); injection 1.9 (OLF variable-index re-sort 1.0); bus V/angle update + realism check 1.9; restore 1.2; the 2 CPU-routed contingencies 1.0 |
+
+GPU kernels (6.2 s): cuDSS factorization 2.6, forward/backward solve 1.1, analysis 0.61 (1.2 before D1), Jacobian
+fill 1.1 (D2, parked), identity rows 0.3, outer-loop passes 0.3, violation screen 0.02, other 0.3.
+
+Next cold-path candidates: the candidate sort (~1 s: sort on the device, or do without the order); bus V/angle
+from arrays instead of OLF's variable objects (up to ~1.5 s); OLF's variable-index re-sort after `apply()` (~1 s);
+the 2 CPU-routed contingencies (~1 s for 2); JNI marshal/pack (1.5 s) and the boxed override lists (0.6 s).
 
 ## 5c. How gpusim2grid handles the same parts (`github.com/Grid2op/gpusim2grid` @ 957ad32, read 2026-09-22)
 

@@ -402,12 +402,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * limits the screen flagged for this contingency and the branches it does not cover (GpuLimitScanner). Every
      * other reader forces the full refresh: a branch or three-windings transformer state monitor (network results),
      * an operator strategy on the contingency (threshold conditions on branch flows), the first contingency (the
-     * screen is built during its detection), and the diagnostics that read flows.
+     * screen is built during its detection), and the diagnostics that read flows — OLF_GPU_VIOL_CROSSCHECK among them,
+     * which runs the stock detection over EVERY branch.
      */
     private int[] flowReadSet(RunState rs, String contingencyId) {
         if (!partialFlowsEnabled() || rs.violationScreen == null || rs.candidates == null || flowsMonitored()
                 || targetedByOperatorStrategy(rs.operatorStrategies, contingencyId)
-                || System.getenv("OLF_GPU_Q_PROBE") != null || System.getenv("OLF_GPU_SA_RESID") != null) {
+                || System.getenv("OLF_GPU_Q_PROBE") != null || System.getenv("OLF_GPU_SA_RESID") != null
+                || System.getenv("OLF_GPU_VIOL_CROSSCHECK") != null) {
             return null;
         }
         GpuLimitTable table = rs.limitTable;

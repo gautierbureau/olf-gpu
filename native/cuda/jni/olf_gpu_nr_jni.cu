@@ -3709,6 +3709,11 @@ __device__ double rlCurveEval(double pMW, const double* pts, int npts, int sel, 
 // which puts the bus's Q box out by 2.67 MVAr and the bus 0.0379 kV off. The share reconstruction
 // survives ONLY as the fallback for entries genCum cannot serve (no DS slot, the per-generator
 // water-fill did not run, or the outaged bus's own entries) — there is no switch back to it.
+// OLF_GPU_CV_PROBE=<rl entry>: trace the curve-limit evaluation for that entry (device printf).
+static const int cvProbeEntry = std::getenv("OLF_GPU_CV_PROBE") == nullptr ? -1
+        : (std::string(std::getenv("OLF_GPU_CV_PROBE")) == "all" ? -2
+           : std::atoi(std::getenv("OLF_GPU_CV_PROBE")));
+
 __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int cvExtrapolate,
                                    const int* cvIdx, const double* cvIn, const double* cvPts,
                                    const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
@@ -3716,7 +3721,7 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
                                    int nQOv, const int* qOvSlotEntry, const double* qOvMinMax,
                                    const int* cvOvPtr, const int* cvOvEntry, const double* cvOvVal,
                                    const double* genCum, const char* genCumValid, int ngen,
-                                   double* minQDyn, double* maxQDyn, double* loadQDyn) {
+                                   double* minQDyn, double* maxQDyn, double* loadQDyn, int cvProbeEntry) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -3765,8 +3770,22 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
             pNow = cvIn[g * 5]
                     + cvIn[g * 5 + 1] * shareScale * (target[(size_t) s * n + pRow] - cvIn[g * 5 + 2] - pStep);
         }
-        mn += rlCurveEval(pNow * 100.0, pts, npts, 0, cvExtrapolate) / 100.0 - cvIn[g * 5 + 3];
-        mx += rlCurveEval(pNow * 100.0, pts, npts, 1, cvExtrapolate) / 100.0 - cvIn[g * 5 + 4];
+        double mnAdd = rlCurveEval(pNow * 100.0, pts, npts, 0, cvExtrapolate) / 100.0 - cvIn[g * 5 + 3];
+        double mxAdd = rlCurveEval(pNow * 100.0, pts, npts, 1, cvExtrapolate) / 100.0 - cvIn[g * 5 + 4];
+        if ((cvProbeEntry == -2 || (cvProbeEntry >= 0 && i == cvProbeEntry)) && s == 0) {
+            // OLF_GPU_CV_PROBE=<rl entry>: the P this curve is evaluated AT, and where that P came
+            // from. OLF re-reads bus.getMinQ() at the generator's CURRENT targetP; the device
+            // reconstructs it, and the two only agree while the reconstruction does.
+            printf("[CV-PROBE] s=%d entry=%d g=%d slot=%d genCumValid=%d basePpu=%.12f genCum=%.12f"
+                   " share=%.12f baseRowTargetP=%.12f rowTarget=%.12f pStep=%.12f shareScale=%.6f"
+                   " pNow=%.12f mnAdd=%.12e mxAdd=%.12e\n",
+                   s, i, g, slot, (int) (genCumValid != nullptr && genCumValid[s]), cvIn[g * 5],
+                   (genCum != nullptr && slot >= 0) ? genCum[(size_t) s * ngen + slot] : 0.0,
+                   cvIn[g * 5 + 1], cvIn[g * 5 + 2], target[(size_t) s * n + pRow], pStep, shareScale,
+                   pNow, mnAdd, mxAdd);
+        }
+        mn += mnAdd;
+        mx += mxAdd;
     }
     // A generator lost at a bus that KEEPS voltage control takes its reactive capability with it. The
     // static aggregate is run-constant and still holds it, while OLF's bus.getMinQ()/getMaxQ() sum only
@@ -4313,7 +4332,8 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             double v = x[(size_t) s * n + rlCmpVrow[i]];
             double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]);
             bool minPin = limitType[rst] == 1 || limitType[rst] == 3;   // LfBus.QLimitType.isMinLimit()
-            bool back = (!minPin && v > vt) || (minPin && v < vt);
+            bool wantsBack = (!minPin && v > vt) || (minPin && v < vt);
+            bool back = wantsBack;
             if (back) {
                 mode[ridx] = pvForm;                         // back to the DISTR_Q share row (the V identity for a pilot)
                 target[ridx] = savedTarget[rst];
@@ -4370,9 +4390,10 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         // for bus with one controller with slope") — once pinned, a slope row stays PQ.
         bool maxPin = limitType[st] == 2 || limitType[st] == 4;       // LfBus.QLimitType.isMaxLimit()
         bool minPin = limitType[st] == 1 || limitType[st] == 3;       // LfBus.QLimitType.isMinLimit()
-        bool back = !slopeRow
+        bool wantsBack = !slopeRow
                 && ((maxPin && v > vt)                               // maxQ-pinned but v above target
                  || (minPin && v < vt));                             // minQ-pinned but v below target
+        bool back = wantsBack;
         if (back) {
             mode[idx] = 0;                                  // PQ → PV: resume voltage control
             target[idx] = vt;
@@ -7736,7 +7757,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
                         ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
                         ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
-                        ctx->dRlLoadQDyn.as<double>());
+                        ctx->dRlLoadQDyn.as<double>(), cvProbeEntry);
             }
             seedRlModeFromState<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n,
                     ctx->dRlVrow.as<int>(),
@@ -9431,7 +9452,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
                         ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
                         ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
-                        ctx->dRlLoadQDyn.as<double>());
+                        ctx->dRlLoadQDyn.as<double>(), cvProbeEntry);
             }
             CUDA_CHECK(cudaMemsetAsync(ctx->dRlPassSwitched.p, 0, static_cast<size_t>(ctx->nrl) * nS, ctx->stream));
             static const char* noPinEnv = std::getenv("OLF_GPU_RL_NOPIN_ROW");

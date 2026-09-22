@@ -1399,6 +1399,22 @@ final class GpuBatchChunkSolver {
                                     (int) chunkResults[s][n]);
                         }
                     }
+                    if (System.getenv("OLF_GPU_DS_FINAL_DUMP") != null && nds > 0 && !pairPhase) {
+                        // Every participant's FINAL distributed-slack delta for slot 0, against the same
+                        // anchor the water-fill resets to. Two water-fills that move the same TOTAL can
+                        // still split it differently, and only the per-participant deltas say so (the
+                        // CPU counterpart is OLF's DS_GEN trace under OLF_DS_TRACE).
+                        double[] ftd = GpuAcNewtonSolver.readBatchTargets(handle);
+                        for (int i = 0; i < nds; i++) {
+                            int row = gpuData.dsPhiRow()[i];
+                            double d = ftd[row] - gpuData.dsBaseTargetP()[i];
+                            if (d != 0) {
+                                System.err.printf("DS_FINAL_ROW ctg=%s i=%d row=%d base=%.12e final=%.12e delta=%.12e factor=%.12e%n",
+                                        contingencies.get(group.get(chunkStart)).contingencyId(), i, row,
+                                        gpuData.dsBaseTargetP()[i], ftd[row], d, gpuData.dsFactor()[i]);
+                            }
+                        }
+                    }
                     if (System.getenv("OLF_GPU_PRELOSS_TRACE") != null && nds > 0 && !pairPhase) {
                         // Did the DEVICE's own distributed-slack pass move power AFTER the host-side
                         // pre-distribution? The CPU's loop should see only the loss-nonlinearity

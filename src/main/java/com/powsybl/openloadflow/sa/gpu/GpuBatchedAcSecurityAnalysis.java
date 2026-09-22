@@ -199,6 +199,20 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         }
     }
 
+    @Override
+    protected void restoreBaseState(com.powsybl.openloadflow.network.NetworkState networkState, LfNetwork network,
+                                    com.powsybl.openloadflow.network.LfContingency lfContingency) {
+        super.restoreBaseState(networkState, network, lfContingency);
+        if (GpuRestoreCheck.ENABLED) {
+            GpuRestoreCheck check = runState.get().restoreCheck;
+            if (check.hasReference(network)) {
+                check.check(network, lfContingency.getId());
+            } else {
+                check.setReference(network);                // the first restore is a full one
+            }
+        }
+    }
+
     private static boolean targetedByOperatorStrategy(List<OperatorStrategy> strategies, String contingencyId) {
         for (OperatorStrategy strategy : strategies) {
             var ctx = strategy.getContingencyContext();
@@ -289,6 +303,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         private PrecomputedBatch precomputed = PrecomputedBatch.empty();
         /** The state injector's row permutation, kept across this partition's contingencies. */
         private final GpuStateInjector.Remap remap = new GpuStateInjector.Remap();
+        /** OLF_GPU_RESTORE_CHECK: this partition's restores against the state a full restore produces. */
+        private final GpuRestoreCheck restoreCheck = new GpuRestoreCheck();
         /** Per bus num: does the realistic-voltage band apply (not fictitious, nominal V at or above the
          *  check's minimum)? Built once for {@link #realisticBandNetwork}. */
         private boolean[] realisticBandApplies;
@@ -459,6 +475,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         } finally {
             if (lossDistribution instanceof LossDistributionCheck check) {
                 check.print();
+            }
+            if (GpuRestoreCheck.ENABLED) {
+                runState.get().restoreCheck.print();
             }
             runState.remove();                               // pooled partition threads must not leak a run's state
             if (System.getenv("OLF_GPU_PHASE_TIME") != null) {

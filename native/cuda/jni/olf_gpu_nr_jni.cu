@@ -53,6 +53,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <map>
 #include <vector>
 
 #include "closed_branch.cuh"
@@ -101,6 +102,10 @@ long long gSolvePasses = 0;
 long long gActiveIterSum = 0;
 long long gWidthIterSum = 0;
 long long gCompactIters = 0;
+// OLF_GPU_PHASE_TIME: cuDSS symbolic analyses run — the main contexts (a batch, the base load flow) and the
+// straggler-compaction context (one per compact WIDTH it is analyzed at).
+long long gAnalysesMain = 0;
+long long gAnalysesCompact = 0;
 
 using namespace powsybl::openloadflow;
 
@@ -2420,6 +2425,7 @@ double luBytesPerScenario(SharedStructure& st) {
                                          CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
         CUDSS_CHECK(cudssMatrixCreateDn(&ds.matB, n, 1, n, dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
         CUDSS_CHECK(cudssMatrixCreateDn(&ds.matX, n, 1, n, dX.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        gAnalysesMain++;
         CUDSS_CHECK(cudssExecute(ds.handle, CUDSS_PHASE_ANALYSIS, ds.config, ds.data, ds.matA, ds.matX, ds.matB));
         // cuDSS's OWN device-memory estimate for one matrix with this pattern — [0] permanent,
         // [1] peak (16 int64 entries). This is the number to size with: the LU numeric factors are
@@ -2619,6 +2625,7 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
         negateInto<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->dF.as<double>(), ctx->dB.as<double>());
         hazRepairRightHandSide(ctx, 1, ctx->dB.as<double>());
         if (!ctx->analyzed) {
+            gAnalysesMain++;
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
             traceLuNnz(ctx->ds.handle, ctx->ds.data, "base");
         }
@@ -5359,6 +5366,10 @@ struct BatchSolverContext {
     cudssMatrix_t matUbC = nullptr, matUbCB = nullptr, matUbCX = nullptr;
     int compactCap = 0;                                      // buffer capacity (nS/2)
     int compactWidth = 0;                                    // currently ANALYZED ubatch width (0 = none)
+    // One ANALYZED cuDSS data object per compact width (OLF_GPU_COMPACT_CACHE, default on): a data object's
+    // buffers belong to the batch size it was analyzed at, but a width seen before -- the next chunk walks the
+    // same tiers, and so does the next run on this context -- can reuse its analysis instead of redoing it.
+    std::map<int, cudssData_t> compactData;
     DeviceBuf dDisabled, dActive;                            // per-scenario masks
     // Reactive limits (full-loadflow PV→PQ outer loop): per local-PV controller bus, its (rowMap-mapped)
     // BUS_V row + reactive limits + load Q. dQbuf holds Σ branch q at every row (a fill into a zeroed
@@ -5717,6 +5728,10 @@ struct BatchSolverContext {
         if (matUb) cudssMatrixDestroy(matUb);
         if (matUbB) cudssMatrixDestroy(matUbB);
         if (matUbX) cudssMatrixDestroy(matUbX);
+        for (auto& e : compactData) {
+            if (e.second && dsC.handle) cudssDataDestroy(dsC.handle, e.second);
+        }
+        compactData.clear();
         if (matUbC) cudssMatrixDestroy(matUbC);
         if (matUbCB) cudssMatrixDestroy(matUbCB);
         if (matUbCX) cudssMatrixDestroy(matUbCX);
@@ -8288,6 +8303,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
         fillActiveBatch(false);
         if (!ctx->analyzed) {
+            gAnalysesMain++;
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
             ctx->analyzed = true;
         }
@@ -8386,6 +8402,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
         fillActiveBatch(false);
         if (!ctx->analyzed) {
+            gAnalysesMain++;
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
             ctx->analyzed = true;
         }
@@ -8457,6 +8474,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
         fillActiveBatch(false);
         if (!ctx->analyzed) {
+            gAnalysesMain++;
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
             ctx->analyzed = true;
         }
@@ -8597,6 +8615,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
         fillActiveBatch(false);
         if (!ctx->analyzed) {
+            gAnalysesMain++;
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
             ctx->analyzed = true;
         }
@@ -8909,6 +8928,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
         hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
         if (!ctx->analyzed) {
+            gAnalysesMain++;
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch));
             traceLuNnz(ctx->ds.handle, ctx->ds.data, "batch-api", ctx->nScenarios);
             ctx->analyzed = true;
@@ -8931,6 +8951,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         negateIntoBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dF.as<double>(), ctx->dB.as<double>());
         hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
         if (!ctx->analyzed) {
+            gAnalysesMain++;
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matBig, ctx->matBigX, ctx->matBigB));
             traceLuNnz(ctx->ds.handle, ctx->ds.data, "blkdiag", ctx->nScenarios);
             ctx->analyzed = true;
@@ -8966,6 +8987,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 t0 = std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()).count();
             }
+            gAnalysesMain++;
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
             double ms = -1.0;
             if (timeIt) {
@@ -9045,17 +9067,38 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             // violation parity -- and then fails with an illegal memory access on a bigger network:
             // the data object's buffers are sized for the batch size it was analyzed at. The analysis
             // is cheap (~64 ms) and costs the same at any batch size, but its STATE belongs to one.
-            if (w != ctx->compactWidth) {                     // tier change: fresh data + single-block ANALYSIS
-                if (ctx->dsC.data) {
-                    CUDSS_CHECK(cudssDataDestroy(ctx->dsC.handle, ctx->dsC.data));
-                    ctx->dsC.data = nullptr;
+            static const bool cacheCompact = std::getenv("OLF_GPU_COMPACT_CACHE") == nullptr
+                    || std::string(std::getenv("OLF_GPU_COMPACT_CACHE")) != "0";
+            cudssData_t compactData = nullptr;
+            if (cacheCompact) {
+                // Tier change to a width analyzed before: its own data object, the batch size set back on the
+                // (shared) config. A new width: a fresh data object and its single-block ANALYSIS, kept.
+                cudssData_t& cached = ctx->compactData[w];
+                if (cached == nullptr) {
+                    CUDSS_CHECK(cudssDataCreate(ctx->dsC.handle, &cached));
+                    CUDSS_CHECK(cudssConfigSet(ctx->dsC.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
+                    gAnalysesCompact++;
+                    CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_ANALYSIS, ctx->dsC.config, cached, ctx->matUbC, ctx->matUbCX, ctx->matUbCB));
+                } else if (w != ctx->compactWidth) {
+                    CUDSS_CHECK(cudssConfigSet(ctx->dsC.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
                 }
-                CUDSS_CHECK(cudssDataCreate(ctx->dsC.handle, &ctx->dsC.data));
-                CUDSS_CHECK(cudssConfigSet(ctx->dsC.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
-                CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_ANALYSIS, ctx->dsC.config, ctx->dsC.data, ctx->matUbC, ctx->matUbCX, ctx->matUbCB));
                 ctx->compactWidth = w;
+                compactData = cached;
+            } else {
+                if (w != ctx->compactWidth) {                 // tier change: fresh data + single-block ANALYSIS
+                    if (ctx->dsC.data) {
+                        CUDSS_CHECK(cudssDataDestroy(ctx->dsC.handle, ctx->dsC.data));
+                        ctx->dsC.data = nullptr;
+                    }
+                    CUDSS_CHECK(cudssDataCreate(ctx->dsC.handle, &ctx->dsC.data));
+                    CUDSS_CHECK(cudssConfigSet(ctx->dsC.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
+                    gAnalysesCompact++;
+                    CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_ANALYSIS, ctx->dsC.config, ctx->dsC.data, ctx->matUbC, ctx->matUbCX, ctx->matUbCB));
+                    ctx->compactWidth = w;
+                }
+                compactData = ctx->dsC.data;
             }
-            CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE, ctx->dsC.config, ctx->dsC.data, ctx->matUbC, ctx->matUbCX, ctx->matUbCB));
+            CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE, ctx->dsC.config, compactData, ctx->matUbC, ctx->matUbCX, ctx->matUbCB));
             CUDA_CHECK(cudaMemsetAsync(ctx->dDx.p, 0, static_cast<size_t>(n) * nS * sizeof(double), ctx->stream));
             scatterScenarios<<<grid(n * nReal), BLOCK, 0, ctx->stream>>>(n, nReal, ctx->dMapC.as<int>(), ctx->dDxC.as<double>(), ctx->dDx.as<double>());
         } else {
@@ -9249,6 +9292,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matB, bS));
             CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matX, dxS));
             if (!ctx->analyzed) {
+                gAnalysesMain++;
                 CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
                 traceLuNnz(ctx->ds.handle, ctx->ds.data, "per-scenario", ctx->nScenarios);
                 ctx->analyzed = true;
@@ -10470,6 +10514,8 @@ extern long long gSolvePasses;
 extern long long gActiveIterSum;
 extern long long gWidthIterSum;
 extern long long gCompactIters;
+extern long long gAnalysesMain;
+extern long long gAnalysesCompact;
 
 static long long marshalNs = 0;
 static long long solveNs = 0;
@@ -10741,9 +10787,11 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         packNs += nowNs() - tPack0;
         calls++;
         fprintf(stderr, "JNI_PHASE_TIME calls=%lld marshal=%lld ms solve=%lld ms pack=%lld ms "
-                "| outerPasses=%lld (solving=%lld) newtonIters=%lld activeIterSum=%lld widthIterSum=%lld compactIters=%lld\n",
+                "| outerPasses=%lld (solving=%lld) newtonIters=%lld activeIterSum=%lld widthIterSum=%lld compactIters=%lld"
+                " | cuDSS analyses main=%lld compaction=%lld\n",
                 calls, marshalNs / 1000000, solveNs / 1000000, packNs / 1000000,
-                gOuterPasses, gSolvePasses, gNewtonIters, gActiveIterSum, gWidthIterSum, gCompactIters);
+                gOuterPasses, gSolvePasses, gNewtonIters, gActiveIterSum, gWidthIterSum, gCompactIters,
+                gAnalysesMain, gAnalysesCompact);
     }
     return out;
 }
@@ -10838,6 +10886,7 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
     hazRepairValues(ctx, nS, ctx->dVals.as<double>());
 
     if (!ctx->analyzed) {
+        gAnalysesMain++;
         CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
         ctx->analyzed = true;
     }
@@ -12850,6 +12899,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveTra
                                          CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
         CUDSS_CHECK(cudssMatrixCreateDn(&ds.matB, nn, 1, nn, dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
         CUDSS_CHECK(cudssMatrixCreateDn(&ds.matX, nn, 1, nn, dX.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        gAnalysesMain++;
         CUDSS_CHECK(cudssExecute(ds.handle, CUDSS_PHASE_ANALYSIS, ds.config, ds.data, ds.matA, ds.matX, ds.matB));
         CUDSS_CHECK(cudssExecute(ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
                                  ds.config, ds.data, ds.matA, ds.matX, ds.matB));

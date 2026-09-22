@@ -298,11 +298,19 @@ solves) is ~3.7 s of it.
   ~35 analyses per run instead of 2 (73 `define_superpanel_ker` launches over two runs). A data object cannot
   change batch size (illegal memory access, 2026-09-16), but one analyzed data object PER WIDTH can be cached and
   reused across chunks and runs: ~9 analyses per run at most, ~0 warm.
+  **DONE (2026-09-22).** Counted directly (`OLF_GPU_PHASE_TIME` now prints cuDSS analyses by path): per run 3 main
+  (base load flow, chunk-size probe, chunk context) + 34 compaction — 73 over cold + warm. With one analyzed data
+  object per compact width (`OLF_GPU_COMPACT_CACHE=0` restores the old path): 12 compaction analyses per run (the
+  widths 1..1024 and the cap), JNI solve −1.0 s per run in four A/B runs; statuses, 906,447 violations 0 differing.
+  The warm run still pays its 12 + 2: the batch context is rebuilt every run — reusing it is the next step.
 - **D2 — `fillClosedBranchBatch` (~1.06 s, 410 launches, ~2.6 ms each):** heavy for a fill; atomicAdd scatter is
   the prime suspect.
-- **D3 — host round trips per Newton iteration:** device-to-host `cudaMemcpyAsync` 3,942 calls over two runs,
-  2.93 s of API time of which 2.91 s waits for the queued kernels (52 MB copied in 0.007 s). Pinned memory would
-  not help (bulk copies are only ~0.3 s of DMA per run); fewer synchronization points per iteration would.
+- **D3 — host round trips:** device-to-host `cudaMemcpyAsync` 3,942 calls over two runs, 2.93 s of API time of which
+  2.91 s waits for the queued kernels (52 MB copied in 0.007 s). **Corrected:** these are NOT our per-iteration
+  syncs — attributed by the kernel preceding each copy, they are cuDSS ANALYSIS internals (34 scalar readbacks per
+  analysis during the forward/backward ordering, 3 reorder-sized ones, …; our solve loop has 5 explicit
+  device-to-host copies, all in rarely-used host-paused controls). They shrink with every analysis D1 avoids.
+  Pinned memory would not help (bulk copies are only ~0.3 s of DMA per run).
 - **D4 — `cudaMalloc`/`cudaFree` (~0.35 s):** a memory pool / cuDSS device-memory handler instead of per-compaction
   allocations.
 - **D5 — `writeIdentityForInactive` (~0.31 s)** for retired scenarios.

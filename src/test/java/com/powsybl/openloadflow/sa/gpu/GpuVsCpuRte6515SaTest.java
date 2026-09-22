@@ -940,8 +940,6 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             System.out.printf("  STATUS MISMATCHES (%d): %s%n", mismatched.size(),
                     mismatched.subList(0, Math.min(20, mismatched.size())));
         }
-        // after the status and violation parity lines, so a failing run still says whether the STATES agree
-        assertTrue(worstDistributed < 1e-3, "distributed active power must match the CPU: worst " + worstDistributed + " MW");
 
         // Per-contingency violation diff: identify WHICH contingencies have differing violation counts
         Map<String, List<com.powsybl.contingency.violations.LimitViolation>> cpuViolByCtg = new TreeMap<>();
@@ -1099,6 +1097,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         }
 
         // ASSERTIONS
+        // after every per-contingency diff line, so a failing run still says whether the STATES agree
+        assertTrue(worstDistributed < 1e-3, "distributed active power must match the CPU: worst " + worstDistributed + " MW");
         assertEquals(statusCounts(cpu), statusCounts(gpuCold),
                 "post-contingency status counts must match CPU");
         // Violation count: allow a small tolerance for border flips (ulp-level value near limit).

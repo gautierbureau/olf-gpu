@@ -765,6 +765,14 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             jdk.jfr.Recording jfr = null;
             if (jfrOut != null) {
                 jfr = new jdk.jfr.Recording(jdk.jfr.Configuration.getConfiguration("profile"));
+                // OLF_GPU_SA_JFR_PERIOD_MS=<n>: sample Java AND native stacks every n ms ("profile" takes Java
+                // stacks every 10-20 ms and native ones apart, too coarse to split a ~1 s difference by method)
+                String period = System.getenv("OLF_GPU_SA_JFR_PERIOD_MS");
+                if (period != null) {
+                    java.time.Duration every = java.time.Duration.ofMillis(Long.parseLong(period));
+                    jfr.enable("jdk.ExecutionSample").withPeriod(every);
+                    jfr.enable("jdk.NativeMethodSample").withPeriod(every);
+                }
                 jfr.start();
             }
             armMark("gpu cold start");

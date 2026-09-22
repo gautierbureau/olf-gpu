@@ -7453,15 +7453,19 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // on the device with NO per-iteration host sync and NO convergence retirement" (the
     // a fixed-iteration NR loop). tol > 0 keeps the per-iteration retirement loop.
     bool deviceFixedIter = (tol <= 0.0);
-    // STRAGGLER EARLY-EXIT (tol > 0 only): once the active count falls to <= frac*nS (min 1),
-    // stop the batched loop and mark the remainder STATUS_REJECTED (-2) so the Java side routes
-    // them to the per-contingency fallback. Rationale (2026-07-17 tol>0 profile): retirement does
-    // NOT shrink cuDSS UBATCH cost — 499 retired identity systems still factorize at the full
-    // ~233 ms/iteration — so one never-converging scenario makes the whole chunk pay maxIter
-    // full-width iterations per outer pass. OLF_GPU_STRAGGLER_FRAC overrides (0 disables).
+    // STRAGGLER EARLY-EXIT (tol > 0 only, OFF by default): once the active count falls to
+    // <= frac*nS (min 1), stop the batched loop and mark the remainder STATUS_REJECTED (-2) so the
+    // Java side routes them to the per-contingency fallback. Rationale (2026-07-17 tol>0 profile):
+    // retirement does NOT shrink cuDSS UBATCH cost — 499 retired identity systems still factorize
+    // at the full ~233 ms/iteration — so one never-converging scenario makes the whole chunk pay
+    // maxIter full-width iterations per outer pass. Off since 2026-09-22: a scenario that exhausts
+    // the budget is reported as MAX_ITERATION_REACHED by the device itself (the precomputer's
+    // exhausted set), which is OLF's own answer, and the replay it replaced cost about what the
+    // extra iterations do (rte6515, 500 busbar sections: +1.2 s of 16 warm, 5/5 statuses agree).
+    // OLF_GPU_STRAGGLER_FRAC=<frac> re-enables the exit as a perf switch.
     int stragglerExit = 0;
     if (!deviceFixedIter) {
-        double stragglerFrac = 0.02;
+        double stragglerFrac = 0.0;
         if (const char* e = std::getenv("OLF_GPU_STRAGGLER_FRAC")) {
             stragglerFrac = std::atof(e);
         }

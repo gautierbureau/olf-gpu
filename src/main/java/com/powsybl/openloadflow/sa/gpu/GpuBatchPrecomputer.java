@@ -270,6 +270,7 @@ final class GpuBatchPrecomputer {
                             reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
             Map<String, double[]> states = new HashMap<>();
             Map<String, int[]> islandedBuses = new HashMap<>();
+            java.util.Set<String> exhausted = new java.util.HashSet<>();
             for (BatchScenarioResult r : results) {
                 if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                     System.err.println("QUALIFY_TRACE result " + r.contingencyId() + " status=" + r.convergenceStatus()
@@ -280,6 +281,16 @@ final class GpuBatchPrecomputer {
                     if (r.islandedBusNums().length > 0) {
                         islandedBuses.put(r.contingencyId(), r.islandedBusNums());
                     }
+                } else if (r.convergenceStatus() == com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STATUS_MAX_ITERATION
+                        && r.contingencyId().indexOf(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STRATEGY_KEY_SEP) < 0) {
+                    // The device ran OLF's full Newton budget (deviceSolverParameters carries the
+                    // run's maxIterations) and the scenario did not converge: that IS the answer OLF
+                    // gives - MAX_ITERATION_REACHED, no network result - so it is reported from here
+                    // rather than replayed. Measured on rte6515's 500 busbar sections with the
+                    // straggler exit off: the device's exhausted set is exactly the CPU's five
+                    // MAX_ITERATION_REACHED sections. Strategy pairs keep the replay.
+                    exhausted.add(r.contingencyId());
+                    GpuBatchScopeCensus.record("DEVICE:MAX_ITERATION_REACHED");
                 } else {
                     GpuBatchScopeCensus.record("RUNTIME:status=" + r.convergenceStatus());
                     if (System.getenv("OLF_GPU_REJECT_TRACE") != null) {
@@ -312,7 +323,7 @@ final class GpuBatchPrecomputer {
             LOGGER.info("GPU batched SA: precomputed {} of {} branch (N-1..N-k) contingencies on the device",
                     states.size(), batch.size());
 
-            return new PrecomputedBatch(states, islandedBuses, baseVariableRows, es, screenData, screenMapper);
+            return new PrecomputedBatch(states, islandedBuses, exhausted, baseVariableRows, es, screenData, screenMapper);
         } catch (Exception e) {
             // full stack at WARN: a swallowed exception here silently un-accelerates the whole run —
             // the 2026-09-06 bridge AIOOBE hid behind the message-only log for days

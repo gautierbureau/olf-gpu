@@ -764,9 +764,24 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                                  PreContingencyNetworkResult preContingencyNetworkResult, boolean createResultExtension,
                                                                  List<LimitReduction> limitReductions, double preDistributedActivePower) {
         PrecomputedBatch precomputed = runState.get().precomputed;
+        if (precomputed.isReady() && precomputed.exhausted().contains(contingency.getId())) {
+            // The device carried this scenario through OLF's whole Newton budget without
+            // convergence. OLF's own path (AbstractSecurityAnalysis.runPostContingencySimulation)
+            // reports MAX_ITERATION_REACHED with an empty network result and no violations for
+            // that outcome; the same result is built here, from the contingency already applied.
+            logPostContingencyStart(network, lfContingency);
+            return new PostContingencyResult(contingency, PostContingencyComputationStatus.MAX_ITERATION_REACHED,
+                    new LimitViolationsResult(List.of()),
+                    new NetworkResult(List.of(), List.of(), List.of()),
+                    new ConnectivityResult(lfContingency.getCreatedSynchronousComponentsCount(), 0,
+                            lfContingency.getDisconnectedLoadActivePower() * PerUnit.SB,
+                            lfContingency.getDisconnectedGenerationActivePower() * PerUnit.SB,
+                            lfContingency.getDisconnectedElementIds()),
+                    preDistributedActivePower * PerUnit.SB);
+        }
         double[] state = precomputed.states().get(contingency.getId());
         if (state == null || !precomputed.isReady()) {
-            // not batched (multi-element / islanding / out of scope / diverged) — standard CPU path
+            // not batched (multi-element / islanding / out of scope / rejected) — standard CPU path
             return super.runPostContingencySimulation(network, context, contingency, lfContingency, preContingencyLimitViolationManager,
                     securityAnalysisParameters, preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
         }

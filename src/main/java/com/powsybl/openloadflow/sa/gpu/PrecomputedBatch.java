@@ -25,6 +25,13 @@ import java.util.Map;
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 record PrecomputedBatch(Map<String, double[]> states, Map<String, int[]> islandedBuses,
+                        /** Contingencies the device carried through the whole Newton budget without
+                         *  converging: reported as MAX_ITERATION_REACHED with an empty network result,
+                         *  exactly what OLF's own post-contingency path reports (it builds the network
+                         *  result and detects violations only for CONVERGED). A REJECTED scenario
+                         *  (status -2: an extractor gate or the straggler exit) is not in here and
+                         *  still replays on the CPU. */
+                        java.util.Set<String> exhausted,
                         Map<Variable<AcVariableType>, Integer> baseVariableRows,
                         EquationSystem<AcVariableType, AcEquationType> equationSystem,
                         com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData gpuData,
@@ -32,7 +39,7 @@ record PrecomputedBatch(Map<String, double[]> states, Map<String, int[]> islande
 
     /** Nothing precomputed — every contingency falls back to the sequential CPU path. */
     static PrecomputedBatch empty() {
-        return new PrecomputedBatch(Map.of(), Map.of(), Map.of(), null, null, null);
+        return new PrecomputedBatch(Map.of(), Map.of(), java.util.Set.of(), Map.of(), null, null, null);
     }
 
     /** True when the batch precompute reached the device solve (an equation system is captured). */

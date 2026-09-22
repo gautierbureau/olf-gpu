@@ -166,6 +166,16 @@ lives, gain, risk, and how to verify. Ordered by expected gain.
 - **Change options.** Recompute only the branches the device violation screen flagged + monitored ones;
   or return flows from the device. GPU repo.
 - **Gain (estimate):** ~4–5 s. **Risk: medium** (lazy/partial vectors vs everything that reads them).
+- **DONE (2026-09-22).** OLF: `StateVector.setValuesOnly(array, closedBranchNums)` + `AcNetworkVector` refreshing
+  only the listed branches (`olf-local-patches` 2cd493c79; on `upstream-candidates` after the values-only commit
+  it builds on). GPU: the injection lists the branches the violation detection reads — those of the limits the
+  device screen flagged for the contingency, plus the screen's uncovered branches; a branch/3WT state monitor, an
+  operator strategy on the contingency, the first contingency (no screen yet) or a flow-reading diagnostic gets
+  the full refresh. `-Dolf.gpu.sa.partialFlows=false` for the A/B.
+  - **Gate** (`OLF_GPU_PARTIAL_FLOW_CHECK=1`: detect again after a full refresh of the SAME state): 14,254
+    contingencies, violations bit-identical in all; 47.3 branches read per contingency instead of ~9,000.
+  - **Measured:** post-contingency simulation 10.8 s -> 6.5 s (cold); GPU 21.6 s cold / 20.4 s warm vs CPU-8t
+    131.9 s this run (121.7 s the previous one: x5.6–6.5); statuses identical, 906,447 violations 0 differing.
 
 ### L4 — per-contingency full-bus scans after injection — 2.9 s
 
@@ -277,7 +287,7 @@ lives, gain, risk, and how to verify. Ordered by expected gain.
    (precompute 16.3 -> 13.9 s). Full run after L2 + L10 + L6/L7/L4: GPU 38.7 s cold / 39.3 s warm vs CPU-8t
    125.9 s (x3.25; wall times move by several seconds between identical runs — read the per-method numbers).
 3. **L1** — OLF hook (upstreamable patch) + GPU-side partial restore; the most verification. **DONE**: see L1.
-4. **L3** (GPU repo).
+4. **L3** (GPU repo). **DONE**: see L3.
 5. **L9** (GPU repo) — last: it multiplies whatever is left, and profits from a smaller host loop.
 
 Verification protocol for every step: the 14,260 run with 0 differing violations and identical statuses;

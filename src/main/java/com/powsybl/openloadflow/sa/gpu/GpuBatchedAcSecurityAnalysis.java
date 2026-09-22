@@ -278,6 +278,94 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         return closed;
     }
 
+    /** System property: after injecting a device state, refresh only the flows of the branches the violation
+     *  detection will read (default on). Set to false for the A/B. */
+    public static final String PARTIAL_FLOWS_PROPERTY = "olf.gpu.sa.partialFlows";
+
+    /** OLF_GPU_PARTIAL_FLOW_CHECK=1: after each partial-flow detection, detect again with every flow refreshed from
+     *  the same state and require the same violations, bit for bit. */
+    private static final boolean PARTIAL_FLOW_CHECK = System.getenv("OLF_GPU_PARTIAL_FLOW_CHECK") != null;
+
+    /** Tally of OLF_GPU_PARTIAL_FLOW_CHECK. */
+    static final class PartialFlowCheck {
+        private long checked;
+        private long differing;
+        private long branchesRead;
+        private final List<String> samples = new java.util.ArrayList<>();
+
+        void compare(String contingencyId, List<com.powsybl.contingency.violations.LimitViolation> partial,
+                     List<com.powsybl.contingency.violations.LimitViolation> full, int branches) {
+            checked++;
+            branchesRead += branches;
+            List<String> a = partial.stream().map(PartialFlowCheck::key).toList();
+            List<String> b = full.stream().map(PartialFlowCheck::key).toList();
+            if (!a.equals(b)) {
+                differing++;
+                if (samples.size() < 10) {
+                    samples.add(contingencyId + ": partial " + a.size() + " violations, full " + b.size()
+                            + " | first partial-only " + a.stream().filter(k -> !b.contains(k)).findFirst().orElse("-")
+                            + " | first full-only " + b.stream().filter(k -> !a.contains(k)).findFirst().orElse("-"));
+                }
+            }
+        }
+
+        private static String key(com.powsybl.contingency.violations.LimitViolation v) {
+            return v.getSubjectId() + "|" + v.getLimitType() + "|" + v.getSide() + "|" + v.getLimitName()
+                    + "|" + Double.doubleToLongBits(v.getValue()) + "|" + Double.doubleToLongBits(v.getLimit());
+        }
+
+        void print() {
+            System.err.printf("PARTIAL_FLOW_CHECK contingencies compared=%d identical=%d differing=%d | mean branches read %.1f%n",
+                    checked, checked - differing, differing, checked > 0 ? (double) branchesRead / checked : 0.0);
+            samples.forEach(x -> System.err.println("PARTIAL_FLOW_CHECK   " + x));
+        }
+    }
+
+    private static boolean partialFlowsEnabled() {
+        return Boolean.parseBoolean(System.getProperty(PARTIAL_FLOWS_PROPERTY, "true"));
+    }
+
+    /**
+     * The branches whose flows anything reads after a device state is injected for {@code contingencyId}, or null
+     * for "refresh them all". With the device violation screen on, the detection reads only the branches of the
+     * limits the screen flagged for this contingency and the branches it does not cover (GpuLimitScanner). Every
+     * other reader forces the full refresh: a branch or three-windings transformer state monitor (network results),
+     * an operator strategy on the contingency (threshold conditions on branch flows), the first contingency (the
+     * screen is built during its detection), and the diagnostics that read flows.
+     */
+    private int[] flowReadSet(RunState rs, String contingencyId) {
+        if (!partialFlowsEnabled() || rs.violationScreen == null || rs.candidates == null || flowsMonitored()
+                || targetedByOperatorStrategy(rs.operatorStrategies, contingencyId)
+                || System.getenv("OLF_GPU_Q_PROBE") != null || System.getenv("OLF_GPU_SA_RESID") != null) {
+            return null;
+        }
+        int[] candidates = rs.candidates.get(contingencyId);
+        if (candidates == null) {
+            return null;                                     // the detection would screen it on the host: read all
+        }
+        GpuLimitTable table = rs.limitTable;
+        java.util.BitSet nums = new java.util.BitSet();
+        for (int c : candidates) {
+            if (c < table.limitCount()) {                    // bus records come after the limits: they read bus V only
+                nums.set(table.branches()[table.groupBranch(table.limitGroup(c))].getNum());
+            }
+        }
+        for (int b : rs.uncoveredBranches) {
+            nums.set(table.branches()[b].getNum());
+        }
+        return nums.stream().toArray();
+    }
+
+    /** True when a state monitor asks for branch or three-windings transformer results, which read flows. */
+    private boolean flowsMonitored() {
+        java.util.List<com.powsybl.security.monitor.StateMonitor> monitors = new java.util.ArrayList<>();
+        monitors.add(monitorIndex.getAllStateMonitor());
+        monitors.add(monitorIndex.getNoneStateMonitor());
+        monitors.addAll(monitorIndex.getSpecificStateMonitors().values());
+        return monitors.stream().anyMatch(m -> m != null
+                && (!m.getBranchIds().isEmpty() || !m.getThreeWindingsTransformerIds().isEmpty()));
+    }
+
     private static boolean targetedByOperatorStrategy(List<OperatorStrategy> strategies, String contingencyId) {
         for (OperatorStrategy strategy : strategies) {
             var ctx = strategy.getContingencyContext();
@@ -368,6 +456,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         private PrecomputedBatch precomputed = PrecomputedBatch.empty();
         /** The state injector's row permutation, kept across this partition's contingencies. */
         private final GpuStateInjector.Remap remap = new GpuStateInjector.Remap();
+        private final PartialFlowCheck partialFlowCheck = new PartialFlowCheck();
         /** OLF_GPU_RESTORE_CHECK: this partition's restores against the state a full restore produces. */
         private final GpuRestoreCheck restoreCheck = new GpuRestoreCheck();
         /** The contingency whose loss distribution the replay answered, and the one whose state the device supplied:
@@ -546,6 +635,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         } finally {
             if (lossDistribution instanceof LossDistributionCheck check) {
                 check.print();
+            }
+            if (PARTIAL_FLOW_CHECK) {
+                runState.get().partialFlowCheck.print();
             }
             if (GpuRestoreCheck.ENABLED) {
                 runState.get().restoreCheck.print();
@@ -1056,8 +1148,9 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 .getOrDefault(contingency.getId(), preDistributedActivePower);
         long tInj = System.nanoTime();
         runState.get().deviceStateInjectedFor = contingency.getId();
+        int[] flowReadSet = flowReadSet(runState.get(), contingency.getId());
         GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
-                runState.get().remap);
+                runState.get().remap, flowReadSet);
         long tUpd = System.nanoTime();
         PHASE_NS.computeIfAbsent("   injectState()", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(tUpd - tInj);
@@ -1185,6 +1278,18 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 preContingencyLimitViolationManager, securityAnalysisParameters, contingency.getId());
         PHASE_NS.computeIfAbsent("   detectViolations()", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tDet);
+        if (flowReadSet != null && PARTIAL_FLOW_CHECK) {
+            // Same state, every flow refreshed, the detection again: any branch the partial refresh left stale
+            // and the detection read shows up as a differing violation.
+            var es = precomputed.equationSystem();
+            es.getStateVector().setValuesOnly(es.getStateVector().get().clone());
+            var fullManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions,
+                    securityAnalysisParameters.getIncreasedViolationsParameters());
+            detectViolations(network, fullManager, limitReductions, preContingencyLimitViolationManager,
+                    securityAnalysisParameters, contingency.getId());
+            runState.get().partialFlowCheck.compare(contingency.getId(), postContingencyLimitViolationManager.getLimitViolations(),
+                    fullManager.getLimitViolations(), flowReadSet.length);
+        }
         PHASE_NS.computeIfAbsent("  result build + violation detection", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tRes);
 

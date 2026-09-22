@@ -241,7 +241,7 @@ public final class GpuBatchHvdcAcEmulation {
                                double[] baseTargets, List<Integer> ovIndexList, List<Double> ovValueList,
                                double[] appliedD1, double[] appliedD2) {
         int[][] status = new int[chunkSize][ctls.size()];
-        java.util.Map<Integer, Integer> posOf = indexOf(ovIndexList);
+        gnu.trove.map.hash.TIntIntHashMap posOf = indexOf(ovIndexList);
         double[] warm = new double[n];
         for (int s = 0; s < realCount; s++) {
             if (x0PerScenario != null) {
@@ -301,7 +301,7 @@ public final class GpuBatchHvdcAcEmulation {
                                      int[][] status, byte[] ctgOut, boolean[][] disabledMask,
                                      double[] baseTargets, List<Integer> ovIdx, List<Double> ovVal,
                                      double[] appliedD1, double[] appliedD2) {
-        java.util.Map<Integer, Integer> posOf = indexOf(ovIdx);
+        gnu.trove.map.hash.TIntIntHashMap posOf = indexOf(ovIdx);
         int nh = ctls.size();
         for (int s = 0; s < realCount; s++) {
             for (int h = 0; h < nh; h++) {
@@ -345,11 +345,11 @@ public final class GpuBatchHvdcAcEmulation {
      *  (e.g. a lost-load target on the converter bus — a row must NEVER carry two overrides, the
      *  parallel scatter has no ordering): value = (existing override | baseTargets) - baseD + d. */
     private static void mergeOverride(List<Integer> ovIdx, List<Double> ovVal,
-                                      java.util.Map<Integer, Integer> posOf, int flat,
+                                      gnu.trove.map.hash.TIntIntHashMap posOf, int flat,
                                       double baseTarget, double baseD, double d) {
-        Integer at = posOf.get(flat);
-        double from = at != null ? ovVal.get(at) : baseTarget;
-        if (at != null) {
+        int at = posOf.get(flat);
+        double from = at >= 0 ? ovVal.get(at) : baseTarget;
+        if (at >= 0) {
             ovVal.set(at, from - baseD + d);
         } else {
             posOf.put(flat, ovIdx.size());
@@ -359,9 +359,10 @@ public final class GpuBatchHvdcAcEmulation {
     }
 
     /** flat-row → position index over an override list (the lookup mergeOverride needs; a scan
-     *  would be quadratic in scenarios × hvdcs over a list that grows with both). */
-    private static java.util.Map<Integer, Integer> indexOf(List<Integer> ovIdx) {
-        java.util.Map<Integer, Integer> posOf = new java.util.HashMap<>(2 * ovIdx.size() + 16);
+     *  would be quadratic in scenarios × hvdcs over a list that grows with both). Primitive (trove, -1 =
+     *  absent): the list holds a whole chunk's overrides and the boxed HashMap was ~0.9 s on rte6515. */
+    private static gnu.trove.map.hash.TIntIntHashMap indexOf(List<Integer> ovIdx) {
+        gnu.trove.map.hash.TIntIntHashMap posOf = new gnu.trove.map.hash.TIntIntHashMap(2 * ovIdx.size() + 16, 0.5f, -1, -1);
         for (int k = 0; k < ovIdx.size(); k++) {
             posOf.put(ovIdx.get(k), k);
         }

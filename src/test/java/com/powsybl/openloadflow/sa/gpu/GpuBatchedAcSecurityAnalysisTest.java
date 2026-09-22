@@ -1663,6 +1663,105 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 List.of(new Contingency("bus-mid", new com.powsybl.contingency.BusbarSectionContingency("bbs1"))));
     }
 
+    /** A remote gen-VC group whose controllers are ALL pinned at their reactive ceiling in the BASE
+     *  state (rte6515 VL-6003_0 on the full busbar scope): gp on the pilot itself, c1 and c2 remotely
+     *  regulate p at 412 kV with 20 MVar each against a 260 MVar load, so the base reactive-limits
+     *  loop pins all three and the control is off before any contingency. The extractor used to ask for "the first enabled
+     *  controller" to host the pilot's DISTR_Q, found none, and the whole precompute fell to the CPU
+     *  (GPU_PRECOMPUTE_FAILED); the choice is structural now and the row modes say what is live. */
+    private static Network allPinnedRemoteGroupNetwork() {
+        Network network = Network.create("all-pinned-remote-group", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vlp", "vlc1", "vlc2")) {
+            com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(vl).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            v.getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        network.getVoltageLevel("vl0").newGenerator().setId("g0").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(600).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl0").newLoad().setId("ld0").setBus("vl0_b").setConnectableBus("vl0_b").setP0(300).setQ0(60).add();
+        network.getVoltageLevel("vlp").newLoad().setId("ldp").setBus("vlp_b").setConnectableBus("vlp_b").setP0(400).setQ0(260).add();
+        // the pilot is one of its own controllers (rte6515 VL-6003_0's shape: the throwing site)
+        network.getVoltageLevel("vlp").newGenerator().setId("gp").setBus("vlp_b").setConnectableBus("vlp_b")
+                .setMinP(0).setMaxP(500).setTargetP(100).setTargetQ(0).setTargetV(412).setVoltageRegulatorOn(true).add();
+        network.getGenerator("gp").newMinMaxReactiveLimits().setMinQ(-20).setMaxQ(20).add();
+        for (String c : List.of("c1", "c2")) {
+            network.getVoltageLevel("vl" + c).newGenerator().setId("g" + c).setBus("vl" + c + "_b").setConnectableBus("vl" + c + "_b")
+                    .setMinP(0).setMaxP(500).setTargetP(120).setTargetQ(0).setTargetV(412).setVoltageRegulatorOn(true)
+                    .setRegulatingTerminal(network.getLoad("ldp").getTerminal()).add();
+            network.getGenerator("g" + c).newMinMaxReactiveLimits().setMinQ(-20).setMaxQ(20).add();
+        }
+        java.util.function.BiConsumer<String, String[]> line = (id, ends) -> network.newLine().setId(id)
+                .setVoltageLevel1(ends[0]).setBus1(ends[0] + "_b").setConnectableBus1(ends[0] + "_b")
+                .setVoltageLevel2(ends[1]).setBus2(ends[1] + "_b").setConnectableBus2(ends[1] + "_b")
+                .setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        line.accept("l0p", new String[] {"vl0", "vlp"});
+        line.accept("lpc1", new String[] {"vlp", "vlc1"});
+        line.accept("lpc2", new String[] {"vlp", "vlc2"});
+        line.accept("l0c1", new String[] {"vl0", "vlc1"});
+        line.accept("l0c2", new String[] {"vl0", "vlc2"});
+        return network;
+    }
+
+    @org.junit.jupiter.api.Test
+    void deviceRemoteGroupAllPinnedInBaseMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = allPinnedRemoteGroupNetwork();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0_0"));
+        assertGpuMatchesCpu(network, List.of(new Contingency("l0c1", new com.powsybl.contingency.LineContingency("l0c1"))),
+                1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the batch must precompute with the whole group pinned in the base (or the test proves nothing)");
+    }
+
+    /** The outage of a branch already OPEN AT ONE END in the base (network.xiidm: 2049 of 11249 branch
+     *  contingencies): the device packs such a branch as an open-branch element (the connected end's
+     *  view: its charging), so the outage is that element's disabled bit. The mapper used to call it
+     *  unresolvable and every one of them replayed on the CPU. l12 carries charging (B1 = B2 = 1e-4 S)
+     *  and is disconnected at vl2, so losing it moves vl1's reactive balance by a measurable amount. */
+    @org.junit.jupiter.api.Test
+    void deviceHalfOpenBranchOutageMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = Network.create("half-open-branch", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vl1", "vl2", "vl3")) {
+            com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(vl).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            v.getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        network.getVoltageLevel("vl0").newGenerator().setId("g0").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(500).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl1").newLoad().setId("ld1").setBus("vl1_b").setConnectableBus("vl1_b").setP0(200).setQ0(60).add();
+        network.getVoltageLevel("vl3").newLoad().setId("ld3").setBus("vl3_b").setConnectableBus("vl3_b").setP0(250).setQ0(90).add();
+        network.getVoltageLevel("vl3").newGenerator().setId("g3").setBus("vl3_b").setConnectableBus("vl3_b")
+                .setMinP(0).setMaxP(500).setTargetP(100).setTargetV(401).setVoltageRegulatorOn(true).add();
+        java.util.function.BiConsumer<String, String[]> line = (id, ends) -> network.newLine().setId(id)
+                .setVoltageLevel1(ends[0]).setBus1(ends[0] + "_b").setConnectableBus1(ends[0] + "_b")
+                .setVoltageLevel2(ends[1]).setBus2(ends[1] + "_b").setConnectableBus2(ends[1] + "_b")
+                .setR(0.4).setX(10).setG1(0).setB1(1e-4).setG2(0).setB2(1e-4).add();
+        line.accept("l01", new String[] {"vl0", "vl1"});
+        line.accept("l12", new String[] {"vl1", "vl2"});
+        line.accept("l13", new String[] {"vl1", "vl3"});
+        line.accept("l03", new String[] {"vl0", "vl3"});
+        line.accept("l23", new String[] {"vl2", "vl3"});
+        network.getLine("l12").getTerminal2().disconnect();   // open at the vl2 end in the base
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0_0"));
+        assertGpuMatchesCpu(network, List.of(new Contingency("l12", new com.powsybl.contingency.LineContingency("l12"))),
+                1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "a half-open branch outage must batch (or the test proves nothing)");
+    }
+
     private void assertMergedPilotLossMatchesCpu(Network network, List<Contingency> ctgs) {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true);

@@ -81,10 +81,12 @@ public final class GpuBatchRlCurves {
             // REPLAY the RL pack's enumeration exactly (GpuAcOuterLoopPacks.reactiveLimitsPack):
             // a remote group member with finite limits is an rlRemote entry regardless of its base
             // pin state; a local bus enters as basePv or basePqCapable.
-            boolean remoteMember = bus.getGeneratorVoltageControl()
-                    .filter(c -> c.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN)
-                    .map(c -> c.getControlledBus() != bus).orElse(false);
-            if (remoteMember) {
+            // the SAME predicates as the reactive-limit pack (a local copy drifted on rte6515's full
+            // busbar scope at VL-5_0: a pilot whose own control is merged is reached through the
+            // main control there)
+            boolean remoteMember = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcOuterLoopPacks.isRemoteMemberEntry(bus);
+            boolean pilotSelf = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcOuterLoopPacks.isPilotSelfEntry(bus);
+            if (remoteMember || pilotSelf) {
                 var vc = bus.getGeneratorVoltageControl().orElseThrow();
                 var pilotVar = es.getVariableSet().getVariable(vc.getControlledBus().getNum(), AcVariableType.BUS_V);
                 if (vVar == null || pilotVar == null || !(bus.getMinQ() < bus.getMaxQ())) {

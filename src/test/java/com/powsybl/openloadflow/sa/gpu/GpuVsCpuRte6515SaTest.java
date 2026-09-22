@@ -54,7 +54,11 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
 
-    private static final Path CASE_FILE = Path.of("rte6515_full.xiidm.gz");
+    /** OLF_GPU_SA_CASE_FILE=<path>: the network to compare on (default rte6515_full.xiidm.gz). The
+     *  same harness runs on network.xiidm at the repo root: every contingency kind except busbar
+     *  sections, branches first, then the other kinds once parity holds. Real network data: never
+     *  read its content, only run it. */
+    private static final Path CASE_FILE = Path.of(System.getenv().getOrDefault("OLF_GPU_SA_CASE_FILE", "rte6515_full.xiidm.gz"));
     private static final Path PARAMS_FILE = Path.of("rte-loadflow-default-parameters.json");
 
     static {
@@ -215,6 +219,20 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             byType.forEach((t, n) -> System.out.printf("  INVENTORY %-28s %d%n", t, n));
             System.out.printf("  INVENTORY %-28s %d%n", "(switches)", network.getSwitchStream().count());
         }
+        // OLF_GPU_SA_CTG_RANGE=<from>:<to>: this window of the (sorted, kind-ordered) list, [from, to).
+        // For kinds that do not change the network structure (branches, injections) a window is a
+        // legitimate unit for the BUS diff, which does not fit the heap at full width on a large
+        // network; statuses and violation parity still run full width.
+        String range = System.getenv("OLF_GPU_SA_CTG_RANGE");
+        if (range != null) {
+            int colon = range.indexOf(':');
+            int from = Integer.parseInt(range.substring(0, colon).trim());
+            int to = Math.min(all.size(), Integer.parseInt(range.substring(colon + 1).trim()));
+            List<Contingency> window = new java.util.ArrayList<>(all.subList(from, to));
+            all.clear();
+            all.addAll(window);
+            System.out.printf("  window [%d, %d): %d contingencies%n", from, to, all.size());
+        }
         // OLF_GPU_SA_CTG_ONLY=<id>[,<id>]: run only these — the instrument for a single differing line.
         String only = System.getenv("OLF_GPU_SA_CTG_ONLY");
         if (only != null) {
@@ -293,11 +311,124 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 .sum();
     }
 
+    /** Post-contingency bus voltages STREAMED to a temp file the moment an arm returns, so the two arms'
+     *  full results never sit in the heap together: 9042 branches (or 6876 busbar sections) x 6877
+     *  BusResult objects x 2 arms overflowed the forked JVM's default heap. The arm's result comes back
+     *  without its post-contingency bus objects (statuses, violations, branch results and the BASE bus
+     *  results stay); the per-contingency comparison reads each arm's entry back on demand. */
+    static final class BusVoltageSpill implements AutoCloseable {
+        private final java.nio.file.Path path;
+        private final java.io.RandomAccessFile raf;
+        private final boolean temporary;
+        private final Map<String, Long> offsetById = new java.util.HashMap<>();
+        private long end;
+
+        BusVoltageSpill(String tag) throws java.io.IOException {
+            path = java.nio.file.Files.createTempFile("busv-" + tag + "-", ".bin");
+            raf = new java.io.RandomAccessFile(path.toFile(), "rw");
+            temporary = true;
+        }
+
+        private BusVoltageSpill(java.nio.file.Path persisted) throws java.io.IOException {
+            path = persisted;
+            raf = new java.io.RandomAccessFile(path.toFile(), "r");
+            temporary = false;
+        }
+
+        SecurityAnalysisResult spill(SecurityAnalysisResult r) throws java.io.IOException {
+            List<PostContingencyResult> slim = new java.util.ArrayList<>(r.getPostContingencyResults().size());
+            for (PostContingencyResult p : r.getPostContingencyResults()) {
+                java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream(1 << 17);
+                java.io.DataOutputStream d = new java.io.DataOutputStream(bo);
+                List<com.powsybl.security.results.BusResult> buses = p.getNetworkResult().getBusResults();
+                d.writeInt(buses.size());
+                for (com.powsybl.security.results.BusResult b : buses) {
+                    d.writeUTF(b.getBusId());
+                    d.writeDouble(b.getV());
+                }
+                d.flush();
+                raf.seek(end);
+                raf.write(bo.toByteArray());
+                offsetById.put(p.getContingency().getId(), end);
+                end += bo.size();
+                slim.add(withoutBusResults(p));
+            }
+            return new SecurityAnalysisResult(r.getPreContingencyResult(), slim, r.getOperatorStrategyResults());
+        }
+
+        /** The arm's bus voltages for one contingency in the order it reported them; null when absent. */
+        java.util.LinkedHashMap<String, Double> load(String contingencyId) throws java.io.IOException {
+            Long off = offsetById.get(contingencyId);
+            if (off == null) {
+                return null;
+            }
+            raf.seek(off);
+            java.io.DataInputStream d = new java.io.DataInputStream(new java.io.BufferedInputStream(
+                    new java.io.FileInputStream(raf.getFD()), 1 << 16));
+            int n = d.readInt();
+            java.util.LinkedHashMap<String, Double> v = new java.util.LinkedHashMap<>(n * 2);
+            for (int i = 0; i < n; i++) {
+                String id = d.readUTF();
+                v.put(id, d.readDouble());
+            }
+            return v;
+        }
+
+        @Override
+        public void close() throws java.io.IOException {
+            raf.close();
+            if (temporary) {
+                java.nio.file.Files.deleteIfExists(path);
+            }
+        }
+
+        /** Persist this spill next to a saved CPU arm: the voltages file and its contingency index. */
+        void saveTo(java.nio.file.Path bin, java.nio.file.Path idx) throws java.io.IOException {
+            raf.getChannel().force(true);
+            java.nio.file.Files.copy(path, bin, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            try (java.io.BufferedWriter w = java.nio.file.Files.newBufferedWriter(idx)) {
+                for (Map.Entry<String, Long> e : offsetById.entrySet()) {
+                    w.write(e.getKey());
+                    w.write('\t');
+                    w.write(Long.toString(e.getValue()));
+                    w.write('\n');
+                }
+            }
+        }
+
+        /** Re-open a persisted spill (read-only use: {@link #load}). */
+        static BusVoltageSpill open(java.nio.file.Path bin, java.nio.file.Path idx) throws java.io.IOException {
+            BusVoltageSpill sp = new BusVoltageSpill(bin);
+            for (String line : java.nio.file.Files.readAllLines(idx)) {
+                int t = line.indexOf('\t');
+                if (t > 0) {
+                    sp.offsetById.put(line.substring(0, t), Long.parseLong(line.substring(t + 1)));
+                }
+            }
+            sp.end = sp.raf.length();
+            return sp;
+        }
+
+        static PostContingencyResult withoutBusResults(PostContingencyResult p) {
+            return new PostContingencyResult(p.getContingency(), p.getStatus(), p.getLimitViolationsResult(),
+                    new com.powsybl.security.results.NetworkResult(p.getNetworkResult().getBranchResults(), List.of(),
+                            p.getNetworkResult().getThreeWindingsTransformerResults()),
+                    p.getConnectivityResult(), p.getDistributedActivePower());
+        }
+
+        /** Drop an arm's post-contingency bus objects without keeping them anywhere (the warm arm). */
+        static SecurityAnalysisResult dropPostBusResults(SecurityAnalysisResult r) {
+            return new SecurityAnalysisResult(r.getPreContingencyResult(),
+                    r.getPostContingencyResults().stream().map(BusVoltageSpill::withoutBusResults).toList(),
+                    r.getOperatorStrategyResults());
+        }
+    }
+
     @Test
     void gpuSaMatchesCpuOnRte6515Full() throws Exception {
         Network network = Network.read(CASE_FILE);
         List<Contingency> contingencies = allBranchContingencies(network);
-        System.out.printf("rte6515_full: %d branches → %d N-1 contingencies%n",
+        System.out.printf("%s: %d branches → %d N-1 contingencies%n", CASE_FILE,
                 network.getBranchCount(), contingencies.size());
 
         LoadFlowParameters lfp = JsonLoadFlowParameters.read(PARAMS_FILE);
@@ -451,8 +582,55 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                         new com.powsybl.security.monitor.StateMonitor(
                                 com.powsybl.contingency.ContingencyContext.none(), monBranches,
                                 monVls, java.util.Set.of()));
-        SecurityAnalysisResult cpu = runSecurityAnalysis(network, contingencies, monitors, sap);
-        long cpuMs = (System.nanoTime() - cpuT0) / 1_000_000;
+        System.out.printf("  JVM max heap: %d MB%n", Runtime.getRuntime().maxMemory() >> 20);
+        // Each arm's post-contingency bus voltages are streamed out of the heap before the next arm
+        // runs (BusVoltageSpill); the raw result lives in a block so nothing keeps it reachable.
+        // OLF_GPU_SA_CPU_ARM_DIR=<dir> + OLF_GPU_SA_CPU_ARM_MODE=save|load: the two arms in SEPARATE
+        // JVMs. On the full busbar scope (6876 sections x 6877 buses) each arm's result alone fills a
+        // 14 GB heap; sharing a JVM ended in the OS killing the fork even with the spill. "save" runs
+        // the CPU arm only and writes its slim result (statuses, violations, connectivity, the base
+        // bus results - powsybl's JSON) plus the spilled bus voltages and their index; "load" rebuilds
+        // the CPU arm from those files and runs only the GPU arms. Same contingency list either way
+        // (sorted ids), so the two runs see the same network.
+        String cpuArmDir = System.getenv("OLF_GPU_SA_CPU_ARM_DIR");
+        String cpuArmMode = System.getenv().getOrDefault("OLF_GPU_SA_CPU_ARM_MODE", "");
+        BusVoltageSpill cpuSpill = null;
+        BusVoltageSpill gpuSpill = busDiff ? new BusVoltageSpill("gpu") : null;
+        SecurityAnalysisResult cpu;
+        long cpuMs;
+        if ("load".equals(cpuArmMode)) {
+            java.nio.file.Path dir = java.nio.file.Path.of(cpuArmDir);
+            cpu = com.powsybl.security.json.SecurityAnalysisResultDeserializer.read(dir.resolve("cpu.json"));
+            if (busDiff) {
+                cpuSpill = BusVoltageSpill.open(dir.resolve("cpu-busv.bin"), dir.resolve("cpu-busv.idx"));
+            }
+            cpuMs = Long.parseLong(java.nio.file.Files.readString(dir.resolve("cpu-ms.txt")).trim());
+            System.out.printf("  CPU arm loaded from %s (%d post-contingency results)%n", dir, cpu.getPostContingencyResults().size());
+        } else {
+            cpuSpill = busDiff ? new BusVoltageSpill("cpu") : null;
+            // OLF_GPU_SA_GPU_ONLY=1: debug lever - skip the CPU arm (run it on an EMPTY contingency
+            // list) so the GPU arm's own behaviour on a large scope can be traced in minutes.
+            // Every comparison below is then meaningless; only the GPU arm's lines are.
+            List<Contingency> cpuCtgs = "1".equals(System.getenv("OLF_GPU_SA_GPU_ONLY")) ? List.of() : contingencies;
+            SecurityAnalysisResult raw = runSecurityAnalysis(network, cpuCtgs, monitors, sap);
+            cpuMs = (System.nanoTime() - cpuT0) / 1_000_000;
+            cpu = cpuSpill != null ? cpuSpill.spill(raw) : raw;
+            raw = null;                                          // the block alone did not free it: 6876 x 6877
+            System.gc();                                         // BusResult objects stayed reachable from the frame
+            if ("save".equals(cpuArmMode)) {
+                java.nio.file.Path dir = java.nio.file.Files.createDirectories(java.nio.file.Path.of(cpuArmDir));
+                try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(dir.resolve("cpu.json"))) {
+                    com.powsybl.security.json.SecurityAnalysisResultSerializer.write(cpu, w);
+                }
+                if (cpuSpill != null) {
+                    cpuSpill.saveTo(dir.resolve("cpu-busv.bin"), dir.resolve("cpu-busv.idx"));
+                    cpuSpill.close();
+                }
+                java.nio.file.Files.writeString(dir.resolve("cpu-ms.txt"), Long.toString(cpuMs));
+                System.out.printf("  CPU_ARM_SAVED %s | %d ms | statuses %s%n", dir, cpuMs, statusCounts(cpu));
+                return;
+            }
+        }
 
         // GPU arm: single-thread, cold + warm runs
         securityAnalysisProvider = new GpuSecurityAnalysisProvider(new SparseMatrixFactory(),
@@ -486,8 +664,13 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
 
             GpuBatchScopeCensus.reset();
             long g0 = System.nanoTime();
-            gpuCold = runSecurityAnalysis(networkGpuCold, contingencies, monitors, sapGpu);
-            gpuColdMs = (System.nanoTime() - g0) / 1_000_000;
+            {
+                SecurityAnalysisResult raw = runSecurityAnalysis(networkGpuCold, contingencies, monitors, sapGpu);
+                gpuColdMs = (System.nanoTime() - g0) / 1_000_000;
+                gpuCold = gpuSpill != null ? gpuSpill.spill(raw) : raw;
+                raw = null;
+                System.gc();
+            }
 
             // Check census: how many contingencies fell back to CPU?
             Map<String, Long> census = GpuBatchScopeCensus.snapshot();
@@ -498,8 +681,13 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
 
             GpuBatchScopeCensus.reset();
             long g1 = System.nanoTime();
-            gpuWarm = runSecurityAnalysis(networkGpuWarm, contingencies, monitors, sapGpu);
-            gpuWarmMs = (System.nanoTime() - g1) / 1_000_000;
+            {
+                SecurityAnalysisResult raw = runSecurityAnalysis(networkGpuWarm, contingencies, monitors, sapGpu);
+                gpuWarmMs = (System.nanoTime() - g1) / 1_000_000;
+                gpuWarm = busDiff ? BusVoltageSpill.dropPostBusResults(raw) : raw;   // only its BASE is compared
+                raw = null;
+                System.gc();
+            }
             Map<String, Long> censusWarm = GpuBatchScopeCensus.snapshot();
             System.out.printf("  GPU CENSUS (warm): %s%n", censusWarm);
         } finally {
@@ -592,6 +780,12 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             System.out.printf("  BASE GPU-vs-GPU (cold vs warm, same arm) buses>1e-12kV=%d of %d"
                             + " | worst abs=%.3e kV%n", selfAbove, selfPairs.size(), selfWorst);
         }
+        if ("1".equals(System.getenv("OLF_GPU_SA_BASE_ONLY"))) {
+            System.out.println("  BASE_ONLY: stopping after the base comparison (no contingency simulated on the GPU arm)");
+            return;
+        }
+        {
+        }
 
         long cpuViolations = violationCount(cpu);
         long gpuViolations = violationCount(gpuCold);
@@ -650,9 +844,15 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 if (gp == null) {
                     continue;
                 }
-                Map<String, Double> gpuV = new TreeMap<>();
-                gp.getNetworkResult().getBusResults().forEach(b -> gpuV.put(b.getBusId(), b.getV()));
-                List<String> worst = cp.getNetworkResult().getBusResults().stream()
+                Map<String, Double> gpuV = gpuSpill.load(gp.getContingency().getId());
+                java.util.LinkedHashMap<String, Double> cpuVm = cpuSpill.load(cp.getContingency().getId());
+                if (gpuV == null || cpuVm == null) {
+                    continue;
+                }
+                List<com.powsybl.security.results.BusResult> cpuBuses = cpuVm.entrySet().stream()
+                        .map(e -> new com.powsybl.security.results.BusResult("", e.getKey(), e.getValue(), 0))
+                        .toList();
+                List<String> worst = cpuBuses.stream()
                         .filter(b -> gpuV.containsKey(b.getBusId()))
                         .sorted(java.util.Comparator.comparingDouble(
                                 (com.powsybl.security.results.BusResult b) -> -Math.abs(b.getV() - gpuV.get(b.getBusId()))))
@@ -662,13 +862,13 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                         .toList();
                 // 1e-12 kV is the project's bar for "the two arms agree" — anything looser hides exactly
                 // the class of difference this instrument exists to find.
-                long above = cp.getNetworkResult().getBusResults().stream()
+                long above = cpuBuses.stream()
                         .filter(b -> gpuV.containsKey(b.getBusId()))
                         .filter(b -> Math.abs(b.getV() - gpuV.get(b.getBusId())) > 1e-12).count();
-                double worstAbs = cp.getNetworkResult().getBusResults().stream()
+                double worstAbs = cpuBuses.stream()
                         .filter(b -> gpuV.containsKey(b.getBusId()))
                         .mapToDouble(b -> Math.abs(b.getV() - gpuV.get(b.getBusId()))).max().orElse(0);
-                double worstRel = cp.getNetworkResult().getBusResults().stream()
+                double worstRel = cpuBuses.stream()
                         .filter(b -> gpuV.containsKey(b.getBusId()))
                         .mapToDouble(b -> Math.abs(b.getV() - gpuV.get(b.getBusId())) / Math.max(1e-9, Math.abs(b.getV())))
                         .max().orElse(0);
@@ -678,12 +878,12 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 // question is whether the two arms even agree on WHICH BUSES SURVIVE it — a bus one arm
                 // disabled and the other kept is a different network, and every neighbouring bus's
                 // balance shifts. The intersection-only view cannot show that.
-                long cpuOnly = cp.getNetworkResult().getBusResults().stream()
+                long cpuOnly = cpuBuses.stream()
                         .filter(b -> !gpuV.containsKey(b.getBusId())).count();
-                long gpuOnly = gpuV.size() - (cp.getNetworkResult().getBusResults().size() - cpuOnly);
+                long gpuOnly = gpuV.size() - (cpuBuses.size() - cpuOnly);
                 System.out.printf("  BUSDIFF ctg=%s buses>1e-12kV=%d of %d | worst abs=%.3e kV rel=%.3e"
                                 + " | uncompared: cpu-only=%d gpu-only=%d%n",
-                        cp.getContingency().getId(), above, cp.getNetworkResult().getBusResults().size(),
+                        cp.getContingency().getId(), above, cpuBuses.size(),
                         worstAbs, worstRel, cpuOnly, gpuOnly);
                 worst.forEach(w -> System.out.printf("      %s%n", w));
                 // OLF_GPU_SA_MON_BUS=<id>[,<id>]: both arms' voltage at NAMED buses, whether or not they
@@ -693,13 +893,19 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 String monBus = System.getenv("OLF_GPU_SA_MON_BUS");
                 if (monBus != null) {
                     java.util.Set<String> want = java.util.Set.of(monBus.split(","));
-                    cp.getNetworkResult().getBusResults().stream()
+                    cpuBuses.stream()
                             .filter(b -> want.contains(b.getBusId()) && gpuV.containsKey(b.getBusId()))
                             .forEach(b -> System.out.printf("      MONBUS ctg=%s bus=%s cpu=%.9f gpu=%.9f d=%.3e%n",
                                     cp.getContingency().getId(), b.getBusId(), b.getV(),
                                     gpuV.get(b.getBusId()), b.getV() - gpuV.get(b.getBusId())));
                 }
             }
+        }
+        if (cpuSpill != null) {
+            cpuSpill.close();
+        }
+        if (gpuSpill != null) {
+            gpuSpill.close();
         }
         // The UNION of both key sets, not just the CPU's. The violation-diff metric is a TOTAL
         // (|cpuViolations - gpuViolations|), so a contingency present in ONE arm's results and not
@@ -741,10 +947,17 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 for (var v : gpuViolByCtg.getOrDefault(ctgId, List.of())) {
                     String key = v.getSubjectId() + "|" + v.getLimitType() + "|" + v.getSide();
                     if (!cpuSet.contains(key)) {
-                        System.out.printf("    GPU-only: %s %s %s value=%.6f limit=%.6f margin=%.6e%n",
+                        var subj = network.getIdentifiable(v.getSubjectId());   // the KIND of the element, not its data
+                        System.out.printf("    GPU-only: %s %s %s value=%.6f limit=%.6f margin=%.6e kind=%s%s%n",
                                 v.getSubjectId(), v.getLimitType(), v.getSide(), v.getValue(),
                                 v.getLimit() * v.getLimitReduction(),
-                                Math.abs(v.getValue() - v.getLimit() * v.getLimitReduction()));
+                                Math.abs(v.getValue() - v.getLimit() * v.getLimitReduction()),
+                                subj == null ? "?" : subj.getType(),
+                                subj instanceof com.powsybl.iidm.network.TwoWindingsTransformer t
+                                        ? " rtc=" + t.hasRatioTapChanger() + " ptc=" + t.hasPhaseTapChanger()
+                                          + " rtcReg=" + (t.hasRatioTapChanger() && t.getRatioTapChanger().isRegulating())
+                                          + " ptcReg=" + (t.hasPhaseTapChanger() && t.getPhaseTapChanger().isRegulating())
+                                        : "");
                     }
                 }
             }

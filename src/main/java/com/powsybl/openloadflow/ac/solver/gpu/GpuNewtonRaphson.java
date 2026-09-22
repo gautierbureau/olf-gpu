@@ -36,6 +36,7 @@ import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.PerEquationTypeStoppingCriteria;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.EquationSystemIndex;
 import com.powsybl.openloadflow.equations.EquationSystemIndexListener;
@@ -116,6 +117,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     public void setDriverEngineActive(boolean active) {
         this.driverEngineActive = active;
         this.driverFallbackForRun = false;                   // a new engine run: the driver is back on
+        this.robustModeForRun = false;
     }
 
     /** A solve of the CURRENT engine run fell back to the CPU Newton-Raphson (a rejected shape): the
@@ -124,6 +126,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      *  machines would restart from INITIAL against OLF's contexts sitting at CONTROL/COMPLETE — the
      *  AFTER_GENERATOR carrier-clamp base measured 2.2e-3 kV that way). Pure-NR device solves only. */
     private boolean driverFallbackForRun;
+    /** Set by the first device reject of a run: the batch-of-one context is rebuilt in mode 6 (the
+     *  robust pivoted single-matrix solve) and stays there for the run. See the retry in runImpl. */
+    private boolean robustModeForRun;
 
     // Diagnostics for the invalidation taxonomy: how the cached native context is reconciled across
     // solves — STRUCTURE rebuilds (pattern + cuDSS re-analysis) vs cheap VALUES re-uploads (a transformer
@@ -671,7 +676,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     // per-extraction cache — the batched SA building its context from the SAME
                     // extraction reuses it device-side.
                     context.handle.set(GpuAcNewtonSolver.createBatchContext(GpuAcStructures.handle(n, data), 1,
-                            GpuBatchContextCache.resolveBatchMode(),
+                            robustModeForRun ? GpuBatchContextCache.MODE_ROBUST : GpuBatchContextCache.resolveBatchMode(),
                             data.rlVrow(), data.rlMinQ(), data.rlMaxQ(), data.rlLoadQ(), data.rlVtarget(),
                             data.rlMonitored(), data.rowSlope(),
                             data.dsPhiRow(), data.dsFactor(), data.dsSlackPhiRow(), data.dsSlackTargetP(),
@@ -1024,12 +1029,37 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     driverOuterLoops ? 0 : 1,                // skipRlPhase: the driver owns RL now
                     0, null, null)[0];
             long t2 = System.nanoTime();
-            if (driverOuterLoops && out.length > n + 2 && (int) out[n + 2] == -2) {
-                // The driver's own detector rejected the scenario (every pinnable PV pinned: OLF's
-                // GLOBAL "strongest stays PV" election, which the kernel does not run). The chunk
-                // solver routes such a scenario to the CPU; the batch-of-one does the same — the
-                // CPU Newton-Raphson reruns it and OLF's loops (deferred by the engine) decide.
-                throw new PowsyblException("GPU driver rejected the base solve (status -2: straggler exit, outer-loop budget, unrealistic state or a device-loop reject - OLF_GPU_REJECT_TRACE=1 names the gate)");
+            if (out.length > n + 2 && (int) out[n + 2] == GpuBatchStatus.STATUS_LINEAR_SOLVE_FAILED && !robustModeForRun) {
+                // A FAILED LINEAR SOLVE (status -3, and only that: every other reject names a state
+                // the device cannot lay out or OLF's own budget, and goes to the CPU as before -
+                // retrying those on the device re-solved bases OLF's loops had to decide, 2.6e-3 kV on
+                // the robust-realistic fixture): retry ON THE DEVICE in the robust single-matrix mode
+                // (mode 6: BTF-COLAMD, global column pivoting, matching) for the rest of the run
+                // before any CPU fallback. rte6515's full busbar structure does not factor in the
+                // uniform batch (linear residual ratio 1e12, the base came back MAX_ITERATION_REACHED
+                // and the whole analysis reported nothing) and converges on the device in mode 0.
+                // A base load flow that works on the CPU has to work on the GPU.
+                LOGGER.info("GPU Newton-Raphson: device rejected the batch-of-one solve; retrying on the device in the robust single-matrix mode");
+                if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+                    System.err.println("GPU_BASE_ROBUST_RETRY status=-2 -> mode 6 (pivoted single matrix)");
+                }
+                robustModeForRun = true;
+                GpuAcNewtonSolver.destroyBatchContext(context.handle.getAndSet(0));
+                cachedData = null;
+                invalidation.structureDirty = true;
+                return runImpl(voltageInitializer, reportNode, true);
+            }
+            if (out.length > n + 2 && (int) out[n + 2] <= GpuBatchStatus.STATUS_REJECTED) {
+                // The kernel rejected the scenario (status -2, or -3 when the robust retry failed too): a linear solve that did not solve (the
+                // structure does not factor unpivoted), the straggler exit, the outer-loop budget, an
+                // unrealistic state or a device-loop reject. The chunk solver routes such a scenario
+                // to the CPU; the batch-of-one does the same - the CPU Newton-Raphson reruns it and
+                // OLF's loops (deferred by the engine) decide. On EVERY path, driver or plain Newton:
+                // this used to be gated on driverOuterLoops, and after a first fallback (which turns
+                // the driver off for the run) the host loop's re-solve came back -2 from the device
+                // and was read as an honest MAX_ITERATION_REACHED - the whole full-scope busbar
+                // analysis reported nothing (rte6515, 6876 sections).
+                throw new PowsyblException("GPU driver rejected the base solve (status -2: a failed linear solve (the structure does not factor unpivoted), straggler exit, outer-loop budget, unrealistic state or a device-loop reject - OLF_GPU_REJECT_TRACE=1 names the gate)");
             }
             LOGGER.debug("GPU Newton-Raphson timing: prepare {} ms (context {}), solve {} ms",
                     (t1 - t0) / 1_000_000, rebuilt ? "rebuilt" : "reused", (t2 - t1) / 1_000_000);

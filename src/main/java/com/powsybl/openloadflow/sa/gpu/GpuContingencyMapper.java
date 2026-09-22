@@ -248,9 +248,22 @@ final class GpuContingencyMapper {
                 continue;
             }
             LfBranch branch = net.getBranchById(e.getKey());
-            if (branch == null || branch.getBus1() == null || branch.getBus2() == null) {
-                trace(pc, "unresolvable " + e.getKey());
+            if (branch == null || (branch.getBus1() == null && branch.getBus2() == null)) {
+                // name the ELEMENT KIND too: an id alone does not say which family
+                trace(pc, "unresolvable " + e.getKey() + " kind=" + pc.getContingency().getElements().stream()
+                        .map(el -> el.getType().name()).distinct().toList()
+                        + (branch == null ? " lfBranch=absent" : " bus1=false bus2=false"));
                 return null;
+            }
+            if (branch.getBus1() == null || branch.getBus2() == null) {
+                // A branch already open at ONE end in the base: the device packs it as an open-branch
+                // element (the connected end's view of it), so its outage is that element's disabled
+                // bit, like a closed branch's. It used to be "unresolvable": 2049 of network.xiidm's
+                // 11249 branch outages (380 of the first 2000), every one replayed on the CPU - most
+                // of the GPU arm's wall time there. It cuts nothing, so the validator's connectivity
+                // check (which skips half-open branches) is unaffected.
+                branches.add(branch);
+                continue;
             }
             if (e.getValue() != DisabledBranchStatus.BOTH_SIDES) {
                 continue;                                    // ONE-SIDE opening: handled by sideOpens()

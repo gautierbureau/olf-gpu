@@ -301,6 +301,49 @@ inline void applyMatchingAlg(cudssConfig_t config) {
 #endif
 }
 
+inline void applyReorderAlg(cudssConfig_t config, bool hasZeroImpedance);   // defined below
+
+// MODE 6 = the ROBUST single-matrix solve: mode 0's per-scenario loop with matching and pivoting
+// on cuDSS's single-matrix API (the uniform batch supports none of the three). It is what a
+// factorization needs on rte6515's full busbar structure (366 retained couplers, 1e-18 pivots under
+// every unpivoted ordering): measured 2026-09-22, the batch-of-one base load flow that the uniform
+// batch could not solve converges on the device in this mode. The batch-of-one falls into it
+// automatically after a linear-solve reject (GpuNewtonRaphson); a context asks for it through
+// olf.gpu.batchMode=6. Mode 0 itself is untouched (the JAVA hybrid builds mode-0 contexts and its
+// 1e-12 fixtures sit on the last ulp of AMD's roundoff). OLF_GPU_REORDER_ALG still overrides the ordering.
+inline void applyRobustSingleMatrixConfig(cudssConfig_t config) {
+#if CUDSS_VERSION >= 800
+    const char* e = std::getenv("OLF_GPU_REORDER_ALG");
+    bool colamdFamily = true;                                // BTF_COLAMD / COLAMD: global column pivoting is defined
+    if (e == nullptr || *e == '\0') {
+        // cuDSS 0.8 REFUSES matching under BTF_COLAMD / COLAMD (status 4 at factorization, every
+        // size); it accepts it under default / ND / AMD with automatic pivoting. AMD by default.
+        OlfReorderAlg amd = CUDSS_REORDERING_ALG_AMD;
+        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_REORDERING_ALG, &amd, sizeof(amd)));
+        colamdFamily = false;
+    } else {
+        applyReorderAlg(config, true);
+        colamdFamily = std::string(e) == "btf_colamd" || std::string(e) == "colamd";
+    }
+    cudssPivotType_t pt = colamdFamily ? CUDSS_PIVOT_GLOBAL_COL : CUDSS_PIVOT_AUTO;
+    CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_PIVOT_TYPE, &pt, sizeof(pt)));
+    if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
+        std::fprintf(stderr, "ROBUST_CFG reorder=%s pivot=%s matching=auto\n", e == nullptr ? "amd" : e,
+                     colamdFamily ? "global_col" : "auto");
+    }
+    // Matching is REQUIRED (measured: pivoting alone left the full-scope base at NaN). Its
+    // permutation is value-dependent and cuDSS accepts ONE analysis per data object (a second
+    // ANALYSIS returns status 4), so the analysis runs once on the first values of the run and the
+    // later factorizations reuse it - which is what converged the full-scope base. A system cuDSS
+    // refuses under this configuration (ieee14 in the cross-check test: status 4 at factorization)
+    // throws, and the batch-of-one falls back to the CPU as before - never wrong.
+    cudssMatchingAlg_t alg = CUDSS_MATCHING_ALG_AUTO;
+    CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_MATCHING_ALG, &alg, sizeof(alg)));
+#else
+    (void) config;
+#endif
+}
+
 // AMD IS NOT SAFE WHEN THE SYSTEM HAS ZERO-IMPEDANCE BRANCHES. AMD is a SYMMETRIC (approximate
 // minimum degree) ordering and assumes a non-zero diagonal; a zero-impedance branch always breaks
 // that, because ZERO_V / ZERO_PHI sit on the DUMMY_P / DUMMY_Q rows and carry v1-v2 and phi1-phi2,
@@ -1294,6 +1337,32 @@ static inline void traceReject(int slot, const char* reason, int outer, int it) 
     if (on) {
         std::fprintf(stderr, "GPU_REJECT slot=%d reason=%s outer=%d it=%d\n", slot, reason, outer, it);
     }
+}
+
+// A linear solve whose residual ratio ||J.dx-B|| / ||F|| exceeds this did NOT solve the system: the
+// factorization is wrong (unpivoted LU on a structure that needs pivoting), not merely inaccurate.
+static const double LIN_SOLVE_FAIL_RATIO = 1e-2;
+
+// Per-scenario score of the linear solve just done: max|J.dx-B| under both sign conventions and
+// max|F|, one thread per scenario (n serial reads each; a few thousand per scenario, once per solve).
+__global__ void linResidScoreBatch(int n, int nS, const double* rp, const double* rm, const double* F,
+                                   double* score) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nS) return;
+    double mp = 0.0;
+    double mm = 0.0;
+    double mf = 0.0;
+    const double* rps = rp + (size_t) s * n;
+    const double* rms = rm + (size_t) s * n;
+    const double* fs = F + (size_t) s * n;
+    for (int i = 0; i < n; i++) {
+        mp = fmax(mp, fabs(rps[i]));
+        mm = fmax(mm, fabs(rms[i]));
+        mf = fmax(mf, fabs(fs[i]));
+    }
+    score[3 * s] = fmin(mp, mm);
+    score[3 * s + 1] = mf;
+    score[3 * s + 2] = (mf > 0.0 && isfinite(mp) && isfinite(mm)) ? fmin(mp, mm) / mf : 1e300;
 }
 
 __global__ void linResidRowBatch(int n, int nS, int nnz, const int* rowPtr, const int* colIdx,
@@ -2590,6 +2659,26 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
             double best = std::min(mp, mm);
             std::fprintf(stderr, "LIN_RESID n=%d ||J.dx-F||inf=%.6e ||F||inf=%.6e ratio=%.3e worstRow=%d\n",
                          n, best, mf, mf > 0 ? best / mf : 0.0, argw);
+        }
+        if (it == 1) {                                       // same guard as the batched loop, batch of one
+            DeviceBuf rp;
+            DeviceBuf rm;
+            DeviceBuf sc;
+            rp.alloc(n * sizeof(double));
+            rm.alloc(n * sizeof(double));
+            sc.alloc(3 * sizeof(double));
+            linResidRow<<<grid(n), BLOCK, 0, ctx->stream>>>(n, ctx->st->dRowPtr.as<int>(),
+                    ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
+                    ctx->dB.as<double>(), rp.as<double>(), rm.as<double>());
+            linResidScoreBatch<<<1, BLOCK, 0, ctx->stream>>>(n, 1, rp.as<double>(), rm.as<double>(),
+                    ctx->dF.as<double>(), sc.as<double>());
+            double hsc[3];
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            CUDA_CHECK(cudaMemcpy(hsc, sc.p, 3 * sizeof(double), cudaMemcpyDeviceToHost));
+            if (!(hsc[2] <= LIN_SOLVE_FAIL_RATIO)) {
+                throw std::runtime_error("device linear solve failed (||J.dx-B||/||F|| = " + std::to_string(hsc[2])
+                                         + "): the structure does not factor unpivoted - CPU fallback");
+            }
         }
         CUDA_CHECK(cudaMemcpyAsync(ctx->dXprev.p, ctx->dX.p, n * sizeof(double), cudaMemcpyDeviceToDevice, ctx->stream));
         if (lsMode == 2) {
@@ -4164,8 +4253,13 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         double rdv2 = svcLim ? x[ridx] * x[ridx] - rlV2Base[i] : 0.0;
         double rliMin = rlMinQ[rli] + (svcLim ? rlSvcBmin[i] * rdv2 : 0.0);
         double rliMax = rlMaxQ[rli] + (svcLim ? rlSvcBmax[i] * rdv2 : 0.0);
+        // rlRemote 2 = a PILOT that is one of its own controllers: unpinned, its row is the group's
+        // voltage IDENTITY (mode 0), not a DISTR_Q share; pinned, its own Q balance (mode 4, the
+        // alternate dest). Everything else (q via the remote q pack, the pilot's V as compare row)
+        // is a remote member's. As a LOCAL entry its pin landed on mode 1, an EMPTY row.
+        int pvForm = rlRemote[i] == 2 ? 0 : 1;
         if (limitType[rst] == 0) {
-            if (mode[ridx] != 1) return;                     // islanded / frozen this scenario
+            if (mode[ridx] != pvForm) return;                // islanded / frozen this scenario
             // OLF_GPU_RL_NOPIN_ROW=<deviceRow>: never pin THIS row. Isolates one pin so the solve
             // it would have interrupted can be compared against the CPU on its own - the only way
             // to tell "the pin is wrong" from "the state the pin was taken at was already wrong".
@@ -4174,8 +4268,10 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             // voltageRemoteControlRobustMode (ReactiveLimitsOuterLoop.checkControllerBus): the criteria
             // below test this REMOTE controller's OWN voltage — the same x row the quadratic SVC delta
             // reads — against the realistic band shrunk by the 1.02 margin.
-            bool unrealisticLo = robust && x[ridx] < vLoRobust;
-            bool unrealisticHi = robust && x[ridx] > vHiRobust;
+            // OLF's robust criterion applies to REMOTE controllers only; a pilot that controls its
+            // own bus (class 2) is a local controller in that respect
+            bool unrealisticLo = robust && rlRemote[i] != 2 && x[ridx] < vLoRobust;
+            bool unrealisticHi = robust && rlRemote[i] != 2 && x[ridx] > vHiRobust;
             if (q < rliMin - tol) {
                 savedTarget[rst] = target[ridx];             // the DISTR_Q row target (NOT 0 in general:
                                                              // see updateDistrQTargetsBatch)
@@ -4215,7 +4311,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             bool minPin = limitType[rst] == 1 || limitType[rst] == 3;   // LfBus.QLimitType.isMinLimit()
             bool back = (!minPin && v > vt) || (minPin && v < vt);
             if (back) {
-                mode[ridx] = 1;                              // back to the DISTR_Q share row
+                mode[ridx] = pvForm;                         // back to the DISTR_Q share row (the V identity for a pilot)
                 target[ridx] = savedTarget[rst];
                 limitType[rst] = 0;
                 switched[s] = 1;
@@ -4332,7 +4428,7 @@ __global__ void rlRobustVResetBatch(int nrl, int nScenarios, int n, const int* r
     int i = tid % nrl;
     int s = tid / nrl;
     if (!rlActive[s]) return;
-    if (rlRemote == nullptr || !rlRemote[i]) return;         // robust mode is remote-controller only
+    if (rlRemote == nullptr || rlRemote[i] != 1) return;     // robust mode is remote-controller only (not a class-2 pilot)
     if (passSwitched[(size_t) s * nrl + i] != 1) return;     // switched PV -> PQ in THIS check
     size_t idx = (size_t) s * n + rlVrow[i];
     if (x[idx] < vLoRobust || x[idx] > vHiRobust) {
@@ -4379,14 +4475,16 @@ __global__ void rlForcedPvElectBatch(int nrl, int nScenarios, int n,
                 bestP = p;
                 bestId = idRank[i];
             }
-        } else if (limitType[st] == 0 && (remote ? m == 1 : (m == 0 || m == 2))) {
+        } else if (limitType[st] == 0 && (rlRemote != nullptr && rlRemote[i] == 2 ? m == 0
+                                          : remote ? m == 1 : (m == 0 || m == 2))) {
             remaining++;                                     // still PV after this pass
         }
     }
     if (cand == 0 || remaining > 0 || best < 0) return;
     size_t st = (size_t) s * nrl + best;
     size_t idx = (size_t) s * n + rlVrow[best];
-    mode[idx] = (rlRemote != nullptr && rlRemote[best]) ? 1 : savedMode[st];
+    mode[idx] = (rlRemote != nullptr && rlRemote[best] == 2) ? 0
+              : (rlRemote != nullptr && rlRemote[best]) ? 1 : savedMode[st];
     target[idx] = savedTarget[st];
     limitType[st] = 0;
     switchCount[st]--;
@@ -4907,6 +5005,28 @@ __global__ void negateIntoBatch(int total, const double* F, double* b) {  // b =
 // Warm-continuation reconcile: a SEEDED pinned controller (limitType != 0) must also carry its
 // consequences — the BUS_V row flips to the reactive equation (mode 1) with the pinned Q target —
 // else the solve holds the PV setpoint while the RL bookkeeping thinks the bus is at a limit.
+// A PINNED pilot that is one of its own controllers (rlRemote 2) while a member of the same group
+// (same compare row = the pilot's V) still controls: OLF then keeps the pilot's V identity AND
+// activates the pilot's own Q balance, hosting it on the reference member's row - a relocation this
+// group has no table for on the device. Flag the scenario; the host rejects it to the CPU replay.
+// The other mixed state (members pinned, pilot controlling) is an ordinary layout: pilot identity,
+// members at their own Q. One thread per (scenario, class-2 entry).
+__global__ void rlPilotSelfMixedGate(int nrl, int nScenarios, const char* rlRemote, const int* rlCmpVrow,
+                                     const char* limitType, char* bad) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= nrl * nScenarios) return;
+    int i = t % nrl;
+    int s = t / nrl;
+    if (rlRemote[i] != 2 || limitType[(size_t) s * nrl + i] == 0) return;   // only a PINNED pilot
+    for (int j = 0; j < nrl; j++) {                          // ... with a member still controlling
+        if (j != i && rlCmpVrow[j] == rlCmpVrow[i] && rlRemote[j] != 0
+                && limitType[(size_t) s * nrl + j] == 0) {
+            bad[s] = 1;
+            return;
+        }
+    }
+}
+
 __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* rlVrow,
                                     const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
                                     const char* limitType, int* mode, double* target, int cvStride,
@@ -5183,6 +5303,8 @@ struct BatchSolverContext {
                                                            // rule (remainingPvBusCount 0) is reachable
     DeviceBuf dRowSlope;                                   // per row: SLOPE-SVC slope (mode-2 V rows), 0 elsewhere
     int nRlRemote = 0;                                     // remote-member RL entries present (plan-B1/B3)
+    int nRlPilotSelf = 0;                                  // rlRemote == 2 entries (a pilot that is its own controller)
+    DeviceBuf dRlMixedBad;                                 // nS chars: rlPilotSelfMixedGate flags
     DeviceBuf dRlRemote;                                   // per-entry remote kind (1 = remote group member)
     DeviceBuf dRlBaseLimitType;                            // OLF's base pin kind per entry (0..4); see hasRlBaseLt
     int hasRlBaseLt = 0;
@@ -5462,7 +5584,7 @@ struct BatchSolverContext {
     CudssCtx ds;
     bool analyzed = false;
     bool factored = false;                                   // first FACTORIZATION done (mode 2: then REFACTORIZE)
-    int mode = 0;                                            // 0 = per-scenario loop, 1 = batched API, 2 = block-diagonal, 3 = UBATCH
+    int mode = 0;                                            // 0 = per-scenario loop, 1 = batched API, 2 = block-diagonal, 3 = UBATCH, 6 = per-scenario loop, robust (pivoted) config
     // Uniform batched cuDSS matrices (mode 1 only): A (CSR) shares the rowPtr/colIdx pattern
     // across all scenarios with per-scenario value pointers; B/X are batched dense (n x 1).
     // The host pointer + size arrays must outlive the matrix objects, so they live here.
@@ -5739,7 +5861,11 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     CUDSS_CHECK(cudssConfigCreate(&ctx->ds.config));
     int ir = irSteps(ctx->st->nzi > 0);
     CUDSS_CHECK(cudssConfigSet(ctx->ds.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
-    applyReorderAlg(ctx->ds.config, ctx->st->nzi > 0);
+    if (mode == 6) {
+        applyRobustSingleMatrixConfig(ctx->ds.config);       // its own ordering: never set the ordering twice
+    } else {
+        applyReorderAlg(ctx->ds.config, ctx->st->nzi > 0);
+    }
     CUDSS_CHECK(cudssDataCreate(ctx->ds.handle, &ctx->ds.data));
 
     if (mode == 1) {
@@ -8945,6 +9071,51 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                              it, s, n, best, mf, mdx, mf > 0 ? best / mf : 0.0, argw);
             }
         }
+        // LINEAR-SOLVE GUARD, first iteration of the first pass of every batched solve: a
+        // factorization the UNPIVOTED uniform batch got wrong shows as a linear residual ratio of
+        // 1e6..1e13 (rte6515's full busbar scope, 366 retained couplers: min pivots of 1e-18 under
+        // any unpivoted ordering) while a sound one sits at 1e-9 (repaired rows, IR=2) and the hardest
+        // measured case at 4e-4 (IR=0). Newton then never moves and the scenario surfaced as an
+        // honest-looking MAX_ITERATION_REACHED; for the batch of ONE that is the BASE load flow of a
+        // whole security analysis, which then reported NOTHING (6876 sections, GPU={}). Reject it
+        // here (status -2): the base throws into the CPU fallback, a chunk scenario replays on the
+        // CPU - never wrong, only un-accelerated. One SpMV per scenario, once per solve. Checked at
+        // the SECOND iteration of the first pass: a first step from the flat start can be garbage
+        // on a row that the first refactorization then heals (deviceRemoteSingletonMemberPin:
+        // ratio 0.17, dx 2e13, converged to 1e-12 all the same), while a wrong factorization stays
+        // at 1e6..1e13 on every iteration.
+        if (outer == 0 && it == 1 && !deviceFixedIter) {   // it=1: a flat-start first step may be garbage and heal (singleton-pin fixture); a wrong factorization never moves
+            DeviceBuf rp;
+            DeviceBuf rm;
+            DeviceBuf sc;
+            rp.alloc((size_t) n * nS * sizeof(double));
+            rm.alloc((size_t) n * nS * sizeof(double));
+            sc.alloc((size_t) 3 * nS * sizeof(double));
+            linResidRowBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(),
+                    ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
+                    ctx->dB.as<double>(), rp.as<double>(), rm.as<double>());
+            linResidScoreBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(n, nS, rp.as<double>(), rm.as<double>(),
+                    ctx->dF.as<double>(), sc.as<double>());
+            std::vector<double> hsc((size_t) 3 * nS);
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            CUDA_CHECK(cudaMemcpy(hsc.data(), sc.p, (size_t) 3 * nS * sizeof(double), cudaMemcpyDeviceToHost));
+            for (int s = 0; s < nS; s++) {
+                if (!active[s]) continue;
+                double ratio = hsc[3 * s + 2];
+                if (!(ratio <= LIN_SOLVE_FAIL_RATIO)) {         // NaN counts as failed
+                    if (std::getenv("OLF_GPU_REJECT_TRACE") != nullptr) {
+                        std::fprintf(stderr, "GPU_REJECT slot=%d reason=linear-solve ratio=%.3e ||J.dx-B||inf=%.3e ||F||inf=%.3e\n",
+                                     s, ratio, hsc[3 * s], hsc[3 * s + 1]);
+                    }
+                    traceReject(s, "linear-solve", outer, it);
+                    res.status[s] = -3;                      // STATUS_LINEAR_SOLVE_FAILED: the one reject a pivoted retry can fix
+                    res.iters[s] = it;
+                    active[s] = 0;
+                    live[s] = 0;
+                    nActive--;
+                }
+            }
+        }
         if (ctx->clampStep) {
             maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dVarType.as<int>(), ctx->dActive.as<char>(), ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>());
             axpy1BatchScaled<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS, ctx->dDx.as<double>(), ctx->dStepFactor.as<double>(), ctx->dX.as<double>());
@@ -9265,6 +9436,26 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
                     ctx->rlRobust ? ctx->dRlInitTgtQ.as<double>() : nullptr,
                     ctx->rlVLoRobust, ctx->rlVHiRobust, ctx->rlRobust, rlNoPinRow);
+            if (ctx->nRlPilotSelf > 0) {
+                // a pilot that is its own controller pinned while a member of its group is not (or
+                // the reverse): the device has no row for OLF's layout of that state - CPU replay
+                if (!ctx->dRlMixedBad.p) ctx->dRlMixedBad.alloc(nS * sizeof(char));
+                CUDA_CHECK(cudaMemsetAsync(ctx->dRlMixedBad.p, 0, nS * sizeof(char), ctx->stream));
+                rlPilotSelfMixedGate<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS,
+                        ctx->dRlRemote.as<char>(), ctx->dRlCmpVrow.as<int>(), ctx->dRlLimitType.as<char>(),
+                        ctx->dRlMixedBad.as<char>());
+                std::vector<char> mixed(nS);
+                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                CUDA_CHECK(cudaMemcpy(mixed.data(), ctx->dRlMixedBad.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
+                for (int s = 0; s < nS; s++) {
+                    if (mixed[s] && live[s]) {
+                        traceReject(s, "pilot-self-mixed-pin", outer, 0);
+                        res.status[s] = -2;
+                        active[s] = 0;
+                        live[s] = 0;
+                    }
+                }
+            }
             if (ctx->rlRobust && ctx->nRlRemote > 0) {       // "set V to a safe 1 pu", as its own pass
                 rlRobustVResetBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(
                         ctx->nrl, nS, n, ctx->dRlVrow.as<int>(), ctx->dRlRemote.as<char>(),
@@ -10575,11 +10766,16 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     jbyte* rem = env->GetByteArrayElements(jRemote, nullptr);
     jint* cmp = env->GetIntArrayElements(jCmpVrow, nullptr);
     int count = 0;
+    int selfCount = 0;
     for (int i = 0; i < nr; i++) {
         if (rem[i]) {
             count++;
         }
+        if (rem[i] == 2) {
+            selfCount++;
+        }
     }
+    ctx->nRlPilotSelf = selfCount;
     ctx->dRlRemote.upload(rem, static_cast<size_t>(nr) * sizeof(char));
     ctx->dRlCmpVrow.upload(cmp, static_cast<size_t>(nr) * sizeof(int));
     env->ReleaseByteArrayElements(jRemote, rem, JNI_ABORT);

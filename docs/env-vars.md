@@ -134,15 +134,21 @@ Safe to add. These are the instruments; several are the only reason a defect was
 | `OLF_OL_TRACE` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuHybridOuterLoopBridge.java:51 |
 | `OLF_RL_PROBE_BUS` | (OLF repo, branch olf-local-patches) src/main/java/com/powsybl/openloadflow/ac/outerloop/ReactiveLimitsOuterLoop.java |
 
-## Test scope selectors (3)
+## Test scope selectors (9)
 
 Choose which contingencies a validation run covers. They change what is measured, not how it is computed.
 
 | variable | read at |
 |---|---|
+| `OLF_GPU_SA_CPU_ARM_DIR` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java — with `OLF_GPU_SA_CPU_ARM_MODE=save`: run the CPU arm only and write it (cpu.json, cpu-busv.bin/.idx, cpu-ms.txt) here; `=load`: rebuild the CPU arm from these files and run the GPU arms only. The two arms of the full busbar scope do not fit one JVM. |
+| `OLF_GPU_SA_CPU_ARM_MODE` | see `OLF_GPU_SA_CPU_ARM_DIR` (`save` / `load`) |
+| `OLF_GPU_SA_GPU_ONLY` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java — `1`: run the CPU arm on an EMPTY contingency list (debug lever: the GPU arm's own behaviour on a large scope in minutes; every comparison is then meaningless and the CPU base sits on a different bus decomposition). |
 | `OLF_GPU_CONT_FILE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:77 +4 |
 | `OLF_GPU_SA_CTG_ONLY` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:218 +1 |
 | `OLF_GPU_SA_MAX_CTG` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:233 |
+| `OLF_GPU_SA_CASE_FILE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java — path of the case to run instead of rte6515 (e.g. `network.xiidm` at the repo root); the other selectors apply unchanged |
+| `OLF_GPU_SA_CTG_RANGE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java — `from:to`: keep only that index window of the selected contingency list (after `OLF_GPU_SA_CTG_KINDS`); a window is ONE or a few chunks — always finish on the full width |
+| `OLF_GPU_SA_BASE_ONLY` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java + GpuBatchedAcSecurityAnalysis — `1`: both arms run the BASE load flow only (the GPU arm hands an empty contingency list to the SA after its base) and the test stops after the base comparison; the lever that isolates a base-on-device failure from a 20-minute contingency sweep |
 
 ## Build / toolchain (4)
 
@@ -202,7 +208,7 @@ Each selects a different computation. Several disable an outer loop or loosen a 
 | `OLF_GPU_NO_DIST_SLACK` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuCpuOuterLoopTrajectoryProbe.java:55 |
 | `OLF_GPU_NO_DS` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedPegaseOutlierDiagnosticTest.java:69 |
 | `OLF_GPU_NO_RL` | src/test/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchedPegaseOutlierDiagnosticTest.java:70 |
-| `OLF_GPU_REORDER_ALG` | native/cuda/jni/olf_gpu_nr_jni.cu:264 +2 |
+| `OLF_GPU_REORDER_ALG` | native/cuda/jni/olf_gpu_nr_jni.cu (`applyReorderAlg`, `applyRobustSingleMatrixConfig`) — cuDSS reordering for the batched contexts (default per structure: AMD, ND when zero-impedance branches are present); the ROBUST single-matrix mode 6 (the batch-of-one retry after a linear-solve reject, status -3) keeps AMD unless set, and enables matching + pivoting only there (cuDSS 0.8 refuses matching under the COLAMD family) |
 | `OLF_GPU_SA_CONV_EPS` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:197 |
 | `OLF_GPU_SA_CPU_SINGLE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:276 |
 | `OLF_GPU_SA_GPU_BASE` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:92 |

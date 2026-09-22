@@ -7,6 +7,8 @@
  */
 package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
+import java.util.List;
+
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
@@ -222,15 +224,32 @@ final class GpuAcRowIndexing {
                 .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                 .orElse(null);
         if (vc != null && vc.getControlledBus() == controller) {
-            LfBus free = vc.getMergedControllerElements().stream()
-                    .filter(vc::isControllerEnabled).findFirst()
-                    .orElseThrow(() -> new PowsyblException("GPU AC solver: remote generator voltage control of bus "
-                            + controller.getId() + " has no enabled controller"));
+            LfBus free = distrQHostMember(vc);
+            if (free == null) {
+                throw new PowsyblException("GPU AC solver: remote generator voltage control of bus "
+                        + controller.getId() + " has no controller");
+            }
             return col(es, free.getNum(), AcVariableType.BUS_V);
         }
         return col(es, controller.getNum(), AcVariableType.BUS_V);
     }
 
+    /** The member row that HOSTS the pilot's DISTR_Q when the pilot is one of its own controllers:
+     *  OLF's reference controller (the first ENABLED merged controller), else - every controller
+     *  pinned in the base state - the first merged controller. In that case the pilot's DISTR_Q is
+     *  inactive and only needs a slot; the row modes carry the pinned state (mode 4 on every row).
+     *  Measured on rte6515's full busbar scope: the base pins EVERY controller of VL-6003_0's
+     *  group, "first enabled" found none and the whole precompute fell to the CPU.
+     *  NOT the free-member predicate below: a pinned member is never free (its row hosts its own
+     *  Q balance, canonical encoding) - calling it free left a pinned singleton at mode 1 with the
+     *  structure-frozen encoding (deviceRemoteSingletonMemberPin, deviceRemoteRobustRealisticVoltage). */
+    static LfBus distrQHostMember(GeneratorVoltageControl vc) {
+        List<LfBus> members = vc.getMergedControllerElements();
+        return members.stream().filter(vc::isControllerEnabled).findFirst()
+                .orElse(members.isEmpty() ? null : members.get(0));
+    }
+
+    /** The FREE member: the first ENABLED merged controller. None when every controller is pinned. */
     static boolean isFreeRemoteGenVcMember(LfBus bus) {
         return bus.getGeneratorVoltageControl()
                 .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)

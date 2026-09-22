@@ -28,6 +28,11 @@ public final class GpuBatchStatus {
      * sequential CPU security-analysis path. The state is the base case (unchanged).
      */
     public static final int STATUS_REJECTED = -2;
+    /** The device's first linear solve did not solve the system (residual ratio above 1e-2: the
+     *  structure does not factor in the uniform batch). Routed like a rejection, but it is the ONE
+     *  reject a pivoted retry can fix, which is why it carries its own code: the batch-of-one retries
+     *  in the robust single-matrix mode before any CPU fallback; every other reject goes to the CPU. */
+    public static final int STATUS_LINEAR_SOLVE_FAILED = -3;
 
     /** Separator inside a (contingency, strategy) pair's BatchContingency id — pairs are solved in a
      *  SECOND phase, WARM-CONTINUED from their parent contingency's state and reactive-limits pinning. */

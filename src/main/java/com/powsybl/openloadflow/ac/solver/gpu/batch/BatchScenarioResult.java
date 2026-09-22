@@ -28,6 +28,7 @@ public record BatchScenarioResult(String contingencyId, double[] state, int iter
 
     /** True if this contingency must fall back to the sequential CPU path. */
     public boolean needsCpuFallback() {
-        return convergenceStatus == GpuBatchStatus.STATUS_REJECTED;
+        return convergenceStatus == GpuBatchStatus.STATUS_REJECTED
+                || convergenceStatus == GpuBatchStatus.STATUS_LINEAR_SOLVE_FAILED;
     }
 }

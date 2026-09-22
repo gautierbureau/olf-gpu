@@ -90,6 +90,21 @@ public final class GpuAcOuterLoopPacks {
     record RmqPack(int[] row, int[] elem, int[] side, int[] kind, double[] weight) {
     }
 
+    /** A REMOTE member entry of the reactive-limit pack: a controller of a MAIN remote group that is
+     *  not the group's controlled bus. Shared with GpuBatchRlCurves, which REPLAYS this enumeration
+     *  and must count exactly the same buses (a drift throws and the run falls to the CPU). */
+    public static boolean isRemoteMemberEntry(LfBus bus) {
+        return bus.getGeneratorVoltageControl()
+                .filter(c -> c.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN)
+                .map(c -> c.getControlledBus() != bus).orElse(false);
+    }
+
+    /** A class-2 entry: a pilot that is one of its own controllers (packed as a remote entry). */
+    public static boolean isPilotSelfEntry(LfBus bus) {
+        return !isRemoteMemberEntry(bus) && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
+                && bus.getGeneratorVoltageControl().map(c -> c.getControlledBus() == bus).orElse(false);
+    }
+
     static RmqPack remoteMemberQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                      ExtractionColumns columns, GpuAcFamilyPacker.Packs family, boolean reactiveLimits) {
         List<int[]> out = new ArrayList<>();
@@ -97,7 +112,7 @@ public final class GpuAcOuterLoopPacks {
         int[] vCol = columns.vCol();
         if (reactiveLimits) {
             for (LfBus bus : network.getBuses()) {
-                boolean member = GpuAcRowIndexing.isRemoteGenVcMember(bus);
+                boolean member = GpuAcRowIndexing.isRemoteGenVcControllerElement(bus);   // incl. a pilot that is a controller
                 if (!member || vCol[bus.getNum()] < 0 || !(bus.getMinQ() < bus.getMaxQ())) {
                     continue;                                // mirror the RL pack's remote-entry condition
                 }
@@ -407,10 +422,15 @@ public final class GpuAcOuterLoopPacks {
                 int bn = bus.getNum();
                 boolean vActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_V) >= 0;
                 boolean qActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_Q) >= 0;
-                boolean remoteMember = bus.getGeneratorVoltageControl()
-                        .filter(c -> c.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN)
-                        .map(c -> c.getControlledBus() != bus).orElse(false);
-                if (remoteMember && vCol[bn] >= 0) {
+                boolean remoteMember = isRemoteMemberEntry(bus);
+                // A pilot that is one of its OWN controllers is packed as a remote entry of class 2: its
+                // q feeds the group's DISTR_Q rows like a remote member's (read through the remote q
+                // pack, not its row), a pin puts its own Q balance on its row (mode 4, alternate dest),
+                // and an UNPIN gives the row back its voltage IDENTITY (mode 0), not a DISTR_Q form. As
+                // a LOCAL entry its pin used to land on mode 1, an EMPTY row: measured on the
+                // all-pinned-group fixture, 0.68 kV at the pilot.
+                boolean pilotSelf = isPilotSelfEntry(bus);
+                if ((remoteMember || pilotSelf) && vCol[bn] >= 0) {
                     var vc = bus.getGeneratorVoltageControl().orElseThrow();
                     int pilotV = vCol[vc.getControlledBus().getNum()];
                     if (pilotV >= 0 && bus.getMinQ() < bus.getMaxQ()) {
@@ -421,7 +441,7 @@ public final class GpuAcOuterLoopPacks {
                         rlVtarget.add(vc.getTargetValue());    // the GROUP target (pilot-referenced)
                         addSvcQuadratic(bus, rlSvcBmin, rlSvcBmax, rlV2Base);
                         rlMonitored.add((byte) 0);
-                        rlRemote.add((byte) 1);
+                        rlRemote.add((byte) (pilotSelf ? 2 : 1));
                         rlCmpVrow.add(pilotV);                 // switch conditions compare the PILOT's V
                         rlBusNum.add(bn);
                         rlNominalV.add(vc.getControlledBus().getNominalV());

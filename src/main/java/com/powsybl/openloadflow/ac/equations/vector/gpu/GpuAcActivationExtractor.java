@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.equations.SingleEquation;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.network.VoltageControl;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LoadFlowModel;
 
@@ -150,8 +151,17 @@ public final class GpuAcActivationExtractor {
                 // rte6515 BUS-24_COUPLER_1 the kind-3 pair summed to +1.0 against the zi coupling's
                 // -1.0, leaving the coupler's DUMMY_Q in NO equation. 45 such columns at 2000
                 // busbar sections, which is what collapsed batching above ~1000.
+                // A pilot that is one of its OWN controllers gets mode 4 whenever its own Q balance
+                // is active, free member or not: the free-member exception exists for the member
+                // whose row carries the pilot's Q in a pilot-is-not-a-controller group, which is not
+                // this shape (the pilot's q feeds the DISTR_Q rows and the row's mode-4 alternate is
+                // its own row). Left at mode 1, the base seeding (which keys a remote pin on mode 4)
+                // read an all-pinned group as "pilot unpinned" (all-pinned-group fixture).
+                boolean pilotSelf = bus.getGeneratorVoltageControl()
+                        .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                        .map(c -> c.getControlledBus() == bus).orElse(false);
                 if (GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
-                        && !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) {
+                        && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus))) {
                     mode[qr] = 4;
                 }
             }

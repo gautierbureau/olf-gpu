@@ -182,3 +182,5 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-21 | 703d8ef+dirty | 20.42 | 16.11 | 27.46 | x1.70 | 0/0/0 | 7.65 | 4.45 | 499/500 | 122/133 (92%) | islanded DISTR_Q controllers: survivors' row targets renormalized + inactive entries (BUS-1359_BBS_2 8.5e-2 -> 0) |
 | 2026-09-22 | 1a0bf35+dirty | 19.87 | 15.88 | 27.59 | x1.74 | 0/0/0 | 7.73 | 4.44 | 499/500 | 122/133 (92%) | shunt gate: DISTR_Q-contributing shunts batch (the fills already read the per-scenario override); 500 busbars 479 -> 480 |
 | 2026-09-22 | 82676cc+dirty | 18.16 | 15.66 | 27.92 | x1.78 | 0/0/0 | 7.59 | 4.51 | 499/500 | 122/133 (92%) | device reports MAX_ITERATION_REACHED itself; straggler exit off by default (perf switch OLF_GPU_STRAGGLER_FRAC) |
+| 2026-09-22 | fbea785+dirty | 18.54 | 15.47 | 27.01 | x1.75 | 0/0/0 | 7.65 | 4.44 | 499/500 | 122/133 (92%) | linear-solve guard (first-iteration residual ratio) + spilled bus diff |
+| 2026-09-22 | fbea785+dirty | 19.28 | 15.45 | 27.23 | x1.76 | 0/0/0 | 7.84 | 4.62 | 499/500 | 122/133 (92%) | linear-solve guard + robust retry (mode 6) + all-pinned remote group extractor fix + two-JVM comparison |

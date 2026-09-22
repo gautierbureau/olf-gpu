@@ -81,6 +81,14 @@ final class GpuStateInjector {
     static void injectState(EquationSystem<AcVariableType, AcEquationType> es,
                             Map<Variable<AcVariableType>, Integer> baseVariableRows, double[] deviceState,
                             Remap remap) {
+        injectState(es, baseVariableRows, deviceState, remap, null);
+    }
+
+    /** As above; with {@code closedBranchNums} non-null only those branches' flows are refreshed — for a caller that
+     *  reads no other branch before the next state set (StateVector.setValuesOnly(double[], int[])). */
+    static void injectState(EquationSystem<AcVariableType, AcEquationType> es,
+                            Map<Variable<AcVariableType>, Integer> baseVariableRows, double[] deviceState,
+                            Remap remap, int[] closedBranchNums) {
         List<Variable<AcVariableType>> vars = es.getIndex().getSortedVariablesToFind();
         if (remap.vars != vars) {                            // identity: the variable set changed, rebuild
             if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
@@ -109,7 +117,7 @@ final class GpuStateInjector {
         }
         if (remap.identity) {                                // the common case: the outage islanded nothing,
             System.arraycopy(deviceState, 0, remap.buf, 0, remap.buf.length);   // so the rows still line up
-            es.getStateVector().setValuesOnly(remap.buf);
+            setValues(es, remap.buf, closedBranchNums);
             return;
         }
         int[] baseRowOf = remap.baseRowOf;
@@ -122,7 +130,15 @@ final class GpuStateInjector {
         // Jacobian — the next solve on this equation system starts with its own full state set. That
         // skips refreshing every branch's partial derivatives, which measured 993 ms of the 1119 ms
         // this notification cost over 2000 contingencies.
-        es.getStateVector().setValuesOnly(mapped);
+        setValues(es, mapped, closedBranchNums);
+    }
+
+    private static void setValues(EquationSystem<AcVariableType, AcEquationType> es, double[] values, int[] closedBranchNums) {
+        if (closedBranchNums != null) {
+            es.getStateVector().setValuesOnly(values, closedBranchNums);
+        } else {
+            es.getStateVector().setValuesOnly(values);
+        }
     }
 
     /** Mirrors the CPU solve's connectivity processing for an injected state: islanded buses (frozen

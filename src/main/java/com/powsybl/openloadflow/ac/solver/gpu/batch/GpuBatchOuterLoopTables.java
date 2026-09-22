@@ -144,7 +144,9 @@ public final class GpuBatchOuterLoopTables {
                 anyRlRemote ? gpuData.dqMemberRow() : null,
                 anyRlRemote ? gpuData.dqMemberHasRow() : null,
                 anyRlRemote ? gpuData.dqMemberQrGroup() : null,
-                anyRlRemote ? gpuData.dqMemberTargetQ() : null);
+                anyRlRemote ? gpuData.dqMemberTargetQ() : null,
+                anyRlRemote ? gpuData.dqMemberTgtPtr() : null,
+                anyRlRemote ? gpuData.dqMemberTgtPeer() : null);
         // Per-generator DistributedSlack participants (OLF's water-fill saturates per generator).
         GpuAcNewtonSolver.setBatchDsGenerators(handle, gpuData.dgBus(), gpuData.dgFactor(),
                 gpuData.dgMaxDelta(), gpuData.dgMinDelta(),

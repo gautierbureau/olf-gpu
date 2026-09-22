@@ -3847,7 +3847,8 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                                          const int* mode, const double* pilotQ, int nQr,
                                          int nDqInact, const int* dqInactSlotMember,
                                          int nFrozen, const int* frozenSlotRow,
-                                         int nTqOv, const int* tqOvKey, const double* tqOvVal) {
+                                         int nTqOv, const int* tqOvKey, const double* tqOvVal,
+                                         const int* mTgtPtr, const int* mTgtPeer) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nMembers * nScenarios) return;
     int k = tid % nMembers;
@@ -3885,12 +3886,22 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     int gs = mGroupStart[k];
     int gc = mGroupCount[k];
     double sum = 0.0;
-    double sumTargetQ = 0.0;
-    for (int m = gs; m < gs + gc; m++) {
+    for (int m = gs; m < gs + gc; m++) {                     // live keys over the WHOLE merged group (updateReactiveKeys)
         int re = mRlEntry[m];
         bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != 0;
         bool inactive = dqMemberInactive(nDqInact, dqInactSlotMember, s, m);
         sum += (pinned || inactive) ? 0.0 : mKey[m];
+    }
+    // targetQ over the peers AcTargetVector sums for THIS member: the elements of its OWN control
+    // (getGeneratorVoltageControl().getMergedControllerElements()), which for a control merged INTO this
+    // group is the member alone. Summing the whole merged group instead left a coupler-merged member's
+    // target off by qPct x the other members' targetQ — rte6515 BUS-2226_BBS_1 alone, 1.85 MVar, and
+    // OLF's own re-test of the device's base state then failed the load flow.
+    double sumTargetQ = 0.0;
+    for (int t = mTgtPtr[k]; t < mTgtPtr[k + 1]; t++) {
+        int m = mTgtPeer[t];
+        int re = mRlEntry[m];
+        bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != 0;
         if (pinned) {
             // a FROZEN member's targetQ IS its q limit: OLF's RL switch calls setGenerationTargetQ(limit),
             // so getTargetQ() = limit - loadTargetQ. Unpinned members keep their packed targetQ.
@@ -3905,7 +3916,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
             ? 0.0 : mKey[k] / sum;
     // AcTargetVector.getGeneratorReactivePowerDistributionTarget, verbatim:
     //   (qPct_k - 1) * targetQ_k + qPct_k * sum_{j != k} targetQ_j
-    // which is qPct_k * sum_over_ALL_j targetQ_j - targetQ_k. k is never pinned here (the RL kernel
+    // which is qPct_k * sum_over_its_PEERS targetQ_j - targetQ_k (k is always one of its own peers). k is never pinned here (the RL kernel
     // owns a pinned member's row and we returned above), so its own term is the packed targetQ.
     // This used to read `qpk * frozen` — the same expression with every UNPINNED targetQ assumed
     // zero. That assumption holds only for groups whose members carry no load and no generator
@@ -5442,6 +5453,9 @@ struct BatchSolverContext {
     DeviceBuf dDqMemberTargetQ;                            // per member: its UNPINNED targetQ (generationTargetQ -
                                                            // loadTargetQ), the value AcTargetVector reads for every
                                                            // member the RL loop has not frozen
+    DeviceBuf dDqMemberTgtPtr;                             // per member (CSR): the members whose targetQ OLF sums
+    DeviceBuf dDqMemberTgtPeer;                            // into its DISTR_Q target — its OWN control's elements,
+                                                           // just itself for a control MERGED into the group
     int nDqMembers = 0;
     int hasDqQrGroups = 0;                                 // plan-B4: any member linked to a pilot-Q relocation group
     DeviceBuf dDqMemberQrGroup;                            // per member: the pilot's qr candidate group id, -1 = none
@@ -9745,7 +9759,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->nDqInact, ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
                         ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
                         ctx->nDqTqOv, ctx->nDqTqOv ? ctx->dDqTqOvKey.as<int>() : nullptr,
-                        ctx->nDqTqOv ? ctx->dDqTqOvVal.as<double>() : nullptr);
+                        ctx->nDqTqOv ? ctx->dDqTqOvVal.as<double>() : nullptr,
+                        ctx->dDqMemberTgtPtr.as<int>(), ctx->dDqMemberTgtPeer.as<int>());
             }
             if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {    // all-pinned corner: pilot vEq flip/restore
                 updatePilotVeqBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
@@ -11322,7 +11337,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
         jintArray jRmqRow, jintArray jRmqElem, jintArray jRmqSide, jintArray jRmqKind, jdoubleArray jRmqWeight,
         jintArray jDqKMember, jintArray jDqJMember, jdoubleArray jMKey, jintArray jMRlEntry,
         jintArray jMGroupStart, jintArray jMGroupCount, jintArray jMRow, jbyteArray jMHasRow,
-        jintArray jMQrGroup, jdoubleArray jMTargetQ) {
+        jintArray jMQrGroup, jdoubleArray jMTargetQ, jintArray jMTgtPtr, jintArray jMTgtPeer) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
         return;
@@ -11407,6 +11422,20 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
         jdouble* mtq = env->GetDoubleArrayElements(jMTargetQ, nullptr);
         ctx->dDqMemberTargetQ.upload(mtq, static_cast<size_t>(nm) * sizeof(double));
         env->ReleaseDoubleArrayElements(jMTargetQ, mtq, JNI_ABORT);
+        if (jMTgtPtr == nullptr || env->GetArrayLength(jMTgtPtr) != nm + 1 || jMTgtPeer == nullptr) {
+            env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
+                          "setBatchRlRemote: dqMemberTgtPtr missing or length != members + 1");
+            return;
+        }
+        jint* mtp = env->GetIntArrayElements(jMTgtPtr, nullptr);
+        ctx->dDqMemberTgtPtr.upload(mtp, static_cast<size_t>(nm + 1) * sizeof(int));
+        env->ReleaseIntArrayElements(jMTgtPtr, mtp, JNI_ABORT);
+        int nPeer = env->GetArrayLength(jMTgtPeer);
+        if (nPeer > 0) {
+            jint* mpe = env->GetIntArrayElements(jMTgtPeer, nullptr);
+            ctx->dDqMemberTgtPeer.upload(mpe, static_cast<size_t>(nPeer) * sizeof(int));
+            env->ReleaseIntArrayElements(jMTgtPeer, mpe, JNI_ABORT);
+        }
         ctx->nDqMembers = nm;
         if (ndqc > 0) {
             ctx->dDqKMember.upload(km, static_cast<size_t>(ndqc) * sizeof(int));

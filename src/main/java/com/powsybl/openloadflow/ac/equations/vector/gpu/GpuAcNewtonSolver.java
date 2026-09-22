@@ -679,7 +679,8 @@ public final class GpuAcNewtonSolver {
                                                int[] dqKMember, int[] dqJMember, double[] dqMemberKey,
                                                int[] dqMemberRlEntry, int[] dqMemberGroupStart,
                                                int[] dqMemberGroupCount, int[] dqMemberRow, byte[] dqMemberHasRow,
-                                               int[] dqMemberQrGroup, double[] dqMemberTargetQ);
+                                               int[] dqMemberQrGroup, double[] dqMemberTargetQ,
+                                               int[] dqMemberTgtPtr, int[] dqMemberTgtPeer);
 
     /** Install (or clear, with nulls) the plan-B4 carrier-row suppression tables on a batch context
      *  WITHOUT the full remote-RL machinery — the JAVA hybrid's channel: OLF's own RL loop decides

@@ -9,6 +9,7 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
 import com.powsybl.iidm.network.Bus;
 import com.powsybl.iidm.network.Network;
+import com.powsybl.openloadflow.ac.AcTargetVector;
 import com.powsybl.openloadflow.ac.equations.AcEquationSystemCreator;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
@@ -28,6 +29,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -75,6 +77,71 @@ class GpuMergedGenVoltageControlTest extends AbstractLoadFlowNetworkFactory {
         createLine(network, b0, b1, "l01", 0.1);
         createLine(network, b1, b2, "l12", 0.0, 0.0);
         return network;
+    }
+
+    /**
+     * The group's DISTR_Q TARGET, which is where the same merge trap bites a second time.
+     * {@code AcTargetVector.getGeneratorReactivePowerDistributionTarget} sums {@code targetQ} over
+     * {@code controllerBus.getGeneratorVoltageControl().getMergedControllerElements()} — the member's OWN
+     * control, so a DEPENDENT member sums only its own targetQ while the MAIN member sums the whole group.
+     * The device recompute summed the whole merged group for every member, which put a coupler-merged
+     * member's target off by {@code qPct x} the other members' targetQ: on rte6515 a SINGLE busbar section
+     * (BUS-2226_BBS_1) retained the coupler that merges two local controls and the base load flow then
+     * failed, 1.85 MVar out, on OLF's own re-test of the device state. The peers the device sums are packed
+     * per member, and this pins both the packing and the resulting target against OLF's own vector.
+     */
+    @Test
+    void distrQTargetSumsTheMembersOwnControlPeers() {
+        Network iidm = mergedAcrossCoupler();
+        // reactive load on BOTH members, different values: targetQ != 0 on each, so summing a member's own
+        // control's peers and summing the whole merged group give different targets
+        createLoad(iidm.getBusBreakerView().getBus("b1"), "ld1", 1, 2);
+        createLoad(iidm.getBusBreakerView().getBus("b2"), "ld2", 1, 3);
+        LfNetwork network = Networks.load(iidm,
+                new LfNetworkParameters().setSlackBusSelector(new FirstSlackBusSelector())).get(0);
+        EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(network).create();
+        AcSolverUtil.initStateVector(network, es, new UniformValueVoltageInitializer());
+        var data = GpuAcDataExtractor.extract(network, es);
+
+        int members = data.dqMemberKey().length;
+        assertEquals(2, members, "the merged group must pack both controllers");
+        assertEquals(members + 1, data.dqMemberTgtPtr().length);
+        for (int k = 0; k < members; k++) {
+            LfBus bus = network.getBus(data.dqMemberBusNum()[k]);
+            List<Integer> packedPeers = new java.util.ArrayList<>();
+            for (int t = data.dqMemberTgtPtr()[k]; t < data.dqMemberTgtPtr()[k + 1]; t++) {
+                packedPeers.add(data.dqMemberBusNum()[data.dqMemberTgtPeer()[t]]);
+            }
+            List<Integer> olfPeers = bus.getGeneratorVoltageControl().orElseThrow()
+                    .getMergedControllerElements().stream().map(LfBus::getNum).sorted().toList();
+            assertEquals(olfPeers, packedPeers.stream().sorted().toList(),
+                    "the peers summed for " + bus.getId() + " must be its OWN control's elements");
+            // and the target the device computes from them is OLF's own, for the member that has a row
+            if (data.dqMemberHasRow()[k] == 0) {
+                continue;
+            }
+            double keySum = 0;
+            int start = data.dqMemberGroupStart()[k];
+            for (int m = start; m < start + data.dqMemberGroupCount()[k]; m++) {
+                keySum += data.dqMemberKey()[m];
+            }
+            double sumTargetQ = 0;
+            for (int t = data.dqMemberTgtPtr()[k]; t < data.dqMemberTgtPtr()[k + 1]; t++) {
+                sumTargetQ += data.dqMemberTargetQ()[data.dqMemberTgtPeer()[t]];
+            }
+            double device = data.dqMemberKey()[k] / keySum * sumTargetQ - data.dqMemberTargetQ()[k];
+            int column = es.getEquation(bus.getNum(), AcEquationType.DISTR_Q).orElseThrow().getColumn();
+            assertEquals(new AcTargetVector(network, es).getArray()[column], device, 1e-15,
+                    "the device's DISTR_Q target for " + bus.getId() + " must be AcTargetVector's");
+            // and summing the WHOLE merged group instead — what the device used to do — must differ here,
+            // or this fixture would pass either way
+            double wholeGroup = 0;
+            for (int m = start; m < start + data.dqMemberGroupCount()[k]; m++) {
+                wholeGroup += data.dqMemberTargetQ()[m];
+            }
+            assertNotEquals(data.dqMemberKey()[k] / keySum * wholeGroup - data.dqMemberTargetQ()[k], device,
+                    "the fixture must separate the member's peers from the whole group");
+        }
     }
 
     @Test

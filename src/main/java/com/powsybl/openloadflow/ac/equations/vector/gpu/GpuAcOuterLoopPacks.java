@@ -45,7 +45,7 @@ public final class GpuAcOuterLoopPacks {
                   int[] dqKMember, int[] dqJMember,
                   double[] dqMemberKey, int[] dqMemberRlEntry, int[] dqMemberGroupStart, int[] dqMemberGroupCount,
                   int[] dqMemberRow, byte[] dqMemberHasRow, int[] dqMemberQrGroup, double[] dqMemberTargetQ,
-                  int[] dqMemberBusNum) {
+                  int[] dqMemberBusNum, int[] dqMemberTgtPtr, int[] dqMemberTgtPeer) {
     }
 
     /** Per-group member table for the IN-KERNEL reactive-key renormalization on a remote RL pin
@@ -58,7 +58,11 @@ public final class GpuAcOuterLoopPacks {
                                 List<Double> key, List<Integer> rlEntry,
                                 List<Integer> groupStart, List<Integer> groupCount,
                                 List<Integer> row, List<Byte> hasRow, List<Double> targetQ,
-                                List<Integer> busNum) {
+                                List<Integer> busNum,
+                                /** Per member, the members whose targetQ OLF sums into its DISTR_Q target: the
+                                 *  elements of the member's OWN voltage control, which for a control MERGED into
+                                 *  another (DEPENDENT) is just its own — see the peer CSR in {@link DqPack}. */
+                                List<List<Integer>> tgtPeers) {
     }
 
     /** DISTR_RHO contributions in the flat device layout: {@code {drRow, drCol}} per row + coefficient. */
@@ -194,7 +198,7 @@ public final class GpuAcOuterLoopPacks {
         // member tables (plan-B3): raw keys + RL-entry mapping + group ranges, in group member order
         MemberTables mt = new MemberTables(new java.util.HashMap<>(), new ArrayList<>(), new ArrayList<>(),
                 new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(),
-                new ArrayList<>());
+                new ArrayList<>(), new ArrayList<>());
         java.util.Map<Integer, Integer> rlEntryByBusNum = new java.util.HashMap<>();
         for (int i = 0; i < rl.rlBusNum().length; i++) {
             rlEntryByBusNum.put(rl.rlBusNum()[i], i);
@@ -233,6 +237,12 @@ public final class GpuAcOuterLoopPacks {
                 // member's targetQ is its q limit and the kernel derives that from the RL tables.
                 mt.targetQ().add(unpinnedTargetQ(m));
                 mt.busNum().add(m.getNum());
+                // AcTargetVector reads the member's OWN control's merged elements, so a control merged INTO this
+                // group (DEPENDENT: its own list is just its controller) sums only its own targetQ. Recorded as bus
+                // numbers here and resolved to member indices once every member is known.
+                mt.tgtPeers().add(m.getGeneratorVoltageControl()
+                        .map(c -> c.getMergedControllerElements().stream().map(LfBus::getNum).toList())
+                        .orElse(List.of(m.getNum())));
                 qrGroupList.add(qrGroup);
             }
             for (int i = 0; i < controllers.size(); i++) {
@@ -266,11 +276,24 @@ public final class GpuAcOuterLoopPacks {
         for (int i = 0; i < hasRow.length; i++) {
             hasRow[i] = mt.hasRow().get(i);
         }
+        int[] tgtPtr = new int[mt.tgtPeers().size() + 1];
+        List<Integer> tgtPeer = new ArrayList<>();
+        for (int i = 0; i < mt.tgtPeers().size(); i++) {
+            tgtPtr[i] = tgtPeer.size();
+            for (int busNum : mt.tgtPeers().get(i)) {
+                Integer peer = mt.memberIdxByBusNum().get(busNum);
+                if (peer != null) {                          // a peer outside the packed group cannot be summed
+                    tgtPeer.add(peer);
+                }
+            }
+        }
+        tgtPtr[tgtPtr.length - 1] = tgtPeer.size();
         return new DqPack(dqElem, dqSide, dqWeight, dqRow, dqKind, dqKMember, dqJMember,
                 GpuAcArrays.toDoubleArray(mt.key()), GpuAcArrays.toIntArray(mt.rlEntry()),
                 GpuAcArrays.toIntArray(mt.groupStart()), GpuAcArrays.toIntArray(mt.groupCount()),
                 GpuAcArrays.toIntArray(mt.row()), hasRow, GpuAcArrays.toIntArray(qrGroupList),
-                GpuAcArrays.toDoubleArray(mt.targetQ()), GpuAcArrays.toIntArray(mt.busNum()));
+                GpuAcArrays.toDoubleArray(mt.targetQ()), GpuAcArrays.toIntArray(mt.busNum()),
+                tgtPtr, GpuAcArrays.toIntArray(tgtPeer));
     }
 
     static DrPack distrRhoPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,

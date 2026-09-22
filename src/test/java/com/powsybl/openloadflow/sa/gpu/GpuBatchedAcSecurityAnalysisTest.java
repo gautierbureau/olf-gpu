@@ -1774,6 +1774,58 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 "the contingency must batch (or the test proves nothing)");
     }
 
+    /** A BRANCH outage combined with a GENERATOR outage on the bus that branch islands, where the lost
+     *  generator is a member of a remote voltage-control group (the group survives and renormalizes its
+     *  reactive keys over the two members left). The combo path used to demand a fully CONTAINED island
+     *  and sent every other shape to the CPU replay; on network.xiidm 65 of 11249 branch contingencies
+     *  were exactly this (a line whose loss islands one generator bus). GPU SA == CPU SA at 1e-12, and
+     *  the contingency must BATCH. */
+    @org.junit.jupiter.api.Test
+    void deviceBranchOutageIslandingAGroupMemberBatchesAndMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = Network.create("island-group-member", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vlp", "vlc1", "vlc2", "vlr")) {
+            com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(vl).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            v.getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        network.getVoltageLevel("vl0").newGenerator().setId("g0").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(400).setTargetV(405).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl0").newLoad().setId("ld0").setBus("vl0_b").setConnectableBus("vl0_b").setP0(200).setQ0(40).add();
+        network.getVoltageLevel("vlp").newLoad().setId("ldp").setBus("vlp_b").setConnectableBus("vlp_b").setP0(400).setQ0(120).add();
+        network.getVoltageLevel("vlr").newLoad().setId("ldr").setBus("vlr_b").setConnectableBus("vlr_b").setP0(60).setQ0(20).add();
+        // three remote members of one group (pilot = the ldp bus); gr sits on the radial bus vlr
+        for (String[] c : new String[][] {{"c1", "vlc1"}, {"c2", "vlc2"}, {"r", "vlr"}}) {
+            network.getVoltageLevel(c[1]).newGenerator().setId("g" + c[0]).setBus(c[1] + "_b")
+                    .setConnectableBus(c[1] + "_b").setMinP(0).setMaxP(500).setTargetP(120).setTargetQ(0)
+                    .setTargetV(404).setVoltageRegulatorOn(true).setRegulatingTerminal(network.getLoad("ldp").getTerminal()).add();
+            network.getGenerator("g" + c[0]).newMinMaxReactiveLimits().setMinQ(-150).setMaxQ(150).add();
+        }
+        java.util.function.BiConsumer<String, String[]> line = (id, ends) -> network.newLine().setId(id)
+                .setVoltageLevel1(ends[0]).setBus1(ends[0] + "_b").setConnectableBus1(ends[0] + "_b")
+                .setVoltageLevel2(ends[1]).setBus2(ends[1] + "_b").setConnectableBus2(ends[1] + "_b")
+                .setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        line.accept("l0p", new String[] {"vl0", "vlp"});
+        line.accept("lpc1", new String[] {"vlp", "vlc1"});
+        line.accept("lpc2", new String[] {"vlp", "vlc2"});
+        line.accept("l0c1", new String[] {"vl0", "vlc1"});
+        line.accept("l0c2", new String[] {"vl0", "vlc2"});
+        line.accept("lpr", new String[] {"vlp", "vlr"});     // the RADIAL feeder of the third member
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0_0"));
+        // the feeder AND the generator behind it: the island takes one member of the group
+        assertGpuMatchesCpu(network, List.of(new Contingency("lpr+gr",
+                new com.powsybl.contingency.LineContingency("lpr"),
+                new com.powsybl.contingency.GeneratorContingency("gr"))), 1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the branch+generator combo islanding a group member must BATCH (or the test proves nothing)");
+    }
+
     /** The outage of a branch already OPEN AT ONE END in the base (network.xiidm: 2049 of 11249 branch
      *  contingencies): the device packs such a branch as an open-branch element (the connected end's
      *  view: its charging), so the outage is that element's disabled bit. The mapper used to call it

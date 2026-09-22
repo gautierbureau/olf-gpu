@@ -188,3 +188,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-22 | fbea785+dirty | 18.49 | 15.42 | 28.07 | x1.82 | 0/0/0 | 7.82 | 4.53 | 499/500 | 122/133 (92%) | hvdc unfreeze atomic + lost load via OLF's load map |
 | 2026-09-22 | 77b23a0+dirty | 18.01 | 15.88 | 27.99 | x1.76 | 0/0/0 | 7.84 | 4.46 | 499/500 | 122/133 (92%) | shunt element map mirrors the pack (controller + stand-by shunts) |
 | 2026-09-22 | 038a693+dirty | 19.23 | 15.74 | 28.44 | x1.81 | 0/0/0 | 7.75 | 4.64 | 499/500 | 122/133 (92%) | unpinned member targetQ recomputed like OLF's unpin |
+| 2026-09-22 | db2a121+dirty | 18.86 | 15.53 | 28.14 | x1.81 | 0/0/0 | 7.71 | 4.54 | 499/500 | 122/133 (92%) | branch+generator combos islanding a group member batch |

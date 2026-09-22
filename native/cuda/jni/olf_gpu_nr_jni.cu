@@ -4180,11 +4180,15 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
     }
     double want1 = nd1 - p[7];                               // composition: base - baseD + d
     double want2 = nd2 - p[8];
+    // ATOMIC: two links between the same bus pair (a doubled corridor) run as two threads of one
+    // scenario and both add to the SAME converter-row target; a plain read-modify-write loses one
+    // of the two unfreeze increments and leaves that link's frozen flow counted twice (measured:
+    // 0.126 kV on every batched branch contingency of a network with a doubled 500 MW link).
     if (hvBus1Row[h] >= 0) {                                 // an inactive P row (the slack) absorbs it, as OLF's does
-        target[(size_t) s * n + hvBus1Row[h]] += want1 - appliedD1[(size_t) s * nh + h];
+        atomicAdd(&target[(size_t) s * n + hvBus1Row[h]], want1 - appliedD1[(size_t) s * nh + h]);
     }
     if (hvBus2Row[h] >= 0) {
-        target[(size_t) s * n + hvBus2Row[h]] += want2 - appliedD2[(size_t) s * nh + h];
+        atomicAdd(&target[(size_t) s * n + hvBus2Row[h]], want2 - appliedD2[(size_t) s * nh + h]);
     }
     appliedD1[(size_t) s * nh + h] = want1;
     appliedD2[(size_t) s * nh + h] = want2;
@@ -9271,8 +9275,22 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             CUDA_CHECK(cudaMemcpy(lt.data(), ctx->dRlLimitType.p, lt.size(), cudaMemcpyDeviceToHost));
             for (char c : lt) nPinned += c ? 1 : 0;
         }
-        std::fprintf(stderr, "BATCH_TRACE pass done: outer=%d loop=%d/%d kind=%s solved=%d changedScenarios=%d iters=%d pinned=%d\n",
+        std::fprintf(stderr, "BATCH_TRACE pass done: outer=%d loop=%d/%d kind=%s solved=%d changedScenarios=%d iters=%d pinned=%d",
                      outer, loopIdx, nLoops, kindName, solvePass ? 1 : 0, nSw, gLastPassIters, nPinned);
+        {
+            // OLF_GPU_ROW_PROBE=<row>: that row's slot-0 TARGET as each pass leaves it — the inner
+            // probe only sees iterations, and a target a loop phase mutates between solves (the
+            // HVDC freeze/unfreeze, a DS anchor reset) is invisible there.
+            static const char* passProbeEnv = std::getenv("OLF_GPU_ROW_PROBE");
+            static int passProbe = passProbeEnv != nullptr ? std::atoi(passProbeEnv) : -1;
+            if (passProbe >= 0 && passProbe < n) {
+                double tv = 0;
+                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                CUDA_CHECK(cudaMemcpy(&tv, ctx->dTarget.as<double>() + passProbe, sizeof(double), cudaMemcpyDeviceToHost));
+                std::fprintf(stderr, " probeRow=%d target=%.12e", passProbe, tv);
+            }
+        }
+        std::fprintf(stderr, "\n");
     }
     if (inDsPhase && getenv("OLF_GPU_DS_DEBUG") && nS > 0) {
         // Is scenario 0 actually CONVERGED at the moment the DS loop reads its mismatch? OLF checks

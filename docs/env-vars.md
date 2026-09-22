@@ -101,7 +101,7 @@ Safe to add. These are the instruments; several are the only reason a defect was
 | `OLF_GPU_LOOP_TRACE` | native/cuda/jni/olf_gpu_nr_jni.cu (driver) — `<slot>`: `LOOP_PASS` per pass, the device side of OLF's `OLF_OL_TRACE` `OL_CHECK`: which loop ran, whether the slot was found UNSTABLE, whether the phase is still unstable |
 | `OLF_GPU_RL_TRACE_VROW` | native/cuda/jni/olf_gpu_nr_jni.cu — `<v row>`: `RL_VROW`, one LOCAL reactive-limits entry's q / live limits / row target / mode at every check (the remote-only RL_TRACE never names it) |
 | `OLF_GPU_DS_DEBUG_SLOT` | native/cuda/jni/olf_gpu_nr_jni.cu — with `OLF_GPU_DS_DEBUG`: which slot the kernel-level water-fill prints (`[DS-GATE]`/`[DS-WF]`/`[DS-SAT]`, device printf → surefire dumpstream) follow; default 0 |
-| `OLF_GPU_HVDC_TRACE` | GpuBatchHvdcAcEmulation / GpuBatchChunkSolver — `<phiRow>` or `all`: `HVDC_SLOT` (slot -> contingency), `HVDC_FREEZE` (the flows each scenario's freeze fixed an hvdc at, vs the base deltas) and `HVDC_END` (the status each scenario ended with) |
+| `OLF_GPU_HVDC_TRACE` | GpuBatchHvdcAcEmulation / GpuBatchChunkSolver — `<phiRow>` or `all`: `HVDC_BUILD` (every AC-emulation hvdc the pack carries: id, element, OLF status, station targetP), `HVDC_SLOT` (slot -> contingency), `HVDC_PREOV` (pre-freeze override entries already on a converter-bus P row — the freeze composes on top of them), `HVDC_CTL` (per slot and hvdc: base status/deltas, mask bit, warm-point flows, base target), `HVDC_FREEZE` (the flows each scenario's freeze fixed an hvdc at, vs the base deltas) and `HVDC_END` (the status each scenario ended with). Found the doubled-corridor unfreeze race (two links on one bus pair, 2026-09-22) |
 | `OLF_GPU_MON_TRACE` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchVoltageMonitoring.java:59 |
 | `OLF_GPU_NAME_ROW` | src/main/java/com/powsybl/openloadflow/sa/gpu/GpuBatchPrecomputer.java — turns a DEVICE row index (from `OLF_GPU_WORST_ROW` / `OLF_GPU_PROBE_ROWS`) back into its variable and element; row indices are NOT portable between runs with different contingency sets |
 | `OLF_GPU_PHASE_TIME` | src/main/java/com/powsybl/openloadflow/sa/gpu/GpuStateInjector.java:86 +9 |
@@ -113,7 +113,7 @@ Safe to add. These are the instruments; several are the only reason a defect was
 | `OLF_GPU_RL_PACK_DUMP` | src/main/java/com/powsybl/openloadflow/ac/equations/vector/gpu/GpuAcOuterLoopPacks.java:484 |
 | `OLF_GPU_RL_TRACE` | src/main/java/com/powsybl/openloadflow/ac/equations/vector/gpu/GpuAcOuterLoopPacks.java:452 +3 |
 | `OLF_GPU_RMQ_TRACE` | native/cuda/jni/olf_gpu_nr_jni.cu:8658 |
-| `OLF_GPU_ROW_PROBE` | native/cuda/jni/olf_gpu_nr_jni.cu:8484 |
+| `OLF_GPU_ROW_PROBE` | native/cuda/jni/olf_gpu_nr_jni.cu — `<deviceRow>`: that row in every scenario at every inner iteration (residual, state, target, non-zero Jacobian entries) AND, with `OLF_GPU_BATCH_TRACE`, the slot-0 target of that row on every `pass done` line (`probeRow=... target=...`): a target a loop PHASE mutates between solves (HVDC freeze/unfreeze, DS anchor reset) is invisible to the per-iteration print. Found the doubled-corridor unfreeze race (2026-09-22) |
 | `OLF_GPU_SA_BUSDIFF` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:348 |
 | `OLF_GPU_SA_DEBUG_CTG` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:164 |
 | `OLF_GPU_SA_INVENTORY` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:205 |

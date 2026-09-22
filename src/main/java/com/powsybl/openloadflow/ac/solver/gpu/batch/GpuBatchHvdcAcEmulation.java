@@ -129,6 +129,11 @@ public final class GpuBatchHvdcAcEmulation {
                     .filter(com.powsybl.openloadflow.equations.Equation::isActive).isPresent();
             boolean p2Active = es.getEquation(hvdc.getBus2().getNum(), AcEquationType.BUS_TARGET_P)
                     .filter(com.powsybl.openloadflow.equations.Equation::isActive).isPresent();
+            if (HVDC_TRACE_ROW != -1) {
+                System.err.printf("HVDC_BUILD h=%d id=%s elem=%d olfStatus=%s st1TargetP=%.9f st2TargetP=%.9f p1Active=%b%n",
+                        h, hvdc.getId(), hvOffset + h, ac.getAcEmulationStatus(), hvdc.getConverterStation1().getTargetP(),
+                        hvdc.getConverterStation2().getTargetP(), p1Active);
+            }
             out.add(new Ctl(hvOffset + h,
                     p1Active ? r1 : ~r1, p2Active ? r2 : ~r2,
                     ac.getP0(), ac.getDroop() * 180 / Math.PI,
@@ -246,6 +251,11 @@ public final class GpuBatchHvdcAcEmulation {
             }
             for (int h = 0; h < ctls.size(); h++) {
                 Ctl c = ctls.get(h);
+                if (HVDC_TRACE_ROW != -1) {
+                    System.err.printf("HVDC_CTL s=%d h=%d elem=%d baseStatus=%d baseD1=%.9f baseD2=%.9f disabled=%b p1warm=%.9f p2warm=%.9f pMax12=%.6f baseT1=%.9f%n",
+                            s, h, c.hvElemIndex(), c.baseStatus(), c.baseD1(), c.baseD2(), disabledMask[s][c.hvElemIndex()],
+                            c.p1At(warm), c.p2At(warm), c.pMax12(), c.bus1PRow() >= 0 ? baseTargets[c.bus1PRow()] : Double.NaN);
+                }
                 if (disabledMask[s][c.hvElemIndex()]) {
                     continue;                                // outaged hvdc — stays as the contingency left it
                 }

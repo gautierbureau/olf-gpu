@@ -184,3 +184,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-22 | 82676cc+dirty | 18.16 | 15.66 | 27.92 | x1.78 | 0/0/0 | 7.59 | 4.51 | 499/500 | 122/133 (92%) | device reports MAX_ITERATION_REACHED itself; straggler exit off by default (perf switch OLF_GPU_STRAGGLER_FRAC) |
 | 2026-09-22 | fbea785+dirty | 18.54 | 15.47 | 27.01 | x1.75 | 0/0/0 | 7.65 | 4.44 | 499/500 | 122/133 (92%) | linear-solve guard (first-iteration residual ratio) + spilled bus diff |
 | 2026-09-22 | fbea785+dirty | 19.28 | 15.45 | 27.23 | x1.76 | 0/0/0 | 7.84 | 4.62 | 499/500 | 122/133 (92%) | linear-solve guard + robust retry (mode 6) + all-pinned remote group extractor fix + two-JVM comparison |
+| 2026-09-22 | fbea785+dirty | 18.44 | 15.88 | 28.04 | x1.77 | 0/0/0 | 7.66 | 4.65 | 499/500 | 122/133 (92%) | hvdc unfreeze atomic on shared converter rows |

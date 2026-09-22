@@ -3255,6 +3255,72 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** TWO AC-emulation links between the SAME bus pair (a doubled corridor) whose converter buses
+     *  host NO slack participant (like the real doubled 500 MW link: two VSC stations and nothing
+     *  else on each end). The two links' converter-row target updates run as two device threads of
+     *  one scenario: the freeze/unfreeze increments must compose ATOMICALLY, or one link's frozen
+     *  flow stays counted twice after the unfreeze (measured: 0.126 kV on every batched branch
+     *  contingency, the base at 1e-10). A converter bus WITH a participant hides the race (the
+     *  distributed-slack pass re-derives that row from its anchor) and so does a voltage-controlled
+     *  one (only the angles move). GPU SA == CPU SA at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceDoubledHvdcCorridorUnfreezeMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = doubledHvdcCorridorNetwork();
+        List<Contingency> ctgs = List.of(new Contingency("l12_BIS", new BranchContingency("l12_BIS")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setHvdcAcEmulation(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+    }
+
+    /** g1 - b1 == l12 / l12_BIS == b2 - g2, with converter buses b1h / b2h hung off b1 / b2 by short
+     *  lines; hvdc12 (droop 1, P0 0) and hvdc12_BIS (droop 1, P0 1 MW) both run b1h -> b2h. */
+    private static Network doubledHvdcCorridorNetwork() {
+        Network network = Network.create("doubled-corridor", "code");
+        String[] buses = {"b1", "b2", "b1h", "b2h"};
+        for (String b : buses) {
+            var vl = network.newSubstation().setId("s_" + b).add()
+                    .newVoltageLevel().setId("vl_" + b).setNominalV(1).setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            vl.getBusBreakerView().newBus().setId(b).add();
+        }
+        network.getVoltageLevel("vl_b1").newGenerator().setId("g1").setBus("b1").setConnectableBus("b1")
+                .setEnergySource(com.powsybl.iidm.network.EnergySource.OTHER).setMinP(0).setMaxP(10)
+                .setTargetP(5).setTargetV(1).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl_b2").newGenerator().setId("g2").setBus("b2").setConnectableBus("b2")
+                .setEnergySource(com.powsybl.iidm.network.EnergySource.OTHER).setMinP(0).setMaxP(10)
+                .setTargetP(0).setTargetV(1).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl_b1").newLoad().setId("l1").setBus("b1").setConnectableBus("b1").setP0(3).setQ0(0).add();
+        network.getVoltageLevel("vl_b2").newLoad().setId("l2").setBus("b2").setConnectableBus("b2").setP0(3).setQ0(0).add();
+        network.getVoltageLevel("vl_b1h").newLoad().setId("l1h").setBus("b1h").setConnectableBus("b1h").setP0(0.5).setQ0(0.1).add();
+        network.getVoltageLevel("vl_b2h").newLoad().setId("l2h").setBus("b2h").setConnectableBus("b2h").setP0(0.5).setQ0(0.1).add();
+        java.util.function.BiConsumer<String[], double[]> line = (ids, rx) -> network.newLine().setId(ids[0])
+                .setVoltageLevel1("vl_" + ids[1]).setBus1(ids[1]).setConnectableBus1(ids[1])
+                .setVoltageLevel2("vl_" + ids[2]).setBus2(ids[2]).setConnectableBus2(ids[2])
+                .setR(rx[0]).setX(rx[1]).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        line.accept(new String[] {"l12", "b1", "b2"}, new double[] {0, 0.1});
+        line.accept(new String[] {"l12_BIS", "b1", "b2"}, new double[] {0, 0.2});
+        line.accept(new String[] {"l1h", "b1", "b1h"}, new double[] {0.002, 0.02});
+        line.accept(new String[] {"l2h", "b2", "b2h"}, new double[] {0.002, 0.02});
+        // PQ converter buses: a voltage-controlled converter bus pins |V| and the lost increment
+        // then moves only the ANGLES, which the bus-voltage comparison does not see
+        for (String[] st : new String[][] {{"cs1", "b1h", "false"}, {"cs2", "b2h", "false"}, {"cs1b", "b1h", "false"}, {"cs2b", "b2h", "false"}}) {
+            network.getVoltageLevel("vl_" + st[1]).newVscConverterStation().setId(st[0]).setBus(st[1]).setConnectableBus(st[1])
+                    .setVoltageRegulatorOn(Boolean.parseBoolean(st[2])).setVoltageSetpoint(1).setReactivePowerSetpoint(0)
+                    .setLossFactor(1.1f).add();
+        }
+        for (String[] hv : new String[][] {{"hvdc12", "cs1", "cs2", "0"}, {"hvdc12_BIS", "cs1b", "cs2b", "1"}}) {
+            network.newHvdcLine().setId(hv[0]).setConverterStationId1(hv[1]).setConverterStationId2(hv[2])
+                    .setNominalV(400).setR(0.1).setActivePowerSetpoint(2)
+                    .setConvertersMode(com.powsybl.iidm.network.HvdcLine.ConvertersMode.SIDE_1_INVERTER_SIDE_2_RECTIFIER)
+                    .setMaxP(10).add()
+                    .newExtension(com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControlAdder.class)
+                    .withDroop(1).withP0(Float.parseFloat(hv[3])).withEnabled(true).add();
+        }
+        return network;
+    }
+
     /** DEVICE-mode HVDC AC emulation with a SATURATED BASE (was a whole-run CPU gate — the pack
      *  assumed every AC-emu HVDC starts LINEAR): maxP 100 MW sits under the ~135 MW unconstrained
      *  droop flow, so the BASE limits loop pins hvdc23 at SAT_1_TO_2 (CPU-probed: base cs2.P = 100).

@@ -114,10 +114,17 @@ final class GpuContingencyMapper {
         List<LoadLoss> out = new java.util.ArrayList<>();
         for (Map.Entry<String, com.powsybl.openloadflow.network.PowerShift> e : pc.getLoadIdsToLose().entrySet()) {
             com.powsybl.iidm.network.Load load = network.getLoad(e.getKey());
-            if (load == null || load.getTerminal().getBusView().getBus() == null) {
-                return null;
+            if (load == null) {
+                return null;                                 // an LCC station's load share: CPU
             }
-            LfBus bus = net.getBusById(load.getTerminal().getBusView().getBus().getId());
+            // The load's LfBus through OLF's OWN map (loadsById), never through the bus view: a
+            // node-breaker level's bus-view buses and its breaker-mode LfBuses share the "<VL>_<n>"
+            // id pattern but partition the level differently (the bus view merges across every
+            // closed breaker, the LfNetwork keeps retained ones), so "GIU_0" named a different
+            // physical bus in each. Measured on network.xiidm / LJBS: the island's two loads (26 MW,
+            // 106 MVar) were removed from the neighbour GIU_0 instead of the frozen GIU_1 — 3.1 kV.
+            com.powsybl.openloadflow.network.LfLoad lfLoad = net.getLoadById(e.getKey());
+            LfBus bus = lfLoad != null ? lfLoad.getBus() : null;
             if (bus == null || bus.isDisabled()) {
                 return null;
             }

@@ -154,10 +154,12 @@ final class GpuStrategyComposer {
                 }
             } else if (a instanceof com.powsybl.action.LoadAction la) {
                 com.powsybl.iidm.network.Load load = network.getLoad(la.getLoadId());
-                if (load == null || load.getTerminal().getBusView().getBus() == null) {
+                if (load == null) {
                     return null;
                 }
-                LfBus bus = net.getBusById(load.getTerminal().getBusView().getBus().getId());
+                // OLF's own load -> LfBus map, never the bus view (see GpuContingencyMapper.loadOutages)
+                com.powsybl.openloadflow.network.LfLoad lfLoad = net.getLoadById(la.getLoadId());
+                LfBus bus = lfLoad != null ? lfLoad.getBus() : null;
                 if (bus == null) {
                     return null;
                 }
@@ -213,8 +215,8 @@ final class GpuStrategyComposer {
                 if (gen == null) {
                     return null;
                 }
-                LfBus bus = net.getBusById(gen.getTerminal().getBusView().getBus() != null
-                        ? gen.getTerminal().getBusView().getBus().getId() : "");
+                com.powsybl.openloadflow.network.LfGenerator lfGen = net.getGeneratorById(ga.getGeneratorId());
+                LfBus bus = lfGen != null ? lfGen.getBus() : null;    // OLF's own map, never the bus view
                 if (bus == null) {
                     return null;
                 }

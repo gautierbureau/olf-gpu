@@ -4120,6 +4120,30 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, List.of(new Contingency("L1", new BranchContingency("L1"))), 1e-12, true);
     }
 
+    /** A lost load's bus must come from OLF's OWN load map, never from the bus view. On a node-breaker
+     *  level the bus-view buses and the breaker-mode LfBuses share the "<VL>_<n>" id pattern but
+     *  partition the level differently: the bus view merges across the closed RETAINED breaker B3,
+     *  so LD1 (behind B3, next to L1's terminal) reports bus-view bus "VL2_0" while its LfBus is
+     *  "VL2_1". The propagated L1 outage opens B3 and loses LD1: resolved through the bus view the
+     *  device removed LD1's 30 MW / 10 MVar from the LIVE busbar VL2_0 instead of the frozen stub
+     *  (measured on network.xiidm / LJBS: 3.1 kV). GPU SA == CPU SA at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceLostLoadBehindRetainedBreakerResolvesItsOwnBusMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.NodeBreakerNetworkFactory.create();
+        var vl1 = network.getVoltageLevel("VL1");
+        var vl2 = network.getVoltageLevel("VL2");
+        vl1.getNodeBreakerView().newBreaker().setId("B5").setNode1(1).setNode2(7).add();
+        vl2.getNodeBreakerView().newBreaker().setId("B6").setNode1(0).setNode2(4).add();
+        network.newLine().setId("L3").setVoltageLevel1("VL1").setNode1(7).setVoltageLevel2("VL2").setNode2(4)
+                .setR(3).setX(33).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        // LD1 on L1's side of the retained breaker B3 (VL2 node 1), on its own node
+        vl2.getNodeBreakerView().newInternalConnection().setNode1(1).setNode2(5).add();
+        vl2.newLoad().setId("LD1").setNode(5).setP0(30).setQ0(10).add();
+        assertGpuMatchesCpu(network, List.of(new Contingency("L1", new BranchContingency("L1"))), 1e-12, true);
+    }
+
     @Test
     void baseOpenSwitchCloseStrategyBatchMatchesCpu() {
         // #31: SwitchAction CLOSING a base-open busbar coupler (zero-impedance branch). The retained

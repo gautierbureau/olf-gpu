@@ -844,6 +844,43 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                             + "distrQResid=%s minQ=%.9f maxQ=%.9f overMaxBy=%.9f%n",
                             contingency.getId(), b.getId(), q, b.getGenerationTargetQ(), b.getLoadTargetQ(),
                             b.getRemoteControlReactivePercent(), resid, b.getMinQ(), b.getMaxQ(), q - b.getMaxQ());
+                    // Every term of OLF's BUS_TARGET_Q equation at this state (value + variables): the
+                    // device's row must carry the same terms, or a pin lands at a different q (a
+                    // zero-impedance dummy, a load-model part, a shunt the pack routes elsewhere).
+                    precomputed.equationSystem().getEquation(b.getNum(), AcEquationType.BUS_TARGET_Q).ifPresent(eq -> {
+                        for (var t : eq.getTerms()) {
+                            System.err.printf("Q_PROBE_TERM ctg=%s bus=%s active=%b term=%s value=%.9f vars=%s%n",
+                                    contingency.getId(), b.getId(), t.isActive(), t.getClass().getSimpleName(),
+                                    t.isActive() ? t.eval() : Double.NaN,
+                                    t.getVariables().stream().map(v -> v.getType() + "#" + v.getElementNum()).toList());
+                        }
+                    });
+                    // Every incident branch: OLF's pi model next to the row the device pack carries for
+                    // it (matched by the two phi columns) — a q that lands 0.2 MVar off its pin with the
+                    // same terms on both arms is a pi-model disagreement on one of these.
+                    var gd = precomputed.gpuData();
+                    if (gd != null) {
+                        int cbCount = gd.cbIn().length / 8;
+                        int idxStride = cbCount > 0 ? gd.cbIdx().length / cbCount : 0;
+                        for (var br : b.getBranches()) {
+                            var pm = br.getPiModel();
+                            Integer ph1 = br.getBus1() == null ? null : precomputed.baseVariableRows().get(precomputed.equationSystem().getVariableSet()
+                                    .getVariable(br.getBus1().getNum(), AcVariableType.BUS_PHI));
+                            Integer ph2 = br.getBus2() == null ? null : precomputed.baseVariableRows().get(precomputed.equationSystem().getVariableSet()
+                                    .getVariable(br.getBus2().getNum(), AcVariableType.BUS_PHI));
+                            String pack = "absent";
+                            for (int e = 0; e < cbCount && idxStride > 0; e++) {
+                                if (ph1 != null && ph2 != null && gd.cbIdx()[e * idxStride] == ph1 && gd.cbIdx()[e * idxStride + 2] == ph2) {
+                                    double[] r = java.util.Arrays.copyOfRange(gd.cbIn(), e * 8, e * 8 + 8);
+                                    pack = String.format("cb=%d y=%.9f g1=%.9f g2=%.9f b1=%.9f b2=%.9f ksi=%.9f r1=%.9f a1=%.9f",
+                                            e, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+                                }
+                            }
+                            System.err.printf("Q_PROBE_BRANCH ctg=%s bus=%s branch=%s num=%d disabled=%b sides=%b/%b olf: y=%.9f g1=%.9f g2=%.9f b1=%.9f b2=%.9f ksi=%.9f r1=%.9f a1=%.9f | pack: %s%n",
+                                    contingency.getId(), b.getId(), br.getId(), br.getNum(), br.isDisabled(), br.isConnectedSide1(), br.isConnectedSide2(),
+                                    pm.getY(), pm.getG1(), pm.getG2(), pm.getB1(), pm.getB2(), pm.getKsi(), pm.getR1(), pm.getA1(), pack);
+                        }
+                    }
                     // A CURVE reactive limit is a function of the GENERATOR's targetP, so a limit that
                     // disagrees between arms is a P disagreement, not a limit-model disagreement.
                     for (var g : b.getGenerators()) {

@@ -111,7 +111,7 @@ Safe to add. These are the instruments; several are the only reason a defect was
 | `OLF_GPU_RESIDUAL_TRACE` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/GpuNewtonRaphson.java:1065 |
 | `OLF_GPU_RL_NOPIN_ROW` | native/cuda/jni/olf_gpu_nr_jni.cu:8850 |
 | `OLF_GPU_RL_PACK_DUMP` | src/main/java/com/powsybl/openloadflow/ac/equations/vector/gpu/GpuAcOuterLoopPacks.java:484 |
-| `OLF_GPU_RL_TRACE` | src/main/java/com/powsybl/openloadflow/ac/equations/vector/gpu/GpuAcOuterLoopPacks.java:452 +3 |
+| `OLF_GPU_RL_TRACE` | src/main/java/com/powsybl/openloadflow/ac/equations/vector/gpu/GpuAcOuterLoopPacks.java — `GPU_RL_ENTRY idx=<n> vRow=<row> bus=<id>` for every reactive-limit entry, LOCAL and REMOTE (a remote member also prints its class and its pilot's V row): the map that lines the device's per-entry `RL_TRACE` pin states up against OLF's `RL_SWITCH` bus names |
 | `OLF_GPU_RMQ_TRACE` | native/cuda/jni/olf_gpu_nr_jni.cu:8658 |
 | `OLF_GPU_ROW_PROBE` | native/cuda/jni/olf_gpu_nr_jni.cu — `<deviceRow>`: that row in every scenario at every inner iteration (residual, state, target, non-zero Jacobian entries) AND, with `OLF_GPU_BATCH_TRACE`, the slot-0 target of that row on every `pass done` line (`probeRow=... target=...`): a target a loop PHASE mutates between solves (HVDC freeze/unfreeze, DS anchor reset) is invisible to the per-iteration print. Found the doubled-corridor unfreeze race (2026-09-22) |
 | `OLF_GPU_SA_BUSDIFF` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:348 |

@@ -231,7 +231,7 @@ public final class GpuAcOuterLoopPacks {
                 // the member's UNPINNED targetQ (generationTargetQ - loadTargetQ), which is what
                 // AcTargetVector reads for every member the RL loop has not frozen; a frozen
                 // member's targetQ is its q limit and the kernel derives that from the RL tables.
-                mt.targetQ().add(m.getTargetQ());
+                mt.targetQ().add(unpinnedTargetQ(m));
                 mt.busNum().add(m.getNum());
                 qrGroupList.add(qrGroup);
             }
@@ -444,6 +444,10 @@ public final class GpuAcOuterLoopPacks {
                         rlRemote.add((byte) (pilotSelf ? 2 : 1));
                         rlCmpVrow.add(pilotV);                 // switch conditions compare the PILOT's V
                         rlBusNum.add(bn);
+                        if (System.getenv("OLF_GPU_RL_TRACE") != null) {
+                            System.err.println("GPU_RL_ENTRY idx=" + (rlVrow.size() - 1) + " vRow=" + vCol[bn]
+                                    + " bus=" + bus.getId() + " remote=" + (pilotSelf ? 2 : 1) + " pilotVRow=" + pilotV);
+                        }
                         rlNominalV.add(vc.getControlledBus().getNominalV());
                         rlPRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.phiCol()[bn] : -1);
                         rlTargetP.add(bus.getTargetP());
@@ -537,6 +541,27 @@ public final class GpuAcOuterLoopPacks {
                 GpuAcArrays.toIntArray(rlBusNum),
                 GpuAcArrays.toDoubleArray(rlNominalV), GpuAcArrays.toIntArray(rlPRow), GpuAcArrays.toDoubleArray(rlTargetP),
                 idRanks(rlBusId), GpuAcArrays.toDoubleArray(rlInitTargetQ), baseLt);
+    }
+
+    /** The targetQ OLF gives a member once the reactive-limits loop UNPINS it. A member pinned in the
+     *  base has its generation targetQ FROZEN at the limit (freezeGenerationTargetQAndDisableGenerator
+     *  VoltageControl), so {@code getTargetQ()} returns the pin, not what the kernel needs for an
+     *  unpinned member. OLF's unpin (setGeneratorVoltageControlEnabledAndRecomputeTargetQ) invalidates
+     *  the frozen value and getGenerationTargetQ recomputes it as the sum over the non-voltage-
+     *  controlling, enabled generators - replayed here verbatim. Measured on network.xiidm / LJYK: a
+     *  three-member group pinned in the base and unpinned by the contingency kept sharing its
+     *  deviation from the PINNED targets, every member landed 1.4 MVar inside its own limit, and the
+     *  CPU's re-pin of two of them never happened (6e-3 kV at convEps 1e-12 on both arms). */
+    static double unpinnedTargetQ(LfBus m) {
+        if (!m.isGenerationTargetQFrozen()) {
+            return m.getTargetQ();
+        }
+        double generationTargetQ = m.getGenerators().stream()
+                .filter(g -> g.getGeneratorControlType() != LfGenerator.GeneratorControlType.VOLTAGE && !g.isDisabled())
+                .mapToDouble(LfGenerator::getTargetQ)
+                .filter(d -> !Double.isNaN(d))
+                .sum();
+        return generationTargetQ - m.getLoadTargetQ();
     }
 
     /** {@code ReactiveLimitsOuterLoop.getInitialGenerationTargetQ}, verbatim. */

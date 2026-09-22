@@ -1719,6 +1719,61 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 "the batch must precompute with the whole group pinned in the base (or the test proves nothing)");
     }
 
+    /** A remote voltage-control group whose members are ALL pinned at MAX_Q in the base (a radial
+     *  200 MVar load at vlq) and all UNPINNED by the contingency (losing that radial line). OLF's unpin
+     *  recomputes each member's targetQ from its generators (0 here) and the group then shares its
+     *  DEVIATION from those targets; the device carried each member's targetQ FROZEN at the pin, so it
+     *  shared the deviation from +20 / +40 MVar instead and the two members settled at different
+     *  reactive injections than the CPU's (network.xiidm / LJYK: 6e-3 kV at convEps 1e-12 on both
+     *  arms). The limits are asymmetric so the keys (Q ranges 90 : 60) are not proportional to the
+     *  pins (30 : 50 MVar) - otherwise the two sharings coincide and the test proves nothing.
+     *  GPU SA == CPU SA at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceRemoteGroupUnpinnedByContingencyRecomputesTargetQMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = Network.create("unpinned-remote-group", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vlp", "vlq", "vlc1", "vlc2")) {
+            com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(vl).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            v.getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        network.getVoltageLevel("vl0").newGenerator().setId("g0").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(300).setTargetV(413).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl0").newLoad().setId("ld0").setBus("vl0_b").setConnectableBus("vl0_b").setP0(100).setQ0(0).add();
+        network.getVoltageLevel("vlp").newLoad().setId("ldp").setBus("vlp_b").setConnectableBus("vlp_b").setP0(400).setQ0(60).add();
+        network.getVoltageLevel("vlq").newLoad().setId("ldq").setBus("vlq_b").setConnectableBus("vlq_b").setP0(0).setQ0(200).add();
+        // ASYMMETRIC limits: the reactive keys come from the Q RANGES (90 : 60) while the pins sit at
+        // maxQ (30 : 50) - with symmetric limits the two ratios coincide and so do both sharings
+        for (String[] c : new String[][] {{"c1", "-60", "30"}, {"c2", "-10", "50"}}) {
+            network.getVoltageLevel("vl" + c[0]).newGenerator().setId("g" + c[0]).setBus("vl" + c[0] + "_b")
+                    .setConnectableBus("vl" + c[0] + "_b").setMinP(0).setMaxP(500).setTargetP(50).setTargetQ(0)
+                    .setTargetV(412).setVoltageRegulatorOn(true).setRegulatingTerminal(network.getLoad("ldp").getTerminal()).add();
+            network.getGenerator("g" + c[0]).newMinMaxReactiveLimits()
+                    .setMinQ(Double.parseDouble(c[1])).setMaxQ(Double.parseDouble(c[2])).add();
+        }
+        java.util.function.BiConsumer<String, String[]> line = (id, ends) -> network.newLine().setId(id)
+                .setVoltageLevel1(ends[0]).setBus1(ends[0] + "_b").setConnectableBus1(ends[0] + "_b")
+                .setVoltageLevel2(ends[1]).setBus2(ends[1] + "_b").setConnectableBus2(ends[1] + "_b")
+                .setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        line.accept("l0p", new String[] {"vl0", "vlp"});
+        line.accept("lpq", new String[] {"vlp", "vlq"});
+        line.accept("lpc1", new String[] {"vlp", "vlc1"});
+        line.accept("lpc2", new String[] {"vlp", "vlc2"});
+        line.accept("l0c1", new String[] {"vl0", "vlc1"});
+        line.accept("l0c2", new String[] {"vl0", "vlc2"});
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0_0"));
+        assertGpuMatchesCpu(network, List.of(new Contingency("lpq", new com.powsybl.contingency.LineContingency("lpq"))),
+                1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the contingency must batch (or the test proves nothing)");
+    }
+
     /** The outage of a branch already OPEN AT ONE END in the base (network.xiidm: 2049 of 11249 branch
      *  contingencies): the device packs such a branch as an open-branch element (the connected end's
      *  view: its charging), so the outage is that element's disabled bit. The mapper used to call it

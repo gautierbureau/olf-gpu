@@ -94,7 +94,6 @@ final class GpuBatchInjectionOutages {
         int[] groupStart = gpuData.dqMemberGroupStart();
         int[] groupCount = gpuData.dqMemberGroupCount();
         double[] mKey = gpuData.dqMemberKey();
-        double[] mTargetQ = gpuData.dqMemberTargetQ();
         byte[] mHasRow = gpuData.dqMemberHasRow();
         int[] mRow = gpuData.dqMemberRow();
         LfBus any = islandedControllers.get(0);
@@ -109,7 +108,7 @@ final class GpuBatchInjectionOutages {
                 double sumTargetQ = 0;
                 for (int m = gs; m < gs + gc; m++) {
                     keySum += !inactive.contains(m) && memberKeepsKey(any, mBusNum[m], m, -1) ? mKey[m] : 0;
-                    sumTargetQ += mTargetQ[m];
+                    sumTargetQ += baseTargetQ(any, mBusNum[m]);
                 }
                 List<Integer> r = new ArrayList<>();
                 List<Double> v = new ArrayList<>();
@@ -119,7 +118,7 @@ final class GpuBatchInjectionOutages {
                     }
                     double qpk = keySum == 0 || !memberKeepsKey(any, mBusNum[m], m, -1) ? 0 : mKey[m] / keySum;
                     r.add(mRow[m]);
-                    v.add(qpk * sumTargetQ - mTargetQ[m]);
+                    v.add(qpk * sumTargetQ - baseTargetQ(any, mBusNum[m]));
                 }
                 rows = r.stream().mapToInt(Integer::intValue).toArray();
                 values = v.stream().mapToDouble(Double::doubleValue).toArray();
@@ -128,6 +127,13 @@ final class GpuBatchInjectionOutages {
                     java.util.Set.of(), 0, 0, 0, im, new int[0], rows, values, 0, -1, 0, -1, 0, -1, 0));
         }
         return out;
+    }
+
+    /** A member's targetQ in the BASE state these seeds describe: a base-pinned member IS frozen at its
+     *  limit there. The device table holds the UNPINNED value instead (what the kernel needs once a pin
+     *  lifts), so the seeds read the bus. */
+    private static double baseTargetQ(LfBus anyMember, int memberBusNum) {
+        return anyMember.getNetwork().getBus(memberBusNum).getTargetQ();
     }
 
     private static boolean memberKeepsKey(LfBus anyMember, int memberBusNum, int member, int inactiveMember) {
@@ -621,14 +627,13 @@ final class GpuBatchInjectionOutages {
             int gc = gpuData.dqMemberGroupCount()[dqAnchor];
             int[] mBusNum = gpuData.dqMemberBusNum();
             double[] mKey = gpuData.dqMemberKey();
-            double[] mTargetQ = gpuData.dqMemberTargetQ();
             byte[] mHasRow = gpuData.dqMemberHasRow();
             int[] mRow = gpuData.dqMemberRow();
             double keySum = 0;
             double sumTargetQ = 0;
             for (int m = gs; m < gs + gc; m++) {
                 keySum += memberKeepsKey(bus, mBusNum[m], m, inactiveDqMember) ? mKey[m] : 0;
-                sumTargetQ += mTargetQ[m] + (mBusNum[m] == bus.getNum() ? dqOwnTargetQDelta : 0);
+                sumTargetQ += baseTargetQ(bus, mBusNum[m]) + (mBusNum[m] == bus.getNum() ? dqOwnTargetQDelta : 0);
             }
             List<Integer> rows = new ArrayList<>();
             List<Double> values = new ArrayList<>();
@@ -640,7 +645,7 @@ final class GpuBatchInjectionOutages {
                         ? 0 : mKey[m] / keySum;
                 rows.add(mRow[m]);
                 values.add(qpk * sumTargetQ
-                        - (mTargetQ[m] + (mBusNum[m] == bus.getNum() ? dqOwnTargetQDelta : 0)));
+                        - (baseTargetQ(bus, mBusNum[m]) + (mBusNum[m] == bus.getNum() ? dqOwnTargetQDelta : 0)));
             }
             dqTargetRows = rows.stream().mapToInt(Integer::intValue).toArray();
             dqTargetValues = values.stream().mapToDouble(Double::doubleValue).toArray();

@@ -616,9 +616,17 @@ final class GpuBatchQualification {
                     // COMBO (generator + branch): stay conservative — this path already carries the
                     // generator outage's own DISTR_Q rediff, so a SECOND one from an islanded
                     // controller would have to compose with it. Only a fully contained island batches.
-                    if (classifyVcSplit(es, q.islandedBuses(), new ArrayList<>(), new ArrayList<>(),
-                            new ArrayList<>()) != VcSplit.CONTAINED) {
+                    VcSplit comboSplit = classifyVcSplit(es, q.islandedBuses(), new ArrayList<>(), new ArrayList<>(),
+                            new ArrayList<>());
+                    if (comboSplit != VcSplit.CONTAINED) {
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:GEN_ON_ISLAND");
+                        if (System.getenv("OLF_GPU_GENOUT_REJECT") != null) {
+                            // name the contingency, the island size, the lost generators and the group
+                            // verdict: the census key alone cannot say which shape to make batchable next
+                            System.err.println("GENOUT_REJECT   ctg=" + c.contingencyId() + " gate=GEN_ON_ISLAND split=" + comboSplit
+                                    + " islandBuses=" + q.islandedBuses().size() + " lostGens=" + c.lostGenerators().size()
+                                    + " outagedBranches=" + c.outagedBranches().size());
+                        }
                         continue;
                     }
                     double[][] drOv = distrRhoOverrides(es, gpuData, distrRhoControllers, c.outagedBranches());

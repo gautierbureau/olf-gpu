@@ -244,7 +244,7 @@ public final class GpuBatchHvdcAcEmulation {
         for (int k = 0; k < ovIndexList.size(); k++) {
             overrides.add(ovIndexList.get(k), ovValueList.get(k));
         }
-        int[][] status = applyFreeze(chunkSize, realCount, n, ctls, baseState, x0PerScenario, disabledMask,
+        int[][] status = applyFreeze(chunkSize, realCount, n, ctls, baseState, x0PerScenario, null, null, disabledMask,
                 baseTargets, overrides, appliedD1, appliedD2);
         ovIndexList.clear();
         ovValueList.clear();
@@ -255,18 +255,26 @@ public final class GpuBatchHvdcAcEmulation {
         return status;
     }
 
-    /** As above, on the batch's own override list (its index is kept, not rebuilt per call). */
+    /**
+     * As above, on the batch's own override list (its index is kept, not rebuilt per call). A scenario's warm start is
+     * {@code x0PerScenario}'s slice when given; otherwise the base state with the scenario's seeds written over it
+     * ({@code seedIdx} flat {@code s * n + row}, the start state the device builds from the same seeds) — applied to
+     * one shared copy and put back after, so a chunk never materializes {@code chunkSize * n} doubles for it.
+     */
     static int[][] applyFreeze(int chunkSize, int realCount, int n, List<Ctl> ctls,
-                               double[] baseState, double[] x0PerScenario, boolean[][] disabledMask,
-                               double[] baseTargets, GpuBatchOverrides overrides,
+                               double[] baseState, double[] x0PerScenario, int[] seedIdx, double[] seedVal,
+                               boolean[][] disabledMask, double[] baseTargets, GpuBatchOverrides overrides,
                                double[] appliedD1, double[] appliedD2) {
         int[][] status = new int[chunkSize][ctls.size()];
-        double[] warm = new double[n];
+        double[] warm = baseState.clone();
+        int[][] seedsOf = x0PerScenario == null && seedIdx != null ? seedsByScenario(seedIdx, realCount, n) : null;
         for (int s = 0; s < realCount; s++) {
             if (x0PerScenario != null) {
                 System.arraycopy(x0PerScenario, s * n, warm, 0, n);
-            } else {
-                System.arraycopy(baseState, 0, warm, 0, n);
+            } else if (seedsOf != null) {
+                for (int k : seedsOf[s]) {
+                    warm[seedIdx[k] - s * n] = seedVal[k];
+                }
             }
             for (int h = 0; h < ctls.size(); h++) {
                 Ctl c = ctls.get(h);
@@ -305,8 +313,32 @@ public final class GpuBatchHvdcAcEmulation {
                     overrides.merge(s * n + c.bus2PRow(), baseTargets[c.bus2PRow()], c.baseD2(), d[1]);
                 }
             }
+            if (seedsOf != null) {
+                for (int k : seedsOf[s]) {                   // back to the base state for the next scenario
+                    int row = seedIdx[k] - s * n;
+                    warm[row] = baseState[row];
+                }
+            }
         }
         return status;
+    }
+
+    /** The positions in {@code seedIdx} of each scenario's seeds. */
+    private static int[][] seedsByScenario(int[] seedIdx, int realCount, int n) {
+        int[] count = new int[realCount];
+        for (int flat : seedIdx) {
+            count[flat / n]++;
+        }
+        int[][] seedsOf = new int[realCount][];
+        for (int s = 0; s < realCount; s++) {
+            seedsOf[s] = new int[count[s]];
+            count[s] = 0;
+        }
+        for (int k = 0; k < seedIdx.length; k++) {
+            int s = seedIdx[k] / n;
+            seedsOf[s][count[s]++] = k;
+        }
+        return seedsOf;
     }
 
     /**

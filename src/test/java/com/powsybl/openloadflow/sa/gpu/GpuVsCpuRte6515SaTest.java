@@ -631,6 +631,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         boolean cpuWarmRun = "1".equals(System.getenv("OLF_GPU_SA_CPU_WARM"));
         Network networkCpuWarm = cpuWarmRun ? Network.read(CASE_FILE) : null;
 
+        armMark("cpu start");
         long cpuT0 = System.nanoTime();
         // With a single contingency under the lens, monitor every voltage level: whether the two arms
         // differ LOCALLY or network-wide is the first thing that splits the candidate causes.
@@ -717,6 +718,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // OLF_GPU_SA_CPU_WARM=1: time the CPU arm TWICE, like the GPU arm. The first CPU run is the JVM's first SA
         // and pays JIT compilation the GPU arms never see, so the cold-vs-cold ratio flatters the GPU. The ratios
         // are quoted against CPU warm. Not available with a loaded (separate-JVM) CPU arm.
+        armMark("cpu end");
         long cpuWarmMs = -1;
         if (cpuWarmRun && !"load".equals(cpuArmMode) && networkCpuWarm != null) {
             long cpuT1 = System.nanoTime();
@@ -765,6 +767,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 jfr = new jdk.jfr.Recording(jdk.jfr.Configuration.getConfiguration("profile"));
                 jfr.start();
             }
+            armMark("gpu cold start");
             long g0 = System.nanoTime();
             {
                 SecurityAnalysisResult raw = runSecurityAnalysis(networkGpuCold, contingencies, monitors, sapGpu);
@@ -773,6 +776,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 raw = null;
                 System.gc();
             }
+            armMark("gpu cold end");
             if (jfr != null) {
                 jfr.stop();
                 jfr.dump(Path.of(jfrOut));
@@ -1115,5 +1119,18 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         assertTrue(violDiffPct < 0.01,
                 "violation diff " + violDiff + " over " + differingCtg + " contingencies ("
                         + violDiffPct + "%) exceeds 0.01% threshold");
+    }
+
+    /** OLF_GPU_SA_MEM=1: print the JVM uptime at an arm boundary, to cut an external memory trace (GC log with
+     *  uptime decoration, RSS sampled against the process start) into per-arm windows, and the live heap there
+     *  (after a full GC — never inside a timed region). */
+    private static void armMark(String what) {
+        if ("1".equals(System.getenv("OLF_GPU_SA_MEM"))) {
+            long uptime = java.lang.management.ManagementFactory.getRuntimeMXBean().getUptime();
+            System.gc();                                     // outside every timed region: the live heap at the mark
+            Runtime rt = Runtime.getRuntime();
+            System.out.printf("  ARM_MARK %s uptime=%d ms live heap=%d MB%n", what, uptime,
+                    (rt.totalMemory() - rt.freeMemory()) >> 20);
+        }
     }
 }

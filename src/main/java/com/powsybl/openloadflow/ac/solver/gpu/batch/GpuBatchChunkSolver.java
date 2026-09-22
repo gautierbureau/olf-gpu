@@ -1172,11 +1172,11 @@ final class GpuBatchChunkSolver {
                                 // the PRE-freeze override entries on this slot's converter-bus P rows: the freeze
                                 // composes on top of them, so a stale one here is a double count downstream
                                 for (GpuBatchHvdcAcEmulation.Ctl c : hvdcControllers) {
-                                    for (int k = 0; k < preHvdcOvIdx.size(); k++) {
-                                        int r = preHvdcOvIdx.get(k) - s * n;
+                                    for (int k = 0; k < preHvdcOverrides.index().length; k++) {
+                                        int r = preHvdcOverrides.index()[k] - s * n;
                                         if (r == c.bus1PRow() || r == c.bus2PRow()) {
                                             System.err.printf("HVDC_PREOV s=%d row=%d value=%.9f base=%.9f%n", s, r,
-                                                    preHvdcOvVal.get(k), baseTargets[r]);
+                                                    preHvdcOverrides.value()[k], baseTargets[r]);
                                         }
                                     }
                                 }

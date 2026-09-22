@@ -127,6 +127,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     static final java.util.concurrent.atomic.AtomicInteger LAST_REPLAYED_LOSS_COUNT =
             new java.util.concurrent.atomic.AtomicInteger();
 
+    /** How many base-state restores of the last run were targeted ({@link #TARGETED_RESTORE_PROPERTY}). */
+    static final java.util.concurrent.atomic.AtomicInteger LAST_TARGETED_RESTORE_COUNT =
+            new java.util.concurrent.atomic.AtomicInteger();
+
     /** Separator inside the precomputed-state key of a (contingency, strategy) pair — the SOLVER's
      *  constant, which also drives its two-phase warm-continuation ordering. */
     private static final char STRATEGY_KEY_SEP = GpuBatchStatus.STRATEGY_KEY_SEP;
@@ -195,6 +199,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                         mismatch * PerUnit.SB, (mismatch - replayed) * PerUnit.SB);
             }
             LAST_REPLAYED_LOSS_COUNT.incrementAndGet();
+            rs.lossReplayedFor = contingency.getId();
             return replayed;
         }
     }
@@ -202,7 +207,20 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     @Override
     protected void restoreBaseState(com.powsybl.openloadflow.network.NetworkState networkState, LfNetwork network,
                                     com.powsybl.openloadflow.network.LfContingency lfContingency) {
-        super.restoreBaseState(networkState, network, lfContingency);
+        RunState rs = runState.get();
+        boolean targeted = targetedRestoreEnabled()
+                && lfContingency.getId().equals(rs.lossReplayedFor)
+                && lfContingency.getId().equals(rs.deviceStateInjectedFor)
+                && !(GpuRestoreCheck.ENABLED && !rs.restoreCheck.hasReference(network));   // the check's reference is a full restore
+        rs.lossReplayedFor = null;
+        rs.deviceStateInjectedFor = null;
+        if (targeted) {
+            java.util.Set<LfBus> buses = touchedBuses(network, lfContingency, rs);
+            networkState.restore(buses, lfContingency.getDisabledNetwork().getBranchesStatus().keySet());
+            LAST_TARGETED_RESTORE_COUNT.incrementAndGet();
+        } else {
+            super.restoreBaseState(networkState, network, lfContingency);
+        }
         if (GpuRestoreCheck.ENABLED) {
             GpuRestoreCheck check = runState.get().restoreCheck;
             if (check.hasReference(network)) {
@@ -211,6 +229,53 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 check.setReference(network);                // the first restore is a full one
             }
         }
+    }
+
+    /** System property: after a contingency the device solved and whose loss distribution the replay answered,
+     *  restore only that contingency's own elements and the bus voltages instead of the whole network (default
+     *  on). Set to false for the A/B; OLF_GPU_RESTORE_CHECK proves the two leave the same network. */
+    public static final String TARGETED_RESTORE_PROPERTY = "olf.gpu.sa.targetedRestore";
+
+    private static boolean targetedRestoreEnabled() {
+        return Boolean.parseBoolean(System.getProperty(TARGETED_RESTORE_PROPERTY, "true"));
+    }
+
+    /**
+     * The buses a device-solved contingency changed beyond their voltage: what LfContingency.apply touched — the
+     * buses it disabled and those of the loads, generators and shunts it lost or shifted — closed over their
+     * voltage and reactive-power control groups, because enabling or disabling a controller recomputes its
+     * whole group's reactive targets.
+     */
+    private static java.util.Set<LfBus> touchedBuses(LfNetwork network, com.powsybl.openloadflow.network.LfContingency c,
+                                                     RunState rs) {
+        java.util.Set<LfBus> touched = new java.util.LinkedHashSet<>(c.getDisabledNetwork().getBuses());
+        c.getLostLoads().keySet().forEach(l -> touched.add(l.getBus()));
+        c.getLostGenerators().forEach(g -> touched.add(g.getBus()));
+        if (!c.getShuntsShift().isEmpty()) {
+            if (rs.shuntBus == null) {
+                rs.shuntBus = new java.util.IdentityHashMap<>();
+                for (LfBus b : network.getBuses()) {
+                    b.getShunt().ifPresent(sh -> rs.shuntBus.put(sh, b));
+                    b.getControllerShunt().ifPresent(sh -> rs.shuntBus.put(sh, b));
+                    b.getSvcShunt().ifPresent(sh -> rs.shuntBus.put(sh, b));
+                }
+            }
+            c.getShuntsShift().keySet().forEach(sh -> {
+                LfBus b = rs.shuntBus.get(sh);
+                if (b != null) {
+                    touched.add(b);
+                }
+            });
+        }
+        java.util.Set<LfBus> closed = new java.util.LinkedHashSet<>(touched);
+        for (LfBus b : touched) {
+            b.getGeneratorVoltageControl().ifPresent(vc -> {
+                closed.add(vc.getControlledBus());
+                closed.addAll(vc.getMergedControllerElements());
+            });
+            b.getGeneratorReactivePowerControl().ifPresent(rpc -> closed.addAll(rpc.getControllerBuses()));
+        }
+        return closed;
     }
 
     private static boolean targetedByOperatorStrategy(List<OperatorStrategy> strategies, String contingencyId) {
@@ -305,6 +370,12 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         private final GpuStateInjector.Remap remap = new GpuStateInjector.Remap();
         /** OLF_GPU_RESTORE_CHECK: this partition's restores against the state a full restore produces. */
         private final GpuRestoreCheck restoreCheck = new GpuRestoreCheck();
+        /** The contingency whose loss distribution the replay answered, and the one whose state the device supplied:
+         *  when both name the contingency just simulated, only its own elements and the bus voltages changed. */
+        private String lossReplayedFor;
+        private String deviceStateInjectedFor;
+        /** Shunt -> its bus, for the shunts a contingency shifts (LfShunt does not know its bus). Built once. */
+        private java.util.Map<com.powsybl.openloadflow.network.LfShunt, LfBus> shuntBus;
         /** Per bus num: does the realistic-voltage band apply (not fictitious, nominal V at or above the
          *  check's minimum)? Built once for {@link #realisticBandNetwork}. */
         private boolean[] realisticBandApplies;
@@ -478,6 +549,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             }
             if (GpuRestoreCheck.ENABLED) {
                 runState.get().restoreCheck.print();
+                System.err.println("RESTORE_CHECK targeted restores (cumulative this run): " + LAST_TARGETED_RESTORE_COUNT.get());
             }
             runState.remove();                               // pooled partition threads must not leak a run's state
             if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
@@ -983,6 +1055,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         double distributedActivePower = precomputed.distributedActivePower()
                 .getOrDefault(contingency.getId(), preDistributedActivePower);
         long tInj = System.nanoTime();
+        runState.get().deviceStateInjectedFor = contingency.getId();
         GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
                 runState.get().remap);
         long tUpd = System.nanoTime();

@@ -98,6 +98,21 @@ lives, gain, risk, and how to verify. Ordered by expected gain.
 - **Verify:** violation diff 0 + statuses on the 14,260 set, AND `OLF_GPU_SA_BUSDIFF=1` on slices (bus-level,
   1e-12 kV bar) including CPU-routed contingencies placed right after device-solved ones; OLF's own SA
   tests for the hook.
+- **DONE (2026-09-22).** OLF (`olf-local-patches` and `upstream-candidates`): the protected `restoreBaseState` hook,
+  `NetworkState.restore(buses, branches)` (listed elements + every HVDC, area, excluded slack bus and bus voltage),
+  and the empty-exclusion fast path of `setExcludedSlackBuses`. GPU: after a contingency the device solved AND
+  whose loss distribution the replay answered, restore the contingency's own buses (disabled, lost loads' /
+  generators' / shifted shunts' buses, closed over voltage and reactive-power control groups) and branches; any
+  other contingency gets the full restore. `-Dolf.gpu.sa.targetedRestore=false` for the A/B.
+  - **Gate** (`OLF_GPU_RESTORE_CHECK=1`, a field-level fingerprint of everything NetworkState restores against the
+    state a full restore gives): 14,256 targeted restores, 14,258 / 14,258 identical, cold and warm.
+  - **The gate's first run found an upstream OLF bug in the FULL restore:** `LoadDcState.restore` handed the saved
+    original-load disabling map itself to the load, so the next contingency wrote into the saved state — 3,828
+    restores left lost loads flagged, accumulating; `LfLoadAction` then skips a strategy's action on such a load.
+    Fixed with a regression test (OLF `529369aa8`, upstream-candidates).
+  - **Measured:** restore 14.9 s -> 1.37 s (the remaining floor is every bus's voltage and angle). Full run: GPU
+    25.5 s cold / 24.3 s warm vs CPU-8t 121.7 s (x4.78 / x5.01); statuses identical, 906,447 violations 0 differing,
+    distributed active power within 8e-7 MW; suite 273/0.
 
 ### L2 — host-side lost-power redistribution, already done on the device — 4.6 s
 
@@ -261,7 +276,7 @@ lives, gain, risk, and how to verify. Ordered by expected gain.
 2. **L6, L7, L4** (GPU repo) — small, independent, low risk. **DONE**: −4.1 s of the cold GPU run by JFR
    (precompute 16.3 -> 13.9 s). Full run after L2 + L10 + L6/L7/L4: GPU 38.7 s cold / 39.3 s warm vs CPU-8t
    125.9 s (x3.25; wall times move by several seconds between identical runs — read the per-method numbers).
-3. **L1** — OLF hook (upstreamable patch) + GPU-side partial restore; the most verification.
+3. **L1** — OLF hook (upstreamable patch) + GPU-side partial restore; the most verification. **DONE**: see L1.
 4. **L3** (GPU repo).
 5. **L9** (GPU repo) — last: it multiplies whatever is left, and profits from a smaller host loop.
 

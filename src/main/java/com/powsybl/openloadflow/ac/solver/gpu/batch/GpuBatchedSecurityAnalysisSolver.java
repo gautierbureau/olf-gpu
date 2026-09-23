@@ -332,9 +332,12 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 ? java.util.stream.IntStream.range(0, rlCurves.cvIdx().length / 5)
                         .map(g -> rlCurves.cvIdx()[g * 5 + 1]).toArray()
                 : null;
+        // Couplers whose DUMMY rows host a bus's power equations under the tree relocation: an island has to
+        // freeze those rows too (see GpuBatchQualification.islandedFrozen). Empty when the relocation is off.
+        Set<LfBranch> relocatedCouplers = GpuAcOuterLoopPacks.relocatedCouplerBranches(network, equationSystem);
         GpuBatchQualification.ScenarioPlan plan = GpuBatchQualification.planScenarios(contingencies, qualifications,
                 elementMapper, gpuData, equationSystem, dsSum, slackParticipates, dsParams, distrRhoControllers,
-                curvePRows);
+                relocatedCouplers, curvePRows);
         List<Integer> batchedIndices = plan.batchedIndices();
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
             System.err.println("PLAN batched=" + batchedIndices.size() + " of " + contingencies.size());

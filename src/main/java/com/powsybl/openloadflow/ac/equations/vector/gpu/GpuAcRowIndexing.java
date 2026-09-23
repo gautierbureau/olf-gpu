@@ -316,6 +316,13 @@ final class GpuAcRowIndexing {
         return Boolean.parseBoolean(System.getProperty("olf.gpu.ziTreeRelocation", "false"));
     }
 
+    /** {@code -Dolf.gpu.ziTreeRelocationMinCouplers=<n>}: relocate only a tree with at least n couplers. The numeric
+     *  row repair is EXACT on short chains (measured: 3 couplers at 2.8e-16) and loses longer ones (1.6e+04 at 7), so
+     *  a short tree keeps the proven path and only the trees that need the relocation take it. */
+    private static int ziTreeMinCouplers() {
+        return Integer.getInteger("olf.gpu.ziTreeRelocationMinCouplers", 4);
+    }
+
     /**
      * The COUPLER-TREE RELOCATION, the general form of the dead-end case below: per zero-impedance spanning tree,
      * every non-root bus's two power equations move onto its PARENT coupler's {@code DUMMY_P} / {@code DUMMY_Q}
@@ -377,6 +384,7 @@ final class GpuAcRowIndexing {
             // Breadth-first from the root: the edge that first reaches a bus is its parent, and the bus is that
             // edge's child. A tree, so every bus is reached once and the pairing is a permutation.
             java.util.Deque<LfBus> queue = new java.util.ArrayDeque<>();
+            java.util.List<Integer> childrenOfThisTree = new java.util.ArrayList<>();
             seen[rootNum] = true;
             queue.add(bus);
             while (!queue.isEmpty()) {
@@ -391,7 +399,17 @@ final class GpuAcRowIndexing {
                     seen[otherNum] = true;
                     parentEdgeOfBus[otherNum] = br.getNum();
                     childBusOfEdge[br.getNum()] = otherNum;
+                    childrenOfThisTree.add(otherNum);
                     queue.add(other);
+                }
+            }
+            if (System.getenv("OLF_GPU_ZITREE_TRACE") != null) {
+                System.err.println("ZITREE root=" + bus.getId() + " couplers=" + childrenOfThisTree.size());
+            }
+            if (childrenOfThisTree.size() < ziTreeMinCouplers()) {
+                for (int child : childrenOfThisTree) {        // short tree: the numeric repair handles it exactly
+                    childBusOfEdge[parentEdgeOfBus[child]] = -1;
+                    parentEdgeOfBus[child] = -1;
                 }
             }
         }

@@ -15,6 +15,7 @@ import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivation;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcActivationExtractor;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataCache;
+import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuEquationDump;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchHvdcAcEmulation;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContinuousPhase;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchIncrementalFlowControl;
@@ -448,8 +449,43 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private final GpuSolverInvalidation invalidation = new GpuSolverInvalidation();
 
     private GpuAcData cachedData;
+
+    /**
+     * Writes the GPU equation system and OLF's own dump of the same state, once, when {@code OLF_GPU_EQ_DUMP}
+     * names a path. Prefers a state that carries an RL pin (row mode 4): that is the assembly a rank-deficient
+     * Jacobian was traced to, and a dump of a healthy pass would not show it.
+     */
+    private void dumpEquationsOnce(int[] rowMode, int n) {
+        String path = System.getenv("OLF_GPU_EQ_DUMP");
+        if (equationsDumped || path == null || path.isEmpty() || cachedData == null) {
+            return;
+        }
+        boolean pinned = false;
+        for (int m : rowMode) {
+            pinned |= m >= 4;
+        }
+        if (!pinned && !"any".equals(System.getenv("OLF_GPU_EQ_DUMP_WHEN"))) {
+            return;                                          // wait for the pinned pass, the one under suspicion
+        }
+        try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(path))) {
+            GpuEquationDump.write(w, network, equationSystem, cachedData, rowMode);
+        } catch (java.io.IOException | RuntimeException e) {
+            LOGGER.warn("OLF_GPU_EQ_DUMP failed: {}", e.toString());
+        }
+        try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(path + ".olf"))) {
+            equationSystem.write(w, true);                   // the CPU side's own reading, inactive ones in [ ]
+        } catch (java.io.IOException | RuntimeException e) {
+            LOGGER.warn("OLF_GPU_EQ_DUMP (.olf) failed: {}", e.toString());
+        }
+        equationsDumped = true;
+        System.err.println("EQ_DUMP wrote " + path + " and " + path + ".olf (n=" + n + " pinned=" + pinned + ")");
+    }
+
     /** The remote gen-VC pin set the cached extraction's DISTR_Q weights were built from (see runImpl). */
     private java.util.BitSet pinnedAtExtraction;
+
+    /** OLF_GPU_EQ_DUMP: written once per run (see dumpEquationsOnce). */
+    private boolean equationsDumped;
 
     private GpuAcActivation activation;
 
@@ -745,6 +781,11 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 installRowCriteria(n);
                 criteriaDirty = false;
             }
+            // OLF_GPU_EQ_DUMP=<path>: the GPU equation system as TEXT, next to OLF's own write() of the same
+            // state (<path>.olf). OLF can print its equations, so a wrong one is readable there; ours only
+            // existed as index packs until now. Written once per run, at the FIRST solve carrying a pin
+            // (row mode 4) when there is one, since that is the assembly under suspicion.
+            dumpEquationsOnce(activation.rowMode(), n);
             // Since the batch-of-1 route (2026-09-08) modes 2 (slope-SVC) and 3 (continuous phase) solve
             // on-device. Mode 4 (a PINNED remote gen-VC member) used to be CPU-routed here because the pack's
             // DISTR_Q weights were the STATIC extraction-time qPct while OLF's pin renormalizes them; the

@@ -1765,3 +1765,42 @@ Fix direction: the zi family already carries a per-side alternate Q row for exac
 alternate was never computed for a suppressed remote member) or whether it is set but not SELECTED when
 the other side is at mode 4. Fix that, then re-measure the N=1000 window: the base should factor, and
 976 of 976 scenarios are already planned onto the device behind it.
+
+### THE DEFECT, read off our own equation dump (2026-09-23)
+
+`GpuEquationDump` (new, the counterpart of OLF's `EquationSystem#write`) prints one line per device row
+plus a per-coupler section with every row slot, `-1`s included. Run it with `OLF_GPU_EQ_DUMP=<path>`; it
+also writes OLF's own dump of the same state to `<path>.olf`. On the failing window it names the defect:
+
+```
+zi#18 branch=BUS-5997_COUPLER_1 b1=VL-5997_0 b2=VL-5997_1
+      pRow1=12561 qRow1=12562 pRow2=12563 qRow2=-1 dummyP=13170 dummyQ=13171 qAlt=[-1,-1]
+zi#36 branch=BUS-6112_COUPLER_1 ... qRow2=-1 dummyQ=13207 qAlt=[-1,-1]
+```
+
+Those are EXACTLY the two columns KLU's null direction pointed at. The `-dQ` coupling has no row
+(`qRow2 = -1`) and no alternate (`qAlt = [-1,-1]` — so it was never computed, not merely unselected),
+because that endpoint is a remote gen-VC member whose own Q row is canonically suppressed: its reactive
+balance lives in the group's DISTR_Q row.
+
+Why the base is healthy until the pin, which is what makes this conclusive:
+
+- BEFORE the pin the dummy's missing second coupling is supplied by the DISTR_Q **kind-3** term
+  (`dq[elem=13171 kind=3 w=qPct-1]`), so the column IS determined and the base converges.
+- AT the pin `updateReactiveKeys` zeroes that member's own key, so every DISTR_Q term on its row becomes
+  the exact negation of the member's own terms (`w = 0 - 1 = -1`): the dump shows `dq[k=106 elem=8699
+  w=-1]` against `cb#8699.q2` and `dq[k=107 elem=13171 kind=3 w=-1]` against `zi#18.q1(+dQ)`. The
+  compensation disappears, `DUMMY_Q` keeps a single `+1`, the column is free and the matrix loses rank.
+
+So the row layout is over-subscribed for such a group: one row (12562, `BUS_V(VL-5997_1)`) carries the
+relocated pilot reactive balance AND has to become the member's OWN Q balance when the member is pinned.
+OLF has no such problem because its rows are EQUATIONS — `BUS_TARGET_Q` and `DISTR_Q` each get their own.
+
+Fix options, in the order worth trying:
+1. Give the zi family the missing alternate: compute `ziQAlt` for a suppressed remote gen-VC member (its
+   reactive balance row), so `ziDynDest` can route `-dQ` there when the member is pinned. Smallest change,
+   uses machinery that already exists.
+2. Keep the DISTR_Q kind-3 compensation alive for the dummy when the member is pinned (i.e. gate only the
+   terms that duplicate the member's own q, not the coupler's).
+Either way the invariant to assert afterwards is the one the dump now checks: a coupler's dummy coupling
+is complete, or the missing side has an alternate that is live in every row mode.

@@ -1564,3 +1564,39 @@ Tests: the 7 `*Shunt*` SA tests pass driver off and on with a section actually m
   OLF does not implement; batching them would make the GPU SUCCEED where CPU throws.
 - **Never trust bench timings from a loaded box.** Sample load over several seconds first; the
   2026-07-20 row read ×0.74 purely from contention + thermal throttle.
+
+## Coupler-tree relocation: the remaining step is PER-SCENARIO, on the device (2026-09-23)
+
+`-Dolf.gpu.ziTreeRelocation` (off by default, `…MinCouplers` threshold) lets the BASE solve
+rte6515's busbar windows that the numeric row repair cannot hold — window [5000,6000) converges on
+device with the trees relocated. What it does NOT yet do is carry the SCENARIOS: a contingency that
+opens a relocated coupler deactivates that coupler's `ZERO_PHI`/`ZERO_V` (which the relocation moved
+onto the child's `PHI`/`V` rows) and pins its dummies with `DUMMY_TARGET` identities (which those
+rows no longer host), so the scenario's system is mis-placed.
+
+Rejected (measured, 2026-09-23): routing coupler-opening scenarios to the CPU. Busbar-section
+contingencies ARE coupler openings — the gate left **0 of 1000** scenarios on the device for that
+window, i.e. it deletes the workload it was meant to protect. The CPU is not the answer here.
+
+The answer is the mechanism the code already has twice: **both placements in the CSR pattern, the
+destination chosen per scenario.**
+
+| scenario has the coupler | child bus P/Q row | coupler `ZERO_PHI`/`ZERO_V` | coupler dummy rows |
+| --- | --- | --- | --- |
+| closed (the base) | `DUMMY_P/Q(coupler)` | child's `PHI`/`V` | — |
+| **opened** | the child's own `PHI`/`V` | deactivated | `DUMMY_TARGET` identity |
+
+One selector bit per (relocated coupler, scenario) — "is this coupler open here" — which the batch
+already knows. Precedents to copy, not to reinvent: dynamic Q-relocation (§11 — `qRowAlt`,
+`cbAltRow`, `hasRelocatable`: two candidate rows unioned into the pattern, the fill picking by row
+mode) and continuous phase control (`cbPcSide`, `collectCbPhasePattern`, `buildCbPhaseDest`: extra
+positions unioned, emission gated by a per-scenario mode). Both placements are permutations of the
+same equations, so mirroring OLF exactly is preserved.
+
+Open, noticed while measuring the rejected gate: in that experimental config (relocation at
+threshold 1, every scenario CPU-routed) the window failed the distributed-active-power assertion
+with a worst diff of 14.3599 MW — exactly the base's own distributed total, so one arm reported the
+base value where the other reported ~0. CPU-routed scenarios go through
+`super.runPostContingencySimulation` (`GpuBatchedAcSecurityAnalysis:1305`), and the default suite is
+green, so this is not a shipped defect — but it wants explaining before the fallback path is trusted
+for anything but the handful of scenarios it carries today.

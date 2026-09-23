@@ -1804,3 +1804,40 @@ Fix options, in the order worth trying:
    terms that duplicate the member's own q, not the coupler's).
 Either way the invariant to assert afterwards is the one the dump now checks: a coupler's dummy coupling
 is complete, or the missing side has an alternate that is live in every row mode.
+
+### THE FIX: 0 -> 900 of 1000 scenarios on the device (2026-09-23)
+
+The RL bookkeeping keys every pin on the entry's own V row, which is only valid when that bus's reactive
+balance actually lives there. On a PILOT that is one of its own controllers, pinned while a SIBLING
+controller still holds the voltage, it does not: the pilot's V row must keep `BUS_TARGET_V`, so
+`computeQRow` relocates its reactive balance to the free member's V row. Two entries then key off one row
+— the pilot's (whose pin marker is elsewhere) and the receiving member's (which reads a marker that is not
+its own) — and the device pinned one row twice while unpinning the row the balance lived on. Exactly 2
+buses on rte6515 have this shape (`VL-5997_0`, `VL-6112_0`); the other 3 relocated pilots have candidate
+tables (`qRowAlt = -2-group`) and their re-pick machinery is fine.
+
+Fix: the host marks such entries with `GpuAcOuterLoopPacks.RL_BASE_RELOCATED` (a base limit-type code, 6),
+and the device turns that into `RL_LIMIT_FROZEN` so the reactive-limits pass, the switch-back AND
+`seedRlModeFromState` all leave the row alone. The last one mattered: `RL_LIMIT_FROZEN` is non-zero, so
+without an explicit skip that seeder stamped mode 4 back onto the wrong row and undid the fix.
+
+| window [5000,6000), N=1000 | before | after |
+| --- | --- | --- |
+| scenarios on device | **0 / 1000** | **900 / 1000** |
+| statuses vs CPU | — | identical (974 CONVERGED, 2 MAX_ITERATION both arms) |
+| violations | 71538 vs 71533 (diff 5) | 71538 vs 71534 (diff 4) |
+| fallbacks | 2 | 1 |
+
+Suite: 288 tests, 0 failures. Checkstyle unchanged at 214.
+
+Still open on this window, in order:
+1. The base LF still falls back once (NaN). Understood now: the ALL-PINNED corner legitimately flips the
+   pilot's V identity to mode 4 (`updatePilotVeqBatch`), but in this TABLE-LESS group neither the pilot nor
+   the free member has an alternate dest (`qRowAlt = -1`), so the flipped row assembles EMPTY. Giving them
+   `qRowAlt = vCol` in `ExtractionColumns` was TRIED and REVERTED: it changes the alternate-dest selection
+   and the unioned pattern for every scenario, and took the window back to 0 / 1000. The alternate has to
+   be introduced without disturbing the batch — most likely by making the all-pinned flip route the q terms
+   itself, rather than by widening the static canonical encoding.
+2. `distributedActivePower`: 525 of 974 contingencies differ, worst 1.057 MW. Unchanged by this fix and
+   identical in the all-CPU-routed run, so it belongs to the base-fallback path, not to the batch.
+3. Violation diff 4 of 71538.

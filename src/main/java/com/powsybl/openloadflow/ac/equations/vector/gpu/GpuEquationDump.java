@@ -187,6 +187,34 @@ public final class GpuEquationDump {
                         e * 2 + 1 < ziQAlt.length ? ziQAlt[e * 2 + 1] : -1));
             }
         }
+
+        // The GROUPS behind the suppressed rows: a member's Q row is suppressed because its balance lives in
+        // the group's DISTR_Q row, and the pilot's own balance rides the FREE member's row. Whether that
+        // arrangement survives an RL pin depends on the candidate table (qRowAlt = -2-group) and on each
+        // member's alternate, so print them together with the reasons a table is skipped.
+        w.write("\n# remote generator voltage-control groups (pilot, members, rows, candidate table)\n");
+        ExtractionColumns cols = ExtractionColumns.of(network, es);
+        int[] qRow = cols.qRow();
+        int[] qRowAlt = cols.qRowAlt();
+        int[] vCol = cols.vCol();
+        for (LfBus bus : network.getBuses()) {
+            var gvc = bus.getGeneratorVoltageControl()
+                    .filter(c -> c.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN)
+                    .orElse(null);
+            if (gvc == null) {
+                continue;
+            }
+            List<LfBus> members = gvc.getMergedControllerElements();
+            StringBuilder sb = new StringBuilder();
+            for (LfBus m : members) {
+                sb.append(String.format(" %s[vCol=%d qRow=%d qRowAlt=%d enabled=%b]", m.getId(), vCol[m.getNum()],
+                        qRow[m.getNum()], qRowAlt[m.getNum()], gvc.isControllerEnabled(m)));
+            }
+            w.write(String.format("gvc pilot=%s controlled=%s local=%b pilotIsController=%b vCol=%d qRow=%d"
+                            + " qRowAlt=%d members=%d:%s%n",
+                    bus.getId(), gvc.getControlledBus().getId(), gvc.isLocalControl(), members.contains(bus),
+                    vCol[bus.getNum()], qRow[bus.getNum()], qRowAlt[bus.getNum()], members.size(), sb));
+        }
         w.flush();
     }
 }

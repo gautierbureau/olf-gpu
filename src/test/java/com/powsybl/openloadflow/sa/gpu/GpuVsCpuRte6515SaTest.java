@@ -87,12 +87,43 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
      * {@code OLF_GPU_SA_LOAD_TOP} the N biggest loads by P0 (default 50), so a first pass on the two new
      * kinds is a small, deliberately chosen slice rather than every injection in the network.
      */
+    /** Is this terminal part of the network OLF actually SOLVES: connected, with a bus view bus, in
+     *  the MAIN connected and synchronous component? An element that fails this is not in OLF's
+     *  LfNetwork, so a contingency on it produces no result on EITHER arm - the harness used to
+     *  create one anyway (one N-1 per IIDM branch), and every one cost a mapper rejection plus a
+     *  pointless CPU replay. Measured on network.xiidm's full branch scope: 709 of 11249, made of
+     *  384 half-open branches whose live side is outside the main component, 285 out of service at
+     *  both ends, 38 wholly outside it and 2 outside the main synchronous component. */
+    private static boolean inSolvedNetwork(com.powsybl.iidm.network.Terminal t) {
+        if (t == null || !t.isConnected()) {
+            return false;
+        }
+        com.powsybl.iidm.network.Bus bus = t.getBusView().getBus();
+        return bus != null
+                && bus.getConnectedComponent() != null
+                && bus.getConnectedComponent().getNum() == com.powsybl.iidm.network.ComponentConstants.MAIN_NUM
+                && bus.getSynchronousComponent() != null
+                && bus.getSynchronousComponent().getNum() == com.powsybl.iidm.network.ComponentConstants.MAIN_NUM;
+    }
+
+    /** Count what the filter removed, so a scope report says it out loud instead of hiding it in a
+     *  batching share. */
+    private static <T> List<T> keepSolved(List<T> all, java.util.function.Predicate<T> live, String kind) {
+        List<T> kept = all.stream().filter(live).toList();
+        if (kept.size() != all.size()) {
+            System.out.printf("  CTG_FILTER %s: %d of %d dropped (out of service, or outside the "
+                    + "network OLF solves - no result on either arm)%n", kind, all.size() - kept.size(), all.size());
+        }
+        return kept;
+    }
+
     private static List<Contingency> allBranchContingencies(Network network) {
         String kinds = System.getenv().getOrDefault("OLF_GPU_SA_CTG_KINDS", "branch");
         List<Contingency> all = new java.util.ArrayList<>();
         if (kinds.contains("branch")) {
-            network.getBranchStream().map(Branch::getId)
-                    .forEach(id -> all.add(new Contingency(id, new BranchContingency(id))));
+            keepSolved(network.getBranchStream().toList(),
+                    b -> inSolvedNetwork(b.getTerminal1()) || inSolvedNetwork(b.getTerminal2()), "branch")
+                    .forEach(b -> all.add(new Contingency(b.getId(), new BranchContingency(b.getId()))));
         }
         if (kinds.contains("generator")) {
             double minKv = Double.parseDouble(System.getenv().getOrDefault("OLF_GPU_SA_GEN_MIN_KV", "400"));
@@ -100,8 +131,9 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             network.getGeneratorStream().forEach(g ->
                     byKv.merge(g.getTerminal().getVoltageLevel().getNominalV(), 1L, Long::sum));
             System.out.printf("  generators by nominal voltage: %s%n", byKv);
-            List<String> gens = network.getGeneratorStream()
-                    .filter(g -> g.getTerminal().getVoltageLevel().getNominalV() >= minKv)
+            List<String> gens = keepSolved(network.getGeneratorStream()
+                    .filter(g -> g.getTerminal().getVoltageLevel().getNominalV() >= minKv).toList(),
+                    g -> inSolvedNetwork(g.getTerminal()), "generator").stream()
                     .map(com.powsybl.iidm.network.Generator::getId)
                     .toList();
             gens.forEach(id -> all.add(new Contingency(id, new com.powsybl.contingency.GeneratorContingency(id))));
@@ -109,9 +141,10 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         }
         if (kinds.contains("load")) {
             int top = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_LOAD_TOP", "50"));
-            List<String> loads = network.getLoadStream()
+            List<String> loads = keepSolved(network.getLoadStream()
                     .sorted(java.util.Comparator.comparingDouble(
-                            (com.powsybl.iidm.network.Load l) -> l.getP0()).reversed())
+                            (com.powsybl.iidm.network.Load l) -> l.getP0()).reversed()).toList(),
+                    l -> inSolvedNetwork(l.getTerminal()), "load").stream()
                     .limit(top)
                     .map(com.powsybl.iidm.network.Load::getId)
                     .toList();
@@ -122,19 +155,24 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // reaches different machinery: an HVDC line carries the AC-emulation freeze, an SVC is a
         // slope-controlled (mode-2) row, and a shunt moves the bus susceptance.
         if (kinds.contains("hvdc")) {
-            List<String> ids = network.getHvdcLineStream().map(com.powsybl.iidm.network.HvdcLine::getId).toList();
+            List<String> ids = keepSolved(network.getHvdcLineStream().toList(),
+                    h -> inSolvedNetwork(h.getConverterStation1().getTerminal())
+                            || inSolvedNetwork(h.getConverterStation2().getTerminal()), "hvdc").stream()
+                    .map(com.powsybl.iidm.network.HvdcLine::getId).toList();
             ids.forEach(id -> all.add(new Contingency(id, new com.powsybl.contingency.HvdcLineContingency(id))));
             System.out.printf("  + %d HVDC line contingencies%n", ids.size());
         }
         if (kinds.contains("svc")) {
-            List<String> ids = network.getStaticVarCompensatorStream()
+            List<String> ids = keepSolved(network.getStaticVarCompensatorStream().toList(),
+                    v -> inSolvedNetwork(v.getTerminal()), "svc").stream()
                     .map(com.powsybl.iidm.network.StaticVarCompensator::getId).toList();
             ids.forEach(id -> all.add(new Contingency(id,
                     new com.powsybl.contingency.StaticVarCompensatorContingency(id))));
             System.out.printf("  + %d static var compensator contingencies%n", ids.size());
         }
         if (kinds.contains("shunt")) {
-            List<String> ids = network.getShuntCompensatorStream()
+            List<String> ids = keepSolved(network.getShuntCompensatorStream().toList(),
+                    c -> inSolvedNetwork(c.getTerminal()), "shunt").stream()
                     .map(com.powsybl.iidm.network.ShuntCompensator::getId).toList();
             ids.forEach(id -> all.add(new Contingency(id,
                     new com.powsybl.contingency.ShuntCompensatorContingency(id))));
@@ -151,7 +189,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             System.out.printf("  + %d busbar section contingencies%n", ids.size());
         }
         if (kinds.contains("battery")) {
-            List<String> ids = network.getBatteryStream()
+            List<String> ids = keepSolved(network.getBatteryStream().toList(),
+                    b -> inSolvedNetwork(b.getTerminal()), "battery").stream()
                     .map(com.powsybl.iidm.network.Battery::getId).toList();
             ids.forEach(id -> all.add(new Contingency(id, new com.powsybl.contingency.BatteryContingency(id))));
             System.out.printf("  + %d battery contingencies%n", ids.size());

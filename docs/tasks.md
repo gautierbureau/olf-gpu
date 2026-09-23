@@ -1694,3 +1694,47 @@ cuDSS. An env-gated scan of `dVals` for non-finite entries, reporting the first 
 and the element that fills it, decides between "the factorization cannot handle this matrix" and "a
 fill wrote NaN into the matrix". Do that before any more ordering/mode sweeps: a NaN entering from a
 fill would explain every result above at once.
+
+### ROOT CAUSE LOCALIZED: the device's own RL pin assembles a rank-deficient system (2026-09-23)
+
+The base solve that fails is the FIRST fill carrying **mode-4 rows** — an RL-pinned remote gen-VC member.
+The per-fill census makes it unambiguous (`OLF_GPU_VALS_SCAN=1`):
+
+| fill | mode 0 | mode 1 | **mode 4** | dupRows | deadCols | tinyDiag |
+| --- | --- | --- | --- | --- | --- | --- |
+| healthy (outer=0) | 998 | 12230 | **0** | none | 0 | 0 |
+| **broken (outer=6)** | 982 | 12243 | **3** | none | 0 | 0 |
+
+The matrix is finite, well-scaled (maxAbs 4.07e+04), every diagonal present and above 1e-12, no duplicate
+row, no dead column — and unsolvable. **KLU, the CPU's own solver, cannot solve it either**
+(`GpuDumpedMatrixRankTest` on an `OLF_GPU_VALS_DUMP`: `||dx||inf = 3.97e+16`, residual ratio **7.59**
+where a real solve is ~1e-12). So cuDSS is NOT at fault and no solver configuration can help: the system
+we assemble is rank-deficient. Since OLF converges on this network on the CPU, OLF's matrix at the
+equivalent pass is not this matrix — **the defect is ours**.
+
+KLU's blown-up solution is a null-space direction, and its largest components name where the rank is
+lost: columns 13171, 13207, 13201, 13185, 13177, 13179, 13175, 13199, 13170, 13181 — all with
+`diag = ±1` and `F = 0`, i.e. DUMMY_P / DUMMY_Q columns — clustered around mode-4 row 12560 (the three
+pinned rows are 12560, 12588, 12834). That is the failure class `GpuAcActivationExtractor:129-146`
+already describes: the existence-keyed DISTR_Q kind-3 terms staying live ALONGSIDE the zero-impedance
+family's direct ±DUMMY_Q into the same row, the two cancelling and "leaving the coupler's DUMMY_Q in NO
+equation. 45 such columns at 2000 busbar sections, which is what collapsed batching above ~1000" — and
+N=1000 is exactly where this window breaks. The `pilotSelf` fix recorded there evidently does not cover
+this instance.
+
+Two further facts that matter for the fix:
+- The pin happens **on the device**, inside the RL kernels, so no host-side check sees it. The
+  pre-change Java produces a byte-identical broken fill (`modes=982,12243,0,0,3`), which is how we know
+  the `row mode 4` de-fallback did not cause this — it only stopped hiding it.
+- Ruled out by measurement, so do not re-sweep them: orderings AMD / ND / BTF-COLAMD, pivot types
+  auto / global column / global row with threshold 1.0, matching auto and off, NaN entering from a fill,
+  zero and tiny diagonals, duplicate rows, dead columns.
+
+Next: compare the device's assembled system at that pass against OLF's pinned system for the same
+group — specifically whether a pinned member's own Q row and its DISTR_Q row both carry, or both drop,
+the coupler's DUMMY_Q term. Fix the assembly; the factorization is innocent.
+
+Tools left in place for it: `OLF_GPU_VALS_SCAN=1` (per-fill census: finiteness, maxAbs, diagonals,
+duplicate rows, dead columns, mode histogram), `OLF_GPU_VALS_DUMP=<path>` (one-shot CSR+rhs+modes at the
+first mode-4 fill), `GpuDumpedMatrixRankTest` (factor it with KLU offline, print the null direction), and
+`OLF_GPU_PIVOT_TYPE` / `OLF_GPU_PIVOT_THRESHOLD` / a now-honoured `OLF_GPU_MATCHING_ALG` in robust mode.

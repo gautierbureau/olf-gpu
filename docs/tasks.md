@@ -1669,3 +1669,28 @@ Leads for the next session:
 - The single-solve linear-residual guard runs only at `it == 1`
   (`olf_gpu_nr_jni.cu:2678`), so a factorization that degrades later is unguarded on that path; the
   batched path's `lastSolveRatio` check is what actually caught this one, reported as a NaN.
+
+#### Hypotheses eliminated by measurement (same window, one run each)
+
+- **Fill-reducing ordering.** `OLF_GPU_REORDER_ALG=nd` → still NaN. Worth testing because the robust
+  config hard-codes AMD when the variable is unset, and this very file documents that "AMD IS NOT SAFE
+  WHEN THE SYSTEM HAS ZERO-IMPEDANCE BRANCHES" (AMD is symmetric and assumes a non-zero diagonal;
+  ZERO_V/ZERO_PHI sit on the DUMMY rows and carry v1−v2 / phi1−phi2, never their own dummy) — on a base
+  whose whole difficulty is retained switches. The reorder choice is NOT the cause here, but the robust
+  path bypassing `applyReorderAlg(config, hasZeroImpedance)` still looks wrong on its own terms.
+- **Robust mode engaging mid-run.** `-Dolf.gpu.batchMode=6` from the first context → still NaN. Tested
+  because cuDSS permits ONE analysis per data object and matching's permutation is value-dependent, so
+  a robust context built after a reject analyses mid-run values; the comment credits the full-scope
+  base's convergence to analysing the run's FIRST values. Not the cause either.
+
+So the robust single-matrix path (matching + pivoting, AMD or ND, from the start or after a reject)
+returns NaN on this structure, while the uniform batch returns a finite-but-wrong solve (ratio 1e7).
+Both orderings and both modes failing IDENTICALLY points away from the factorization and toward the
+matrix itself.
+
+**Next probe (needs a native rebuild, small).** The device checks `F` for finiteness in both paths
+(`olf_gpu_nr_jni.cu:2578`, `:5192`) but NOTHING checks `dVals` — the Jacobian — before handing it to
+cuDSS. An env-gated scan of `dVals` for non-finite entries, reporting the first offending (row, col)
+and the element that fills it, decides between "the factorization cannot handle this matrix" and "a
+fill wrote NaN into the matrix". Do that before any more ordering/mode sweeps: a NaN entering from a
+fill would explain every result above at once.

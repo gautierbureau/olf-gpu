@@ -5453,6 +5453,7 @@ struct BatchSolverContext {
     DeviceBuf dDqMemberTargetQ;                            // per member: its UNPINNED targetQ (generationTargetQ -
                                                            // loadTargetQ), the value AcTargetVector reads for every
                                                            // member the RL loop has not frozen
+    DeviceBuf dLinRp, dLinRm, dLinSc;                      // linear-solve guard scratch, reused across passes
     DeviceBuf dDqMemberTgtPtr;                             // per member (CSR): the members whose targetQ OLF sums
     DeviceBuf dDqMemberTgtPeer;                            // into its DISTR_Q target — its OWN control's elements,
                                                            // just itself for a control MERGED into the group
@@ -8769,6 +8770,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     };
     // LINE_SEARCH per-scenario backtracking state (mirrors the sequential solveContext: lastNorm2 /
     // haveLast, per pass — a phase re-entry retargets the system, voiding the step relation)
+    // Per scenario, the linear-solve residual ratio of this pass's LAST solve — scored only when the pass runs
+    // its Newton budget out (see the it == maxIter branch), so a healthy run never pays for it.
+    std::vector<double> lastSolveRatio(nS, 0.0);
     std::vector<double> lsLastSsq(lsMode == 1 ? nS : 0, 0.0);
     std::vector<char> lsHaveLast(lsMode == 1 ? nS : 0, 0);
     std::vector<double> hMu(lsMode == 1 ? nS : 0, -1.0);
@@ -8834,6 +8838,28 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 }
             } else {
                 CUDA_CHECK(cudaMemcpy(hF.data(), ctx->dF.p, nTot * sizeof(double), cudaMemcpyDeviceToHost));
+            }
+            // A pass about to report exhaustion: score its LAST linear solve (dVals/dDx/dB still hold it - the
+            // it == maxIter fill is F-only). A wrong factorization sits at 1e5..1e13, a sound solve at 1e-9, so this
+            // separates "OLF's budget, spent moving" from "the step was junk" without the per-pass cost of scoring
+            // every pass (measured: 34 s on a 19 s rte6515 run).
+            if (it == maxIter && !deviceFixedIter && nActive > 0) {
+                if (!ctx->dLinRp.p) {
+                    ctx->dLinRp.alloc((size_t) n * nS * sizeof(double));
+                    ctx->dLinRm.alloc((size_t) n * nS * sizeof(double));
+                    ctx->dLinSc.alloc((size_t) 3 * nS * sizeof(double));
+                }
+                linResidRowBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(),
+                        ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
+                        ctx->dB.as<double>(), ctx->dLinRp.as<double>(), ctx->dLinRm.as<double>());
+                linResidScoreBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dLinRp.as<double>(),
+                        ctx->dLinRm.as<double>(), ctx->dF.as<double>(), ctx->dLinSc.as<double>());
+                std::vector<double> hsc((size_t) 3 * nS);
+                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                CUDA_CHECK(cudaMemcpy(hsc.data(), ctx->dLinSc.p, (size_t) 3 * nS * sizeof(double), cudaMemcpyDeviceToHost));
+                for (int s2 = 0; s2 < nS; s2++) {
+                    lastSolveRatio[s2] = hsc[3 * s2 + 2];
+                }
             }
             bool anyChanged = false;
             // Inner-Newton convergence test. Default (convEpsPerEq <= 0): the device infinity-norm floor
@@ -8943,7 +8969,22 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     // exhausted iterations. With fixed inner iterations those are the K steps asked for, not OLF's
                     // Newton budget, so the scenario is REJECTED (the CPU replays it) rather than reported
                     // MAX_ITERATION_REACHED from the device.
-                    res.status[s] = checkOnlyAtEnd ? -2 : 1;
+                    //
+                    // A BAD LAST SOLVE is a reject, not OLF's answer: the pass ran its whole budget on steps the
+                    // factorization got wrong (rte6515 busbar sections [5000,6000): 885 scenarios sat at
+                    // ||F||inf ~ 56 for 30 iterations, reported as MAX_ITERATION_REACHED, 10,067 violations
+                    // against the CPU's 71,553). Reported max_iter has to mean "OLF's budget, spent on sound
+                    // steps". On the BATCH OF ONE (the base load flow) -3 takes the pivoted device retry first;
+                    // a chunk scenario replays on the CPU either way (needsCpuFallback covers both).
+                    bool badSolve = !(lastSolveRatio[s] <= LIN_SOLVE_FAIL_RATIO);
+                    if (badSolve) {
+                        traceReject(s, "max-iter-bad-solve", outer, it);
+                        if (std::getenv("OLF_GPU_REJECT_TRACE") != nullptr) {
+                            std::fprintf(stderr, "GPU_REJECT slot=%d reason=max-iter-bad-solve ratio=%.3e norm=%.6e\n",
+                                         s, lastSolveRatio[s], norm);
+                        }
+                    }
+                    res.status[s] = badSolve ? (nS == 1 ? -3 : -2) : (checkOnlyAtEnd ? -2 : 1);
                     active[s] = 0;
                     live[s] = 0;                             // did not converge: stop iterating its outer loops
                     nActive--;
@@ -9309,13 +9350,18 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         // on a row that the first refactorization then heals (deviceRemoteSingletonMemberPin:
         // ratio 0.17, dx 2e13, converged to 1e-12 all the same), while a wrong factorization stays
         // at 1e6..1e13 on every iteration.
+        // Pass 0 only: two n*nS kernels and a sync per pass cost 34 s of a 19 s rte6515 run (measured), and a
+        // factorization that goes wrong LATER - after a reactive-limits pin rewrites its rows - is caught by the
+        // no-progress reject at the end of that pass instead (see the it == maxIter branch).
         if (outer == 0 && it == 1 && !deviceFixedIter) {   // it=1: a flat-start first step may be garbage and heal (singleton-pin fixture); a wrong factorization never moves
-            DeviceBuf rp;
-            DeviceBuf rm;
-            DeviceBuf sc;
-            rp.alloc((size_t) n * nS * sizeof(double));
-            rm.alloc((size_t) n * nS * sizeof(double));
-            sc.alloc((size_t) 3 * nS * sizeof(double));
+            if (!ctx->dLinRp.p) {
+                ctx->dLinRp.alloc((size_t) n * nS * sizeof(double));
+                ctx->dLinRm.alloc((size_t) n * nS * sizeof(double));
+                ctx->dLinSc.alloc((size_t) 3 * nS * sizeof(double));
+            }
+            DeviceBuf& rp = ctx->dLinRp;
+            DeviceBuf& rm = ctx->dLinRm;
+            DeviceBuf& sc = ctx->dLinSc;
             linResidRowBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(),
                     ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
                     ctx->dB.as<double>(), rp.as<double>(), rm.as<double>());

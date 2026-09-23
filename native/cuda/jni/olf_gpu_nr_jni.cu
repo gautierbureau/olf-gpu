@@ -4394,6 +4394,26 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
     double dv2 = svcLim ? x[idx] * x[idx] - rlV2Base[i] : 0.0;   // see the remote branch: NaN base v² otherwise
     double liMin = rlMinQ[li] + (svcLim ? rlSvcBmin[i] * dv2 : 0.0);
     double liMax = rlMaxQ[li] + (svcLim ? rlSvcBmax[i] * dv2 : 0.0);
+    // A DEGENERATE reactive range (min >= max) belongs to a bus with no reactive capability of its
+    // own: the CONTROLLED (pilot) bus of a remote group carries a generator voltage control but no
+    // generators, so bus.getMinQ()/getMaxQ() are a sum over nothing and both are 0. OLF never checks
+    // such a bus - ReactiveLimitsOuterLoop walks getControllerElements(GENERATOR) and the pilot is
+    // not one of them - while here its q is the bus's own reactive balance, which for a pure transit
+    // node is zero up to rounding, so the pin test |q| > tol with tol = convEps (1e-12 under
+    // UNIFORM_CRITERIA) fires on the LAST BITS. Measured on network.xiidm: two runs of the same
+    // 2000-contingency window differed on 430 reactive-limit decisions and every one was such an
+    // entry, q at +-1.2e-12 against limits of exactly 0. The pin flips the pilot's row to its own Q
+    // balance for a pass, which perturbs the whole group, and once per ~2000 contingencies it
+    // changes a real downstream pin (8.178e-05 kV on the KUMB group).
+    // Only the PIN is refused, and only while the entry is unpinned: a pilot row that came in PINNED
+    // from the base seed still reaches the switch-back below and gives the group its voltage
+    // identity back. That matters - blocking both directions instead (an `else if` that swallowed
+    // the pinned branch) left network.xiidm/LKPH 0.32 kV off, because nothing restored the row.
+    if (liMin >= liMax && limitType[st] == 0) {
+        swLogPut(passSwitched[st], qBuf[idx] + rlLoadQ[li], liMin, liMax, x[idx], x[idx],
+                 rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]));
+        return;
+    }
     if ((mode[idx] == 0 || mode[idx] == 2) && limitType[st] == 0) {   // currently PV — check the reactive limits
         double q = qBuf[idx] + rlLoadQ[li];
         if (q < liMin - tol) {

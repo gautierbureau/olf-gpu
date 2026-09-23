@@ -48,7 +48,8 @@ final class GpuBatchQualification {
      * target, a P/Q value that produces a nonsensical islanded voltage/angle) gives the disconnected buses a
      * well-defined reported state — no garbage voltage, no spurious limit violations — without touching the main.
      */
-    static FrozenIsland islandedFrozen(EquationSystem<AcVariableType, AcEquationType> es, List<LfBus> islandedBuses) {
+    static FrozenIsland islandedFrozen(EquationSystem<AcVariableType, AcEquationType> es, List<LfBus> islandedBuses,
+                                       Set<LfBranch> relocatedCouplers) {
         if (islandedBuses.isEmpty()) {
             return new FrozenIsland(NO_FROZEN_ROWS, NO_FROZEN_TARGETS);
         }
@@ -58,6 +59,7 @@ final class GpuBatchQualification {
             addFrozenVarRow(es, bus.getNum(), AcVariableType.BUS_PHI, 0.0, rows, targets);   // angle 0
             addFrozenVarRow(es, bus.getNum(), AcVariableType.BUS_V, 1.0, rows, targets);     // voltage 1 pu
         }
+        freezeRelocatedCouplerRows(es, islandedBuses, relocatedCouplers, rows, targets);
         int[] outRows = new int[rows.size()];
         double[] outTargets = new double[targets.size()];
         for (int i = 0; i < outRows.length; i++) {
@@ -65,6 +67,40 @@ final class GpuBatchQualification {
             outTargets[i] = targets.get(i);
         }
         return new FrozenIsland(outRows, outTargets);
+    }
+
+    /**
+     * The extra identity rows an island needs under the COUPLER-TREE RELOCATION. Relocated, a coupler inside the
+     * island hosts the child bus's P/Q balance on its own {@code DUMMY_P} / {@code DUMMY_Q} rows, while the
+     * coupler's {@code ZERO_V} / {@code ZERO_PHI} moved onto that bus's V / PHI rows — which the freeze above turns
+     * into identities, erasing them. Freezing the coupler's dummy rows as well makes EVERY row of the island an
+     * identity again, which is what an island wants (it has no equation left to satisfy): without it the child
+     * bus's power balance is stranded on a dummy row nobody pins, and the island cannot converge.
+     *
+     * <p>Only couplers with BOTH endpoints islanded are frozen here; the boundary coupler the contingency opened
+     * already has its dummy rows pinned by the chunk solver's zi-outage path. The set is empty when the relocation
+     * is off, so the default path keeps its exact row list (and with it {@code nActive}).
+     */
+    private static void freezeRelocatedCouplerRows(EquationSystem<AcVariableType, AcEquationType> es,
+                                                   List<LfBus> islandedBuses, Set<LfBranch> relocatedCouplers,
+                                                   List<Integer> rows, List<Double> targets) {
+        if (relocatedCouplers.isEmpty()) {
+            return;
+        }
+        Set<Integer> islandedNums = islandedBuses.stream().map(LfBus::getNum)
+                .collect(java.util.stream.Collectors.toSet());
+        Set<LfBranch> done = new java.util.HashSet<>();
+        for (LfBus bus : islandedBuses) {
+            for (LfBranch br : bus.getBranches()) {
+                if (relocatedCouplers.contains(br) && br.getBus1() != null && br.getBus2() != null
+                        && islandedNums.contains(br.getBus1().getNum())
+                        && islandedNums.contains(br.getBus2().getNum())
+                        && done.add(br)) {
+                    addFrozenVarRow(es, br.getNum(), AcVariableType.DUMMY_P, 0.0, rows, targets);
+                    addFrozenVarRow(es, br.getNum(), AcVariableType.DUMMY_Q, 0.0, rows, targets);
+                }
+            }
+        }
     }
 
     private static void addFrozenVarRow(EquationSystem<AcVariableType, AcEquationType> es, int busNum,
@@ -486,7 +522,7 @@ final class GpuBatchQualification {
             EquationSystem<AcVariableType, AcEquationType> es,
             double dsSum, boolean slackParticipates,
             com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams, Set<LfBranch> distrRhoControllers,
-            int[] curvePRows) {
+            Set<LfBranch> relocatedCouplers, int[] curvePRows) {
         List<Integer> batchedIndices = new ArrayList<>();
         int[][] frozenRowsByIndex = new int[contingencies.size()][];     // islanded buses' variable rows, per contingency
         int[][] islandedNumsByIndex = new int[contingencies.size()][];   // islanded LfBus nums (result-building excludes them)
@@ -662,7 +698,7 @@ final class GpuBatchQualification {
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");
                         continue;
                     }
-                    FrozenIsland fi = islandedFrozen(es, q.islandedBuses());
+                    FrozenIsland fi = islandedFrozen(es, q.islandedBuses(), relocatedCouplers);
                     islandedNumsByIndex[i] = q.islandedBuses().stream().mapToInt(LfBus::getNum).toArray();
                     java.util.Set<Integer> frozenSet = java.util.Arrays.stream(fi.rows()).boxed()
                             .collect(java.util.stream.Collectors.toSet());
@@ -840,7 +876,7 @@ final class GpuBatchQualification {
                     com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:PAIR_CURVE_LINKAGE");
                     continue;                                // pair anchor shifts skew the curve linkage — CPU
                 }
-                FrozenIsland fi = islandedFrozen(es, q.islandedBuses());
+                FrozenIsland fi = islandedFrozen(es, q.islandedBuses(), relocatedCouplers);
                 // A contingency that BOTH splits the network AND strands a distributed-slack participant.
                 // OLF distributes over getSynchronousNetworks().getFirst(), so a stranded participant is
                 // not a participant at all: its share must not be computed, and the factors of the ones

@@ -27,15 +27,19 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The sequential (base-loadflow) GPU solver's DEVICE-BROKEN safety net. On this network — a
- * remote gen-VC group, a zero-impedance branch at member b2 feeding a LOADED far bus b8, plus a
- * Q-heavy area that pins g2 during the run — the FIRST device solve returns an exploded state
- * (phi ~1e22 at b8 while the SAME system solves fine on the CPU and in the batched context; the
- * device-side root cause is still open, reproducible here by removing the safety net). Before the
- * net, that state poisoned OLF's outer loops and the whole run failed MAX_ITERATION where the
- * stock CPU provider converges — as an SA base it failed the ENTIRE analysis. The net detects the
- * absurd residual, reruns the solve on the CPU Newton-Raphson, and later solves return to the
- * device: never wrong, only un-accelerated.
+ * A network that once needed the sequential solver's DEVICE-BROKEN safety net, and no longer does: a
+ * remote gen-VC group, a zero-impedance branch at member b2 feeding a LOADED far bus b8, and a Q-heavy
+ * area that PINS g2 during the run. The first device solve used to return an exploded state (phi ~1e22
+ * at b8) while the same system solved fine on the CPU, and the safety net reran it on the CPU — never
+ * wrong, only un-accelerated, with the device-side cause recorded as open.
+ *
+ * <p>The cause was the pin: OLF renormalizes a group's reactive keys ({@code updateReactiveKeys}) and
+ * fires NO equation-system event, so the cached extraction kept its PRE-pin static {@code qPct} and the
+ * device distributed reactive power with stale weights. {@code GpuNewtonRaphson} now watches the pinned
+ * set ({@code GpuAcActivationExtractor.pinnedRemoteMembers}) and re-extracts when it changes, so this
+ * run stays on the device from end to end. The test therefore asserts the OPPOSITE of what it once did —
+ * no fallback — and keeps the CPU comparison that is the real contract. {@code olf.gpu.cpuFallback=false}
+ * makes a regression LOUD: a device-broken state throws here instead of quietly reverting to the CPU.
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
@@ -84,18 +88,24 @@ class GpuSeqBaseFallbackTest {
     }
 
     @org.junit.jupiter.api.Test
-    void deviceBrokenSolveFallsBackAndMatchesCpu() {
+    void pinnedRemoteMemberRunStaysOnTheDevice() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         double[] cpu = run(ziMemberNetwork(), false);
         long fallbacksBefore = GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
-        double[] gpu = run(ziMemberNetwork(), true);
-        assertTrue(GpuNewtonRaphson.CPU_FALLBACK_COUNT.get() > fallbacksBefore,
-                "the device-broken first solve must trip the CPU-fallback safety net");
+        System.setProperty("olf.gpu.cpuFallback", "false");      // a device-broken state must THROW, not hide
+        double[] gpu;
+        try {
+            gpu = run(ziMemberNetwork(), true);
+        } finally {
+            System.clearProperty("olf.gpu.cpuFallback");
+        }
+        assertEquals(fallbacksBefore, GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
+                "the pinned remote gen-VC run must need no CPU fallback: its re-extracted qPct is OLF's");
         double worst = 0;
         for (int i = 0; i < cpu.length; i++) {
             worst = Math.max(worst, Math.abs(cpu[i] - gpu[i]));
         }
-        assertTrue(worst < 1e-10, "GPU-with-fallback must match the CPU engine run (worst |dV| = " + worst + " pu)");
+        assertTrue(worst < 1e-10, "the on-device run must match the CPU engine run (worst |dV| = " + worst + " pu)");
     }
 }

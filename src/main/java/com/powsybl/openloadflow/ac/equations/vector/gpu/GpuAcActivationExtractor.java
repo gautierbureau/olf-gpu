@@ -320,4 +320,31 @@ public final class GpuAcActivationExtractor {
         }
         return varType;
     }
+
+    /**
+     * The buses currently PINNED as remote generator-voltage-control members — exactly the set this extractor
+     * gives row mode 4 above. A pin is a REACTIVE-LIMIT event: OLF renormalizes the group's reactive keys
+     * ({@code updateReactiveKeys}) and fires NO equation-system event, so a cached extraction would keep its
+     * pre-pin {@code qPct} and the device would distribute reactive power with stale weights. A caller that
+     * caches an extraction across solves therefore watches this set and re-extracts when it changes: the fresh
+     * pack's {@code dqWeight} differs, which {@code GpuAcData.sameStructureAs} compares, so the structure is
+     * REBUILT with OLF's renormalized keys instead of being value-refreshed in place.
+     */
+    public static java.util.BitSet pinnedRemoteMembers(LfNetwork network,
+                                                      EquationSystem<AcVariableType, AcEquationType> es) {
+        java.util.BitSet pinned = new java.util.BitSet();
+        for (LfBus bus : network.getBuses()) {
+            if (GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_Q) < 0) {
+                continue;                                    // no active own-Q balance: not pinned
+            }
+            boolean pilotSelf = bus.getGeneratorVoltageControl()
+                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                    .map(c -> c.getControlledBus() == bus).orElse(false);
+            if (GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
+                    && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus))) {
+                pinned.set(bus.getNum());
+            }
+        }
+        return pinned;
+    }
 }

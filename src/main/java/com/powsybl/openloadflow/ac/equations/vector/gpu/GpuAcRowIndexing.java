@@ -219,6 +219,18 @@ final class GpuAcRowIndexing {
      *  collide on one row — one silently overwrites the other and the group's reactive sharing is
      *  left unsatisfied (measured on a richer-modelling RTE-like network: the device "converged"
      *  with a 0.45 pu DISTR_Q residual and OLF's own re-test then failed the load flow). */
+    /** As below, following the coupler-tree relocation: a relocated CHILD's DISTR_Q moves onto its parent
+     *  coupler's DUMMY_Q column, which its own reactive terms already carry (the kind-3 contribution), leaving
+     *  its V row free for that coupler's ZERO_V. */
+    static int distrQRow(EquationSystem<AcVariableType, AcEquationType> es, LfBus controller,
+                         int[] ziParentEdge, int[] dummyQCol) {
+        int parent = ziParentEdge == null ? -1 : ziParentEdge[controller.getNum()];
+        if (parent >= 0 && dummyQCol[parent] >= 0) {
+            return dummyQCol[parent];
+        }
+        return distrQRow(es, controller);
+    }
+
     static int distrQRow(EquationSystem<AcVariableType, AcEquationType> es, LfBus controller) {
         var vc = controller.getGeneratorVoltageControl()
                 .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
@@ -298,6 +310,132 @@ final class GpuAcRowIndexing {
         }
         return alt;
     }
+    /** {@code -Dolf.gpu.ziTreeRelocation=true}: relocate along the WHOLE coupler tree. Default false, which
+     *  relocates dead-end stubs only - the shape this generalises, and the only one validated end to end. */
+    static boolean ziTreeRelocationEnabled() {
+        return Boolean.parseBoolean(System.getProperty("olf.gpu.ziTreeRelocation", "false"));
+    }
+
+    /**
+     * The COUPLER-TREE RELOCATION, the general form of the dead-end case below: per zero-impedance spanning tree,
+     * every non-root bus's two power equations move onto its PARENT coupler's {@code DUMMY_P} / {@code DUMMY_Q}
+     * columns, and every coupler's {@code ZERO_PHI} / {@code ZERO_V} move onto its CHILD bus's {@code PHI} / {@code V}.
+     * Each of those four pairings has a structurally non-zero diagonal (+-1, or +-rho for ZERO_V), and the root keeps
+     * its own rows, whose diagonal comes from its impedant branches.
+     *
+     * <p>Why: with the stock pairing a coupler's two equations sit on its own dummy rows, which neither depends on,
+     * so a chain of couplers chains zero diagonals. The numeric row repair (hazRepairVals) rescues short chains but
+     * not longer ones: measured against OLF's own Newton on an all-generator chain, the device's FIRST step is exact
+     * at 3 couplers (2.8e-16) and wrong from 7 on (1.6e+04 at 7, 5.5e+04 at 15) - no zero diagonal, no tiny one and
+     * no empty column at that point, just an unpivoted factorization losing the chain. rte6515's busbar scope (366
+     * retained couplers) is the same defect at scale: the base load flow's factorization came back wrong
+     * (||J.dx-B||inf / ||F||inf = 2.1e+08) and every scenario of a 1000-section window had to fall back to the CPU.
+     *
+     * @return {@code parentEdgeOfBus[busNum]} = the coupler whose dummy columns host that bus's power equations
+     *         (-1 = a root, or not in a relocated tree), and {@code childBusOfEdge[branchNum]} = the bus whose
+     *         {@code PHI} / {@code V} host that coupler's zero equations (-1 = not relocated).
+     */
+    static int[][] ziTreeRelocation(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+                                    int[] phiCol, int[] vCol, int[] qRow, int[] dummyPCol, int[] dummyQCol) {
+        int nBuses = network.getBuses().size();
+        int nBranches = network.getBranches().size();
+        int[] parentEdgeOfBus = new int[nBuses];
+        int[] childBusOfEdge = new int[nBranches];
+        java.util.Arrays.fill(parentEdgeOfBus, -1);
+        java.util.Arrays.fill(childBusOfEdge, -1);
+        if (!ziTreeRelocationEnabled()) {                    // dead-end stubs only: the k=1 case, as before
+            for (LfBranch br : network.getBranches()) {
+                if (!br.isZeroImpedance(LoadFlowModel.AC)) {
+                    continue;
+                }
+                int side = ziDeadEndSide(es, br, phiCol, vCol, qRow);
+                if (side != 0) {
+                    LfBus stub = side == 1 ? br.getBus1() : br.getBus2();
+                    parentEdgeOfBus[stub.getNum()] = br.getNum();
+                    childBusOfEdge[br.getNum()] = stub.getNum();
+                }
+            }
+            return new int[][] {parentEdgeOfBus, childBusOfEdge};
+        }
+        // Adjacency over the zero-impedance SPANNING-TREE edges only: a non-tree coupler carries no reactive flow
+        // and no zero equations to relocate (OLF gives it no DUMMY variables either).
+        java.util.Map<Integer, java.util.List<LfBranch>> treeEdges = new java.util.HashMap<>();
+        for (LfBranch br : network.getBranches()) {
+            if (!br.isZeroImpedance(LoadFlowModel.AC) || !br.isSpanningTreeEdge(LoadFlowModel.AC)
+                    || br.getBus1() == null || br.getBus2() == null) {
+                continue;
+            }
+            treeEdges.computeIfAbsent(br.getBus1().getNum(), k -> new java.util.ArrayList<>()).add(br);
+            treeEdges.computeIfAbsent(br.getBus2().getNum(), k -> new java.util.ArrayList<>()).add(br);
+        }
+        boolean[] seen = new boolean[nBuses];
+        for (LfBus bus : network.getBuses()) {
+            int rootNum = bus.getNum();
+            if (seen[rootNum] || !treeEdges.containsKey(rootNum) || !hasImpedantBranch(bus)) {
+                continue;                                    // the root's own P row needs a real dP/dPHI diagonal
+            }
+            // Breadth-first from the root: the edge that first reaches a bus is its parent, and the bus is that
+            // edge's child. A tree, so every bus is reached once and the pairing is a permutation.
+            java.util.Deque<LfBus> queue = new java.util.ArrayDeque<>();
+            seen[rootNum] = true;
+            queue.add(bus);
+            while (!queue.isEmpty()) {
+                LfBus b = queue.poll();
+                for (LfBranch br : treeEdges.getOrDefault(b.getNum(), List.of())) {
+                    LfBus other = br.getBus1() == b ? br.getBus2() : br.getBus1();
+                    int otherNum = other.getNum();
+                    if (seen[otherNum] || phiCol[otherNum] < 0 || vCol[otherNum] < 0
+                            || row(es, otherNum, AcEquationType.BUS_TARGET_V) >= 0) {
+                        continue;                            // a pilot's V row is an identity: ZERO_V cannot take it
+                    }
+                    seen[otherNum] = true;
+                    parentEdgeOfBus[otherNum] = br.getNum();
+                    childBusOfEdge[br.getNum()] = otherNum;
+                    queue.add(other);
+                }
+            }
+        }
+        // A child's own rows must be FREE for the pairing: its V row takes its coupler's ZERO_V once its reactive
+        // equation moves to the parent's DUMMY_Q, so a bus whose V row hosts ANOTHER bus's reactive balance (a
+        // group's free controller carries the pilot's) or whose reactive equation is relocated elsewhere (a
+        // transformer- or shunt-controlled bus) keeps its rows, and the numeric repair covers it as before.
+        boolean[] hostsAnotherReactiveRow = new boolean[nBuses];
+        for (int other = 0; other < nBuses; other++) {
+            if (qRow[other] < 0) {
+                continue;
+            }
+            for (int bn = 0; bn < nBuses; bn++) {
+                if (bn != other && qRow[other] == vCol[bn]) {
+                    hostsAnotherReactiveRow[bn] = true;
+                }
+            }
+        }
+        for (LfBus bus : network.getBuses()) {
+            int bn = bus.getNum();
+            int parent = parentEdgeOfBus[bn];
+            if (parent < 0) {
+                continue;
+            }
+            boolean ownReactiveOnItsVRow = qRow[bn] == vCol[bn]
+                    || row(es, bn, AcEquationType.DISTR_Q) >= 0 && distrQRow(es, bus) == vCol[bn];
+            if (dummyPCol[parent] < 0 || dummyQCol[parent] < 0 || hostsAnotherReactiveRow[bn]
+                    || !ownReactiveOnItsVRow) {
+                parentEdgeOfBus[bn] = -1;
+                childBusOfEdge[parent] = -1;
+            }
+        }
+        return new int[][] {parentEdgeOfBus, childBusOfEdge};
+    }
+
+    private static boolean hasImpedantBranch(LfBus bus) {
+        for (LfBranch br : bus.getBranches()) {
+            if (!br.isZeroImpedance(LoadFlowModel.AC)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
      * Which side of a zero-impedance branch is a DEAD-END STUB that is SAFE to relocate: a bus whose
      * only branch is this one, with no shunt, no generator and no voltage-dependent load, and with a

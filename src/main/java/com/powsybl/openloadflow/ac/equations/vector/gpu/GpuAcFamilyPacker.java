@@ -53,6 +53,7 @@ final class GpuAcFamilyPacker {
     static Packs pack(LfNetwork network, ExtractionColumns columns,
                       Set<String> baseOpenBranchIds, Set<String> baseOpenZiBranchIds) {
         int[] phiCol = columns.phiCol();
+        int[] pRow = columns.pRow();       // a bus's P-balance row: its PHI column, or its parent coupler's DUMMY_P
         int[] vCol = columns.vCol();
         int[] branchRhoCol = columns.branchRhoCol();
         int[] branchAlphaCol = columns.branchAlphaCol();
@@ -129,19 +130,16 @@ final class GpuAcFamilyPacker {
                 }
                 ziNums.add(br.getNum());
                 ziIn.add(new double[] {PiModel.R2 / pi.getR1()});
-                // DEAD-END STUB relocation: the stub's P/Q balances move onto the DUMMY_P/DUMMY_Q
-                // rows, where ∓DUMMY_P / ∓DUMMY_Q is their diagonal, and ZERO_V/ZERO_PHI move onto
-                // the stub's own v/phi rows. Slots 4/5 stay the dummy COLUMNS (the kernel reads the
-                // dummy values through them), so the relocated ZERO_V/ZERO_PHI ROWS are derived
-                // natively from the side encoded in slot 10.
-                int deadSide = columns.ziDeadEnd()[br.getNum()];
-                int p1Row = deadSide == 1 ? dpRow : phiCol[b1n];
-                int q1Row = deadSide == 1 ? dqRow : qRow[b1n];
-                int p2Row = deadSide == 2 ? dpRow : phiCol[b2n];
-                int q2Row = deadSide == 2 ? dqRow : qRow[b2n];
-                ziIdx.add(new int[] {p1Row, q1Row, p2Row, q2Row, dpRow, dqRow,
+                // COUPLER-TREE relocation (the dead-end stub is its k=1 case): the CHILD bus's P/Q balances move
+                // onto this coupler's DUMMY_P/DUMMY_Q rows, where ∓DUMMY_P / ∓DUMMY_Q is their diagonal, and
+                // ZERO_V/ZERO_PHI move onto the child's own v/phi rows. Slots 4/5 stay the dummy COLUMNS (the kernel
+                // reads the dummy values through them), so the relocated ZERO_V/ZERO_PHI ROWS are derived natively
+                // from the child side encoded in slot 10 — the same encoding the stub case used.
+                int child = columns.ziChildBus()[br.getNum()];
+                int childSide = child == b1n ? 1 : (child == b2n ? 2 : 0);
+                ziIdx.add(new int[] {pRow[b1n], qRow[b1n], pRow[b2n], qRow[b2n], dpRow, dqRow,
                     vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n],
-                    (br.isSpanningTreeEdge(LoadFlowModel.AC) ? 1 : 0) | (deadSide << 1)});
+                    (br.isSpanningTreeEdge(LoadFlowModel.AC) ? 1 : 0) | (childSide << 1)});
                 ziQAlt.add(new int[] {qRowAlt[b1n], qRowAlt[b2n]});
                 continue;
             }
@@ -158,7 +156,7 @@ final class GpuAcFamilyPacker {
                 // Prow = bus PHI col; Qrow = qRow[bus] (its V col normally, the controlling
                 // transformer's rho col when this bus is voltage-controlled). a1col/r1col carry the
                 // branch's own control columns, -1 when not derived (then those scatter rows skip).
-                cbIdx.add(new int[] {ph1, qRow[b1.getNum()], ph2, qRow[b2.getNum()],
+                cbIdx.add(new int[] {pRow[b1.getNum()], qRow[b1.getNum()], pRow[b2.getNum()], qRow[b2.getNum()],
                     ph1, v1, ph2, v2, a1col, r1col,
                     qRowAlt[b1.getNum()], qRowAlt[b2.getNum()]});    // [10],[11]: alternate Q rows (dyn reloc)
                 // CONTINUOUS phase control (CONTROLLER mode, LOCAL): the controlled side whose P-flow is
@@ -182,14 +180,14 @@ final class GpuAcFamilyPacker {
                 obElemOf[br.getNum()] = obIn.size();
                 obIn.add(new double[] {pi.getY(), pi.getKsi(), pi.getG1(), pi.getB1(), pi.getG2(), pi.getB2(), pi.getR1()});
                 obIdx.add(new int[] {-1, -1,
-                    phiCol[b2.getNum()], qRow[b2.getNum()],
+                    pRow[b2.getNum()], qRow[b2.getNum()],
                     -1, vCol[b2.getNum()]});
                 obQAlt.add(new int[] {-1, qRowAlt[b2.getNum()]});
             } else if (b1 != null) {                       // side 2 open: p1/q1 at bus1, variable v1
                 obElemOf[br.getNum()] = obIn.size();
                 obIn.add(new double[] {pi.getY(), pi.getKsi(), pi.getG1(), pi.getB1(), pi.getG2(), pi.getB2(), pi.getR1()});
                 obIdx.add(new int[] {
-                    phiCol[b1.getNum()], qRow[b1.getNum()],
+                    pRow[b1.getNum()], qRow[b1.getNum()],
                     -1, -1,
                     vCol[b1.getNum()], -1});
                 obQAlt.add(new int[] {qRowAlt[b1.getNum()], -1});
@@ -218,7 +216,7 @@ final class GpuAcFamilyPacker {
                 baseOpenCb.add(cbIn.size());
                 cbIn.add(new double[] {pi.getY(), pi.getG1(), pi.getG2(), pi.getB1(), pi.getB2(),
                     pi.getKsi(), pi.getR1(), pi.getA1()});
-                cbIdx.add(new int[] {ph1, qRow[b1.getNum()], ph2, qRow[b2.getNum()],
+                cbIdx.add(new int[] {pRow[b1.getNum()], qRow[b1.getNum()], pRow[b2.getNum()], qRow[b2.getNum()],
                     ph1, v1, ph2, v2, -1, -1,                // no control columns on a disabled branch
                     qRowAlt[b1.getNum()], qRowAlt[b2.getNum()]});    // [10],[11]: alternate Q rows (dyn reloc)
                 cbPcSide.add(-1);                            // EVERY cb element needs its entry: this list
@@ -279,7 +277,7 @@ final class GpuAcFamilyPacker {
                 shElemOf[bus.getNum()] = shIn.size();
                 shIn.add(new double[] {sh.getG(), sh.getB()});
                 shIdx.add(new int[] {
-                    phiCol[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], -1,
+                    pRow[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], -1,
                     qRowAlt[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
             });
             // Voltage-CONTROLLING shunt: its susceptance b is a SHUNT_B state variable (bRow >= 0, idx 3), so the
@@ -288,7 +286,7 @@ final class GpuAcFamilyPacker {
             bus.getControllerShunt().ifPresent(sh -> {
                 shIn.add(new double[] {sh.getG(), sh.getB()});
                 shIdx.add(new int[] {
-                    phiCol[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], shuntBCol[sh.getNum()],
+                    pRow[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], shuntBCol[sh.getNum()],
                     qRowAlt[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
             });
             // SVC stand-by shunt (StandbyAutomaton b0): a permanent fixed susceptance the SVC injects
@@ -297,10 +295,10 @@ final class GpuAcFamilyPacker {
             bus.getSvcShunt().ifPresent(sh -> {
                 shIn.add(new double[] {sh.getG(), sh.getB()});
                 shIdx.add(new int[] {
-                    phiCol[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], -1,
+                    pRow[bus.getNum()], qRow[bus.getNum()], vCol[bus.getNum()], -1,
                     qRowAlt[bus.getNum()]});                 // [4]: alternate Q row (dyn reloc)
             });
-            packLoadModels(bus, phiCol, qRow, vCol, vdlIn, vdlIdx);
+            packLoadModels(bus, pRow, qRow, vCol, vdlIn, vdlIdx);
         }
 
         List<double[]> hvIn = new ArrayList<>();
@@ -312,10 +310,12 @@ final class GpuAcFamilyPacker {
             double k = hvdc.getAcEmulationControl().getDroop() * 180 / Math.PI;
             int ph1 = phiCol[hvdc.getBus1().getNum()];
             int ph2 = phiCol[hvdc.getBus2().getNum()];
+            int p1 = pRow[hvdc.getBus1().getNum()];
+            int p2 = pRow[hvdc.getBus2().getNum()];
             hvIn.add(new double[] {hvdc.getAcEmulationControl().getP0(), k,
                 hvdc.getConverterStation1().getLossFactor() / 100, hvdc.getConverterStation2().getLossFactor() / 100,
                 hvdc.getR()});
-            hvIdx.add(new int[] {ph1, ph2, ph1, ph2});
+            hvIdx.add(new int[] {p1, p2, ph1, ph2});      // [0],[1] = the two P ROWS; [2],[3] = the PHI columns
         }
 
         return new Packs(cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx, ziIn, ziIdx, ziNums,
@@ -326,7 +326,7 @@ final class GpuAcFamilyPacker {
     /** Voltage-dependent load model (ZIP/exponential): one vdl entry per NON-CONSTANT exp term,
      *  f = c_n * target * V^n added to the bus P/Q row with the derivative on the own-V column —
      *  exactly OLF's AbstractLoadModelEquationTerm (the n = 0 part lives in the target vector). */
-    private static void packLoadModels(com.powsybl.openloadflow.network.LfBus bus, int[] phiCol, int[] qRow, int[] vCol,
+    private static void packLoadModels(com.powsybl.openloadflow.network.LfBus bus, int[] pRow, int[] qRow, int[] vCol,
                                        List<double[]> vdlIn, List<int[]> vdlIdx) {
         for (com.powsybl.openloadflow.network.LfLoad load : bus.getLoads()) {
             var lm = load.getLoadModel().orElse(null);
@@ -339,7 +339,7 @@ final class GpuAcFamilyPacker {
                 throw new com.powsybl.commons.PowsyblException("GPU AC solver: load model on controller-shunt bus "
                         + bus.getId() + " (dynamic Q-relocation) not supported");
             }
-            if (qRow[bus.getNum()] < 0 || phiCol[bus.getNum()] < 0 || vCol[bus.getNum()] < 0) {
+            if (qRow[bus.getNum()] < 0 || pRow[bus.getNum()] < 0 || vCol[bus.getNum()] < 0) {
                 // a suppressed/relocated Q row (e.g. a REMOTE-VC controller bus: qRow == -1) has no
                 // static slot for the vdl term — a -1 row would be an OOB read in buildStructure
                 throw new com.powsybl.commons.PowsyblException("GPU AC solver: load model on bus "
@@ -351,7 +351,7 @@ final class GpuAcFamilyPacker {
             for (var t : lm.getExpTermsP()) {
                 if (t.n() != 0) {
                     vdlIn.add(new double[] {t.c(), t.n(), load.getTargetP()});
-                    vdlIdx.add(new int[] {phiCol[bus.getNum()], vCol[bus.getNum()]});
+                    vdlIdx.add(new int[] {pRow[bus.getNum()], vCol[bus.getNum()]});
                 }
             }
             for (var t : lm.getExpTermsQ()) {

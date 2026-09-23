@@ -1635,3 +1635,37 @@ The two real blockers, both in the base LF, both before any contingency runs:
    renormalize keys there — the same staleness may exist per scenario. Not yet investigated.
 2. **A NaN** on the first base attempt once the reactive-limits loop engages on a switch-heavy base.
    Next up.
+
+### The remaining blocker, characterized (2026-09-23)
+
+`OLF_GPU_LIN_RESID=1` on the N=1000 window separates the two candidate explanations, and it is NOT a
+diverging Newton. Three base solves run in sequence (all `slot=0`, n=13228):
+
+| solve | first-iteration `‖J·dx−F‖/‖F‖` | `‖dx‖inf` | `‖F‖inf` at entry |
+| --- | --- | --- | --- |
+| A | 8.6e-09 → 1.2e-13 over 3 iters | 11 → 1e-2 | 40.6 (flat start) |
+| B | 1.2e-11 | 3.2e-03 | 3.3e-03 |
+| **C** | **6.7e+08** | **7.7e+13** | **1.73 (a sound state)** |
+
+Solve C enters from a reasonable state and its FIRST linear solve is wrong by eight orders of
+magnitude; every later iteration stays at 1e7–1e9 with steps of 7.7e13, and the Newton then walks to
+NaN. So the matrix of that outer-loop pass does not factor unpivoted — the divergence and the NaN are
+CONSEQUENCES, and `MAX_VOLTAGE_CHANGE` clamping (which the RTE params set, and which both the
+sequential and batched paths do pass — `lsMode=2`, `maxVoltageChangeFactorBatch`) cannot save a step
+computed from a broken factorization.
+
+The batch's own divergence in the same log is also a consequence, not a second defect: with the base
+fallen back, every scenario starts from a flat state (`‖F‖inf = 5.555`, identical to 7 digits across
+all slots) instead of the converged base.
+
+Leads for the next session:
+- The worst rows repeat — 12582, 12914, 12933, 13005, 13181, all high indices of 13228, i.e. the
+  non-bus variable region (DUMMY_P/DUMMY_Q, BRANCH_RHO1, SHUNT_B). Resolve them to equations first:
+  a zero/tiny diagonal there is the unpivoted-LU failure this smells like, and the same family as the
+  coupler-tree work even though the tree relocation does not change this outcome.
+- What changes between the sound solve B and the broken solve C is one OUTER-LOOP pass. Identify
+  which loop acts there (PV→PQ, a reactive-limit pin, a tap or shunt move) — that names the row whose
+  mode/placement flips into the unfactorable shape.
+- The single-solve linear-residual guard runs only at `it == 1`
+  (`olf_gpu_nr_jni.cu:2678`), so a factorization that degrades later is unguarded on that path; the
+  batched path's `lastSolveRatio` check is what actually caught this one, reported as a NaN.

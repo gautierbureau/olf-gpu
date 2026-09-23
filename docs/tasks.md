@@ -1738,3 +1738,30 @@ Tools left in place for it: `OLF_GPU_VALS_SCAN=1` (per-fill census: finiteness, 
 duplicate rows, dead columns, mode histogram), `OLF_GPU_VALS_DUMP=<path>` (one-shot CSR+rhs+modes at the
 first mode-4 fill), `GpuDumpedMatrixRankTest` (factor it with KLU offline, print the null direction), and
 `OLF_GPU_PIVOT_TYPE` / `OLF_GPU_PIVOT_THRESHOLD` / a now-honoured `OLF_GPU_MATCHING_ALG` in robust mode.
+
+#### The wrong equation, named
+
+The null direction's dummy columns show the defect structurally:
+
+```
+col=13171  touchedBy=3  (row=12560 mode=4 v=+1) (row=12562 mode=1 v=+1) (row=13171 v=-1)
+col=13207  touchedBy=3  (row=12834 mode=4 v=+1) (row=12836 mode=1 v=+1) (row=13207 v=-1)
+```
+
+A zero-impedance branch's `DUMMY_Q` is determined by an OPPOSING pair: `+1` in one endpoint's Q row and
+`-1` in the other's (`fillZeroImpBatch`: `addAt(d2, dummyQ)` / `addAt(d3, -dummyQ)`). Here both real
+entries are `+1` (the `-1` on the diagonal is the numeric repair's donor, `nHaz=242`), so the
+opposite-side coupling is MISSING. That endpoint is a remote gen-VC member whose own Q row is canonically
+SUPPRESSED (`qRow = -1`, `ExtractionColumns:164-172`) because its reactive balance moved into the group's
+DISTR_Q row — so the `-dummyQ` dest resolved to `-1` (skip) and the term was dropped. The dummy is then
+undeterminable, and across the pinned cluster the matrix loses rank. The identical pattern at both pinned
+members (12560/12562/13171 and 12834/12836/13207) is a systematic assembly bug, not a numerical accident.
+
+OLF does not lose this: the suppressed member's reactive balance still exists inside the group's DISTR_Q
+equation. Our layout drops the coupling instead of ROUTING it to wherever that member's balance now lives.
+
+Fix direction: the zi family already carries a per-side alternate Q row for exactly this
+(`ziQAlt`, `ziDynDest`), so the question to answer first is whether `ziQAlt` is `-1` for such a bus (the
+alternate was never computed for a suppressed remote member) or whether it is set but not SELECTED when
+the other side is at mode 4. Fix that, then re-measure the N=1000 window: the base should factor, and
+976 of 976 scenarios are already planned onto the device behind it.

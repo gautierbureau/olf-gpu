@@ -163,5 +163,25 @@ class GpuDumpedMatrixRankTest {
             System.out.printf("  row/col=%d dx=%.6e mode=%d rowEntries=%d diag=%.6e F=%.6e%n",
                     r, sol[r], d.mode()[r], entries, diag, d.f()[r]);
         }
+        // WHICH equations touch those columns, and with what values: a variable whose only appearances
+        // CANCEL is in no equation at all, which is the documented DISTR_Q-against-DUMMY_Q failure. Print
+        // each suspect column as the list of (row, mode, value) that write into it, plus the column's sum.
+        System.out.println("columns of the null direction, by the rows that touch them:");
+        for (int i = 0; i < Math.min(4, n); i++) {
+            int c = byMag[i];
+            StringBuilder sb = new StringBuilder();
+            double sum = 0;
+            int touching = 0;
+            for (int r = 0; r < n; r++) {
+                for (int k = d.rowPtr()[r]; k < d.rowPtr()[r + 1]; k++) {
+                    if (d.colIdx()[k] == c && d.vals()[k] != 0.0) {
+                        sb.append(String.format(" (row=%d mode=%d v=%.6g)", r, d.mode()[r], d.vals()[k]));
+                        sum += d.vals()[k];
+                        touching++;
+                    }
+                }
+            }
+            System.out.printf("  col=%d touchedBy=%d colSum=%.6e%s%n", c, touching, sum, sb);
+        }
     }
 }

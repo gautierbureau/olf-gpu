@@ -4221,6 +4221,10 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
 // type 5 alone, because a bus whose voltage control is off is not one of its controllers at all.
 #define RL_LIMIT_FROZEN 5
 
+// on-device reactive-limit decision log (OLF_GPU_SW_LOG): capacity in records, width in doubles
+#define SW_LOG_CAP 1048576
+#define SW_LOG_W 12
+
 __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenarios, int n, double tol, int maxSwitch,
                                     const int* rlVrow, const double* rlMinQ, const double* rlMaxQ,
                                     const double* rlLoadQ, const double* rlVtarget, const double* qBuf,
@@ -4234,7 +4238,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                                     const char* rlIslanded,
                                     const double* rlInitTgtQ, double vLoRobust, double vHiRobust,
                                     int robust,
-                                    int noPinRow) {
+                                    int noPinRow, int swLogSlot, double* swLog, int* swLogCnt, int passId) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -4258,6 +4262,21 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
     // the per-entry svcB coefficients add the quadratic delta vs the packed base v^2 — exact for
     // the SVC part, identically zero on SVC-less buses.
     bool svcLim = rlSvcBmin[i] != 0.0 || rlSvcBmax[i] != 0.0;
+    // records one decision of the traced scenario; the branches below call it right where they act
+    // swLogSlot >= 0: every check of that ONE scenario. swLogSlot == -2 ("all"): only the checks
+    // that DECIDED something, for every scenario - the whole batch's decision set in ~40 records per
+    // scenario, which is what two runs have to be compared on when the contingency that flips is not
+    // known in advance.
+    auto swLogPut = [&](int act, double q, double mn, double mx, double vOwn, double cmpV, double vt) {
+        if (swLog == nullptr) return;
+        if (swLogSlot == -2 ? act == 0 : s != swLogSlot) return;
+        int k = atomicAdd(swLogCnt, 1);
+        if (k >= SW_LOG_CAP) return;
+        double* r = swLog + (size_t) k * SW_LOG_W;
+        r[0] = passId; r[1] = i; r[2] = act; r[3] = q; r[4] = mn; r[5] = mx;
+        r[6] = vOwn; r[7] = cmpV; r[8] = vt; r[9] = limitType[(size_t) s * nrl + i];
+        r[10] = switchCount[(size_t) s * nrl + i]; r[11] = s;
+    };
     if (rlRemote != nullptr && rlRemote[i]) {
         // REMOTE group member (plan-B3). Unpinned = its DISTR_Q row (mode 1, limitType 0);
         // pinned = mode 4 ("row hosts its own Q balance"). BOTH switch conditions test the
@@ -4359,6 +4378,12 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                 }
             }
         }
+        {
+            double qRec = qBuf[ridx] + rlLoadQ[rli];
+            double cmpRec = rlCmpVrow != nullptr && rlCmpVrow[i] >= 0 ? x[(size_t) s * n + rlCmpVrow[i]] : x[ridx];
+            swLogPut(passSwitched[rst], qRec, rliMin, rliMax, x[ridx], cmpRec,
+                     rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]));
+        }
         return;
     }
     int vrow = rlVrow[i];
@@ -4422,6 +4447,8 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             }
         }
     }
+    swLogPut(passSwitched[st], qBuf[idx] + rlLoadQ[li], liMin, liMax, x[idx], x[idx],
+             rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]));
 }
 
 // AcloadFlowEngine.isStateUnrealistic, on the states INSIDE the sweep. OLF re-checks after every
@@ -5391,6 +5418,7 @@ struct BatchSolverContext {
     // replaced (to undo the elected one), and the static election keys (controlled bus nominal V, the
     // bus's P row for its LIVE target P, the static target P when it has no row, the id rank).
     DeviceBuf dRlPassSwitched, dRlSavedMode;
+    DeviceBuf dSwLog, dSwLogCnt;                           // OLF_GPU_SW_LOG: on-DEVICE decision log for one slot
     DeviceBuf dRlElectNomV, dRlElectPRow, dRlElectStaticP, dRlElectIdRank;
     int hasRlElection = 0;
     // voltageRemoteControlRobustMode (OLF default TRUE): a REMOTE voltage controller whose OWN bus
@@ -5855,6 +5883,16 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
         }
         ctx->dRlSavedTarget.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(double));
         ctx->dRlPassSwitched.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(char));
+        // OLF_GPU_SW_LOG=<slot>: record one scenario's reactive-limit decisions ON THE DEVICE (one
+        // atomicAdd per decision, copied out once at the end) instead of reading the whole batch's
+        // buffers over PCIe every pass. The host-side traces cost hundreds of MB per pass, which
+        // serializes the stream and changes the very kernel scheduling whose effect is being traced:
+        // a run-to-run flip disappears while you watch it.
+        if (std::getenv("OLF_GPU_SW_LOG") != nullptr) {
+            ctx->dSwLog.alloc(SW_LOG_CAP * SW_LOG_W * sizeof(double));
+            ctx->dSwLogCnt.alloc(sizeof(int));
+            CUDA_CHECK(cudaMemset(ctx->dSwLogCnt.p, 0, sizeof(int)));
+        }
         ctx->dRlSavedMode.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(char));
         ctx->dRlLimitType.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(char));
         ctx->dRlSwitchCount.alloc(static_cast<size_t>(nrl) * nScenarios * sizeof(char));
@@ -7652,6 +7690,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                                              || ctx->nTvd > 0 || ctx->nSvd > 0 || ctx->nSvc > 0);
     const int RL_MAX_OUTER = maxOuterProductive > 0 ? maxOuterProductive : 20;   // OLF maxOuterLoopIterations
     const int RL_MAX_SWITCH = rlMaxSwitch > 0 ? rlMaxSwitch : 3;   // per-bus PV→PQ count cap (OLF maxPqPvSwitch)
+    static const char* swLogEnv = std::getenv("OLF_GPU_SW_LOG");
+    const int swLogSlot = swLogEnv == nullptr ? -1 : (std::string(swLogEnv) == "all" ? -2 : std::atoi(swLogEnv));
     // Outer-loop convergence tolerances (pu) — passed in so the device uses the SAME criteria as the CPU
     // loadflow that built the base case (maxReactivePowerMismatch / slackBusPMaxMismatch, per-unitized), NOT
     // hardcoded constants. With matching parameters and the same equations the GPU outer-loop fixed point
@@ -9246,8 +9286,29 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
 
     // ---- REACTIVE LIMITS pass: switch any local PV controller over its Q limit to PQ ----
     // Only scenarios (re)solved this pass that converged can have new violations.
+    // OLF_GPU_RL_SKIP=<slot>:<outer>: make ONE scenario's reactive-limit check not happen at ONE
+    // pass - the shape of the failure being chased (a converged scenario that returns with an
+    // unpinned controller past its limit, i.e. the trajectory one check short). It reproduces that
+    // state deliberately so the end-of-solve audit and any repair can be tested against it, the way
+    // OLF_GPU_RL_NOPIN_ROW reproduces a pin that never fires.
+    static const char* rlSkipEnv = std::getenv("OLF_GPU_RL_SKIP");
+    static int rlSkipSlot = -1;
+    static int rlSkipOuter = -1;
+    static bool rlSkipParsed = false;
+    if (!rlSkipParsed) {
+        rlSkipParsed = true;
+        if (rlSkipEnv != nullptr) {
+            const char* colon = std::strchr(rlSkipEnv, ':');
+            rlSkipSlot = std::atoi(rlSkipEnv);
+            rlSkipOuter = colon != nullptr ? std::atoi(colon + 1) : -1;
+        }
+    }
     for (int s = 0; s < nS; s++) {
         rlActive[s] = (wasActive[s] && res.status[s] == 0) ? 1 : 0;
+        if (rlSkipSlot >= 0 && s == rlSkipSlot && outer == rlSkipOuter && loopOrder[loopIdx] == LOOP_RL) {
+            std::fprintf(stderr, "RL_SKIP s=%d outer=%d (check suppressed)\n", s, outer);
+            rlActive[s] = 0;
+        }
     }
     CUDA_CHECK(cudaMemcpy(ctx->dRlActive.p, rlActive.data(), nS * sizeof(char), cudaMemcpyHostToDevice));
     // generator Q per controller = (Σ branch q + shunt q) at its BUS_V row + load Q. Compute the first
@@ -9501,7 +9562,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dRlSvcBmin.as<double>(), ctx->dRlSvcBmax.as<double>(), ctx->dRlV2Base.as<double>(),
                     ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
                     ctx->rlRobust ? ctx->dRlInitTgtQ.as<double>() : nullptr,
-                    ctx->rlVLoRobust, ctx->rlVHiRobust, ctx->rlRobust, rlNoPinRow);
+                    ctx->rlVLoRobust, ctx->rlVHiRobust, ctx->rlRobust, rlNoPinRow,
+                    swLogSlot, ctx->dSwLog.p ? ctx->dSwLog.as<double>() : nullptr,
+                    ctx->dSwLogCnt.p ? ctx->dSwLogCnt.as<int>() : nullptr, outer);
             if (ctx->nRlPilotSelf > 0) {
                 // a pilot that is its own controller pinned while a member of its group is not (or
                 // the reverse): the device has no row for OLF's layout of that state - CPU replay
@@ -9804,6 +9867,23 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     }
     }   // ---- end sequential outer-loop driver ----
 
+    if (ctx->dSwLog.p && (swLogSlot == -2 || (swLogSlot >= 0 && swLogSlot < nS))) {
+        int cnt = 0;
+        CUDA_CHECK(cudaMemcpy(&cnt, ctx->dSwLogCnt.p, sizeof(int), cudaMemcpyDeviceToHost));
+        int keep = cnt > SW_LOG_CAP ? SW_LOG_CAP : cnt;
+        std::vector<double> lg((size_t) keep * SW_LOG_W);
+        if (keep > 0) {
+            CUDA_CHECK(cudaMemcpy(lg.data(), ctx->dSwLog.p, lg.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        }
+        for (int k = 0; k < keep; k++) {
+            const double* r = lg.data() + (size_t) k * SW_LOG_W;
+            std::fprintf(stderr, "SW_LOG s=%d pass=%d entry=%d act=%d lt=%d sc=%d q=%.17e min=%.17e max=%.17e v=%.17e cmpV=%.17e vt=%.17e\n",
+                         (int) r[11], (int) r[0], (int) r[1], (int) r[2], (int) r[9], (int) r[10],
+                         r[3], r[4], r[5], r[6], r[7], r[8]);
+        }
+        std::fprintf(stderr, "SW_LOG_END s=%d records=%d (cap %d)\n", swLogSlot, cnt, SW_LOG_CAP);
+        CUDA_CHECK(cudaMemset(ctx->dSwLogCnt.p, 0, sizeof(int)));
+    }
     // ---- OLF_GPU_RL_AUDIT=<pu threshold>: audit the FINAL state against the reactive-limit rule
     //      itself. OLF's outer loop ends only after a check found NOTHING to switch, so in OLF's
     //      answer every UNPINNED controller sits inside its reactive limits (within the switch
@@ -9835,6 +9915,76 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
                     ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), -1);
         }
+        // The audit's verdict comes from OLF's OWN check, not a second implementation of it: run the
+        // real reactiveLimitsBatch on the final state. It either changes nothing - the state IS the
+        // fixpoint the loop claimed - or it makes exactly the change the loop still owed, and then
+        // rlSwitched names the scenarios that were returned one check short. Running it on the real
+        // buffers is safe for the same reason: a fixpoint is a no-op.
+        if (useDynRlLimits) {                                // limits at the FINAL targets
+            rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
+                    ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
+                    ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
+                    ctx->dTarget.as<double>(),
+                    nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
+                    nRlQOv > 0 ? dRlQOvMinMax.as<double>() : nullptr,
+                    nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
+                    nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
+                    nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
+                    ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
+                    ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
+                    ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
+                    ctx->dRlLoadQDyn.as<double>(), -1);
+        }
+        CUDA_CHECK(cudaMemsetAsync(ctx->dRlPassSwitched.p, 0, static_cast<size_t>(ctx->nrl) * nS, ctx->stream));
+        CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitched.p, 0, nS, ctx->stream));
+        // The check writes pin state, row modes and row targets. The context is REUSED by the next
+        // chunk, so the audit stashes everything the kernel can touch and puts it back: an
+        // instrument that changes the next chunk's answer is not an instrument. dDx/dB are dead
+        // here (the solve is over) and are exactly n*nS wide, so they carry the two big ones.
+        CUDA_CHECK(cudaMemcpyAsync(ctx->dDx.p, ctx->dTarget.p, (size_t) n * nS * sizeof(double), cudaMemcpyDeviceToDevice, ctx->stream));
+        CUDA_CHECK(cudaMemcpyAsync(ctx->dB.p, ctx->dMode.p, (size_t) n * nS * sizeof(int), cudaMemcpyDeviceToDevice, ctx->stream));
+        std::vector<char> keepLt(static_cast<size_t>(ctx->nrl) * nS), keepSc(static_cast<size_t>(ctx->nrl) * nS), keepSm(static_cast<size_t>(ctx->nrl) * nS);
+        std::vector<double> keepSt(static_cast<size_t>(ctx->nrl) * nS);
+        CUDA_CHECK(cudaMemcpy(keepLt.data(), ctx->dRlLimitType.p, keepLt.size(), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(keepSc.data(), ctx->dRlSwitchCount.p, keepSc.size(), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(keepSm.data(), ctx->dRlSavedMode.p, keepSm.size(), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(keepSt.data(), ctx->dRlSavedTarget.p, keepSt.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        reactiveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(
+                ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
+                ctx->nrl, nS, n, REACTIVE_LIMIT_TOL, RL_MAX_SWITCH,
+                ctx->dRlVrow.as<int>(),
+                useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
+                useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
+                useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(),
+                ctx->dRlVtarget.as<double>(), ctx->dQbuf.as<double>(), ctx->dX.as<double>(), ctx->dRlActive.as<char>(),
+                ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
+                ctx->dRlLimitType.as<char>(), ctx->dRlSwitchCount.as<char>(), ctx->dRlSwitched.as<char>(),
+                ctx->dRlPassSwitched.as<char>(), ctx->dRlSavedMode.as<char>(),
+                nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
+                nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
+                ctx->dRowSlope.as<double>(), ctx->dRlSavedTarget.as<double>(), useDynRlLimits ? 1 : 0,
+                ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
+                ctx->nRlRemote > 0 ? ctx->dRlCmpVrow.as<int>() : nullptr,
+                ctx->dRlSvcBmin.as<double>(), ctx->dRlSvcBmax.as<double>(), ctx->dRlV2Base.as<double>(),
+                ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
+                ctx->rlRobust ? ctx->dRlInitTgtQ.as<double>() : nullptr,
+                ctx->rlVLoRobust, ctx->rlVHiRobust, ctx->rlRobust, -1,
+                swLogSlot, ctx->dSwLog.p ? ctx->dSwLog.as<double>() : nullptr,
+                ctx->dSwLogCnt.p ? ctx->dSwLogCnt.as<int>() : nullptr, 999999);
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        std::vector<char> aSw(nS), aPs(static_cast<size_t>(ctx->nrl) * nS);
+        CUDA_CHECK(cudaMemcpy(aSw.data(), ctx->dRlSwitched.p, nS, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(aPs.data(), ctx->dRlPassSwitched.p, aPs.size(), cudaMemcpyDeviceToHost));
+        std::vector<char> altPost(static_cast<size_t>(ctx->nrl) * nS);
+        CUDA_CHECK(cudaMemcpy(altPost.data(), ctx->dRlLimitType.p, altPost.size(), cudaMemcpyDeviceToHost));
+        // put every touched buffer back before anything else reads them
+        CUDA_CHECK(cudaMemcpyAsync(ctx->dTarget.p, ctx->dDx.p, (size_t) n * nS * sizeof(double), cudaMemcpyDeviceToDevice, ctx->stream));
+        CUDA_CHECK(cudaMemcpyAsync(ctx->dMode.p, ctx->dB.p, (size_t) n * nS * sizeof(int), cudaMemcpyDeviceToDevice, ctx->stream));
+        CUDA_CHECK(cudaMemcpy(ctx->dRlLimitType.p, keepLt.data(), keepLt.size(), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->dRlSwitchCount.p, keepSc.data(), keepSc.size(), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->dRlSavedMode.p, keepSm.data(), keepSm.size(), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->dRlSavedTarget.p, keepSt.data(), keepSt.size() * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitched.p, 0, nS, ctx->stream));
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         std::vector<double> aq(static_cast<size_t>(n) * nS), ax(static_cast<size_t>(n) * nS), alq(ctx->nrl);
         std::vector<char> alt(static_cast<size_t>(ctx->nrl) * nS), aisl;
@@ -9853,6 +10003,34 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         amx.resize(amn.size());
         CUDA_CHECK(cudaMemcpy(amn.data(), ctx->ncv > 0 ? ctx->dRlMinQDyn.p : ctx->dRlMinQ.p, amn.size() * sizeof(double), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(amx.data(), ctx->ncv > 0 ? ctx->dRlMaxQDyn.p : ctx->dRlMaxQ.p, amx.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        std::vector<int> acv(ctx->nrl, -1);
+        std::vector<double> avt(ctx->nrl, 0.0);
+        if (ctx->dRlCmpVrow.p) {
+            CUDA_CHECK(cudaMemcpy(acv.data(), ctx->dRlCmpVrow.p, acv.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        }
+        if (ctx->dRlVtarget.p) {
+            CUDA_CHECK(cudaMemcpy(avt.data(), ctx->dRlVtarget.p, avt.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        }
+        for (int s = 0; s < nS; s++) {
+            if (!allLive[s] || !aSw[s]) continue;
+            for (int i = 0; i < ctx->nrl; i++) {
+                size_t st = (size_t) s * ctx->nrl + i;
+                if (!aPs[st]) continue;
+                size_t li = ctx->ncv > 0 ? st : (size_t) i;
+                double cmpV = (acv[i] >= 0) ? ax[(size_t) s * n + acv[i]] : 0.0;
+                // act 1 = a pin this check owed, 2 = an unpin, 3 = a moved limit it owed
+                std::fprintf(stderr, "RL_OWED s=%d entry=%d vrow=%d act=%d ltBefore=%d ltAfter=%d q=%.15e min=%.15e max=%.15e v=%.15e cmpV=%.15e vt=%.15e margin=%.3e\n",
+                             s, i, avr[i], (int) aPs[st], (int) alt[st], (int) altPost[st],
+                             aq[(size_t) s * n + avr[i]] + alq[i], amn[li], amx[li],
+                             ax[(size_t) s * n + avr[i]], cmpV, avt[i], cmpV - avt[i]);
+                if (!auditDumped.empty() && !auditDumped[s]) {
+                    auditDumped[s] = 1;
+                    for (const std::string& r : auditLog[s]) {
+                        std::fprintf(stderr, "AUDIT_HIST s=%d | %s", s, r.c_str());
+                    }
+                }
+            }
+        }
         for (int s = 0; s < nS; s++) {
             if (!allLive[s]) continue;
             for (int i = 0; i < ctx->nrl; i++) {

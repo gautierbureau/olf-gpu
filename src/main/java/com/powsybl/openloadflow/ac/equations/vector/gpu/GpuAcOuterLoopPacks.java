@@ -418,6 +418,28 @@ public final class GpuAcOuterLoopPacks {
         }
         try {
         if (reactiveLimits) {                                   // empty pack when the RL outer loop is disabled
+            // KNOWN DEFECT, measured 2026-09-23, not yet fixed - read this before touching the
+            // predicate below. This enumeration is WIDER than OLF's: ReactiveLimitsOuterLoop walks
+            // getControllerElements(GENERATOR) and nothing else, while
+            // getGeneratorVoltageControl().isPresent() also answers yes on the CONTROLLED (pilot)
+            // bus of a remote group. A pilot with no generators of its own therefore enters as a
+            // local entry whose limits are a sum over ZERO generators - minQ = maxQ = 0 - and whose
+            // q is the bus's own reactive balance, which for a pure transit node is zero up to
+            // rounding. Against the reactive-limit tolerance (convEps under UNIFORM_CRITERIA, 1e-12
+            // in validation runs) such an entry pins MIN_Q or MAX_Q on the LAST BITS: two runs of
+            // the same 2000-contingency window of network.xiidm differed on 430 reactive-limit
+            // decisions and every single one was such an entry, q at +-1.2e-12 against limits of
+            // exactly 0 (7 buses: CQHT_0/1/3/5, HMDR_0, IZUM_0, KUNQ_3). That is where the device's
+            // run-to-run non-determinism comes from, and once per ~2000 contingencies it changes a
+            // real downstream pin (8.178e-05 kV on the KUMB group).
+            // Excluding them is NOT enough on its own: for a group whose voltage control is already
+            // OFF in the base case, this entry's pin/unpin is currently the ONLY thing that takes
+            // the pilot's row between its own Q balance and the group's voltage identity
+            // (updatePilotVeqBatch restores only rows IT flipped, and pilotRowAllPinnedBatch covers
+            // a pilot that is its own controller). Dropping the entry, or refusing to pin a
+            // degenerate range, both move LKPH by 0.32 kV - measured. The fix is to drive the
+            // pilot's row from the GROUP's control state (any member unpinned = voltage identity),
+            // and only then take these buses out of the pack.
             for (LfBus bus : network.getBuses()) {
                 int bn = bus.getNum();
                 boolean vActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_V) >= 0;
@@ -485,7 +507,10 @@ public final class GpuAcOuterLoopPacks {
                     if (System.getenv("OLF_GPU_RL_TRACE") != null) {
                         // entry -> bus, so a device pin can be named and lined up against OLF's RL_SWITCH
                         System.err.println("GPU_RL_ENTRY idx=" + (rlVrow.size() - 1) + " vRow=" + vCol[bn]
-                                + " bus=" + bus.getId());
+                                + " bus=" + bus.getId() + " minQ=" + minQ + " maxQ=" + maxQ
+                                + " loadQ=" + bus.getLoadTargetQ() + " basePv=" + basePv
+                                + " basePqCapable=" + basePqCapable + " vcEnabled=" + bus.isGeneratorVoltageControlEnabled()
+                                + " gens=" + bus.getGenerators().size());
                     }
                     rlMinQ.add(minQ);
                     rlMaxQ.add(maxQ);

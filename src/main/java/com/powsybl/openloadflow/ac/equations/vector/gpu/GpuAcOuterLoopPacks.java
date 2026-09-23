@@ -418,6 +418,17 @@ public final class GpuAcOuterLoopPacks {
         // compare row (both RL switch conditions test the pilot's V against the GROUP target — verified B0).
         // The kernel SKIPS remote entries until the B3 transition machinery lands; the whole-run scope gate
         // still routes remote-pinnable runs to the CPU, so these entries are structurally inert today.
+        // Rows that RECEIVE another bus's relocated reactive balance from a pilot with NO candidate table.
+        // A pilot whose table exists (qRowAlt = -2-group) has the mode-scan re-pick machinery, and its free
+        // member must stay dynamic — only the table-less shape is the one the RL bookkeeping cannot own.
+        boolean[] hostsRelocatedBalance = new boolean[vCol.length == 0 ? 0 : maxRow(vCol, columns.qRow()) + 1];
+        for (LfBus b : network.getBuses()) {
+            int q = columns.qRow()[b.getNum()];
+            if (q >= 0 && q != vCol[b.getNum()] && columns.qRowAlt()[b.getNum()] == -1
+                    && q < hostsRelocatedBalance.length) {
+                hostsRelocatedBalance[q] = true;
+            }
+        }
         List<Integer> rlVrow = new ArrayList<>();
         List<Double> rlMinQ = new ArrayList<>();
         List<Double> rlMaxQ = new ArrayList<>();
@@ -505,7 +516,7 @@ public final class GpuAcOuterLoopPacks {
                         rlTargetP.add(bus.getTargetP());
                         rlBusId.add(bus.getId());
                         rlInitTargetQ.add(initialGenerationTargetQ(bus));
-                        rlBaseQLimitType.add(qLimitTypeCode(bus));
+                        rlBaseQLimitType.add(relocatedPinCode(bus, bn, columns, hostsRelocatedBalance));
                     }
                     continue;                                  // never let a base-pinned remote member
                 }                                              // masquerade as a LOCAL basePqCapable entry
@@ -620,6 +631,44 @@ public final class GpuAcOuterLoopPacks {
     }
 
     /** {@code ReactiveLimitsOuterLoop.getInitialGenerationTargetQ}, verbatim. */
+    /**
+     * The {@code rlBaseQLimitType} code that means "this entry's pin bookkeeping row is NOT its own", so the
+     * device must leave the entry to OLF instead of pinning or unpinning a row it does not own. It is not one
+     * of OLF's {@code QLimitType}s — those are 1..4 — and the seeding kernel turns it into
+     * {@code RL_LIMIT_FROZEN} (keep it in step with {@code RL_BASE_RELOCATED} in olf_gpu_nr_jni.cu).
+     *
+     * <p>Two shapes need it, both on a PILOT that is one of its own controllers while a SIBLING controller
+     * still holds the voltage. The pilot's own V row must keep {@code BUS_TARGET_V}, so {@code computeQRow}
+     * relocates its reactive balance to the free member's V row. Then (a) the pilot's own mode-4 marker is on
+     * that other row, so the seeding cannot see its base pin at its V row, and (b) the bus whose V row
+     * RECEIVES the balance reads a mode-4 marker that is not its own and concludes it is pinned itself.
+     * Before this, (a) made the device pin the pilot's V row a SECOND time — destroying {@code BUS_TARGET_V}
+     * and putting mode 4 on a row no q term is routed to — and (b) made it UNPIN the row the pilot's balance
+     * lives on. The result was an empty row and a rank-deficient base that no ordering, pivot type or
+     * matching could solve (KLU could not solve it either), on rte6515's busbar windows above ~1000 sections.
+     */
+    static final byte RL_BASE_RELOCATED = 6;
+
+    private static int maxRow(int[] a, int[] b) {
+        int m = 0;
+        for (int v : a) {
+            m = Math.max(m, v);
+        }
+        for (int v : b) {
+            m = Math.max(m, v);
+        }
+        return m;
+    }
+
+    /** OLF's base limit type, or {@link #RL_BASE_RELOCATED} when this entry does not own its V row's pin. */
+    private static byte relocatedPinCode(LfBus bus, int bn, ExtractionColumns columns, boolean[] hostsRelocated) {
+        int qr = columns.qRow()[bn];
+        int vr = columns.vCol()[bn];
+        boolean pinLivesElsewhere = qr >= 0 && qr != vr && columns.qRowAlt()[bn] == -1;
+        boolean rowHoldsAnothersBalance = vr >= 0 && vr < hostsRelocated.length && hostsRelocated[vr];
+        return pinLivesElsewhere || rowHoldsAnothersBalance ? RL_BASE_RELOCATED : qLimitTypeCode(bus);
+    }
+
     static byte qLimitTypeCode(LfBus bus) {
         return bus.getQLimitType().map(t -> switch (t) {
             case MIN_Q -> (byte) 1;

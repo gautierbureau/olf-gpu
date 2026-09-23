@@ -3817,6 +3817,15 @@ __device__ inline double rlTargetOf(int nRlVtOv, const int* rlVtOvSlotIdx, const
     return baseTarget;
 }
 
+// Reactive-limit limit types: 0 unpinned, 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V, 4 MAX_REALISTIC_V, and
+// 5 = frozen by OLF's GeneratorVoltageControlManager. 6 arrives only as a BASE code
+// (GpuAcOuterLoopPacks.RL_BASE_RELOCATED, keep the two in step): "this entry does not own the pin on its V
+// row", which the seeding turns into 5 so the pass leaves that row alone. The DISTR_Q key renormalization drops any member
+// whose type is non-zero, which is why the freeze needs one; the reactive-limits pass must then LEAVE
+// type 5 alone, because a bus whose voltage control is off is not one of its controllers at all.
+#define RL_LIMIT_FROZEN 5
+#define RL_BASE_RELOCATED 6
+
 __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* rlVrow,
                                      const double* rlVtarget, const char* rlMonitored,
                                      const int* baseMode, const double* x, char* limitType,
@@ -3847,6 +3856,14 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
             double tgt = target[idx];
             limitType[st] = olfKind != 0 ? olfKind
                     : (fabs(tgt - (rlMaxQb[i] - rlLoadQb[i])) <= fabs(tgt - (rlMinQb[i] - rlLoadQb[i])) ? 2 : 1);
+        }
+        if (olfKind == RL_BASE_RELOCATED) {
+            // This entry does NOT own the pin on its V row (GpuAcOuterLoopPacks.RL_BASE_RELOCATED): either its
+            // own reactive balance was relocated off that row, or the row carries ANOTHER bus's relocated
+            // balance. Both happen on a pilot that is one of its own controllers while a sibling still holds
+            // the voltage. Freeze the entry: the reactive-limits pass and the switch-back both key on the V
+            // row, and pinning or unpinning a row this entry does not own left the Jacobian rank-deficient.
+            limitType[st] = RL_LIMIT_FROZEN;
         }
         return;
     }
@@ -4446,11 +4463,6 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
     switched[s] = 1;                                         // this outer loop is UNSTABLE for s
 }
 
-// Reactive-limit limit types: 0 unpinned, 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V, 4 MAX_REALISTIC_V, and
-// 5 = frozen by OLF's GeneratorVoltageControlManager. The DISTR_Q key renormalization drops any member
-// whose type is non-zero, which is why the freeze needs one; the reactive-limits pass must then LEAVE
-// type 5 alone, because a bus whose voltage control is off is not one of its controllers at all.
-#define RL_LIMIT_FROZEN 5
 
 // on-device reactive-limit decision log (OLF_GPU_SW_LOG): capacity in records, width in doubles
 #define SW_LOG_CAP 1048576
@@ -5342,12 +5354,18 @@ __global__ void rlPilotSelfMixedGate(int nrl, int nScenarios, const char* rlRemo
 __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* rlVrow,
                                     const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
                                     const char* limitType, int* mode, double* target, int cvStride,
-                                    const char* rlRemote, double* savedTarget, char* savedMode) {
+                                    const char* rlRemote, double* savedTarget, char* savedMode,
+                                    const char* rlBaseLt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
     int s = tid / nrl;
     char lt = limitType[(size_t) s * nrl + i];
+    // An entry that does not OWN the pin on its V row must not have one stamped there: its balance lives on
+    // another row (or that row carries another bus's), and the row it does own was already set correctly by
+    // the base activation. RL_LIMIT_FROZEN alone is not enough to skip on, because the run-time freeze uses
+    // the same type on entries that DO own their row and must be restored here on a resumed solve.
+    if (rlBaseLt != nullptr && rlBaseLt[i] == RL_BASE_RELOCATED) return;
     if (lt != 0) {
         size_t idx = (size_t) s * n + rlVrow[i];
         size_t li = cvStride ? (size_t) s * nrl + i : (size_t) i;
@@ -8145,7 +8163,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(),
                     ctx->dMode.as<int>(), ctx->dTarget.as<double>(), useDynRlLimits ? 1 : 0,
                     ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
-                    ctx->dRlSavedTarget.as<double>(), ctx->dRlSavedMode.as<char>());
+                    ctx->dRlSavedTarget.as<double>(), ctx->dRlSavedMode.as<char>(),
+                    ctx->hasRlBaseLt ? ctx->dRlBaseLimitType.as<char>() : nullptr);
         } else {
             CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitchCount.p, 0, static_cast<size_t>(ctx->nrl) * nS * sizeof(char), ctx->stream));
             if (ctx->nrl > 0) {                              // seed the pinned limit for base-PQ controllers (else all PV)

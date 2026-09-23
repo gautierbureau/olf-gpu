@@ -448,6 +448,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     private final GpuSolverInvalidation invalidation = new GpuSolverInvalidation();
 
     private GpuAcData cachedData;
+    /** The remote gen-VC pin set the cached extraction's DISTR_Q weights were built from (see runImpl). */
+    private java.util.BitSet pinnedAtExtraction;
 
     private GpuAcActivation activation;
 
@@ -669,6 +671,15 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         try {
             long t0 = System.nanoTime();
             boolean rebuilt = false;
+            // A REACTIVE-LIMIT PIN of a remote gen-VC member (row mode 4) renormalizes OLF's DISTR_Q reactive
+            // keys (updateReactiveKeys) and fires NO equation-system event, so the cached extraction would keep
+            // its pre-pin static qPct. Watch the pinned SET and re-extract when it changes: the fresh pack's
+            // dqWeight differs, sameStructureAs compares it, so the structure is rebuilt with OLF's renormalized
+            // keys. That is what used to make every post-pin solve CPU-routed; it now solves on the device.
+            java.util.BitSet pinnedNow = GpuAcActivationExtractor.pinnedRemoteMembers(network, equationSystem);
+            if (!pinnedNow.equals(pinnedAtExtraction)) {
+                invalidation.structureDirty = true;
+            }
             if (invalidation.structureDirty) {
                 // validate + build, through the shared cache (the batched SA reuses this extraction)
                 // The RUN's outer-loop set and its DistributedSlack settings — the device must not
@@ -720,6 +731,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     tablesDirty = true;
                     VALUE_REFRESHES.incrementAndGet();
                 }
+                pinnedAtExtraction = pinnedNow;           // the packs now carry this pin set's qPct
                 invalidation.structureDirty = false;
                 invalidation.activationDirty = true;
             }
@@ -733,17 +745,15 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 installRowCriteria(n);
                 criteriaDirty = false;
             }
-            // Since the batch-of-1 route (2026-09-08) modes 2 (slope-SVC) and 3 (continuous phase)
-            // solve on-device — the batch kernels carry them. Mode 4 (a PINNED remote gen-VC member,
-            // a base reactive-limit switch during this engine run) stays DELIBERATELY CPU-routed:
-            // the pack's DISTR_Q weights are STATIC extraction-time qPct, and OLF's pin renormalizes
-            // them (updateReactiveKeys) with NO equation-system event — solving on-device would use
-            // stale weights. Every post-pin solve of the run runs on the CPU (correct, just
-            // un-accelerated).
+            // Since the batch-of-1 route (2026-09-08) modes 2 (slope-SVC) and 3 (continuous phase) solve
+            // on-device. Mode 4 (a PINNED remote gen-VC member) used to be CPU-routed here because the pack's
+            // DISTR_Q weights were the STATIC extraction-time qPct while OLF's pin renormalizes them; the
+            // pinned-set watch above re-extracts on a pin, so the weights are OLF's and the solve stays on
+            // the device. Anything ABOVE the modes the kernels implement is still a fallback, not a guess.
             for (int mode : activation.rowMode()) {
-                if (mode >= 4) {
+                if (mode > 4) {
                     throw new UnsupportedOperationException(
-                            "row mode " + mode + " (pinned remote gen-VC member) uses stale static qPct on-device");
+                            "row mode " + mode + " is not implemented on-device");
                 }
             }
             double[] target = activation.applyTargets(targetVector.getArray());

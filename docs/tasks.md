@@ -1600,3 +1600,38 @@ base value where the other reported ~0. CPU-routed scenarios go through
 `super.runPostContingencySimulation` (`GpuBatchedAcSecurityAnalysis:1305`), and the default suite is
 green, so this is not a shipped defect — but it wants explaining before the fallback path is trusted
 for anything but the handful of scenarios it carries today.
+
+## The busbar windows: what actually blocks them (corrected, 2026-09-23)
+
+**A window's BASE network depends on its contingency set.** OLF retains the switches a contingency
+needs, so more busbar-section contingencies ⇒ more retained switches ⇒ more zero-impedance couplers
+in the base LfNetwork. Measured on window [5000,6000) with `OLF_GPU_SA_MAX_CTG`:
+
+| slice | on device |
+| --- | --- |
+| 200 | 193 / 200 |
+| 600 | 578 / 600 |
+| 1000 | **0 / 1000** — the BASE LF itself falls back |
+
+So "window [5000,6000) fails" is not a property of those contingencies: it is the switch count their
+union retains. Every windowed measurement has to name its slice, and a slice that passes says nothing
+about the full window. This also corrects an earlier attribution here: the coupler-tree relocation was
+credited with fixing this window's base. It does not — the N=1000 base fails IDENTICALLY with
+`-Dolf.gpu.ziTreeRelocation` on and off (same two fallbacks, same order). The relocation's real result
+stands on its own (the coupler chain's first Newton step, exact at 7/15 couplers where the numeric
+repair is wrong), but it is not this window's blocker.
+
+The two real blockers, both in the base LF, both before any contingency runs:
+
+1. **`row mode 4 (pinned remote gen-VC member) uses stale static qPct on-device`** — an explicit
+   `UnsupportedOperationException`, i.e. a deliberate CPU route, not a numeric failure. A reactive-limit
+   pin makes OLF renormalize the group's reactive keys (`updateReactiveKeys`) and fire NO
+   equation-system event, so the cached extraction kept its pre-pin `qPct`.
+   FIXED (this commit): `GpuAcActivationExtractor.pinnedRemoteMembers` exposes the pin SET, and
+   `GpuNewtonRaphson` re-extracts when it changes. The fresh pack's `dqWeight` differs, which
+   `GpuAcData.sameStructureAs` already compares, so the structure is REBUILT with OLF's renormalized
+   keys instead of being value-refreshed in place. The throw now only covers modes above 4.
+   Still open: the BATCHED path pins on-device (the RL kernels set mode 4 themselves) and cannot
+   renormalize keys there — the same staleness may exist per scenario. Not yet investigated.
+2. **A NaN** on the first base attempt once the reactive-limits loop engages on a switch-heavy base.
+   Next up.

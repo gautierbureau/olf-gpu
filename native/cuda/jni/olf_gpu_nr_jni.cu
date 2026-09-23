@@ -1548,6 +1548,13 @@ std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const in
     // A bus whose reactive balance was ROUTED ELSEWHERE (Qrow != its own V col) leaves that V col
     // carrying the v−target identity (PV / transformer / generator-pilot) or another power row that
     // no Q self-pair claims — claim it here. For an ordinary bus Qrow == V col, so this is a no-op.
+    // A bus's P row pairs with its PHI column - unless the coupler-tree relocation moved that balance onto its
+    // parent coupler's DUMMY_P column, where the row IS its own diagonal (the balance carries -DUMMY_P). The
+    // relocated PHI column is then claimed by that coupler's ZERO_PHI, in the zero-impedance loop below. Exactly
+    // the treatment the Q row already gets, where Qrow != V col means "relocated, self-pairs".
+    auto pairP = [&](int prow, int phcol) {
+        pairRc(prow, prow == phcol ? phcol : prow);
+    };
     auto claimMovedV = [&](int qrow, int vcol) {
         if (vcol >= 0 && qrow != vcol) {
             pairRc(vcol, vcol);
@@ -1555,8 +1562,8 @@ std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const in
     };
     for (int e = 0; e < ncb; e++) {                          // P1 Q1 P2 Q2 ph1 v1 ph2 v2 a1col r1col
         const int* ix = cbIdx + e * 12;
-        pairRc(ix[0], ix[4]);                                // P1 -> ph1
-        pairRc(ix[2], ix[6]);                                // P2 -> ph2
+        pairP(ix[0], ix[4]);                                 // P1 -> ph1 (or itself, relocated)
+        pairP(ix[2], ix[6]);                                 // P2 -> ph2 (or itself, relocated)
         // Q rows pair with their own stable index — its V col on an ordinary bus (Qrow==v col), the
         // controlling transformer's RHO col or a controller's DISTR_Q row on a voltage-controlled bus
         // (the extractor set Qrow to it). So the strong diagonal is dq/dv, dq/dr1 or the DISTR_Q diag.
@@ -1598,8 +1605,8 @@ std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const in
     }
     for (int e = 0; e < nhv; e++) {                          // P1 P2 ph1 ph2
         const int* ix = hvIdx + e * 4;
-        pairRc(ix[0], ix[2]);
-        pairRc(ix[1], ix[3]);
+        pairP(ix[0], ix[2]);
+        pairP(ix[1], ix[3]);
     }
     // DISTR_Q reactive-distribution rows sit on a controller's BUS_V row and self-pair: their strong
     // diagonal is that controller's own weighted dq/dV (qPct_k·∂q_Gk/∂V_Gk − ∂q_Gk/∂V_Gk). Each

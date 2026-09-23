@@ -13,11 +13,9 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.SingleEquation;
 import com.powsybl.openloadflow.equations.Variable;
-import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.VoltageControl;
 import com.powsybl.openloadflow.network.LfNetwork;
-import com.powsybl.openloadflow.network.LoadFlowModel;
 
 /**
  * Extracts what ACTIVATION decides — the per-row power-equation/identity mode, the
@@ -110,21 +108,12 @@ public final class GpuAcActivationExtractor {
         // fails loudly here instead of silently dropping a constraint.
         int[] dummyPCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.DUMMY_P);
         int[] dummyQCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.DUMMY_Q);
-        int[] stubBranchOfBus = new int[network.getBuses().size()];
-        int[] stubBusOfBranch = new int[nBranches];
-        java.util.Arrays.fill(stubBranchOfBus, -1);
-        java.util.Arrays.fill(stubBusOfBranch, -1);
-        for (LfBranch br : network.getBranches()) {
-            if (!br.isZeroImpedance(LoadFlowModel.AC)) {
-                continue;
-            }
-            int side = GpuAcRowIndexing.ziDeadEndSide(es, br, phiCol, vCol, qRow);
-            if (side != 0) {
-                LfBus stub = side == 1 ? br.getBus1() : br.getBus2();
-                stubBranchOfBus[stub.getNum()] = br.getNum();
-                stubBusOfBranch[br.getNum()] = stub.getNum();
-            }
-        }
+        // The coupler-tree relocation, from the same helper ExtractionColumns uses, so the scatter destinations and
+        // this target map name the same rows: a child bus's power equations on its parent coupler's dummy columns,
+        // that coupler's zero equations on the child's own PHI / V.
+        int[][] ziTree = GpuAcRowIndexing.ziTreeRelocation(network, es, phiCol, vCol, qRow, dummyPCol, dummyQCol);
+        int[] stubBranchOfBus = ziTree[0];
+        int[] stubBusOfBranch = ziTree[1];
         for (LfBus bus : network.getBuses()) {
             int stubBr = stubBranchOfBus[bus.getNum()];
             int p = GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_P);
@@ -173,7 +162,8 @@ public final class GpuAcActivationExtractor {
             if (e.getType() == AcEquationType.DISTR_Q) {
                 // the controller's BUS_V row — or, when the controller IS the group's controlled bus
                 // (its own row already carries the pilot's V identity), the FREE controller's row
-                int distrRow = GpuAcRowIndexing.distrQRow(es, network.getBus(e.getElementNum()));
+                int distrRow = GpuAcRowIndexing.distrQRow(es, network.getBus(e.getElementNum()),
+                        stubBranchOfBus, dummyQCol);
                 if (DISTR_Q_DUMP != null) {
                     LfBus cb = network.getBus(e.getElementNum());
                     if (cb.getId().startsWith(DISTR_Q_DUMP)) {

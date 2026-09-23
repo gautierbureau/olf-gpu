@@ -32,7 +32,13 @@ import java.util.List;
  */
 record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] branchAlphaCol,
                          int[] dummyPCol, int[] dummyQCol, int[] shuntBCol, int[] qRow, int[] qRowAlt,
-                         int[] qrPtr, int[] qrRows, int[] qrGroupOfPilot, int[] ziDeadEnd) {
+                         int[] qrPtr, int[] qrRows, int[] qrGroupOfPilot, int[] ziDeadEnd,
+                         /** Each bus's P-balance ROW: its own BUS_PHI column, or its parent coupler's DUMMY_P under
+                          *  the coupler-tree relocation (GpuAcRowIndexing#ziTreeRelocation). */
+                         int[] pRow,
+                         /** Per bus, the coupler whose dummy columns host its power equations (-1 = root/none), and
+                          *  per branch, the bus whose PHI/V host its zero equations (-1 = not relocated). */
+                         int[] ziParentEdge, int[] ziChildBus) {
 
     static ExtractionColumns of(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es) {
         // Cache each bus's BUS_PHI/BUS_V column once: a bus appears in several branches (degree ~3),
@@ -207,8 +213,32 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                 ziDeadEnd[br.getNum()] = GpuAcRowIndexing.ziDeadEndSide(es, br, phiCol, vCol, qRow);
             }
         }
+        // The coupler-tree relocation: a child bus's power equations move onto its parent coupler's dummy columns,
+        // so every row of a coupler chain keeps a structurally non-zero diagonal.
+        int[][] ziTree = GpuAcRowIndexing.ziTreeRelocation(network, es, phiCol, vCol, qRow, dummyPCol, dummyQCol);
+        int[] ziParentEdge = ziTree[0];
+        int[] ziChildBus = ziTree[1];
+        int[] pRow = phiCol.clone();
+        for (LfBus bus : network.getBuses()) {
+            int bn = bus.getNum();
+            int parent = ziParentEdge[bn];
+            if (parent < 0) {
+                continue;
+            }
+            pRow[bn] = dummyPCol[parent];
+            if (qRow[bn] == vCol[bn]) {                       // a DISTR_Q child moves through distrQRow instead
+                qRow[bn] = dummyQCol[parent];
+            }
+        }
+        for (int br = 0; br < nBranches; br++) {
+            int child = ziChildBus[br];
+            if (child >= 0 && ziParentEdge[child] != br) {
+                ziChildBus[br] = -1;                          // its child's relocation did not survive the check
+            }
+        }
         return new ExtractionColumns(phiCol, vCol, branchRhoCol, branchAlphaCol, dummyPCol, dummyQCol, shuntBCol, qRow, qRowAlt,
-                GpuAcArrays.toIntArray(qrPtr), GpuAcArrays.toIntArray(qrRows), qrGroupOfPilot, ziDeadEnd);
+                GpuAcArrays.toIntArray(qrPtr), GpuAcArrays.toIntArray(qrRows), qrGroupOfPilot, ziDeadEnd,
+                pRow, ziParentEdge, ziChildBus);
     }
 
 }

@@ -253,7 +253,7 @@ public final class GpuAcOuterLoopPacks {
         List<int[]> dq = new ArrayList<>();      // {elem, side, dqRow, kind, kMember, jMember} per DISTR_Q contribution
         List<Double> dqW = new ArrayList<>();    // weight per contribution
         buildDistrQContributions(network, es, columns.vCol(), family.cbElemOf(), family.shElemOf(),
-                family.obElemOf(), columns.dummyQCol(), dq, dqW, mt.memberIdxByBusNum());
+                family.obElemOf(), columns.dummyQCol(), columns.ziParentEdge(), dq, dqW, mt.memberIdxByBusNum());
         // dqKind: 0 = closed-branch q1/q2, 1 = shunt q, 2 = open-branch q,
         // 3 = zero-impedance DUMMY_Q (linear, elem holds the var column)
         int[] dqKind = new int[dq.size()];
@@ -482,7 +482,7 @@ public final class GpuAcOuterLoopPacks {
                                     + " bus=" + bus.getId() + " remote=" + (pilotSelf ? 2 : 1) + " pilotVRow=" + pilotV);
                         }
                         rlNominalV.add(vc.getControlledBus().getNominalV());
-                        rlPRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.phiCol()[bn] : -1);
+                        rlPRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.pRow()[bn] : -1);
                         rlTargetP.add(bus.getTargetP());
                         rlBusId.add(bus.getId());
                         rlInitTargetQ.add(initialGenerationTargetQ(bus));
@@ -532,7 +532,7 @@ public final class GpuAcOuterLoopPacks {
                     rlCmpVrow.add(vCol[bn]);                   // local: compare row = own row
                     rlBusNum.add(bn);
                     rlNominalV.add(bus.getGeneratorVoltageControl().map(c -> c.getControlledBus().getNominalV()).orElse(bus.getNominalV()));
-                    rlPRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.phiCol()[bn] : -1);
+                    rlPRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.pRow()[bn] : -1);
                     rlTargetP.add(bus.getTargetP());
                     rlBusId.add(bus.getId());
                     rlInitTargetQ.add(initialGenerationTargetQ(bus));
@@ -617,6 +617,7 @@ public final class GpuAcOuterLoopPacks {
     static DsPack distributedSlackPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                        ExtractionColumns columns, boolean distributedSlack, GpuDsParams dsParams) {
         int[] phiCol = columns.phiCol();
+        int[] pRow = columns.pRow();       // a DS target is written at the bus's P ROW, relocated under a coupler tree
         // Distributed-slack pack: the single slack/reference bus (BUS_TARGET_PHI active, BUS_TARGET_P
         // inactive — its P is free) provides the mismatch; every OTHER bus with participating generators
         // takes a share of it into its BUS_TARGET_P target. Default balance type PROPORTIONAL_TO_GENERATION_
@@ -662,7 +663,7 @@ public final class GpuAcOuterLoopPacks {
             }
             int bn = bus.getNum();
             if (GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_PHI) >= 0) {       // the slack/reference bus
-                dsSlackPhiRow = phiCol[bn];
+                dsSlackPhiRow = pRow[bn];
                 dsSlackTargetP = bus.getTargetP() - anchorOffset(bus, dsParams);   // the slack's ANCHOR target
                 dsSlackFactor = dsParams.busFactor(bus);
                 if (System.getenv("OLF_GPU_DS_GEN_TRACE") != null) {
@@ -717,7 +718,7 @@ public final class GpuAcOuterLoopPacks {
                 if (System.getenv("OLF_GPU_DS_TARGET_DUMP") != null) {
                     System.err.println("GPU_DS_BUS idx=" + dsPhiRow.size() + " bus=" + bus.getId());
                 }
-                dsPhiRow.add(phiCol[bn]);
+                dsPhiRow.add(pRow[bn]);
                 dsBusNum.add(bn);
                 dsFactorRaw.add(factor);
                 dsBaseTargetP.add(bus.getTargetP() - anchorOffset(bus, dsParams));   // the row's ANCHOR target
@@ -835,7 +836,7 @@ public final class GpuAcOuterLoopPacks {
      */
     private static void buildDistrQContributions(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                                  int[] vCol, int[] cbElemOf, int[] shElemOf, int[] obElemOf,
-                                                 int[] dummyQCol, List<int[]> out, List<Double> weights,
+                                                 int[] dummyQCol, int[] ziParentEdge, List<int[]> out, List<Double> weights,
                                                  java.util.Map<Integer, Integer> memberIdxByBusNum) {
         for (LfBus pilot : network.getBuses()) {
             GeneratorVoltageControl gvc = pilot.getGeneratorVoltageControl()
@@ -864,7 +865,7 @@ public final class GpuAcOuterLoopPacks {
                 if (gk == freeCtl || es.getEquation(gk.getNum(), AcEquationType.DISTR_Q).isEmpty()) {
                     continue;                                // the free controller carries the pilot's Q
                 }
-                int dqRow = GpuAcRowIndexing.distrQRow(es, gk);   // free-controller row when gk IS the pilot
+                int dqRow = GpuAcRowIndexing.distrQRow(es, gk, ziParentEdge, dummyQCol);
                 double qpk = gk.getRemoteControlReactivePercent();
                 int kIdx = memberIdxByBusNum.getOrDefault(gk.getNum(), -1);
                 for (LfBus gj : controllers) {

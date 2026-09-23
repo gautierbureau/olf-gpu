@@ -241,8 +241,15 @@ final class GpuBatchPrecomputer {
                 if (shunt != null) {
                     batch.add(BatchContingency.shunt(pc.getContingency().getId(), shunt));
                 } else {
-                    GpuBatchScopeCensus.record(composeRejectReason(branches, gens, loads, shifts, hvdcs, sideOpens,
-                            loadsBatchable));
+                    String rejectReason = composeRejectReason(branches, gens, loads, shifts, hvdcs, sideOpens,
+                            loadsBatchable);
+                    GpuBatchScopeCensus.record(rejectReason);
+                    if (System.getenv("OLF_GPU_REJECT_TRACE") != null) {
+                        // the census counts these by KIND; the id is what lets a scope report say
+                        // whether a non-batched contingency is one OLF itself does not answer
+                        System.err.println("GPU_REJECT_CTG ctg=" + pc.getContingency().getId()
+                                + " reason=" + rejectReason);
+                    }
                 }
             }
             if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {

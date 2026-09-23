@@ -44,6 +44,7 @@
 #include <cublas_v2.h>
 
 #include <algorithm>
+#include <unordered_map>
 #include <map>
 #include <cstring>
 #include <chrono>
@@ -332,10 +333,42 @@ inline void applyRobustSingleMatrixConfig(cudssConfig_t config) {
         colamdFamily = std::string(e) == "btf_colamd" || std::string(e) == "colamd";
     }
     cudssPivotType_t pt = colamdFamily ? CUDSS_PIVOT_GLOBAL_COL : CUDSS_PIVOT_AUTO;
+    // OLF_GPU_PIVOT_TYPE / OLF_GPU_PIVOT_THRESHOLD: reach the two knobs that make KLU work on the CPU.
+    // KLU pivots on ROWS with a threshold inside each BTF block; this config only ever asked for
+    // GLOBAL_COL (or AUTO) and never set a threshold at all, so cuDSS used its own default and a tiny
+    // pivot could be accepted — which is what a finite, well-scaled matrix solved to a 1e9 residual
+    // looks like. Defaults are unchanged when neither variable is set.
+    const char* ptEnv = std::getenv("OLF_GPU_PIVOT_TYPE");
+    if (ptEnv != nullptr && *ptEnv != '\0') {
+        std::string want(ptEnv);
+        if (want == "global_row") {
+            pt = CUDSS_PIVOT_GLOBAL_ROW;
+        } else if (want == "global_col") {
+            pt = CUDSS_PIVOT_GLOBAL_COL;
+        } else if (want == "diagonal") {
+            pt = CUDSS_PIVOT_DIAGONAL;
+        } else if (want == "auto") {
+            pt = CUDSS_PIVOT_AUTO;
+        } else if (want == "none") {
+            pt = CUDSS_PIVOT_NONE;
+        } else {
+            throw std::runtime_error("OLF_GPU_PIVOT_TYPE: unknown value '" + want
+                                     + "' (auto|global_row|global_col|diagonal|none)");
+        }
+    }
     CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_PIVOT_TYPE, &pt, sizeof(pt)));
+    const char* thrEnv = std::getenv("OLF_GPU_PIVOT_THRESHOLD");
+    if (thrEnv != nullptr && *thrEnv != '\0') {
+        double thr = std::atof(thrEnv);
+        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_PIVOT_THRESHOLD, &thr, sizeof(thr)));
+    }
     if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
-        std::fprintf(stderr, "ROBUST_CFG reorder=%s pivot=%s matching=auto\n", e == nullptr ? "amd" : e,
-                     colamdFamily ? "global_col" : "auto");
+        const char* m = std::getenv("OLF_GPU_MATCHING_ALG");
+        const char* thr = std::getenv("OLF_GPU_PIVOT_THRESHOLD");
+        std::fprintf(stderr, "ROBUST_CFG reorder=%s pivot=%s matching=%s threshold=%s\n",
+                     e == nullptr || *e == '\0' ? "amd" : e,
+                     ptEnv != nullptr && *ptEnv != '\0' ? ptEnv : (colamdFamily ? "global_col" : "auto"),
+                     m == nullptr || *m == '\0' ? "auto" : m, thr == nullptr || *thr == '\0' ? "default" : thr);
     }
     // Matching is REQUIRED (measured: pivoting alone left the full-scope base at NaN). Its
     // permutation is value-dependent and cuDSS accepts ONE analysis per data object (a second
@@ -343,8 +376,12 @@ inline void applyRobustSingleMatrixConfig(cudssConfig_t config) {
     // later factorizations reuse it - which is what converged the full-scope base. A system cuDSS
     // refuses under this configuration (ieee14 in the cross-check test: status 4 at factorization)
     // throws, and the batch-of-one falls back to the CPU as before - never wrong.
-    cudssMatchingAlg_t alg = CUDSS_MATCHING_ALG_AUTO;
-    CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_MATCHING_ALG, &alg, sizeof(alg)));
+    // Default AUTO, but OLF_GPU_MATCHING_ALG must reach HERE too, not only the standalone path: cuDSS
+    // REFUSES matching under BTF_COLAMD / COLAMD (status 4 at ANALYSIS), so while this hard-coded AUTO
+    // stood, the KLU-LIKE orderings could not be tested in robust mode at all — every attempt died in
+    // analysis before factoring anything, which is also why this mode silently runs AMD (the ordering
+    // its own comment does not claim) whenever the variable is unset.
+    applyMatchingAlg(config);
 #else
     (void) config;
 #endif
@@ -1299,6 +1336,174 @@ __global__ void hazRepairRhs(int nHaz, int nS, int n, const int* hazRow, const i
     int hd = hazDonorHaz[j];
     double bd = hd >= 0 ? bsnap[(size_t) s * nHaz + hd] : B[(size_t) s * n + d];
     B[(size_t) s * n + hazRow[i]] += hazSign[i] * bd;
+}
+
+// OLF_GPU_VALS_SCAN=1: is the MATRIX itself sound before cuDSS ever sees it? Every finiteness check on
+// this path guards F (the mismatch); nothing guards the Jacobian values. A NaN or an astronomical entry
+// arriving from a FILL explains a broken solve under every ordering and every mode at once, which no
+// amount of reordering or pivoting can fix — so this separates "cuDSS cannot factor this matrix" from
+// "the matrix handed to cuDSS was already wrong". Reports the FIRST non-finite entry with the row it
+// sits on, that row's per-scenario mode and its diagonal, plus the largest |value| in the matrix.
+// Diagnostic only: it copies values back, so it scans at most the first two scenario slots.
+template <typename Ctx>
+static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
+    static const bool on = std::getenv("OLF_GPU_VALS_SCAN") != nullptr;
+    if (!on) {
+        return;
+    }
+    static int seq = 0;
+    int it = seq++;                                          // fill sequence: orders these against LIN_RESID
+    int sMax = std::min(nS, 2);
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    std::vector<double> hv(static_cast<size_t>(nnz) * sMax);
+    CUDA_CHECK(cudaMemcpy(hv.data(), ctx->dVals.p, hv.size() * sizeof(double), cudaMemcpyDeviceToHost));
+    std::vector<int> rowPtr(n + 1);
+    std::vector<int> colIdx(nnz);
+    std::vector<int> diagPos(n);
+    CUDA_CHECK(cudaMemcpy(rowPtr.data(), ctx->st->dRowPtr.p, (n + 1) * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(colIdx.data(), ctx->st->dColIdx.p, nnz * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(diagPos.data(), ctx->st->dDiagPos.p, n * sizeof(int), cudaMemcpyDeviceToHost));
+    std::vector<int> mode(static_cast<size_t>(n) * sMax);
+    CUDA_CHECK(cudaMemcpy(mode.data(), ctx->dMode.p, mode.size() * sizeof(int), cudaMemcpyDeviceToHost));
+    for (int s = 0; s < sMax; s++) {
+        const double* vs = hv.data() + static_cast<size_t>(s) * nnz;
+        double maxAbs = 0.0;
+        int maxRow = -1;
+        int maxCol = -1;
+        int bad = -1;
+        for (int k = 0; k < nnz; k++) {
+            double v = vs[k];
+            if (bad < 0 && !std::isfinite(v)) {
+                bad = k;
+            }
+            if (std::isfinite(v) && std::fabs(v) > maxAbs) {
+                maxAbs = std::fabs(v);
+                maxCol = colIdx[k];
+                maxRow = static_cast<int>(std::upper_bound(rowPtr.begin(), rowPtr.end(), k) - rowPtr.begin()) - 1;
+            }
+        }
+        if (bad >= 0) {
+            int row = static_cast<int>(std::upper_bound(rowPtr.begin(), rowPtr.end(), bad) - rowPtr.begin()) - 1;
+            std::fprintf(stderr, "VALS_NAN outer=%d it=%d slot=%d row=%d col=%d mode=%d value=%g diag=%g\n",
+                         outer, it, s, row, colIdx[bad], mode[static_cast<size_t>(s) * n + row], vs[bad],
+                         diagPos[row] >= 0 ? vs[diagPos[row]] : 0.0);
+        }
+        // Rows with no usable PIVOT on the real values: an unpivoted LU divides by these. nHaz is what the
+        // structural repair thought needed fixing, so nHaz == 0 beside a nonzero count here means the
+        // repair did not RECOGNIZE these rows — which is a detection bug, not a numerical limit.
+        int noDiagSlot = 0;
+        int tinyDiag = 0;
+        int firstBad = -1;
+        for (int r = 0; r < n; r++) {
+            if (diagPos[r] < 0) {
+                noDiagSlot++;
+                if (firstBad < 0) {
+                    firstBad = r;
+                }
+            } else if (std::fabs(vs[diagPos[r]]) < 1e-12) {
+                tinyDiag++;
+                if (firstBad < 0) {
+                    firstBad = r;
+                }
+            }
+        }
+        // RANK, not scaling: when no ordering and no pivoting strategy helps a finite, well-scaled matrix
+        // with no tiny diagonal, the remaining explanation is that it is SINGULAR — and pivoting cannot fix
+        // rank deficiency. Two structural witnesses are cheap to check here: a row that DUPLICATES another
+        // (the same equation scattered into two rows leaves one variable undetermined) and the per-mode row
+        // census (an equation row that silently became an identity, or the reverse, changes rank).
+        std::unordered_map<std::string, int> rowKey;
+        int dupA = -1;
+        int dupB = -1;
+        for (int r = 0; r < n && dupA < 0; r++) {
+            std::string key;
+            key.reserve(static_cast<size_t>(rowPtr[r + 1] - rowPtr[r]) * 24);
+            for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
+                if (vs[k] != 0.0) {
+                    char buf[48];
+                    std::snprintf(buf, sizeof(buf), "%d:%.17g;", colIdx[k], vs[k]);
+                    key += buf;
+                }
+            }
+            if (key.empty()) {
+                continue;                                    // an all-zero row is caught by tinyDiag above
+            }
+            auto hit = rowKey.emplace(key, r);
+            if (!hit.second) {
+                dupA = hit.first->second;
+                dupB = r;
+            }
+        }
+        // COLUMN witness, which the diagonal check above cannot give: the documented failure of this
+        // structure is a variable left in NO equation when two contributions CANCEL (a DISTR_Q kind-3 pair
+        // against the zero-impedance family's +-DUMMY_Q — "45 such columns at 2000 busbar sections, which
+        // is what collapsed batching above ~1000", GpuAcActivationExtractor). A dead COLUMN makes the
+        // matrix exactly singular, and no ordering or pivot strategy can rescue that.
+        std::vector<double> colMax(n, 0.0);
+        for (int k = 0; k < nnz; k++) {
+            double a = std::fabs(vs[k]);
+            if (std::isfinite(a) && a > colMax[colIdx[k]]) {
+                colMax[colIdx[k]] = a;
+            }
+        }
+        int deadCols = 0;
+        int firstDeadCol = -1;
+        for (int c = 0; c < n; c++) {
+            if (colMax[c] < 1e-12) {
+                deadCols++;
+                if (firstDeadCol < 0) {
+                    firstDeadCol = c;
+                }
+            }
+        }
+        int modeCount[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        for (int r = 0; r < n; r++) {
+            int m = mode[static_cast<size_t>(s) * n + r];
+            if (m >= 0 && m < 8) {
+                modeCount[m]++;
+            }
+        }
+        // OLF_GPU_VALS_DUMP=<path>: write the FIRST matrix that carries a mode-4 row (the RL-pinned remote
+        // gen-VC member whose fill is where this structure stops factoring) as plain CSR + rhs + modes, once.
+        // Every local witness here comes back clean on it, so the open question is RANK — which is answered
+        // offline in seconds (scipy / KLU on the same matrix) instead of by more 8-minute device runs.
+        static bool dumped = false;
+        const char* dumpPath = std::getenv("OLF_GPU_VALS_DUMP");
+        if (!dumped && dumpPath != nullptr && *dumpPath != '\0' && modeCount[4] > 0) {
+            std::vector<double> hf(n);
+            CUDA_CHECK(cudaMemcpy(hf.data(), static_cast<const double*>(ctx->dF.p) + static_cast<size_t>(s) * n,
+                                  n * sizeof(double), cudaMemcpyDeviceToHost));
+            if (std::FILE* f = std::fopen(dumpPath, "w")) {
+                std::fprintf(f, "n %d nnz %d outer %d seq %d slot %d\n", n, nnz, outer, it, s);
+                for (int r = 0; r <= n; r++) {
+                    std::fprintf(f, "%d%c", rowPtr[r], r == n ? '\n' : ' ');
+                }
+                for (int k = 0; k < nnz; k++) {
+                    std::fprintf(f, "%d%c", colIdx[k], k == nnz - 1 ? '\n' : ' ');
+                }
+                for (int k = 0; k < nnz; k++) {
+                    std::fprintf(f, "%.17g%c", vs[k], k == nnz - 1 ? '\n' : ' ');
+                }
+                for (int r = 0; r < n; r++) {
+                    std::fprintf(f, "%.17g%c", hf[r], r == n - 1 ? '\n' : ' ');
+                }
+                for (int r = 0; r < n; r++) {
+                    std::fprintf(f, "%d%c", mode[static_cast<size_t>(s) * n + r], r == n - 1 ? '\n' : ' ');
+                }
+                std::fclose(f);
+                dumped = true;
+                std::fprintf(stderr, "VALS_DUMP wrote %s (n=%d nnz=%d outer=%d seq=%d mode4=%d)\n",
+                             dumpPath, n, nnz, outer, it, modeCount[4]);
+            }
+        }
+        std::fprintf(stderr, "VALS_SCAN outer=%d it=%d slot=%d nnz=%d finite=%s maxAbs=%.6e at row=%d col=%d"
+                             " | noDiagSlot=%d tinyDiag=%d firstBadRow=%d nHaz=%d dupRows=%d,%d"
+                             " modes[0..4]=%d,%d,%d,%d,%d deadCols=%d firstDeadCol=%d\n",
+                     outer, it, s, nnz, bad < 0 ? "yes" : "NO", maxAbs, maxRow, maxCol,
+                     noDiagSlot, tinyDiag, firstBad, ctx->st->nHaz, dupA, dupB,
+                     modeCount[0], modeCount[1], modeCount[2], modeCount[3], modeCount[4],
+                     deadCols, firstDeadCol);
+    }
 }
 
 template <typename Ctx>
@@ -8334,6 +8539,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, ziRelocOf(ctx->st.get()));
         applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>());
         hazRepairValues(ctx, nS, ctx->dVals.as<double>());
+        scanValsFinite(ctx, nS, n, nnz, outer);               // OLF_GPU_VALS_SCAN: is the matrix sound at all?
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: stream-ordered into the solve, no host sync
     };
     // ---- IncrementalTransformerVoltageControl as a DRIVER PHASE (OLF order 8). OLF's own rule, per

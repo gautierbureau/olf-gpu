@@ -312,6 +312,17 @@ final class GpuAcRowIndexing {
     }
     /** {@code -Dolf.gpu.ziTreeRelocation=true}: relocate along the WHOLE coupler tree. Default false, which
      *  relocates dead-end stubs only - the shape this generalises, and the only one validated end to end. */
+    /**
+     * {@code -Dolf.gpu.pilotSelfRotation} (default false while it lands): enrol PILOT-SELF voltage-control
+     * groups — a control whose merged controllers contain its own controlled bus — in the candidate-table
+     * relocation, so a reactive-limit pin of the pilot moves its Q balance to the first ENABLED member's row
+     * per scenario, which is OLF's own rule ({@code updateRemoteVoltageControlEquations}: DISTR_Q for every
+     * enabled controller except the FIRST, BUS_TARGET_Q for every pinned one).
+     */
+    static boolean pilotSelfRotationEnabled() {
+        return Boolean.parseBoolean(System.getProperty("olf.gpu.pilotSelfRotation", "false"));
+    }
+
     static boolean ziTreeRelocationEnabled() {
         return Boolean.parseBoolean(System.getProperty("olf.gpu.ziTreeRelocation", "false"));
     }

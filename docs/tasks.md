@@ -1925,3 +1925,36 @@ The hook already exists: `qrGroupOfPilot` is deliberately a SEPARATE channel fro
 and Q-routing are independent. That is exactly what a pilot-self group needs — a table that drives the
 re-pick WITHOUT re-routing its own q, which is the double-count the exclusion in the qr-group loop was
 protecting against.
+
+### Option 1, slice 1: the pilot-self group table (2026-09-24)
+
+`GpuAcOuterLoopPacks.pilotSelfGroups` packs every MAIN remote generator voltage control whose merged
+controllers CONTAIN the controlled bus, with >= 2 controllers: member rows AND member RL ENTRIES in merged
+order, the pilot's entry and row, and the group's V target. On rte6515: **27 groups — 17 of size 2, 7 of
+size 3, one each of 4, 5 and 6** (`OLF_GPU_RL_TRACE` prints `GPU_PILOTSELF`).
+
+Two design facts decided the shape, both read off the dumps rather than assumed:
+
+- **`BUS_TARGET_V` cannot change rows.** A mode-0 identity constrains its OWN row's variable, so on a
+  member's row it would pin that member's v to the pilot's target. It stays on the controlled bus's row.
+  What rotates is a PINNED pilot's reactive balance, onto the first ENABLED member's row —
+  `computeQRow` already puts it there, but FROZEN at extraction while the device's RL loop moves pins.
+- **The choice cannot be read off row modes.** The row to pick is mode 4 BECAUSE it carries the relocated
+  balance, which is circular. `limitType` per RL entry is the ground truth OLF's own rule uses, so the
+  table is keyed by ENTRY.
+
+Slice 1 is additive — nothing consumes the pack yet, so the 900/1000 window and every existing group are
+untouched (suite 290/0, checkstyle 214). `GpuPilotSelfGroupTest` pins the semantics on a purpose-built
+3-controller group (one generator controlling its own bus, two more controlling it remotely) instead of
+inside rte6515's 13k-variable system, and asserts the merged ORDER, since OLF's free role is index 0 of the
+live enabled list.
+
+Slice 2 (next): a device kernel over the pack that reproduces
+`updateRemoteVoltageControlEquations` from the pin states — for each group, per scenario: the first enabled
+member is free (its `DISTR_Q` gated off), every pinned controller's row hosts its own Q balance, and a
+pinned pilot's balance rides the free member's row. Then re-measure the window; the base's remaining NaN is
+exactly this rotation being missing.
+
+Trap worth remembering, cost an hour: `ExtractionColumns.of` returns `vCol = -1` for a bus whose variables
+the LAZY equation index has not sorted yet. The real pipeline extracts after the solver materialises the
+index; a test must call `AcSolverUtil.initStateVector` first or it silently packs nothing.

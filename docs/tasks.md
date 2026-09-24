@@ -2240,3 +2240,44 @@ writing more device code.
 
 The tree is left at the best measured state (`dd32d58`): A = 3, total violation difference 16 on the full
 window, invariant intact.
+
+### The CPU post-contingency dump, and what it settles (2026-09-24)
+
+`OLF_GPU_EQ_DUMP_CTG=<contingency id>` (+ optional `OLF_GPU_EQ_DUMP_CTG_FILE`) writes OLF's OWN equation
+system for the POST-CONTINGENCY state from `GpuBatchedAcSecurityAnalysis.runPostContingencySimulation`,
+where `lfContingency.apply()` has already run — so it is the system the CPU actually solves for that
+scenario, inactive equations in `[ ]`, with a bus/branch id legend (OLF writes `<symbol><elementNum>`).
+This is the reference the device side was missing, and it should be consulted BEFORE writing placement code:
+reasoning about where a row could go produced two wrong fixes in a row.
+
+For `BUS-6014_BBS_2` it reads:
+
+```
+# disabled buses: [VL-6014_1]
+# disabled branches: [BUS-6014_COUPLER_1, BUS-6014_COUPLER_2, LINE-6136-6014#0]
+bus_target_v6281 = v6281              ACTIVE    (VL-6014_0)
+[ bus_target_v6282 = [ v6282 ] ]      INACTIVE  (VL-6014_1, disabled)
+bus_target_v6283 = v6283              ACTIVE    (VL-6014_2)
+[ zero_v9042 ] [ zero_v9043 ]         INACTIVE  (both couplers disabled)
+dummy_target_p9042/q9042, p9043/q9043 ACTIVE
+```
+
+Two conclusions, one of which is a confirmed post-mortem:
+
+1. It EXPLAINS the failed dq attempt. `VL-6014_2` is PV post-contingency (`bus_target_v6283` active), so it
+   has NO reactive equation at all — routing its `DISTR_Q` back to its V row added an equation OLF does not
+   have, which is why the error grew 150x.
+2. The relocation gave `VL-6014_2`'s V row to `zero_v9043`, which is now inactive, so that row must host
+   `bus_target_v6283`. The device left it a power row with nothing emitted into it. Fixed in
+   `GpuBatchChunkSolver`'s zi-outage loop: when the opened coupler is tree-relocated (bit 3) and the child is
+   still voltage-controlled, its V row is set to mode 0 with the control's target. Verified applied by
+   `ZITREE_VID` (`child=VL-6014_2 vRow=12566 applied=true`).
+
+HONEST RESULT: the reproducer is UNCHANGED at 4.086e-02 kV. The change matches the CPU reference and closes
+a real hole, but it is not the cause of the residual error, so it is kept on the strength of the reference
+rather than of a measurement.
+
+Next diagnostic, and the other half of the comparison: dump the DEVICE's per-scenario ROW MODES for this
+scenario (`readBatchRowModes` already exists natively) and diff them against this CPU dump row by row for
+12563..12566 and 13044..13047. The second `ZITREE_VID` line is the lead — `VL-6014_1` is the bus OLF
+DISABLES, and how the device freezes it (or fails to) is now the main suspect.

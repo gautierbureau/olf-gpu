@@ -10,7 +10,9 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
+import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBranch;
+import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfShunt;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -696,6 +698,37 @@ final class GpuBatchChunkSolver {
                                 rowZi[dqRow] = 0;
                                 overrides.add(s * n + dpRow, 0.0);
                                 overrides.add(s * n + dqRow, 0.0);
+                                // The RELOCATION gave this coupler's ZERO_V the CHILD bus's own V row. With the
+                                // coupler open that equation is gone, and OLF's post-contingency system has
+                                // BUS_TARGET_V active on that bus instead (read off the CPU dump for
+                                // BUS-6014_BBS_2: bus_target_v6283 ACTIVE, zero_v9043 inactive). The device
+                                // must make the same move, or the row is left EMPTY - the P balance comes back
+                                // through the stock-placement fallback, but nothing restores the V identity.
+                                // Only for a bus that is still VOLTAGE-CONTROLLED: a PQ child's reactive
+                                // balance returns to this row through that same fallback instead.
+                                int relocBits = gpuData.ziIdx()[ze * 11 + 10];
+                                int childSide = (relocBits >> 1) & 3;
+                                if ((relocBits & 8) != 0 && childSide != 0) {
+                                    LfBus child = childSide == 1 ? ziOut.getBus1() : ziOut.getBus2();
+                                    int childVRow = gpuData.ziIdx()[ze * 11 + (childSide == 1 ? 6 : 7)];
+                                    var childVc = child == null ? java.util.Optional.<GeneratorVoltageControl>empty()
+                                            : child.getGeneratorVoltageControl();
+                                    boolean applied = childVRow >= 0 && child != null && !child.isDisabled()
+                                            && child.isGeneratorVoltageControlled() && childVc.isPresent();
+                                    if (applied) {
+                                        rowZi[childVRow] = 0;
+                                        overrides.add(s * n + childVRow, childVc.orElseThrow().getTargetValue());
+                                    }
+                                    if (System.getenv("OLF_GPU_ZITREE_TRACE") != null) {
+                                        System.err.println("ZITREE_VID coupler=" + ziOut.getId()
+                                                + " child=" + (child == null ? "-" : child.getId())
+                                                + " vRow=" + childVRow
+                                                + " disabled=" + (child != null && child.isDisabled())
+                                                + " vc=" + (child != null && child.isGeneratorVoltageControlled())
+                                                + " baseMode=" + (childVRow >= 0 ? baseRowMode[childVRow] : -1)
+                                                + " applied=" + applied);
+                                    }
+                                }
                                 rowModePerScenario[s] = rowZi;
                             }
                             for (LfBranch reclosed : contingencies.get(ci).reclosedBranches()) {

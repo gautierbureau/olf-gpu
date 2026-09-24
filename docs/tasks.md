@@ -2351,3 +2351,38 @@ Consequences for the plan:
   DISTR_Q. That is a real feature, not a placement tweak, and it wants its own design pass.
 - Until then the relocation's residual on this window is understood and bounded: 3 contingencies, all
   opening two couplers of one substation, all of them merged-control splits.
+
+### A real fix, and the residual turns out NOT to be placement at all (2026-09-24)
+
+FIX (`GpuAcOuterLoopPacks.distrQPack`): the DISTR_Q member bookkeeping row was `columns.vCol()[m]`, the
+member's own V column, while under the coupler-tree relocation a relocated child's DISTR_Q lives on its
+parent coupler's `DUMMY_Q` — the move `buildDistrQContributions` already makes through `distrQRow`'s tree
+overload. The row now follows the relocation. Consequence, measured with `OLF_GPU_TARGET_ROW=12566`:
+
+```
+before:  row=12566 mode=0<-1 target=0.00000000      <- DISTR_Q target updater wrote the member's V row
+after:   row=12566 mode=0<-1 target=1.14200000      <- the BUS_TARGET_V target the scenario needs
+```
+
+So the device's post-contingency equation set for `BUS-6014_BBS_2` now matches OLF's: `BUS_TARGET_V` active
+on both `VL-6014_0` and `VL-6014_2`, both couplers' dummies pinned, the member's DISTR_Q gone with them.
+
+AND YET the bus difference is unchanged at 4.086e-02 kV — because the residual was never that row. The
+BUSDIFF detail shows the error is NOT at `VL-6014_2` but spread network-wide, uniformly signed:
+
+```
+BUS-141_BBS  413.070204 vs 413.111063  (-4.086e-02)
+BUS-856_BBS  412.302956 vs 412.332075  (-2.912e-02)
+BUS-4563_BBS 241.699616 vs 241.726876  (-2.726e-02)
+```
+
+and the cause is in the same log: `distributedActivePower: worst 7.386068e+00 MW` for this single
+contingency. A 7.4 MW difference in distributed slack shifts every bus slightly, in one direction — exactly
+this signature. The full-window worst of 404 MW is the same defect aggregated.
+
+So the remaining work on this window is the DISTRIBUTED SLACK, not row placement. The lead: this scenario
+DISABLES a bus (`VL-6014_1`), which OLF removes from the system entirely while the device FREEZES its rows
+at a flat state. A frozen bus still has load and generation in the device's active balance, so the mismatch
+it distributes differs from OLF's. Check `GpuBatchQualification`'s scheduled-loss computation
+(`scheduledActivePowerLoss`) against `lfContingency.getDisabledNetwork()` for a bus-disabling contingency
+before touching anything else — and note the base agrees to 3e-9 MW, so this is contingency-specific.

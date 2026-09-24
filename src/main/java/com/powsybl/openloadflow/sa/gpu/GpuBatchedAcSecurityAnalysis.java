@@ -1274,12 +1274,60 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         }
     }
 
+    /**
+     * {@code OLF_GPU_EQ_DUMP_CTG=<contingency id>}: writes OLF's OWN equation set for the POST-CONTINGENCY
+     * state — {@code lfContingency.apply()} has already run when this is called, so the system here is the
+     * one the CPU actually solves for that scenario, with inactive equations in {@code [ ]}.
+     *
+     * <p>This is the reference the device side has been missing. Reasoning about where a relocated row COULD
+     * go produced two wrong fixes in a row (a DISTR_Q routed back to its bus's V row made the worst bus
+     * difference 150x larger), because a coupler opening does not merely free a row: it changes the GROUP, and
+     * OLF re-evaluates {@code updateRemoteVoltageControlEquations} over the live controllers, which can
+     * DEACTIVATE an equation rather than move it. The only way to know is to read what OLF has.
+     *
+     * <p>Written to {@code OLF_GPU_EQ_DUMP_CTG_FILE}, or {@code <id>.olf.post} in the working directory.
+     * Also lists the contingency's own elements, so the dump identifies which couplers opened.
+     */
+    private void dumpPostContingencyEquations(AcLoadFlowContext context, Contingency contingency,
+                                              LfContingency lfContingency, LfNetwork network) {
+        String want = System.getenv("OLF_GPU_EQ_DUMP_CTG");
+        if (want == null || !want.equals(contingency.getId())) {
+            return;
+        }
+        String path = System.getenv().getOrDefault("OLF_GPU_EQ_DUMP_CTG_FILE",
+                contingency.getId().replaceAll("[^A-Za-z0-9_.-]", "_") + ".olf.post");
+        try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(path))) {
+            w.write("# OLF's POST-CONTINGENCY equation system for " + contingency.getId()
+                    + " (inactive equations in [ ])\n");
+            w.write("# disabled buses: " + lfContingency.getDisabledNetwork().getBuses().stream()
+                    .map(LfBus::getId).sorted().toList() + "\n");
+            w.write("# disabled branches: " + lfContingency.getDisabledNetwork().getBranches().stream()
+                    .map(LfBranch::getId).sorted().toList() + "\n");
+            // OLF writes equations as <symbol><elementNum>, so a legend is what makes the file readable
+            // next to the device's row dump, which names elements by id.
+            w.write("# bus legend: num = id\n");
+            for (LfBus b : network.getBuses()) {
+                w.write("#   bus " + b.getNum() + " = " + b.getId() + (b.isDisabled() ? "  [DISABLED]" : "") + "\n");
+            }
+            w.write("# branch legend: num = id\n");
+            for (LfBranch br : network.getBranches()) {
+                w.write("#   branch " + br.getNum() + " = " + br.getId()
+                        + (br.isDisabled() ? "  [DISABLED]" : "") + "\n");
+            }
+            context.getEquationSystem().write(w, true);
+        } catch (java.io.IOException | RuntimeException e) {
+            LOGGER.warn("OLF_GPU_EQ_DUMP_CTG failed: {}", e.toString());
+        }
+        System.err.println("EQ_DUMP_CTG wrote " + path + " for " + contingency.getId());
+    }
+
     @Override
     protected PostContingencyResult runPostContingencySimulation(LfNetwork network, AcLoadFlowContext context, Contingency contingency,
                                                                  LfContingency lfContingency, LimitViolationManager preContingencyLimitViolationManager,
                                                                  SecurityAnalysisParameters securityAnalysisParameters,
                                                                  PreContingencyNetworkResult preContingencyNetworkResult, boolean createResultExtension,
                                                                  List<LimitReduction> limitReductions, double preDistributedActivePower) {
+        dumpPostContingencyEquations(context, contingency, lfContingency, network);
         PrecomputedBatch precomputed = runState.get().precomputed;
         if (precomputed.isReady() && precomputed.exhausted().contains(contingency.getId())) {
             // The device carried this scenario through OLF's whole Newton budget without

@@ -1888,3 +1888,40 @@ Tried and rejected on the way here, so do not repeat them:
 - Excluding relocated entries from the all-pinned flip test (`pilotRowAllPinnedBatch`): kept, it is
   correct on its own terms (the flip cannot route q in a table-less group), but it did NOT clear the NaN —
   the flip was never the trigger.
+
+#### Parity check: option 1 IS the CPU behavior (2026-09-24)
+
+`AcEquationSystemCreator.updateRemoteVoltageControlEquations` is the spec, and it is a ROTATION:
+
+```java
+vEq.setActive(!enabledControllerElements.isEmpty());       // BUS_TARGET_V iff >= 1 controller enabled
+for (disabled)   { distr OFF; ctrl /*BUS_TARGET_Q*/ ON; }  // every PINNED controller gets its own Q balance
+for (i, enabled) { distr.setActive(i != 0); ctrl OFF; }    // the FREE one is the FIRST ENABLED - no DISTR_Q
+```
+
+`i != 0` over the LIVE ENABLED list is the free-role rotation, and `relocChoose` ("pick the first member row
+whose per-scenario mode is neither identity nor pinned") is its device-side evaluation. The candidate table
+is therefore not a convenience for a corner case — it is the model of OLF's rule, so **option 1 is the
+parity behavior**.
+
+The divergence at the failing pass, in those terms:
+
+| | active reactive equations |
+| --- | --- |
+| OLF | `BUS_TARGET_V(pilot)`, `BUS_TARGET_Q(pilot)` |
+| device | `BUS_TARGET_Q(pilot)` at 12560, PLUS `DISTR_Q(member)` at 12562 with its key renormalized to 1.0, which is algebraically `q_pilot = target` |
+
+i.e. `BUS_TARGET_V` is MISSING and `BUS_TARGET_Q` is DUPLICATED. The rank loss is the symptom of that, not
+a numerical accident — which is also why no solver setting could ever have fixed it.
+
+Option 2 (a targeted 2-row rotation) is parity-correct ONLY for two-member groups. Pilot-self groups on
+rte6515, counted from the dump: 974 with 1 member, 19 with 2, 10 with 3, and one each with 4, 5 and 6. The
+13 groups with >= 3 members need the ORDERED candidate list, because after one pin several survivors remain
+and only the first goes free while the others keep their DISTR_Q. So option 2 is a stopgap the data already
+outgrows; do option 1.
+
+The hook already exists: `qrGroupOfPilot` is deliberately a SEPARATE channel from `qRowAlt = -2-group`
+(`GpuAcOuterLoopPacks:241`, "Read from qrGroupOfPilot, NOT decoded from qRowAlt") so that table membership
+and Q-routing are independent. That is exactly what a pilot-self group needs — a table that drives the
+re-pick WITHOUT re-routing its own q, which is the double-count the exclusion in the qr-group loop was
+protecting against.

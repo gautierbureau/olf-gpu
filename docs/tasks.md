@@ -2313,3 +2313,41 @@ scenario, yet the measured worst bus difference is only 4.086e-02 kV. Either the
 come from that row, or the target is rewritten again before the solve that produces the answer. Resolve that
 contradiction BEFORE fixing anything — it is the same trap as the two wrong fixes above, where a plausible
 story was acted on ahead of the evidence.
+
+### ROOT CAUSE: a coupler opening DISSOLVES a merged voltage control, which the device does not model
+
+Resolved with the two dumps rather than by reasoning, and it is not a placement problem at all.
+
+The override is not lost. `OLF_GPU_TARGET_ROW=12566` shows the host's value reaching the uploaded snapshot:
+
+```
+TARGET_ROW row=12566 base=0.000000000 baseMode=1 mode[s=0]=0 ov[s=0]=1.142000000
+  row=12566 mode=0<-1 target=0.00000000        <- post-solve readback: back to the BASE value
+```
+
+Why it is reset: the base extraction has ONE merged generator voltage control here —
+`pilot=VL-6014_0, pilotIsController=true, members={VL-6014_0, VL-6014_2}` — so `VL-6014_2` is a MEMBER,
+its V row carries `zero_v9043`, and its reactive lives in the group's DISTR_Q. Side by side:
+
+| | `BUS_V(VL-6014_0)` | `BUS_V(VL-6014_2)` |
+| --- | --- | --- |
+| device BASE structure | mode 0 (BUS_TARGET_V) | mode 1, hosts `zi#1.ZERO_V` — a MEMBER |
+| OLF POST-contingency | `bus_target_v6281` ACTIVE | **`bus_target_v6283` ACTIVE** |
+
+Those buses are one electrical node through the zero-impedance couplers, so OLF MERGES their voltage
+controls. Opening the couplers splits the node, the merge dissolves, and each bus gets its own
+`BUS_TARGET_V` while the merged group's DISTR_Q structure disappears. The device's structure is frozen at
+extraction with the MERGED group, so post-contingency it carries equations OLF no longer has — a different
+equation SET, not a permutation of one, which is why no amount of row re-placement closed it.
+
+It also explains the reset: the host write of mode 0 + 1.142 on the member's row is exactly right, but the
+gen-VC kernels still believe the merged group and restore the row to the group's own bookkeeping.
+
+Consequences for the plan:
+- This is the SAME shape as the pilot-self rotation (slice 2): `pilotIsController=true` with a member on a
+  coupled bus. The two lines of work meet here.
+- The fix is per-scenario voltage-control re-merging: when a scenario opens the couplers that merged a
+  control, the members separated from the pilot need their OWN `BUS_TARGET_V` and must leave the group's
+  DISTR_Q. That is a real feature, not a placement tweak, and it wants its own design pass.
+- Until then the relocation's residual on this window is understood and bounded: 3 contingencies, all
+  opening two couplers of one substation, all of them merged-control splits.

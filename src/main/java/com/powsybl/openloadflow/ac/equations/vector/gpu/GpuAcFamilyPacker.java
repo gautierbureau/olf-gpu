@@ -139,7 +139,12 @@ final class GpuAcFamilyPacker {
                 int childSide = child == b1n ? 1 : (child == b2n ? 2 : 0);
                 ziIdx.add(new int[] {pRow[b1n], qRow[b1n], pRow[b2n], qRow[b2n], dpRow, dqRow,
                     vCol[b1n], vCol[b2n], phiCol[b1n], phiCol[b2n],
-                    (br.isSpanningTreeEdge(LoadFlowModel.AC) ? 1 : 0) | (childSide << 1)});
+                    (br.isSpanningTreeEdge(LoadFlowModel.AC) ? 1 : 0) | (childSide << 1)
+                        // bit 3: the child side came from the COUPLER-TREE walk, not from the long-standing
+                        // dead-end stub case. Only these need the per-scenario stock-placement fallback
+                        // (native stockAltRow); gating on the bit keeps a relocation-OFF structure
+                        // bit-identical instead of merely measured-equal.
+                        | (GpuAcRowIndexing.ziTreeRelocationEnabled() && childSide != 0 ? 8 : 0)});
                 ziQAlt.add(new int[] {qRowAlt[b1n], qRowAlt[b2n]});
                 continue;
             }

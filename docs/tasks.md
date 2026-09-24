@@ -2086,3 +2086,61 @@ It also corrects the earlier rejection of a targeted gate. The gate measured at 
 opening, which is every busbar contingency. The precise set is 67 of 1000 (6.7%), and only 11 of those
 actually break — so a gate on RELOCATED-coupler openings would cost 6.7% of the batch, not all of it. Still
 scaffolding rather than the goal, but an order of magnitude cheaper than what was measured and rejected.
+
+### Per-scenario placement for the relocated coupler rows (2026-09-24)
+
+The relocation moves a child bus's P/Q equations onto its parent coupler's `DUMMY_P`/`DUMMY_Q` rows and the
+coupler's `ZERO_V`/`ZERO_PHI` onto the child's own rows. A scenario that OPENS that coupler skips the zi
+element (no ZERO equations, no ±dummy coupling) and the host pins the dummy rows with `DUMMY_TARGET`
+identities — so the relocated equations get zeroed and the bus is left with no balance. That, and only that,
+is what the confirmed set inclusion (A ⊂ B) measured.
+
+Implemented without any new host table, JNI change or `GpuAcData` component, because rows ARE variables: a
+relocated child's own P/Q rows are already in `ziIdx` (slots 8/9 phi, 6/7 V) and the relocated dest rows are
+slots 4/5. `buildStructure` derives one map, `relocOwnRow[dummyRow] = the child's own row` (both sides
+through `rowMap`, since those slots are COLUMNS), and every family's existing alternate-dest channel then
+offers the stock placement as its alternate via `stockAltRow`.
+
+The selector is the DUMMY ROW itself, which the host already sets to mode 0 exactly when the coupler opens.
+One correctness detail: the existing channel diverts on `mode ∈ {0,4}`, but a relocated child that is
+RL-PINNED carries mode 4 on that same dummy row, where its own Q balance legitimately lives — diverting
+there would be wrong. So these outputs encode their selector as `-2-row`, which the three pick sites
+(`scatterAddDyn`, the residual variant, `ziDynDest`) decode as "divert only while this row is an identity".
+
+Covered: closed branch, open branch, shunt. NOT covered yet: the zi family's own ±dummy couplings into a
+relocated child's rows — its alternate channel has Q slots only (4 per element) — which matters for coupler
+CHAINS, where a sub-coupler emits into its parent's dummy rows. 1,692 of 2,538 trees are depth 1, so the
+measurement below says how much of the gap that leaves.
+
+Measured on window [5000,6000) at N=1000, relocation on (`mvn -D...`, 1 CPU thread — the harness default for
+busbar, since a multi-threaded CPU arm lands on a different bus decomposition):
+
+| | before | ungated first attempt | **gated** |
+| --- | --- | --- | --- |
+| A = contingencies whose violations differ | 11 | 29 | **4** |
+| A outside B (should be 0) | 0 | **25** | **0** |
+| total violation difference | 299 | 73 | 93 |
+
+The ungated attempt broke the invariant: it applied the fallback to DEAD-END stubs too, whose `childSide` is
+also nonzero, so scenarios that open no relocated coupler started diverging (25 of 29). Fixed by marking
+tree-relocated couplers with **bit 3** of `ziIdx` slot 10 (`GpuAcFamilyPacker`, set only when
+`ziTreeRelocationEnabled()`), which the native map requires. With the property off the bit is never set, so
+`relocOwn` is null, `dynReloc` is unchanged and the structure is bit-identical BY CONSTRUCTION rather than
+by measurement — the lesson from the ungated run, where the default window moved and there was no
+apples-to-apples baseline to compare against.
+
+The two worst cases before this change are FIXED: `BUS-5959_BBS_1` (was cpu=211 gpu=80) and
+`BUS-5962_BBS_1` (was cpu=230 gpu=107) no longer appear in A. The four survivors are
+
+| survivor | relocated couplers opened | delta |
+| --- | --- | --- |
+| `BUS-5958_BBS_1` | 1 | +24 |
+| `BUS-6014_BBS_2` | 2 | −2 |
+| `BUS-6014_BBS_3` | 2 | −1 |
+| `BUS-6029_BBS_2` | 2 | +72 |
+
+THREE of the four open TWO relocated couplers — chains, which is exactly the gap left open: the zi family's
+own ±dummy couplings into a relocated child's rows are not covered, because its alternate channel has Q
+slots only (4 per element). A sub-coupler in a chain emits into its parent's dummy rows, so opening the
+parent strands it. Extending `buildZeroImpDest` to P slots (and `vdl`/`hv`, which have no alternate channel
+at all) is the next increment, and `BUS-6029_BBS_2` is the reproducer to drive it.

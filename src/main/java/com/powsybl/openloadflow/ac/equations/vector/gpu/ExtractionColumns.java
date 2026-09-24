@@ -132,8 +132,9 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             boolean pilotSelf = gvc != null && gvc.getMergedControllerElements().contains(bus);
             boolean pilotSelfRotates = pilotSelf && GpuAcRowIndexing.pilotSelfRotationEnabled()
                     && gvc.getMergedControllerElements().size() >= 2;
+            boolean pilotSelfExcluded = pilotSelf && !pilotSelfRotates;
             if (gvc == null || gvc.getMergedControllerElements().isEmpty() || vCol[bus.getNum()] < 0
-                    || (pilotSelf && !pilotSelfRotates)) {
+                    || pilotSelfExcluded) {
                 continue;
             }
             List<Integer> memberRows = new ArrayList<>();

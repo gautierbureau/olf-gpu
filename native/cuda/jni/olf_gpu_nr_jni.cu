@@ -591,6 +591,26 @@ static bool hasRelocatable(int ncb, const int* cbIdx, int nsh, const int* shIdx)
 
 // The alternate candidate Q row for a closed-branch output, or -1 if this output does not relocate
 // (only Q rows, rowEq==1) or the endpoint bus has no second candidate (qRowAlt was -1).
+// STOCK-PLACEMENT fallback for the COUPLER-TREE relocation. A child bus whose P/Q equations were relocated
+// onto its parent coupler's DUMMY_P / DUMMY_Q rows must get them BACK on its own rows in any scenario that
+// OPENS that coupler: the coupler's element is then skipped (no ZERO_V / ZERO_PHI, no +-dummy coupling) and
+// the host pins the dummy rows with DUMMY_TARGET identities, so the relocated equations would be zeroed and
+// the bus left with no balance at all. relocOwn[dummyRow] = that bus's own row.
+//
+// The selector is the DUMMY ROW itself, whose mode the host sets to 0 exactly when the coupler opens — but
+// it must divert on mode 0 ONLY, not on mode 4: a relocated child that is RL-PINNED carries mode 4 on that
+// same dummy row, where its own Q balance legitimately lives. Encoded as -2-row in selRow, which the picks
+// decode as "divert only while this row is an identity".
+inline int stockAltRow(int frozenRow, int alt, const int* relocOwn) {
+    return alt < 0 && frozenRow >= 0 && relocOwn != nullptr && relocOwn[frozenRow] >= 0
+            ? relocOwn[frozenRow] : alt;
+}
+
+inline int stockSelRow(int frozenRow, int alt, const int* relocOwn) {
+    return alt < 0 && frozenRow >= 0 && relocOwn != nullptr && relocOwn[frozenRow] >= 0
+            ? -2 - frozenRow : frozenRow;
+}
+
 inline int cbAltRow(const CbScatter& s, const int* ix) {
     return s.rowEq == 1 ? ix[10 + s.rowEnd] : -1;
 }
@@ -649,7 +669,7 @@ void buildCbPhaseDest(int ncb, const int* cbIdx, const int* cbPcSide, const std:
 
 // Union the alternate Q rows into the CSR pattern: for each closed-branch role-1 Q output emit an
 // extra (altRow, col) entry so buildDest can resolve a slot there. Deduped by the caller's unique().
-void collectCbAltPattern(int ncb, const int* cbIdx, std::vector<std::pair<int, int>>& pat,
+void collectCbAltPattern(int ncb, const int* cbIdx, const int* relocOwn, std::vector<std::pair<int, int>>& pat,
                          int nQr, const int* qrPtr, const int* qrRows) {
     for (int e = 0; e < ncb; e++) {
         const int* ix = cbIdx + static_cast<size_t>(e) * 12;
@@ -659,7 +679,9 @@ void collectCbAltPattern(int ncb, const int* cbIdx, std::vector<std::pair<int, i
                 continue;
             }
             RC rc = resolveCb(s, ix);
-            int altRow = cbAltRow(s, ix);
+            int origAlt = cbAltRow(s, ix);
+            int altRow = stockAltRow(rc.row, origAlt, relocOwn);
+            int stockSel = stockSelRow(rc.row, origAlt, relocOwn);
             if (rc.col < 0) {
                 continue;
             }
@@ -679,7 +701,7 @@ void collectCbAltPattern(int ncb, const int* cbIdx, std::vector<std::pair<int, i
 // a role-0 F residual) and the FROZEN row to test the per-scenario row-mode against. selRow == -1
 // marks an output that never relocates (the fill then always uses the frozen dest). Sized ncb*CB_NOUT
 // like the frozen dest, so the fill indexes all three arrays identically.
-void buildCbDynDest(int ncb, const int* cbIdx, const CsrPattern& pos,
+void buildCbDynDest(int ncb, const int* cbIdx, const int* relocOwn, const CsrPattern& pos,
                     std::vector<int>& altDest, std::vector<int>& selRow,
                     int nQr, const int* qrPtr, const int* qrRows,
                     std::vector<int>& relocGroup, std::vector<int>& relocOff, std::vector<int>& relocPool) {
@@ -692,7 +714,9 @@ void buildCbDynDest(int ncb, const int* cbIdx, const CsrPattern& pos,
         for (int k = 0; k < CB_NOUT; k++) {
             const CbScatter& s = CB_SCATTER[k];
             RC rc = resolveCb(s, ix);
-            int altRow = cbAltRow(s, ix);
+            int origAlt = cbAltRow(s, ix);
+            int altRow = stockAltRow(rc.row, origAlt, relocOwn);
+            int stockSel = stockSelRow(rc.row, origAlt, relocOwn);
             size_t o = static_cast<size_t>(e) * CB_NOUT + k;
             if (altRow <= -2) {                              // GROUP relocation (plan-A6): one slot per
                 int g = -2 - altRow;                         // candidate, selected per scenario by the
@@ -716,10 +740,10 @@ void buildCbDynDest(int ncb, const int* cbIdx, const CsrPattern& pos,
             }
             if (s.role == 1 && rc.col >= 0) {
                 altDest[o] = pos.at(altRow, rc.col);
-                selRow[o] = rc.row >= 0 ? rc.row : altRow;   // suppressed frozen dest (remote member):
+                selRow[o] = stockSel <= -2 ? stockSel : (rc.row >= 0 ? rc.row : altRow);   // suppressed frozen dest (remote member):
             } else if (s.role == 0) {                        // select on the ALT row itself (mode 4)
                 altDest[o] = -2 - altRow;
-                selRow[o] = rc.row >= 0 ? rc.row : altRow;
+                selRow[o] = stockSel <= -2 ? stockSel : (rc.row >= 0 ? rc.row : altRow);
             }
         }
     }
@@ -734,7 +758,7 @@ inline int shAltRow(const ShScatter& s, const int* ix) {
     return s.rowEq == 1 ? ix[4] : -1;
 }
 
-void collectShAltPattern(int nsh, const int* shIdx, std::vector<std::pair<int, int>>& pat,
+void collectShAltPattern(int nsh, const int* shIdx, const int* relocOwn, std::vector<std::pair<int, int>>& pat,
                          int nQr, const int* qrPtr, const int* qrRows) {
     for (int e = 0; e < nsh; e++) {
         const int* ix = shIdx + static_cast<size_t>(e) * 5;
@@ -744,7 +768,9 @@ void collectShAltPattern(int nsh, const int* shIdx, std::vector<std::pair<int, i
                 continue;
             }
             RC rc = resolveSh(s, ix);
-            int altRow = shAltRow(s, ix);
+            int origAlt = shAltRow(s, ix);
+            int altRow = stockAltRow(rc.row, origAlt, relocOwn);
+            int stockSel = stockSelRow(rc.row, origAlt, relocOwn);
             if (rc.col < 0) {
                 continue;
             }
@@ -760,7 +786,7 @@ void collectShAltPattern(int nsh, const int* shIdx, std::vector<std::pair<int, i
     }
 }
 
-void buildShDynDest(int nsh, const int* shIdx, const CsrPattern& pos,
+void buildShDynDest(int nsh, const int* shIdx, const int* relocOwn, const CsrPattern& pos,
                     std::vector<int>& altDest, std::vector<int>& selRow,
                     int nQr, const int* qrPtr, const int* qrRows,
                     std::vector<int>& relocGroup, std::vector<int>& relocOff, std::vector<int>& relocPool) {
@@ -773,7 +799,9 @@ void buildShDynDest(int nsh, const int* shIdx, const CsrPattern& pos,
         for (int k = 0; k < SH_NOUT; k++) {
             const ShScatter& s = SH_SCATTER[k];
             RC rc = resolveSh(s, ix);
-            int altRow = shAltRow(s, ix);
+            int origAlt = shAltRow(s, ix);
+            int altRow = stockAltRow(rc.row, origAlt, relocOwn);
+            int stockSel = stockSelRow(rc.row, origAlt, relocOwn);
             size_t o = static_cast<size_t>(e) * SH_NOUT + k;
             if (altRow <= -2) {
                 int g = -2 - altRow;
@@ -797,10 +825,10 @@ void buildShDynDest(int nsh, const int* shIdx, const CsrPattern& pos,
             }
             if (s.role == 1 && rc.col >= 0) {
                 altDest[o] = pos.at(altRow, rc.col);
-                selRow[o] = rc.row >= 0 ? rc.row : altRow;   // suppressed frozen dest: select on ALT row
+                selRow[o] = stockSel <= -2 ? stockSel : (rc.row >= 0 ? rc.row : altRow);   // suppressed frozen dest: select on ALT row
             } else if (s.role == 0) {
                 altDest[o] = -2 - altRow;
-                selRow[o] = rc.row >= 0 ? rc.row : altRow;
+                selRow[o] = stockSel <= -2 ? stockSel : (rc.row >= 0 ? rc.row : altRow);
             }
         }
     }
@@ -814,7 +842,7 @@ inline int obAltRow(const ObScatter& s, const int* qAlt, int e) {
     return s.rowEq == 1 ? qAlt[e * 2 + s.rowEnd] : -1;
 }
 
-void collectObAltPattern(int nob, const int* obIdx, const int* obQAlt, std::vector<std::pair<int, int>>& pat,
+void collectObAltPattern(int nob, const int* obIdx, const int* obQAlt, const int* relocOwn, std::vector<std::pair<int, int>>& pat,
                          int nQr, const int* qrPtr, const int* qrRows) {
     for (int e = 0; e < nob; e++) {
         const int* ix = obIdx + static_cast<size_t>(e) * 6;
@@ -824,7 +852,9 @@ void collectObAltPattern(int nob, const int* obIdx, const int* obQAlt, std::vect
                 continue;
             }
             RC rc = resolveOb(s, ix);
-            int altRow = obAltRow(s, obQAlt, e);
+            int origAlt = obAltRow(s, obQAlt, e);
+            int altRow = stockAltRow(rc.row, origAlt, relocOwn);
+            int stockSel = stockSelRow(rc.row, origAlt, relocOwn);
             if (rc.col < 0) {
                 continue;
             }
@@ -840,7 +870,7 @@ void collectObAltPattern(int nob, const int* obIdx, const int* obQAlt, std::vect
     }
 }
 
-void buildObDynDest(int nob, const int* obIdx, const int* obQAlt, const CsrPattern& pos,
+void buildObDynDest(int nob, const int* obIdx, const int* obQAlt, const int* relocOwn, const CsrPattern& pos,
                     std::vector<int>& altDest, std::vector<int>& selRow,
                     int nQr, const int* qrPtr, const int* qrRows,
                     std::vector<int>& relocGroup, std::vector<int>& relocOff, std::vector<int>& relocPool) {
@@ -853,7 +883,9 @@ void buildObDynDest(int nob, const int* obIdx, const int* obQAlt, const CsrPatte
         for (int k = 0; k < OB_NOUT; k++) {
             const ObScatter& s = OB_SCATTER[k];
             RC rc = resolveOb(s, ix);
-            int altRow = obAltRow(s, obQAlt, e);
+            int origAlt = obAltRow(s, obQAlt, e);
+            int altRow = stockAltRow(rc.row, origAlt, relocOwn);
+            int stockSel = stockSelRow(rc.row, origAlt, relocOwn);
             size_t o = static_cast<size_t>(e) * OB_NOUT + k;
             if (altRow <= -2) {
                 int g = -2 - altRow;
@@ -877,10 +909,10 @@ void buildObDynDest(int nob, const int* obIdx, const int* obQAlt, const CsrPatte
             }
             if (s.role == 1 && rc.col >= 0) {
                 altDest[o] = pos.at(altRow, rc.col);
-                selRow[o] = rc.row >= 0 ? rc.row : altRow;   // suppressed frozen dest: select on ALT row
+                selRow[o] = stockSel <= -2 ? stockSel : (rc.row >= 0 ? rc.row : altRow);   // suppressed frozen dest: select on ALT row
             } else if (s.role == 0) {
                 altDest[o] = -2 - altRow;
-                selRow[o] = rc.row >= 0 ? rc.row : altRow;
+                selRow[o] = stockSel <= -2 ? stockSel : (rc.row >= 0 ? rc.row : altRow);
             }
         }
     }
@@ -958,6 +990,9 @@ __device__ inline int ziDynDest(int frozen, int slot, const int* alt, const int*
         return rt.pool[rt.off[slot] + relocChoose(rg, rt.qrPtr, rt.qrRows, mode)];
     }
     int sr = sel != nullptr ? sel[slot] : -1;
+    if (sr <= -2) {
+        return mode[-2 - sr] == 0 ? alt[slot] : frozen;       // stock-placement: identity only (see stockAltRow)
+    }
     return (sr >= 0 && (mode[sr] == 0 || mode[sr] == 4)) ? alt[slot] : frozen;
 }
 
@@ -974,7 +1009,9 @@ __device__ void scatterAddDyn(int nout, const int* dest, const int* altDest, con
             d = rt.pool[rt.off[eOff + k] + relocChoose(rg, rt.qrPtr, rt.qrRows, mode)];
         } else {
             int sr = selRow[k];
-            d = (sr >= 0 && (mode[sr] == 0 || mode[sr] == 4)) ? altDest[k] : dest[k];
+            bool useAlt = sr >= 0 ? (mode[sr] == 0 || mode[sr] == 4)
+                                  : (sr <= -2 && mode[-2 - sr] == 0);   // stock-placement: identity only
+            d = useAlt ? altDest[k] : dest[k];
         }
         if (d >= 0) {
             atomicAdd(&vals[d], o[k]);
@@ -2288,6 +2325,31 @@ SharedStructure* buildStructure(int n,
     // ---- diagonal-pairing row permutation + index packs rewritten through it ----
     st->rowMap = buildRowMap(n, ncb, cbIdx, nob, obIdx, nsh, shIdx, nhv, hvIdx, ndq, dqRow, nzi, ziIdx);
     const std::vector<int>& rowMap = st->rowMap;
+    // COUPLER-TREE relocation, per-scenario placement: map each coupler DUMMY row that hosts a child bus's
+    // relocated P/Q equation to that bus's OWN row, so a scenario OPENING the coupler can put the equation
+    // back where the stock layout has it (see stockAltRow). ziIdx is not row-mapped and its slots 4..9 are
+    // variable COLUMNS, so both sides go through rowMap. Empty unless rows actually moved, which keeps every
+    // existing structure bit-identical.
+    std::vector<int> relocOwnRow(static_cast<size_t>(n), -1);
+    bool anyRelocOwn = false;
+    for (int e = 0; e < nzi; e++) {
+        const int* z = ziIdx + static_cast<size_t>(e) * 11;
+        int childSide = (z[10] >> 1) & 3;
+        if (childSide == 0 || (z[10] & 8) == 0) {
+            continue;                                        // dead-end stub (bit 3 clear): long-standing case
+        }
+        int ownPhiCol = childSide == 1 ? z[8] : z[9];
+        int ownVCol = childSide == 1 ? z[6] : z[7];
+        if (z[4] >= 0 && ownPhiCol >= 0) {
+            relocOwnRow[rowMap[z[4]]] = rowMap[ownPhiCol];
+            anyRelocOwn = true;
+        }
+        if (z[5] >= 0 && ownVCol >= 0) {
+            relocOwnRow[rowMap[z[5]]] = rowMap[ownVCol];
+            anyRelocOwn = true;
+        }
+    }
+    const int* relocOwn = anyRelocOwn ? relocOwnRow.data() : nullptr;
     auto mapRows = [&](const int* idx, int ne, int stride, std::initializer_list<int> rowSlots) {
         std::vector<int> out(idx, idx + static_cast<size_t>(ne) * stride);
         for (int e = 0; e < ne; e++) {
@@ -2328,10 +2390,10 @@ SharedStructure* buildStructure(int n,
     // ---- fixed CSR pattern (rows = permuted equations, cols = variables) ----
     std::vector<std::pair<int, int>> pat;
     collectPattern(ncb, cbIdx, 12, CB_SCATTER, CB_NOUT, resolveCb, pat);
-    bool dynReloc = hasRelocatable(ncb, cbIdx, nsh, shIdx)
+    bool dynReloc = anyRelocOwn || hasRelocatable(ncb, cbIdx, nsh, shIdx)
             || hasAltEntries(obQAlt, nob * 2) || hasAltEntries(ziQAlt, nzi * 2);
     if (dynReloc) {
-        collectCbAltPattern(ncb, cbIdx, pat, st->nQr,        // union the alternate Q rows into the pattern
+        collectCbAltPattern(ncb, cbIdx, relocOwn, pat, st->nQr,        // union the alternate Q rows into the pattern
                 st->hQrPtr.data(), st->hQrRows.data());      // (+ every GROUP candidate's slots, plan-A6)
     }
     bool phaseCtl = false;
@@ -2343,11 +2405,11 @@ SharedStructure* buildStructure(int n,
     }
     collectPattern(nob, obIdx, 6, OB_SCATTER, OB_NOUT, resolveOb, pat);
     if (dynReloc) {
-        collectObAltPattern(nob, obIdx, obQAlt, pat, st->nQr, st->hQrPtr.data(), st->hQrRows.data());
+        collectObAltPattern(nob, obIdx, obQAlt, relocOwn, pat, st->nQr, st->hQrPtr.data(), st->hQrRows.data());
     }
     collectPattern(nsh, shIdx, 5, SH_SCATTER, SH_NOUT, resolveSh, pat);
     if (dynReloc) {
-        collectShAltPattern(nsh, shIdx, pat, st->nQr, st->hQrPtr.data(), st->hQrRows.data());
+        collectShAltPattern(nsh, shIdx, relocOwn, pat, st->nQr, st->hQrPtr.data(), st->hQrRows.data());
     }
     collectPattern(nhv, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pat);
     collectFamilyPattern(rowMap, cbIdx, obIdx, shIdx, ndq, dqElem, dqSide, dqKind, dqRow,
@@ -2532,7 +2594,7 @@ SharedStructure* buildStructure(int n,
         std::vector<int> relocGroup;
         std::vector<int> relocOff;
         std::vector<int> relocPool;
-        buildCbDynDest(ncb, cbIdx, pos, altDest, selRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
+        buildCbDynDest(ncb, cbIdx, relocOwn, pos, altDest, selRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
                 relocGroup, relocOff, relocPool);
         st->cb.altDest.upload(altDest.data(), altDest.size() * sizeof(int));
         st->cb.selRow.upload(selRow.data(), selRow.size() * sizeof(int));
@@ -2568,7 +2630,7 @@ SharedStructure* buildStructure(int n,
         std::vector<int> obRelocGroup;
         std::vector<int> obRelocOff;
         std::vector<int> obRelocPool;
-        buildObDynDest(nob, obIdx, obQAlt, pos, obAltDest, obSelRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
+        buildObDynDest(nob, obIdx, obQAlt, relocOwn, pos, obAltDest, obSelRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
                 obRelocGroup, obRelocOff, obRelocPool);
         st->ob.altDest.upload(obAltDest.data(), obAltDest.size() * sizeof(int));
         st->ob.selRow.upload(obSelRow.data(), obSelRow.size() * sizeof(int));
@@ -2592,7 +2654,7 @@ SharedStructure* buildStructure(int n,
         std::vector<int> shRelocGroup;
         std::vector<int> shRelocOff;
         std::vector<int> shRelocPool;
-        buildShDynDest(nsh, shIdx, pos, shAltDest, shSelRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
+        buildShDynDest(nsh, shIdx, relocOwn, pos, shAltDest, shSelRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
                 shRelocGroup, shRelocOff, shRelocPool);
         st->sh.altDest.upload(shAltDest.data(), shAltDest.size() * sizeof(int));
         st->sh.selRow.upload(shSelRow.data(), shSelRow.size() * sizeof(int));
@@ -3324,7 +3386,9 @@ __device__ void scatterAddFDyn(int nres, const int* dest, const int* altDest, co
             d = rt.pool[rt.off[eOff + idx] + relocChoose(rg, rt.qrPtr, rt.qrRows, mode)];
         } else {
             int sr = selRow[idx];
-            d = (sr >= 0 && (mode[sr] == 0 || mode[sr] == 4)) ? altDest[idx] : dest[idx];
+            bool useAlt = sr >= 0 ? (mode[sr] == 0 || mode[sr] == 4)
+                                  : (sr <= -2 && mode[-2 - sr] == 0);   // stock-placement: identity only
+            d = useAlt ? altDest[idx] : dest[idx];
         }
         if (d <= -2) {
             atomicAdd(&F[-2 - d], o[k]);

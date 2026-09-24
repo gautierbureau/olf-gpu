@@ -674,6 +674,17 @@ final class GpuBatchChunkSolver {
                             }
                             for (LfBranch ziOut : contingencies.get(ci).outagedZiBranches()) {
                                 Integer ze = ziElemByNumAll.get(ziOut.getNum());
+                                // OLF_GPU_ZITREE_TRACE: does this scenario OPEN a coupler the tree relocation
+                                // moved rows onto? Such a scenario deactivates the coupler's ZERO_V/ZERO_PHI,
+                                // which the relocation put on the CHILD bus's rows, and pins its dummies with
+                                // DUMMY_TARGET identities those rows no longer host — the per-scenario gap.
+                                // childSide (ziIdx slot 10, bits 1-2) is nonzero exactly when rows moved.
+                                if (System.getenv("OLF_GPU_ZITREE_TRACE") != null
+                                        && ((gpuData.ziIdx()[ze * 11 + 10] >> 1) & 3) != 0) {
+                                    System.err.println("ZITREE_OPEN ctg=" + contingencies.get(ci).contingencyId()
+                                            + " coupler=" + ziOut.getId()
+                                            + " childSide=" + ((gpuData.ziIdx()[ze * 11 + 10] >> 1) & 3));
+                                }
                                 ziOffSlotElemList.add(s);
                                 ziOffSlotElemList.add(ze);
                                 // the decoupled branch's ZERO_V/ZERO_PHI rows become identities again

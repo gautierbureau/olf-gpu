@@ -2058,3 +2058,31 @@ Next step, cheap and named: run `OLF_GPU_SA_CTG_ONLY=BUS-6014_BBS_2` with `OLF_G
 `ziChildBus >= 0`. If it does, the fix is the per-scenario placement already sketched at the top of this
 file (both placements unioned in the pattern, the destination chosen per scenario) — not a CPU gate, which
 was measured at 0/1000 and rejected.
+
+#### CONFIRMED: the relocation's divergence is exactly the coupler-opening scenarios (2026-09-24)
+
+`OLF_GPU_ZITREE_TRACE` now prints `ZITREE_OPEN ctg=<id> coupler=<id> childSide=<n>` from the batch path's
+zi-outage loop whenever a scenario opens a coupler whose rows the tree relocation MOVED (`ziIdx` slot 10,
+bits 1-2 nonzero). On window [5000,6000) at N=1000 with the relocation on, the sets are:
+
+| set | count |
+| --- | --- |
+| contingencies whose violations differ from the CPU (A) | **11** |
+| contingencies that open a RELOCATED coupler (B) | 67 |
+| **A \ B** (diverge without opening one) | **0** |
+
+`A` is a strict subset of `B`, with no exceptions: the 3.982 kV state difference, the 808 MW distributed
+power and all 299 violation diffs come from scenarios that open a relocated coupler, and nothing else
+differs. The three named reproducers all appear in B (`BUS-6014_BBS_2` opens TWO relocated couplers,
+`BUS-5959_BBS_1` and `BUS-5962_BBS_1` one each). 56 of the 67 do NOT diverge, which fits: when the opened
+coupler's subtree becomes an island, the freeze makes every row of it an identity and the placement stops
+mattering (the fix committed as 2fee085).
+
+This is the validation target for the per-scenario placement work: after it, **A must be empty while B stays
+67**. A metric that only counts violations cannot see the difference — use the bus-level worst over ALL
+contingencies (`OLF_GPU_SA_BUSDIFF=1`), not the first lines of it.
+
+It also corrects the earlier rejection of a targeted gate. The gate measured at 0/1000 keyed on ANY coupler
+opening, which is every busbar contingency. The precise set is 67 of 1000 (6.7%), and only 11 of those
+actually break — so a gate on RELOCATED-coupler openings would cost 6.7% of the batch, not all of it. Still
+scaffolding rather than the goal, but an order of magnitude cheaper than what was measured and rejected.

@@ -478,7 +478,16 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             LOGGER.warn("OLF_GPU_EQ_DUMP (.olf) failed: {}", e.toString());
         }
         equationsDumped = true;
-        System.err.println("EQ_DUMP wrote " + path + " and " + path + ".olf (n=" + n + " pinned=" + pinned + ")");
+        StringBuilder m4 = new StringBuilder();
+        for (int r = 0; r < rowMode.length; r++) {
+            if (rowMode[r] == 4) {
+                m4.append(' ').append(r);
+            }
+        }
+        // The HOST's pinned rows, to line up against the device's (OLF_GPU_VALS_SCAN prints mode4Rows per
+        // fill): if they differ, the device moved a pin, and the row it moved it to is the defect.
+        System.err.println("EQ_DUMP wrote " + path + " and " + path + ".olf (n=" + n + " pinned=" + pinned
+                + ") hostMode4Rows=[" + m4.toString().trim() + "]");
     }
 
     /** The remote gen-VC pin set the cached extraction's DISTR_Q weights were built from (see runImpl). */

@@ -1841,3 +1841,50 @@ Still open on this window, in order:
 2. `distributedActivePower`: 525 of 974 contingencies differ, worst 1.057 MW. Unchanged by this fix and
    identical in the all-CPU-routed run, so it belongs to the base-fallback path, not to the batch.
 3. Violation diff 4 of 71538.
+
+### Why the base still falls back: a DEGENERATE DISTR_Q, not a missing row (2026-09-24)
+
+Printing the host's pinned rows next to the device's settles what the remaining NaN is. At the failing
+pass the two disagree outright:
+
+```
+host  (from OLF's state) hostMode4Rows=[12562 12588 12590 12592 12836]
+device (ctx->dMode)      mode4Rows=[12560 12588 12834]        <- at outer=6, the first pinned fill
+```
+
+The device is not mis-pinning: it runs its own RL decisions against the FIRST extraction's layout, and in
+THAT layout its choice is routable and right. `OLF_GPU_EQ_DUMP_WHEN=any` shows it:
+
+```
+VL-5997_0 (pilot)  qRow=-1 qRowAlt=12560 enabled=true   row=12560 mode=0 terms=[cb#8699.q2@alt]
+VL-5997_1 (member) qRow=-1 qRowAlt=-1    enabled=true   row=12562 mode=1 terms=[dq ... w=0.500000 ...]
+```
+
+Both q scatters are suppressed into the group's DISTR_Q row with weight 0.5 while both controllers are
+enabled — correct. The device then pins the pilot at 12560, where its `@alt` dest routes its q terms
+properly, and the key renormalization gives the SURVIVOR a share of 1.0. At that point
+`DISTR_Q_member = 1·Σq − q_member = q_pilot`, which is the SAME equation as the pilot's own Q balance now
+hosted at 12560. Two identical equations, which is precisely the two `+1` entries measured on the
+`DUMMY_Q` column and the lost rank. Nothing is missing from the assembly; one equation is DUPLICATED.
+
+OLF cannot hit this: when a controller pins, the survivor becomes the FREE controller, its `DISTR_Q`
+ceases to exist and `BUS_TARGET_V` takes that row. That ROLE ROTATION is what the candidate table
+(`qRowAlt = -2-group`, `relocChoose`, `updatePilotVeqBatch`) implements — and this group has none, because
+the qr-group loop deliberately excludes "a pilot that is ALSO one of its own controllers" (leaving it in
+the table double-counted its q). Exactly the 2 rte6515 buses in that shape are the ones that fail.
+
+So step 1 is NOT a small patch. Two ways to close it, both real work:
+1. Extend the candidate table to pilot-self groups: give the group a table whose member list drives the
+   re-pick while keeping the pilot's own q out of it (the double-count the exclusion was protecting
+   against). Then the survivor's row gets the V identity and its DISTR_Q is dropped, as on the CPU.
+2. A targeted rotation: when the device pins the pilot of a pilot-self group, set the surviving free
+   member's row to mode 0 with the group's V target and gate off its DISTR_Q — the same effect, driven by
+   a small host-provided pairing (pilot row, survivor row, V target) instead of a general table.
+
+Tried and rejected on the way here, so do not repeat them:
+- Static alternates for both buses (`qRowAlt = vCol`): took the window from 900 back to 0 / 1000. The
+  selector reads the FROZEN row's mode, and mode 4 there is the pilot's own relocated pin, so the pilot's
+  q got diverted off the row that must host it.
+- Excluding relocated entries from the all-pinned flip test (`pilotRowAllPinnedBatch`): kept, it is
+  correct on its own terms (the flip cannot route q in a table-less group), but it did NOT clear the NaN —
+  the flip was never the trigger.

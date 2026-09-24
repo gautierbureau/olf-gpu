@@ -1457,10 +1457,15 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
             }
         }
         int modeCount[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        char m4[256] = {0};
+        int m4len = 0;
         for (int r = 0; r < n; r++) {
             int m = mode[static_cast<size_t>(s) * n + r];
             if (m >= 0 && m < 8) {
                 modeCount[m]++;
+            }
+            if (m == 4 && m4len < 200) {                     // WHICH rows are pinned, so the fill that first
+                m4len += std::snprintf(m4 + m4len, sizeof(m4) - m4len, " %d", r);   // moves one is visible
             }
         }
         // OLF_GPU_VALS_DUMP=<path>: write the FIRST matrix that carries a mode-4 row (the RL-pinned remote
@@ -1498,11 +1503,11 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
         }
         std::fprintf(stderr, "VALS_SCAN outer=%d it=%d slot=%d nnz=%d finite=%s maxAbs=%.6e at row=%d col=%d"
                              " | noDiagSlot=%d tinyDiag=%d firstBadRow=%d nHaz=%d dupRows=%d,%d"
-                             " modes[0..4]=%d,%d,%d,%d,%d deadCols=%d firstDeadCol=%d\n",
+                             " modes[0..4]=%d,%d,%d,%d,%d deadCols=%d firstDeadCol=%d mode4Rows=[%s]\n",
                      outer, it, s, nnz, bad < 0 ? "yes" : "NO", maxAbs, maxRow, maxCol,
                      noDiagSlot, tinyDiag, firstBad, ctx->st->nHaz, dupA, dupB,
                      modeCount[0], modeCount[1], modeCount[2], modeCount[3], modeCount[4],
-                     deadCols, firstDeadCol);
+                     deadCols, firstDeadCol, m4);
     }
 }
 
@@ -4235,7 +4240,7 @@ __global__ void pilotRowAllPinnedBatch(int nEntries, int nScenarios, int n, int 
                                        const int* entOff, const int* entCount, const int* entRlPool,
                                        const char* limitType, int* mode, double* target,
                                        char* flipped, double* savedVTarget,
-                                       const char* rlActive, char* switched) {
+                                       const char* rlActive, char* switched, const char* rlBaseLt) {
     int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= nEntries) return;
     int s = entSlot[e];
@@ -4248,6 +4253,15 @@ __global__ void pilotRowAllPinnedBatch(int nEntries, int nScenarios, int n, int 
         int rl = entRlPool[entOff[e] + k];
         if (rl < 0 || rl >= nrl || limitType[(size_t) s * nrl + rl] == 0) {
             allPinned = false;                              // this one still carries its DISTR_Q row
+            break;
+        }
+        if (rlBaseLt != nullptr && rlBaseLt[rl] == RL_BASE_RELOCATED) {
+            // This member's pin state is not ours to read: its reactive balance does not live on the row the
+            // RL bookkeeping keys on (GpuAcOuterLoopPacks.RL_BASE_RELOCATED), and it is seeded FROZEN — a
+            // non-zero type that would otherwise read here as "pinned" and fire the flip. The flip only
+            // works when the pilot's q can be ROUTED to the flipped row by an alternate dest, which this
+            // shape has none of, so flipping would empty the row and lose BUS_TARGET_V with it.
+            allPinned = false;
             break;
         }
     }
@@ -10056,7 +10070,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->dPfOff.as<int>(), ctx->dPfCount.as<int>(), ctx->dPfRlPool.as<int>(),
                         ctx->dRlLimitType.as<char>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
                         ctx->dPfFlipped.as<char>(), ctx->dPfSavedVT.as<double>(),
-                        ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
+                        ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(),
+                        ctx->hasRlBaseLt ? ctx->dRlBaseLimitType.as<char>() : nullptr);
             }
         }
     }

@@ -123,8 +123,17 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             // A pilot that is ALSO one of its controllers has NO Q balance of its own to relocate —
             // its q feeds the group's DISTR_Q rows instead (GpuAcRowIndexing.distrQRow), and leaving
             // it in this table double-counted that q on top of the DISTR_Q terms.
+            // ...but only WHILE IT CONTROLS. Once a reactive limit PINS such a pilot, OLF activates its
+            // BUS_TARGET_Q, which needs a row, and its own row still carries BUS_TARGET_V because a sibling
+            // controller keeps the voltage — so the group DOES need the table, with the pilot's raw-q
+            // emission GATED on it being pinned (psPilotPinned in olf_gpu_nr_jni.cu). Property-gated while
+            // this lands; without it such a group keeps a relocation frozen at extraction, which is what
+            // leaves rte6515's busbar base rank-deficient.
+            boolean pilotSelf = gvc != null && gvc.getMergedControllerElements().contains(bus);
+            boolean pilotSelfRotates = pilotSelf && GpuAcRowIndexing.pilotSelfRotationEnabled()
+                    && gvc.getMergedControllerElements().size() >= 2;
             if (gvc == null || gvc.getMergedControllerElements().isEmpty() || vCol[bus.getNum()] < 0
-                    || gvc.getMergedControllerElements().contains(bus)) {
+                    || (pilotSelf && !pilotSelfRotates)) {
                 continue;
             }
             List<Integer> memberRows = new ArrayList<>();
@@ -145,6 +154,11 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             qrRows.addAll(memberRows);
             qRowAlt[bus.getNum()] = -2 - g;
             qrPilotBuses.add(bus.getNum());
+            if (pilotSelf && System.getenv("OLF_GPU_RL_TRACE") != null) {
+                System.err.println("PILOTSELF_ENROL group=" + g + " pilot=" + bus.getId()
+                        + " members=" + gvc.getMergedControllerElements().size()
+                        + " fallbackRow=" + vCol[bus.getNum()]);
+            }
         }
         qrPtr.add(qrRows.size());
 

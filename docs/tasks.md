@@ -1958,3 +1958,49 @@ exactly this rotation being missing.
 Trap worth remembering, cost an hour: `ExtractionColumns.of` returns `vCol = -1` for a bus whose variables
 the LAZY equation index has not sorted yet. The real pipeline extracts after the solver materialises the
 index; a test must call `AcSolverUtil.initStateVector` first or it silently packs nothing.
+
+### METHOD CORRECTION: MAVEN_OPTS does not reach the surefire fork (2026-09-24)
+
+Measured today, unambiguously, on the same run shape: with
+`MAVEN_OPTS="-Dolf.gpu.pilotSelfRotation=true"` the property arrives as FALSE in the test JVM (0 enrolment
+traces); with `mvn -Dolf.gpu.pilotSelfRotation=true` it arrives as TRUE (1917 traces). Surefire forks its
+own JVM and propagates `-D` given on the MAVEN COMMAND LINE, not `MAVEN_OPTS`, which only configures the
+Maven JVM. **Always pass a GPU property as `mvn -D<prop>=<value>`.**
+
+This invalidates earlier entries here that switched a property through `MAVEN_OPTS`. Specifically:
+
+- **VOID**: "window [5000,6000)'s base fails identically with `-Dolf.gpu.ziTreeRelocation` on and off" — the
+  "on" run had it OFF, so both arms were the same configuration. The conclusion drawn from it, that the
+  coupler-tree relocation is NOT this window's blocker, is therefore UNPROVEN and must be re-measured.
+- **VOID**: the coupler-tree threshold experiments run through `MAVEN_OPTS` (the 0/1000 and base-failure
+  numbers attributed to "relocation at threshold 1").
+- **STILL VALID** (no property involved, or set in-JVM): the coupler-chain first-step results
+  (`GpuZiCouplerTreeRelocationTest` sets the property with `System.setProperty`); the RL_BASE_RELOCATED fix
+  and its 0 -> 900 of 1000 measurement; the KLU rank analysis; every equation-dump finding; the
+  DISTR_Q-duplication diagnosis, which was read off dumps rather than a property switch.
+
+### Option 1, slice 2: the pilot-self gate, property-gated and NOT yet working (2026-09-24)
+
+Landed behind `-Dolf.gpu.pilotSelfRotation` (default false; suite 290/0 with it off, so the shipped path is
+untouched). What works: pilot-self groups now enrol in the candidate table, and the device DERIVES both
+facts the gate needs with no new host table — a group is pilot-self exactly when its fallback row (candidate
+0, the pilot's own row) reappears among its member rows, and the pilot's RL entry is the one sitting on that
+row. `PILOTSELF_GATE groups=27 of 30` on rte6515, the other 3 being the pre-existing table-ful groups: the
+derivation is right.
+
+`pilotSelfGateBatch` recomputes, per (scenario, group) before every fill, whether the pilot is unpinned, and
+that gate now suppresses BOTH halves — the pilot's raw-q emission at the carrier row (`RelocTables.psSkip`
+in all three pick sites) and the carrier's own `DISTR_Q` suppression in `fillDistrQBatch`. The second half
+was missing at first and cost a run: for a table-ful group the carrier's `DISTR_Q` is always inactive
+because the pilot always has a balance to place, but a pilot-self group's pilot has none while it controls,
+so suppressing it dropped an equation without gaining one.
+
+With both halves gated the window is still **0 / 1000 with 2 fallbacks** (vs 900 / 1000 with the property
+off), so something in the enrolment is still wrong. Do NOT enable it. Next suspects, in order:
+1. All 27 groups enrol, including 17 of size 2 where the pilot and one member are the whole group; check a
+   size-2 group by hand against OLF's rule before trusting the general path.
+2. `qRowAlt[pilot] = -2-g` REPLACES the own-row alternate the second canonicalization loop gave these
+   pilots. The all-pinned corner then relies on candidate 0 falling back to that row — verify it does.
+3. The pattern union (`collectCbAltPattern` and friends) now unions every candidate row for these groups;
+   confirm the extra positions exist for the rows the gate can select, or a pick lands on a slot that was
+   never patterned.

@@ -2281,3 +2281,35 @@ Next diagnostic, and the other half of the comparison: dump the DEVICE's per-sce
 scenario (`readBatchRowModes` already exists natively) and diff them against this CPU dump row by row for
 12563..12566 and 13044..13047. The second `ZITREE_VID` line is the lead — `VL-6014_1` is the bus OLF
 DISABLES, and how the device freezes it (or fails to) is now the main suspect.
+
+### Both halves of the comparison, and what they show (2026-09-24)
+
+`OLF_GPU_ROWMODE_DUMP_CTG=<contingency id>` prints the DEVICE's final per-scenario row modes and targets, as
+the rows that DIFFER from the base, from the post-solve readback in `GpuBatchChunkSolver`. With
+`OLF_GPU_EQ_DUMP_CTG` (OLF's post-contingency equations) that is the full row-by-row comparison, and for
+`BUS-6014_BBS_2` it reads:
+
+| row | variable | device mode/target | OLF post-contingency |
+| --- | --- | --- | --- |
+| 12564 | `BUS_V(VL-6014_1)` | 0 / **1.0** | bus DISABLED — the flat freeze is the device equivalent |
+| 12565 | `BUS_PHI(VL-6014_1)` | 0 / 0.0 | disabled |
+| **12566** | **`BUS_V(VL-6014_2)`** | **0 / 0.0** | **`bus_target_v6283` ACTIVE**, target 1.142 pu |
+| 12567 | `BUS_PHI(VL-6014_2)` | unchanged (1) | P balance active — the stock fallback returns it |
+| 13044–13047 | both couplers' dummies | 0 / 0.0 | `dummy_target_*` ACTIVE |
+
+So the device pins a LIVE bus's voltage identity to **zero** instead of to its control target. The
+`ZITREE_VID` trace shows the host writing the right value (`child=VL-6014_2 vRow=12566 target=1.142
+applied=true`), and the MODE does land (the row is 0, not its base 1) while the TARGET does not.
+
+Next session starts here, with two candidates and a warning:
+1. The override may never reach that row — trace `GpuBatchOverrides` for row 12566 end to end (the
+   neighbouring zi-outage overrides write 0.0, which is ALSO the base target for a dummy row, so "13044–13047
+   are 0.0" is NOT evidence that those overrides landed).
+2. A device kernel may rewrite it afterwards — `readBatchRowModes`' own javadoc warns the outer-loop kernels
+   rewrite mode AND target, and this dump is read after the solve.
+
+The warning: a mode-0 identity at target 0 on a live bus should drive its voltage to 0 pu and wreck the
+scenario, yet the measured worst bus difference is only 4.086e-02 kV. Either the reported voltage does not
+come from that row, or the target is rewritten again before the solve that produces the answer. Resolve that
+contradiction BEFORE fixing anything — it is the same trap as the two wrong fixes above, where a plausible
+story was acted on ahead of the evidence.

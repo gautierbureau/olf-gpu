@@ -2216,3 +2216,27 @@ Next increment: give `buildDistrQDest` the same `relocOwn` fallback the families
 whose row is a relocated `DUMMY_Q`, an alternate at the child's own V row with the `-2-row` selector, plus the
 matching pattern positions — and then `fillDistrQBatch` picks per scenario. `relocOwn` is already built and in
 scope. `vdl` and `hv` still have no alternate channel at all and remain the other open candidate.
+
+#### NEGATIVE RESULT: routing a relocated DISTR_Q back to the bus's own V row is WRONG (2026-09-24)
+
+Implemented and measured, then reverted. `buildDistrQDest` gained an alternate set of the same six dests
+computed at `relocOwn[dummyQRow]` (the child's own V row) with the `-2-row` selector, the pattern gained the
+matching positions, and `fillDistrQBatch` picked per scenario. On the fast reproducer
+(`OLF_GPU_SA_CTG_ONLY=BUS-6014_BBS_2`, relocation on) the worst bus difference went from **4.086e-02 kV to
+6.023 kV** — about 150x worse — so the premise is wrong, not the wiring.
+
+Why the premise looked right and is not: when the coupler opens, the child's `ZERO_V` does vanish and its V
+row is free, so "put the DISTR_Q back there" is the obvious move. But a coupler opening also changes the
+GROUP: on the CPU, OLF re-evaluates `updateRemoteVoltageControlEquations` over the live controllers, which
+can deactivate that `DISTR_Q` entirely (the controller is no longer connected to the pilot), or the child is
+islanded, in which case the equation should be zeroed rather than relocated. Blindly relocating it forces an
+equation OLF no longer has.
+
+So the next attempt must first establish what OLF's equation set actually IS for that scenario — dump the
+CPU side with `EquationSystem#write` for the post-contingency state of `BUS-6014_BBS_2` and compare against
+the device's rows — rather than assuming the row simply moves. `GpuEquationDump` writes both sides already;
+what is missing is a dump taken with the CONTINGENCY applied, which is worth adding to the harness before
+writing more device code.
+
+The tree is left at the best measured state (`dd32d58`): A = 3, total violation difference 16 on the full
+window, invariant intact.

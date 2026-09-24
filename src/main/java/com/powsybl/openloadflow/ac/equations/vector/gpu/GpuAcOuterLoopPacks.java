@@ -332,7 +332,16 @@ public final class GpuAcOuterLoopPacks {
                 mt.memberIdxByBusNum().put(m.getNum(), mt.key().size());
                 mt.key().add(rawKeys[i]);
                 mt.rlEntry().add(rlEntryByBusNum.getOrDefault(m.getNum(), -1));
-                mt.row().add(columns.vCol()[m.getNum()]);
+                // The member's DISTR_Q row, NOT simply its V column: under the coupler-tree relocation a
+                // relocated child's DISTR_Q lives on its parent coupler's DUMMY_Q (the same move
+                // buildDistrQContributions makes through distrQRow's tree overload), and its own V row
+                // carries that coupler's ZERO_V instead. Pointing this bookkeeping at the V row made the
+                // DISTR_Q target updater write there, which overwrote the BUS_TARGET_V target a scenario
+                // opening the coupler had just set - measured as row 12566 ending at target 0 instead of
+                // 1.142 on BUS-6014_BBS_2.
+                int mParent = columns.ziParentEdge()[m.getNum()];
+                mt.row().add(mParent >= 0 && columns.dummyQCol()[mParent] >= 0
+                        ? columns.dummyQCol()[mParent] : columns.vCol()[m.getNum()]);
                 // a member OWNS a DISTR_Q row when the equation EXISTS and it is not the FREE
                 // member (whose row carries the pilot's relocated Q)
                 mt.hasRow().add((byte) (m != freeMember

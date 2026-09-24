@@ -2020,3 +2020,41 @@ So the CONCLUSION stands on valid evidence this time — the coupler-tree reloca
 this window's base fallback — and there is a new reason to keep it off: enabling it takes the violation
 difference from 4 to 284. The relocation's demonstrated value remains narrow and unchanged: exact first
 Newton steps on coupler chains at 7 and 15 couplers, proven by a unit test that sets the property in-JVM.
+
+#### What the relocation's 284/299 violation diff actually is (2026-09-24, corrected twice)
+
+A row permutation cannot change the solution of a correctly assembled system, so a violation difference
+under the relocation is NOT evidence against the relocation — it is evidence that something ELSE still
+differs from the CPU, which the relocation exposes. Chasing it that way found it.
+
+Corrections to two things stated earlier in this session, both from sloppy measurement:
+
+1. "Keep the relocation off because it degrades violation parity" — wrong framing, deleted as a
+   conclusion. The relocation is a permutation; the diff is a symptom to chase.
+2. "States match to 1e-9 kV, so the 284 are pure threshold flicker" — wrong, and drawn from the FIRST few
+   `BUSDIFF` lines rather than the worst. The harness already sets the prescribed
+   `IncreasedViolationsParameters` (0.5, 0.001, 0.5, 0.001, 0.001), so the documented zero-threshold
+   flicker is already suppressed. Nor is it the CPU thread count: at the harness's busbar default of 1
+   thread the diff is 299, not 4.
+
+Measured properly, with the relocation ON (`mvn -Dolf.gpu.ziTreeRelocation=true
+-Dolf.gpu.ziTreeRelocationMinCouplers=1`), the divergence is CONCENTRATED:
+
+| reproducer | symptom |
+| --- | --- |
+| `BUS-6014_BBS_2` | worst bus difference **3.982 kV** (most contingencies sit at 1e-9 kV) |
+| `BUS-5959_BBS_1` | violations cpu=211 gpu=80 (delta -131) |
+| `BUS-5962_BBS_1` | violations cpu=230 gpu=107 (delta -123) |
+| any | distributed active power worst **808.1 MW** (1.06 MW with the relocation off) |
+
+Two contingencies carry ~254 of the 299. That is a real physical divergence on a few scenarios, not a
+reporting artifact, and it matches the per-scenario gap this file already documents: a contingency that
+OPENS a relocated coupler deactivates the `ZERO_V`/`ZERO_PHI` the relocation moved onto the child bus's
+rows, and pins the coupler's dummies with `DUMMY_TARGET` identities that those rows no longer host. The
+base is fine because nothing is open there; these scenarios are not.
+
+Next step, cheap and named: run `OLF_GPU_SA_CTG_ONLY=BUS-6014_BBS_2` with `OLF_GPU_SA_BUSDIFF=1` and
+`OLF_GPU_EQ_DUMP`, relocation on, and check whether that contingency opens a coupler whose
+`ziChildBus >= 0`. If it does, the fix is the per-scenario placement already sketched at the top of this
+file (both placements unioned in the pattern, the destination chosen per scenario) — not a CPU gate, which
+was measured at 0/1000 and rejected.

@@ -726,6 +726,8 @@ final class GpuBatchChunkSolver {
                                                 + " disabled=" + (child != null && child.isDisabled())
                                                 + " vc=" + (child != null && child.isGeneratorVoltageControlled())
                                                 + " baseMode=" + (childVRow >= 0 ? baseRowMode[childVRow] : -1)
+                                                + " target=" + (childVc.isPresent()
+                                                        ? childVc.orElseThrow().getTargetValue() : Double.NaN)
                                                 + " applied=" + applied);
                                     }
                                 }
@@ -1599,6 +1601,30 @@ final class GpuBatchChunkSolver {
                             for (int s = 0; s < realCount; s++) {
                                 slackAbsorbedByIndex.put(group.get(chunkStart + s), absorbed[s]);
                             }
+                        }
+                    }
+                    // OLF_GPU_ROWMODE_DUMP_CTG=<contingency id>: the DEVICE's final per-scenario row modes
+                    // and targets for that scenario, as the rows that DIFFER from the base. This is the other
+                    // half of the comparison against OLF_GPU_EQ_DUMP_CTG (OLF's post-contingency equations):
+                    // together they say, row by row, which equation each side has where.
+                    String rmCtg = System.getenv("OLF_GPU_ROWMODE_DUMP_CTG");
+                    if (rmCtg != null && !rmCtg.isEmpty()) {
+                        int[] devModes = GpuAcNewtonSolver.readBatchRowModes(handle);
+                        double[] devTargets = GpuAcNewtonSolver.readBatchTargets(handle);
+                        for (int s = 0; s < realCount; s++) {
+                            if (!rmCtg.equals(contingencies.get(group.get(chunkStart + s)).contingencyId())) {
+                                continue;
+                            }
+                            StringBuilder sb = new StringBuilder();
+                            for (int r = 0; r < n; r++) {
+                                int m = devModes[s * n + r];
+                                if (m != baseRowMode[r]) {
+                                    sb.append(String.format("  row=%d mode=%d<-%d target=%.9g%n",
+                                            r, m, baseRowMode[r], devTargets[s * n + r]));
+                                }
+                            }
+                            System.err.print("ROWMODE_DUMP ctg=" + rmCtg + " slot=" + s
+                                    + " rows differing from base:\n" + sb);
                         }
                     }
                     if (!pairPhase && nds > 0 && !pairIdxList.isEmpty()) {

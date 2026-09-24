@@ -1203,18 +1203,23 @@ __global__ void fillZeroImp(int nzi, const double* in, const int* ix, const int*
     double dummyP = x[q[4]], dummyQ = x[q[5]];
     const int* d = dest + e * 14;
     int d2 = d[2], d3 = d[3], d6 = d[6], d7 = d[7];
+    int d0 = d[0], d1 = d[1], d4 = d[4], d5 = d[5];
     if (ziDyn) {                                             // dynamic Q-routing (ob/zi channels)
-        d2 = ziDynDest(d2, e * 4 + 0, ziAlt, ziSel, mode, rt);
-        d3 = ziDynDest(d3, e * 4 + 1, ziAlt, ziSel, mode, rt);
-        d6 = ziDynDest(d6, e * 4 + 2, ziAlt, ziSel, mode, rt);
-        d7 = ziDynDest(d7, e * 4 + 3, ziAlt, ziSel, mode, rt);
+        d2 = ziDynDest(d2, e * 8 + 0, ziAlt, ziSel, mode, rt);
+        d3 = ziDynDest(d3, e * 8 + 1, ziAlt, ziSel, mode, rt);
+        d6 = ziDynDest(d6, e * 8 + 2, ziAlt, ziSel, mode, rt);
+        d7 = ziDynDest(d7, e * 8 + 3, ziAlt, ziSel, mode, rt);
+        d0 = ziDynDest(d0, e * 8 + 4, ziAlt, ziSel, mode, rt);
+        d1 = ziDynDest(d1, e * 8 + 5, ziAlt, ziSel, mode, rt);
+        d4 = ziDynDest(d4, e * 8 + 6, ziAlt, ziSel, mode, rt);
+        d5 = ziDynDest(d5, e * 8 + 7, ziAlt, ziSel, mode, rt);
     }
-    addAt(d[0], dummyP, vals, F);                            // F[bus1 P] += dummyP
-    addAt(d[1], -dummyP, vals, F);                           // F[bus2 P] -= dummyP
+    addAt(d0, dummyP, vals, F);                            // F[bus1 P] += dummyP
+    addAt(d1, -dummyP, vals, F);                           // F[bus2 P] -= dummyP
     addAt(d2, dummyQ, vals, F);                              // F[bus1 Q] += dummyQ
     addAt(d3, -dummyQ, vals, F);                             // F[bus2 Q] -= dummyQ
-    addAt(d[4], 1.0, vals, F);                               // J(bus1 P, dummyP)
-    addAt(d[5], -1.0, vals, F);                              // J(bus2 P, dummyP)
+    addAt(d4, 1.0, vals, F);                               // J(bus1 P, dummyP)
+    addAt(d5, -1.0, vals, F);                              // J(bus2 P, dummyP)
     addAt(d6, 1.0, vals, F);                                 // J(bus1 Q, dummyQ)
     addAt(d7, -1.0, vals, F);                                // J(bus2 Q, dummyQ)
     if (q[10] & 1) {                                         // spanning-tree edge: voltage/angle coupling
@@ -2108,7 +2113,8 @@ static void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const st
 }
 
 static void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
-                             int nzi, const double* ziIn, const int* ziIdx, const int* ziQAlt) {
+                             int nzi, const double* ziIn, const int* ziIdx, const int* ziQAlt,
+                             const int* relocOwn) {
     st->nzi = nzi;
     if (nzi > 0) {
         std::vector<int> ziDest(static_cast<size_t>(nzi) * 14, -1);
@@ -2116,10 +2122,14 @@ static void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const s
         // J side2} with the same alt/select/group encodings as the cb/sh families. A GROUP side's
         // FROZEN F dest is re-pointed at the fallback row (the pilot's own row) so the qBuf
         // diagnostic never lands the pilot's dummy-Q on a member row.
-        std::vector<int> ziAlt(static_cast<size_t>(nzi) * 4, -1);
-        std::vector<int> ziSel(static_cast<size_t>(nzi) * 4, -1);
-        std::vector<int> ziGrp(static_cast<size_t>(nzi) * 4, -1);
-        std::vector<int> ziOff(static_cast<size_t>(nzi) * 4, -1);
+        // 8 slots per element: Q at 0..3 {F side1, F side2, J side1, J side2} exactly as before, and P at
+        // 4..7 with the same meaning. The P half exists only for the COUPLER-TREE stock-placement fallback —
+        // a coupler in a CHAIN emits its +-dummyP into its parent's DUMMY_P row, so opening the parent would
+        // strand it (three of the four surviving divergences open two relocated couplers).
+        std::vector<int> ziAlt(static_cast<size_t>(nzi) * 8, -1);
+        std::vector<int> ziSel(static_cast<size_t>(nzi) * 8, -1);
+        std::vector<int> ziGrp(static_cast<size_t>(nzi) * 8, -1);
+        std::vector<int> ziOff(static_cast<size_t>(nzi) * 8, -1);
         std::vector<int> ziPool;
         bool anyDyn = false;
         for (int e = 0; e < nzi; e++) {
@@ -2147,8 +2157,8 @@ static void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const s
             int frozenQ[2] = {b1Q, b2Q};
             for (int side = 0; side < 2; side++) {
                 int altRow = ziQAlt[e * 2 + side];
-                int fSlot = static_cast<int>(e) * 4 + side;
-                int jSlot = static_cast<int>(e) * 4 + 2 + side;
+                int fSlot = static_cast<int>(e) * 8 + side;
+                int jSlot = static_cast<int>(e) * 8 + 2 + side;
                 if (altRow <= -2) {                          // GROUP relocation: one slot per candidate
                     int g = -2 - altRow;
                     ziGrp[fSlot] = g;
@@ -2170,6 +2180,31 @@ static void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const s
                     ziSel[fSlot] = sel;                      // suppressed frozen dest: select on ALT row
                     ziSel[jSlot] = sel;
                     anyDyn = true;
+                }
+            }
+            // STOCK-PLACEMENT fallback (see stockAltRow): when this element's own +-dummy coupling lands on a
+            // row that is itself a RELOCATED bus equation's home (its parent coupler's dummy row), give it the
+            // bus's own row as the alternate, selected by -2-row so it diverts only while that row is an
+            // identity — i.e. only in the scenarios that OPEN the parent coupler.
+            if (relocOwn != nullptr) {
+                int frozenP[2] = {b1P, b2P};
+                for (int side = 0; side < 2; side++) {
+                    int pRow = frozenP[side];
+                    if (pRow >= 0 && relocOwn[pRow] >= 0) {
+                        ziAlt[static_cast<size_t>(e) * 8 + 4 + side] = -2 - relocOwn[pRow];
+                        ziAlt[static_cast<size_t>(e) * 8 + 6 + side] = pos.at(relocOwn[pRow], z[4]);
+                        ziSel[static_cast<size_t>(e) * 8 + 4 + side] = -2 - pRow;
+                        ziSel[static_cast<size_t>(e) * 8 + 6 + side] = -2 - pRow;
+                        anyDyn = true;
+                    }
+                    int qRow = frozenQ[side];
+                    if (qRow >= 0 && relocOwn[qRow] >= 0 && ziSel[static_cast<size_t>(e) * 8 + side] < 0) {
+                        ziAlt[static_cast<size_t>(e) * 8 + side] = -2 - relocOwn[qRow];
+                        ziAlt[static_cast<size_t>(e) * 8 + 2 + side] = pos.at(relocOwn[qRow], z[5]);
+                        ziSel[static_cast<size_t>(e) * 8 + side] = -2 - qRow;
+                        ziSel[static_cast<size_t>(e) * 8 + 2 + side] = -2 - qRow;
+                        anyDyn = true;
+                    }
                 }
             }
             if (ziSpan(z)) {                                 // spanning-tree edge
@@ -2415,7 +2450,24 @@ SharedStructure* buildStructure(int n,
     collectFamilyPattern(rowMap, cbIdx, obIdx, shIdx, ndq, dqElem, dqSide, dqKind, dqRow,
                          ndr, drRow, drCol, ndb, dbRow, dbCol, nzi, ziIdx, pat);
     if (dynReloc) {
-        for (int e = 0; e < nzi; e++) {                      // zi alt J slots: (alt/candidate row, dummyQ col)
+        for (int e = 0; e < nzi; e++) {                      // zi STOCK positions: a +-dummy coupling that lands on
+        const int* z = ziIdx + static_cast<size_t>(e) * 11;   // a relocated bus's home row also needs the slot
+        if (relocOwn != nullptr) {                            // at that bus's OWN row, for the open-coupler case
+            int rows[2] = {rowMap[z[0]], rowMap[z[2]]};
+            for (int side = 0; side < 2; side++) {
+                if (rows[side] >= 0 && relocOwn[rows[side]] >= 0) {
+                    pat.emplace_back(relocOwn[rows[side]], z[4]);
+                }
+            }
+            int qrows[2] = {z[1] >= 0 ? rowMap[z[1]] : -1, z[3] >= 0 ? rowMap[z[3]] : -1};
+            for (int side = 0; side < 2; side++) {
+                if (qrows[side] >= 0 && relocOwn[qrows[side]] >= 0) {
+                    pat.emplace_back(relocOwn[qrows[side]], z[5]);
+                }
+            }
+        }
+    }
+    for (int e = 0; e < nzi; e++) {                      // zi alt J slots: (alt/candidate row, dummyQ col)
             int dqCol = ziIdx[static_cast<size_t>(e) * 11 + 5];
             for (int side = 0; side < 2; side++) {
                 int altRow = ziQAlt[e * 2 + side];
@@ -2678,7 +2730,7 @@ SharedStructure* buildStructure(int n,
     buildDistrQDest(st.get(), pos, rowMap, ndq, dqElem, dqSide, dqKind, dqWeight, dqRow, cbIdx, obIdx, shIdx);
 
     // ---- zero-impedance destinations: per branch the 8 dummy couplings + (tree) the 6 ZERO_V/ZERO_PHI ----
-    buildZeroImpDest(st.get(), pos, rowMap, nzi, ziIn, ziIdx, ziQAlt);
+    buildZeroImpDest(st.get(), pos, rowMap, nzi, ziIn, ziIdx, ziQAlt, relocOwn);
 
     // ---- DISTR_RHO destinations: per contribution {F row, J slot (row, r1 col)} ----
     buildDistrRhoDest(st.get(), pos, rowMap, ndr, drRow, drCol, drCoef);
@@ -3846,20 +3898,25 @@ __global__ void fillZeroImpBatch(int nzi, int nScenarios, int n, int nnz,
     const int* d = dest + e * 14;
     double dummyP = xs[q[4]], dummyQ = xs[q[5]];
     int d2 = d[2], d3 = d[3], d6 = d[6], d7 = d[7];
+    int d0 = d[0], d1 = d[1], d4 = d[4], d5 = d[5];
     if (ziDyn) {                                             // dynamic Q-routing (ob/zi channels)
         const int* ms = mode + (size_t) s * n;
         RelocTables rtS = relocForScenario(rt, s);
-        d2 = ziDynDest(d2, e * 4 + 0, ziAlt, ziSel, ms, rtS);
-        d3 = ziDynDest(d3, e * 4 + 1, ziAlt, ziSel, ms, rtS);
-        d6 = ziDynDest(d6, e * 4 + 2, ziAlt, ziSel, ms, rtS);
-        d7 = ziDynDest(d7, e * 4 + 3, ziAlt, ziSel, ms, rtS);
+        d2 = ziDynDest(d2, e * 8 + 0, ziAlt, ziSel, ms, rtS);
+        d3 = ziDynDest(d3, e * 8 + 1, ziAlt, ziSel, ms, rtS);
+        d6 = ziDynDest(d6, e * 8 + 2, ziAlt, ziSel, ms, rtS);
+        d7 = ziDynDest(d7, e * 8 + 3, ziAlt, ziSel, ms, rtS);
+        d0 = ziDynDest(d0, e * 8 + 4, ziAlt, ziSel, ms, rtS);   // +-dummyP: back to the bus's own PHI row
+        d1 = ziDynDest(d1, e * 8 + 5, ziAlt, ziSel, ms, rtS);   // when its parent coupler opens
+        d4 = ziDynDest(d4, e * 8 + 6, ziAlt, ziSel, ms, rtS);
+        d5 = ziDynDest(d5, e * 8 + 7, ziAlt, ziSel, ms, rtS);
     }
-    addAt(d[0], dummyP, valsS, FS);                          // F[bus1 P] += dummyP
-    addAt(d[1], -dummyP, valsS, FS);                         // F[bus2 P] -= dummyP
+    addAt(d0, dummyP, valsS, FS);                          // F[bus1 P] += dummyP
+    addAt(d1, -dummyP, valsS, FS);                         // F[bus2 P] -= dummyP
     addAt(d2, dummyQ, valsS, FS);                            // F[bus1 Q] += dummyQ
     addAt(d3, -dummyQ, valsS, FS);                           // F[bus2 Q] -= dummyQ
-    addAt(d[4], 1.0, valsS, FS);                             // J(bus1 P, dummyP)
-    addAt(d[5], -1.0, valsS, FS);                            // J(bus2 P, dummyP)
+    addAt(d4, 1.0, valsS, FS);                             // J(bus1 P, dummyP)
+    addAt(d5, -1.0, valsS, FS);                            // J(bus2 P, dummyP)
     addAt(d6, 1.0, valsS, FS);                               // J(bus1 Q, dummyQ)
     addAt(d7, -1.0, valsS, FS);                              // J(bus2 Q, dummyQ)
     if (q[10] & 1) {                                         // spanning-tree edge: voltage/angle coupling

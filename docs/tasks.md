@@ -2144,3 +2144,31 @@ own ±dummy couplings into a relocated child's rows are not covered, because its
 slots only (4 per element). A sub-coupler in a chain emits into its parent's dummy rows, so opening the
 parent strands it. Extending `buildZeroImpDest` to P slots (and `vdl`/`hv`, which have no alternate channel
 at all) is the next increment, and `BUS-6029_BBS_2` is the reproducer to drive it.
+
+#### Slice 2 of the per-scenario placement: the zi family's own ±dummy couplings (2026-09-24)
+
+Three of the four survivors opened TWO relocated couplers, i.e. CHAINS: a sub-coupler emits its ±dummyP /
+±dummyQ into its parent's DUMMY rows, so opening the parent stranded it exactly as the bus equations were
+stranded before. The zi alternate channel carried Q slots only (4 per element), so those couplings had no
+stock placement to fall back to.
+
+Extended to 8 slots per element — Q at 0..3 as before, P at 4..7 — with the same `stockAltRow` fallback and
+the same `-2-row` selector (divert only while the parent's dummy row is an identity). `buildZeroImpDest` now
+takes `relocOwn`, both zi kernels route `d0/d1/d4/d5` through `ziDynDest` (they previously used `d[...]`
+directly), and the pattern union adds the stock positions `(ownRow, dummyPCol)` and `(ownRow, dummyQCol)`.
+
+Cumulative on window [5000,6000) at N=1000, relocation on:
+
+| | start | bus equations (6b2499a) | **+ zi couplings** |
+| --- | --- | --- | --- |
+| A = contingencies whose violations differ | 11 | 4 | **3** |
+| A outside B (invariant: 0) | 0 | 0 | **0** |
+| total violation difference | 299 | 93 | **16** |
+
+`BUS-5958_BBS_1` (+24) is fixed. The three survivors are `BUS-6014_BBS_2` (−1), `BUS-6014_BBS_3` (−1) and
+`BUS-6029_BBS_2` (+18) — two of them differ by a single violation, which at this point is likelier a
+threshold edge than a placement error, and should be checked with the bus-level worst before more code.
+
+Remaining candidates for `BUS-6029_BBS_2`, the only substantial one left: `vdl` (load models) and `hv`
+(HVDC) have NO alternate-dest channel at all, so their P/Q at a relocated child cannot fall back; and the
+DISTR_Q kind-3 terms carry a dummy column into a DISTR_Q row, which may itself be a relocated home row.

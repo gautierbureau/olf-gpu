@@ -2004,3 +2004,19 @@ off), so something in the enrolment is still wrong. Do NOT enable it. Next suspe
 3. The pattern union (`collectCbAltPattern` and friends) now unions every candidate row for these groups;
    confirm the extra positions exist for the rows the gate can select, or a pick lands on a slot that was
    never patterned.
+
+#### The re-measurement the MAVEN_OPTS error forced (2026-09-24)
+
+Re-ran window [5000,6000) at N=1000 with `mvn -Dolf.gpu.ziTreeRelocation=true
+-Dolf.gpu.ziTreeRelocationMinCouplers=1`, confirmed live by 2565 `ZITREE` traces:
+
+| | relocation OFF | relocation ON (threshold 1) |
+| --- | --- | --- |
+| scenarios on device | 900 / 1000 | 900 / 1000 |
+| base fallbacks | 1 | 1 |
+| violations vs CPU | diff **4** | diff **284** |
+
+So the CONCLUSION stands on valid evidence this time — the coupler-tree relocation neither fixes nor causes
+this window's base fallback — and there is a new reason to keep it off: enabling it takes the violation
+difference from 4 to 284. The relocation's demonstrated value remains narrow and unchanged: exact first
+Newton steps on coupler chains at 7 and 15 couplers, proven by a unit test that sets the property in-JVM.

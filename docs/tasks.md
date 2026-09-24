@@ -2172,3 +2172,47 @@ threshold edge than a placement error, and should be checked with the bus-level 
 Remaining candidates for `BUS-6029_BBS_2`, the only substantial one left: `vdl` (load models) and `hv`
 (HVDC) have NO alternate-dest channel at all, so their P/Q at a relocated child cannot fall back; and the
 DISTR_Q kind-3 terms carry a dummy column into a DISTR_Q row, which may itself be a relocated home row.
+
+#### The last piece for the window: the relocated DISTR_Q row (2026-09-24)
+
+The bus-level check contradicts the violation counts, exactly as the harness warns
+("violation parity is a THRESHOLD test and will report zero while a bus is 0.1 kV out"). After both
+placement slices, with the relocation on:
+
+| survivor | violation delta | worst bus diff |
+| --- | --- | --- |
+| `BUS-6014_BBS_2` | −1 | **4.150 kV** |
+| `BUS-6029_BBS_2` | +18 | 0.617 kV |
+| `BUS-6014_BBS_3` | −1 | 0.041 kV |
+
+A one-violation difference hiding a 4.15 kV state error, so "likely a threshold edge" was the wrong read —
+always take the bus-level worst over ALL contingencies, not the violation count and not the first BUSDIFF
+lines.
+
+FAST REPRODUCER (about 2 minutes instead of 10): `OLF_GPU_SA_CTG_ONLY=BUS-6014_BBS_2` with
+`OLF_GPU_SA_CTG_KINDS=busbar OLF_GPU_SA_BUSBAR_TOP=100000` and the relocation on reproduces the mechanism at
+smaller amplitude (41 mV, violations diff 1) — retaining one contingency retains fewer switches, hence a
+smaller tree. Validate finally on the full window.
+
+All three survivors open TWO couplers OF THE SAME substation, and the dump shows why that shape is special:
+
+```
+zi#0 COUPLER_1 b1=VL-6014_0 b2=VL-6014_1 pRow2=13044 qRow2=13045   (child P and Q both relocated)
+zi#1 COUPLER_2 b1=VL-6014_1 b2=VL-6014_2 pRow2=13046 qRow2=-1      (child's Q is a DISTR_Q)
+```
+
+A first hypothesis — that `ZERO_V` collides with the child's `DISTR_Q` on its V row — is WRONG, checked:
+`GpuAcRowIndexing.distrQRow(es, controller, ziParentEdge, dummyQCol)` already relocates a relocated child's
+`DISTR_Q` onto the parent's `DUMMY_Q` column, "leaving its V row free for that coupler's ZERO_V", and it is
+used by both `GpuAcActivationExtractor` and `GpuAcOuterLoopPacks`. So `dummyQ` 13047 hosts that `DISTR_Q`
+and the layout is consistent.
+
+THE DEFECT is one step further on: when the scenario OPENS that coupler, the host pins `dummyP`/`dummyQ` to
+`DUMMY_TARGET` identities, so the relocated `DISTR_Q` at 13047 is ZEROED and nothing routes it back to the
+child's V row — which the vanished `ZERO_V` has just freed. The two placement slices give the bus P/Q family
+fills their stock fallback; the `dq` contributions never got one.
+
+Next increment: give `buildDistrQDest` the same `relocOwn` fallback the families have — for any contribution
+whose row is a relocated `DUMMY_Q`, an alternate at the child's own V row with the `-2-row` selector, plus the
+matching pattern positions — and then `fillDistrQBatch` picks per scenario. `relocOwn` is already built and in
+scope. `vdl` and `hv` still have no alternate channel at all and remain the other open candidate.

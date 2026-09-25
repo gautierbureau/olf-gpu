@@ -935,6 +935,15 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                             + " | worst abs=%.3e kV%n", selfAbove, selfPairs.size(), selfWorst);
         }
         if ("1".equals(System.getenv("OLF_GPU_SA_BASE_ONLY"))) {
+            // The BASE's own distributed active power, printed here because it is the cheapest reproducer of
+            // the per-contingency spread: the base carries the SAME systematic difference (0.066 MW, the
+            // device distributing less than OLF) that 462 of the window's contingencies show, and it needs one
+            // load flow per arm instead of a thousand.
+            System.out.printf("  BASE distributedActivePower: cpu=%.9f gpu=%.9f MW | diff=%.6e MW%n",
+                    cpu.getPreContingencyResult().getDistributedActivePower(),
+                    gpuCold.getPreContingencyResult().getDistributedActivePower(),
+                    Math.abs(cpu.getPreContingencyResult().getDistributedActivePower()
+                            - gpuCold.getPreContingencyResult().getDistributedActivePower()));
             System.out.println("  BASE_ONLY: stopping after the base comparison (no contingency simulated on the GPU arm)");
             return;
         }

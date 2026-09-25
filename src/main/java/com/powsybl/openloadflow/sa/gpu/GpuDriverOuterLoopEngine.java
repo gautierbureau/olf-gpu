@@ -164,8 +164,18 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
      * so every GPU-driven load flow reported 0 (the base case of a GPU security analysis: -60.29 MW on the
      * CPU, 0.0 on the GPU, IEEE 14). While the device drives, the amount is what its passes placed: each
      * device solve re-derives the whole distribution from the run's anchor, so the last solve that
-     * distributed carries it, and one that distributed nothing leaves it standing. Once a solve falls back to
-     * the CPU, OLF's real loop ran and holds its own account.
+     * distributed carries it, and one that distributed nothing leaves it standing.
+     *
+     * <p>The device's amount is read whoever drove the last solve, and the two accounts ADD. A solve can
+     * place its distribution in-kernel and only then fall back (a later pass meets a shape the device cannot
+     * solve), so {@code deviceDroveLastSolve()} is false while the device's passes are ALREADY in the network
+     * state; OLF's real loop, taking over on that balanced state, correctly books nothing, because the
+     * mismatch it now sees is far inside the {@code slackBusPMaxMismatch} deadband. Reading the device's
+     * amount only while it was still driving therefore reported rte6515's busbar-window base as
+     * gpu=0.000000000 MW against cpu=14.359916553 — the largest single disagreement in that comparison —
+     * with the device holding 14.294 MW at the very check that reported zero (OLF_GPU_DS_ACCOUNT=1). Where
+     * the real loop does shift power on top, it books only its own increment, so the sum is the run's total
+     * and a pure-CPU run adds nothing (the device's amount is NaN until a pass fires).
      */
     static final class DeviceDrivenDistributionLoop extends DeviceDrivenLoop implements AcActivePowerDistributionOuterLoop {
         private final AcActivePowerDistributionOuterLoop realDistribution;
@@ -181,29 +191,51 @@ public class GpuDriverOuterLoopEngine extends AcloadFlowEngine {
         @Override
         public com.powsybl.openloadflow.lf.outerloop.OuterLoopResult check(AcOuterLoopContext context,
                                                                           com.powsybl.commons.report.ReportNode reportNode) {
-            if (engine.deviceDroveLastSolve()) {
-                double d = engine.lastDeviceDistributedActivePower();
-                if (!Double.isNaN(d)) {
-                    deviceDistributed = d;
-                }
-            } else {
+            // Take the device's amount whoever drove the last solve: what its passes placed is in the state
+            // whether or not the solve that placed it went on to fall back.
+            double d = engine.lastDeviceDistributedActivePower();
+            if (!Double.isNaN(d)) {
+                deviceDistributed = d;
+            }
+            if (!engine.deviceDroveLastSolve()) {
                 fellBack = true;
+                if (System.getenv("OLF_GPU_DS_ACCOUNT") != null) {
+                    // The mismatch OLF's own loop is about to gate on: a loop that books nothing either saw
+                    // nothing to distribute (the state was already balanced before this run) or was asked on
+                    // the wrong context. The two look identical from the account alone.
+                    System.err.printf("GPU_DS_ACCOUNT check FELL BACK run=%08x mismatch=%.9f booked=%.9f deviceHas=%s%n",
+                            System.identityHashCode(this), realDistribution.getSlackBusActivePowerMismatch(context),
+                            realDistribution.getDistributedActivePower(context),
+                            Double.toString(engine.lastDeviceDistributedActivePower()));
+                }
             }
             return super.check(context, reportNode);
         }
 
         @Override
         public double getDistributedActivePower(AcOuterLoopContext context, int numSC) {
-            if (fellBack) {
-                return realDistribution.getDistributedActivePower(context, numSC);
-            }
             // the device distributes over the main synchronous component only
-            return numSC == context.getNetwork().getSynchronousNetworks().getFirst().getNumSC() ? deviceDistributed : 0.0;
+            int mainSc = context.getNetwork().getSynchronousNetworks().getFirst().getNumSC();
+            double onDevice = numSC == mainSc ? deviceDistributed : 0.0;
+            double onCpu = fellBack ? realDistribution.getDistributedActivePower(context, numSC) : 0.0;
+            if (System.getenv("OLF_GPU_DS_ACCOUNT") != null) {
+                System.err.printf("GPU_DS_ACCOUNT ask numSC=%d mainSC=%d fellBack=%b device=%.9f cpu=%.9f%n",
+                        numSC, mainSc, fellBack, onDevice, onCpu);
+            }
+            return onDevice + onCpu;
         }
 
         @Override
         public double getDistributedActivePower(AcOuterLoopContext context) {
-            return fellBack ? realDistribution.getDistributedActivePower(context) : deviceDistributed;
+            double onCpu = fellBack ? realDistribution.getDistributedActivePower(context) : 0.0;
+            if (System.getenv("OLF_GPU_DS_ACCOUNT") != null) {
+                // Which of the two accounts holds the run's distribution, asked of the loop itself: a base
+                // reported as 0.0 is either a device that recorded nothing or a fallback whose real loop was
+                // never asked. Guessing between them cost a wrong fix once.
+                System.err.printf("GPU_DS_ACCOUNT fellBack=%b device=%.9f cpu=%.9f loop=%s%n",
+                        fellBack, deviceDistributed, onCpu, getName());
+            }
+            return deviceDistributed + onCpu;
         }
 
         @Override

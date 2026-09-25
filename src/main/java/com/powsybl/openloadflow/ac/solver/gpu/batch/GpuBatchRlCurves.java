@@ -87,7 +87,7 @@ public final class GpuBatchRlCurves {
             boolean remoteMember = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcOuterLoopPacks.isRemoteMemberEntry(bus);
             boolean pilotSelf = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcOuterLoopPacks.isPilotSelfEntry(bus);
             if (remoteMember || pilotSelf) {
-                var vc = bus.getGeneratorVoltageControl().orElseThrow();
+                var vc = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcOuterLoopPacks.mainGenVc(bus);
                 var pilotVar = es.getVariableSet().getVariable(vc.getControlledBus().getNum(), AcVariableType.BUS_V);
                 if (vVar == null || pilotVar == null || !(bus.getMinQ() < bus.getMaxQ())) {
                     continue;                                // not packed

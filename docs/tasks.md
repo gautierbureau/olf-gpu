@@ -2599,3 +2599,39 @@ Next: give every non-first member of a pilot-self group its own Q-row placement 
 RL check sees each controller's real q and pins the same set as OLF, and (b) a pinned pilot has somewhere to
 put the group's balance. Then re-measure the base (`OLF_GPU_SA_BASE_ONLY=1` prints the distributed power, and
 the 0.066 MW should go with the retry it comes from).
+
+**FIX 1 (committed): the pin set now matches OLF, 16 -> 19.** The cause was not a missing q and not a missing
+rmq entry — both of those guesses were WRONG and are corrected here. `OLF_GPU_RL_TRACE_VROW=12590` shows the
+device computing `q=1.921012507` pu for `VL-6003_1`, which is OLF's `192.1012507165038` MW exactly, with
+correct limits `±0.7536`. (The earlier "`OLF_GPU_RMQ_TRACE` prints nothing, so the row is never filled" was an
+artefact: those are device-side `printf`s that did not reach the log, not evidence of a missing fill.)
+
+What actually dropped the member is one line in `reactiveLimitsBatch`:
+
+```cpp
+int pvForm = rlRemote[i] == 2 ? 0 : 1;   // 2 = a PILOT that is one of its own controllers
+if (limitType[rst] == 0) {
+    if (mode[ridx] != pvForm) return;    // member row is mode 1 (DISTR_Q), pvForm 0 -> returns before reading q
+```
+
+and every member of a pilot-self group was tagged `rlRemote=2` with its OWN row as the pilot row. The
+classification asked `bus.getGeneratorVoltageControl()` — a merged group keeps ONE **MAIN** control and leaves
+every other member holding a **DEPENDENT** control that regulates ITSELF, so `isRemoteMemberEntry`'s
+`MergeStatus.MAIN` filter dropped the members (returning false) and `isPilotSelfEntry` then answered true for
+each of them. Fixed by resolving the MAIN control (`mainGenVc`, mirroring `isRemoteGenVcControllerElement`
+right beside it, which already did this) in both predicates and in the pack's own `controlledBus` / target /
+nominal-V reads, plus the same resolution in `GpuBatchRlCurves` (whose comment already noted that "a pilot
+whose own control is merged is reached through the main control"). The ENTRY SET is unchanged — only the class
+and the pilot row — so the curve enumeration cannot drift.
+
+Measured: the members are now `remote=1 pilotVRow=12560/12588`, and the base pins **19**, the same count OLF
+switches in its first RL pass. Suite 299/0, checkstyle 214 (baseline).
+
+**STILL OPEN: the base still diverges at outer=6 and still falls back**, with the base's distributed power
+unchanged at 14.294298358 against the CPU's 14.359916553. So the pin PARITY was necessary but not sufficient,
+and the remaining cause is most likely the corner the pin parity has now opened for the first time on this
+network: `VL-6003`'s three members and `VL-5997`'s two now ALL pin, so each group is FULLY pinned, which is
+exactly the case the kernel comments call out ("When the LAST live member pins, `updatePilotVeqBatch` flips
+the pilot's V identity to a power row (control lost) and restores it on the first unpin"). Next: check the row
+modes of both groups after the outer-6 pass — whether the pilot's V identity flipped, and where the group's Q
+balance ended up — before reading anything else into the divergence.

@@ -184,15 +184,33 @@ public final class GpuAcOuterLoopPacks {
      *  not the group's controlled bus. Shared with GpuBatchRlCurves, which REPLAYS this enumeration
      *  and must count exactly the same buses (a drift throws and the run falls to the CPU). */
     public static boolean isRemoteMemberEntry(LfBus bus) {
-        return bus.getGeneratorVoltageControl()
-                .filter(c -> c.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN)
-                .map(c -> c.getControlledBus() != bus).orElse(false);
+        GeneratorVoltageControl vc = mainGenVc(bus);
+        return vc != null && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus) && vc.getControlledBus() != bus;
     }
 
     /** A class-2 entry: a pilot that is one of its own controllers (packed as a remote entry). */
     public static boolean isPilotSelfEntry(LfBus bus) {
-        return !isRemoteMemberEntry(bus) && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
-                && bus.getGeneratorVoltageControl().map(c -> c.getControlledBus() == bus).orElse(false);
+        GeneratorVoltageControl vc = mainGenVc(bus);
+        return vc != null && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus) && vc.getControlledBus() == bus;
+    }
+
+    /**
+     * The bus's MAIN generator voltage control, which is the only one that can answer a question about the
+     * GROUP: who the controlled bus is, what the target is, which nominal V it refers to.
+     *
+     * <p>A merged group keeps ONE main control (on the bus OLF picked) and leaves every other member holding
+     * a DEPENDENT control that regulates ITSELF. Asking {@code bus.getGeneratorVoltageControl()} therefore
+     * answered "I control my own bus" for every member, so each one was classified as the pilot
+     * ({@code isPilotSelfEntry}) with its own row as the pilot row. Since class 2 means "unpinned, my row is
+     * the group's voltage IDENTITY (mode 0)" while a member's row actually carries DISTR_Q (mode 1), the
+     * reactive-limit kernel's {@code if (mode[ridx] != pvForm) return;} dropped every member before it ever
+     * looked at q: rte6515's base pinned 16 where OLF pinned 19 (VL-5997_1, VL-6003_1, VL-6003_2 missing,
+     * each with a correct q of 1.921012507 pu against a 0.7536 limit), then diverged at outer pass 7.
+     */
+    public static GeneratorVoltageControl mainGenVc(LfBus bus) {
+        return bus.getGeneratorVoltageControl()
+                .<GeneratorVoltageControl>map(VoltageControl::getMainVoltageControl)
+                .orElse(null);
     }
 
     static RmqPack remoteMemberQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
@@ -203,6 +221,16 @@ public final class GpuAcOuterLoopPacks {
         if (reactiveLimits) {
             for (LfBus bus : network.getBuses()) {
                 boolean member = GpuAcRowIndexing.isRemoteGenVcControllerElement(bus);   // incl. a pilot that is a controller
+                // OLF_GPU_RMQ_WHY=1: one line per REMOTE CONTROLLER bus saying whether it gets a diagnostic q
+                // and, when it does not, which gate dropped it. A member with no q source is invisible to the
+                // reactive-limit check — it can never pin, whatever its real q — which is how rte6515's base
+                // pinned 16 where OLF pinned 19 and then diverged.
+                if (member && System.getenv("OLF_GPU_RMQ_WHY") != null) {
+                    System.err.printf("RMQ_WHY bus=%s vCol=%d minQ=%.6f maxQ=%.6f qRange=%b skipped=%s%n",
+                            bus.getId(), vCol[bus.getNum()], bus.getMinQ(), bus.getMaxQ(),
+                            bus.getMinQ() < bus.getMaxQ(),
+                            vCol[bus.getNum()] < 0 ? "no-vCol" : !(bus.getMinQ() < bus.getMaxQ()) ? "empty-q-range" : "-");
+                }
                 if (!member || vCol[bus.getNum()] < 0 || !(bus.getMinQ() < bus.getMaxQ())) {
                     continue;                                // mirror the RL pack's remote-entry condition
                 }
@@ -589,7 +617,7 @@ public final class GpuAcOuterLoopPacks {
                 // all-pinned-group fixture, 0.68 kV at the pilot.
                 boolean pilotSelf = isPilotSelfEntry(bus);
                 if ((remoteMember || pilotSelf) && vCol[bn] >= 0) {
-                    var vc = bus.getGeneratorVoltageControl().orElseThrow();
+                    var vc = mainGenVc(bus);                   // the GROUP's control, never the member's own
                     int pilotV = vCol[vc.getControlledBus().getNum()];
                     if (pilotV >= 0 && bus.getMinQ() < bus.getMaxQ()) {
                         rlVrow.add(vCol[bn]);                  // transition WRITE row: the member's own bus row

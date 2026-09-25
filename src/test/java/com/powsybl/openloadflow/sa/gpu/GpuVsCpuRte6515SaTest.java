@@ -30,6 +30,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -688,7 +689,20 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // will report zero while a bus is 0.1 kV out (measured — rte6515 LOAD-1263). CTG_ONLY turns it
         // on for one contingency; OLF_GPU_SA_BUSDIFF=1 turns it on for the whole set, which is what a
         // new contingency KIND needs before anyone calls it clean.
+        // OLF_GPU_SA_BUSDIFF_CTG=<id>[,<id>]: bus-diff those contingencies INSIDE the full scope. On a
+        // node-breaker network the contingency LIST decides which switches are retained, so running a
+        // differing contingency alone (CTG_ONLY) solves a different network - network.xiidm/LNER goes
+        // from 13202 buses to 8859 and the difference vanishes. Monitoring the whole set instead is
+        // what does not fit: bus results are produced BY THE MONITORS, so an all-contingency monitor
+        // puts 10540 x 13202 BusResults on the heap before anything can spill them and the arm dies at
+        // its 14g ceiling. Scoping the monitor to a few ids keeps the full list, the full network and
+        // the full chunking, and costs nothing.
+        java.util.Set<String> busDiffCtgs = System.getenv("OLF_GPU_SA_BUSDIFF_CTG") == null
+                ? java.util.Set.of()
+                : java.util.Arrays.stream(System.getenv("OLF_GPU_SA_BUSDIFF_CTG").split(","))
+                        .map(String::trim).filter(x -> !x.isEmpty()).collect(Collectors.toSet());
         boolean busDiff = System.getenv("OLF_GPU_SA_CTG_ONLY") != null
+                || !busDiffCtgs.isEmpty()
                 || "1".equals(System.getenv("OLF_GPU_SA_BUSDIFF"));
         // OLF_GPU_SA_MON_BRANCH=<id>[,<id>]: monitor these branches and print BOTH arms' flows. A
         // one-sided violation says only that the other arm is on the other side of the limit — it does
@@ -707,14 +721,27 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // a clean base - it was no base compared at all, in every run this test has ever done. A
         // post-contingency difference cannot be attributed to the contingency until the BASE states
         // are known to agree, so add an explicit N-state monitor.
-        List<com.powsybl.security.monitor.StateMonitor> monitors = !busDiff && monBranches.isEmpty()
-                ? Collections.emptyList()
-                : List.of(new com.powsybl.security.monitor.StateMonitor(
-                                com.powsybl.contingency.ContingencyContext.all(), monBranches,
-                                monVls, java.util.Set.of()),
-                        new com.powsybl.security.monitor.StateMonitor(
-                                com.powsybl.contingency.ContingencyContext.none(), monBranches,
-                                monVls, java.util.Set.of()));
+        List<com.powsybl.security.monitor.StateMonitor> monitors;
+        if (!busDiff && monBranches.isEmpty()) {
+            monitors = Collections.emptyList();
+        } else {
+            List<com.powsybl.security.monitor.StateMonitor> ms = new ArrayList<>();
+            if (busDiffCtgs.isEmpty()) {
+                ms.add(new com.powsybl.security.monitor.StateMonitor(
+                        com.powsybl.contingency.ContingencyContext.all(), monBranches,
+                        monVls, java.util.Set.of()));
+            } else {
+                for (String id : busDiffCtgs) {           // one scoped monitor per id, so the heap holds
+                    ms.add(new com.powsybl.security.monitor.StateMonitor(   // a handful of results, not 10540
+                            com.powsybl.contingency.ContingencyContext.specificContingency(id),
+                            monBranches, monVls, java.util.Set.of()));
+                }
+            }
+            ms.add(new com.powsybl.security.monitor.StateMonitor(
+                    com.powsybl.contingency.ContingencyContext.none(), monBranches,
+                    monVls, java.util.Set.of()));
+            monitors = List.copyOf(ms);
+        }
         System.out.printf("  JVM max heap: %d MB%n", Runtime.getRuntime().maxMemory() >> 20);
         // Each arm's post-contingency bus voltages are streamed out of the heap before the next arm
         // runs (BusVoltageSpill); the raw result lives in a block so nothing keeps it reachable.

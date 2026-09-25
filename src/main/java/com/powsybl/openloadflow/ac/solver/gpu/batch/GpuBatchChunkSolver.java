@@ -1497,10 +1497,25 @@ final class GpuBatchChunkSolver {
                             hist.merge((int) chunkResults[s][n], 1, Integer::sum);
                         }
                         System.err.println("ITER_HIST main solve, iterations -> scenarios: " + hist);
-                        for (int s = 0; s < realCount && realCount <= 4; s++) {
-                            System.err.printf("ITER ctg=%s iters=%d%n",
-                                    contingencies.get(group.get(chunkStart + s)).contingencyId(),
-                                    (int) chunkResults[s][n]);
+                        // OLF_GPU_ITER_TRACE_CTG=<id>[,<id>]: the iteration count of NAMED scenarios, at any
+                        // chunk size. Two implementations that solve the same system in the same number of
+                        // iterations agree to machine precision, so the count is the first thing to compare
+                        // against OLF's own (OLF_LF_STEPS_TRACE) when the answers differ - and on a full
+                        // scope the per-scenario print below never fires, because the chunk holds hundreds.
+                        String iterCtg = System.getenv("OLF_GPU_ITER_TRACE_CTG");
+                        for (int s = 0; s < realCount; s++) {
+                            String id = contingencies.get(group.get(chunkStart + s)).contingencyId();
+                            boolean named = false;
+                            if (iterCtg != null) {
+                                for (String w : iterCtg.split(",")) {
+                                    named = named || w.trim().equals(id);
+                                }
+                            }
+                            if (named || realCount <= 4) {
+                                System.err.printf("ITER ctg=%s iters=%d finalMismatch=%.6e status=%d%n",
+                                        id, (int) chunkResults[s][n], chunkResults[s][n + 1],
+                                        (int) chunkResults[s][n + 2]);
+                            }
                         }
                     }
                     if (System.getenv("OLF_GPU_DS_FINAL_DUMP") != null && nds > 0 && !pairPhase) {

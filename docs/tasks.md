@@ -2635,3 +2635,50 @@ exactly the case the kernel comments call out ("When the LAST live member pins, 
 the pilot's V identity to a power row (control lost) and restores it on the first unpin"). Next: check the row
 modes of both groups after the outer-6 pass — whether the pilot's V identity flipped, and where the group's Q
 balance ended up — before reading anything else into the divergence.
+
+### Iteration parity as the standard, and the divergence narrowed to the post-pin assembly (2026-09-25)
+
+Standing requirement from the user, now the working invariant here: **the GPU and the CPU must agree on the
+number of outer-loop iterations AND on the inner Newton iteration count of every solve.** Any difference is a
+defect to find, not a tolerance to widen. Measured on the base at default settings
+(`OLF_GPU_BATCH_TRACE=1` against `OLF_GPU_DBG_NR=1`):
+
+| solve | OLF inner iterations | device inner iterations |
+| --- | --- | --- |
+| 1 (initial) | 3 | 3 |
+| 2 (after DS distributes) | 1 | 1 |
+| 3 (after RL pins) | **2, converges** | **30, diverges** |
+
+OLF's whole base is `outerLoopIterations=3, solverIterations=7` (3+1+2+1). The device matches solve 1 and
+solve 2 EXACTLY, and after FIX 1 it also pins the SAME 19 buses — verified by name, not just by count
+(`comm` on the two lists: empty both ways). So the two arms are in the same state, making the same decisions,
+and then the device's third solve runs away. The fault is therefore in the ASSEMBLY AFTER THE PIN, which is
+the narrowest this has ever been.
+
+What the assembly looks like at that pass (`OLF_GPU_EQ_DUMP`, which fires on the first mode-4 pass), for
+`VL-5997` whose TWO controllers both pin:
+
+```
+row=12560 BUS_V(VL-5997_0) mode=0 terms=[]                 <- still a V IDENTITY
+row=12562 BUS_V(VL-5997_1) mode=4 terms=[cb#8699.q2, ...]  <- hosts the PILOT's q (12560's "q2@alt" before)
+```
+
+OLF's system once every controller is pinned is: `BUS_TARGET_Q` for `_0` on 12560, `BUS_TARGET_Q` for `_1` on
+12562, and `BUS_TARGET_V` INACTIVE (control lost, no enabled controller). The device keeps the V identity on
+the pilot row, moves the pilot's q onto the member's row, and so the member's OWN pinned balance is enforced
+nowhere — one constraint too many and one too few, which is what Newton walks away from.
+
+The device HAS a kernel for this corner, `updatePilotVeqBatch`: when `relocChoose` finds no unpinned carrier it
+flips the pilot's V identity to a power row. It never fires for these groups because they are not in the qr
+candidate table (`qRowAlt=12588`, a direct row, not the `-2-group` encoding; `nQr=3`).
+
+RETESTED AND STILL NOT THE FIX: `-Dolf.gpu.pilotSelfRotation=true`, which enrols them (`nQr` 3 -> 30,
+`qRowAlt=-19`, pilot q on `qRow=12562`). The base diverges at outer=6 with the same 30 iterations, adds a
+second fallback, and row 12560 is STILL `mode=0` — the V identity does not flip. This retest matters because
+the earlier rejection of the rotation was run with the members MISCLASSIFIED (FIX 1), so it could have been
+void; it is not. Enrolment alone does not make the all-pinned corner work for a pilot-self group.
+
+Next: find why `updatePilotVeqBatch` leaves the pilot row at mode 0 for an enrolled pilot-self group — its
+`lost` test is `relocChoose(...) == 0`, and for a pilot-self group candidate 0 IS the pilot's own row, so
+"fell back to candidate 0" and "correctly chose the pilot" are indistinguishable there. That conflation is the
+most likely reason the flip never happens, and it is a property of the pilot-self shape specifically.

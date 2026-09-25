@@ -2506,27 +2506,49 @@ in-kernel pass fires on its own trajectory. A less-converged state underestimate
 distributes slightly less, and the remainder hides under the deadband. Prediction: tightening
 `OLF_GPU_DBG_CONV_EPS` on BOTH arms shrinks the 0.066 MW.
 
-**Defect 2 ANSWERED, and it is NOT an equation difference.** The squeeze settles it, on the base reproducer:
+**Defect 2 ANSWERED: the two arms solve the same system, and they agree at machine precision when both are
+actually converged.** The user rejected the first answer ("if the two system solved are the same they should
+agree at machine precision") and was right to: "within tolerance" explains nothing by itself, since two Newton
+runs on the same J and F from the same start must stop at the same iterate and agree to last-ulp. Sweeping
+`newtonRaphsonConvEpsPerEq` on BOTH arms, on the base reproducer:
 
 | `newtonRaphsonConvEpsPerEq` (BOTH arms) | cpu | gpu | diff |
 | --- | --- | --- | --- |
-| 1e-4 (the RTE default) | 14.359916553 | 14.294298359 | **6.56e-02 MW** |
-| 1e-6 | 14.381761494 | 14.381763087 | **1.59e-06 MW** |
-| 1e-8 | 14.381761494 | 14.381763087 | **1.59e-06 MW** |
+| 1e-4 (the RTE default) | 14.359916553 | 14.294298359 | 6.56e-02 MW |
+| 1e-6 | 14.381761494 | 14.381763087 | 1.59e-06 MW |
+| 1e-8 | 14.381761494 | 14.381763087 | 1.59e-06 MW |
+| 1e-10 | 14.381763285 | 14.381763087 | 1.98e-07 MW |
+| 1e-12 | 14.381763285 | 14.381763287 | **1.12e-09 MW** |
 
-A different equation system converges to a different solution no matter how tight the criterion; this one
-collapses by 41,000x and then STOPS MOVING (1e-6 and 1e-8 agree digit for digit on both arms). So the two arms
-solve the SAME system, and the 0.066 MW was the inner Newton's convergence depth at the default per-equation
-criterion, inherited by the distributed-slack amount: OLF's DS loop fires on its converged iterate, the
-device's in-kernel pass on its own, and at 1e-4 per equation those iterates differ by ~0.02-0.07 MW of loss.
-The residual 1.59e-06 MW is the atomicAdd reassociation floor already documented for the bus comparison.
+1.12e-09 MW on 14.38 MW is 7.8e-11 relative, and the GPU against ITSELF (cold vs warm, same binary, same
+network) differs by 9.79e-10 MW at that tolerance — so the CPU-vs-GPU gap is the size of the device's own
+atomicAdd reassociation floor, printed now beside it by `OLF_GPU_SA_BASE_ONLY=1`. There is no room left for an
+equation difference. (An intermediate claim made here earlier was WRONG and is retracted: the 1e-6/1e-8
+plateau was read as a fixed floor, hence as evidence of a residual difference. It is not a floor — the two
+criteria simply first trip at the SAME Newton iterate, and the gap resumes shrinking at 1e-10.)
 
-Note the CPU arm's OWN number moves with the criterion (14.3599 -> 14.3818, 0.022 MW): at the default
-tolerance neither arm's distributed power is determined to better than a few hundredths of a MW, so no
-comparison at 1e-4 can assert tighter than that. Any future distributed-power parity assertion must either
-set `OLF_GPU_DBG_CONV_EPS=1e-6` or carry a tolerance of ~0.1 MW, and the 1 MW deadband amplification means
-the per-contingency assertion needs ~1.1 MW at the default criterion.
+WHY the default criterion gives 0.066 MW, which is the part worth remembering: the distributed amount is read
+off the SLACK ROW of the mismatch vector, and at `convEpsPerEq=1e-4` that row's own residual is ~0.2 MW
+(`sqrt(1e-4^2*n)` = 1.1e-02 pu with n=13040). The amount is therefore FIRST-ORDER sensitive to which iterate
+the DS pass fires on, and the existing `[DS-CONV]` probe (`OLF_GPU_DS_DEBUG=1`) shows the two arms firing at
+different ones:
 
-What stays open from this thread: nothing about the equations. The deadband amplification makes a handful of
-contingencies report the pre-distribution alone, which is cosmetically ugly but is the documented fallback of
-`recordDistributedActivePower`; the base fallback at outer=6 remains the real open item.
+```
+outer=0 innerNewtonIters=3 ||F||2=2.453e-03 slackMismatchFromAnchor=0.143599166   <- equals the CPU's 14.359916553
+outer=0 innerNewtonIters=2 ||F||2=3.866e-04 slackMismatchFromAnchor=0.142942984   <- the 14.294 the run reports
+```
+
+Both states pass OLF's own test (2.45e-03 and 3.87e-04 are both under 1.1e-02), so OLF's default parameters do
+not pin this quantity down to better than a few hundredths of a MW on EITHER arm — its own number moves
+0.022 MW between 1e-4 and 1e-6. Consequences for any future work here: a distributed-power parity assertion
+must either set `OLF_GPU_DBG_CONV_EPS=1e-6` or carry ~0.1 MW (~1.1 MW per contingency, because the 1 MW
+deadband amplifies it); and a GPU-vs-CPU difference in a quantity read off a converged-to-1e-4 state should be
+compared against the GPU-vs-GPU floor of that same quantity BEFORE it is called a bug.
+
+The 15 per-contingency outliers at 0.5-1.5 MW are this same sensitivity amplified by the 1 MW
+`slackBusPMaxMismatch` deadband: where the arms' mismatch straddles it, OLF fires a pass the device does not,
+and the device then reports the pre-distribution alone (`recordDistributedActivePower`: `retain[s]` NaN = "no
+pass fired"), which is why those GPU values are round numbers like -19.3 and 31.6.
+
+What stays open from this thread: nothing about the equations. The base fallback at outer=6 remains the real
+open item.

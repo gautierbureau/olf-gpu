@@ -939,11 +939,21 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             // the per-contingency spread: the base carries the SAME systematic difference (0.066 MW, the
             // device distributing less than OLF) that 462 of the window's contingencies show, and it needs one
             // load flow per arm instead of a thousand.
+            double dapCpu = cpu.getPreContingencyResult().getDistributedActivePower();
+            double dapCold = gpuCold.getPreContingencyResult().getDistributedActivePower();
+            double dapWarm = gpuWarm.getPreContingencyResult().getDistributedActivePower();
             System.out.printf("  BASE distributedActivePower: cpu=%.9f gpu=%.9f MW | diff=%.6e MW%n",
-                    cpu.getPreContingencyResult().getDistributedActivePower(),
-                    gpuCold.getPreContingencyResult().getDistributedActivePower(),
-                    Math.abs(cpu.getPreContingencyResult().getDistributedActivePower()
-                            - gpuCold.getPreContingencyResult().getDistributedActivePower()));
+                    dapCpu, dapCold, Math.abs(dapCpu - dapCold));
+            // The SAME arm against ITSELF, as for the bus voltages above: the cold and warm GPU runs solve the
+            // identical problem with the identical binary, so the gap between them is this quantity's own
+            // reproducibility floor. It matters because the distributed amount is read off the slack row of a
+            // state converged only to newtonRaphsonConvEpsPerEq, where that row's residual is ~0.2 MW at the
+            // 1e-4 default — so the amount is FIRST-ORDER sensitive to which iterate the pass fires on
+            // ([DS-CONV] measured 3 inner Newton iterations in one run and 2 in the other). A CPU-vs-GPU gap
+            // no larger than this one is not evidence of a different system.
+            System.out.printf("  BASE distributedActivePower GPU-vs-GPU (cold vs warm, same arm): "
+                            + "cold=%.9f warm=%.9f MW | diff=%.6e MW%n",
+                    dapCold, dapWarm, Math.abs(dapCold - dapWarm));
             System.out.println("  BASE_ONLY: stopping after the base comparison (no contingency simulated on the GPU arm)");
             return;
         }

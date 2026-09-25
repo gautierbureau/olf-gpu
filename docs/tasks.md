@@ -2716,3 +2716,58 @@ case take that plain form for EVERY member including the pilot, instead of routi
 machinery, whose whole purpose (finding a row for the pilot's relocated Q) is moot when no controller is free.
 
 Rotation stays OFF by default: with it on the base still diverges and takes a SECOND fallback.
+
+### VERIFIED: the pinned pass assembles a SINGULAR matrix, and the defect is named (2026-09-25)
+
+The diagnosis above was checked with instruments that do not depend on it. All of the following is MEASURED,
+on the base, at default settings, rotation OFF (the shipping config).
+
+`OLF_GPU_VALS_DUMP` wrote the fill at the pinned pass (`outer=6`, `mode4=6`), and `GpuDumpedMatrixRankTest`
+factored it with the CPU's own solver:
+
+```
+DUMP n=13228 nnz=93161 mode4Rows=[12560 12562 12588 12590 12592 12834]
+KLU REFUSED to factor this matrix: klu_factor error KLU_SINGULAR
+```
+
+So the matrix the device assembles once the reactive-limit pass pins is **structurally singular**, which by
+that test's own premise is OUR assembly's defect and cannot be rescued by any ordering, pivot type or
+matching. This also sharpens the earlier record, which had only "unfactorable, ratio 8.1e+11" from
+`max-iter-bad-solve`: the failure is rank, not conditioning. And the six mode-4 rows are EXACTLY the
+pilot-self group rows identified from the pin-set diff, plus 12834 (entry 997, which `OLF_GPU_RL_AUDIT`
+independently flagged as unpinned-but-over-limit).
+
+`OLF_GPU_VALS_SCAN` at that same pass names the deficiency:
+
+```
+dupRows=12590,12592  deadCols=1 firstDeadCol=13185  tinyDiag=1 firstBadRow=13185
+modes[0..4]=982,12240,0,0,6
+```
+
+and the equation dump identifies what 13185 is:
+
+```
+zi#25 branch=BUS-6003_COUPLER_2 b1=VL-6003_1 b2=VL-6003_2 qRow1=12590 qRow2=12592 dummyQ=13185 qAlt=[-1,-1]
+```
+
+So the two DUPLICATE rows are the two endpoints of a ZERO-IMPEDANCE COUPLER, and the DEAD column is that
+coupler's own `DUMMY_Q`. This is the part the earlier description missed: these pilot-self members are the SAME
+electrical node split by switches (`VL-6003_0 -COUPLER_1- VL-6003_1 -COUPLER_2- VL-6003_2`), so their two rows
+are distinguishable ONLY by the dummy coupling (+dQ in one endpoint's row, -dQ in the other's). At the pinned
+pass that coupling is gone from the values, so the rows collapse into duplicates AND the dummy variable is left
+unconstrained — one rank deficiency each, which is why KLU refuses. The invariant the repo already documents
+for this ("a DUMMY_Q needs an OPPOSING pair to be determined at all") is broken by the pin, not by the
+extraction: the HOST tables still list both couplings
+(`row=12590 ... zi#24.q2(-dQ), zi#25.q1(+dQ)`, `row=12592 ... zi#25.q2(-dQ)`).
+
+RULED OUT as the mechanism: `applyRowMode`, which returns immediately unless `mode[r] == 0` and so never
+touches a mode-4 row. The coupling is therefore lost during the FILL, in the per-scenario destination
+selection (`ziDynDest`), not by the identity stamp.
+
+NOT YET VERIFIED, and the next measurement rather than a thing to reason about: WHICH branch of `ziDynDest`
+drops it. Its two-way form is `mode[-2-sr] == 0 ? alt[slot] : frozen`, the group form is a `relocChoose`
+mode-scan, and `qAlt=[-1,-1]` on this coupler means one of those branches yields "no destination". A first
+reading suggested the pinned mode-4 rows take the `frozen` branch and would KEEP the term, which contradicts
+the measured dead column — so the selection must be reached another way (the `sel` row may be the pilot's, or
+the group branch may apply). Trace the zi q-slot destination per slot per pass for zi#24/zi#25 before
+changing anything: a wrong guess here would move a coupling that is currently correct in every other scenario.

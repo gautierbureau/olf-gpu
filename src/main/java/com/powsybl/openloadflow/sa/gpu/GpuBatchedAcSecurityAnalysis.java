@@ -1303,6 +1303,17 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     .map(LfBus::getId).sorted().toList() + "\n");
             w.write("# disabled branches: " + lfContingency.getDisabledNetwork().getBranches().stream()
                     .map(LfBranch::getId).sorted().toList() + "\n");
+            // OLF's own mismatch to distribute, the reference for the device's scheduledActivePowerLoss
+            // (OLF_GPU_LOSS_TRACE prints that one): gen - load over the DISABLED buses plus the named lost
+            // loads/generators that are not on them.
+            w.write(String.format("# OLF activePowerLoss=%.9f pu (disconnectedGeneration=%.9f"
+                            + " disconnectedLoad=%.9f)%n", lfContingency.getActivePowerLoss(),
+                    lfContingency.getDisconnectedGenerationActivePower(),
+                    lfContingency.getDisconnectedLoadActivePower()));
+            for (LfBus b : lfContingency.getDisabledNetwork().getBuses()) {
+                w.write(String.format("#   disabled bus %s: generationTargetP=%.9f loadTargetP=%.9f%n",
+                        b.getId(), b.getGenerationTargetP(), b.getLoadTargetP()));
+            }
             // OLF writes equations as <symbol><elementNum>, so a legend is what makes the file readable
             // next to the device's row dump, which names elements by id.
             w.write("# bus legend: num = id\n");

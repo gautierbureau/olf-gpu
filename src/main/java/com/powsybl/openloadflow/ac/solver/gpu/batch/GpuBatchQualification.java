@@ -394,19 +394,34 @@ final class GpuBatchQualification {
      *  put in another synchronous component. OLF distributes over
      *  {@code getSynchronousNetworks().getFirst()}, so these are simply not participants for this
      *  scenario, and the device renormalizes the remaining factors over the survivors. */
-    private static int[] islandedDsParticipants(int[] frozenRows, GpuAcData gpuData) {
+    private static int[] islandedDsParticipants(int[] frozenRows, GpuAcData gpuData, List<LfBus> islandedBuses) {
         int[] dsPhiRow = gpuData.dsPhiRow();
         if (dsPhiRow == null || dsPhiRow.length == 0 || frozenRows.length == 0) {
             return NO_ISLANDED_DS;
         }
+        // Match on the BUS as well as on the row. The row test alone misses a participant whose P row was
+        // RELOCATED by the coupler-tree relocation: dsPhiRow carries pRow, which for a relocated bus is its
+        // parent coupler's DUMMY_P, while the frozen rows are the bus's own BUS_PHI / BUS_V. The device then
+        // kept distributing slack to a generator on a DEAD bus — measured on BUS-6014_BBS_2 as 7.386 MW of
+        // distributed active power against the CPU, with every bus in the network shifted 2-4e-2 kV in one
+        // direction, while the scheduled loss itself agreed exactly (both 0.0 pu).
+        java.util.Set<Integer> islandedNums = new java.util.HashSet<>();
+        for (LfBus b : islandedBuses) {
+            islandedNums.add(b.getNum());
+        }
+        int[] dsBusNum = gpuData.dsBusNum();
         int[] found = new int[dsPhiRow.length];
         int count = 0;
         for (int i = 0; i < dsPhiRow.length; i++) {
+            boolean islanded = dsBusNum != null && i < dsBusNum.length && islandedNums.contains(dsBusNum[i]);
             for (int frozen : frozenRows) {
                 if (frozen == dsPhiRow[i]) {
-                    found[count++] = i;
+                    islanded = true;
                     break;
                 }
+            }
+            if (islanded) {
+                found[count++] = i;
             }
         }
         return count == 0 ? NO_ISLANDED_DS : java.util.Arrays.copyOf(found, count);
@@ -449,6 +464,28 @@ final class GpuBatchQualification {
             }
         }
         return count == 0 ? NO_ISLANDED_DS : java.util.Arrays.copyOf(found, count);
+    }
+
+    /**
+     * {@code OLF_GPU_LOSS_TRACE=<contingency id>}: the device's SCHEDULED active power loss and the islanded
+     * bus set it was computed from. The formula mirrors {@code LfContingency}'s
+     * {@code disconnectedGenerationActivePower - disconnectedLoadActivePower} term for term, but only if this
+     * islanded set equals OLF's {@code disabledNetwork.getBuses()} — an islanded bus contributes its WHOLE
+     * injection and is skipped in the named lost load/generator sums, so a set that differs by one bus moves
+     * the loss by that bus's (generation - load). Compare against the {@code disabled buses:} line that
+     * {@code OLF_GPU_EQ_DUMP_CTG} prints.
+     */
+    private static void traceScheduledLoss(BatchContingency c, List<LfBus> islandedBuses, double loss) {
+        String want = System.getenv("OLF_GPU_LOSS_TRACE");
+        if (want == null || !want.equals(c.contingencyId())) {
+            return;
+        }
+        System.err.printf("LOSS_TRACE ctg=%s deviceScheduledLoss=%.9f pu islanded=%s lostGens=%s lostLoads=%s%n",
+                c.contingencyId(), loss,
+                islandedBuses.stream().map(LfBus::getId).sorted().toList(),
+                c.lostGenerators().stream().map(com.powsybl.openloadflow.network.LfGenerator::getId).sorted()
+                        .toList(),
+                c.lostLoads().stream().map(ll -> ll.bus() == null ? "?" : ll.bus().getId()).sorted().toList());
     }
 
     private static double scheduledActivePowerLoss(BatchContingency c, List<LfBus> islandedBuses) {
@@ -754,7 +791,7 @@ final class GpuBatchQualification {
                     // Measured on rte6515 BUS-1238_BBS: absorbed -0.305 pu where OLF pre-distributed
                     // +0.155, a second DS round OLF never runs (+0.471 pu reappearing at the slack)
                     // and 1.18e-03 kV at the end.
-                    islandedDsByIndex[i] = islandedDsParticipants(fi.rows(), gpuData);
+                    islandedDsByIndex[i] = islandedDsParticipants(fi.rows(), gpuData, q.islandedBuses());
                     islandedRlByIndex[i] = islandedRlControllers(fi.rows(), gpuData);
                     if (fi.rows().length > 0) {
                         islandingCount++;
@@ -782,6 +819,7 @@ final class GpuBatchQualification {
                 }
                 genOutagesByIndex[i] = gos;
                 activePowerLossByIndex[i] = scheduledActivePowerLoss(c, q.islandedBuses());
+                traceScheduledLoss(c, q.islandedBuses(), activePowerLossByIndex[i]);
                 batchedIndices.add(i);
             } else if (!c.outagedShunts().isEmpty()) {       // fixed-shunt disconnection: mask the shunt element
                 if (canBatchShuntOutage(c.outagedShunts(), elementMapper, gpuData)) {
@@ -885,7 +923,7 @@ final class GpuBatchQualification {
                 // retained share it had while the stranded bus still counted, and the pass retires with
                 // most of the mismatch undistributed. The device now takes the per-scenario participant
                 // set and derives BOTH the shares and the stopping gate from it.
-                islandedDsByIndex[i] = islandedDsParticipants(fi.rows(), gpuData);
+                islandedDsByIndex[i] = islandedDsParticipants(fi.rows(), gpuData, q.islandedBuses());
                 islandedRlByIndex[i] = islandedRlControllers(fi.rows(), gpuData);
                 if ("1".equals(System.getenv("OLF_GPU_DBG_BUSDUMP")) && fi.rows().length > 0) {
                     // Which reactive-limits ENTRIES the island masks, and which frozen rows are an
@@ -940,6 +978,7 @@ final class GpuBatchQualification {
                 frozenRowsByIndex[i] = fi.rows();
                 frozenTargetsByIndex[i] = fi.targets();
                 activePowerLossByIndex[i] = scheduledActivePowerLoss(c, q.islandedBuses());
+                traceScheduledLoss(c, q.islandedBuses(), activePowerLossByIndex[i]);
                 if (frozenRowsByIndex[i].length > 0) {
                     islandingCount++;
                 }

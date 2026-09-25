@@ -719,6 +719,40 @@ final class GpuBatchChunkSolver {
                                         rowZi[childVRow] = 0;
                                         overrides.add(s * n + childVRow, childVc.orElseThrow().getTargetValue());
                                     }
+                                    // The TARGET must travel with the equation. The child's P balance lives on
+                                    // this coupler's DUMMY_P while it is closed, so its target (the bus's net
+                                    // scheduled injection, and whatever the distributed slack has shifted it
+                                    // to) sits there too. The stock-placement fallback moves the EQUATION back
+                                    // to the child's own PHI row when the coupler opens; without moving the
+                                    // target with it the bus's whole injection is left on a row that is now a
+                                    // DUMMY_TARGET identity, and the slack absorbs it — measured on
+                                    // BUS-6014_BBS_2 as 7.386 MW of distributed active power against the CPU
+                                    // and every bus shifted 2-4e-2 kV in one direction.
+                                    int childPhiRow = childSide == 1 ? gpuData.ziIdx()[ze * 11 + 8]
+                                            : gpuData.ziIdx()[ze * 11 + 9];
+                                    // ...unless the child is in the ISLAND this outage created. Then the
+                                    // freeze already holds its rows at a clean flat state (V=1, phi=0) and
+                                    // OLF has removed the bus, so moving an injection target onto them would
+                                    // overwrite the freeze - these overrides are applied after it.
+                                    int[] frozenForCtg = frozenRowsByIndex[ci];
+                                    boolean childFrozen = false;
+                                    for (int fr : frozenForCtg) {
+                                        if (fr == childPhiRow || fr == childVRow) {
+                                            childFrozen = true;
+                                            break;
+                                        }
+                                    }
+                                    if (childFrozen) {
+                                        continue;
+                                    }
+                                    if (childPhiRow >= 0 && dpRow >= 0) {
+                                        overrides.add(s * n + childPhiRow, baseTargets[dpRow]);
+                                    }
+                                    // A child that is NOT voltage-controlled has its reactive balance on the
+                                    // coupler's DUMMY_Q instead, so its Q target follows the same way.
+                                    if (!applied && childVRow >= 0 && dqRow >= 0) {
+                                        overrides.add(s * n + childVRow, baseTargets[dqRow]);
+                                    }
                                     if (System.getenv("OLF_GPU_ZITREE_TRACE") != null) {
                                         System.err.println("ZITREE_VID coupler=" + ziOut.getId()
                                                 + " child=" + (child == null ? "-" : child.getId())

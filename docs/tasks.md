@@ -2386,3 +2386,39 @@ at a flat state. A frozen bus still has load and generation in the device's acti
 it distributes differs from OLF's. Check `GpuBatchQualification`'s scheduled-loss computation
 (`scheduledActivePowerLoss`) against `lfContingency.getDisabledNetwork()` for a bus-disabling contingency
 before touching anything else — and note the base agrees to 3e-9 MW, so this is contingency-specific.
+
+### THE BUG: a relocated bus's TARGET stayed behind when its equation moved (2026-09-25)
+
+The residual on this window was never a missing equation — it was a missing TARGET. The distributed slack is
+applied by shifting a bus's P target, and for a relocated bus that target sits on its parent coupler's
+`DUMMY_P`, where its P balance lives. The stock-placement fallback moved the EQUATION back to the bus's own
+row when the coupler opens and left the target behind on a row that is now a `DUMMY_TARGET` identity, so the
+bus's entire scheduled injection vanished and the slack absorbed it.
+
+Found by discriminating instead of guessing. Same contingency, relocation off vs on:
+
+| | slack difference | worst bus difference |
+| --- | --- | --- |
+| relocation OFF | 0.023 MW | **6.003 kV** |
+| relocation ON (before the fix) | **7.386 MW** | 0.041 kV |
+
+Two different defects, which is why each configuration looked "nearly right" in one metric and wrong in the
+other. The scheduled loss itself agreed exactly (both 0.0 pu, `OLF_GPU_LOSS_TRACE` vs the `# OLF
+activePowerLoss` line), which is what ruled out the pre-distribution and pointed at the solve.
+
+FIX (`GpuBatchChunkSolver`, zi-outage loop): when an opened coupler is tree-relocated, the child's P target
+moves from the coupler's `DUMMY_P` to the child's own PHI row, and — for a child that is NOT
+voltage-controlled — its Q target moves from `DUMMY_Q` to its V row. Plus a guard that matters as much as the
+fix: SKIP all of it when the child is in the island this outage created, because the freeze already holds its
+rows at a flat state and these overrides are applied after it. Without the guard the window went from 3
+diverging contingencies to 27 (56 of the 67 coupler-openers island their subtree).
+
+| window [5000,6000), N=1000, relocation ON | placement work start | before this fix | after |
+| --- | --- | --- | --- |
+| contingencies whose violations differ | 11 | 3 | **1** |
+| total violation difference | 299 | 16 | **1** |
+| worst distributed active power | 808 MW | 10.8 MW | **0.887 MW** |
+
+The isolated reproducer is now EXACT: `BUS-6014_BBS_2` goes from 7.386 MW / 4.086e-02 kV to 1.11e-09 MW /
+3.40e-11 kV, violations diff 0. And the relocation is now BETTER than no relocation on this window (violation
+difference 1 against 19), which it was not before.

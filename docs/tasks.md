@@ -2454,3 +2454,79 @@ Next target, in order of value: the base's outer=6 unfactorable system, using th
 `OLF_GPU_EQ_DUMP` for OLF's base equations at that state against `OLF_GPU_VALS_SCAN`'s mode census, and the
 KLU rank test on an `OLF_GPU_VALS_DUMP` of that exact fill. That combination localized every defect this
 session; guessing at mechanisms did not.
+
+### The distributed-power spread, part 1: a lost account and a 0.066 MW real difference (2026-09-25)
+
+Acting on "this much difference is a difference in equation between cpu and gpu hence a bug", the spread was
+taken apart rather than filed as pre-existing. Two separate defects came out of it, and the previous entry's
+"general GPU-vs-CPU slack difference" wording is retracted: one of them is a reporting bug, the other is a
+real difference in what the two arms distribute.
+
+FIRST, a method note that cost two wrong fixes. `sort -rn` does NOT understand scientific notation, so a
+ranking of differences printed `9.9476e-14` above `1.05` and the real offenders never appeared at the top.
+Use `sort -g`. Every conclusion drawn from such a ranking before this was worthless — that is how the earlier
+claim "the worst converged difference is 9.5e-05 MW" happened.
+
+**Defect 1 (FIXED): a fallen-back run threw away the device's distribution.** The window's base reported
+`cpu=14.359916553 gpu=0.000000000 MW`, the largest single disagreement in the comparison. Traced with a new
+`OLF_GPU_DS_ACCOUNT=1` on `GpuDriverOuterLoopEngine.DeviceDrivenDistributionLoop`, on the base alone:
+
+```
+check FELL BACK run=23a8deea mismatch=-0.001767686 booked=0.000000000 deviceHas=0.14294298360059193
+ask numSC=0 mainSC=0 fellBack=true device=0.000000000 cpu=0.000000000
+```
+
+The device was HOLDING 14.294 MW at that very check. The loop read `lastDeviceDistributedActivePower()` only
+while `deviceDroveLastSolve()`, so a run whose last solve fell back reported OLF's account alone — and OLF's
+account is legitimately 0, because the device had already balanced the network (the mismatch it sees is
+-0.18 MW, far inside the 1 MW `slackBusPMaxMismatch` deadband, so it correctly books nothing). The two
+accounts must ADD: the device's passes moved the targets IN THE STATE, OLF's loop books only what it shifts on
+top. Reading the device's amount unconditionally (it is NaN-guarded and reset per solve, so a pure-CPU replay
+cannot double count) takes the base to `gpu=14.294298359`.
+
+Three wrong guesses on the way, all from reasoning instead of measuring: that a mid-run handover was losing
+the account (the no-arg `getDistributedActivePower` is never called — OLF only uses the per-SC overload at
+`AcloadFlowEngine:331`); that the 10-contingency window proved the fix (it has NO fallback, so it exercised
+the already-working path); that the two arms were leaking network state into each other (each arm reads its
+own `Network`).
+
+**Defect 2 (OPEN): the device distributes 0.066 MW less than OLF.** What is left on the base is
+`cpu=14.359916553 gpu=14.294298359`, diff **6.56e-02 MW** — the SAME magnitude and the same direction as the
+per-contingency spread (462 of the 465 significant differences share one sign; the device distributes less in
+magnitude). The 15 outliers at 0.5-1.5 MW are this same difference AMPLIFIED by the 1 MW deadband: where the
+two arms' mismatch straddles it, OLF fires a pass the device does not, and the device then reports the
+pre-distribution alone (`recordDistributedActivePower`: `retain[s]` NaN = "no pass fired"), which is why the
+worst offenders' GPU values are round numbers like -19.3 and 31.6.
+
+So the base is now the CHEAP REPRODUCER for the whole spread: one load flow per arm instead of 1000
+contingencies, printed by `OLF_GPU_SA_BASE_ONLY=1` (`BASE distributedActivePower:`), ~2 min a run.
+
+Leading hypothesis, under test: OLF's DS loop fires only on a CONVERGED inner solve, while the device's
+in-kernel pass fires on its own trajectory. A less-converged state underestimates losses, so the device
+distributes slightly less, and the remainder hides under the deadband. Prediction: tightening
+`OLF_GPU_DBG_CONV_EPS` on BOTH arms shrinks the 0.066 MW.
+
+**Defect 2 ANSWERED, and it is NOT an equation difference.** The squeeze settles it, on the base reproducer:
+
+| `newtonRaphsonConvEpsPerEq` (BOTH arms) | cpu | gpu | diff |
+| --- | --- | --- | --- |
+| 1e-4 (the RTE default) | 14.359916553 | 14.294298359 | **6.56e-02 MW** |
+| 1e-6 | 14.381761494 | 14.381763087 | **1.59e-06 MW** |
+| 1e-8 | 14.381761494 | 14.381763087 | **1.59e-06 MW** |
+
+A different equation system converges to a different solution no matter how tight the criterion; this one
+collapses by 41,000x and then STOPS MOVING (1e-6 and 1e-8 agree digit for digit on both arms). So the two arms
+solve the SAME system, and the 0.066 MW was the inner Newton's convergence depth at the default per-equation
+criterion, inherited by the distributed-slack amount: OLF's DS loop fires on its converged iterate, the
+device's in-kernel pass on its own, and at 1e-4 per equation those iterates differ by ~0.02-0.07 MW of loss.
+The residual 1.59e-06 MW is the atomicAdd reassociation floor already documented for the bus comparison.
+
+Note the CPU arm's OWN number moves with the criterion (14.3599 -> 14.3818, 0.022 MW): at the default
+tolerance neither arm's distributed power is determined to better than a few hundredths of a MW, so no
+comparison at 1e-4 can assert tighter than that. Any future distributed-power parity assertion must either
+set `OLF_GPU_DBG_CONV_EPS=1e-6` or carry a tolerance of ~0.1 MW, and the 1 MW deadband amplification means
+the per-contingency assertion needs ~1.1 MW at the default criterion.
+
+What stays open from this thread: nothing about the equations. The deadband amplification makes a handful of
+contingencies report the pre-distribution alone, which is cosmetically ugly but is the documented fallback of
+`recordDistributedActivePower`; the base fallback at outer=6 remains the real open item.

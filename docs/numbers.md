@@ -193,3 +193,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-22 | 6144ded+dirty | 18.47 | 15.43 | 27.61 | x1.79 | 0/0/0 | 7.50 | 4.46 | 499/500 | 122/133 (92%) | the PV-PQ switch cap bounds the switch, not the pinned limit refresh |
 | 2026-09-22 | 1fdcf34+dirty | 18.69 | 15.75 | 27.46 | x1.74 | 0/0/0 | 7.73 | 4.48 | 499/500 | 122/133 (92%) | switch cap bounds the switch only + pin seed records the pre-pin row |
 | 2026-09-23 | c1eab23 | 18.75 | 15.40 | 28.43 | x1.85 | 0/0/0 | 7.70 | 4.42 | 499/500 | 122/133 (92%) | empty-reactive-range controllers never pin (pilot buses); RL decisions reproducible |
+| 2026-09-25 | 45ce19c | 12.14 | 10.43 | 27.51 | x2.64 | 0/0/0 | 7.27 | 4.19 | 499/500 | 122/133 (92%) | curve limits: only VOLTAGE/REMOTE_REACTIVE_POWER generators move a bus's Q box |

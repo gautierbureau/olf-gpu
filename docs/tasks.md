@@ -2918,3 +2918,43 @@ dump as if they were sent this investigation after a placement that was never in
 the ground truth. (2) `mode4Rows` differs between the first pinned fill and the end of the run
 (`[12560 12562 12588 12590 12592 12834]` then `[12562 12588 12590 12592 12836]`), so always state WHICH fill a
 mode observation comes from.
+
+**What the two `rlVrow` uses need, and three refuted explanations for the same-signed pair (2026-09-25).**
+
+The two uses genuinely need DIFFERENT rows, so they must not be moved together:
+- the q READ (`q = qBuf[rlVrow] + loadQ`) must stay the bus's OWN row, because that is where
+  `remoteMemberQPack` writes the diagnostic own-q (`int row = vCol[bus.getNum()]`);
+- the pin WRITE (`mode[ridx] = 4`, `target[ridx] = limit`) must be the row that HOSTS that bus's Q balance,
+  which for a relocated bus is the carrier.
+
+`relocatedPinCode` already freezes an entry whose pin lives elsewhere, and it is not firing here for a good
+reason: at the extraction that matters the pilot is UNPINNED (`qRow = -1`), so nothing is relocated yet and
+there is nothing to freeze. That path is correct.
+
+The decisive new fact, from `OLF_GPU_DBG_ROW=12834` — the packer's own inputs, not a recomputation — is that
+the base is extracted TWICE with DIFFERENT placements:
+
+```
+#1  b1=VL-6112_0(vCol=12834 qRow=12836 qRowAlt=-1)   b2=VL-6112_1(vCol=12836 qRow=-1 qRowAlt=-1)
+#2  b1=VL-6112_0(vCol=12834 qRow=-1 qRowAlt=12834)   b2=VL-6112_1(vCol=12836 qRow=-1 qRowAlt=12836)
+```
+
+Each is INTERNALLY CONSISTENT: #1 (pilot pinned at extraction) emits the pilot's `+dQ` at the carrier 12836;
+#2 (pilot unpinned, both loops of FIX 2 firing) emits it at 12834 when that row goes mode 4, and correctly
+emits no `-dQ` because the free member has no Q equation in OLF either. Neither placement alone can put +1.0
+on BOTH rows, which is what the dumped matrix shows.
+
+REFUTED, each by reading the mechanism rather than guessing:
+1. "The cached structure aliased a different placement." `GpuAcData.sameStructureInputsAs` compares `cbIdx`,
+   `ziIdx`, `dqRow` and the rest — all of which embed `qRow`/`qRowAlt` — so two placements cannot content-match.
+2. "A pattern slot kept a stale value after the destination moved." The value array is memset on EVERY full
+   fill (`fillActiveBatch(false)`).
+3. "Row mode 4 triggers F-only fills that reuse a stale J across the pin." `fOnly = it == maxIter ||
+   (ctx->mode == 4 && it > 0)` is the cuDSS SOLVE STRATEGY (line 6159: 0 per-scenario, 1 batched, 2
+   block-diagonal, 3 UBATCH, 6 robust), where 4 is the chord strategy factorizing at iteration 0 only. It has
+   nothing to do with row mode 4.
+
+So the next measurement is to establish WHICH extraction produced the dumped matrix, which the dump does not
+currently say: add the structure identity (or the packer's `qRow`/`qRowAlt` for the traced rows) to the
+`VALS_DUMP` header, then re-read column 13207 with that known. Until that is pinned down, any change to the
+selection would be aimed at a placement that may not be the one in force.

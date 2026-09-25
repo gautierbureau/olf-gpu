@@ -2852,3 +2852,34 @@ alternate and the pilot-Q relocation now both write into that coupling, one of t
 bus2's `-dQ` is missing altogether. That interaction is the next thing to fix, and the existing
 INCOMPLETE-coupling section of `GpuEquationDump` plus a sign check on each coupler's pair is the instrument
 for it.
+
+**The remaining defect, named: the RL pin writes mode 4 on the entry's OWN row even when that bus's Q balance
+is RELOCATED.** Measured placement for the group behind the same-signed pair (post-FIX 2):
+
+```
+gvc pilot=VL-6112_0 vCol=12834 qRow=12836 qRowAlt=-1 members=2:
+    VL-6112_0[vCol=12834 qRow=12836 qRowAlt=-1 enabled=false]   VL-6112_1[vCol=12836 qRow=-1 qRowAlt=-1 enabled=true]
+zi#36 BUS-6112_COUPLER_1 b1=VL-6112_0 b2=VL-6112_1 qRow1=12836 qRow2=-1 dummyQ=13207
+```
+
+This pilot is ALREADY PINNED at extraction (`enabled=false`, its `BUS_TARGET_Q` active), so `computeQRow`
+relocates its Q balance to the free member's row (12836) and its own row 12834 keeps `BUS_TARGET_V` — which a
+sibling controller still needs. That placement is CORRECT and it is why FIX 2's two loops both skip this group
+(the pilot has `qRow >= 0`, the member is the free one). The pilot-self pinned pilot cannot host both
+`BUS_TARGET_V` and `BUS_TARGET_Q` on one row, and relocating the Q is the device's answer.
+
+What is wrong is the ROW MODE. `reactiveLimitsBatch` pins by writing `mode[ridx] = 4` with
+`ridx = s*n + rlVrow[i]`, and `rlVrow` is "the transition WRITE row: the member's own bus row". For a bus whose
+Q balance is relocated to a carrier, mode 4 must go on the CARRIER's row (12836) while its own row stays the
+mode-0 `BUS_TARGET_V` identity. Today row 12834 is told "host your own Q" while that q is emitted at 12836, so
+the coupler's `+dQ` appears at BOTH rows (measured: column 13207 touched by 12834 +1.0 and 12836 +1.0, no
+opposing `-dQ`) and the `DUMMY_Q` is left underdetermined — `||dx||inf = 3.2e+15` on an otherwise factorable
+matrix.
+
+So the fix is to make the pin's write row follow the RELOCATION, not the bus: `rlVrow` (or a second per-entry
+"pin row") must be `qRow[bus]` when that differs from `vCol[bus]`. Note this is the same quantity
+`GpuAcOuterLoopPacks` already computes for the DISTR_Q member table, where the comment records the identical
+lesson for the coupler-tree case ("The member's DISTR_Q row, NOT simply its V column ... Pointing this
+bookkeeping at the V row made the DISTR_Q target updater write there"). Check both `rlVrow` uses (the pin write
+and the `q = qBuf[row] + loadQ` read) before changing either: the READ must stay on the row that carries the
+bus's own q, which for a relocated bus is the carrier, so the two may already need to differ from `vCol`.

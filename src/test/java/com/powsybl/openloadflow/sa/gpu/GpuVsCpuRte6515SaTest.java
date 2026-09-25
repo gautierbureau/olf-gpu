@@ -542,6 +542,32 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // converges cleanly against the WRONG equation - so the two switch lists are the only
         // direct evidence. Ported from GpuVsCpuProductionSaBenchmarkTest; the harness has no
         // appender configured (core/classic version mismatch), so attach one.
+        // OLF_GPU_DBG_NR: the CPU arm's own Newton trajectory — |f(x0)|, one line per iteration, and
+        // every MAX_VOLTAGE_CHANGE step-size clamp it applies. Put beside the device's OLF_GPU_CONV_TRACE
+        // this is the only direct way to see WHERE the two trajectories part at the DEFAULT criterion,
+        // which is the question: the two arms must take the same iterates, not merely land in the same
+        // tolerance ball. Tightening the tolerance hides this instead of answering it.
+        if (System.getenv("OLF_GPU_DBG_NR") != null) {
+            ch.qos.logback.classic.encoder.PatternLayoutEncoder nrEnc =
+                    new ch.qos.logback.classic.encoder.PatternLayoutEncoder();
+            ch.qos.logback.classic.Logger nrRoot = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                    .getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+            nrEnc.setContext(nrRoot.getLoggerContext());
+            nrEnc.setPattern("CPU_NR %logger{0} %msg%n");
+            nrEnc.start();
+            ch.qos.logback.core.ConsoleAppender<ch.qos.logback.classic.spi.ILoggingEvent> nrApp =
+                    new ch.qos.logback.core.ConsoleAppender<>();
+            nrApp.setContext(nrRoot.getLoggerContext());
+            nrApp.setEncoder(nrEnc);
+            nrApp.start();
+            for (String n : new String[] {"com.powsybl.openloadflow.ac.solver.NewtonRaphson",
+                                          "com.powsybl.openloadflow.ac.solver.MaxVoltageChangeStateVectorScaling"}) {
+                ch.qos.logback.classic.Logger lg = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(n);
+                lg.setLevel(ch.qos.logback.classic.Level.DEBUG);
+                lg.setAdditive(false);
+                lg.addAppender(nrApp);
+            }
+        }
         if (System.getenv("OLF_GPU_DBG_RL") != null) {
             ch.qos.logback.classic.Logger rlLog = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
                     .getLogger("com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop");

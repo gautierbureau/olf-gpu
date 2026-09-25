@@ -2883,3 +2883,38 @@ lesson for the coupler-tree case ("The member's DISTR_Q row, NOT simply its V co
 bookkeeping at the V row made the DISTR_Q target updater write there"). Check both `rlVrow` uses (the pin write
 and the `q = qBuf[row] + loadQ` read) before changing either: the READ must stay on the row that carries the
 bus's own q, which for a relocated bus is the carrier, so the two may already need to differ from `vCol`.
+
+**WHAT NEEDS TO CHANGE, from the tables themselves.** The free member's row, as the host tables list it:
+
+```
+row=12836 BUS_V(VL-6112_1) mode=4 terms=[cb#8783.q1, cb#8925.q2, zi#36.q1(+dQ),
+                                         dq[k=271 elem=13207 side=0 kind=3 w=-1.00000],
+                                         dq[k=274 elem=13207 side=1 kind=3 w=-0.00000]]
+```
+
+`zi#36.q1(+dQ)` is bus1's (the PILOT's) coupling and its frozen dest is 12836, because `qRow1 = 12836` — the
+pilot's balance rides the carrier. When the pilot's OWN row (12834) goes mode 4, the same term ALSO resolves
+there through the alternate, so column 13207 gets +1.0 twice with no opposing -dQ. The kind-3 `dq` term on the
+same column (weight -1.0) is correctly gated off by mode 4, so that gate is NOT the problem — it works.
+
+The emission must happen EXACTLY ONCE, at whichever row hosts that bus's Q balance this scenario, and the
+two-way channel can already express that. It simply keys on the wrong row:
+
+```cpp
+selRow[o] = stockSel <= -2 ? stockSel : (rc.row >= 0 ? rc.row : altRow);   // frozen exists -> select on the CARRIER
+```
+
+For a bus whose alternate is its OWN row and whose frozen dest is a DIFFERENT row (a relocation carrier), the
+select row must be the OWN row: mode 4 -> alt (own row), else -> frozen (carrier). One emission either way.
+The `sel = altRow` branch already does exactly this when the frozen dest is SUPPRESSED (-1); it needs to
+extend to the relocated case. What blocks a one-line change is that the build must know `altRow` IS the bus's
+own V row, which the cb/zi index tables do not carry today (they carry the frozen q dest and `qRowAlt`, not
+the bus's V column for that side) — so this needs either a new per-side field or an explicit sel shipped from
+Java, which is where the next change starts.
+
+Two method notes worth keeping. (1) `GpuEquationDump`'s `gvc` line recomputes `ExtractionColumns.of(network,
+es)` AT DUMP TIME, so its `qRow`/`qRowAlt` are NOT the values the running structure uses — reading a pinned-pass
+dump as if they were sent this investigation after a placement that was never in play. The dumped MATRIX is
+the ground truth. (2) `mode4Rows` differs between the first pinned fill and the end of the run
+(`[12560 12562 12588 12590 12592 12834]` then `[12562 12588 12590 12592 12836]`), so always state WHICH fill a
+mode observation comes from.

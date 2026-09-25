@@ -2422,3 +2422,35 @@ diverging contingencies to 27 (56 of the 67 coupler-openers island their subtree
 The isolated reproducer is now EXACT: `BUS-6014_BBS_2` goes from 7.386 MW / 4.086e-02 kV to 1.11e-09 MW /
 3.40e-11 kV, violations diff 0. And the relocation is now BETTER than no relocation on this window (violation
 difference 1 against 19), which it was not before.
+
+### Hunting the next one: the base fallback is NOT the pilot-self rotation (2026-09-25)
+
+After the target fix the window sits at 897/1000 with ONE fallback left, and it is the BASE load flow. The
+gate is now named (`OLF_GPU_REJECT_TRACE=1`):
+
+```
+GPU_REJECT slot=0 reason=max-iter-bad-solve outer=6 it=30 ratio=8.139e+11 norm=2.359472e+02
+GPU_BASE_ROBUST_RETRY status=-2 -> mode 6      (the robust retry then gives ratio 6.187e+06, norm 7.6e+71)
+```
+
+So the base still meets an unfactorable system at outer pass 6 — the pass where the first mode-4 rows appear
+— and even the pivoted, matched single-matrix mode cannot solve it.
+
+TESTED AND REJECTED: that this is the pilot-self degeneracy, whose (property-gated, unfinished) rotation was
+built for exactly this shape. Re-running with `-Dolf.gpu.pilotSelfRotation=true` on top of today's fixes —
+including the `distrQPack` member-row correction the rotation depends on — leaves the base failing at the
+SAME pass with the SAME gate (`max-iter-bad-solve` at outer=6, ratio 4.203e+11 against 8.139e+11), while
+adding a second fallback and taking the window to 0/1000. So the rotation neither fixes the base nor changes
+its failure, and the earlier hypothesis that the base's outer=6 rank deficiency IS the pilot-self duplicated
+DISTR_Q is unproven at best. Keep the property off; do not spend more on the rotation until the base failure
+is understood on its own terms.
+
+Also measured, so it is not mistaken for a relocation defect: the residual distributed-power spread (412 of
+974 contingencies above 1e-9 MW, worst 0.887 MW) is PRE-EXISTING and slightly WORSE without the relocation
+(525 of 974, worst 1.057 MW). It is a general GPU-vs-CPU slack difference, not something today's work
+introduced.
+
+Next target, in order of value: the base's outer=6 unfactorable system, using the tools that worked today —
+`OLF_GPU_EQ_DUMP` for OLF's base equations at that state against `OLF_GPU_VALS_SCAN`'s mode census, and the
+KLU rank test on an `OLF_GPU_VALS_DUMP` of that exact fill. That combination localized every defect this
+session; guessing at mechanisms did not.

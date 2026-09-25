@@ -2771,3 +2771,43 @@ reading suggested the pinned mode-4 rows take the `frozen` branch and would KEEP
 the measured dead column — so the selection must be reached another way (the `sel` row may be the pilot's, or
 the group branch may apply). Trace the zi q-slot destination per slot per pass for zi#24/zi#25 before
 changing anything: a wrong guess here would move a coupling that is currently correct in every other scenario.
+
+### ROOT CAUSE, measured from the dumped matrix: a pinned member's row has no own-q placement
+
+The dumped CSR at the pinned pass settles it without any further inference (parsed straight out of
+`OLF_GPU_VALS_DUMP`'s file):
+
+```
+row 12588 (PILOT,  mode 4): 5 nonzero — (1768,-29.752) (1769,-3.635) (12588,27.090) (12589,3.635) (13183,+1.0)
+row 12590 (member, mode 4): 2 nonzero — (12590,-1.0) (12592,+1.0)   F=-7.536000e-01
+row 12592 (member, mode 4): 2 nonzero — (12590,-1.0) (12592,+1.0)   F=-1.192700e+00
+rows 12590 and 12592 literally identical: True
+column 13185: slot present in rows 12590, 12592, 13183, 13185 — every value 0.0
+```
+
+`F = -target` EXACTLY on both member rows (-0.7536 and -1.1927 are those buses' own maxQ), so no q was
+evaluated on them at all: every term the host tables list for those rows — `cb#8717.q2`, `zi#24.q2(-dQ)`,
+`zi#25.q1(+dQ)` — is absent from the values. What is left is a single +-1 pair on the two V columns, the same
+in both rows, hence the duplicate pair; and the coupler's `DUMMY_Q` column is all zeros, hence the dead
+column. The PILOT's mode-4 row, by contrast, is assembled correctly, so this is specific to NON-PILOT members.
+
+The mechanism is the design note on `RmqPack`: "that slot is free because **the main qBuf fill suppresses
+member rows**". The suppression is deliberate — it frees the member row's qBuf slot for the diagnostic own-q
+that the reactive-limit check reads — but it NEVER LIFTS when the member pins and its row must host its own Q
+balance. The pilot escapes because it has an own-q placement (`qRowAlt=12588`); the members have `qRowAlt=-1`.
+
+So the very first hypothesis of this investigation was right about the PLACEMENT and wrong about the symptom.
+The members' rows genuinely have no own-q placement; what was wrong was calling their q "invisible" (it is
+computed correctly, 1.921012507 pu, by the rmq fill into the same row's qBuf slot). FIX 1 (the MAIN-control
+classification) made those members pin for the first time, which turned a latent placement gap into a singular
+matrix. Both defects are real and FIX 1 stays: without it the device silently solved a different system from
+OLF's (16 pins against 19).
+
+THE FIX: give every merged-group member an own-q placement on its OWN row, selected when that row's mode is 4,
+exactly as the pilot already has. Then a pinned member's row carries `q_member - limit_member` (its
+`BUS_TARGET_Q`), the coupler's +-dQ couplings land on it again (reviving column 13185), the two rows stop being
+identical, and the assembly matches what OLF builds: each controller's own BUS_TARGET_Q on its own row, no
+carrier, `BUS_TARGET_V` dropped. Touches `ExtractionColumns` (a member's `qRowAlt`) and the cb/zi ALT dest
+tables, which today point a member's q at the PILOT's row (`cb#8699.q2@alt` on row 12560) for the relocation
+case rather than back at the member's own row for the pinned case — so the alt channel needs to distinguish
+those two destinations, not merely toggle.

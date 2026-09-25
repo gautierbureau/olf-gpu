@@ -182,6 +182,21 @@ public final class GpuBatchRlCurves {
             if (curve == null || busFactor <= 0 || dsParams.factor(gen) <= 0) {
                 continue;                                    // no curve, or its P never moves — static is exact
             }
+            // A bus limit is NOT the sum of its generators' curve limits. AbstractLfBus.getLimitQ
+            // takes a generator's own limit only when it is in VOLTAGE or REMOTE_REACTIVE_POWER
+            // control, and its fixed targetQ otherwise - so a machine that is not controlling
+            // contributes a CONSTANT to the bus limit and its curve must not move that limit when
+            // the distributed slack moves its P. Packing it anyway made the device re-freeze a
+            // pinned bus at a limit OLF never computed. Measured on network.xiidm/DJXY: a BATTERY
+            // (FQHV, curve points p=-9.45/+9.45) shares bus FQHL_0 with a voltage-controlling
+            // generator; the slack moved the battery's P by 0.06 MW, the device moved the bus's
+            // MAX_Q by the battery's curve slope (-7.9087e-06 pu, which IIDM's own curve confirms
+            // to 10 digits) and OLF did not - 5.166e-05 kV across the network, invariant to convEps.
+            if (gen.getGeneratorControlType() != LfGenerator.GeneratorControlType.VOLTAGE
+                    && gen.getGeneratorControlType() != LfGenerator.GeneratorControlType.REMOTE_REACTIVE_POWER) {
+                // a constant in the bus limit: its P may move, the limit does not
+                continue;
+            }
             var points = ((ReactiveCapabilityCurve) curve).getPoints().stream()
                     .sorted(java.util.Comparator.comparingDouble(ReactiveCapabilityCurve.Point::getP)).toList();
             int ptsOff = cvPts.size() / 3;

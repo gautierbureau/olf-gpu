@@ -1091,6 +1091,72 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
     }
 
+    /** A curve generator that is NOT in voltage control shares a bus with one that is. A bus's
+     *  reactive limit is not the sum of its generators' curve limits: AbstractLfBus.getLimitQ takes a
+     *  generator's own limit only when its control type is VOLTAGE or REMOTE_REACTIVE_POWER, and its
+     *  fixed targetQ otherwise. So a machine that is not controlling contributes a CONSTANT to the bus
+     *  limit, and the distributed slack moving its P must not move that limit — while the curve channel
+     *  packed every participating curve generator and the kernel added its slope to the bus's box.
+     *
+     *  <p>B3 carries B3-G in voltage control and B3-G2 with its regulator OFF; both participate in the
+     *  distributed slack and both carry a curve sloped over the whole working range, so the slack moves
+     *  both generators' P while only B3-G's slope belongs in B3's limit. B3-G2's fixed targetQ is low
+     *  enough that B3 is genuinely PINNED at its maxQ (Q_PROBE: genTargetQ == maxQ, and the bus sits
+     *  0.0004 pu over), which is what makes the evaluated limit reach the answer — an earlier version
+     *  with B3 1.9 MVAr short of its limit passed with the filter removed and proved nothing. With the
+     *  filter removed this fails at 136.35 kV against the CPU's 134.44. The same shape on network.xiidm
+     *  (battery FQHV, regulator off, sharing a controlled bus) put the load contingency DJXY
+     *  5.166e-05 kV out, invariant to convEps. */
+    @org.junit.jupiter.api.Test
+    void deviceCurveLimitOfNonControllingGeneratorStaysConstant() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        com.powsybl.iidm.network.Generator g3 = network.getGenerator("B3-G");
+        g3.setTargetP(40).setMinP(0).setMaxP(200);
+        // regulator OFF -> LfGenerator control type OFF -> contributes its fixed targetQ to B3's box
+        com.powsybl.iidm.network.Generator g3b = network.getVoltageLevel("VL3").newGenerator()
+                .setId("B3-G2")
+                .setBus("B3").setConnectableBus("B3")
+                .setTargetP(60).setMinP(0).setMaxP(200)
+                .setTargetQ(-10).setVoltageRegulatorOn(false)
+                .add();
+        // B3-G's curve puts B3 at its maxQ; B3-G2's is steeper still, so packing it moves the box by
+        // MVAr per MW of slack — a difference no tolerance hides.
+        g3.newReactiveCapabilityCurve()
+                .beginPoint().setP(0).setMinQ(-40).setMaxQ(5).endPoint()
+                .beginPoint().setP(200).setMinQ(-40).setMaxQ(-45).endPoint()
+                .add();
+        g3b.newReactiveCapabilityCurve()
+                .beginPoint().setP(0).setMinQ(-60).setMaxQ(60).endPoint()
+                .beginPoint().setP(200).setMinQ(-60).setMaxQ(-60).endPoint()
+                .add();
+        network.getGenerator("B1-G").newMinMaxReactiveLimits().setMinQ(-990).setMaxQ(990).add();
+        // keep the case's generation/load balance: B3's extra 100 MW comes off B1-G (see
+        // deviceCurveLimitsWithLostSiblingGeneratorMatchesCpu — an unbalanced case fails outright).
+        com.powsybl.iidm.network.Generator g1 = network.getGenerator("B1-G");
+        g1.setTargetP(g1.getTargetP() - 100);
+        network.getGenerator("B6-G").setMinP(0).setMaxP(100);
+        network.getGenerator("B8-G").setMinP(0).setMaxP(100);
+        java.util.Set<String> sitOut = java.util.Set.of("B1-G", "B2-G");   // the slack end sits out
+        for (com.powsybl.iidm.network.Generator g : network.getGenerators()) {
+            g.newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                    .withParticipate(!sitOut.contains(g.getId())).withParticipationFactor(1.0).add();
+        }
+        // LOAD outages, not line outages: a line outage only moves the LOSSES, and a tenth of a MW
+        // through the curve slope stays under the bar. Losing B4-L takes ~48 MW off the participants,
+        // which is what makes a wrongly-packed slope worth MVAr.
+        List<Contingency> ctgs = List.of(
+                new Contingency("B4-L", new com.powsybl.contingency.LoadContingency("B4-L")),
+                new Contingency("B9-L", new com.powsybl.contingency.LoadContingency("B9-L")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true)
+                .setBalanceType(com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_PARTICIPATION_FACTOR);
+        assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "both contingencies must run on the DEVICE, or the curve channel is never exercised");
+    }
+
     /** Curve-limit EXTRAPOLATION (extrapolateReactiveLimits — ON in the RTE production params;
      *  was a whole-run CPU gate on any curve network): the curve stops at P = 41 MW just above
      *  B2-G's base 40 MW, so the post-outage DS raise pushes P OUTSIDE the range and the limit

@@ -46,7 +46,7 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-final class GpuBatchIncrementalFlowControl {
+public final class GpuBatchIncrementalFlowControl {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchIncrementalFlowControl.class);
 
@@ -62,9 +62,9 @@ final class GpuBatchIncrementalFlowControl {
     private GpuBatchIncrementalFlowControl() {
     }
 
-    record Controller(int kind, int pinRow, int pinTapCol, EquationTerm<AcVariableType, AcEquationType> flowTerm,
+    public record Controller(int kind, int pinRow, int pinTapCol, EquationTerm<AcVariableType, AcEquationType> flowTerm,
                       double targetValue, double halfDeadband, double[][] tapRows, int baseTapIdx,
-                      int elemIndex, int controlledElemIndex, int maxTapShift) {
+                      int elemIndex, int controlledElemIndex, int maxTapShift, int controlledSide, int branchNum) {
         double pin(int tap) {
             return tapRows[tap][pinTapCol];
         }
@@ -89,11 +89,11 @@ final class GpuBatchIncrementalFlowControl {
 
     /** The observable-evaluation context captured at build time: the shared es state vector (scenario
      *  states are loaded into it so OLF's own flow terms evaluate/differentiate at the right point). */
-    record EsContext(StateVector stateVector, int n) {
+    public record EsContext(StateVector stateVector, int n) {
     }
 
     @SuppressWarnings("unchecked")
-    static List<Controller> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    public static List<Controller> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                              GpuBatchElementMapper elementMapper, int rpcMaxTapShift,
                                              boolean rpc, boolean phase) {
         List<Controller> out = new ArrayList<>();
@@ -118,7 +118,8 @@ final class GpuBatchIncrementalFlowControl {
                 int ctlElemIndex = elementMapper.getElementIndex(controlled);
                 double[][] tapRows = GpuBatchTransformerControl.tapModels(controller.getPiModel());
                 if (pinRow == null || elemIndex < 0 || ctlElemIndex < 0 || tapRows.length == 0) {
-                    LOGGER.info("Incremental RPC controller {} not representable on the GPU batch — skipped", controller.getId());
+                    GpuBatchSkips.record(GpuBatchSkips.Slot.RPC, LOGGER,
+                            "Incremental RPC controller {} not representable on the GPU batch — skipped", controller.getId());
                     continue;
                 }
                 var term = (EquationTerm<AcVariableType, AcEquationType>) (rc.getControlledSide() == TwoSides.ONE
@@ -130,7 +131,7 @@ final class GpuBatchIncrementalFlowControl {
                 double halfDb = rc.getTargetDeadband().orElse(MIN_TARGET_DEADBAND_MVAR) / 2;
                 out.add(new Controller(KIND_RPC, pinRow, 6, term, target, halfDb,
                         tapRows, closestTap(tapRows, 6, controller.getPiModel().getR1()),
-                        elemIndex, ctlElemIndex, rpcMaxTapShift));
+                        elemIndex, ctlElemIndex, rpcMaxTapShift, rc.getControlledSide() == TwoSides.ONE ? 1 : 2, controller.getNum()));
             }
         }
         if (phase) {
@@ -154,7 +155,8 @@ final class GpuBatchIncrementalFlowControl {
                 int ctlElemIndex = elementMapper.getElementIndex(controlled);
                 double[][] tapRows = GpuBatchTransformerControl.tapModels(controller.getPiModel());
                 if (pinRow == null || elemIndex < 0 || ctlElemIndex < 0 || tapRows.length == 0) {
-                    LOGGER.info("Incremental phase controller {} not representable on the GPU batch — skipped", controller.getId());
+                    GpuBatchSkips.record(GpuBatchSkips.Slot.PHASE, LOGGER,
+                            "Incremental phase controller {} not representable on the GPU batch — skipped", controller.getId());
                     continue;
                 }
                 EquationTerm<AcVariableType, AcEquationType> term;
@@ -168,10 +170,80 @@ final class GpuBatchIncrementalFlowControl {
                 double halfDb = Math.max(pc.getTargetDeadband(), MIN_TARGET_DEADBAND_P) / 2;
                 out.add(new Controller(kind, pinRow, 7, term, pc.getTargetValue(), halfDb,
                         tapRows, closestTap(tapRows, 7, controller.getPiModel().getA1()),
-                        elemIndex, ctlElemIndex, Integer.MAX_VALUE));
+                        elemIndex, ctlElemIndex, Integer.MAX_VALUE, pc.getControlledSide() == TwoSides.ONE ? 1 : 2, controller.getNum()));
             }
         }
         return out;
+    }
+
+    /** Install the controllers for the in-kernel loops (RPC at OLF order 9, incremental phase at order 7).
+     *  Returns true when the kernel loops OWN them, false when there are none or one controlled branch is
+     *  not a closed branch (the host orchestrator then runs). */
+    public static boolean uploadToDevice(long handle, List<Controller> ctrls) {
+        if (ctrls == null || ctrls.isEmpty()) {
+            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchFlowControllers(handle,
+                    null, null, null, null, null, null, null, null, null, null, null, null);
+            return false;
+        }
+        int nc = ctrls.size();
+        int[] kind = new int[nc];
+        int[] pinRow = new int[nc];
+        int[] pinCol = new int[nc];
+        int[] side = new int[nc];
+        double[] targetValue = new double[nc];
+        double[] halfDb = new double[nc];
+        int[] elem = new int[nc];
+        int[] ctlElem = new int[nc];
+        int[] tapPtr = new int[nc + 1];
+        int[] baseTap = new int[nc];
+        int[] maxShift = new int[nc];
+        List<Double> tapData = new ArrayList<>();
+        for (int c = 0; c < nc; c++) {
+            Controller ctl = ctrls.get(c);
+            kind[c] = ctl.kind();
+            pinRow[c] = ctl.pinRow();
+            pinCol[c] = ctl.pinTapCol();
+            side[c] = ctl.controlledSide();
+            targetValue[c] = ctl.targetValue();
+            halfDb[c] = ctl.halfDeadband();
+            elem[c] = ctl.elemIndex();
+            ctlElem[c] = ctl.controlledElemIndex();
+            tapPtr[c] = tapData.size() / 8;
+            for (double[] row : ctl.tapRows()) {
+                for (double d : row) {
+                    tapData.add(d);
+                }
+            }
+            baseTap[c] = ctl.baseTapIdx();
+            maxShift[c] = ctl.maxTapShift() == Integer.MAX_VALUE ? 1 << 20 : ctl.maxTapShift();
+        }
+        tapPtr[nc] = tapData.size() / 8;
+        boolean owned = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchFlowControllers(handle,
+                kind, pinRow, pinCol, side, targetValue, halfDb, elem, ctlElem, tapPtr,
+                tapData.stream().mapToDouble(Double::doubleValue).toArray(), baseTap, maxShift) != 0;
+        LOGGER.info("Uploaded {} flow-observed incremental controllers to device: {}", nc, owned ? "in-kernel loops" : "host orchestrator");
+        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            System.err.printf("FLOW_UPLOAD nCtrl=%d kernel=%b%n", nc, owned);
+        }
+        return owned;
+    }
+
+    /** Give the driver's final taps (scenario 0) back to the network through the pi model. */
+    public static void writeBackTaps(LfNetwork network, List<Controller> ctrls, int[] taps) {
+        if (ctrls == null || ctrls.isEmpty() || taps == null) {
+            return;
+        }
+        for (int c = 0; c < ctrls.size() && c < taps.length; c++) {
+            Controller ctl = ctrls.get(c);
+            if (taps[c] == ctl.baseTapIdx()) {
+                continue;
+            }
+            LfBranch branch = network.getBranch(ctl.branchNum());
+            if (branch != null) {
+                var pm = branch.getPiModel();
+                pm.setTapPosition(pm.getTapPositionRange().getMinimum() + taps[c]);
+            }
+        }
     }
 
     private static int closestTap(double[][] tapRows, int col, double value) {
@@ -184,290 +256,11 @@ final class GpuBatchIncrementalFlowControl {
         return best;
     }
 
-    /** OLF ClosestTapPositionFinder over the pinned column (r1 or a1). Returns 0 or the direction. */
-    private static int moveClosest(Controller c, int[] tap, double delta, int maxTapShift, Ratchet ratchet) {
-        int cur = tap[0];
-        double newV = c.pin(cur) + delta;
-        int lo = ratchet.allowedDirection > 0 ? cur : 0;
-        int hi = ratchet.allowedDirection < 0 ? cur : c.tapRows().length - 1;
-        int best = cur;
-        double bestDist = Math.abs(newV - c.pin(cur));
-        for (int i = lo; i <= hi; i++) {
-            if (Math.abs(i - cur) > maxTapShift) {
-                continue;
-            }
-            double dist = Math.abs(newV - c.pin(i));
-            if (dist < bestDist) {
-                best = i;
-                bestDist = dist;
-            }
-        }
-        if (best == cur) {
-            return 0;
-        }
-        tap[0] = best;
-        int direction = best > cur ? 1 : -1;
-        ratchet.update(direction);
-        return direction;
-    }
 
-    /** OLF FirstTapPositionAboveFinder over a1 (LIMITER mode): walk tap by tap in the shift's direction
-     *  while the remaining shift still reaches past the next tap's a1, within the allowed range. */
-    private static int moveExceed(Controller c, int[] tap, double deltaA1, Ratchet ratchet) {
-        int start = tap[0];
-        int cur = start;
-        double remaining = deltaA1;
-        int lo = ratchet.allowedDirection > 0 ? start : 0;
-        int hi = ratchet.allowedDirection < 0 ? start : c.tapRows().length - 1;
-        while (true) {
-            int next = nextIndex(c, cur, remaining);
-            if (next < 0 || next < lo || next > hi) {
-                break;
-            }
-            double value = c.pin(cur);
-            double nextValue = c.pin(next);
-            cur = next;
-            if (remaining < 0 && value + remaining > nextValue
-                    || remaining > 0 && value + remaining < nextValue) {
-                break;                                       // shift not enough to go to the next position
-            }
-            remaining -= nextValue - value;
-        }
-        if (cur == start) {
-            return 0;
-        }
-        tap[0] = cur;
-        int direction = cur > start ? 1 : -1;
-        ratchet.update(direction);
-        return direction;
-    }
 
-    private static int nextIndex(Controller c, int i, double shift) {  // OLF nextTapPositionIndex
-        if (shift == 0) {
-            return -1;
-        }
-        int last = c.tapRows().length - 1;
-        if (i == 0 && descending(c, 1, 0, shift)) {
-            return -1;
-        }
-        if (i > 0 && descending(c, i, i - 1, shift)) {
-            return i - 1;
-        }
-        if (i < last && descending(c, i, i + 1, shift)) {
-            return i + 1;
-        }
-        return -1;
-    }
 
     private static boolean descending(Controller c, int n1, int n2, double shift) {
         return shift > 0 ? c.pin(n1) < c.pin(n2) : c.pin(n1) > c.pin(n2);
     }
 
-    @SuppressWarnings({"java:S107", "java:S3776"})
-    static double[][] orchestrate(long handle, int chunkSize, int realCount, int n,
-            double[][] chunkResults, List<Controller> ctrls, EsContext esCtx,
-            int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
-            int[] targetOverrideIndex, double[] targetOverrideValue,
-            int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
-            int[] dsPhiRow, double[] dsFactor,
-            int[] baseR1OvSlotElem, double[] baseR1OvVal, int[] shOvSlotElem, double[] shOvGb,
-            int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem,
-            double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
-            double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, int[] varType,
-            BatchConfig config) {
-        int nc = ctrls.size();
-        int[][] tap = new int[chunkSize][nc];
-        Ratchet[][] ratchets = new Ratchet[chunkSize][nc];
-        for (int s = 0; s < chunkSize; s++) {
-            for (int c = 0; c < nc; c++) {
-                tap[s][c] = ctrls.get(c).baseTapIdx();
-                ratchets[s][c] = new Ratchet();
-            }
-        }
-        // the union of the flow terms' variable rows: the JNI returns dx at these; a sparse-filled
-        // DenseMatrix hands them to OLF's own term.calculateSensi
-        List<Integer> obsList = new ArrayList<>();
-        Map<Integer, Integer> obsPos = new LinkedHashMap<>();
-        for (Controller c : ctrls) {
-            for (Variable<AcVariableType> v : c.flowTerm().getVariables()) {
-                obsPos.computeIfAbsent(v.getRow(), r -> {
-                    obsList.add(r);
-                    return obsList.size() - 1;
-                });
-            }
-        }
-        int[] obs = obsList.stream().mapToInt(Integer::intValue).toArray();
-        int m = obs.length;
-        int maxRounds = config.maxOuterIterations() > 0 ? config.maxOuterIterations() : 20;
-        // DS target carry (same three coupled pieces as GpuBatchTransformerControl): the MAIN
-        // solve's slack distribution must ride into every tap-move re-solve, or the kernel
-        // re-derives it from the re-uploaded baseTargets along a trajectory the CPU never takes.
-        int nds = dsPhiRow != null ? dsPhiRow.length : 0;
-        double[] dsAnchorCarry = nds > 0 ? new double[chunkSize * nds] : null;
-        double[] dsSlackCarry = nds > 0 ? new double[chunkSize] : null;
-        double[] dsSeed = nds > 0 ? new double[chunkSize * nds] : null;
-        if (nds > 0) {
-            GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
-                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
-        }
-
-        for (int round = 0; round < maxRounds; round++) {
-            // ---- which (scenario, controller) pairs need attention on the current converged states ----
-            double[][] diffOf = new double[realCount][nc];   // target - flow (RPC/P) or target - i (LIMITER)
-            List<int[]> pending = new ArrayList<>();
-            boolean[] ctrlNeeded = new boolean[nc];
-            for (int slot = 0; slot < realCount; slot++) {
-                double[] r = chunkResults[slot];
-                if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
-                    continue;
-                }
-                esCtx.stateVector().set(java.util.Arrays.copyOf(r, n));
-                for (int c = 0; c < nc; c++) {
-                    Controller ctl = ctrls.get(c);
-                    if (disabledMask[slot][ctl.elemIndex()] || disabledMask[slot][ctl.controlledElemIndex()]) {
-                        continue;
-                    }
-                    double flow = ctl.flowTerm().eval();
-                    double diff = ctl.targetValue() - flow;
-                    boolean needs = ctl.kind() == KIND_PHASE_I
-                            ? flow > ctl.targetValue()                        // LIMITER: one-sided
-                            : Math.abs(diff) > ctl.halfDeadband();
-                    if (needs) {
-                        diffOf[slot][c] = diff;
-                        pending.add(new int[] {slot, c});
-                        ctrlNeeded[c] = true;
-                    }
-                }
-            }
-            if (pending.isEmpty()) {
-                break;
-            }
-            // ---- batched device sensitivities: unit RHS at each needed controller's pinned row ----
-            int[] unit = new int[nc];
-            int[] unitOf = new int[nc];
-            int ku = 0;
-            for (int c = 0; c < nc; c++) {
-                if (ctrlNeeded[c]) {
-                    unitOf[c] = ku;
-                    unit[ku++] = ctrls.get(c).pinRow();
-                } else {
-                    unitOf[c] = -1;
-                }
-            }
-            double[] statesFlat = new double[chunkSize * n];
-            for (int s = 0; s < chunkSize; s++) {
-                double[] src = s < realCount && chunkResults[s] != null ? chunkResults[s] : baseState;
-                System.arraycopy(src, 0, statesFlat, s * n, n);
-            }
-            double[] dxAtObs = GpuAcNewtonSolver.solveBatchSensitivities(handle, statesFlat,
-                    java.util.Arrays.copyOf(unit, ku), obs);
-
-            // ---- OLF decisions per pending (scenario, controller) ----
-            boolean anyMoved = false;
-            boolean[] affected = new boolean[chunkSize];
-            int lastSlotLoaded = -1;
-            DenseMatrix dx = new DenseMatrix(n, ku);
-            for (int[] sc : pending) {
-                int slot = sc[0];
-                int c = sc[1];
-                Controller ctl = ctrls.get(c);
-                if (lastSlotLoaded != slot) {
-                    esCtx.stateVector().set(java.util.Arrays.copyOf(chunkResults[slot], n));
-                    for (int kk = 0; kk < ku; kk++) {         // sparse-refill the observed rows for this scenario
-                        for (int mi = 0; mi < m; mi++) {
-                            dx.set(obs[mi], kk, dxAtObs[slot * ku * m + kk * m + mi]);
-                        }
-                    }
-                    lastSlotLoaded = slot;
-                }
-                double rawSensi = ctl.flowTerm().calculateSensi(dx, unitOf[c]);
-                double diff = diffOf[slot][c];
-                int[] holder = {tap[slot][c]};
-                int dir = 0;
-                switch (ctl.kind()) {
-                    case KIND_RPC -> {
-                        double deltaR1 = diff / rawSensi;    // OLF RPC: no sensitivity gate
-                        dir = moveClosest(ctl, holder, deltaR1, ctl.maxTapShift(), ratchets[slot][c]);
-                    }
-                    case KIND_PHASE_P -> {
-                        if (Math.abs(rawSensi * Math.toRadians(1)) > SENSI_EPS) {
-                            double da = diff / rawSensi;     // per-degree RHS and toRadians cancel out
-                            dir = moveClosest(ctl, holder, da, ctl.maxTapShift(), ratchets[slot][c]);
-                        }
-                    }
-                    case KIND_PHASE_I -> {
-                        if (Math.abs(rawSensi * Math.toRadians(1)) > SENSI_EPS) {
-                            double da = diff / rawSensi;     // diff = target - i < 0 here
-                            dir = moveExceed(ctl, holder, da, ratchets[slot][c]);
-                        }
-                    }
-                    default -> throw new IllegalStateException();
-                }
-                if (dir != 0) {
-                    tap[slot][c] = holder[0];
-                    anyMoved = true;
-                    affected[slot] = true;
-                }
-            }
-            if (!anyMoved) {
-                break;
-            }
-            // ---- apply moved taps: pinned-row targets + pi rows + state seeds, re-solve warm ----
-            List<Integer> ovIdx = new ArrayList<>();
-            List<Double> ovVal = new ArrayList<>();
-            for (int i = 0; i < targetOverrideIndex.length; i++) {
-                ovIdx.add(targetOverrideIndex[i]);
-                ovVal.add(targetOverrideValue[i]);
-            }
-            GpuBatchTransformerControl.seedDsTargets(nds, dsPhiRow, dsSeed, chunkResults, realCount, n, ovIdx, ovVal);
-            List<Integer> r1Slot = new ArrayList<>();
-            List<Double> r1Val = new ArrayList<>();
-            for (int v : baseR1OvSlotElem) {
-                r1Slot.add(v);
-            }
-            for (double v : baseR1OvVal) {
-                r1Val.add(v);
-            }
-            double[] x0Full = statesFlat;
-            for (int s = 0; s < chunkSize; s++) {
-                for (int c = 0; c < nc; c++) {
-                    Controller ctl = ctrls.get(c);
-                    if (tap[s][c] != ctl.baseTapIdx()) {
-                        double[] row = ctl.tapRows()[tap[s][c]];
-                        ovIdx.add(s * n + ctl.pinRow());
-                        ovVal.add(row[ctl.pinTapCol()]);     // identity row pins rho/a1 at the tap's value
-                        x0Full[s * n + ctl.pinRow()] = row[ctl.pinTapCol()];
-                        r1Slot.add(s);
-                        r1Slot.add(ctl.elemIndex());
-                        for (double d : row) {
-                            r1Val.add(d);                    // full 8-double pi row: per-step R/X/G/B follow
-                        }
-                    }
-                }
-            }
-            double[][] r2 = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
-                    rowModePerScenario, baseRowMode, disabledMask,
-                    ovIdx.stream().mapToInt(Integer::intValue).toArray(),
-                    ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorCarry, dsSlackCarry, null, null,
-                    parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                    config.lsMode(), config.maxDv(), config.maxDphi(),
-                    config.lsMode() == 2 ? varType : null, x0Full,
-                    shOvSlotElem, shOvGb, null, null,
-                    r1Slot.stream().mapToInt(Integer::intValue).toArray(),
-                    r1Val.stream().mapToDouble(Double::doubleValue).toArray(),
-                    config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0,
-                    nziBase, ziOnSlotElem, ziOffSlotElem);
-            for (int s = 0; s < realCount; s++) {
-                if (affected[s]) {                           // untouched scenarios KEEP their converged state —
-                    chunkResults[s] = r2[s];                 // the CPU never re-runs Newton on a STABLE scenario,
-                }                                            // and the batch re-solve's forced first iteration
-            }                                                // would polish them off the CPU's point (~1e-5)
-            if (nds > 0) {                                   // this solve may have distributed further
-                GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
-                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed, affected);
-            }
-        }
-        return chunkResults;
-    }
 }

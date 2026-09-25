@@ -7,6 +7,8 @@
  */
 package com.powsybl.openloadflow.ac.equations.vector.gpu;
 
+import java.util.List;
+
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
@@ -17,6 +19,7 @@ import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfShunt;
+import com.powsybl.openloadflow.network.LoadFlowModel;
 import com.powsybl.openloadflow.network.ShuntVoltageControl;
 import com.powsybl.openloadflow.network.TransformerVoltageControl;
 import com.powsybl.openloadflow.network.VoltageControl;
@@ -178,13 +181,31 @@ final class GpuAcRowIndexing {
                 .orElse(false);
     }
 
-    /** True when the bus is a CONTROLLER ELEMENT of a remote (non-local) MAIN generator voltage
-     *  control — INCLUDING the case where it is also that control's CONTROLLED bus (a generator
-     *  regulating its own bus, merged with remote controllers). Such a bus's reactive injection
-     *  feeds the group's DISTR_Q rows, never a plain per-bus Q scatter. */
+    /** True when the bus is a CONTROLLER ELEMENT of a remote (non-local) generator voltage control
+     *  — INCLUDING the case where it is also that control's CONTROLLED bus (a generator regulating
+     *  its own bus, merged with remote controllers). Such a bus's reactive injection feeds the
+     *  group's DISTR_Q rows, never a plain per-bus Q scatter.
+     *
+     *  <p>Resolved on the MAIN control via {@link VoltageControl#getMainVoltageControl()}, NOT by
+     *  filtering {@code getMergeStatus() == MAIN}. A control that has been MERGED into another is
+     *  DEPENDENT, and on the dependent object both tests below read the wrong thing: its
+     *  {@code controllerElements} is just itself, so {@code isLocalControl()} is TRUE (it appears to
+     *  be a generator regulating its own bus alone) and the merged element list is not reachable.
+     *  Filtering DEPENDENT away therefore answered FALSE for a bus that really is a controller, and
+     *  {@link #computeQRow} then left its Q balance on its own BUS_V row — a row that already hosts
+     *  the bus's DISTR_Q equation. The zero-impedance family's direct +-DUMMY_Q coupling landed
+     *  there alongside the DISTR_Q derivative and the two CANCELLED: measured on rte6515
+     *  BUS-24_COUPLER_1 as kind-3 terms summing +1.0 against the zi coupling's -1.0, leaving the
+     *  coupler's DUMMY_Q in NO equation at all — a STRUCTURALLY ZERO COLUMN, which is invisible in
+     *  every residual (the free variable perturbs nothing, so |F| looks healthy while the whole
+     *  Newton step is polluted). 45 such columns at 2000 busbar sections.
+     *
+     *  <p>Generator voltage controls merge exactly when their buses are joined by ZERO-IMPEDANCE
+     *  branches, which is why the whole population is busbar couplers and why the defect only
+     *  appears once enough busbar-section contingencies retain enough switches. */
     static boolean isRemoteGenVcControllerElement(LfBus bus) {
         return bus.getGeneratorVoltageControl()
-                .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                .<GeneratorVoltageControl>map(VoltageControl::getMainVoltageControl)
                 .filter(c -> !c.isLocalControl())
                 .map(c -> c.getMergedControllerElements().contains(bus))
                 .orElse(false);
@@ -198,20 +219,49 @@ final class GpuAcRowIndexing {
      *  collide on one row — one silently overwrites the other and the group's reactive sharing is
      *  left unsatisfied (measured on a richer-modelling RTE-like network: the device "converged"
      *  with a 0.45 pu DISTR_Q residual and OLF's own re-test then failed the load flow). */
+    /** As below, following the coupler-tree relocation: a relocated CHILD's DISTR_Q moves onto its parent
+     *  coupler's DUMMY_Q column, which its own reactive terms already carry (the kind-3 contribution), leaving
+     *  its V row free for that coupler's ZERO_V. */
+    static int distrQRow(EquationSystem<AcVariableType, AcEquationType> es, LfBus controller,
+                         int[] ziParentEdge, int[] dummyQCol) {
+        int parent = ziParentEdge == null ? -1 : ziParentEdge[controller.getNum()];
+        if (parent >= 0 && dummyQCol[parent] >= 0) {
+            return dummyQCol[parent];
+        }
+        return distrQRow(es, controller);
+    }
+
     static int distrQRow(EquationSystem<AcVariableType, AcEquationType> es, LfBus controller) {
         var vc = controller.getGeneratorVoltageControl()
                 .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                 .orElse(null);
         if (vc != null && vc.getControlledBus() == controller) {
-            LfBus free = vc.getMergedControllerElements().stream()
-                    .filter(vc::isControllerEnabled).findFirst()
-                    .orElseThrow(() -> new PowsyblException("GPU AC solver: remote generator voltage control of bus "
-                            + controller.getId() + " has no enabled controller"));
+            LfBus free = distrQHostMember(vc);
+            if (free == null) {
+                throw new PowsyblException("GPU AC solver: remote generator voltage control of bus "
+                        + controller.getId() + " has no controller");
+            }
             return col(es, free.getNum(), AcVariableType.BUS_V);
         }
         return col(es, controller.getNum(), AcVariableType.BUS_V);
     }
 
+    /** The member row that HOSTS the pilot's DISTR_Q when the pilot is one of its own controllers:
+     *  OLF's reference controller (the first ENABLED merged controller), else - every controller
+     *  pinned in the base state - the first merged controller. In that case the pilot's DISTR_Q is
+     *  inactive and only needs a slot; the row modes carry the pinned state (mode 4 on every row).
+     *  Measured on rte6515's full busbar scope: the base pins EVERY controller of VL-6003_0's
+     *  group, "first enabled" found none and the whole precompute fell to the CPU.
+     *  NOT the free-member predicate below: a pinned member is never free (its row hosts its own
+     *  Q balance, canonical encoding) - calling it free left a pinned singleton at mode 1 with the
+     *  structure-frozen encoding (deviceRemoteSingletonMemberPin, deviceRemoteRobustRealisticVoltage). */
+    static LfBus distrQHostMember(GeneratorVoltageControl vc) {
+        List<LfBus> members = vc.getMergedControllerElements();
+        return members.stream().filter(vc::isControllerEnabled).findFirst()
+                .orElse(members.isEmpty() ? null : members.get(0));
+    }
+
+    /** The FREE member: the first ENABLED merged controller. None when every controller is pinned. */
     static boolean isFreeRemoteGenVcMember(LfBus bus) {
         return bus.getGeneratorVoltageControl()
                 .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
@@ -260,4 +310,226 @@ final class GpuAcRowIndexing {
         }
         return alt;
     }
+    /** {@code -Dolf.gpu.ziTreeRelocation=true}: relocate along the WHOLE coupler tree. Default false, which
+     *  relocates dead-end stubs only - the shape this generalises, and the only one validated end to end. */
+    /**
+     * {@code -Dolf.gpu.pilotSelfRotation} (default false while it lands): enrol PILOT-SELF voltage-control
+     * groups — a control whose merged controllers contain its own controlled bus — in the candidate-table
+     * relocation, so a reactive-limit pin of the pilot moves its Q balance to the first ENABLED member's row
+     * per scenario, which is OLF's own rule ({@code updateRemoteVoltageControlEquations}: DISTR_Q for every
+     * enabled controller except the FIRST, BUS_TARGET_Q for every pinned one).
+     */
+    static boolean pilotSelfRotationEnabled() {
+        return Boolean.parseBoolean(System.getProperty("olf.gpu.pilotSelfRotation", "false"));
+    }
+
+    static boolean ziTreeRelocationEnabled() {
+        return Boolean.parseBoolean(System.getProperty("olf.gpu.ziTreeRelocation", "false"));
+    }
+
+    /** {@code -Dolf.gpu.ziTreeRelocationMinCouplers=<n>}: relocate only a tree with at least n couplers. The numeric
+     *  row repair is EXACT on short chains (measured: 3 couplers at 2.8e-16) and loses longer ones (1.6e+04 at 7), so
+     *  a short tree keeps the proven path and only the trees that need the relocation take it. */
+    private static int ziTreeMinCouplers() {
+        return Integer.getInteger("olf.gpu.ziTreeRelocationMinCouplers", 4);
+    }
+
+    /**
+     * The COUPLER-TREE RELOCATION, the general form of the dead-end case below: per zero-impedance spanning tree,
+     * every non-root bus's two power equations move onto its PARENT coupler's {@code DUMMY_P} / {@code DUMMY_Q}
+     * columns, and every coupler's {@code ZERO_PHI} / {@code ZERO_V} move onto its CHILD bus's {@code PHI} / {@code V}.
+     * Each of those four pairings has a structurally non-zero diagonal (+-1, or +-rho for ZERO_V), and the root keeps
+     * its own rows, whose diagonal comes from its impedant branches.
+     *
+     * <p>Why: with the stock pairing a coupler's two equations sit on its own dummy rows, which neither depends on,
+     * so a chain of couplers chains zero diagonals. The numeric row repair (hazRepairVals) rescues short chains but
+     * not longer ones: measured against OLF's own Newton on an all-generator chain, the device's FIRST step is exact
+     * at 3 couplers (2.8e-16) and wrong from 7 on (1.6e+04 at 7, 5.5e+04 at 15) - no zero diagonal, no tiny one and
+     * no empty column at that point, just an unpivoted factorization losing the chain. rte6515's busbar scope (366
+     * retained couplers) is the same defect at scale: the base load flow's factorization came back wrong
+     * (||J.dx-B||inf / ||F||inf = 2.1e+08) and every scenario of a 1000-section window had to fall back to the CPU.
+     *
+     * @return {@code parentEdgeOfBus[busNum]} = the coupler whose dummy columns host that bus's power equations
+     *         (-1 = a root, or not in a relocated tree), and {@code childBusOfEdge[branchNum]} = the bus whose
+     *         {@code PHI} / {@code V} host that coupler's zero equations (-1 = not relocated).
+     */
+    static int[][] ziTreeRelocation(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+                                    int[] phiCol, int[] vCol, int[] qRow, int[] dummyPCol, int[] dummyQCol) {
+        int nBuses = network.getBuses().size();
+        int nBranches = network.getBranches().size();
+        int[] parentEdgeOfBus = new int[nBuses];
+        int[] childBusOfEdge = new int[nBranches];
+        java.util.Arrays.fill(parentEdgeOfBus, -1);
+        java.util.Arrays.fill(childBusOfEdge, -1);
+        if (!ziTreeRelocationEnabled()) {                    // dead-end stubs only: the k=1 case, as before
+            for (LfBranch br : network.getBranches()) {
+                if (!br.isZeroImpedance(LoadFlowModel.AC)) {
+                    continue;
+                }
+                int side = ziDeadEndSide(es, br, phiCol, vCol, qRow);
+                if (side != 0) {
+                    LfBus stub = side == 1 ? br.getBus1() : br.getBus2();
+                    parentEdgeOfBus[stub.getNum()] = br.getNum();
+                    childBusOfEdge[br.getNum()] = stub.getNum();
+                }
+            }
+            return new int[][] {parentEdgeOfBus, childBusOfEdge};
+        }
+        // Adjacency over the zero-impedance SPANNING-TREE edges only: a non-tree coupler carries no reactive flow
+        // and no zero equations to relocate (OLF gives it no DUMMY variables either).
+        java.util.Map<Integer, java.util.List<LfBranch>> treeEdges = new java.util.HashMap<>();
+        for (LfBranch br : network.getBranches()) {
+            if (!br.isZeroImpedance(LoadFlowModel.AC) || !br.isSpanningTreeEdge(LoadFlowModel.AC)
+                    || br.getBus1() == null || br.getBus2() == null) {
+                continue;
+            }
+            treeEdges.computeIfAbsent(br.getBus1().getNum(), k -> new java.util.ArrayList<>()).add(br);
+            treeEdges.computeIfAbsent(br.getBus2().getNum(), k -> new java.util.ArrayList<>()).add(br);
+        }
+        boolean[] seen = new boolean[nBuses];
+        for (LfBus bus : network.getBuses()) {
+            int rootNum = bus.getNum();
+            if (seen[rootNum] || !treeEdges.containsKey(rootNum) || !hasImpedantBranch(bus)) {
+                continue;                                    // the root's own P row needs a real dP/dPHI diagonal
+            }
+            // Breadth-first from the root: the edge that first reaches a bus is its parent, and the bus is that
+            // edge's child. A tree, so every bus is reached once and the pairing is a permutation.
+            java.util.Deque<LfBus> queue = new java.util.ArrayDeque<>();
+            java.util.List<Integer> childrenOfThisTree = new java.util.ArrayList<>();
+            seen[rootNum] = true;
+            queue.add(bus);
+            while (!queue.isEmpty()) {
+                LfBus b = queue.poll();
+                for (LfBranch br : treeEdges.getOrDefault(b.getNum(), List.of())) {
+                    LfBus other = br.getBus1() == b ? br.getBus2() : br.getBus1();
+                    int otherNum = other.getNum();
+                    if (seen[otherNum] || phiCol[otherNum] < 0 || vCol[otherNum] < 0
+                            || row(es, otherNum, AcEquationType.BUS_TARGET_V) >= 0) {
+                        continue;                            // a pilot's V row is an identity: ZERO_V cannot take it
+                    }
+                    seen[otherNum] = true;
+                    parentEdgeOfBus[otherNum] = br.getNum();
+                    childBusOfEdge[br.getNum()] = otherNum;
+                    childrenOfThisTree.add(otherNum);
+                    queue.add(other);
+                }
+            }
+            if (System.getenv("OLF_GPU_ZITREE_TRACE") != null) {
+                System.err.println("ZITREE root=" + bus.getId() + " couplers=" + childrenOfThisTree.size());
+            }
+            if (childrenOfThisTree.size() < ziTreeMinCouplers()) {
+                for (int child : childrenOfThisTree) {        // short tree: the numeric repair handles it exactly
+                    childBusOfEdge[parentEdgeOfBus[child]] = -1;
+                    parentEdgeOfBus[child] = -1;
+                }
+            }
+        }
+        // A child's own rows must be FREE for the pairing: its V row takes its coupler's ZERO_V once its reactive
+        // equation moves to the parent's DUMMY_Q, so a bus whose V row hosts ANOTHER bus's reactive balance (a
+        // group's free controller carries the pilot's) or whose reactive equation is relocated elsewhere (a
+        // transformer- or shunt-controlled bus) keeps its rows, and the numeric repair covers it as before.
+        boolean[] hostsAnotherReactiveRow = new boolean[nBuses];
+        for (int other = 0; other < nBuses; other++) {
+            if (qRow[other] < 0) {
+                continue;
+            }
+            for (int bn = 0; bn < nBuses; bn++) {
+                if (bn != other && qRow[other] == vCol[bn]) {
+                    hostsAnotherReactiveRow[bn] = true;
+                }
+            }
+        }
+        for (LfBus bus : network.getBuses()) {
+            int bn = bus.getNum();
+            int parent = parentEdgeOfBus[bn];
+            if (parent < 0) {
+                continue;
+            }
+            boolean ownReactiveOnItsVRow = qRow[bn] == vCol[bn]
+                    || row(es, bn, AcEquationType.DISTR_Q) >= 0 && distrQRow(es, bus) == vCol[bn];
+            if (dummyPCol[parent] < 0 || dummyQCol[parent] < 0 || hostsAnotherReactiveRow[bn]
+                    || !ownReactiveOnItsVRow) {
+                parentEdgeOfBus[bn] = -1;
+                childBusOfEdge[parent] = -1;
+            }
+        }
+        return new int[][] {parentEdgeOfBus, childBusOfEdge};
+    }
+
+    private static boolean hasImpedantBranch(LfBus bus) {
+        for (LfBranch br : bus.getBranches()) {
+            if (!br.isZeroImpedance(LoadFlowModel.AC)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Which side of a zero-impedance branch is a DEAD-END STUB that is SAFE to relocate: a bus whose
+     * only branch is this one, with no shunt, no generator and no voltage-dependent load, and with a
+     * plain P/Q balance of its own. 1 = side 1, 2 = side 2, 0 = neither (or both, which would be a
+     * two-bus island and is left alone).
+     *
+     * <p>Why relocate at all: a zero-impedance branch puts ZERO_V (v1−rho·v2) on the DUMMY_P row and
+     * ZERO_PHI (ph1−ph2) on the DUMMY_Q row, and neither depends on its own dummy — two structurally
+     * zero diagonals, harmless while isolated. A dead-end stub adds two more, because its P and Q
+     * balances then carry ONLY ∓DUMMY_P / ∓DUMMY_Q, and the four zero pivots CHAIN. cuDSS's AMD
+     * ordering is symmetric and assumes a non-zero diagonal; on that chain it perturbs the pivot and
+     * propagates the reciprocal (measured DUMMY_P = -1.220703125e+09 and phi = -1.220703125e+22
+     * against exact answers of -0.05 and 0). Pairing the same four equations with different columns
+     * — the stub's P balance on the DUMMY_P row, its Q balance on the DUMMY_Q row, ZERO_V on the
+     * stub's v row and ZERO_PHI on its phi row — makes every diagonal non-zero and the factorization
+     * well behaved, with AMD retained.
+     *
+     * <p>WHY THE CONDITIONS ARE THIS STRICT. Moving a bus's P balance off {@code phiCol} is only safe
+     * when NOTHING ELSE is keyed on that row, and several packs are: {@code dsPhiRow} writes each
+     * distributed-slack participant's target at {@code phiCol[bn]}, the reactive-capability curve
+     * pack has its own P rows, the HVDC family scatters into both ends' P rows, and a load model
+     * emits a vdl term at the bus's P and Q rows. Excluding generators covers DS, the curves and
+     * HVDC at once, because OLF models a converter station as an {@code LfGenerator}. A first,
+     * looser version of this test (branch count + shunt only) fired on rte6515 buses that carry
+     * those packs and moved the base error from 3.9e-08 to 5.0e-05.
+     */
+    static int ziDeadEndSide(EquationSystem<AcVariableType, AcEquationType> es, LfBranch br,
+                             int[] phiCol, int[] vCol, int[] qRow) {
+        if (!br.isSpanningTreeEdge(LoadFlowModel.AC)) {
+            return 0;                                        // no ZERO_V/ZERO_PHI to relocate
+        }
+        boolean s1 = isZiDeadEnd(es, br.getBus1(), br, phiCol, vCol, qRow);
+        boolean s2 = isZiDeadEnd(es, br.getBus2(), br, phiCol, vCol, qRow);
+        if (s1 == s2) {
+            return 0;                                        // neither, or a two-bus island
+        }
+        return s1 ? 1 : 2;
+    }
+
+    private static boolean isZiDeadEnd(EquationSystem<AcVariableType, AcEquationType> es, LfBus bus,
+                                       LfBranch br, int[] phiCol, int[] vCol, int[] qRow) {
+        if (bus == null) {
+            return false;
+        }
+        int bn = bus.getNum();
+        // Exactly one incident branch, counted regardless of state: a base-open branch still packs an
+        // open-branch view that scatters into this bus's Q row, and a contingency can reclose one,
+        // while the STRUCTURE is built once.
+        if (bus.getBranches().size() != 1 || bus.getBranches().get(0) != br) {
+            return false;
+        }
+        if (bus.getShunt().isPresent() || bus.getControllerShunt().isPresent() || bus.getSvcShunt().isPresent()) {
+            return false;                                    // a shunt scatters into this bus's Q row
+        }
+        if (!bus.getGenerators().isEmpty()) {
+            return false;                                    // DS rows, curve P rows, HVDC stations
+        }
+        for (com.powsybl.openloadflow.network.LfLoad load : bus.getLoads()) {
+            if (load.getLoadModel().isPresent()) {
+                return false;                                // vdl term at this bus's P and Q rows
+            }
+        }
+        return phiCol[bn] >= 0 && vCol[bn] >= 0 && qRow[bn] == vCol[bn]
+                && row(es, bn, AcEquationType.BUS_TARGET_P) >= 0
+                && row(es, bn, AcEquationType.BUS_TARGET_Q) >= 0;
+    }
+
 }

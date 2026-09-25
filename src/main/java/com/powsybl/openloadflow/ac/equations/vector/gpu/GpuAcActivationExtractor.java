@@ -14,6 +14,7 @@ import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.SingleEquation;
 import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.network.VoltageControl;
 import com.powsybl.openloadflow.network.LfNetwork;
 
 /**
@@ -98,21 +99,59 @@ public final class GpuAcActivationExtractor {
             vCol[bus.getNum()] = GpuAcRowIndexing.col(es, bus.getNum(), AcVariableType.BUS_V);
         }
         int[] qRow = GpuAcRowIndexing.computeQRow(network, es, vCol, branchRhoCol, shuntBCol);
+        int[] phiCol = new int[network.getBuses().size()];
         for (LfBus bus : network.getBuses()) {
+            phiCol[bus.getNum()] = GpuAcRowIndexing.col(es, bus.getNum(), AcVariableType.BUS_PHI);
+        }
+        // DEAD-END STUB relocation, the other half of the one in GpuAcFamilyPacker: both sides must
+        // name the SAME row for each equation. assign() refuses a double write, so a disagreement
+        // fails loudly here instead of silently dropping a constraint.
+        int[] dummyPCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.DUMMY_P);
+        int[] dummyQCol = GpuAcRowIndexing.branchVarCols(es, nBranches, AcVariableType.DUMMY_Q);
+        // The coupler-tree relocation, from the same helper ExtractionColumns uses, so the scatter destinations and
+        // this target map name the same rows: a child bus's power equations on its parent coupler's dummy columns,
+        // that coupler's zero equations on the child's own PHI / V.
+        int[][] ziTree = GpuAcRowIndexing.ziTreeRelocation(network, es, phiCol, vCol, qRow, dummyPCol, dummyQCol);
+        int[] stubBranchOfBus = ziTree[0];
+        int[] stubBusOfBranch = ziTree[1];
+        for (LfBus bus : network.getBuses()) {
+            int stubBr = stubBranchOfBus[bus.getNum()];
             int p = GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_P);
             if (p >= 0) {
-                assign(es, targetMap, GpuAcRowIndexing.col(es, bus.getNum(), AcVariableType.BUS_PHI), p,
+                assign(es, targetMap, stubBr >= 0 ? dummyPCol[stubBr] : phiCol[bus.getNum()], p,
                         AcEquationType.BUS_TARGET_P, bus.getNum());
             }
             int q = GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_Q);
             if (q >= 0) {
-                // Q row = V row, or the controlling rho row
-                assign(es, targetMap, qRow[bus.getNum()], q, AcEquationType.BUS_TARGET_Q, bus.getNum());
+                // Q row = V row, the controlling rho row, or the DUMMY_Q row on a dead-end stub
+                int qr = stubBr >= 0 ? dummyQCol[stubBr] : qRow[bus.getNum()];
+                assign(es, targetMap, qr, q, AcEquationType.BUS_TARGET_Q, bus.getNum());
                 // ACTIVE own-Q balance at a (non-free) remote gen-VC member = the RL-PINNED state:
                 // row mode 4, so the family fills route the member's own q here (the frozen dest is
                 // canonically SUPPRESSED) and the DISTR_Q emissions at this row gate off (plan-B2).
-                if (GpuAcRowIndexing.isRemoteGenVcMember(bus) && !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) {
-                    mode[qRow[bus.getNum()]] = 4;
+                // The SAME predicate computeQRow used to hand this bus its own Q row. It used
+                // isRemoteGenVcControllerElement, which INCLUDES a controller that is also the
+                // group's controlled bus (its javadoc says so); this used isRemoteGenVcMember,
+                // which is controlledBus != bus and therefore EXCLUDES the pilot. For a PINNED
+                // pilot-that-is-also-a-controller the two disagreed: computeQRow gave it its own Q
+                // row, this left the row at mode 1, so the mode-4 gate in fillDistrQBatch never
+                // fired and the existence-keyed DISTR_Q kind-3 terms stayed live ALONGSIDE the
+                // zero-impedance family's direct +-DUMMY_Q into the same row. The two cancel: on
+                // rte6515 BUS-24_COUPLER_1 the kind-3 pair summed to +1.0 against the zi coupling's
+                // -1.0, leaving the coupler's DUMMY_Q in NO equation. 45 such columns at 2000
+                // busbar sections, which is what collapsed batching above ~1000.
+                // A pilot that is one of its OWN controllers gets mode 4 whenever its own Q balance
+                // is active, free member or not: the free-member exception exists for the member
+                // whose row carries the pilot's Q in a pilot-is-not-a-controller group, which is not
+                // this shape (the pilot's q feeds the DISTR_Q rows and the row's mode-4 alternate is
+                // its own row). Left at mode 1, the base seeding (which keys a remote pin on mode 4)
+                // read an all-pinned group as "pilot unpinned" (all-pinned-group fixture).
+                boolean pilotSelf = bus.getGeneratorVoltageControl()
+                        .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                        .map(c -> c.getControlledBus() == bus).orElse(false);
+                if (GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
+                        && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus))) {
+                    mode[qr] = 4;
                 }
             }
         }
@@ -123,7 +162,8 @@ public final class GpuAcActivationExtractor {
             if (e.getType() == AcEquationType.DISTR_Q) {
                 // the controller's BUS_V row — or, when the controller IS the group's controlled bus
                 // (its own row already carries the pilot's V identity), the FREE controller's row
-                int distrRow = GpuAcRowIndexing.distrQRow(es, network.getBus(e.getElementNum()));
+                int distrRow = GpuAcRowIndexing.distrQRow(es, network.getBus(e.getElementNum()),
+                        stubBranchOfBus, dummyQCol);
                 if (DISTR_Q_DUMP != null) {
                     LfBus cb = network.getBus(e.getElementNum());
                     if (cb.getId().startsWith(DISTR_Q_DUMP)) {
@@ -140,6 +180,15 @@ public final class GpuAcActivationExtractor {
                     }
                 }
                 assign(es, targetMap, distrRow, e.getColumn(), AcEquationType.DISTR_Q, e.getElementNum());
+                continue;
+            }
+            // ZERO_V / ZERO_PHI move off the dummy rows onto the STUB's own v / phi rows when this
+            // branch feeds a dead end — the other two legs of the same four-way relocation.
+            if ((e.getType() == AcEquationType.ZERO_V || e.getType() == AcEquationType.ZERO_PHI)
+                    && stubBusOfBranch[e.getElementNum()] >= 0) {
+                int stub = stubBusOfBranch[e.getElementNum()];
+                assign(es, targetMap, e.getType() == AcEquationType.ZERO_V ? vCol[stub] : phiCol[stub],
+                        e.getColumn(), e.getType(), e.getElementNum());
                 continue;
             }
             AcVariableType powerRowVar = switch (e.getType()) {
@@ -270,5 +319,32 @@ public final class GpuAcActivationExtractor {
             };
         }
         return varType;
+    }
+
+    /**
+     * The buses currently PINNED as remote generator-voltage-control members — exactly the set this extractor
+     * gives row mode 4 above. A pin is a REACTIVE-LIMIT event: OLF renormalizes the group's reactive keys
+     * ({@code updateReactiveKeys}) and fires NO equation-system event, so a cached extraction would keep its
+     * pre-pin {@code qPct} and the device would distribute reactive power with stale weights. A caller that
+     * caches an extraction across solves therefore watches this set and re-extracts when it changes: the fresh
+     * pack's {@code dqWeight} differs, which {@code GpuAcData.sameStructureAs} compares, so the structure is
+     * REBUILT with OLF's renormalized keys instead of being value-refreshed in place.
+     */
+    public static java.util.BitSet pinnedRemoteMembers(LfNetwork network,
+                                                      EquationSystem<AcVariableType, AcEquationType> es) {
+        java.util.BitSet pinned = new java.util.BitSet();
+        for (LfBus bus : network.getBuses()) {
+            if (GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.BUS_TARGET_Q) < 0) {
+                continue;                                    // no active own-Q balance: not pinned
+            }
+            boolean pilotSelf = bus.getGeneratorVoltageControl()
+                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                    .map(c -> c.getControlledBus() == bus).orElse(false);
+            if (GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
+                    && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus))) {
+                pinned.set(bus.getNum());
+            }
+        }
+        return pinned;
     }
 }

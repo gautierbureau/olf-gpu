@@ -170,7 +170,10 @@ public final class GpuBatchContingencyValidator {
             // isolated slack reports the LIVE side as removed (measured: {BBS2, BBS3}), which would
             // freeze the whole energized network instead of the stub.
             LfBus slack = network.getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
-            if (!connectivity.getLargestConnectedComponent().contains(slack)) {
+            // Component 0 IS the largest one (GraphConnectivity numbering, and what getLargestConnectedComponent
+            // returns), and asking for the slack's number looks only through the small components split off by
+            // the outage, where getLargestConnectedComponent() copies every bus of the network into a new set.
+            if (connectivity.getComponentNumber(slack) != 0) {
                 // Isolating the slack necessarily FRAGMENTS the network, so in fixed-iter mode (islanding
                 // handling off) that is the reason to report — it is the mode's primary rejection and what
                 // its contract documents. Only when islanding IS handled does the distinction matter: there
@@ -186,6 +189,16 @@ public final class GpuBatchContingencyValidator {
             // PropagatedContingency does (setMainComponentVertex + getVerticesRemovedFromMainComponent).
             connectivity.setMainComponentVertex(slack);
             Set<LfBus> islanded = connectivity.getVerticesRemovedFromMainComponent();
+            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                // What this pass CUT and what it FOUND. The CPU derives its lost buses from the same
+                // kind of pass on its own per-contingency topology; when the two disagree on a bus,
+                // the edge lists are the only way to see whether the graphs differ or the cuts do.
+                System.err.printf("QUALIFY_TRACE islanding %s: cut=%s -> islanded=%s%n",
+                        contingency.contingencyId(),
+                        closed.stream().map(b -> b.getId() + "(" + (b.getBus1() == null ? "-" : b.getBus1().getId())
+                                + "," + (b.getBus2() == null ? "-" : b.getBus2().getId()) + ")").toList(),
+                        islanded.stream().map(LfBus::getId).toList());
+            }
             for (LfBranch zi : contingency.outagedZiBranches()) {
                 if (!islanded.contains(zi.getBus1()) && !islanded.contains(zi.getBus2())) {
                     LOGGER.debug("Contingency {} rejected: switch outage {} leaves both sides energized "

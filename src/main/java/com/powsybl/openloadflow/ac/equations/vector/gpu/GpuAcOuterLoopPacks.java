@@ -44,7 +44,8 @@ public final class GpuAcOuterLoopPacks {
     record DqPack(int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                   int[] dqKMember, int[] dqJMember,
                   double[] dqMemberKey, int[] dqMemberRlEntry, int[] dqMemberGroupStart, int[] dqMemberGroupCount,
-                  int[] dqMemberRow, byte[] dqMemberHasRow, int[] dqMemberQrGroup, double[] dqMemberTargetQ) {
+                  int[] dqMemberRow, byte[] dqMemberHasRow, int[] dqMemberQrGroup, double[] dqMemberTargetQ,
+                  int[] dqMemberBusNum, int[] dqMemberTgtPtr, int[] dqMemberTgtPeer) {
     }
 
     /** Per-group member table for the IN-KERNEL reactive-key renormalization on a remote RL pin
@@ -56,7 +57,12 @@ public final class GpuAcOuterLoopPacks {
     private record MemberTables(java.util.Map<Integer, Integer> memberIdxByBusNum,
                                 List<Double> key, List<Integer> rlEntry,
                                 List<Integer> groupStart, List<Integer> groupCount,
-                                List<Integer> row, List<Byte> hasRow, List<Double> targetQ) {
+                                List<Integer> row, List<Byte> hasRow, List<Double> targetQ,
+                                List<Integer> busNum,
+                                /** Per member, the members whose targetQ OLF sums into its DISTR_Q target: the
+                                 *  elements of the member's OWN voltage control, which for a control MERGED into
+                                 *  another (DEPENDENT) is just its own — see the peer CSR in {@link DqPack}. */
+                                List<List<Integer>> tgtPeers) {
     }
 
     /** DISTR_RHO contributions in the flat device layout: {@code {drRow, drCol}} per row + coefficient. */
@@ -74,7 +80,95 @@ public final class GpuAcOuterLoopPacks {
      *  orchestrator may activate it). */
     record RlPack(int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget,
                   double[] rlSvcBmin, double[] rlSvcBmax, double[] rlV2Base,
-                  byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow, int[] rlBusNum) {
+                  byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow, int[] rlBusNum,
+                  double[] rlNominalV, int[] rlPRow, double[] rlTargetP, int[] rlIdRank,
+                  double[] rlInitTargetQ, byte[] rlBaseQLimitType) {
+    }
+
+    /**
+     * PILOT-SELF voltage-control groups, keyed by RL ENTRY so the free-role rotation can be computed from the
+     * pin state rather than from row modes. One group per MAIN remote generator voltage control whose merged
+     * controllers CONTAIN the controlled bus, with at least two controllers.
+     *
+     * <p>OLF's rule ({@code AcEquationSystemCreator.updateRemoteVoltageControlEquations}) is a rotation over
+     * the LIVE ENABLED controllers: {@code BUS_TARGET_V} is active while any is enabled, every PINNED
+     * controller gets its own {@code BUS_TARGET_Q}, and {@code DISTR_Q} is active for every enabled
+     * controller except the FIRST — so which controller is "free" changes each time one pins. In this layout
+     * (rows are VARIABLES) that means: {@code BUS_TARGET_V} stays on the controlled bus's own row, because a
+     * mode-0 identity constrains its OWN row's variable and moving it would pin a member's v to the pilot's
+     * target; and a PINNED pilot's reactive balance has to ride the first ENABLED member's row instead.
+     * {@code computeQRow} already places it there, but statically, frozen at extraction — while the device's
+     * reactive-limits loop changes pin states mid-solve. That mismatch is the rank-deficient base on
+     * rte6515's busbar windows.
+     *
+     * <p>The choice cannot be read off the row modes: the row to pick is mode 4 BECAUSE it carries the
+     * relocated balance, which is circular. {@code limitType} per RL entry is the ground truth OLF itself
+     * uses, hence the entry keying here. {@code memberEntry} is {@code -1} for a controller with no RL entry
+     * (it can never pin), and a group is dropped when the pilot has no entry or no row.
+     *
+     * @param ptr group boundaries into {@code memberEntry}/{@code memberRow} ({@code nGroups + 1} entries)
+     * @param memberEntry RL entry per controller, in merged order, or -1
+     * @param memberRow the controller's own BUS_V row, in merged order
+     * @param pilotEntry the pilot's own RL entry (it is one of its controllers, so it always has one)
+     * @param pilotRow the controlled bus's BUS_V row — where BUS_TARGET_V stays
+     * @param vTarget the group's voltage target, for the identity the pilot's row keeps
+     */
+    public record PilotSelfPack(int[] ptr, int[] memberEntry, int[] memberRow, int[] pilotEntry,
+                                int[] pilotRow, double[] vTarget) {
+
+        public int groupCount() {
+            return ptr.length == 0 ? 0 : ptr.length - 1;
+        }
+    }
+
+    /** Builds {@link PilotSelfPack} from an RL pack's entries (bus num -> entry index). */
+    public static PilotSelfPack pilotSelfGroups(LfNetwork network,
+                                                ExtractionColumns columns, int[] rlBusNum) {
+        java.util.Map<Integer, Integer> entryOfBus = new java.util.HashMap<>();
+        for (int i = 0; i < rlBusNum.length; i++) {
+            entryOfBus.putIfAbsent(rlBusNum[i], i);
+        }
+        int[] vCol = columns.vCol();
+        List<Integer> ptr = new ArrayList<>();
+        List<Integer> memberEntry = new ArrayList<>();
+        List<Integer> memberRow = new ArrayList<>();
+        List<Integer> pilotEntry = new ArrayList<>();
+        List<Integer> pilotRow = new ArrayList<>();
+        List<Double> vTarget = new ArrayList<>();
+        for (LfBus bus : network.getBuses()) {
+            var gvc = bus.getGeneratorVoltageControl()
+                    .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                    .filter(c -> !c.isLocalControl())
+                    .orElse(null);
+            if (gvc == null || gvc.getControlledBus() != bus || !gvc.getMergedControllerElements().contains(bus)
+                    || gvc.getMergedControllerElements().size() < 2) {
+                continue;                                    // not a pilot-self group with a rotation to make
+            }
+            Integer pe = entryOfBus.get(bus.getNum());
+            if (pe == null || vCol[bus.getNum()] < 0) {
+                continue;                                    // the pilot cannot pin: nothing rotates
+            }
+            List<LfBus> members = gvc.getMergedControllerElements();
+            boolean rowsResolvable = members.stream().allMatch(m -> vCol[m.getNum()] >= 0);
+            if (!rowsResolvable) {
+                continue;
+            }
+            ptr.add(memberEntry.size());
+            for (LfBus m : members) {
+                memberEntry.add(entryOfBus.getOrDefault(m.getNum(), -1));
+                memberRow.add(vCol[m.getNum()]);
+            }
+            pilotEntry.add(pe);
+            pilotRow.add(vCol[bus.getNum()]);
+            vTarget.add(gvc.getTargetValue());
+        }
+        ptr.add(memberEntry.size());
+        if (pilotEntry.isEmpty()) {
+            return new PilotSelfPack(new int[0], new int[0], new int[0], new int[0], new int[0], new double[0]);
+        }
+        return new PilotSelfPack(GpuAcArrays.toIntArray(ptr), GpuAcArrays.toIntArray(memberEntry),
+                GpuAcArrays.toIntArray(memberRow), GpuAcArrays.toIntArray(pilotEntry),
+                GpuAcArrays.toIntArray(pilotRow), GpuAcArrays.toDoubleArray(vTarget));
     }
 
     /** Remote-member OWN reactive-injection contributors (plan-B3): per contribution, the member's
@@ -86,6 +180,21 @@ public final class GpuAcOuterLoopPacks {
     record RmqPack(int[] row, int[] elem, int[] side, int[] kind, double[] weight) {
     }
 
+    /** A REMOTE member entry of the reactive-limit pack: a controller of a MAIN remote group that is
+     *  not the group's controlled bus. Shared with GpuBatchRlCurves, which REPLAYS this enumeration
+     *  and must count exactly the same buses (a drift throws and the run falls to the CPU). */
+    public static boolean isRemoteMemberEntry(LfBus bus) {
+        return bus.getGeneratorVoltageControl()
+                .filter(c -> c.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN)
+                .map(c -> c.getControlledBus() != bus).orElse(false);
+    }
+
+    /** A class-2 entry: a pilot that is one of its own controllers (packed as a remote entry). */
+    public static boolean isPilotSelfEntry(LfBus bus) {
+        return !isRemoteMemberEntry(bus) && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
+                && bus.getGeneratorVoltageControl().map(c -> c.getControlledBus() == bus).orElse(false);
+    }
+
     static RmqPack remoteMemberQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                      ExtractionColumns columns, GpuAcFamilyPacker.Packs family, boolean reactiveLimits) {
         List<int[]> out = new ArrayList<>();
@@ -93,7 +202,7 @@ public final class GpuAcOuterLoopPacks {
         int[] vCol = columns.vCol();
         if (reactiveLimits) {
             for (LfBus bus : network.getBuses()) {
-                boolean member = GpuAcRowIndexing.isRemoteGenVcMember(bus);
+                boolean member = GpuAcRowIndexing.isRemoteGenVcControllerElement(bus);   // incl. a pilot that is a controller
                 if (!member || vCol[bus.getNum()] < 0 || !(bus.getMinQ() < bus.getMaxQ())) {
                     continue;                                // mirror the RL pack's remote-entry condition
                 }
@@ -166,14 +275,35 @@ public final class GpuAcOuterLoopPacks {
                   int dsMode, double[] dsMarginUp, double[] dsMarginDown,
                   double dsSlackMarginUp, double dsSlackMarginDown,
                   int[] dgBus, double[] dgFactor, double[] dgMaxDelta, double[] dgMinDelta,
-                  double[] dgMarginUp, double[] dgMarginDown, int[] busGenStart, int[] busGenEnd) {
+                  double[] dgMarginUp, double[] dgMarginDown, int[] busGenStart, int[] busGenEnd,
+                  int[] dsBusNum, String[] dgGenId) {
+    }
+
+    /** The couplers whose {@code DUMMY_P} / {@code DUMMY_Q} rows host a bus's power equations under the
+     *  coupler-tree relocation ({@link GpuAcRowIndexing#ziTreeRelocation}). A batched scenario has to know them:
+     *  inside an island every row must become an identity, and under the relocation two of those rows belong to
+     *  the coupler, not to the bus. Empty when the relocation is off, so the default path is untouched. */
+    public static java.util.Set<LfBranch> relocatedCouplerBranches(LfNetwork network,
+                                                                  EquationSystem<AcVariableType, AcEquationType> es) {
+        if (!GpuAcRowIndexing.ziTreeRelocationEnabled()) {
+            return java.util.Set.of();
+        }
+        int[] childBusOfEdge = ExtractionColumns.of(network, es).ziChildBus();
+        java.util.Set<LfBranch> relocated = new java.util.HashSet<>();
+        for (LfBranch br : network.getBranches()) {
+            if (childBusOfEdge[br.getNum()] >= 0) {
+                relocated.add(br);
+            }
+        }
+        return relocated;
     }
 
     static DqPack distrQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                              ExtractionColumns columns, GpuAcFamilyPacker.Packs family, RlPack rl) {
         // member tables (plan-B3): raw keys + RL-entry mapping + group ranges, in group member order
         MemberTables mt = new MemberTables(new java.util.HashMap<>(), new ArrayList<>(), new ArrayList<>(),
-                new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>());
+                new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(),
+                new ArrayList<>(), new ArrayList<>());
         java.util.Map<Integer, Integer> rlEntryByBusNum = new java.util.HashMap<>();
         for (int i = 0; i < rl.rlBusNum().length; i++) {
             rlEntryByBusNum.put(rl.rlBusNum()[i], i);
@@ -192,16 +322,26 @@ public final class GpuAcOuterLoopPacks {
                     controllers, com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.VOLTAGE);
             int start = mt.key().size();
             LfBus freeMember = controllers.stream().filter(gvc::isControllerEnabled).findFirst().orElse(null);
-            // the pilot's relocation group (plan-B4, encoded -2-g in qRowAlt by the extraction):
-            // the kernels re-pick the pilot-Q carrier by mode-scan, so the CURRENT carrier's
-            // DISTR_Q row is suppressed and its target carries the pilot's Q instead
-            int qrGroup = columns.qRowAlt()[pilot.getNum()] <= -2 ? -2 - columns.qRowAlt()[pilot.getNum()] : -1;
+            // the pilot's relocation group: the kernels re-pick the pilot-Q carrier by mode-scan, so
+            // the CURRENT carrier's DISTR_Q row is suppressed and its target carries the pilot's Q
+            // instead. Read from qrGroupOfPilot, NOT decoded from qRowAlt: table membership and Q
+            // re-routing are separate facts that happened to share one encoding.
+            int qrGroup = columns.qrGroupOfPilot()[pilot.getNum()];
             for (int i = 0; i < controllers.size(); i++) {
                 LfBus m = controllers.get(i);
                 mt.memberIdxByBusNum().put(m.getNum(), mt.key().size());
                 mt.key().add(rawKeys[i]);
                 mt.rlEntry().add(rlEntryByBusNum.getOrDefault(m.getNum(), -1));
-                mt.row().add(columns.vCol()[m.getNum()]);
+                // The member's DISTR_Q row, NOT simply its V column: under the coupler-tree relocation a
+                // relocated child's DISTR_Q lives on its parent coupler's DUMMY_Q (the same move
+                // buildDistrQContributions makes through distrQRow's tree overload), and its own V row
+                // carries that coupler's ZERO_V instead. Pointing this bookkeeping at the V row made the
+                // DISTR_Q target updater write there, which overwrote the BUS_TARGET_V target a scenario
+                // opening the coupler had just set - measured as row 12566 ending at target 0 instead of
+                // 1.142 on BUS-6014_BBS_2.
+                int mParent = columns.ziParentEdge()[m.getNum()];
+                mt.row().add(mParent >= 0 && columns.dummyQCol()[mParent] >= 0
+                        ? columns.dummyQCol()[mParent] : columns.vCol()[m.getNum()]);
                 // a member OWNS a DISTR_Q row when the equation EXISTS and it is not the FREE
                 // member (whose row carries the pilot's relocated Q)
                 mt.hasRow().add((byte) (m != freeMember
@@ -209,7 +349,14 @@ public final class GpuAcOuterLoopPacks {
                 // the member's UNPINNED targetQ (generationTargetQ - loadTargetQ), which is what
                 // AcTargetVector reads for every member the RL loop has not frozen; a frozen
                 // member's targetQ is its q limit and the kernel derives that from the RL tables.
-                mt.targetQ().add(m.getTargetQ());
+                mt.targetQ().add(unpinnedTargetQ(m));
+                mt.busNum().add(m.getNum());
+                // AcTargetVector reads the member's OWN control's merged elements, so a control merged INTO this
+                // group (DEPENDENT: its own list is just its controller) sums only its own targetQ. Recorded as bus
+                // numbers here and resolved to member indices once every member is known.
+                mt.tgtPeers().add(m.getGeneratorVoltageControl()
+                        .map(c -> c.getMergedControllerElements().stream().map(LfBus::getNum).toList())
+                        .orElse(List.of(m.getNum())));
                 qrGroupList.add(qrGroup);
             }
             for (int i = 0; i < controllers.size(); i++) {
@@ -220,7 +367,7 @@ public final class GpuAcOuterLoopPacks {
         List<int[]> dq = new ArrayList<>();      // {elem, side, dqRow, kind, kMember, jMember} per DISTR_Q contribution
         List<Double> dqW = new ArrayList<>();    // weight per contribution
         buildDistrQContributions(network, es, columns.vCol(), family.cbElemOf(), family.shElemOf(),
-                family.obElemOf(), columns.dummyQCol(), dq, dqW, mt.memberIdxByBusNum());
+                family.obElemOf(), columns.dummyQCol(), columns.ziParentEdge(), dq, dqW, mt.memberIdxByBusNum());
         // dqKind: 0 = closed-branch q1/q2, 1 = shunt q, 2 = open-branch q,
         // 3 = zero-impedance DUMMY_Q (linear, elem holds the var column)
         int[] dqKind = new int[dq.size()];
@@ -243,11 +390,24 @@ public final class GpuAcOuterLoopPacks {
         for (int i = 0; i < hasRow.length; i++) {
             hasRow[i] = mt.hasRow().get(i);
         }
+        int[] tgtPtr = new int[mt.tgtPeers().size() + 1];
+        List<Integer> tgtPeer = new ArrayList<>();
+        for (int i = 0; i < mt.tgtPeers().size(); i++) {
+            tgtPtr[i] = tgtPeer.size();
+            for (int busNum : mt.tgtPeers().get(i)) {
+                Integer peer = mt.memberIdxByBusNum().get(busNum);
+                if (peer != null) {                          // a peer outside the packed group cannot be summed
+                    tgtPeer.add(peer);
+                }
+            }
+        }
+        tgtPtr[tgtPtr.length - 1] = tgtPeer.size();
         return new DqPack(dqElem, dqSide, dqWeight, dqRow, dqKind, dqKMember, dqJMember,
                 GpuAcArrays.toDoubleArray(mt.key()), GpuAcArrays.toIntArray(mt.rlEntry()),
                 GpuAcArrays.toIntArray(mt.groupStart()), GpuAcArrays.toIntArray(mt.groupCount()),
                 GpuAcArrays.toIntArray(mt.row()), hasRow, GpuAcArrays.toIntArray(qrGroupList),
-                GpuAcArrays.toDoubleArray(mt.targetQ()));
+                GpuAcArrays.toDoubleArray(mt.targetQ()), GpuAcArrays.toIntArray(mt.busNum()),
+                tgtPtr, GpuAcArrays.toIntArray(tgtPeer));
     }
 
     static DrPack distrRhoPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
@@ -289,6 +449,34 @@ public final class GpuAcOuterLoopPacks {
      *  limit(v) = packedLimit + b*(v^2 - v2Base) — exact for the SVC part, identically zero on
      *  SVC-less buses. Must run under the SAME control-type view as the min/max capture (the
      *  monitoring flip). */
+    /** Σ over the bus's participating generators of (current − anchor target P): what OLF's
+     *  resetToInitialState undoes and adds back as previousMismatch. 0 when anchoring at the current
+     *  targets. The anchor row target = the row's current target minus this. */
+    static double anchorOffset(LfBus bus, GpuDsParams dsParams) {
+        double off = 0;
+        for (LfGenerator g : bus.getGenerators()) {
+            if (dsParams.factor(g) != 0) {
+                off += g.getTargetP() - dsParams.anchorTargetP(g);
+            }
+        }
+        return off;
+    }
+
+    /** Rank of each id in lexicographic order — OLF's BY_ID_COMPARATOR tie-break, as an int the kernel can compare. */
+    private static int[] idRanks(List<String> ids) {
+        List<String> sorted = new ArrayList<>(ids);
+        java.util.Collections.sort(sorted);
+        java.util.Map<String, Integer> rank = new java.util.HashMap<>();
+        for (int i = 0; i < sorted.size(); i++) {
+            rank.putIfAbsent(sorted.get(i), i);
+        }
+        int[] out = new int[ids.size()];
+        for (int i = 0; i < ids.size(); i++) {
+            out[i] = rank.get(ids.get(i));
+        }
+        return out;
+    }
+
     private static void addSvcQuadratic(LfBus bus, List<Double> rlSvcBmin, List<Double> rlSvcBmax,
                                         List<Double> rlV2Base) {
         double v2 = bus.getV() * bus.getV();
@@ -325,6 +513,17 @@ public final class GpuAcOuterLoopPacks {
         // compare row (both RL switch conditions test the pilot's V against the GROUP target — verified B0).
         // The kernel SKIPS remote entries until the B3 transition machinery lands; the whole-run scope gate
         // still routes remote-pinnable runs to the CPU, so these entries are structurally inert today.
+        // Rows that RECEIVE another bus's relocated reactive balance from a pilot with NO candidate table.
+        // A pilot whose table exists (qRowAlt = -2-group) has the mode-scan re-pick machinery, and its free
+        // member must stay dynamic — only the table-less shape is the one the RL bookkeeping cannot own.
+        boolean[] hostsRelocatedBalance = new boolean[vCol.length == 0 ? 0 : maxRow(vCol, columns.qRow()) + 1];
+        for (LfBus b : network.getBuses()) {
+            int q = columns.qRow()[b.getNum()];
+            if (q >= 0 && q != vCol[b.getNum()] && columns.qRowAlt()[b.getNum()] == -1
+                    && q < hostsRelocatedBalance.length) {
+                hostsRelocatedBalance[q] = true;
+            }
+        }
         List<Integer> rlVrow = new ArrayList<>();
         List<Double> rlMinQ = new ArrayList<>();
         List<Double> rlMaxQ = new ArrayList<>();
@@ -337,15 +536,59 @@ public final class GpuAcOuterLoopPacks {
         List<Byte> rlRemote = new ArrayList<>();
         List<Integer> rlCmpVrow = new ArrayList<>();
         List<Integer> rlBusNum = new ArrayList<>();
+        // forced-PV election keys (OLF switchPvPq: controlled bus nominal V, live target P, id)
+        List<Double> rlNominalV = new ArrayList<>();
+        List<Integer> rlPRow = new ArrayList<>();
+        List<Double> rlTargetP = new ArrayList<>();
+        List<String> rlBusId = new ArrayList<>();
+        // Robust-mode pin target (ReactiveLimitsOuterLoop.getInitialGenerationTargetQ): the sum of the
+        // bus generators' targetQ, which is what OLF freezes a REMOTE controller at when its own voltage
+        // leaves the realistic band while its Q is still inside its limits.
+        List<Double> rlInitTargetQ = new ArrayList<>();
+        // OLF's OWN reason for a base pin (LfBus.getQLimitType): 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V,
+        // 4 MAX_REALISTIC_V, 0 none. The device used to guess the KIND of a base pin from which Q
+        // limit the row's target was nearest to - which turns a realistic-voltage pin (target = the
+        // generation targetQ, nowhere near a limit) into a MIN_Q/MAX_Q pin, and the curve-limit drift
+        // then legitimately re-freezes that "limit pin" AT the limit. rte6515 VL-1251_1: OLF pins it
+        // at -0.0035 (V < 16 kV), the device at -1.0000, in every one of 366 contingencies.
+        List<Byte> rlBaseQLimitType = new ArrayList<>();
+        // A never-solved network has NaN bus voltages, and an SVC's reactive limits are Bmin/Bmax·V²:
+        // packing them (and the quadratic reference v²) at NaN left the entry's limits NaN and the
+        // device never pinned it (the base load flow on the driver; a chunk extracts after a solve).
+        // Evaluate at a flat 1 pu instead — the kernel's limit(v) = base + B·(v² − v²ref) is exact at
+        // any finite reference — and put the NaN back.
+        List<LfBus> flatVBuses = new ArrayList<>();
+        for (LfBus bus : network.getBuses()) {
+            if (Double.isNaN(bus.getV())) {
+                flatVBuses.add(bus);
+                bus.setV(1.0);
+            }
+        }
+        try {
         if (reactiveLimits) {                                   // empty pack when the RL outer loop is disabled
+            // This enumeration is WIDER than OLF's, on purpose but knowingly:
+            // ReactiveLimitsOuterLoop walks getControllerElements(GENERATOR) and nothing else, while
+            // getGeneratorVoltageControl().isPresent() also answers yes on the CONTROLLED (pilot)
+            // bus of a remote group. A pilot with no generators of its own therefore enters as a
+            // local entry whose limits are a sum over ZERO generators - minQ = maxQ = 0 - and whose
+            // q is the bus's own reactive balance, zero up to rounding on a transit node. Its PIN is
+            // refused in the kernel (reactiveLimitsBatch, degenerate range) because at convEps 1e-12
+            // it fired on the last bits; its entry is kept because a pilot row that came in PINNED
+            // from the base still needs the switch-back to hand the group's voltage identity back.
+            // 7 such buses here: CQHT_0/1/3/5, HMDR_0, IZUM_0, KUNQ_3.
             for (LfBus bus : network.getBuses()) {
                 int bn = bus.getNum();
                 boolean vActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_V) >= 0;
                 boolean qActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_Q) >= 0;
-                boolean remoteMember = bus.getGeneratorVoltageControl()
-                        .filter(c -> c.getMergeStatus() == com.powsybl.openloadflow.network.VoltageControl.MergeStatus.MAIN)
-                        .map(c -> c.getControlledBus() != bus).orElse(false);
-                if (remoteMember && vCol[bn] >= 0) {
+                boolean remoteMember = isRemoteMemberEntry(bus);
+                // A pilot that is one of its OWN controllers is packed as a remote entry of class 2: its
+                // q feeds the group's DISTR_Q rows like a remote member's (read through the remote q
+                // pack, not its row), a pin puts its own Q balance on its row (mode 4, alternate dest),
+                // and an UNPIN gives the row back its voltage IDENTITY (mode 0), not a DISTR_Q form. As
+                // a LOCAL entry its pin used to land on mode 1, an EMPTY row: measured on the
+                // all-pinned-group fixture, 0.68 kV at the pilot.
+                boolean pilotSelf = isPilotSelfEntry(bus);
+                if ((remoteMember || pilotSelf) && vCol[bn] >= 0) {
                     var vc = bus.getGeneratorVoltageControl().orElseThrow();
                     int pilotV = vCol[vc.getControlledBus().getNum()];
                     if (pilotV >= 0 && bus.getMinQ() < bus.getMaxQ()) {
@@ -356,9 +599,19 @@ public final class GpuAcOuterLoopPacks {
                         rlVtarget.add(vc.getTargetValue());    // the GROUP target (pilot-referenced)
                         addSvcQuadratic(bus, rlSvcBmin, rlSvcBmax, rlV2Base);
                         rlMonitored.add((byte) 0);
-                        rlRemote.add((byte) 1);
+                        rlRemote.add((byte) (pilotSelf ? 2 : 1));
                         rlCmpVrow.add(pilotV);                 // switch conditions compare the PILOT's V
                         rlBusNum.add(bn);
+                        if (System.getenv("OLF_GPU_RL_TRACE") != null) {
+                            System.err.println("GPU_RL_ENTRY idx=" + (rlVrow.size() - 1) + " vRow=" + vCol[bn]
+                                    + " bus=" + bus.getId() + " remote=" + (pilotSelf ? 2 : 1) + " pilotVRow=" + pilotV);
+                        }
+                        rlNominalV.add(vc.getControlledBus().getNominalV());
+                        rlPRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.pRow()[bn] : -1);
+                        rlTargetP.add(bus.getTargetP());
+                        rlBusId.add(bus.getId());
+                        rlInitTargetQ.add(initialGenerationTargetQ(bus));
+                        rlBaseQLimitType.add(relocatedPinCode(bus, bn, columns, hostsRelocatedBalance));
                     }
                     continue;                                  // never let a base-pinned remote member
                 }                                              // masquerade as a LOCAL basePqCapable entry
@@ -390,7 +643,10 @@ public final class GpuAcOuterLoopPacks {
                     if (System.getenv("OLF_GPU_RL_TRACE") != null) {
                         // entry -> bus, so a device pin can be named and lined up against OLF's RL_SWITCH
                         System.err.println("GPU_RL_ENTRY idx=" + (rlVrow.size() - 1) + " vRow=" + vCol[bn]
-                                + " bus=" + bus.getId());
+                                + " bus=" + bus.getId() + " minQ=" + minQ + " maxQ=" + maxQ
+                                + " loadQ=" + bus.getLoadTargetQ() + " basePv=" + basePv
+                                + " basePqCapable=" + basePqCapable + " vcEnabled=" + bus.isGeneratorVoltageControlEnabled()
+                                + " gens=" + bus.getGenerators().size());
                     }
                     rlMinQ.add(minQ);
                     rlMaxQ.add(maxQ);
@@ -400,7 +656,18 @@ public final class GpuAcOuterLoopPacks {
                     rlRemote.add((byte) 0);
                     rlCmpVrow.add(vCol[bn]);                   // local: compare row = own row
                     rlBusNum.add(bn);
+                    rlNominalV.add(bus.getGeneratorVoltageControl().map(c -> c.getControlledBus().getNominalV()).orElse(bus.getNominalV()));
+                    rlPRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.pRow()[bn] : -1);
+                    rlTargetP.add(bus.getTargetP());
+                    rlBusId.add(bus.getId());
+                    rlInitTargetQ.add(initialGenerationTargetQ(bus));
+                        rlBaseQLimitType.add(qLimitTypeCode(bus));
                 }
+            }
+        }
+        } finally {
+            for (LfBus bus : flatVBuses) {
+                bus.setV(Double.NaN);
             }
         }
         byte[] mon = new byte[rlMonitored.size()];
@@ -409,25 +676,121 @@ public final class GpuAcOuterLoopPacks {
             mon[i] = rlMonitored.get(i);
             rem[i] = rlRemote.get(i);
         }
+        if (System.getenv("OLF_GPU_RL_TRACE") != null) {
+            // The pilot-self groups this extraction sees, with their member ENTRIES: the rotation the device
+            // still owes OLF is computed from those entries' pin states (see PilotSelfPack).
+            PilotSelfPack ps = pilotSelfGroups(network, columns, GpuAcArrays.toIntArray(rlBusNum));
+            java.util.Map<Integer, Integer> bySize = new java.util.TreeMap<>();
+            for (int g = 0; g < ps.groupCount(); g++) {
+                bySize.merge(ps.ptr()[g + 1] - ps.ptr()[g], 1, Integer::sum);
+            }
+            System.err.println("GPU_PILOTSELF groups=" + ps.groupCount() + " bySize=" + bySize);
+        }
         if (System.getenv("OLF_GPU_RL_PACK_DUMP") != null) {
             for (int i = 0; i < rlBusNum.size(); i++) {
-                System.err.printf("RL_PACK entry=%d bus=%s vRow=%d minQ=%.9f maxQ=%.9f remote=%d monitored=%d%n",
+                // cmpVrow is the row whose V the switch condition reads - for a REMOTE member that is
+                // the PILOT's row, not the member's own, so a pin that looks unexplainable from the
+                // member alone is often the pilot's V. loadQ and vTarget complete the pin target
+                // (OLF pins at limit - loadTargetQ), which is the other half of any pin mismatch.
+                System.err.printf("RL_PACK entry=%d bus=%s vRow=%d minQ=%.9f maxQ=%.9f remote=%d"
+                        + " monitored=%d cmpVrow=%d loadQ=%.9f vTarget=%.9f baseQLimitType=%d%n",
                         i, network.getBus(rlBusNum.get(i)).getId(), rlVrow.get(i), rlMinQ.get(i), rlMaxQ.get(i),
-                        rlRemote.get(i), rlMonitored.get(i));
+                        rlRemote.get(i), rlMonitored.get(i), rlCmpVrow.get(i), rlLoadQ.get(i),
+                        rlVtarget.get(i), rlBaseQLimitType.get(i));
             }
         }
 
+        byte[] baseLt = new byte[rlBaseQLimitType.size()];
+        for (int i = 0; i < baseLt.length; i++) {
+            baseLt[i] = rlBaseQLimitType.get(i);
+        }
         return new RlPack(GpuAcArrays.toIntArray(rlVrow), GpuAcArrays.toDoubleArray(rlMinQ),
                 GpuAcArrays.toDoubleArray(rlMaxQ), GpuAcArrays.toDoubleArray(rlLoadQ),
                 GpuAcArrays.toDoubleArray(rlVtarget), GpuAcArrays.toDoubleArray(rlSvcBmin),
                 GpuAcArrays.toDoubleArray(rlSvcBmax), GpuAcArrays.toDoubleArray(rlV2Base),
                 mon, rem, GpuAcArrays.toIntArray(rlCmpVrow),
-                GpuAcArrays.toIntArray(rlBusNum));
+                GpuAcArrays.toIntArray(rlBusNum),
+                GpuAcArrays.toDoubleArray(rlNominalV), GpuAcArrays.toIntArray(rlPRow), GpuAcArrays.toDoubleArray(rlTargetP),
+                idRanks(rlBusId), GpuAcArrays.toDoubleArray(rlInitTargetQ), baseLt);
+    }
+
+    /** The targetQ OLF gives a member once the reactive-limits loop UNPINS it. A member pinned in the
+     *  base has its generation targetQ FROZEN at the limit (freezeGenerationTargetQAndDisableGenerator
+     *  VoltageControl), so {@code getTargetQ()} returns the pin, not what the kernel needs for an
+     *  unpinned member. OLF's unpin (setGeneratorVoltageControlEnabledAndRecomputeTargetQ) invalidates
+     *  the frozen value and getGenerationTargetQ recomputes it as the sum over the non-voltage-
+     *  controlling, enabled generators - replayed here verbatim. Measured on network.xiidm / LJYK: a
+     *  three-member group pinned in the base and unpinned by the contingency kept sharing its
+     *  deviation from the PINNED targets, every member landed 1.4 MVar inside its own limit, and the
+     *  CPU's re-pin of two of them never happened (6e-3 kV at convEps 1e-12 on both arms). */
+    static double unpinnedTargetQ(LfBus m) {
+        if (!m.isGenerationTargetQFrozen()) {
+            return m.getTargetQ();
+        }
+        double generationTargetQ = m.getGenerators().stream()
+                .filter(g -> g.getGeneratorControlType() != LfGenerator.GeneratorControlType.VOLTAGE && !g.isDisabled())
+                .mapToDouble(LfGenerator::getTargetQ)
+                .filter(d -> !Double.isNaN(d))
+                .sum();
+        return generationTargetQ - m.getLoadTargetQ();
+    }
+
+    /** {@code ReactiveLimitsOuterLoop.getInitialGenerationTargetQ}, verbatim. */
+    /**
+     * The {@code rlBaseQLimitType} code that means "this entry's pin bookkeeping row is NOT its own", so the
+     * device must leave the entry to OLF instead of pinning or unpinning a row it does not own. It is not one
+     * of OLF's {@code QLimitType}s — those are 1..4 — and the seeding kernel turns it into
+     * {@code RL_LIMIT_FROZEN} (keep it in step with {@code RL_BASE_RELOCATED} in olf_gpu_nr_jni.cu).
+     *
+     * <p>Two shapes need it, both on a PILOT that is one of its own controllers while a SIBLING controller
+     * still holds the voltage. The pilot's own V row must keep {@code BUS_TARGET_V}, so {@code computeQRow}
+     * relocates its reactive balance to the free member's V row. Then (a) the pilot's own mode-4 marker is on
+     * that other row, so the seeding cannot see its base pin at its V row, and (b) the bus whose V row
+     * RECEIVES the balance reads a mode-4 marker that is not its own and concludes it is pinned itself.
+     * Before this, (a) made the device pin the pilot's V row a SECOND time — destroying {@code BUS_TARGET_V}
+     * and putting mode 4 on a row no q term is routed to — and (b) made it UNPIN the row the pilot's balance
+     * lives on. The result was an empty row and a rank-deficient base that no ordering, pivot type or
+     * matching could solve (KLU could not solve it either), on rte6515's busbar windows above ~1000 sections.
+     */
+    static final byte RL_BASE_RELOCATED = 6;
+
+    private static int maxRow(int[] a, int[] b) {
+        int m = 0;
+        for (int v : a) {
+            m = Math.max(m, v);
+        }
+        for (int v : b) {
+            m = Math.max(m, v);
+        }
+        return m;
+    }
+
+    /** OLF's base limit type, or {@link #RL_BASE_RELOCATED} when this entry does not own its V row's pin. */
+    private static byte relocatedPinCode(LfBus bus, int bn, ExtractionColumns columns, boolean[] hostsRelocated) {
+        int qr = columns.qRow()[bn];
+        int vr = columns.vCol()[bn];
+        boolean pinLivesElsewhere = qr >= 0 && qr != vr && columns.qRowAlt()[bn] == -1;
+        boolean rowHoldsAnothersBalance = vr >= 0 && vr < hostsRelocated.length && hostsRelocated[vr];
+        return pinLivesElsewhere || rowHoldsAnothersBalance ? RL_BASE_RELOCATED : qLimitTypeCode(bus);
+    }
+
+    static byte qLimitTypeCode(LfBus bus) {
+        return bus.getQLimitType().map(t -> switch (t) {
+            case MIN_Q -> (byte) 1;
+            case MAX_Q -> (byte) 2;
+            case MIN_REALISTIC_V -> (byte) 3;
+            case MAX_REALISTIC_V -> (byte) 4;
+        }).orElse((byte) 0);
+    }
+
+    private static double initialGenerationTargetQ(LfBus bus) {
+        return bus.getGenerators().stream().mapToDouble(LfGenerator::getTargetQ).sum();
     }
 
     static DsPack distributedSlackPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                        ExtractionColumns columns, boolean distributedSlack, GpuDsParams dsParams) {
         int[] phiCol = columns.phiCol();
+        int[] pRow = columns.pRow();       // a DS target is written at the bus's P ROW, relocated under a coupler tree
         // Distributed-slack pack: the single slack/reference bus (BUS_TARGET_PHI active, BUS_TARGET_P
         // inactive — its P is free) provides the mismatch; every OTHER bus with participating generators
         // takes a share of it into its BUS_TARGET_P target. Default balance type PROPORTIONAL_TO_GENERATION_
@@ -459,6 +822,8 @@ public final class GpuAcOuterLoopPacks {
         List<Double> dgMarginDown = new ArrayList<>();
         List<Integer> busGenStart = new ArrayList<>();
         List<Integer> busGenEnd = new ArrayList<>();
+        List<Integer> dsBusNum = new ArrayList<>();                     // WHICH bus each row is (write-back)
+        List<String> dgGenId = new ArrayList<>();                       // WHICH generator each slot is
         List<Double> dsFactorRaw = new ArrayList<>();
         List<Double> dsBaseTargetP = new ArrayList<>();                 // each bus's initial BUS_TARGET_P
         List<Double> dsMaxDelta = new ArrayList<>();                    // headroom ≥ 0
@@ -471,9 +836,13 @@ public final class GpuAcOuterLoopPacks {
             }
             int bn = bus.getNum();
             if (GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_PHI) >= 0) {       // the slack/reference bus
-                dsSlackPhiRow = phiCol[bn];
-                dsSlackTargetP = bus.getTargetP();
+                dsSlackPhiRow = pRow[bn];
+                dsSlackTargetP = bus.getTargetP() - anchorOffset(bus, dsParams);   // the slack's ANCHOR target
                 dsSlackFactor = dsParams.busFactor(bus);
+                if (System.getenv("OLF_GPU_DS_GEN_TRACE") != null) {
+                    System.err.println("GPU_DS_SLACK bus=" + bus.getId() + " busFactor=" + dsSlackFactor
+                            + " gens=" + bus.getGenerators().stream().map(g -> g.getId() + ":" + dsParams.factor(g)).toList());
+                }
                 if (dsParams.isRemainingMargin()) {
                     double[] m = dsParams.busMargins(bus);
                     dsSlackMarginUp = m[0];
@@ -482,6 +851,11 @@ public final class GpuAcOuterLoopPacks {
                 continue;
             }
             if (GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) < 0) {
+                if (System.getenv("OLF_GPU_DS_GEN_TRACE") != null) {
+                    System.err.println("GPU_DS_SKIP bus=" + bus.getId() + " busFactor=" + dsParams.busFactor(bus)
+                            + " gens=" + bus.getGenerators().stream().map(g -> g.getId() + ":" + dsParams.factor(g)).toList()
+                            + " (no active BUS_TARGET_P row)");
+                }
                 continue;                                               // no active P balance to retarget
             }
             double factor = dsParams.busFactor(bus);
@@ -491,7 +865,7 @@ public final class GpuAcOuterLoopPacks {
                 if (dsParams.factor(g) != 0) {
                     double minTp = g.getMinTargetP();
                     double maxTp = g.getMaxTargetP();
-                    double tp = g.getTargetP();
+                    double tp = dsParams.anchorTargetP(g);
                     if (tp < 0) {                                       // OLF: distribution never flips a gen's sign
                         maxTp = Math.min(maxTp, 0);
                     } else {
@@ -517,9 +891,10 @@ public final class GpuAcOuterLoopPacks {
                 if (System.getenv("OLF_GPU_DS_TARGET_DUMP") != null) {
                     System.err.println("GPU_DS_BUS idx=" + dsPhiRow.size() + " bus=" + bus.getId());
                 }
-                dsPhiRow.add(phiCol[bn]);
+                dsPhiRow.add(pRow[bn]);
+                dsBusNum.add(bn);
                 dsFactorRaw.add(factor);
-                dsBaseTargetP.add(bus.getTargetP());
+                dsBaseTargetP.add(bus.getTargetP() - anchorOffset(bus, dsParams));   // the row's ANCHOR target
                 dsMaxDelta.add(headroom);
                 dsMinDelta.add(footroom);
                 if (dsParams.isRemainingMargin()) {
@@ -541,7 +916,7 @@ public final class GpuAcOuterLoopPacks {
                     }
                     double minTp = g.getMinTargetP();
                     double maxTp = g.getMaxTargetP();
-                    double tp = g.getTargetP();
+                    double tp = dsParams.anchorTargetP(g);
                     if (tp < 0) {                            // OLF: distribution never flips a gen's sign
                         maxTp = Math.min(maxTp, 0);
                     } else {
@@ -554,6 +929,7 @@ public final class GpuAcOuterLoopPacks {
                                 + " maxTargetP=" + g.getMaxTargetP() + " minTargetP=" + g.getMinTargetP());
                     }
                     dgBus.add(dsPhiRow.size() - 1);
+                    dgGenId.add(g.getId());
                     dgFactorRaw.add(gf);
                     boolean unbounded = !dsParams.useActiveLimits() || dsParams.isLoadBased();
                     dgMaxDelta.add(unbounded ? Double.POSITIVE_INFINITY : maxTp - tp);
@@ -604,6 +980,8 @@ public final class GpuAcOuterLoopPacks {
             dgMarginDown.clear();
             busGenStart.clear();
             busGenEnd.clear();
+            dsBusNum.clear();
+            dgGenId.clear();
         }
         return new DsPack(GpuAcArrays.toIntArray(dsPhiRow), dsFactor, dsSlackPhiRow, dsSlackTargetP,
                 GpuAcArrays.toDoubleArray(dsBaseTargetP), GpuAcArrays.toDoubleArray(dsMaxDelta),
@@ -614,7 +992,8 @@ public final class GpuAcOuterLoopPacks {
                 GpuAcArrays.toIntArray(dgBus), dgFactor,
                 GpuAcArrays.toDoubleArray(dgMaxDelta), GpuAcArrays.toDoubleArray(dgMinDelta),
                 GpuAcArrays.toDoubleArray(dgMarginUp), GpuAcArrays.toDoubleArray(dgMarginDown),
-                GpuAcArrays.toIntArray(busGenStart), GpuAcArrays.toIntArray(busGenEnd));
+                GpuAcArrays.toIntArray(busGenStart), GpuAcArrays.toIntArray(busGenEnd),
+                GpuAcArrays.toIntArray(dsBusNum), dgGenId.toArray(new String[0]));
     }
 
     /**
@@ -630,7 +1009,7 @@ public final class GpuAcOuterLoopPacks {
      */
     private static void buildDistrQContributions(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                                  int[] vCol, int[] cbElemOf, int[] shElemOf, int[] obElemOf,
-                                                 int[] dummyQCol, List<int[]> out, List<Double> weights,
+                                                 int[] dummyQCol, int[] ziParentEdge, List<int[]> out, List<Double> weights,
                                                  java.util.Map<Integer, Integer> memberIdxByBusNum) {
         for (LfBus pilot : network.getBuses()) {
             GeneratorVoltageControl gvc = pilot.getGeneratorVoltageControl()
@@ -643,6 +1022,14 @@ public final class GpuAcOuterLoopPacks {
             List<LfBus> controllers = gvc.getMergedControllerElements();
             LfBus freeCtl = controllers.stream()
                     .filter(b -> gvc.isControllerEnabled(b)).findFirst().orElse(null);
+            if (System.getenv("OLF_GPU_FREECTL_TRACE") != null) {
+                System.err.printf("FREECTL pilot=%s members=%s freeCtl=%s olfHasDistrQ=%s%n",
+                        gvc.getControlledBus().getId(),
+                        controllers.stream().map(LfBus::getId).toList(),
+                        freeCtl == null ? "-" : freeCtl.getId(),
+                        controllers.stream().map(b -> b.getId() + "="
+                                + !es.getEquation(b.getNum(), AcEquationType.DISTR_Q).isEmpty()).toList());
+            }
             for (LfBus gk : controllers) {
                 // EXISTENCE-keyed (the A1 lesson): pack every non-free member whose DISTR_Q equation
                 // EXISTS — a base-PINNED member's row is inactive (mode 4, own Q) but an in-flight
@@ -651,7 +1038,7 @@ public final class GpuAcOuterLoopPacks {
                 if (gk == freeCtl || es.getEquation(gk.getNum(), AcEquationType.DISTR_Q).isEmpty()) {
                     continue;                                // the free controller carries the pilot's Q
                 }
-                int dqRow = GpuAcRowIndexing.distrQRow(es, gk);   // free-controller row when gk IS the pilot
+                int dqRow = GpuAcRowIndexing.distrQRow(es, gk, ziParentEdge, dummyQCol);
                 double qpk = gk.getRemoteControlReactivePercent();
                 int kIdx = memberIdxByBusNum.getOrDefault(gk.getNum(), -1);
                 for (LfBus gj : controllers) {
@@ -694,6 +1081,16 @@ public final class GpuAcOuterLoopPacks {
                             if (dqCol < 0) {
                                 throw new PowsyblException("GPU AC solver: DISTR_Q controller " + gj.getId()
                                         + " has a zero-impedance branch " + brj.getId() + " without a DUMMY_Q variable");
+                            }
+                            // Keyed by dummy-Q column OR, with a leading 'r', by dqROW - when the
+                            // question is "what lands in THIS equation" the column is not known yet.
+                            String dq3 = System.getenv("OLF_GPU_DQ3_TRACE");
+                            if (dq3 != null && (dq3.startsWith("r")
+                                    ? dqRow == Integer.parseInt(dq3.substring(1))
+                                    : dqCol == Integer.parseInt(dq3))) {
+                                System.err.printf("DQ3 gk=%s qpk=%.9f gj=%s side=%d dqRow=%d weight=%.9f"
+                                        + " signed=%.9f%n", gk.getId(), qpk, gj.getId(), side, dqRow,
+                                        weight, weight * (side == 0 ? 1.0 : -1.0));
                             }
                             out.add(new int[] {dqCol, side, dqRow, 3, kIdx, jIdx});  // elem = the DUMMY_Q var column
                             weights.add(weight * (side == 0 ? 1.0 : -1.0));

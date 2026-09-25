@@ -39,7 +39,7 @@ import java.util.Map;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-final class GpuBatchIncrementalShuntVc {
+public final class GpuBatchIncrementalShuntVc {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchIncrementalShuntVc.class);
 
@@ -62,8 +62,8 @@ final class GpuBatchIncrementalShuntVc {
 
     /** One controller shunt: the SHUNT_B variable row (pinned identity — unit-RHS row, target index and
      *  state index coincide), the controlled bus V row, and its sub-controllers. */
-    record Controller(int bRow, int vRow, int ctrlBusNum, double targetV, double halfDeadband,
-                      List<Sub> subs, double bMagnitude, int shOvElem, int elemIndexAbs) {
+    public record Controller(int bRow, int vRow, int ctrlBusNum, double targetV, double halfDeadband,
+                      List<Sub> subs, double bMagnitude, int shOvElem, int elemIndexAbs, int shuntNum) {
     }
 
     private static final class Ratchet {
@@ -83,7 +83,7 @@ final class GpuBatchIncrementalShuntVc {
         }
     }
 
-    static List<Controller> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    public static List<Controller> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                              GpuBatchElementMapper elementMapper, int shPackOffset) {
         List<Controller> out = new ArrayList<>();
         Map<Integer, Integer> busVRows = new LinkedHashMap<>();
@@ -117,7 +117,8 @@ final class GpuBatchIncrementalShuntVc {
             // the dedicated test was hollow: its 5 kV deadband never moved a section post-outage.)
             int elemIndex = elementMapper.getElementIndex(shunt);
             if (bRow == null || vRow == null) {
-                LOGGER.info("Incremental shunt controller {} not representable on the GPU batch — skipped", shunt.getId());
+                GpuBatchSkips.record(GpuBatchSkips.Slot.SHUNT, LOGGER,
+                        "Incremental shunt controller {} not representable on the GPU batch — skipped", shunt.getId());
                 continue;
             }
             List<Sub> subs = new ArrayList<>();
@@ -140,12 +141,104 @@ final class GpuBatchIncrementalShuntVc {
             double halfDeadband = vc.getTargetDeadband()
                     .orElse(MIN_TARGET_DEADBAND_KV / vc.getControlledBus().getNominalV()) / 2;
             out.add(new Controller(bRow, vRow, vc.getControlledBus().getNum(), vc.getTargetValue(), halfDeadband,
-                    subs, magnitude, elemIndex - shPackOffset, elemIndex));
+                    subs, magnitude, elemIndex - shPackOffset, elemIndex, shunt.getNum()));
         }
         return out;
     }
 
     @SuppressWarnings("unchecked")
+    /** Install the controllers for the in-kernel loop (OLF order 10): groups per controlled bus in
+     *  OLF's |b|-descending order, sub-controller section tables, the run's maxSectionShift. Returns
+     *  true when the kernel loop OWNS them (the host orchestrator must then stay off). */
+    public static boolean uploadToDevice(long handle, List<Controller> ctrls, int maxSectionShift) {
+        if (ctrls == null || ctrls.isEmpty()) {
+            com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchShuntControllers(handle,
+                    null, null, null, null, null, null, null, null, null, null, null, null, null, null, maxSectionShift);
+            return false;
+        }
+        int nc = ctrls.size();
+        Map<Integer, List<Integer>> byBus = new LinkedHashMap<>();
+        for (int c = 0; c < nc; c++) {
+            byBus.computeIfAbsent(ctrls.get(c).ctrlBusNum(), k -> new ArrayList<>()).add(c);
+        }
+        int[] groupPtr = new int[byBus.size() + 1];
+        int[] groupCtrl = new int[nc];
+        int g = 0;
+        int k = 0;
+        for (List<Integer> group : byBus.values()) {
+            group.sort(Comparator.comparingDouble((Integer ci) -> ctrls.get(ci).bMagnitude()).reversed());
+            groupPtr[g++] = k;
+            for (int ci : group) {
+                groupCtrl[k++] = ci;
+            }
+        }
+        groupPtr[g] = k;
+        int[] bRow = new int[nc];
+        int[] vRow = new int[nc];
+        double[] targetV = new double[nc];
+        double[] halfDb = new double[nc];
+        int[] elemAbs = new int[nc];
+        int[] shOvElem = new int[nc];
+        int[] subPtr = new int[nc + 1];
+        List<Integer> secPtr = new ArrayList<>();
+        List<Double> secB = new ArrayList<>();
+        List<Double> secG = new ArrayList<>();
+        List<Integer> subMin = new ArrayList<>();
+        List<Integer> subBase = new ArrayList<>();
+        for (int c = 0; c < nc; c++) {
+            Controller ctl = ctrls.get(c);
+            bRow[c] = ctl.bRow();
+            vRow[c] = ctl.vRow();
+            targetV[c] = ctl.targetV();
+            halfDb[c] = ctl.halfDeadband();
+            elemAbs[c] = ctl.elemIndexAbs();
+            shOvElem[c] = ctl.elemIndexAbs() >= 0 ? ctl.shOvElem() : -1;
+            subPtr[c] = subMin.size();
+            for (Sub sub : ctl.subs()) {
+                secPtr.add(secB.size());
+                for (int i = 0; i < sub.sectionsB().length; i++) {
+                    secB.add(sub.sectionsB()[i]);
+                    secG.add(sub.sectionsG()[i]);
+                }
+                subMin.add(sub.minPos());
+                subBase.add(sub.basePos());
+            }
+        }
+        subPtr[nc] = subMin.size();
+        secPtr.add(secB.size());
+        boolean owned = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.setBatchShuntControllers(handle,
+                bRow, vRow, targetV, halfDb, elemAbs, shOvElem, groupPtr, groupCtrl, subPtr,
+                secPtr.stream().mapToInt(Integer::intValue).toArray(),
+                secB.stream().mapToDouble(Double::doubleValue).toArray(),
+                secG.stream().mapToDouble(Double::doubleValue).toArray(),
+                subMin.stream().mapToInt(Integer::intValue).toArray(),
+                subBase.stream().mapToInt(Integer::intValue).toArray(), maxSectionShift) != 0;
+        LOGGER.info("Uploaded {} incremental shunt controllers to device ({} groups, {} subs): {}",
+                nc, byBus.size(), subMin.size(), owned ? "in-kernel loop" : "host orchestrator");
+        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            System.err.printf("SHUNT_UPLOAD nCtrl=%d nGroups=%d nSubs=%d kernel=%b%n", nc, byBus.size(), subMin.size(), owned);
+        }
+        return owned;
+    }
+
+    /** Give the driver's final sections (scenario 0) back to the network — what OLF's own loop leaves
+     *  through LfShunt.Controller.updateSectionB; the shunt's b follows through OLF's listeners. */
+    public static void writeBackPositions(LfNetwork network, List<Controller> ctrls, int[] positions) {
+        if (ctrls == null || ctrls.isEmpty() || positions == null) {
+            return;
+        }
+        int u = 0;
+        for (Controller ctl : ctrls) {
+            LfShunt shunt = network.getShunt(ctl.shuntNum());
+            List<LfShunt.Controller> subs = shunt != null ? shunt.getControllers() : List.of();
+            for (int k = 0; k < ctl.subs().size(); k++, u++) {
+                if (u < positions.length && k < subs.size() && subs.get(k).getPosition() != positions[u]) {
+                    subs.get(k).updateSectionB(positions[u]);
+                }
+            }
+        }
+    }
+
     static double shuntSectionG(LfShunt.Controller c, int pos) {
         // no public accessor for the per-section G table (only getG() at the current position) —
         // read-only reflection, same pattern as GpuBatchTransformerControl.tapModels
@@ -159,285 +252,7 @@ final class GpuBatchIncrementalShuntVc {
         }
     }
 
-    /** OLF LfShunt.Controller.updateSectionB: closest section to b(cur)+deltaB, one section at a time,
-     *  within the ratchet's allowed range. Returns 0 (no move) or the direction. */
-    private static int moveSection(Sub sub, int[] pos, double deltaB, Ratchet ratchet) {
-        int cur = pos[0];
-        double newB = sub.b(cur) + deltaB;
-        int lo = ratchet.allowedDirection > 0 ? cur : sub.minPos();
-        int hi = ratchet.allowedDirection < 0 ? cur : sub.sectionsB().length - 1;
-        int best = cur;
-        double smallest = Math.abs(deltaB);
-        for (int p = lo; p <= hi; p++) {
-            if (Math.abs(p - cur) > 1) {                     // maxSectionShift = 1 per call (OLF adjustB)
-                continue;
-            }
-            double dist = Math.abs(newB - sub.b(p));
-            if (dist < smallest) {
-                best = p;
-                smallest = dist;
-            }
-        }
-        if (best == cur) {
-            return 0;
-        }
-        pos[0] = best;
-        int direction = best > cur ? 1 : -1;
-        ratchet.update(direction);
-        return direction;
-    }
 
-    /** OLF adjustB per out-of-deadband (scenario, bus): round-robin over the magnitude-sorted
-     *  shunts, one section per sub-controller per pass, per-round maxSectionShift cap, remaining
-     *  diffV tracked by sensitivity. Fills {@code affected}; returns whether anything moved. */
-    @SuppressWarnings("java:S107")
-    private static boolean adjustGroups(List<int[]> outOfDb, Map<Integer, List<Integer>> byBus, List<Integer> busKeys,
-            List<Controller> ctrls, double[][] chunkResults, boolean[][] disabledMask,
-            double[] sensi, int[] unitOf, int kuF, int m, int[][][] pos, Ratchet[][][] ratchets,
-            int maxSectionShift, int nc, boolean[] affected) {
-        boolean anyMoved = false;
-        for (int[] sg : outOfDb) {
-            int slot = sg[0];
-            int g = sg[1];
-            List<Integer> group = byBus.get(busKeys.get(g));
-            Controller c0 = ctrls.get(group.get(0));
-            double diffV = c0.targetV() - chunkResults[slot][c0.vRow()];
-            if (System.getenv("OLF_GPU_SHUNT_TRACE") != null) {
-                StringBuilder sb = new StringBuilder("SHUNT_TRACE slot=" + slot + " g=" + g + " diffV=" + diffV);
-                for (int ci : group) {
-                    sb.append(String.format(" s[%d]=%.6f pos=%s", ci,
-                            sensi[slot * kuF * m + unitOf[ci] * m + g], java.util.Arrays.toString(pos[slot][ci])));
-                }
-                System.err.println(sb);
-            }
-            // OLF adjustB verbatim: round-robin over the magnitude-sorted shunts, one section per
-            // sub-controller per pass, per-round maxSectionShift cap, remaining tracked by sensitivity
-            double remaining = diffV;
-            boolean changed = true;
-            int[][] shiftKey = new int[nc][];            // per-(ctrl, sub) section shifts this ROUND
-            boolean roundMoved = false;
-            while (changed) {
-                changed = false;
-                for (int ci : group) {
-                    Controller ctl = ctrls.get(ci);
-                    if (ctl.elemIndexAbs() >= 0 && disabledMask[slot][ctl.elemIndexAbs()]) {
-                        continue;                        // the controller shunt itself is outaged
-                    }
-                    double sv = sensi[slot * kuF * m + unitOf[ci] * m + g];
-                    for (int k = 0; k < ctl.subs().size(); k++) {
-                        if (Math.abs(remaining) > c0.halfDeadband()) {
-                            if (shiftKey[ci] == null) {
-                                shiftKey[ci] = new int[ctl.subs().size()];
-                            }
-                            if (shiftKey[ci][k] > maxSectionShift) {
-                                continue;                // reached max section shift in this outer loop
-                            }
-                            Sub sub = ctl.subs().get(k);
-                            double prevB = sub.b(pos[slot][ci][k]);
-                            double deltaB = remaining / sv;
-                            int[] holder = {pos[slot][ci][k]};
-                            if (moveSection(sub, holder, deltaB, ratchets[slot][ci][k]) != 0) {
-                                pos[slot][ci][k] = holder[0];
-                                shiftKey[ci][k]++;
-                                remaining -= (sub.b(pos[slot][ci][k]) - prevB) * sv;
-                                if (System.getenv("OLF_GPU_SHUNT_TRACE") != null) {
-                                    System.err.println("SHUNT_TRACE   move slot=" + slot + " ctrl=" + ci + " sub=" + k
-                                            + " ->pos=" + pos[slot][ci][k] + " remaining=" + remaining);
-                                }
-                                changed = true;
-                                roundMoved = true;
-                            }
-                        }
-                    }
-                }
-            }
-            anyMoved |= roundMoved;
-            if (roundMoved) {
-                affected[slot] = true;
-            }
-        }
-        return anyMoved;
-    }
 
-    @SuppressWarnings({"java:S107", "java:S3776"})
-    static double[][] orchestrate(long handle, int chunkSize, int realCount, int n,
-            double[][] chunkResults, List<Controller> ctrls,
-            int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
-            int[] targetOverrideIndex, double[] targetOverrideValue,
-            int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
-            int[] dsPhiRow, double[] dsFactor,
-            int[] baseR1OvSlotElem, double[] baseR1OvVal, int[] baseShOvSlotElem, double[] baseShOvGb,
-            int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem,
-            double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
-            double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, int[] varType,
-            BatchConfig config) {
-        int nc = ctrls.size();
-        if (System.getenv("OLF_GPU_SHUNT_TRACE") != null) {
-            System.err.println("SHUNT_TRACE orchestrate nc=" + nc + " realCount=" + realCount);
-        }
-        int[][][] pos = new int[chunkSize][nc][];            // per-scenario per-sub section position
-        Ratchet[][][] ratchets = new Ratchet[chunkSize][nc][];
-        for (int s = 0; s < chunkSize; s++) {
-            for (int c = 0; c < nc; c++) {
-                List<Sub> subs = ctrls.get(c).subs();
-                pos[s][c] = new int[subs.size()];
-                ratchets[s][c] = new Ratchet[subs.size()];
-                for (int k = 0; k < subs.size(); k++) {
-                    pos[s][c][k] = subs.get(k).basePos();
-                    ratchets[s][c][k] = new Ratchet();
-                }
-            }
-        }
-        // controllers grouped by controlled bus, |B| magnitude DESCENDING inside each group (OLF ordering)
-        Map<Integer, List<Integer>> byBus = new LinkedHashMap<>();
-        for (int c = 0; c < nc; c++) {
-            byBus.computeIfAbsent(ctrls.get(c).ctrlBusNum(), k -> new ArrayList<>()).add(c);
-        }
-        for (List<Integer> group : byBus.values()) {
-            group.sort(Comparator.comparingDouble((Integer ci) -> ctrls.get(ci).bMagnitude()).reversed());
-        }
-        int maxSectionShift = config.incShuntMaxSectionShift();
-        int maxRounds = config.maxOuterIterations() > 0 ? config.maxOuterIterations() : 20;
-        // DS target carry (the same three coupled pieces as GpuBatchTransformerControl /
-        // GpuBatchIncrementalTvc): the MAIN solve's slack distribution must ride into every
-        // section-move re-solve, or the kernel re-derives it from the re-uploaded baseTargets
-        // (4.8 kV measured on the loss-jump l1 outage before this carry).
-        int nds = dsPhiRow != null ? dsPhiRow.length : 0;
-        double[] dsAnchorCarry = nds > 0 ? new double[chunkSize * nds] : null;
-        double[] dsSlackCarry = nds > 0 ? new double[chunkSize] : null;
-        double[] dsSeed = nds > 0 ? new double[chunkSize * nds] : null;
-        if (nds > 0) {
-            GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
-                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
-        }
-
-        for (int round = 0; round < maxRounds; round++) {
-            List<int[]> outOfDb = new ArrayList<>();
-            List<Integer> busKeys = new ArrayList<>(byBus.keySet());
-            boolean[] ctrlNeeded = new boolean[nc];
-            for (int slot = 0; slot < realCount; slot++) {
-                double[] r = chunkResults[slot];
-                if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
-                    continue;
-                }
-                final int slotL = slot;
-                for (int g = 0; g < busKeys.size(); g++) {
-                    List<Integer> group = byBus.get(busKeys.get(g));
-                    Controller c0 = ctrls.get(group.get(0));
-                    boolean anyLive = group.stream().anyMatch(ci -> ctrls.get(ci).elemIndexAbs() < 0
-                            || !disabledMask[slotL][ctrls.get(ci).elemIndexAbs()]);
-                    if (System.getenv("OLF_GPU_SHUNT_TRACE") != null) {
-                        System.err.println("SHUNT_TRACE db-check slot=" + slot + " g=" + g + " live=" + anyLive
-                                + " v=" + r[c0.vRow()] + " target=" + c0.targetV() + " halfDb=" + c0.halfDeadband());
-                    }
-                    if (anyLive && Math.abs(c0.targetV() - r[c0.vRow()]) > c0.halfDeadband()) {
-                        outOfDb.add(new int[] {slot, g});
-                        for (int ci : group) {
-                            ctrlNeeded[ci] = true;
-                        }
-                    }
-                }
-            }
-            if (outOfDb.isEmpty()) {
-                break;
-            }
-            int[] unit = new int[nc];
-            int[] unitOf = new int[nc];
-            int ku = 0;
-            for (int c = 0; c < nc; c++) {
-                if (ctrlNeeded[c]) {
-                    unitOf[c] = ku;
-                    unit[ku++] = ctrls.get(c).bRow();
-                } else {
-                    unitOf[c] = -1;
-                }
-            }
-            int[] obs = new int[busKeys.size()];
-            for (int g = 0; g < busKeys.size(); g++) {
-                obs[g] = ctrls.get(byBus.get(busKeys.get(g)).get(0)).vRow();
-            }
-            double[] statesFlat = new double[chunkSize * n];
-            for (int s = 0; s < chunkSize; s++) {
-                double[] src = s < realCount && chunkResults[s] != null ? chunkResults[s] : baseState;
-                System.arraycopy(src, 0, statesFlat, s * n, n);
-            }
-            double[] sensi = GpuAcNewtonSolver.solveBatchSensitivities(handle, statesFlat,
-                    java.util.Arrays.copyOf(unit, ku), obs);
-            final int kuF = ku;
-            int m = obs.length;
-
-            boolean[] affected = new boolean[chunkSize];
-            boolean anyMoved = adjustGroups(outOfDb, byBus, busKeys, ctrls, chunkResults, disabledMask,
-                    sensi, unitOf, kuF, m, pos, ratchets, maxSectionShift, nc, affected);
-            if (!anyMoved) {
-                break;
-            }
-            // ---- apply: SHUNT_TARGET_B targets + B state seeds + additive (dG,dB) admittance deltas ----
-            List<Integer> ovIdx = new ArrayList<>();
-            List<Double> ovVal = new ArrayList<>();
-            for (int i = 0; i < targetOverrideIndex.length; i++) {
-                ovIdx.add(targetOverrideIndex[i]);
-                ovVal.add(targetOverrideValue[i]);
-            }
-            GpuBatchTransformerControl.seedDsTargets(nds, dsPhiRow, dsSeed, chunkResults, realCount, n, ovIdx, ovVal);
-            List<Integer> shSlot = new ArrayList<>();
-            List<Double> shGb = new ArrayList<>();
-            for (int i = 0; i < baseShOvSlotElem.length; i++) {
-                shSlot.add(baseShOvSlotElem[i]);
-            }
-            for (double v : baseShOvGb) {
-                shGb.add(v);
-            }
-            double[] x0Full = statesFlat;
-            for (int s = 0; s < chunkSize; s++) {
-                for (int c = 0; c < nc; c++) {
-                    Controller ctl = ctrls.get(c);
-                    double db = 0;
-                    double dg = 0;
-                    for (int k = 0; k < ctl.subs().size(); k++) {
-                        Sub sub = ctl.subs().get(k);
-                        db += sub.b(pos[s][c][k]) - sub.b(sub.basePos());
-                        dg += sub.g(pos[s][c][k]) - sub.g(sub.basePos());
-                    }
-                    if (db != 0 || dg != 0) {
-                        double newB = baseTargets[ctl.bRow()] + db;
-                        ovIdx.add(s * n + ctl.bRow());
-                        ovVal.add(newB);                     // the identity row pins B at the section total
-                        x0Full[s * n + ctl.bRow()] = newB;   // the CPU re-reads b from the shunt on re-solve
-                        if (ctl.elemIndexAbs() >= 0) {       // unpacked controller shunt: b rides SHUNT_B, no static G
-                            shSlot.add(s);
-                            shSlot.add(ctl.shOvElem());
-                            shGb.add(dg);                    // static G follows the section; static B is
-                            shGb.add(db);                    // shadowed by the SHUNT_B variable (harmless)
-                        }
-                    }
-                }
-            }
-            double[][] r2 = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
-                    rowModePerScenario, baseRowMode, disabledMask,
-                    ovIdx.stream().mapToInt(Integer::intValue).toArray(),
-                    ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorCarry, dsSlackCarry, null, null,
-                    parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                    config.lsMode(), config.maxDv(), config.maxDphi(),
-                    config.lsMode() == 2 ? varType : null, x0Full,
-                    shSlot.stream().mapToInt(Integer::intValue).toArray(),
-                    shGb.stream().mapToDouble(Double::doubleValue).toArray(),
-                    null, null,
-                    baseR1OvSlotElem, baseR1OvVal,
-                    config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0,
-                    nziBase, ziOnSlotElem, ziOffSlotElem);
-            for (int s = 0; s < realCount; s++) {
-                if (affected[s]) {                           // untouched scenarios KEEP their converged state
-                    chunkResults[s] = r2[s];                 // (no extra Newton polish the CPU never runs)
-                }
-            }
-            if (nds > 0) {                                   // this solve may have distributed further
-                GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
-                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed, affected);
-            }
-        }
-        return chunkResults;
-    }
 
 }

@@ -51,19 +51,39 @@ public final class GpuBatchHvdcAcEmulation {
     private GpuBatchHvdcAcEmulation() {
     }
 
-    static final int LINEAR = 0;
-    static final int SAT_1_TO_2 = 1;
-    static final int SAT_2_TO_1 = 2;
-    static final int FROZEN = 3;
+    public static final int LINEAR = 0;
+    public static final int SAT_1_TO_2 = 1;
+    public static final int SAT_2_TO_1 = 2;
+    public static final int FROZEN = 3;
 
     /** One packed AC-emulation HVDC: the hv element index (per-scenario disabled bit), the two
      *  converter buses' P-target rows, OLF's own linear p1/p2 terms, the emulation limits, and the
      *  BASE frame — the base status plus the base VSC station targetP contributions ALREADY inside
      *  baseTargets (0 for a linear base; a saturated/frozen base carries its injections there, so
      *  every status override composes as {@code baseTargets - baseD + d(status)}). */
-    record Ctl(int hvElemIndex, int bus1PRow, int bus2PRow, double p0, double k,
+    public record Ctl(int hvElemIndex, int bus1PRow, int bus2PRow, double p0, double k,
                double pMax12, double pMax21, double loss1, double loss2, double r,
                int baseStatus, double baseD1, double baseD2) {
+
+        // A converter bus whose BUS_TARGET_P is INACTIVE (the slack) is packed as ~phiRow: the angle
+        // still reads at that column, but its row hosts the PHI identity and must never receive a P
+        // target — OLF's slack simply absorbs the station's targetP. Writing there pinned the base
+        // LF's slack angle at the freeze delta (BUS_TARGET_PHI residual 0.014, base MAX_ITER).
+        public int bus1PhiRow() {
+            return bus1PRow >= 0 ? bus1PRow : ~bus1PRow;
+        }
+
+        public int bus2PhiRow() {
+            return bus2PRow >= 0 ? bus2PRow : ~bus2PRow;
+        }
+
+        public boolean bus1PActive() {
+            return bus1PRow >= 0;
+        }
+
+        public boolean bus2PActive() {
+            return bus2PRow >= 0;
+        }
 
         /** OLF's own {@code HvdcAcEmulationSide1ActiveFlowEquationTerm.p1} at a scenario's state.
          *  Called directly on the state array rather than through the equation term: loading a
@@ -72,16 +92,16 @@ public final class GpuBatchHvdcAcEmulation {
          *  per scenario per check round, which measured 6 s of a 10 s orchestrator on a 9k-branch
          *  case. The row IS the bus's BUS_PHI row (one device row per variable). */
         double p1At(double[] x) {
-            return HvdcAcEmulationSide1ActiveFlowEquationTerm.p1(p0, k, loss1, loss2, r, x[bus1PRow], x[bus2PRow]);
+            return HvdcAcEmulationSide1ActiveFlowEquationTerm.p1(p0, k, loss1, loss2, r, x[bus1PhiRow()], x[bus2PhiRow()]);
         }
 
         /** OLF's own {@code HvdcAcEmulationSide2ActiveFlowEquationTerm.p2}; see {@link #p1At}. */
         double p2At(double[] x) {
-            return HvdcAcEmulationSide2ActiveFlowEquationTerm.p2(p0, k, loss1, loss2, r, x[bus1PRow], x[bus2PRow]);
+            return HvdcAcEmulationSide2ActiveFlowEquationTerm.p2(p0, k, loss1, loss2, r, x[bus1PhiRow()], x[bus2PhiRow()]);
         }
     }
 
-    static List<Ctl> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    public static List<Ctl> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                       int nElements) {
         Map<Integer, Integer> phiRows = new LinkedHashMap<>();
         for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
@@ -103,8 +123,19 @@ public final class GpuBatchHvdcAcEmulation {
                 case SATURATION_MODE_FROM_CS2_TO_CS1 -> SAT_2_TO_1;
                 case FROZEN -> FROZEN;
             };
+            int r1 = phiRows.get(hvdc.getBus1().getNum());
+            int r2 = phiRows.get(hvdc.getBus2().getNum());
+            boolean p1Active = es.getEquation(hvdc.getBus1().getNum(), AcEquationType.BUS_TARGET_P)
+                    .filter(com.powsybl.openloadflow.equations.Equation::isActive).isPresent();
+            boolean p2Active = es.getEquation(hvdc.getBus2().getNum(), AcEquationType.BUS_TARGET_P)
+                    .filter(com.powsybl.openloadflow.equations.Equation::isActive).isPresent();
+            if (HVDC_TRACE_ROW != -1) {
+                System.err.printf("HVDC_BUILD h=%d id=%s elem=%d olfStatus=%s st1TargetP=%.9f st2TargetP=%.9f p1Active=%b%n",
+                        h, hvdc.getId(), hvOffset + h, ac.getAcEmulationStatus(), hvdc.getConverterStation1().getTargetP(),
+                        hvdc.getConverterStation2().getTargetP(), p1Active);
+            }
             out.add(new Ctl(hvOffset + h,
-                    phiRows.get(hvdc.getBus1().getNum()), phiRows.get(hvdc.getBus2().getNum()),
+                    p1Active ? r1 : ~r1, p2Active ? r2 : ~r2,
                     ac.getP0(), ac.getDroop() * 180 / Math.PI,
                     ac.getPMaxFromCS1toCS2(), ac.getPMaxFromCS2toCS1(),
                     hvdc.getConverterStation1().getLossFactor() / 100,
@@ -118,7 +149,7 @@ public final class GpuBatchHvdcAcEmulation {
 
     /** The packed hv element index of every AC-emulation HVDC (the packer's exact enumeration order) —
      *  for per-scenario outage masking of HVDC contingencies. */
-    static java.util.Map<LfHvdc, Integer> elementIndices(LfNetwork network, int nElements) {
+    public static java.util.Map<LfHvdc, Integer> elementIndices(LfNetwork network, int nElements) {
         List<LfHvdc> packed = network.getHvdcs().stream()
                 .filter(h -> h.getBus1() != null && h.getBus2() != null && h.isAcEmulation())
                 .toList();
@@ -151,6 +182,9 @@ public final class GpuBatchHvdcAcEmulation {
 
     /** OLF switchToFrozenState at the given (warm-start) evaluation point: pMax-clamped when the
      *  linear flows overpass the limits, else pinned at the current flows. */
+    private static final int HVDC_TRACE_ROW = System.getenv("OLF_GPU_HVDC_TRACE") == null ? -1
+            : "all".equals(System.getenv("OLF_GPU_HVDC_TRACE")) ? -2 : Integer.parseInt(System.getenv("OLF_GPU_HVDC_TRACE"));
+
     private static double[] frozenDeltas(Ctl c, double p1, double p2) {
         if (p1 > c.pMax12()) {
             return saturationDeltas(c, true);
@@ -202,25 +236,68 @@ public final class GpuBatchHvdcAcEmulation {
     /** As above, additionally recording the converter-row delta each freeze APPLIED (relative to the
      *  base-status delta), which is what the in-kernel loops need to keep applying transitions
      *  incrementally instead of rebuilding the override list. */
-    static int[][] applyFreeze(int chunkSize, int realCount, int n, List<Ctl> ctls,
+    public static int[][] applyFreeze(int chunkSize, int realCount, int n, List<Ctl> ctls,
                                double[] baseState, double[] x0PerScenario, boolean[][] disabledMask,
                                double[] baseTargets, List<Integer> ovIndexList, List<Double> ovValueList,
                                double[] appliedD1, double[] appliedD2) {
+        GpuBatchOverrides overrides = new GpuBatchOverrides();   // the base load flow's plain lists, same order
+        for (int k = 0; k < ovIndexList.size(); k++) {
+            overrides.add(ovIndexList.get(k), ovValueList.get(k));
+        }
+        int[][] status = applyFreeze(chunkSize, realCount, n, ctls, baseState, x0PerScenario, null, null, disabledMask,
+                baseTargets, overrides, appliedD1, appliedD2);
+        ovIndexList.clear();
+        ovValueList.clear();
+        for (int k = 0; k < overrides.size(); k++) {
+            ovIndexList.add(overrides.indexAt(k));
+            ovValueList.add(overrides.valueAt(k));
+        }
+        return status;
+    }
+
+    /**
+     * As above, on the batch's own override list (its index is kept, not rebuilt per call). A scenario's warm start is
+     * {@code x0PerScenario}'s slice when given; otherwise the base state with the scenario's seeds written over it
+     * ({@code seedIdx} flat {@code s * n + row}, the start state the device builds from the same seeds) — applied to
+     * one shared copy and put back after, so a chunk never materializes {@code chunkSize * n} doubles for it.
+     */
+    static int[][] applyFreeze(int chunkSize, int realCount, int n, List<Ctl> ctls,
+                               double[] baseState, double[] x0PerScenario, int[] seedIdx, double[] seedVal,
+                               boolean[][] disabledMask, double[] baseTargets, GpuBatchOverrides overrides,
+                               double[] appliedD1, double[] appliedD2) {
         int[][] status = new int[chunkSize][ctls.size()];
-        java.util.Map<Integer, Integer> posOf = indexOf(ovIndexList);
-        double[] warm = new double[n];
+        double[] warm = baseState.clone();
+        int[][] seedsOf = x0PerScenario == null && seedIdx != null ? seedsByScenario(seedIdx, realCount, n) : null;
         for (int s = 0; s < realCount; s++) {
             if (x0PerScenario != null) {
                 System.arraycopy(x0PerScenario, s * n, warm, 0, n);
-            } else {
-                System.arraycopy(baseState, 0, warm, 0, n);
+            } else if (seedsOf != null) {
+                for (int k : seedsOf[s]) {
+                    warm[seedIdx[k] - s * n] = seedVal[k];
+                }
             }
             for (int h = 0; h < ctls.size(); h++) {
                 Ctl c = ctls.get(h);
+                if (HVDC_TRACE_ROW != -1) {
+                    System.err.printf("HVDC_CTL s=%d h=%d elem=%d baseStatus=%d baseD1=%.9f baseD2=%.9f disabled=%b p1warm=%.9f p2warm=%.9f pMax12=%.6f baseT1=%.9f%n",
+                            s, h, c.hvElemIndex(), c.baseStatus(), c.baseD1(), c.baseD2(), disabledMask[s][c.hvElemIndex()],
+                            c.p1At(warm), c.p2At(warm), c.pMax12(), c.bus1PRow() >= 0 ? baseTargets[c.bus1PRow()] : Double.NaN);
+                }
                 if (disabledMask[s][c.hvElemIndex()]) {
                     continue;                                // outaged hvdc — stays as the contingency left it
                 }
                 double[] d = frozenDeltas(c, c.p1At(warm), c.p2At(warm));
+                if (HVDC_TRACE_ROW == -2 || (HVDC_TRACE_ROW >= 0 && (c.bus1PhiRow() == HVDC_TRACE_ROW || c.bus2PhiRow() == HVDC_TRACE_ROW))) {
+                    // OLF_GPU_HVDC_TRACE=<phiRow>: what this scenario's freeze fixed the hvdc at - the
+                    // flows read at the warm-start state and the deltas that go into the two converter
+                    // rows. OLF freezes each contingency at its own restored base angles; a scenario
+                    // whose warm start is not the base freezes at different flows and nothing else
+                    // in the residual will say so (the frozen P IS the equation).
+                    System.err.printf("HVDC_FREEZE s=%d h=%d row1=%d row2=%d warmIsBase=%b p1=%.9f p2=%.9f d1=%.9f d2=%.9f"
+                            + " baseD1=%.9f baseD2=%.9f pMax12=%.6f pMax21=%.6f%n", s, h, c.bus1PhiRow(), c.bus2PhiRow(),
+                            x0PerScenario == null, c.p1At(warm), c.p2At(warm), d[0], d[1], c.baseD1(), c.baseD2(),
+                            c.pMax12(), c.pMax21());
+                }
                 if (appliedD1 != null) {
                     appliedD1[s * ctls.size() + h] = d[0] - c.baseD1();
                     appliedD2[s * ctls.size() + h] = d[1] - c.baseD2();
@@ -229,13 +306,39 @@ public final class GpuBatchHvdcAcEmulation {
                 disabledMask[s][c.hvElemIndex()] = true;
                 // base frame: baseTargets (or the row's existing override — e.g. a lost load on the
                 // converter bus) already carry the base injections
-                mergeOverride(ovIndexList, ovValueList, posOf, s * n + c.bus1PRow(),
-                        baseTargets[c.bus1PRow()], c.baseD1(), d[0]);
-                mergeOverride(ovIndexList, ovValueList, posOf, s * n + c.bus2PRow(),
-                        baseTargets[c.bus2PRow()], c.baseD2(), d[1]);
+                if (c.bus1PActive()) {
+                    overrides.merge(s * n + c.bus1PRow(), baseTargets[c.bus1PRow()], c.baseD1(), d[0]);
+                }
+                if (c.bus2PActive()) {
+                    overrides.merge(s * n + c.bus2PRow(), baseTargets[c.bus2PRow()], c.baseD2(), d[1]);
+                }
+            }
+            if (seedsOf != null) {
+                for (int k : seedsOf[s]) {                   // back to the base state for the next scenario
+                    int row = seedIdx[k] - s * n;
+                    warm[row] = baseState[row];
+                }
             }
         }
         return status;
+    }
+
+    /** The positions in {@code seedIdx} of each scenario's seeds. */
+    private static int[][] seedsByScenario(int[] seedIdx, int realCount, int n) {
+        int[] count = new int[realCount];
+        for (int flat : seedIdx) {
+            count[flat / n]++;
+        }
+        int[][] seedsOf = new int[realCount][];
+        for (int s = 0; s < realCount; s++) {
+            seedsOf[s] = new int[count[s]];
+            count[s] = 0;
+        }
+        for (int k = 0; k < seedIdx.length; k++) {
+            int s = seedIdx[k] / n;
+            seedsOf[s][count[s]++] = k;
+        }
+        return seedsOf;
     }
 
     /**
@@ -247,9 +350,8 @@ public final class GpuBatchHvdcAcEmulation {
      */
     static void applyStatusOverrides(int chunkSize, int realCount, int n, List<Ctl> ctls,
                                      int[][] status, byte[] ctgOut, boolean[][] disabledMask,
-                                     double[] baseTargets, List<Integer> ovIdx, List<Double> ovVal,
+                                     double[] baseTargets, GpuBatchOverrides overrides,
                                      double[] appliedD1, double[] appliedD2) {
-        java.util.Map<Integer, Integer> posOf = indexOf(ovIdx);
         int nh = ctls.size();
         for (int s = 0; s < realCount; s++) {
             for (int h = 0; h < nh; h++) {
@@ -260,10 +362,12 @@ public final class GpuBatchHvdcAcEmulation {
                 if (status[s][h] == LINEAR) {
                     disabledMask[s][c.hvElemIndex()] = false;
                     if (c.baseStatus() != LINEAR) {          // strip the base injections from the targets
-                        mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus1PRow(),
-                                baseTargets[c.bus1PRow()], c.baseD1(), 0);
-                        mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus2PRow(),
-                                baseTargets[c.bus2PRow()], c.baseD2(), 0);
+                        if (c.bus1PActive()) {
+                            overrides.merge(s * n + c.bus1PRow(), baseTargets[c.bus1PRow()], c.baseD1(), 0);
+                        }
+                        if (c.bus2PActive()) {
+                            overrides.merge(s * n + c.bus2PRow(), baseTargets[c.bus2PRow()], c.baseD2(), 0);
+                        }
                     }
                 } else {
                     disabledMask[s][c.hvElemIndex()] = true;
@@ -276,40 +380,15 @@ public final class GpuBatchHvdcAcEmulation {
                             : status[s][h] == SAT_2_TO_1 ? saturationDeltas(c, false)
                             : new double[] {appliedD1[s * nh + h] + c.baseD1(),
                                             appliedD2[s * nh + h] + c.baseD2()};
-                    mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus1PRow(),
-                            baseTargets[c.bus1PRow()], c.baseD1(), d[0]);
-                    mergeOverride(ovIdx, ovVal, posOf, s * n + c.bus2PRow(),
-                            baseTargets[c.bus2PRow()], c.baseD2(), d[1]);
+                    if (c.bus1PActive()) {
+                        overrides.merge(s * n + c.bus1PRow(), baseTargets[c.bus1PRow()], c.baseD1(), d[0]);
+                    }
+                    if (c.bus2PActive()) {
+                        overrides.merge(s * n + c.bus2PRow(), baseTargets[c.bus2PRow()], c.baseD2(), d[1]);
+                    }
                 }
             }
         }
-    }
-
-    /** Compose one converter-bus status override ONTO any override already present at the row
-     *  (e.g. a lost-load target on the converter bus — a row must NEVER carry two overrides, the
-     *  parallel scatter has no ordering): value = (existing override | baseTargets) - baseD + d. */
-    private static void mergeOverride(List<Integer> ovIdx, List<Double> ovVal,
-                                      java.util.Map<Integer, Integer> posOf, int flat,
-                                      double baseTarget, double baseD, double d) {
-        Integer at = posOf.get(flat);
-        double from = at != null ? ovVal.get(at) : baseTarget;
-        if (at != null) {
-            ovVal.set(at, from - baseD + d);
-        } else {
-            posOf.put(flat, ovIdx.size());
-            ovIdx.add(flat);
-            ovVal.add(from - baseD + d);
-        }
-    }
-
-    /** flat-row → position index over an override list (the lookup mergeOverride needs; a scan
-     *  would be quadratic in scenarios × hvdcs over a list that grows with both). */
-    private static java.util.Map<Integer, Integer> indexOf(List<Integer> ovIdx) {
-        java.util.Map<Integer, Integer> posOf = new java.util.HashMap<>(2 * ovIdx.size() + 16);
-        for (int k = 0; k < ovIdx.size(); k++) {
-            posOf.put(ovIdx.get(k), k);
-        }
-        return posOf;
     }
 
     /** Seed the NON-LINEAR-at-base statuses (a saturated/frozen base — the extraction gate used to
@@ -317,7 +396,7 @@ public final class GpuBatchHvdcAcEmulation {
      *  the hv bit set and NO target override (baseTargets already carry the base injections), and
      *  PADDING slots get the base bits so they still converge at iteration 0. An entry whose bit is
      *  already set while its status is LINEAR is a contingency outage — left alone. */
-    static void seedBaseStatuses(int chunkSize, int realCount, List<Ctl> ctls,
+    public static void seedBaseStatuses(int chunkSize, int realCount, List<Ctl> ctls,
                                  int[][] status, boolean[][] disabledMask) {
         for (int h = 0; h < ctls.size(); h++) {
             Ctl c = ctls.get(h);
@@ -335,4 +414,93 @@ public final class GpuBatchHvdcAcEmulation {
         }
     }
 
+
+    /** Install the two AC-emulation driver phases (freeze, limits) on a batch context: the controller
+     *  tables, each scenario's starting status, the "outaged by the contingency" bits and the deltas the
+     *  host-side freeze already applied. Shared by the batched SA's chunk contexts and the base load
+     *  flow's batch-of-one. Returns the flat ctgOut bits (null when there is nothing to install — the
+     *  context's HVDC loops are then cleared). */
+    public static byte[] installDriverLoops(long handle, List<Ctl> ctls, int chunkSize, int[][] hvdcStatus,
+                                            boolean[][] disabledMask, double[] appliedD1, double[] appliedD2,
+                                            boolean limits) {
+        if (ctls == null || ctls.isEmpty()) {
+            GpuAcNewtonSolver.setBatchHvdcLoops(handle, null, null, null, null, null, null, null, null, 0);
+            return null;
+        }
+        int nh = ctls.size();
+        int[] hvElem = new int[nh];
+        int[] hvB1 = new int[nh];
+        int[] hvB2 = new int[nh];
+        double[] hvIn = new double[nh * 9];
+        for (int h = 0; h < nh; h++) {
+            Ctl c = ctls.get(h);
+            hvElem[h] = c.hvElemIndex();          // GLOBAL element index
+            hvB1[h] = c.bus1PRow();
+            hvB2[h] = c.bus2PRow();
+            hvIn[h * 9] = c.p0();
+            hvIn[h * 9 + 1] = c.k();
+            hvIn[h * 9 + 2] = c.pMax12();
+            hvIn[h * 9 + 3] = c.pMax21();
+            hvIn[h * 9 + 4] = c.loss1();
+            hvIn[h * 9 + 5] = c.loss2();
+            hvIn[h * 9 + 6] = c.r();
+            hvIn[h * 9 + 7] = c.baseD1();
+            hvIn[h * 9 + 8] = c.baseD2();
+        }
+        byte[] ctgOut = new byte[chunkSize * nh];
+        int[] flatStatus = new int[chunkSize * nh];
+        for (int s2 = 0; s2 < chunkSize; s2++) {
+            for (int h = 0; h < nh; h++) {
+                flatStatus[s2 * nh + h] = hvdcStatus[s2][h];
+                // "the contingency outaged it" is the bit set on a LINEAR entry
+                ctgOut[s2 * nh + h] = (byte) (hvdcStatus[s2][h] == LINEAR
+                        && disabledMask[s2][ctls.get(h).hvElemIndex()] ? 1 : 0);
+            }
+        }
+        GpuAcNewtonSolver.setBatchHvdcLoops(handle, hvElem, hvB1, hvB2, hvIn, ctgOut,
+                flatStatus, appliedD1, appliedD2, limits ? 1 : 0);
+        return ctgOut;
+    }
+
+    /** Give the driver's final AC-emulation statuses (scenario 0) back to the network the way OLF's own
+     *  loops do — the same {@code AcEmulationControl} switches, which set the converter stations'
+     *  targetP and re-activate/deactivate the emulation terms through OLF's listeners. */
+    public static void writeBack(LfNetwork network, List<Ctl> ctls, int[] deviceStatus, int nElements) {
+        if (ctls == null || ctls.isEmpty() || deviceStatus == null) {
+            return;
+        }
+        java.util.Map<Integer, LfHvdc> byElem = new java.util.HashMap<>();
+        elementIndices(network, nElements).forEach((h, e) -> byElem.put(e, h));
+        for (int h = 0; h < ctls.size() && h < deviceStatus.length; h++) {
+            LfHvdc hvdc = byElem.get(ctls.get(h).hvElemIndex());
+            if (hvdc == null) {
+                continue;
+            }
+            var control = hvdc.getAcEmulationControl();
+            var now = control.getAcEmulationStatus();
+            switch (deviceStatus[h]) {
+                case LINEAR -> {
+                    if (now != LfHvdc.AcEmulationControl.AcEmulationStatus.LINEAR_MODE) {
+                        control.switchToLinearMode();
+                    }
+                }
+                case SAT_1_TO_2 -> {
+                    if (now != LfHvdc.AcEmulationControl.AcEmulationStatus.SATURATION_MODE_FROM_CS1_TO_CS2) {
+                        control.switchToSaturationFromCS1toCS2(true);
+                    }
+                }
+                case SAT_2_TO_1 -> {
+                    if (now != LfHvdc.AcEmulationControl.AcEmulationStatus.SATURATION_MODE_FROM_CS2_TO_CS1) {
+                        control.switchToSaturationFromCS2toCS1(true);
+                    }
+                }
+                case FROZEN -> {
+                    if (now != LfHvdc.AcEmulationControl.AcEmulationStatus.FROZEN) {
+                        control.switchToFrozenState(true);
+                    }
+                }
+                default -> { }
+            }
+        }
+    }
 }

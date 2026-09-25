@@ -147,7 +147,8 @@ REMAINING (documented contract, not a bug): clamping the CURRENT CARRIER while o
 members stay continuous re-picks the pilot-Q role MID-FLIGHT. The re-picked system sits
 on the CPU's 1-MW DS-threshold knife edge — a measured 1.7e-9 trajectory offset flips a
 1.0045-MW distribution decision, so bitwise-close is not enough; the machine routes the
-SCENARIO to the CPU (STATUS_REJECTED, `deviceSharedCarrierClampRoutesToCpuAndMatches`).
+SCENARIO to the CPU (STATUS_REJECTED) — CLOSED 2026-09-15: the in-kernel TransformerVoltageControl phase
+(tasks #47) batches it at 1e-12 (`deviceSharedCarrierClampBatchesAndMatches`).
 Non-carrier clamps and clamps with no other alive member stay on-device. Also observed
 on that network: the GPU sequential BASE loadflow degrades when the base itself clamps
 (pre-existing sequential-path gap, unrelated to batching) — the test runs the base on

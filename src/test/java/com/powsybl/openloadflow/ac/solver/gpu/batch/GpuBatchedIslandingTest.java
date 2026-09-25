@@ -97,7 +97,7 @@ class GpuBatchedIslandingTest {
                 + "the UBATCH factorization); status=" + r.convergenceStatus() + " ||F||=" + r.finalMismatch());
 
         // write the GPU's frozen-island solution back to the full network's buses
-        sv.set(r.state());
+        sv.set(java.util.Arrays.copyOf(r.state(), es.getIndex().getSortedVariablesToFind().size()));
         AcSolverUtil.updateNetwork(net, es);
 
         // ---- reference: the triangle alone (the post-contingency main component) ----

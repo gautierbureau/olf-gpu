@@ -267,6 +267,14 @@ public final class GpuAcNewtonSolver {
      * @return {@code [nScenarios][n + 3]}: per-scenario [state(n), iterations, finalMismatch, convergenceStatus]
      *         where convergenceStatus is: 0 = converged, 1 = max_iter, -1 = diverged/NaN
      */
+    /** Starting values for the next batch solve that is given no full per-scenario state: {@code s * n + row} ->
+     *  value, written over the base state the device tiles; consumed by that solve. Null clears. */
+    public static native void setBatchX0Seeds(long handle, int[] flatIndex, double[] value);
+
+    /** Fixed inner iterations for the context's batch solves: {@code k > 0} = exactly k Newton steps per inner solve,
+     *  the convergence criterion tested after the last one only (outer loops unchanged); 0 = test every iteration. */
+    public static native void setBatchFixedIter(long handle, int k);
+
     public static native double[][] solveBatchContext(long handle, double[] x0Base, double[] targetBase,
                                                        int[][] rowMode, int[] baseRowMode, boolean[][] disabledElementMask,
                                                        int[] targetOverrideIndex, double[] targetOverrideValue,
@@ -275,6 +283,8 @@ public final class GpuAcNewtonSolver {
                                                        double[] dsOverrideMinDelta, double[] dsAnchorShift,
                                                        double[] dsSlackShift,
                                                        int[] rlVtOvSlotIdx, double[] rlVtOvVal,
+                                                       int[] rlQOvSlotEntry, double[] rlQOvMinMax,
+                                                       int[] cvOvSlotEntry, double[] cvOvStepScale,
                                                        int maxIter, double tol,
                                                        double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                                                        int lsMode, double maxDv, double maxDphi, int[] varType,
@@ -289,6 +299,12 @@ public final class GpuAcNewtonSolver {
      *  outer loops mutate targets in place; the strategy/pair phase re-anchors its slack distribution at the
      *  PARENT contingency's final distributed targets (OLF's setGeneratorsInitialTargetPToTargetP). */
     public static native double[] readBatchTargets(long handle);
+
+    /** The per-scenario ROW MODES the device ended with — the companion to {@link #readBatchTargets}.
+     *  A row's equation is (mode, target) TOGETHER, and the outer-loop kernels rewrite both; the host's
+     *  {@code rowModePerScenario} is only what setup asked for. Reading a target without its final mode
+     *  can say "the target is right" about a row that is no longer the equation it was set up to be. */
+    public static native int[] readBatchRowModes(long handle);
 
     /** VALUES refresh addressed by the SHARED STRUCTURE handle: same semantics as
      *  {@link #refreshContextValues} (tap r1/a1 or shunt-b moves with an unchanged pattern), but
@@ -308,6 +324,20 @@ public final class GpuAcNewtonSolver {
     /** Per-scenario slack-only-DS absorbed totals after a solve, or null when the context is not
      *  slack-only — the pair phase seeds its scenarios with the parent contingency's value. */
     public static native double[] readBatchSlackAbsorbed(long handle);
+
+    /** The driver's DistributedSlack result per (scenario, participating generator): the cumulative
+     *  target delta (pu) the water-fill gave each generator — null when the context has no per-generator
+     *  list. Layout {@code s * ngen + g}, g in the extraction's generator order. */
+    public static native double[] readBatchDsGenCum(long handle);
+
+    /** Per scenario, the slack's RETAINED share of the distributed mismatch (pu) — what OLF's own loop
+     *  gives the slack bus's participating generators, which have no device row of their own. */
+    public static native double[] readBatchDsRetain(long handle);
+
+    /** How many {@code solveBatchContext} calls the context has run. The distributed-slack read-backs
+     *  ({@link #readBatchDsRetain}, {@link #readBatchDsGenCum}, {@link #readBatchSlackAbsorbed}) are reset at
+     *  every solve: they describe the whole distribution only when one solve covered it. */
+    public static native long readBatchSolveCount(long handle);
 
     /**
      * Upload the run's limit thresholds and the branch model they are compared against, once per
@@ -360,6 +390,21 @@ public final class GpuAcNewtonSolver {
      */
     public static native void setBatchRlIslanded(long handle, int[] slotControllerPairs);
 
+    /** Per-scenario member targetQ overrides for the DISTR_Q target kernel, as {@code key = slot *
+     *  nDqMembers + memberIndex} with the member's post-contingency targetQ. Needed because that kernel
+     *  RECOMPUTES the group's row targets from the base member targetQ on every reactive-limits pass, so
+     *  a host-side row seed alone is put straight back. Nulls clear. */
+    public static native void setBatchDqMemberTargetQOverrides(long handle, int[] keys, double[] values);
+
+    /** Pilot-row flip entries: one per (scenario, pilot) where the outage made the pilot stop being one
+     *  of its OWN controllers. While the survivors hold its voltage the pilot keeps BUS_TARGET_V and its
+     *  acquired reactive balance rides one of THEIR rows; when every survivor pins, those rows take their
+     *  own pinned balances and the pilot's is evicted. The kernel then puts it on the pilot's freed row,
+     *  as OLF does. {@code rlCounts} sizes each entry's slice of {@code rlPool} (the surviving
+     *  controllers' reactive-limit entries). Nulls clear. */
+    public static native void setBatchPilotAllPinnedFlip(long handle, int[] slots, int[] rows,
+                                                         double[] qTargets, int[] rlCounts, int[] rlPool);
+
     /**
      * Install the HVDC AC-emulation outer loops' tables and their per-scenario starting state, so
      * FreezingHvdcACEmulation and AcHvdcAcEmulationLimits run as DRIVER PHASES in OLF's order —
@@ -385,14 +430,55 @@ public final class GpuAcNewtonSolver {
                                                       int[] deltaPtr, int[] deltaRow,
                                                       int[] deltaMode, double[] deltaTarget);
 
-    /** Enable the HOST-owned outer-loop slot (OLF order 5); 0 leaves the driver exactly as before. */
-    public static native void setBatchHostLoop(long handle, int enabled);
+    /** Enable HOST-owned outer-loop slots via a bitmask.
+     *  Bit 0 = SecondaryVoltageControl (OLF order 4, pre-RL),
+     *  Bit 1 = PhaseControl (OLF order 7, post-RL),
+     *  Bit 2 = TransformerVoltageControl (OLF order 8),
+     *  Bit 3 = TransformerReactivePowerControl (OLF order 9),
+     *  Bit 4 = ShuntVoltageControl (OLF order 10).
+     *  0 disables all; the driver behaves exactly as before. */
+    public static native void setBatchHostLoop(long handle, int mask);
 
-    /** Did the last solve stop at the host-owned slot rather than finish? */
+    /** Host loop kind constants matching the native {@code DeviceLoopKind} enum. */
+    public static final int HOST_LOOP_SVC = 5;
+    public static final int HOST_LOOP_PHASE = 6;
+    public static final int HOST_LOOP_TVC = 7;
+    public static final int HOST_LOOP_TRPC = 8;
+    public static final int HOST_LOOP_SHUNT = 9;
+
+    /** Upload incremental TVC controller data for the in-kernel outer loop.
+     *  rhoRow/vRow/elemIndex: per-controller int arrays; targetV/halfDb: per-controller doubles;
+     *  tapPtr: CSR pointers [nCtrl+1] into tapData; tapData: flat [totalTaps*8] (y,g1,g2,b1,b2,ksi,r1,a1);
+     *  baseTap: per-controller initial tap index; groupPtr/groupCtrl: CSR grouping of controllers
+     *  sharing a controlled bus (for the one-tap-at-a-time round-robin). */
+    /** Returns 1 when the in-kernel TVC loop owns these controllers, 0 when it refused them (a
+     *  controlled bus shared by several transformers stays on the host orchestrator). */
+    public static native int setBatchTvcControllers(long handle,
+            int[] rhoRow, int[] vRow, double[] targetV, double[] halfDb, int[] elemIndex,
+            int[] tapPtr, double[] tapData, int[] baseTap, int[] groupPtr, int[] groupCtrl,
+            int maxTapShift);
+
+    /** Host loop enable mask bits — use with {@link #setBatchHostLoop}. */
+    public static final int HOST_MASK_SVC = 1 << 0;
+    public static final int HOST_MASK_PHASE = 1 << 1;
+    public static final int HOST_MASK_TVC = 1 << 2;
+    public static final int HOST_MASK_TRPC = 1 << 3;
+    public static final int HOST_MASK_SHUNT = 1 << 4;
+
+    /** Did the last solve stop at a host-owned slot? Returns 0 if not paused, or the
+     *  {@code HOST_LOOP_*} constant identifying WHICH host loop was reached. */
     public static native int readBatchDriverPaused(long handle);
 
     /** Resume the paused driver; {@code hostChanged[s] != 0} is the host loop's UNSTABLE verdict. */
     public static native void setBatchDriverResume(long handle, byte[] hostChanged);
+
+    /** Drop a paused driver sequence without resuming it (the host loop changed the equation layout
+     *  or the row modes): the next solveBatchContext starts over on the re-extracted system. */
+    public static native void cancelBatchDriverPause(long handle);
+
+    /** The next fresh solve resumes its sweep at this LOOP_HOST_* kind after its first solve — the
+     *  restarted sequence re-checks the loop that went UNSTABLE, as OLF's runOuterLoop does. */
+    public static native void setBatchDriverStartLoop(long handle, int kind);
 
     /** Absolute target writes at flat {@code (scenario * n + row)} positions, for a host-owned loop. */
     public static native void setBatchTargetDeltas(long handle, int[] rows, double[] values);
@@ -402,6 +488,115 @@ public final class GpuAcNewtonSolver {
 
     /** The HVDC statuses after a solve, {@code nScenarios * nHvdc}, or null when none are installed. */
     public static native int[] readBatchHvdcStatus(long handle);
+
+    /** Per (scenario, monitoring controller): the target the driver's MonitoringVoltage phase activated
+     *  (pu), NaN while standing by — null without the table. Layout {@code s * nmon + c}. */
+    public static native double[] readBatchMonitoringTargets(long handle);
+
+    /** The zone-regulated generator voltage control targets the SecondaryVoltageControl phase settled
+     *  on, per {@code (scenario, controller)} — what OLF's own loop leaves on the network. */
+    public static native double[] readBatchSecondaryVcTargets(long handle);
+
+    /** Per (scenario, incremental TVC controller): the tap index the driver's TransformerVoltageControl
+     *  phase left — null without the table. Layout {@code s * nTvc + c}. */
+    public static native int[] readBatchTvcTaps(long handle);
+
+    /** Install the incremental SHUNT voltage-control tables for the in-kernel loop (OLF order 10);
+     *  see GpuBatchIncrementalShuntVc.uploadToDevice. Returns 1 when the kernel loop owns them. */
+    public static native int setBatchShuntControllers(long handle,
+            int[] bRow, int[] vRow, double[] targetV, double[] halfDb, int[] elemAbs, int[] shOvElem,
+            int[] groupPtr, int[] groupCtrl, int[] subPtr, int[] secPtr, double[] secB, double[] secG,
+            int[] subMin, int[] subBase, int maxSectionShift);
+
+    /** Per (scenario, sub-controller): the section the driver's ShuntVoltageControl phase left —
+     *  null without the table. Layout {@code s * nSubs + u}, subs in upload order. */
+    public static native int[] readBatchShuntPositions(long handle);
+
+    /** Install the FLOW-OBSERVED incremental controllers (RPC / incremental phase) for the in-kernel
+     *  loops (OLF orders 7 and 9); see GpuBatchIncrementalFlowControl.uploadToDevice. Returns 1 when
+     *  the kernel loops own them. */
+    public static native int setBatchFlowControllers(long handle, int[] kind, int[] pinRow, int[] pinCol, int[] side,
+            double[] targetValue, double[] halfDb, int[] elem, int[] ctlElem, int[] tapPtr, double[] tapData,
+            int[] baseTap, int[] maxShift);
+
+    /** Per (scenario, flow controller): the tap the driver left — null without the table. */
+    public static native int[] readBatchFlowTaps(long handle);
+
+    /** Install the CONTINUOUS phase controllers for the in-kernel PhaseControl phase (OLF order 7);
+     *  see GpuBatchContinuousPhase.uploadToDevice. Returns 1 when the kernel loop owns them. */
+    public static native int setBatchContinuousPhase(long handle, int[] kind, int[] a1Row, int[] side, double[] limit,
+            int[] elem, int[] tapPtr, double[] tapData, int[] baseTap);
+
+    /** Per (scenario, continuous phase controller): the tap the driver left — null without the table. */
+    public static native int[] readBatchContinuousPhaseTaps(long handle);
+
+    /** Install the DISCRETE transformer voltage-control tables for the in-kernel TransformerVoltageControl
+     *  phase (OLF order 8): {@code mode} 0 = AFTER_GENERATOR (TransformerVoltageControlOuterLoop), 1 =
+     *  WITH_GENERATOR (SimpleTransformerVoltageControlOuterLoop); {@code entryOn} = the uploaded activation
+     *  already carries the control ON (a base load flow whose network OLF's initialize switched on). Groups
+     *  are controlled buses (CSR over members) with their toggle-diffed ON/OFF row deltas (CSR); see
+     *  GpuBatchTransformerControl.uploadToDevice. Returns 1 when the kernel loop owns them. */
+    @SuppressWarnings("java:S107")
+    public static native int setBatchDiscreteTvc(long handle, int mode, int entryOn,
+            int[] grpPtr, int[] grpVRow, double[] grpTargetV, double[] grpHalfDb, int[] grpUseInit,
+            int[] deltaPtr, int[] deltaRow, int[] deltaModeOn, int[] deltaModeOff, double[] deltaTargetOn, double[] deltaTargetOff,
+            int[] memRhoRow, int[] memElem, int[] memBaseTap, int[] memTapPtr, double[] memMin, double[] memMax, double[] memInit,
+            double[] tapData);
+
+    /** Per (scenario, member): {state (0 off, 1 continuous, 2 fixed), tap index, the r1 fed to the rounding},
+     *  layout {@code (s * nMembers + m) * 3} — null without the table. */
+    public static native double[] readBatchDiscreteTvcState(long handle);
+
+    /** GeneratorVoltageControlManager tables for the AFTER_GENERATOR phase (after setBatchDiscreteTvc): the
+     *  freeze candidates (controller-bus V row, load Q, and the reactive-limit entry of a REMOTE
+     *  controller or −1) and the UNIVERSE of
+     *  fixTransformerVoltageControls — the {@code BUS_V} row of every generator-voltage-controlled bus,
+     *  which the per-scenario masks index. Returns 1 when installed. */
+    public static native int setBatchDiscreteTvcFreeze(long handle, int[] fzVRow, double[] fzLoadQ, int[] fzRlEntry,
+                                                      int[] fixPvRow);
+
+    /** fixTransformerVoltageControls' per-(scenario, member) connectivity masks over the
+     *  {@code fixPvRow} universe, {@code words} ints each: {@code minMask} cuts every controller branch
+     *  (a subset of OLF's component), {@code maxMask} cuts none (a superset). A PV bus in min means keep
+     *  the control, no PV bus in max means disable it, anything between routes the scenario to the CPU.
+     *  Null clears the channel. */
+    public static native void setBatchDiscreteTvcFixMasks(long handle, int[] minMask, int[] maxMask, int words);
+
+    /** Per (scenario, freeze candidate): {frozen (0/1), the row target while frozen (generation − load Q)},
+     *  layout {@code (s * nFz + c) * 2} — null without candidates. */
+    public static native double[] readBatchDiscreteTvcFreeze(long handle);
+
+    /** Install the WITH_GENERATOR shunt voltage-control tables for the in-kernel ShuntVoltageControl phase
+     *  (OLF order 10); see GpuBatchSimpleShuntVc.uploadToDevice. Returns 1 when the kernel loop owns them. */
+    @SuppressWarnings("java:S107")
+    public static native int setBatchDiscreteShunt(long handle, int entryOn,
+            int[] grpPtr, int[] deltaPtr, int[] deltaRow, int[] deltaModeOn, int[] deltaModeOff,
+            double[] deltaTargetOn, double[] deltaTargetOff,
+            int[] memBRow, int[] memElem, int[] memSubPtr, int[] secPtr, double[] secB, int[] subMin, int[] subBase);
+
+    /** Per (scenario, member shunt): {state (0 off, 1 continuous, 2 dispatched), the continuous b the
+     *  dispatch started from}, layout {@code (s * nMembers + m) * 2} — null without the table. */
+    public static native double[] readBatchDiscreteShuntState(long handle);
+
+    /** Per (scenario, sub-controller): the dispatched section, layout {@code s * nSubs + u}. */
+    public static native int[] readBatchDiscreteShuntPositions(long handle);
+
+    /** Un-pin reactive-limit entries at a driver pause (SecondaryVoltageControl's re-enable step):
+     *  {@code pairs} is (scenario, RL entry) flattened, {@code newTargets} the voltage target each row
+     *  returns to. A resume skips the RL seeding, so this is the only way a host-side un-pin reaches
+     *  the device. No-op for an entry that is not pinned. */
+    public static native void setBatchRlUnpin(long handle, int[] pairs, double[] newTargets);
+
+    /** Install the SecondaryVoltageControl zones for the in-kernel phase (OLF order 4); see
+     *  GpuBatchSecondaryVc.uploadToDevice. Returns 1 when the kernel loop owns them — it refuses a zone
+     *  set wider than the in-kernel dense system, or an observable on an element the batch does not pack. */
+    @SuppressWarnings("java:S107")
+    public static native int setBatchSecondaryVc(long handle,
+            int[] ctldVRow, int[] busVRow, int[] rlIdx, double[] baseTargetV,
+            double[] minQ, double[] maxQ, double[] loadQ,
+            int[] qPtr, int[] qKind, int[] qElem, int[] qBRow,
+            int[] zonePtr, int[] zoneCtl, int[] zonePilotRow, double[] zoneTargetV,
+            double minPlausibleV, double maxPlausibleV);
 
     /**
      * Install the PER-GENERATOR distributed-slack participants: the factors and limits OLF's
@@ -419,6 +614,12 @@ public final class GpuAcNewtonSolver {
 
     /** Release a violation table (idempotent for handle 0). */
     public static native void destroyViolationTable(long tableHandle);
+
+    /** EXPERIMENTAL: decide the violations of a chunk of states on the device (OLF's strict comparison on the
+     *  device's values). Returns nScenarios counts, then nScenarios * capacity records, then as many values —
+     *  a count above the capacity sends that scenario back to the host. Null on a device failure. */
+    public static native double[] decideViolationsBatch(long tableHandle, double[] states, int nScenarios, int n,
+                                                        int capacity);
 
     /** Release a batch context from {@link #createBatchContext} (idempotent for handle 0). */
     /** Install (or clear, with nulls) the PER_EQUATION_TYPE per-row stopping thresholds on a batch
@@ -445,8 +646,32 @@ public final class GpuAcNewtonSolver {
     /** Install the voltage-dependent SVC reactive-limit coefficients on a batch context:
      *  per RL entry, limit(v) = packed base limit + svcB*(v^2 - v2Base) — exactly OLF's live
      *  Bmin/Bmax*(v*nomV)^2 evaluation (and the pinned re-freeze via busesWithUpdatedQLimits). */
+    /** OLF's GLOBAL forced-PV election keys per RL entry (ReactiveLimitsOuterLoop.switchPvPq: when every
+     *  PV bus would switch, the strongest stays PV — highest controlled-bus nominal V, then highest bus
+     *  target P, then lowest id): the nominal V, the bus's BUS_TARGET_P row (−1 = none, use staticP)
+     *  and the id rank. Installed on every batch context; the RL pass then runs the election in-kernel. */
+    public static native void setBatchRlElection(long handle, double[] nominalV, int[] pRow, double[] staticTargetP, int[] idRank);
+
     public static native void setBatchRlSvcLimits(long handle, double[] svcBmin, double[] svcBmax,
                                                   double[] v2Base);
+
+    /** {@code voltageRemoteControlRobustMode} (OLF's default): per RL entry, the initial generation
+     *  target Q a realistic-V freeze pins at, plus the two thresholds the controller's OWN voltage is
+     *  tested against ({@code minRealisticVoltage * 1.02} and {@code maxRealisticVoltage / 1.02}).
+     *  {@code robust = 0} clears the channel on a cached context. */
+    public static native void setBatchRlRobust(long handle, double[] rlInitTargetQ, double vLo, double vHi, int robust);
+
+    /** {@code AcloadFlowEngine.isStateUnrealistic} on the driver's INTERMEDIATE states: per row, 1 = a
+     *  non-fictitious bus's {@code BUS_V} at or above {@code minNominalVoltageRealisticVoltageCheck},
+     *  plus the realistic band. A scenario that ever leaves the band goes to the CPU replay.
+     *  {@code enabled = 0} clears the channel on a cached context. */
+    public static native void setBatchRealisticCheck(long handle, byte[] rowChecked, double minV, double maxV,
+                                                     int enabled, int fixingLoop);
+
+    /** OLF's own base pin kind per RL entry (0 none, 1 MIN_Q, 2 MAX_Q, 3 MIN_REALISTIC_V,
+     *  4 MAX_REALISTIC_V); null clears it on a cached context and the device falls back to its
+     *  nearest-limit guess. */
+    public static native void setBatchRlBaseLimitType(long handle, byte[] rlBaseQLimitType);
 
     public static native void setBatchRlRemote(long handle, byte[] rlRemote, int[] rlCmpVrow,
                                                int[] rmqRow, int[] rmqElem, int[] rmqSide, int[] rmqKind,
@@ -454,7 +679,8 @@ public final class GpuAcNewtonSolver {
                                                int[] dqKMember, int[] dqJMember, double[] dqMemberKey,
                                                int[] dqMemberRlEntry, int[] dqMemberGroupStart,
                                                int[] dqMemberGroupCount, int[] dqMemberRow, byte[] dqMemberHasRow,
-                                               int[] dqMemberQrGroup, double[] dqMemberTargetQ);
+                                               int[] dqMemberQrGroup, double[] dqMemberTargetQ,
+                                               int[] dqMemberTgtPtr, int[] dqMemberTgtPeer);
 
     /** Install (or clear, with nulls) the plan-B4 carrier-row suppression tables on a batch context
      *  WITHOUT the full remote-RL machinery — the JAVA hybrid's channel: OLF's own RL loop decides
@@ -468,6 +694,25 @@ public final class GpuAcNewtonSolver {
     /** Install (or clear, with nulls) per-scenario DISTR_Q weight overrides on a batch context —
      *  {@code idx} = flat {scenario, contribution} pairs, {@code w} = the renormalized weight (a gen
      *  outage at a remote-VC controller bus re-runs updateReactiveKeys on the CPU). Per-chunk state. */
+    /** {@code {slot, dqMember}} pairs: DISTR_Q controllers a scenario DEACTIVATES (their bus lost its
+     *  last voltage generator while the group survives). Context state, not a solve parameter — a
+     *  monitoring or secondary-VC re-solve on the same context must not silently drop it, which is
+     *  exactly what happened while this was a parameter: the re-solve passed null and
+     *  updateDistrQTargetsBatch recomputed the DISTR_Q target with the dead controller's key back in
+     *  the denominator, clobbering the right target with the base one. Cleared when the chunk has none. */
+    public static native void setBatchDqInactiveMembers(long handle, int[] slotMember);
+
+    /** The generators an outage REMOVES, as (scenario, DS generator slot) pairs. With the identity the
+     *  outaged bus's survivors take part in the per-generator slack water-fill like any others, instead
+     *  of the bus riding on one aggregate entry — which leaves their own P unknown to everything that
+     *  reads it, the reactive-capability curve channel above all. */
+    public static native void setBatchDsLostGenerators(long handle, int[] slotGen);
+
+    /** Rows an islanding outage froze to a flat identity state, as (scenario, row) pairs. Their targets
+     *  are not the outer loops' to write — OLF removes an islanded bus's equations, so nothing there
+     *  re-derives a target for them. */
+    public static native void setBatchFrozenRows(long handle, int[] slotRow);
+
     public static native void setBatchDqWeightOverrides(long handle, int[] idx, double[] w);
 
     /** Install (or clear, with nulls) per-scenario DISTR_RHO coefficient overrides on a batch
@@ -539,9 +784,22 @@ public final class GpuAcNewtonSolver {
                     dsPhiRow, dsFactor, dsSlackPhiRow, dsSlackTargetP,
                     dsBaseTargetP, dsMaxDelta, dsMinDelta, 0, new double[0], new double[0], 0, 0);
             try {
+                // OLF's forced-PV election keys. This one-shot entry point has no network behind it
+                // (the caller hands raw rows), so the keys are NEUTRAL: equal nominal voltage, no
+                // live target-P row, and the entry order as the id rank — which reduces the rule to
+                // OLF's last tie-break, "lowest id stays PV". A context that reaches a solve without
+                // any keys is refused, and the rule can only fire at all when every PV bus is
+                // pinnable, so this keeps the low-level entry usable without inventing a ranking.
+                int[] idRank = new int[rlVrow.length];
+                int[] pRow = new int[rlVrow.length];
+                for (int i = 0; i < idRank.length; i++) {
+                    idRank[i] = i;
+                    pRow[i] = -1;
+                }
+                setBatchRlElection(handle, new double[rlVrow.length], pRow, new double[rlVrow.length], idRank);
                 // one-shot: no per-scenario gen-override flips, so any scenario's row mode IS the base row mode
                 return solveBatchContext(handle, x0Base, targetBase, rowMode, rowMode[0], disabledElementMask,
-                        new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null,
+                        new int[0], new double[0], new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null, null, null, null, null,
                         maxIter, tol, reactiveLimitTol, slackDistTol, 0.0, 0, 0.0, 0.0, null, null, null, null, null, null, null, null, 0, 0, 0, 0, 0, null, null);
             } finally {
                 destroyBatchContext(handle);

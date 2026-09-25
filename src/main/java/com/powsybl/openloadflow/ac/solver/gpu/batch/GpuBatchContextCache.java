@@ -49,6 +49,10 @@ public final class GpuBatchContextCache {
      * ~2x faster per iter but needs ~3x more iters to converge, a net wash) — do NOT use in production.
      */
     public static final String BATCH_MODE_PROPERTY = "olf.gpu.batchMode";
+    /** 6 = the ROBUST single-matrix solve: mode 0's per-scenario loop with BTF-COLAMD ordering, global
+     *  column pivoting and matching (cuDSS single-matrix API). What the batch-of-one retries in after a
+     *  linear-solve reject: rte6515's full busbar structure does not factor in the uniform batch. */
+    public static final int MODE_ROBUST = 6;
 
     static final int AUTO_MAX_CHUNK = 4096;
 
@@ -126,6 +130,7 @@ public final class GpuBatchContextCache {
                 data.dsBaseTargetP(), data.dsMaxDelta(), data.dsMinDelta(),
                 data.dsMode(), data.dsMarginUp(), data.dsMarginDown(),
                 data.dsSlackMarginUp(), data.dsSlackMarginDown());
+        GpuBatchOuterLoopTables.installRlElection(handle, data);
         cachedContext = new CachedBatchContext(handle, data, chunkSize, mode);
         return handle;
     }

@@ -68,6 +68,14 @@ final class GpuBatchPrecomputer {
                                        List<Action> actions, boolean distributedSlack, boolean reactiveLimits,
                                        double reactiveLimitTol, double slackDistTol, double convEpsPerEq,
                                        BatchConfig config, ReportNode reportNode) {
+        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {   // the network the batch starts from
+            for (var b : net.getBuses()) {
+                for (var g : b.getGenerators()) {
+                    System.err.println("BASE_GEN " + g.getId() + " targetP=" + g.getTargetP() + " targetQ=" + g.getTargetQ()
+                            + " vc=" + b.isGeneratorVoltageControlEnabled());
+                }
+            }
+        }
         synchronized (GPU_DEVICE_LOCK) {
             return precomputeLocked(network, net, context, contingencies, strategies, actions, distributedSlack,
                     reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq, config, reportNode);
@@ -122,6 +130,14 @@ final class GpuBatchPrecomputer {
                 // section admittance): per-scenario admittance overrides, combinable with everything.
                 List<ShuntShift> shifts =
                         pc.getShuntIdsToShift().isEmpty() ? List.of() : GpuContingencyMapper.shuntShifts(net, pc);
+                // A lost static var compensator takes its stand-by automaton shunt with it (OLF's
+                // processLostGenerators), and that shunt is NOT in the propagation's shift list.
+                if (shifts != null && gens != null && !gens.isEmpty()) {
+                    List<ShuntShift> svcShifts = GpuContingencyMapper.svcStandbyShuntShifts(gens);
+                    if (!svcShifts.isEmpty()) {
+                        shifts = java.util.stream.Stream.concat(shifts.stream(), svcShifts.stream()).toList();
+                    }
+                }
                 // AC-emulation HVDC outage: the hv element's per-scenario disabled bit (the stations'
                 // injection losses ride the generator channel above); unresolvable/setpoint -> CPU.
                 List<com.powsybl.openloadflow.network.LfHvdc> hvdcs = GpuContingencyMapper.hvdcOutages(net, pc);
@@ -134,6 +150,59 @@ final class GpuBatchPrecomputer {
                             + " hvdcs=" + (hvdcs == null ? "null" : hvdcs.size())
                             + " zi=" + ziOutages.size()
                             + " sideOpens=" + (sideOpens == null ? "null" : sideOpens.size()));
+                    // Name the zero-impedance branches and their two ends. A busbar outage that opens
+                    // a COUPLER is the shape that separates the batched busbars from the CPU-routed
+                    // ones, and "zi=1" alone does not say which coupler or which buses it merged.
+                    // Each lost load as the DEVICE will apply it, next to the RAW PowerShift OLF
+                    // propagated. A busbar outage loses its loads through the propagation rather than
+                    // by naming them, and "loads=1" does not say whether the bus, the active part or
+                    // the reactive part is the one that differs.
+                    for (var ll : loads == null ? List.<LoadLoss>of() : loads) {
+                        System.err.printf("QUALIFY_TRACE   load bus=%s p=%.9f q=%.9f%n",
+                                ll.bus() == null ? "?" : ll.bus().getId(), ll.p(), ll.q());
+                    }
+                    // Each shunt shift as the DEVICE will apply it (dg/db added to the packed g/b) next to
+                    // the RAW AdmittanceShift the propagation carries and the shunt's CURRENT admittance:
+                    // "shifts=1" does not say whether the two arms remove the same susceptance.
+                    for (var sh : shifts == null ? List.<ShuntShift>of() : shifts) {
+                        System.err.printf("QUALIFY_TRACE   shunt=%s dg=%.9f db=%.9f baseG=%.9f baseB=%.9f bus=%s%n",
+                                sh.shunt().getId(), sh.dg(), sh.db(), sh.shunt().getG(), sh.shunt().getB(),
+                                "n/a");
+                    }
+                    for (var e : pc.getShuntIdsToShift().entrySet()) {
+                        System.err.printf("QUALIFY_TRACE   olfShift shunt=%s g=%.9f b=%.9f%n",
+                                e.getKey(), e.getValue().getG(), e.getValue().getB());
+                    }
+                    for (var e : pc.getLoadIdsToLose().entrySet()) {
+                        System.err.printf("QUALIFY_TRACE   olfShift load=%s active=%.9f variableActive=%.9f"
+                                + " reactive=%.9f%n", e.getKey(), e.getValue().getActive(),
+                                e.getValue().getVariableActive(), e.getValue().getReactive());
+                    }
+                    // Each SIDE-OPEN with the side and the pi-model the dangling reduction will use.
+                    // r1 != 1 or a1 != 0 means danglingCbRow takes its TRANSFORMER path, where r1^2
+                    // multiplies OLF's whole open-side-2 bracket and side-1-open uses the constant R2 —
+                    // analytically verified but, until something prints this, never known to have run.
+                    for (var so : sideOpens == null ? List.<BatchContingency.SideOpen>of() : sideOpens) {
+                        var pi = so.branch().getPiModel();
+                        var vcO = so.branch().getVoltageControl();
+                        System.err.printf("QUALIFY_TRACE   sideOpen %s side=%d r1=%.9f a1=%.9f y=%.6e ksi=%.6e"
+                                        + " vcCtl=%b vc=%s members=%d%n",
+                                so.branch().getId(), so.side(), pi.getR1(), pi.getA1(), pi.getY(), pi.getKsi(),
+                                so.branch().isVoltageController(),
+                                vcO.map(vc -> vc.getControlledBus().getId()).orElse("-"),
+                                vcO.map(vc -> vc.getMergedControllerElements().size()).orElse(0));
+                    }
+                    for (var zi : ziOutages) {
+                        LfBranch br = net.getBranchById(zi.toString());
+                        if (br == null) {
+                            System.err.println("QUALIFY_TRACE   zi " + zi);
+                        } else {
+                            System.err.printf("QUALIFY_TRACE   zi %s: b1=%s b2=%s spanningTree=%b%n", br.getId(),
+                                    br.getBus1() == null ? "?" : br.getBus1().getId(),
+                                    br.getBus2() == null ? "?" : br.getBus2().getId(),
+                                    br.isSpanningTreeEdge(com.powsybl.openloadflow.network.LoadFlowModel.AC));
+                        }
+                    }
                 }
                 if (branches != null && gens != null && loads != null && shifts != null && hvdcs != null && sideOpens != null
                         && (!branches.isEmpty() || !gens.isEmpty() || !loads.isEmpty() || !shifts.isEmpty()
@@ -172,8 +241,15 @@ final class GpuBatchPrecomputer {
                 if (shunt != null) {
                     batch.add(BatchContingency.shunt(pc.getContingency().getId(), shunt));
                 } else {
-                    GpuBatchScopeCensus.record(composeRejectReason(branches, gens, loads, shifts, hvdcs, sideOpens,
-                            loadsBatchable));
+                    String rejectReason = composeRejectReason(branches, gens, loads, shifts, hvdcs, sideOpens,
+                            loadsBatchable);
+                    GpuBatchScopeCensus.record(rejectReason);
+                    if (System.getenv("OLF_GPU_REJECT_TRACE") != null) {
+                        // the census counts these by KIND; the id is what lets a scope report say
+                        // whether a non-batched contingency is one OLF itself does not answer
+                        System.err.println("GPU_REJECT_CTG ctg=" + pc.getContingency().getId()
+                                + " reason=" + rejectReason);
+                    }
                 }
             }
             if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
@@ -189,6 +265,26 @@ final class GpuBatchPrecomputer {
             // self-consistent with the plain mapper below — a base-open branch simply maps to no
             // element and falls back to the host scan.
             GpuAcData screenData = GpuAcDataCache.extract(net, es, distributedSlack, reactiveLimits, config.dsParams());
+            // OLF_GPU_DS_BUSMAP=<file>: DS-pack index -> bus id, written at BASE state. The chunk
+            // solver dumps the distributed power per DS index (GPU_DS_TARGET) but has no network
+            // handle to name the bus; OLF's own side (OLF_DS_SPLIT) is keyed by bus id. This map is
+            // what joins the two, which is the only way to compare the SPLIT rather than the total.
+            String dsBusMap = System.getenv("OLF_GPU_DS_BUSMAP");
+            if (dsBusMap != null && screenData != null && screenData.dsPhiRow() != null) {
+                java.util.Map<Integer, String> busByPhiRow = new java.util.HashMap<>();
+                for (var b : net.getBuses()) {
+                    var v = es.getVariableSet().getVariable(b.getNum(), AcVariableType.BUS_PHI);
+                    if (v != null && v.getRow() >= 0) {
+                        busByPhiRow.put(v.getRow(), b.getId());
+                    }
+                }
+                try (java.io.PrintWriter w = new java.io.PrintWriter(new java.io.FileWriter(dsBusMap))) {
+                    int[] rows = screenData.dsPhiRow();
+                    for (int i = 0; i < rows.length; i++) {
+                        w.printf("%d %s%n", i, busByPhiRow.getOrDefault(rows[i], "?row" + rows[i]));
+                    }
+                }
+            }
             GpuBatchElementMapper screenMapper = new GpuBatchElementMapper(net);
 
             List<BatchScenarioResult> results = config.outerLoopMode() == OuterLoopMode.JAVA
@@ -201,6 +297,9 @@ final class GpuBatchPrecomputer {
                             reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
             Map<String, double[]> states = new HashMap<>();
             Map<String, int[]> islandedBuses = new HashMap<>();
+            java.util.Set<String> exhausted = new java.util.HashSet<>();
+            Map<String, Double> preDistributed = new HashMap<>();
+            Map<String, Double> distributed = new HashMap<>();
             for (BatchScenarioResult r : results) {
                 if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                     System.err.println("QUALIFY_TRACE result " + r.contingencyId() + " status=" + r.convergenceStatus()
@@ -208,25 +307,70 @@ final class GpuBatchPrecomputer {
                 }
                 if (r.hasConverged()) {
                     states.put(r.contingencyId(), r.state());
+                    recordDistributed(r, preDistributed, distributed);
                     if (r.islandedBusNums().length > 0) {
                         islandedBuses.put(r.contingencyId(), r.islandedBusNums());
                     }
+                } else if (r.convergenceStatus() == com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STATUS_MAX_ITERATION
+                        && r.contingencyId().indexOf(com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STRATEGY_KEY_SEP) < 0) {
+                    // The device ran OLF's full Newton budget (deviceSolverParameters carries the
+                    // run's maxIterations) and the scenario did not converge: that IS the answer OLF
+                    // gives - MAX_ITERATION_REACHED, no network result - so it is reported from here
+                    // rather than replayed. Measured on rte6515's 500 busbar sections with the
+                    // straggler exit off: the device's exhausted set is exactly the CPU's five
+                    // MAX_ITERATION_REACHED sections. Strategy pairs keep the replay.
+                    exhausted.add(r.contingencyId());
+                    // OLF reports on a MAX_ITERATION_REACHED result what its slack distribution placed before
+                    // giving up (AbstractSecurityAnalysis adds the load flow's own distributed power to the loss
+                    // pre-distribution whatever the status), so the device's total is carried for these too.
+                    recordDistributed(r, preDistributed, distributed);
+                    GpuBatchScopeCensus.record("DEVICE:MAX_ITERATION_REACHED");
                 } else {
                     GpuBatchScopeCensus.record("RUNTIME:status=" + r.convergenceStatus());
+                    if (System.getenv("OLF_GPU_REJECT_TRACE") != null) {
+                        // pairs with the kernel's GPU_REJECT slot= reason= lines (same switch)
+                        System.err.println("GPU_REJECT_CTG ctg=" + r.contingencyId() + " status=" + r.convergenceStatus());
+                    }
                 }
             }
             Map<Variable<AcVariableType>, Integer> baseVariableRows = new HashMap<>();
+            // OLF_GPU_NAME_ROW=<n>[,<n>]: which element does a DEVICE row belong to? The device
+            // numbers its rows by OLF's own variable row (this map is the identity), so a row index
+            // printed by OLF_GPU_WORST_ROW or OLF_GPU_PROBE_ROWS can be turned back into an element
+            // here and nowhere else — `getEquationAtColumn` resolves against an activation-dependent
+            // index and has named the wrong element three times.
+            java.util.Set<Integer> nameRows = new java.util.HashSet<>();
+            boolean nameAll = "all".equals(System.getenv("OLF_GPU_NAME_ROW"));
+            if (System.getenv("OLF_GPU_NAME_ROW") != null && !nameAll) {
+                for (String t : System.getenv("OLF_GPU_NAME_ROW").split(",")) {
+                    nameRows.add(Integer.parseInt(t.trim()));
+                }
+            }
             for (var v : es.getIndex().getSortedVariablesToFind()) {
                 baseVariableRows.put(v, v.getRow());
+                if (nameAll || nameRows.contains(v.getRow())) {
+                    var el = net.getElement(v.getType().getElementType(), v.getElementNum());
+                    System.err.printf("NAME_ROW %d: var=%s elementNum=%d id=%s%n",
+                            v.getRow(), v.getType(), v.getElementNum(), el == null ? "?" : el.getId());
+                }
             }
             LOGGER.info("GPU batched SA: precomputed {} of {} branch (N-1..N-k) contingencies on the device",
                     states.size(), batch.size());
 
-            return new PrecomputedBatch(states, islandedBuses, baseVariableRows, es, screenData, screenMapper);
+            return new PrecomputedBatch(states, islandedBuses, exhausted, baseVariableRows, es, screenData, screenMapper,
+                    preDistributed, distributed);
         } catch (Exception e) {
             // full stack at WARN: a swallowed exception here silently un-accelerates the whole run —
             // the 2026-09-06 bridge AIOOBE hid behind the message-only log for days
             LOGGER.warn("GPU batched SA precompute failed; falling back to per-contingency CPU solves", e);
+            // ...and ONE LINE on stderr unconditionally. This failure silently un-accelerates the
+            // WHOLE run - every contingency reverts to a CPU solve and the only outward sign is a
+            // precomputed count of -1 - and it has now hidden twice behind a log nobody saw: the
+            // 2026-09-06 bridge AIOOBE, and again at 6876 busbar sections where the run reported
+            // matching statuses and a zero violation diff that were vacuous because NOTHING ran on
+            // the device. The test harness's logback appenders are broken (core/classic version
+            // mismatch), so the WARN above does not reach anyone here.
+            System.err.println("GPU_PRECOMPUTE_FAILED " + e);
             if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                 e.printStackTrace();                         // the test harness's logback appenders are broken
             }                                                // (core/classic version mismatch) — surface it here
@@ -285,4 +429,14 @@ final class GpuBatchPrecomputer {
         return nrp;
     }
 
+    /** The device's own loss pre-distribution and distributed total for a scenario, where it reported them. */
+    private static void recordDistributed(BatchScenarioResult r, Map<String, Double> preDistributed,
+                                          Map<String, Double> distributed) {
+        if (!Double.isNaN(r.preDistributedActivePower())) {
+            preDistributed.put(r.contingencyId(), r.preDistributedActivePower());
+        }
+        if (!Double.isNaN(r.distributedActivePower())) {
+            distributed.put(r.contingencyId(), r.distributedActivePower());
+        }
+    }
 }

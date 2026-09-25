@@ -20,19 +20,30 @@ import java.util.Map;
  * ({@code states}), the islanded LfBus nums to exclude from each scenario's results
  * ({@code islandedBuses}), the BASE variable-row snapshot the injection remaps through
  * ({@code baseVariableRows}), and the engine's equation system the states were solved against
- * ({@code equationSystem} — {@code null} when nothing was precomputed, the CPU-fallback signal).
+ * ({@code equationSystem} — {@code null} when nothing was precomputed, the CPU-fallback signal), and
+ * per converged scenario id the contingency loss pre-distribution the batch replayed
+ * ({@code preDistributedActivePower}, pu — absent where it was not replayed) and the total the device distributed
+ * ({@code distributedActivePower}, pu — pre-distribution plus its own distributed-slack passes; absent where unknown).
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
 record PrecomputedBatch(Map<String, double[]> states, Map<String, int[]> islandedBuses,
+                        /** Contingencies the device carried through the whole Newton budget without
+                         *  converging: reported as MAX_ITERATION_REACHED with an empty network result,
+                         *  exactly what OLF's own post-contingency path reports (it builds the network
+                         *  result and detects violations only for CONVERGED). A REJECTED scenario
+                         *  (status -2: an extractor gate or the straggler exit) is not in here and
+                         *  still replays on the CPU. */
+                        java.util.Set<String> exhausted,
                         Map<Variable<AcVariableType>, Integer> baseVariableRows,
                         EquationSystem<AcVariableType, AcEquationType> equationSystem,
                         com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData gpuData,
-                        com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper elementMapper) {
+                        com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchElementMapper elementMapper,
+                        Map<String, Double> preDistributedActivePower, Map<String, Double> distributedActivePower) {
 
     /** Nothing precomputed — every contingency falls back to the sequential CPU path. */
     static PrecomputedBatch empty() {
-        return new PrecomputedBatch(Map.of(), Map.of(), Map.of(), null, null, null);
+        return new PrecomputedBatch(Map.of(), Map.of(), java.util.Set.of(), Map.of(), null, null, null, Map.of(), Map.of());
     }
 
     /** True when the batch precompute reached the device solve (an equation system is captured). */

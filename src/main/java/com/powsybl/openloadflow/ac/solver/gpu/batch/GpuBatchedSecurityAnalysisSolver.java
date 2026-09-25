@@ -329,12 +329,15 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         config.rlCurveExtrapolate())
                 : null;
         int[] curvePRows = rlCurves != null
-                ? java.util.stream.IntStream.range(0, rlCurves.cvIdx().length / 4)
-                        .map(g -> rlCurves.cvIdx()[g * 4 + 1]).toArray()
+                ? java.util.stream.IntStream.range(0, rlCurves.cvIdx().length / 5)
+                        .map(g -> rlCurves.cvIdx()[g * 5 + 1]).toArray()
                 : null;
+        // Couplers whose DUMMY rows host a bus's power equations under the tree relocation: an island has to
+        // freeze those rows too (see GpuBatchQualification.islandedFrozen). Empty when the relocation is off.
+        Set<LfBranch> relocatedCouplers = GpuAcOuterLoopPacks.relocatedCouplerBranches(network, equationSystem);
         GpuBatchQualification.ScenarioPlan plan = GpuBatchQualification.planScenarios(contingencies, qualifications,
                 elementMapper, gpuData, equationSystem, dsSum, slackParticipates, dsParams, distrRhoControllers,
-                curvePRows);
+                relocatedCouplers, curvePRows);
         List<Integer> batchedIndices = plan.batchedIndices();
         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
             System.err.println("PLAN batched=" + batchedIndices.size() + " of " + contingencies.size());
@@ -350,6 +353,12 @@ public final class GpuBatchedSecurityAnalysisSolver {
         // Solve the qualified scenarios on the GPU, in chunks bounded by the device-memory budget (the
         // uniform batched factorization holds an LU per scenario, so the footprint scales with the chunk).
         double[][] resultsByIndex = new double[contingencies.size()][];
+        // The replayed contingency loss pre-distribution per contingency (pu); NaN where none was replayed.
+        double[] preDistributedByIndex = new double[contingencies.size()];
+        java.util.Arrays.fill(preDistributedByIndex, Double.NaN);
+        // What the device distributed in all (pre-distribution + its own distributed-slack passes, pu); NaN = unknown.
+        double[] distributedByIndex = new double[contingencies.size()];
+        java.util.Arrays.fill(distributedByIndex, Double.NaN);
         if (!batchedIndices.isEmpty()) {
             // PER_EQUATION_TYPE stopping criterion: per-row thresholds from the equation system's
             // variable pairing (null under UNIFORM_CRITERIA — the chunk solver then CLEARS the cached
@@ -360,53 +369,39 @@ public final class GpuBatchedSecurityAnalysisSolver {
                             config.perEqCriteria().angle(), config.perEqCriteria().ratio(), config.perEqCriteria().b(),
                             config.perEqCriteria().eps())
                     : null;
-            GpuBatchChunkSolver.solveQualifiedInChunks(batchedIndices, contingencies, elementMapper, gpuData, baseState,
-                    baseTargets, baseActivation.rowMode(), plan.frozenRowsByIndex(), plan.frozenTargetsByIndex(), plan.genOutagesByIndex(),
-                    plan.activePowerLossByIndex(),
-                    GpuBatchHvdcAcEmulation.elementIndices(network, nElements), rowCriteria, rlCurves,
-                    plan.dqOvContribByIndex(), plan.dqOvWByIndex(),
-                    plan.drOvContribByIndex(), plan.drOvCByIndex(), plan.islandedDsByIndex(),
-                    plan.islandedRlByIndex(), plan.islandedHvdcsByIndex(),
-                    n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
-                    config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
-                    config.transformerControl() || config.simpleTransformerControl()
-                            ? GpuBatchTransformerControl.buildTransformerControllers(network, equationSystem, targetVector, baseActivation,
-                                    baseTargets, elementMapper, config.tvcUseInitialTapPosition())
-                            : null,
-                    config.incrementalTransformerControl()
-                            ? GpuBatchIncrementalTvc.buildControllers(network, equationSystem, elementMapper)
-                            : null,
-                    config.incrementalShuntControl()
-                            ? GpuBatchIncrementalShuntVc.buildControllers(network, equationSystem, elementMapper,
-                                    elementMapper.getClosedBranchCount() + elementMapper.getOpenBranchCount())
-                            : null,
-                    config.simpleShuntControl()
-                            ? GpuBatchSimpleShuntVc.buildGroups(network, equationSystem, targetVector, baseActivation,
-                                    baseTargets, elementMapper,
-                                    elementMapper.getClosedBranchCount() + elementMapper.getOpenBranchCount())
-                            : null,
-                    config.incrementalRpcControl() || config.incrementalPhaseControl()
-                            ? GpuBatchIncrementalFlowControl.buildControllers(network, equationSystem, elementMapper,
-                                    config.incTvcMaxTapShift(), config.incrementalRpcControl(), config.incrementalPhaseControl())
-                            : null,
-                    new GpuBatchIncrementalFlowControl.EsContext(equationSystem.getStateVector(), n),
-                    config.hvdcFreezing() || config.hvdcLimits()
-                            ? GpuBatchHvdcAcEmulation.buildControllers(network, equationSystem, nElements)
-                            : null,
-                    config.secondaryVoltageControl()
-                            ? GpuBatchSecondaryVc.build(network, equationSystem, gpuData.rlVrow(),
-                                    new GpuBatchIncrementalFlowControl.EsContext(equationSystem.getStateVector(), n),
-                                    config.minPlausibleTargetV(), config.maxPlausibleTargetV())
-                            : null,
-                    config.voltageMonitoring()
-                            ? GpuBatchVoltageMonitoring.buildControllers(network, equationSystem, targetVector,
-                                    baseActivation, baseTargets, gpuData.rlVrow())
-                            : null,
-                    config.continuousPhaseControl()
-                            ? GpuBatchContinuousPhase.buildControllers(network, equationSystem, targetVector,
-                                    baseActivation, baseTargets, elementMapper)
-                            : null,
-                    config);
+            // Every phase's tables, built by the SAME function the base load flow calls (#58): a phase
+            // added there reaches both routes or neither.
+            GpuBatchPhases.Built phases = GpuBatchPhases.build(new GpuBatchPhases.Request(
+                    config.voltageMonitoring(),
+                    config.incrementalTransformerControl(),
+                    config.incrementalShuntControl(),
+                    config.simpleShuntControl(),
+                    config.incrementalRpcControl(), config.incrementalPhaseControl(), config.incTvcMaxTapShift(),
+                    config.continuousPhaseControl(),
+                    config.transformerControl() || config.simpleTransformerControl(),
+                    config.tvcUseInitialTapPosition(), config.genVcMinNominalV(),
+                    config.secondaryVoltageControl(), config.minPlausibleTargetV(), config.maxPlausibleTargetV()),
+                    network, equationSystem, targetVector, baseActivation, baseTargets,
+                    gpuData.rlVrow(), gpuData.rlBusNum(), n);
+            // All-or-nothing, the same rule the base load flow applies: a loop the builders represented
+            // only PARTIALLY would have the device drive a SUBSET of it, and this path has no host-pause
+            // slot to hand it back to, so the whole run goes to the CPU (resultsByIndex stays null).
+            if (GpuBatchPhaseOwnership.batchable()) {
+                GpuBatchChunkSolver.solveQualifiedInChunks(batchedIndices, contingencies, elementMapper, gpuData, baseState,
+                        baseTargets, baseActivation.rowMode(), plan.frozenRowsByIndex(), plan.frozenTargetsByIndex(), plan.genOutagesByIndex(),
+                        plan.activePowerLossByIndex(),
+                        GpuBatchHvdcAcEmulation.elementIndices(network, nElements), rowCriteria, rlCurves,
+                        plan.dqOvContribByIndex(), plan.dqOvWByIndex(),
+                        plan.drOvContribByIndex(), plan.drOvCByIndex(), plan.islandedDsByIndex(),
+                        plan.islandedRlByIndex(), plan.islandedHvdcsByIndex(),
+                        n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
+                        preDistributedByIndex, distributedByIndex, config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
+                        phases,
+                        config.hvdcFreezing() || config.hvdcLimits()
+                                ? GpuBatchHvdcAcEmulation.buildControllers(network, equationSystem, nElements)
+                                : null,
+                        config);
+            }
         }
 
         // Assemble results in the original contingency order: batched scenarios carry their
@@ -415,13 +410,13 @@ public final class GpuBatchedSecurityAnalysisSolver {
         for (int i = 0; i < contingencies.size(); i++) {
             String id = contingencies.get(i).contingencyId();
             double[] result = resultsByIndex[i];
-            if (result != null) {
-                double[] state = new double[n];
-                System.arraycopy(result, 0, state, 0, n);
-                results.add(new BatchScenarioResult(id, state, (int) result[n], result[n + 1], (int) result[n + 2],
-                        plan.islandedNumsByIndex()[i] != null ? plan.islandedNumsByIndex()[i] : new int[0]));
+            if (result != null) {                          // the state is the result row's first n entries
+                results.add(new BatchScenarioResult(id, result, (int) result[n], result[n + 1], (int) result[n + 2],
+                        plan.islandedNumsByIndex()[i] != null ? plan.islandedNumsByIndex()[i] : new int[0],
+                        preDistributedByIndex[i], distributedByIndex[i]));
             } else {
-                results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, GpuBatchStatus.STATUS_REJECTED, new int[0]));
+                results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, GpuBatchStatus.STATUS_REJECTED, new int[0],
+                        Double.NaN, Double.NaN));
             }
         }
         return results;

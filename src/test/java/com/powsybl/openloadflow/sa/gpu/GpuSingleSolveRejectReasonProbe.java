@@ -90,6 +90,15 @@ class GpuSingleSolveRejectReasonProbe {
         return v;
     }
 
+    @org.junit.jupiter.api.AfterEach
+    void restoreFallbackProperty() {
+        // The probe's "fail loudly" setting must not leak into the classes surefire runs after it in
+        // the same JVM: with it, any later base solve the device rejects (a remote member pinned at
+        // base → row mode 4) turns into a whole-run failure instead of the CPU fallback those tests
+        // expect ("the batch must ENGAGE" on 11 remote-member tests, order-dependent).
+        System.clearProperty(GpuNewtonRaphson.CPU_FALLBACK_PROPERTY);
+    }
+
     @Test
     void probe() throws Exception {
         System.setProperty(GpuNewtonRaphson.CPU_FALLBACK_PROPERTY, "false"); // ON DEVICE or throw

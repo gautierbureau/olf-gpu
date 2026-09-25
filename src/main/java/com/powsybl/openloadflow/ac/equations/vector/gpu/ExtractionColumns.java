@@ -10,8 +10,10 @@ package com.powsybl.openloadflow.ac.equations.vector.gpu;
 import com.powsybl.openloadflow.ac.equations.AcEquationType;
 import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.equations.EquationSystem;
+import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.LoadFlowModel;
 import com.powsybl.openloadflow.network.VoltageControl;
 
 import java.util.ArrayList;
@@ -30,7 +32,13 @@ import java.util.List;
  */
 record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] branchAlphaCol,
                          int[] dummyPCol, int[] dummyQCol, int[] shuntBCol, int[] qRow, int[] qRowAlt,
-                         int[] qrPtr, int[] qrRows) {
+                         int[] qrPtr, int[] qrRows, int[] qrGroupOfPilot, int[] ziDeadEnd,
+                         /** Each bus's P-balance ROW: its own BUS_PHI column, or its parent coupler's DUMMY_P under
+                          *  the coupler-tree relocation (GpuAcRowIndexing#ziTreeRelocation). */
+                         int[] pRow,
+                         /** Per bus, the coupler whose dummy columns host its power equations (-1 = root/none), and
+                          *  per branch, the bus whose PHI/V host its zero equations (-1 = not relocated). */
+                         int[] ziParentEdge, int[] ziChildBus) {
 
     static ExtractionColumns of(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es) {
         // Cache each bus's BUS_PHI/BUS_V column once: a bus appears in several branches (degree ~3),
@@ -115,8 +123,18 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             // A pilot that is ALSO one of its controllers has NO Q balance of its own to relocate —
             // its q feeds the group's DISTR_Q rows instead (GpuAcRowIndexing.distrQRow), and leaving
             // it in this table double-counted that q on top of the DISTR_Q terms.
+            // ...but only WHILE IT CONTROLS. Once a reactive limit PINS such a pilot, OLF activates its
+            // BUS_TARGET_Q, which needs a row, and its own row still carries BUS_TARGET_V because a sibling
+            // controller keeps the voltage — so the group DOES need the table, with the pilot's raw-q
+            // emission GATED on it being pinned (psPilotPinned in olf_gpu_nr_jni.cu). Property-gated while
+            // this lands; without it such a group keeps a relocation frozen at extraction, which is what
+            // leaves rte6515's busbar base rank-deficient.
+            boolean pilotSelf = gvc != null && gvc.getMergedControllerElements().contains(bus);
+            boolean pilotSelfRotates = pilotSelf && GpuAcRowIndexing.pilotSelfRotationEnabled()
+                    && gvc.getMergedControllerElements().size() >= 2;
+            boolean pilotSelfExcluded = pilotSelf && !pilotSelfRotates;
             if (gvc == null || gvc.getMergedControllerElements().isEmpty() || vCol[bus.getNum()] < 0
-                    || gvc.getMergedControllerElements().contains(bus)) {
+                    || pilotSelfExcluded) {
                 continue;
             }
             List<Integer> memberRows = new ArrayList<>();
@@ -137,6 +155,11 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             qrRows.addAll(memberRows);
             qRowAlt[bus.getNum()] = -2 - g;
             qrPilotBuses.add(bus.getNum());
+            if (pilotSelf && System.getenv("OLF_GPU_RL_TRACE") != null) {
+                System.err.println("PILOTSELF_ENROL group=" + g + " pilot=" + bus.getId()
+                        + " members=" + gvc.getMergedControllerElements().size()
+                        + " fallbackRow=" + vCol[bus.getNum()]);
+            }
         }
         qrPtr.add(qrRows.size());
 
@@ -161,8 +184,76 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                 qRowAlt[bn] = vCol[bn];
             }
         }
+        // A pilot that is ALSO one of its own controllers. computeQRow already suppressed its per-bus
+        // Q scatter (qRow = -1 — its reactive injection feeds the group's DISTR_Q rows), and its own
+        // comment names the move that is missing: "if the controller is switched to PQ by reactive
+        // limits, BUS_TARGET_Q becomes active again and the bus must recover its own BUS_V-backed Q
+        // row". That recovery is the member ALTERNATE dest + row mode 4, which this bus never got
+        // because isRemoteGenVcMember is defined as controlledBus != bus and so excludes a pilot by
+        // construction. Give it the alternate; without one, a row put in mode 4 assembles EMPTY (no q
+        // contributions were ever routed to it), which is measurably a no-op: on rte6515 GEN-1522 the
+        // solve was unchanged to 10 digits and the answer stayed 3.2 kV out.
+        // INERT IN THE BASE: the alternate is read only when the row is mode 4, and while the pilot
+        // controls, its row is a mode-0 BUS_TARGET_V identity.
+        for (LfBus bus : network.getBuses()) {
+            int bn = bus.getNum();
+            if (vCol[bn] >= 0 && qRow[bn] < 0 && qRowAlt[bn] < 0
+                    && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
+                    && bus.getGeneratorVoltageControl()
+                            .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                            .map(c -> c.getControlledBus() == bus).orElse(false)) {
+                qRowAlt[bn] = vCol[bn];
+            }
+        }
+        // Which relocation group a pilot OWNS, as its own channel. qRowAlt = -2-g has always meant two
+        // separate things at once: "route this pilot's Q through the relocation carrier" AND "this
+        // pilot has a candidate table". Consumers that want only the second (the member -> group link
+        // that gates the gen-VC kernels) had to decode the first, which makes it impossible to give a
+        // group a table WITHOUT also re-routing its Q — exactly what a pilot that is one of its own
+        // controllers needs, since its q already feeds the group's DISTR_Q rows. Derived here from the
+        // final qRowAlt, so this commit is bit-identical to the decode it replaces.
+        int[] qrGroupOfPilot = new int[nBuses];
+        java.util.Arrays.fill(qrGroupOfPilot, -1);
+        for (int b = 0; b < nBuses; b++) {
+            if (qRowAlt[b] <= -2) {
+                qrGroupOfPilot[b] = -2 - qRowAlt[b];
+            }
+        }
+        // Per zero-impedance branch, which side is a DEAD-END STUB safe to relocate (0 = none):
+        // GpuAcRowIndexing#ziDeadEndSide. GpuAcActivationExtractor derives the same answer from the
+        // same helper, so the scatter destinations and the target map name the same rows.
+        int[] ziDeadEnd = new int[nBranches];
+        for (LfBranch br : network.getBranches()) {
+            if (br.isZeroImpedance(LoadFlowModel.AC)) {
+                ziDeadEnd[br.getNum()] = GpuAcRowIndexing.ziDeadEndSide(es, br, phiCol, vCol, qRow);
+            }
+        }
+        // The coupler-tree relocation: a child bus's power equations move onto its parent coupler's dummy columns,
+        // so every row of a coupler chain keeps a structurally non-zero diagonal.
+        int[][] ziTree = GpuAcRowIndexing.ziTreeRelocation(network, es, phiCol, vCol, qRow, dummyPCol, dummyQCol);
+        int[] ziParentEdge = ziTree[0];
+        int[] ziChildBus = ziTree[1];
+        int[] pRow = phiCol.clone();
+        for (LfBus bus : network.getBuses()) {
+            int bn = bus.getNum();
+            int parent = ziParentEdge[bn];
+            if (parent < 0) {
+                continue;
+            }
+            pRow[bn] = dummyPCol[parent];
+            if (qRow[bn] == vCol[bn]) {                       // a DISTR_Q child moves through distrQRow instead
+                qRow[bn] = dummyQCol[parent];
+            }
+        }
+        for (int br = 0; br < nBranches; br++) {
+            int child = ziChildBus[br];
+            if (child >= 0 && ziParentEdge[child] != br) {
+                ziChildBus[br] = -1;                          // its child's relocation did not survive the check
+            }
+        }
         return new ExtractionColumns(phiCol, vCol, branchRhoCol, branchAlphaCol, dummyPCol, dummyQCol, shuntBCol, qRow, qRowAlt,
-                GpuAcArrays.toIntArray(qrPtr), GpuAcArrays.toIntArray(qrRows));
+                GpuAcArrays.toIntArray(qrPtr), GpuAcArrays.toIntArray(qrRows), qrGroupOfPilot, ziDeadEnd,
+                pRow, ziParentEdge, ziChildBus);
     }
 
 }

@@ -84,6 +84,72 @@ class GpuLimitTableTest {
         assertFalse(describe(table).contains("NHV1_NHV2_1"), "a disabled branch reports no violation");
     }
 
+    /**
+     * A branch whose side a contingency opened is evaluated by the screen in the BASE topology, closed — so its
+     * candidates can be wrong both ways. Too high and the group's cut stops at a limit the host re-test rejects,
+     * hiding the lower limit the stock detection reports (rte6515 BUS-1601_BBS: LINE-2771-1601 lost its 47.6 MVA
+     * apparent-power violation). The scanner must therefore ignore such a branch's candidates and scan it in full,
+     * in place. Here the screen result is forged to what an over-estimating device emits: only each group's highest
+     * limit, which the true flow does not reach.
+     */
+    @Test
+    void scansASideOpenedBranchInFullInsteadOfTrustingItsCandidates() {
+        Network iidm = EurostagTutorialExample1Factory.createWithFixedCurrentLimits();
+        // temporary limits ABOVE the ~1048 A flow the outage leaves on side TWO: the violation stays the permanent
+        // one, and a candidate at the 1' limit is one the host re-test rejects
+        iidm.getLine("NHV1_NHV2_2").getOrCreateSelectedOperationalLimitsGroup2().newCurrentLimits()
+                .setPermanentLimit(500)
+                .beginTemporaryLimit().setName("20'").setAcceptableDuration(1200).setValue(1100).endTemporaryLimit()
+                .beginTemporaryLimit().setName("1'").setAcceptableDuration(60).setValue(1500).endTemporaryLimit()
+                .add();
+        LoadFlowParameters lfp = new LoadFlowParameters();
+        OpenLoadFlowParameters olfp = OpenLoadFlowParameters.create(lfp);
+        AcLoadFlowParameters acp = OpenLoadFlowParameters.createAcParameters(iidm, lfp, olfp,
+                new SparseMatrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>(), false, false);
+        LfNetwork network = LfNetwork.load(iidm, new LfNetworkLoaderImpl(), acp.getNetworkParameters(), ReportNode.NO_OP).get(0);
+        network.getBranchById("NHV1_NHV2_1").setDisabled(true);
+        new AcloadFlowEngine(new AcLoadFlowContext(network, acp)).run();
+        List<LimitViolation> stock = detectStock(network);
+        assertFalse(stock.isEmpty(), "the surviving line should be overloaded once its parallel line is out");
+
+        GpuLimitTable table = GpuLimitTable.build(network, LimitReductionManager.create(List.of()));
+        int b = -1;
+        for (int k = 0; k < table.branches().length; k++) {
+            if (table.branches()[k].getId().equals("NHV1_NHV2_2")) {
+                b = k;
+            }
+        }
+        // every group of the overloaded branch emits only its highest-threshold limit: what a device reading the
+        // branch far above every limit sends once the cut stops the group there
+        java.util.List<Integer> forged = new java.util.ArrayList<>();
+        for (int g = table.groupStart(b); g < table.groupEnd(b); g++) {
+            int highest = -1;
+            for (int l = table.limitStart(g); l < table.limitEnd(g); l++) {
+                if (highest < 0 || table.threshold(l) > table.threshold(highest)) {
+                    highest = l;
+                }
+            }
+            if (highest >= 0) {
+                forged.add(highest);
+            }
+        }
+        int[] candidates = forged.stream().mapToInt(Integer::intValue).toArray();
+        java.util.BitSet sideOpened = new java.util.BitSet();
+        sideOpened.set(b);
+
+        var trusted = new LimitViolationManager(List.of());
+        new GpuLimitScanner(table).detectFromCandidates(network, trusted, candidates, null, new int[0], null);
+        var scanned = new LimitViolationManager(List.of());
+        new GpuLimitScanner(table).detectFromCandidates(network, scanned, candidates, null, new int[0], sideOpened);
+
+        // the forged list carries no bus record, so only the branch is compared
+        String stockBranch = describe(stock.stream().filter(v -> v.getSubjectId().equals("NHV1_NHV2_2")).toList());
+        assertFalse(stockBranch.isEmpty());
+        assertFalse(stockBranch.equals(describe(trusted.getLimitViolations())),
+                "the forged candidates must actually lose a violation, or this test proves nothing");
+        assertEquals(stockBranch, describe(scanned.getLimitViolations()));
+    }
+
     private static List<LimitViolation> detectStock(LfNetwork network) {
         var manager = new LimitViolationManager(List.of());
         manager.detectViolations(network);

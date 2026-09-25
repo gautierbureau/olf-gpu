@@ -48,7 +48,7 @@ import java.util.List;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-final class GpuBatchSimpleShuntVc {
+public final class GpuBatchSimpleShuntVc {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchSimpleShuntVc.class);
 
@@ -56,18 +56,19 @@ final class GpuBatchSimpleShuntVc {
     }
 
     /** One controller shunt of a group: its SHUNT_B row and per-section tables (dispatch targets). */
-    record Member(int bRow, List<GpuBatchIncrementalShuntVc.Sub> subs, int shOvElem, int elemIndexAbs) {
+    public record Member(int bRow, List<GpuBatchIncrementalShuntVc.Sub> subs, int shOvElem, int elemIndexAbs, int shuntNum) {
     }
 
     /** One controlled bus's shunt VC group: the toggle-diff VC-ON activation + its member shunts. */
-    record Group(int[] deltaRows, int[] deltaModesOn, double[] deltaTargetsOn, List<Member> members) {
+    public record Group(int[] deltaRows, int[] deltaModesOn, double[] deltaTargetsOn, List<Member> members,
+                 int[] deltaModesOff, double[] deltaTargetsOff) {
     }
 
     /** Build the groups by TOGGLING each controlled bus's merged controller shunts on the shared
      *  equation system and diffing the activation — the ON recipe is exactly what the engine itself
      *  would produce (same pattern as {@code GpuBatchTransformerControl.buildTransformerControllers}).
      *  The network is restored before returning. */
-    static List<Group> buildGroups(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    public static List<Group> buildGroups(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                    TargetVector<AcVariableType, AcEquationType> targetVector,
                                    GpuAcActivation baseActivation, double[] baseTargets,
                                    GpuBatchElementMapper elementMapper, int shPackOffset) {
@@ -92,7 +93,8 @@ final class GpuBatchSimpleShuntVc {
             boolean representable = !memberShunts.isEmpty()
                     && memberShunts.stream().allMatch(sh -> shuntBRows.get(sh.getNum()) != null);
             if (!representable) {
-                LOGGER.info("Shunt voltage control of {} not representable on the GPU batch — skipped "
+                GpuBatchSkips.record(GpuBatchSkips.Slot.SHUNT, LOGGER,
+                        "Shunt voltage control of {} not representable on the GPU batch — skipped "
                         + "(results follow the base sections)", controlled.getId());
                 continue;
             }
@@ -117,7 +119,7 @@ final class GpuBatchSimpleShuntVc {
                     ok = false;
                     break;
                 }
-                members.add(new Member(shuntBRows.get(sh.getNum()), subs, elemIndex - shPackOffset, elemIndex));
+                members.add(new Member(shuntBRows.get(sh.getNum()), subs, elemIndex - shPackOffset, elemIndex, sh.getNum()));
             }
             if (!ok) {
                 continue;
@@ -125,6 +127,11 @@ final class GpuBatchSimpleShuntVc {
             boolean[] wasEnabled = new boolean[memberShunts.size()];
             for (int m = 0; m < memberShunts.size(); m++) {
                 wasEnabled[m] = memberShunts.get(m).isVoltageControlEnabled();
+                memberShunts.get(m).setVoltageControlEnabled(false);     // the WHOLE group OFF
+            }
+            GpuAcActivation offAct = GpuAcActivation.fromEquationSystem(network, es);
+            double[] offTargets = offAct.applyTargets(targetVector.getArray());
+            for (int m = 0; m < memberShunts.size(); m++) {
                 memberShunts.get(m).setVoltageControlEnabled(true);      // the WHOLE group ON
             }
             GpuAcActivation onAct = GpuAcActivation.fromEquationSystem(network, es);
@@ -132,22 +139,143 @@ final class GpuBatchSimpleShuntVc {
             for (int m = 0; m < memberShunts.size(); m++) {
                 memberShunts.get(m).setVoltageControlEnabled(wasEnabled[m]);
             }
+            // ON/OFF diffed against each other (not the caller's base): a base extracted with the
+            // control already ON (the base load flow, whose network OLF's initialize switched on)
+            // yields the same rows as a control-off base
             List<Integer> dRows = new ArrayList<>();
             for (int r = 0; r < baseTargets.length; r++) {
-                if (onAct.rowMode()[r] != baseActivation.rowMode()[r] || onTargets[r] != baseTargets[r]) {
+                if (onAct.rowMode()[r] != offAct.rowMode()[r] || onTargets[r] != offTargets[r]) {
                     dRows.add(r);
                 }
             }
             int[] deltaRows = dRows.stream().mapToInt(Integer::intValue).toArray();
             int[] deltaModesOn = new int[deltaRows.length];
             double[] deltaTargetsOn = new double[deltaRows.length];
+            int[] deltaModesOff = new int[deltaRows.length];
+            double[] deltaTargetsOff = new double[deltaRows.length];
             for (int k = 0; k < deltaRows.length; k++) {
                 deltaModesOn[k] = onAct.rowMode()[deltaRows[k]];
                 deltaTargetsOn[k] = onTargets[deltaRows[k]];
+                deltaModesOff[k] = offAct.rowMode()[deltaRows[k]];
+                deltaTargetsOff[k] = offTargets[deltaRows[k]];
             }
-            out.add(new Group(deltaRows, deltaModesOn, deltaTargetsOn, members));
+            out.add(new Group(deltaRows, deltaModesOn, deltaTargetsOn, members, deltaModesOff, deltaTargetsOff));
         }
         return out;
+    }
+
+    /** Install the groups for the in-kernel WITH_GENERATOR ShuntVoltageControl phase (OLF order 10):
+     *  {@code entryOn} = the activation the solve starts from already carries the control ON (the base
+     *  load flow — OLF's initialize ran on the network); a chunk applies the ON deltas at solve entry
+     *  itself. Returns true when the kernel loop owns them. */
+    public static boolean uploadToDevice(long handle, List<Group> groups, boolean entryOn) {
+        if (groups == null || groups.isEmpty()) {
+            GpuAcNewtonSolver.setBatchDiscreteShunt(handle, 0, null, null, null, null, null, null, null,
+                    null, null, null, null, null, null, null);
+            return false;
+        }
+        int nG = groups.size();
+        int[] grpPtr = new int[nG + 1];
+        int[] deltaPtr = new int[nG + 1];
+        List<Integer> dRow = new ArrayList<>();
+        List<Integer> dModeOn = new ArrayList<>();
+        List<Integer> dModeOff = new ArrayList<>();
+        List<Double> dTgtOn = new ArrayList<>();
+        List<Double> dTgtOff = new ArrayList<>();
+        List<Integer> memBRow = new ArrayList<>();
+        List<Integer> memElem = new ArrayList<>();
+        List<Integer> memSubPtr = new ArrayList<>();
+        List<Integer> secPtr = new ArrayList<>();
+        List<Double> secB = new ArrayList<>();
+        List<Integer> subMin = new ArrayList<>();
+        List<Integer> subBase = new ArrayList<>();
+        for (int g = 0; g < nG; g++) {
+            Group grp = groups.get(g);
+            grpPtr[g] = memBRow.size();
+            deltaPtr[g] = dRow.size();
+            for (int k = 0; k < grp.deltaRows().length; k++) {
+                dRow.add(grp.deltaRows()[k]);
+                dModeOn.add(grp.deltaModesOn()[k]);
+                dModeOff.add(grp.deltaModesOff()[k]);
+                dTgtOn.add(grp.deltaTargetsOn()[k]);
+                dTgtOff.add(grp.deltaTargetsOff()[k]);
+            }
+            for (Member m : grp.members()) {
+                memBRow.add(m.bRow());
+                memElem.add(m.elemIndexAbs());
+                memSubPtr.add(subBase.size());
+                for (GpuBatchIncrementalShuntVc.Sub sub : m.subs()) {
+                    secPtr.add(secB.size());
+                    for (double b : sub.sectionsB()) {
+                        secB.add(b);
+                    }
+                    subMin.add(sub.minPos());
+                    subBase.add(sub.basePos());
+                }
+            }
+        }
+        grpPtr[nG] = memBRow.size();
+        deltaPtr[nG] = dRow.size();
+        memSubPtr.add(subBase.size());
+        secPtr.add(secB.size());
+        boolean owned = GpuAcNewtonSolver.setBatchDiscreteShunt(handle, entryOn ? 1 : 0, grpPtr, deltaPtr,
+                dRow.stream().mapToInt(Integer::intValue).toArray(),
+                dModeOn.stream().mapToInt(Integer::intValue).toArray(), dModeOff.stream().mapToInt(Integer::intValue).toArray(),
+                dTgtOn.stream().mapToDouble(Double::doubleValue).toArray(), dTgtOff.stream().mapToDouble(Double::doubleValue).toArray(),
+                memBRow.stream().mapToInt(Integer::intValue).toArray(), memElem.stream().mapToInt(Integer::intValue).toArray(),
+                memSubPtr.stream().mapToInt(Integer::intValue).toArray(), secPtr.stream().mapToInt(Integer::intValue).toArray(),
+                secB.stream().mapToDouble(Double::doubleValue).toArray(),
+                subMin.stream().mapToInt(Integer::intValue).toArray(), subBase.stream().mapToInt(Integer::intValue).toArray()) != 0;
+        LOGGER.info("Uploaded {} shunt voltage-control groups ({} shunts, {} sub-controllers) to device: {}",
+                nG, memBRow.size(), subBase.size(), owned ? "in-kernel loop" : "host orchestrator");
+        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            System.err.printf("SVD_UPLOAD entryOn=%b nGroups=%d nMembers=%d nSubs=%d kernel=%b%n", entryOn, nG, memBRow.size(), subBase.size(), owned);
+        }
+        return owned;
+    }
+
+    /** Give the in-kernel phase's decisions back to the network (batch-of-one base load flow), exactly as
+     *  OLF's loop leaves it: every dispatched controller shunt has its control disabled and
+     *  {@code dispatchB()} run from the continuous b the device rounded ({@code state} =
+     *  readBatchDiscreteShuntState, {@code positions} = readBatchDiscreteShuntPositions). */
+    public static void writeBack(LfNetwork network, List<Group> groups, double[] state, int[] positions) {
+        if (groups == null || groups.isEmpty() || state == null) {
+            return;
+        }
+        int m = 0;
+        int u = 0;
+        for (Group g : groups) {
+            for (Member mem : g.members()) {
+                int k = m++ * 2;
+                int u0 = u;
+                u += mem.subs().size();
+                if (k + 1 >= state.length || (int) state[k] != 2) {
+                    continue;
+                }
+                LfShunt shunt = network.getShunt(mem.shuntNum());
+                if (shunt == null) {
+                    continue;
+                }
+                if (shunt.isVoltageControlEnabled()) {
+                    shunt.setVoltageControlEnabled(false);
+                }
+                List<LfShunt.Controller> subs = shunt.getControllers();
+                boolean same = positions != null;
+                for (int i = 0; same && i < subs.size() && u0 + i < positions.length; i++) {
+                    same = subs.get(i).getPosition() == positions[u0 + i];
+                }
+                if (!same) {
+                    shunt.setB(state[k + 1]);
+                    shunt.dispatchB();
+                    for (int i = 0; positions != null && i < subs.size() && u0 + i < positions.length; i++) {
+                        if (subs.get(i).getPosition() != positions[u0 + i]) {   // tie: take the device's section
+                            subs.get(i).setPosition(positions[u0 + i]);
+                        }
+                    }
+                    shunt.setB(subs.stream().mapToDouble(LfShunt.Controller::getB).sum());
+                }
+            }
+        }
     }
 
     private static boolean groupLive(Group g, boolean[] slotDisabled) {
@@ -208,125 +336,4 @@ final class GpuBatchSimpleShuntVc {
         return bSum;
     }
 
-    /** Post-solve rounding: read each scenario's continuous b per member, dispatch to the closest
-     *  sections, restore the VC-OFF (base) activation and re-solve warm with the SHUNT_TARGET_B
-     *  identities pinned at the dispatched totals, the b states seeded there, and the
-     *  section-driven (dG, dB) admittance deltas applied. */
-    @SuppressWarnings("java:S107")
-    static double[][] roundAndResolve(long handle, int chunkSize, int realCount, int n,
-            double[][] chunkResults, List<Group> groups,
-            int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
-            List<Integer> baseOvIndexList, List<Double> baseOvValueList,
-            int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
-            double[] dsAnchorShift, double[] dsSlackShift, int[] dsPhiRow, double[] dsFactor,
-            int[] r1OvSlotElem, double[] r1OvVal, int[] shOvSlotElem, double[] shOvGb,
-            int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem,
-            double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
-            double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, int[] varType,
-            BatchConfig config) {
-        List<Integer> ovIdx = new ArrayList<>(baseOvIndexList);
-        List<Double> ovVal = new ArrayList<>(baseOvValueList);
-        // DS target carry (the same three coupled pieces as every sibling orchestrator): the main
-        // solve's slack distribution must ride into this re-solve, or the kernel re-derives it
-        // from the re-uploaded baseTargets and takes Newton steps the CPU never takes.
-        int nds = dsPhiRow != null ? dsPhiRow.length : 0;
-        double[] dsAnchorUse = dsAnchorShift;
-        double[] dsSlackUse = dsSlackShift;
-        if (nds > 0) {
-            double[] anchor = new double[chunkSize * nds];
-            double[] slackC = new double[chunkSize];
-            double[] seed = new double[chunkSize * nds];
-            GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor,
-                    baseTargets, dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, anchor, slackC, seed);
-            dsAnchorUse = anchor;
-            dsSlackUse = slackC;
-            GpuBatchTransformerControl.seedDsTargets(nds, dsPhiRow, seed, chunkResults, realCount, n, ovIdx, ovVal);
-        }
-        List<Integer> shSe = new ArrayList<>();
-        List<Double> shGb = new ArrayList<>();
-        if (shOvSlotElem != null) {                          // shOv deltas are ADDITIVE — base first
-            for (int i : shOvSlotElem) {
-                shSe.add(i);
-            }
-            for (double d : shOvGb) {
-                shGb.add(d);
-            }
-        }
-        double[] x0Full = new double[chunkSize * n];
-        int[][] rowModeOff = new int[chunkSize][];
-        boolean[] affected = new boolean[chunkSize];
-        for (int s = 0; s < chunkSize; s++) {
-            double[] src = s < realCount && chunkResults[s] != null ? chunkResults[s] : baseState;
-            System.arraycopy(src, 0, x0Full, s * n, n);
-            rowModeOff[s] = baseRowMode;
-        }
-        for (int s = 0; s < realCount; s++) {
-            if (chunkResults[s] == null || (int) chunkResults[s][n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
-                continue;
-            }
-            int[] row = null;
-            for (Group g : groups) {
-                if (!groupLive(g, disabledMask[s])) {
-                    continue;
-                }
-                if (row == null) {
-                    row = rowModePerScenario[s].clone();
-                }
-                for (int k = 0; k < g.deltaRows().length; k++) {
-                    row[g.deltaRows()[k]] = baseRowMode[g.deltaRows()[k]];   // undo the VC-on flip
-                }
-                for (Member m : g.members()) {               // OLF dispatchB, per controller shunt
-                    int[] pos = new int[m.subs().size()];
-                    double bSum = dispatchB(m, chunkResults[s][m.bRow()], pos);
-                    ovIdx.add(s * n + m.bRow());
-                    ovVal.add(bSum);                         // the identity row pins b at the section total
-                    x0Full[s * n + m.bRow()] = bSum;         // the CPU re-reads b from the shunt on re-solve
-                    double dg = 0;
-                    double db = 0;
-                    for (int k = 0; k < m.subs().size(); k++) {
-                        GpuBatchIncrementalShuntVc.Sub sub = m.subs().get(k);
-                        dg += sub.g(pos[k]) - sub.g(sub.basePos());
-                        db += sub.b(pos[k]) - sub.b(sub.basePos());
-                    }
-                    if (m.elemIndexAbs() >= 0 && (dg != 0 || db != 0)) {
-                        shSe.add(s);
-                        shSe.add(m.shOvElem());
-                        shGb.add(dg);                        // static G follows the section; static B is
-                        shGb.add(db);                        // shadowed by the SHUNT_B variable (harmless)
-                    }
-                }
-                affected[s] = true;
-            }
-            if (row != null) {
-                rowModeOff[s] = row;
-            }
-        }
-        boolean any = false;
-        for (boolean a : affected) {
-            any |= a;
-        }
-        if (!any) {
-            return chunkResults;
-        }
-        double[][] r2 = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
-                rowModeOff, baseRowMode, disabledMask,
-                ovIdx.stream().mapToInt(Integer::intValue).toArray(),
-                ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorUse, dsSlackUse, null, null,
-                parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                config.lsMode(), config.maxDv(), config.maxDphi(),
-                config.lsMode() == 2 ? varType : null, x0Full,
-                shSe.isEmpty() ? null : shSe.stream().mapToInt(Integer::intValue).toArray(),
-                shGb.isEmpty() ? null : shGb.stream().mapToDouble(Double::doubleValue).toArray(),
-                null, null,
-                r1OvSlotElem, r1OvVal,
-                config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0,
-                nziBase, ziOnSlotElem, ziOffSlotElem);
-        for (int s = 0; s < realCount; s++) {
-            if (affected[s]) {
-                chunkResults[s] = r2[s];
-            }
-        }
-        return chunkResults;
-    }
 }

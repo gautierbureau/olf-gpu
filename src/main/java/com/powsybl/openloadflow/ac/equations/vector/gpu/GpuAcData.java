@@ -74,24 +74,28 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         int[] dqElem, int[] dqSide, double[] dqWeight, int[] dqRow, int[] dqKind,
                         int[] dqKMember, int[] dqJMember, double[] dqMemberKey, int[] dqMemberRlEntry,
                         int[] dqMemberGroupStart, int[] dqMemberGroupCount, int[] dqMemberRow, byte[] dqMemberHasRow,
-                        int[] dqMemberQrGroup, double[] dqMemberTargetQ,
+                        int[] dqMemberQrGroup, double[] dqMemberTargetQ, int[] dqMemberBusNum,
+                        int[] dqMemberTgtPtr, int[] dqMemberTgtPeer,
                         double[] ziIn, int[] ziIdx,
                         int[] drRow, int[] drCol, double[] drCoef,
                         int[] dbRow, int[] dbCol, double[] dbCoef,
                         int[] rlVrow, double[] rlMinQ, double[] rlMaxQ, double[] rlLoadQ, double[] rlVtarget,
                         double[] rlSvcBmin, double[] rlSvcBmax, double[] rlV2Base,
-                        byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow,
+                        byte[] rlMonitored, byte[] rlRemote, int[] rlCmpVrow, int[] rlBusNum,
+                        double[] rlNominalV, int[] rlPRow, double[] rlTargetP, int[] rlIdRank,
+                        double[] rlInitTargetQ,
                         int[] rmqRow, int[] rmqElem, int[] rmqSide, int[] rmqKind, double[] rmqWeight,
-                        double[] rowSlope,
+                        double[] rowSlope, double[] rowNominalV,
                         int[] dsPhiRow, double[] dsFactor, int dsSlackPhiRow, double dsSlackTargetP,
                         double[] dsBaseTargetP, double[] dsMaxDelta, double[] dsMinDelta,
                         int dsMode, double[] dsMarginUp, double[] dsMarginDown,
                         double dsSlackMarginUp, double dsSlackMarginDown,
                         int[] dgBus, double[] dgFactor, double[] dgMaxDelta, double[] dgMinDelta,
                         double[] dgMarginUp, double[] dgMarginDown, int[] busGenStart, int[] busGenEnd,
+                        int[] dsBusNum, String[] dgGenId,
                         int[] baseOpenCbElements, int[] baseOpenZiElements, int[] baseOpenZiBranchNums,
                         int[] ziBranchNums, double[] vdlIn, int[] vdlIdx, int[] qrPtr, int[] qrRows,
-                        int[] obQAlt, int[] ziQAlt) {
+                        int[] obQAlt, int[] ziQAlt, byte[] rlBaseQLimitType) {
 
     /**
      * Content equality over every array — true means a cached solver context built from
@@ -173,7 +177,9 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(obQAlt, other.obQAlt) && java.util.Arrays.equals(ziQAlt, other.ziQAlt)
                 && java.util.Arrays.equals(rlMonitored, other.rlMonitored)
                 && java.util.Arrays.equals(rlRemote, other.rlRemote)
+                && java.util.Arrays.equals(rlBaseQLimitType, other.rlBaseQLimitType)
                 && java.util.Arrays.equals(rlCmpVrow, other.rlCmpVrow)
+                && java.util.Arrays.equals(rlInitTargetQ, other.rlInitTargetQ)
                 && java.util.Arrays.equals(dqKMember, other.dqKMember) && java.util.Arrays.equals(dqJMember, other.dqJMember)
                 && java.util.Arrays.equals(dqMemberKey, other.dqMemberKey)
                 && java.util.Arrays.equals(dqMemberRlEntry, other.dqMemberRlEntry)
@@ -183,10 +189,12 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(dqMemberHasRow, other.dqMemberHasRow)
                 && java.util.Arrays.equals(dqMemberQrGroup, other.dqMemberQrGroup)
                 && java.util.Arrays.equals(dqMemberTargetQ, other.dqMemberTargetQ)
+                && java.util.Arrays.equals(dqMemberBusNum, other.dqMemberBusNum)
                 && java.util.Arrays.equals(rmqRow, other.rmqRow) && java.util.Arrays.equals(rmqElem, other.rmqElem)
                 && java.util.Arrays.equals(rmqSide, other.rmqSide) && java.util.Arrays.equals(rmqKind, other.rmqKind)
                 && java.util.Arrays.equals(rmqWeight, other.rmqWeight)
                 && java.util.Arrays.equals(rowSlope, other.rowSlope)
+                && java.util.Arrays.equals(rowNominalV, other.rowNominalV)
                 && java.util.Arrays.equals(cbPcSide, other.cbPcSide)
                 && dsMode == other.dsMode
                 && java.util.Arrays.equals(dsMarginUp, other.dsMarginUp) && java.util.Arrays.equals(dsMarginDown, other.dsMarginDown)

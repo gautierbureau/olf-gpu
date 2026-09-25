@@ -308,11 +308,13 @@ public final class GpuHybridBatchOuterLoopEngine {
     }
 
     private static long createHandleRaw(long structure, int count, int mode, GpuAcData d) {
-        return GpuAcNewtonSolver.createBatchContext(structure, count, mode,
+        long h = GpuAcNewtonSolver.createBatchContext(structure, count, mode,
                 d.rlVrow(), d.rlMinQ(), d.rlMaxQ(), d.rlLoadQ(), d.rlVtarget(), d.rlMonitored(), d.rowSlope(),
                 d.dsPhiRow(), d.dsFactor(), d.dsSlackPhiRow(), d.dsSlackTargetP(),
                 d.dsBaseTargetP(), d.dsMaxDelta(), d.dsMinDelta(),
                 d.dsMode(), d.dsMarginUp(), d.dsMarginDown(), d.dsSlackMarginUp(), d.dsSlackMarginDown());
+        GpuBatchOuterLoopTables.installRlElection(h, d);
+        return h;
     }
 
     /**
@@ -1221,6 +1223,8 @@ public final class GpuHybridBatchOuterLoopEngine {
                     rowModeC, in.baseRowMode(), disabledC,
                     ovIdx.stream().mapToInt(Integer::intValue).toArray(), ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
                     new int[0], new double[0], new double[0], new double[0], new double[0], null, null, null, null,
+                    null, null,
+                    null, null,
                     // the RUN's inner-solve stopping criteria — convEpsPerEq drives the norm-2 stop, matching the
                     // CPU (RL/DS tols are moot here: the packs are empty and OLF's Java loops do DS/RL).
                     in.maxIterations(), in.tol(), in.reactiveLimitTol(), in.slackDistTol(), in.convEpsPerEq(),

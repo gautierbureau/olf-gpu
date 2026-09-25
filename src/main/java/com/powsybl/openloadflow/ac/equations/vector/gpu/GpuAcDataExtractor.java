@@ -111,6 +111,23 @@ public final class GpuAcDataExtractor {
                 }
             }
         }
+        // Realistic-voltage check (AcloadFlowEngine.isStateUnrealistic): it walks the BUS_V variables
+        // of NON-FICTITIOUS buses and compares the state against [minRealisticVoltage,
+        // maxRealisticVoltage], but only where the bus's nominal voltage reaches
+        // minNominalVoltageRealisticVoltageCheck. The nominal voltage is network data and the
+        // thresholds are run parameters, so the row carries the nominal voltage and the install site
+        // applies the parameters. 0 marks a row the check never looks at.
+        double[] rowNominalV = new double[es.getIndex().getSortedVariablesToFind().size()];
+        for (com.powsybl.openloadflow.network.LfBus bus : network.getBuses()) {
+            if (bus.isFictitious()) {
+                continue;
+            }
+            int vRow = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcRowIndexing.col(
+                    es, bus.getNum(), com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_V);
+            if (vRow >= 0) {
+                rowNominalV[vRow] = bus.getNominalV();
+            }
+        }
         return new GpuAcData(
                 GpuAcArrays.flatD(family.cbIn(), 8), GpuAcArrays.flatI(family.cbIdx(), 12),
                 family.cbPcSide().stream().mapToInt(Integer::intValue).toArray(),
@@ -120,25 +137,28 @@ public final class GpuAcDataExtractor {
                 dq.dqElem(), dq.dqSide(), dq.dqWeight(), dq.dqRow(), dq.dqKind(),
                 dq.dqKMember(), dq.dqJMember(), dq.dqMemberKey(), dq.dqMemberRlEntry(),
                 dq.dqMemberGroupStart(), dq.dqMemberGroupCount(), dq.dqMemberRow(), dq.dqMemberHasRow(),
-                dq.dqMemberQrGroup(), dq.dqMemberTargetQ(),
+                dq.dqMemberQrGroup(), dq.dqMemberTargetQ(), dq.dqMemberBusNum(),
+                dq.dqMemberTgtPtr(), dq.dqMemberTgtPeer(),
                 GpuAcArrays.flatD(family.ziIn(), 1), GpuAcArrays.flatI(family.ziIdx(), 11),
                 dr.drRow(), dr.drCol(), dr.drCoef(),
                 dsb.dbRow(), dsb.dbCol(), dsb.dbCoef(),
                 rl.rlVrow(), rl.rlMinQ(), rl.rlMaxQ(), rl.rlLoadQ(), rl.rlVtarget(),
                 rl.rlSvcBmin(), rl.rlSvcBmax(), rl.rlV2Base(), rl.rlMonitored(),
-                rl.rlRemote(), rl.rlCmpVrow(),
-                rmq.row(), rmq.elem(), rmq.side(), rmq.kind(), rmq.weight(), rowSlope,
+                rl.rlRemote(), rl.rlCmpVrow(), rl.rlBusNum(),
+                rl.rlNominalV(), rl.rlPRow(), rl.rlTargetP(), rl.rlIdRank(), rl.rlInitTargetQ(),
+                rmq.row(), rmq.elem(), rmq.side(), rmq.kind(), rmq.weight(), rowSlope, rowNominalV,
                 ds.dsPhiRow(), ds.dsFactor(), ds.dsSlackPhiRow(), ds.dsSlackTargetP(),
                 ds.dsBaseTargetP(), ds.dsMaxDelta(), ds.dsMinDelta(),
                 ds.dsMode(), ds.dsMarginUp(), ds.dsMarginDown(), ds.dsSlackMarginUp(), ds.dsSlackMarginDown(),
                 ds.dgBus(), ds.dgFactor(), ds.dgMaxDelta(), ds.dgMinDelta(),
                 ds.dgMarginUp(), ds.dgMarginDown(), ds.busGenStart(), ds.busGenEnd(),
+                ds.dsBusNum(), ds.dgGenId(),
                 family.baseOpenCb().stream().mapToInt(Integer::intValue).toArray(),
                 family.baseOpenZi().stream().mapToInt(Integer::intValue).toArray(),
                 family.baseOpenZiNums().stream().mapToInt(Integer::intValue).toArray(),
                 family.ziNums().stream().mapToInt(Integer::intValue).toArray(),
                 GpuAcArrays.flatD(family.vdlIn(), 3), GpuAcArrays.flatI(family.vdlIdx(), 2),
                 columns.qrPtr(), columns.qrRows(),
-                GpuAcArrays.flatI(family.obQAlt(), 2), GpuAcArrays.flatI(family.ziQAlt(), 2));
+                GpuAcArrays.flatI(family.obQAlt(), 2), GpuAcArrays.flatI(family.ziQAlt(), 2), rl.rlBaseQLimitType());
     }
 }

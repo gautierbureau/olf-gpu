@@ -10,7 +10,9 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData;
 import com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver;
 import com.powsybl.openloadflow.ac.solver.NewtonRaphsonParameters;
+import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBranch;
+import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfShunt;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,6 +47,9 @@ final class GpuBatchChunkSolver {
      * results are discarded.
      */
 
+    /** OLF_GPU_X0_SEEDS=0: send islanded scenarios' starting state as full chunkSize * n arrays again (A/B). */
+    private static final boolean X0_SEEDS = !"0".equals(System.getenv("OLF_GPU_X0_SEEDS"));
+
     static void solveQualifiedInChunks(List<Integer> batchedIndices, List<BatchContingency> contingencies,
                                                GpuBatchElementMapper elementMapper, GpuAcData gpuData,
                                                double[] baseState, double[] baseTargets, int[] baseRowMode,
@@ -58,17 +63,9 @@ final class GpuBatchChunkSolver {
                                                List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
-                                               double convEpsPerEq, double[][] resultsByIndex, int[] varType,
-                                               List<GpuBatchTransformerControl.TransformerController> transformerControllers,
-                                               List<GpuBatchIncrementalTvc.Controller> incrementalTvcControllers,
-                                               List<GpuBatchIncrementalShuntVc.Controller> incrementalShuntControllers,
-                                               List<GpuBatchSimpleShuntVc.Group> simpleShuntGroups,
-                                               List<GpuBatchIncrementalFlowControl.Controller> incrementalFlowControllers,
-                                               GpuBatchIncrementalFlowControl.EsContext esContext,
+                                               double convEpsPerEq, double[][] resultsByIndex, double[] preDistributedByIndex,
+                                               double[] distributedByIndex, int[] varType, GpuBatchPhases.Built phases,
                                                List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers,
-                                               GpuBatchSecondaryVc.Controllers svcControllers,
-                                               List<GpuBatchVoltageMonitoring.Ctl> monitoringControllers,
-                                               List<GpuBatchContinuousPhase.Ctl> continuousPhaseControllers,
                                                BatchConfig config) {
         int nb = batchedIndices.size();
         // Chunk sizing is a device-memory ESTIMATE (a cuDSS probe on the shared structure). When it
@@ -86,9 +83,7 @@ final class GpuBatchChunkSolver {
                         dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
                         islandedRlByIndex, islandedHvdcsByIndex,
                         n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
-                        varType, transformerControllers, incrementalTvcControllers, incrementalShuntControllers,
-                        simpleShuntGroups, incrementalFlowControllers, esContext, hvdcControllers, svcControllers,
-                        monitoringControllers, continuousPhaseControllers, config);
+                        preDistributedByIndex, distributedByIndex, varType, phases, hvdcControllers, config);
                 return;
             } catch (RuntimeException e) {
                 if (chunkSize <= 1 || !isDeviceAllocFailure(e)) {
@@ -117,6 +112,19 @@ final class GpuBatchChunkSolver {
                 chunkSize = retryChunk;
             }
         }
+    }
+
+    /** The DS generator slots one scenario's outage removes, out of the flat (scenario, slot) pairs.
+     *  The host seed needs the same identity the kernel has, or the two model the outaged bus
+     *  differently and the seed stops being the function it is meant to replay. */
+    private static int[] lostSlotsOf(java.util.List<Integer> pairs, int scenario) {
+        java.util.List<Integer> out = new java.util.ArrayList<>();
+        for (int k = 0; k + 1 < pairs.size(); k += 2) {
+            if (pairs.get(k) == scenario) {
+                out.add(pairs.get(k + 1));
+            }
+        }
+        return out.stream().mapToInt(Integer::intValue).toArray();
     }
 
     private static int countTrue(boolean[] flags) {
@@ -156,17 +164,9 @@ final class GpuBatchChunkSolver {
                                                List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
-                                               double convEpsPerEq, double[][] resultsByIndex, int[] varType,
-                                               List<GpuBatchTransformerControl.TransformerController> transformerControllers,
-                                               List<GpuBatchIncrementalTvc.Controller> incrementalTvcControllers,
-                                               List<GpuBatchIncrementalShuntVc.Controller> incrementalShuntControllers,
-                                               List<GpuBatchSimpleShuntVc.Group> simpleShuntGroups,
-                                               List<GpuBatchIncrementalFlowControl.Controller> incrementalFlowControllers,
-                                               GpuBatchIncrementalFlowControl.EsContext esContext,
+                                               double convEpsPerEq, double[][] resultsByIndex, double[] preDistributedByIndex,
+                                               double[] distributedByIndex, int[] varType, GpuBatchPhases.Built phases,
                                                List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers,
-                                               GpuBatchSecondaryVc.Controllers svcControllers,
-                                               List<GpuBatchVoltageMonitoring.Ctl> monitoringControllers,
-                                               List<GpuBatchContinuousPhase.Ctl> continuousPhaseControllers,
                                                BatchConfig config) {
         int nb = batchedIndices.size();
         int nChunks = (nb + chunkCap - 1) / chunkCap;
@@ -184,39 +184,113 @@ final class GpuBatchChunkSolver {
         // context — or CLEAR a previous run's thresholds under UNIFORM_CRITERIA.
         GpuAcNewtonSolver.setBatchRowCriteria(handle,
                 rowCriteria != null ? rowCriteria[0] : null, rowCriteria != null ? rowCriteria[1] : null);
-        // Curve limits at runtime P: install (or clear, for cached contexts) the per-gen curve channel.
-        GpuAcNewtonSolver.setBatchRlCurves(handle,
-                rlCurves != null ? rlCurves.cvIdx() : null,
-                rlCurves != null ? rlCurves.cvIn() : null,
-                rlCurves != null ? rlCurves.cvPts() : null,
-                rlCurves != null && rlCurves.extrapolate() ? 1 : 0);
-        // Voltage-dependent SVC reactive limits: install the quadratic coefficients (zero on
-        // SVC-less entries — the kernel's limit(v) then degenerates to the packed static limit).
-        GpuAcNewtonSolver.setBatchRlSvcLimits(handle,
-                gpuData.rlSvcBmin(), gpuData.rlSvcBmax(), gpuData.rlV2Base());
-        // Remote-member RL entries (plan-B1): install (or clear, on a cached context) the kinds.
-        boolean anyRlRemote = false;
-        for (byte b : gpuData.rlRemote()) {
-            anyRlRemote |= b != 0;
+        // The run-constant outer-loop tables, shared with the base load flow's batch-of-one.
+        GpuBatchOuterLoopTables.install(handle, gpuData, rlCurves,
+                config.rlRobustMode(), config.minRealisticVoltage(), config.maxRealisticVoltage(),
+                config.minNominalVoltageRealisticVoltageCheck(), config.realisticFixingLoop());
+
+        // Which reactive-capability CURVE entries hang off each bus P row. Run-constant, and the
+        // index a generator outage needs to find the entries it disturbs at its own bus.
+        java.util.Map<Integer, int[]> curveEntriesByPRow = new java.util.HashMap<>();
+        if (rlCurves != null) {
+            java.util.Map<Integer, List<Integer>> acc = new java.util.HashMap<>();
+            for (int e = 0; e < rlCurves.cvGenId().length; e++) {
+                acc.computeIfAbsent(rlCurves.cvIdx()[e * 5 + 1], k -> new ArrayList<>()).add(e);
+            }
+            acc.forEach((row, es) -> curveEntriesByPRow.put(row, es.stream().mapToInt(Integer::intValue).toArray()));
         }
-        GpuAcNewtonSolver.setBatchRlRemote(handle,
-                anyRlRemote ? gpuData.rlRemote() : null,
-                anyRlRemote ? gpuData.rlCmpVrow() : null,
-                anyRlRemote ? gpuData.rmqRow() : null,
-                anyRlRemote ? gpuData.rmqElem() : null,
-                anyRlRemote ? gpuData.rmqSide() : null,
-                anyRlRemote ? gpuData.rmqKind() : null,
-                anyRlRemote ? gpuData.rmqWeight() : null,
-                anyRlRemote ? gpuData.dqKMember() : null,
-                anyRlRemote ? gpuData.dqJMember() : null,
-                anyRlRemote ? gpuData.dqMemberKey() : null,
-                anyRlRemote ? gpuData.dqMemberRlEntry() : null,
-                anyRlRemote ? gpuData.dqMemberGroupStart() : null,
-                anyRlRemote ? gpuData.dqMemberGroupCount() : null,
-                anyRlRemote ? gpuData.dqMemberRow() : null,
-                anyRlRemote ? gpuData.dqMemberHasRow() : null,
-                anyRlRemote ? gpuData.dqMemberQrGroup() : null,
-                anyRlRemote ? gpuData.dqMemberTargetQ() : null);
+
+        // Incremental TVC: upload controller data to device (run-constant, not per-chunk).
+        // IncrementalTransformerVoltageControl as a DRIVER PHASE (OLF order 8), shared controlled
+        // buses included (the one-tap-at-a-time round robin runs in the group kernel).
+        // Every table upload also CLEARS when the run has none: the context is cached across runs on the
+        // same network, and a stale table from a previous run selects the wrong driver phase (a Simple
+        // TVC run after an INCREMENTAL one ran LOOP_TVC_KERNEL on its controls — 3.6e-7 kV).
+        boolean tvcInKernel = false;
+        if (phases.incrementalTvc() != null && !phases.incrementalTvc().isEmpty()) {
+            tvcInKernel = GpuBatchIncrementalTvc.uploadToDevice(handle, phases.incrementalTvc(),
+                    config.incTvcMaxTapShift());
+        } else {
+            GpuBatchIncrementalTvc.uploadToDevice(handle, null, 1);
+        }
+        // The flow-observed incremental loops (RPC at OLF order 9, incremental phase at order 7) as DRIVER PHASES.
+        boolean flowInKernel = false;
+        if (phases.flow() != null && !phases.flow().isEmpty()) {
+            flowInKernel = GpuBatchIncrementalFlowControl.uploadToDevice(handle, phases.flow());
+        } else {
+            GpuBatchIncrementalFlowControl.uploadToDevice(handle, null);
+        }
+        // CONTINUOUS PhaseControl as a DRIVER PHASE (OLF order 7); the pre-solve control-ON activation stays host-side.
+        boolean cphInKernel = false;
+        if (phases.continuousPhase() != null && !phases.continuousPhase().isEmpty()) {
+            cphInKernel = GpuBatchContinuousPhase.uploadToDevice(handle, phases.continuousPhase());
+        } else {
+            GpuBatchContinuousPhase.uploadToDevice(handle, null);
+        }
+        // IncrementalShuntVoltageControl as a DRIVER PHASE (OLF order 10).
+        boolean shuntInKernel = false;
+        if (phases.incrementalShunt() != null && !phases.incrementalShunt().isEmpty()) {
+            shuntInKernel = GpuBatchIncrementalShuntVc.uploadToDevice(handle, phases.incrementalShunt(),
+                    config.incShuntMaxSectionShift());
+        } else {
+            GpuBatchIncrementalShuntVc.uploadToDevice(handle, null, 3);
+        }
+        // The DISCRETE TransformerVoltageControl (AFTER_GENERATOR / WITH_GENERATOR, OLF order 8) and the
+        // WITH_GENERATOR ShuntVoltageControl (order 10) as DRIVER PHASES: the control-ON entry (OLF's
+        // initialize) and the rounding/dispatch checks run in-kernel; the host machines stay for a
+        // control the upload refuses (a member without a tap table).
+        boolean tvdInKernel = false;
+        if ((config.transformerControl() || config.simpleTransformerControl())
+                && phases.discreteTvc() != null && !phases.discreteTvc().isEmpty()) {
+            tvdInKernel = GpuBatchTransformerControl.uploadToDevice(handle, phases.discreteTvc(),
+                    config.simpleTransformerControl() ? 1 : 0, false);
+            if (tvdInKernel) {
+                // AFTER_GENERATOR: OLF's GeneratorVoltageControlManager freeze + fixTransformerVoltageControls
+                GpuBatchTransformerControl.uploadFreeze(handle, config.transformerControl() ? phases.freeze() : null);
+            } else if (phases.freeze() != null && phases.freeze().hasCandidates()) {
+                throw new com.powsybl.commons.PowsyblException("GPU batch: the transformer voltage control needs the "
+                        + "in-kernel phase (generator freeze under the controlled level) but a control has no tap table");
+            }
+        } else {
+            GpuBatchTransformerControl.uploadToDevice(handle, null, 0, false);   // clears a cached context's table
+        }
+        boolean svdInKernel = false;
+        if (config.simpleShuntControl() && phases.simpleShunt() != null && !phases.simpleShunt().isEmpty()) {
+            svdInKernel = GpuBatchSimpleShuntVc.uploadToDevice(handle, phases.simpleShunt(), false);
+        } else {
+            GpuBatchSimpleShuntVc.uploadToDevice(handle, null, false);
+        }
+
+        // A control loop the kernel REFUSES must never fall back to an after-the-sweep host orchestrator.
+        // Such an orchestrator runs out of OLF's order — after the loops OLF puts at orders 7 to 10 — and
+        // two of them in a chain discard each other's target moves (measured 2.4e-1 kV). Un-accelerated is
+        // the only honest alternative to wrong, so the whole group goes to the CPU: leaving resultsByIndex
+        // null is exactly how the caller routes a contingency to the stock per-contingency path.
+        List<String> refusedLoops = new ArrayList<>();
+        if (phases.incrementalTvc() != null && !phases.incrementalTvc().isEmpty() && !tvcInKernel) {
+            refusedLoops.add("IncrementalTransformerVoltageControl");
+        }
+        if (phases.flow() != null && !phases.flow().isEmpty() && !flowInKernel) {
+            refusedLoops.add("IncrementalTransformerReactivePowerControl/IncrementalPhaseControl");
+        }
+        if (phases.continuousPhase() != null && !phases.continuousPhase().isEmpty() && !cphInKernel) {
+            refusedLoops.add("PhaseControl");
+        }
+        if (phases.incrementalShunt() != null && !phases.incrementalShunt().isEmpty() && !shuntInKernel) {
+            refusedLoops.add("IncrementalShuntVoltageControl");
+        }
+        if ((config.transformerControl() || config.simpleTransformerControl())
+                && phases.discreteTvc() != null && !phases.discreteTvc().isEmpty() && !tvdInKernel) {
+            refusedLoops.add("TransformerVoltageControl");
+        }
+        if (config.simpleShuntControl() && phases.simpleShunt() != null && !phases.simpleShunt().isEmpty() && !svdInKernel) {
+            refusedLoops.add("ShuntVoltageControl");
+        }
+        if (!refusedLoops.isEmpty()) {
+            LOGGER.warn("GPU batched N-1 disabled for this run: the device cannot own {} — every contingency "
+                    + "runs on the CPU rather than through a host orchestrator out of OLF's loop order", refusedLoops);
+            return;
+        }
 
         // The base state / targets are IDENTICAL for every scenario (a single-branch N-1 starts from the
         // same converged base operating point): passed as single length-n rows and tiled on-device. The
@@ -289,14 +363,17 @@ final class GpuBatchChunkSolver {
             // The pilot's V equals the group target at the base (degenerate) — key the direction on
             // WHICH limit the extracted BUS_TARGET_Q target equals instead.
             boolean remote = gpuData.rlRemote().length > i && gpuData.rlRemote()[i] != 0;
+            byte olfKind = gpuData.rlBaseQLimitType().length > i ? gpuData.rlBaseQLimitType()[i] : 0;
             if (remote) {
                 double tgt = baseTargets[vrow];
                 baseRlSeed[i] = baseRowMode[vrow] == 4
-                        ? (Math.abs(tgt - (gpuData.rlMaxQ()[i] - gpuData.rlLoadQ()[i]))
-                           <= Math.abs(tgt - (gpuData.rlMinQ()[i] - gpuData.rlLoadQ()[i])) ? 2 : 1)
+                        ? (olfKind != 0 ? olfKind
+                           : (Math.abs(tgt - (gpuData.rlMaxQ()[i] - gpuData.rlLoadQ()[i]))
+                              <= Math.abs(tgt - (gpuData.rlMinQ()[i] - gpuData.rlLoadQ()[i])) ? 2 : 1))
                         : 0;
             } else {
-                baseRlSeed[i] = baseRowMode[vrow] == 1 ? (baseState[vrow] < gpuData.rlVtarget()[i] ? 2 : 1) : 0;
+                baseRlSeed[i] = baseRowMode[vrow] == 1
+                        ? (olfKind != 0 ? olfKind : (baseState[vrow] < gpuData.rlVtarget()[i] ? 2 : 1)) : 0;
             }
         }
         try {
@@ -313,10 +390,52 @@ final class GpuBatchChunkSolver {
                 for (int chunkStart = 0; chunkStart < nbg; chunkStart += chunkSize) {
                     int realCount = Math.min(chunkSize, nbg - chunkStart);
                     overrides.clear();
+                    // fixTransformerVoltageControls is a POST-CONTINGENCY check on the CPU, so its
+                    // connectivity masks are per scenario and belong to the chunk, not to the run.
+                    if (tvdInKernel && config.transformerControl() && phases.freeze() != null && phases.freeze().hasFix()) {
+                        List<BatchContingency> slotCtgs = new ArrayList<>(realCount);
+                        for (int s = 0; s < realCount; s++) {
+                            slotCtgs.add(contingencies.get(group.get(chunkStart + s)));
+                        }
+                        GpuBatchTransformerControl.uploadFixMasks(handle, phases.freeze(), slotCtgs, chunkSize);
+                    }
                     // {slot, participant} pairs: the distributed-slack participants this scenario
                     // strands in another synchronous component (see distributeSlackBatch).
                     List<Integer> dsIslandedList = new ArrayList<>();
                     List<Integer> rlIslandedList = new ArrayList<>();
+                    // {slot, rlEntry} pairs + {dMinQ, dMaxQ}: the reactive capability a lost generator
+                    // takes with it, at a bus that still controls voltage.
+                    List<Integer> rlQOvSlot = new ArrayList<>();
+                    List<Double> rlQOvVal = new ArrayList<>();
+                    // {slot, curveEntry} pairs + {pStep, shareScale}: how a generator outage repairs
+                    // the reactive-capability CURVE channel at its own bus (shareScale < 0 = the entry
+                    // is the lost generator's own and stops evaluating).
+                    List<Integer> cvOvSlot = new ArrayList<>();
+                    List<Double> cvOvVal = new ArrayList<>();
+                    // {slot, dqMember} pairs: a DISTR_Q controller that stops controlling in this
+                    // scenario. Its key has to leave the renormalization denominator on the TARGET
+                    // side, which the qPct override channel does not reach.
+                    List<Integer> dqInactList = new ArrayList<>();
+                    // PER CHUNK, like dqInactList above: the scenario index in every one of these is a
+                    // SLOT in this chunk, so a list that outlives the chunk applies chunk N's entries to
+                    // chunk N+1's slots. That is invisible to any validation run in windows of one chunk.
+                    List<Integer> dsLostGenList = new ArrayList<>();
+                    List<Integer> frozenSeedSlot = new ArrayList<>();
+                    List<Integer> frozenSeedRow = new ArrayList<>();
+                    List<Double> frozenSeedValue = new ArrayList<>();
+                    // slot -> the RL entries of the controllers still holding a deactivated pilot's
+                    // voltage. All pinned = its Q balance lost its row; the CPU replays that scenario.
+                    java.util.Map<Integer, int[]> pilotPinCheck = new java.util.HashMap<>();
+                    // Pilot-row flip entries: the scenarios that used to be REJECTED by that check are
+                    // FIXED in the solve instead. Per chunk, like every other list here — the scenario
+                    // index is a chunk SLOT.
+                    List<Integer> dqTqOvKey = new ArrayList<>();     // slot*nDqMembers + member
+                    List<Double> dqTqOvVal = new ArrayList<>();
+                    List<Integer> pfSlot = new ArrayList<>();
+                    List<Integer> pfRow = new ArrayList<>();
+                    List<Double> pfQTarget = new ArrayList<>();
+                    List<Integer> pfRlCount = new ArrayList<>();
+                    List<Integer> pfRlPool = new ArrayList<>();
                     List<Integer> dqOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_Q reweight)
                     List<Double> dqOvWList = new ArrayList<>();
                     List<Integer> drOvIdxList = new ArrayList<>();   // {s, contrib} pairs (DISTR_RHO renorm, plan A5)
@@ -406,12 +525,56 @@ final class GpuBatchChunkSolver {
                             int[] eis = new int[branches.size() + shunts.size() + hvdcs.size() + sideOpens.size()];
                             int ei = 0;
                             for (BatchContingency.SideOpen so : sideOpens) {
-                                // OLF's AC path treats a side-opened branch as FULLY out (measured:
-                                // a bus loss is bit-identical to the full outage of its incident
-                                // branches — the dangling half carries no model); mask the element.
-                                int cbIdx2 = elementMapper.getElementIndex(so.branch());   // qualification guarantees >= 0
-                                disabledMask[s][cbIdx2] = true;
-                                eis[ei++] = cbIdx2;
+                                // A side-opened branch is NOT fully out. OLF keeps it DANGLING, and the
+                                // dangling half's charging still injects at the connected bus — OLF's own
+                                // testLineOpenOneSideContingency measures -55.873 MVAr on exactly this
+                                // shape. Masking the element deletes that injection: measured on rte6515
+                                // BUS-1003_BBS as EXACTLY -2 x b_side x v^2 at every bus bordering the
+                                // opened side (six buses, ratios -1.994..-2.004), and on the 9-bus
+                                // reproducer as VL2 374.62 kV against the CPU's 379.85.
+                                //
+                                // A branch open at one end is, seen from the live bus, a PURE SHUNT: the
+                                // far side's series+shunt reduces to one equivalent admittance. So keep
+                                // the element LIVE and override its pi row to that shunt — y = 0 kills the
+                                // series coupling (so the frozen far bus contributes nothing and receives
+                                // nothing), and the connected side's g/b carry the equivalent. No new
+                                // kernel: this is the per-scenario pi-model override the tap channel
+                                // already uses, and the cb evaluation reads it through findTapOverride.
+                                double[] cbRow = GpuBatchSideOpen.danglingCbRow(so.branch(), so.side());
+                                if (cbRow == null) {         // not expressible -> keep the old behaviour
+                                    int cbIdx2 = elementMapper.getElementIndex(so.branch());
+                                    disabledMask[s][cbIdx2] = true;
+                                    eis[ei++] = cbIdx2;
+                                } else {
+                                    int soElem = elementMapper.getElementIndex(so.branch());
+                                    if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                                        // Does this branch also feed a DISTR_Q row? fillDistrQBatch reads
+                                        // cbIn with NO r1Ov parameters, so it cannot see the per-scenario
+                                        // pi override: a side-opened branch that contributes to a remote
+                                        // voltage-control group's reactive distribution would be counted
+                                        // there with its FULL series admittance instead of the dangling
+                                        // equivalent.
+                                        int hits = 0;
+                                        for (int k = 0; k < gpuData.dqElem().length; k++) {
+                                            if (gpuData.dqElem()[k] == soElem) {
+                                                hits++;
+                                            }
+                                        }
+                                        var sopi = so.branch().getPiModel();
+                                        System.err.printf("SIDEOPEN_DQ ctg=%s branch=%s side=%d elem=%d"
+                                                        + " dqContribs=%d base(g1=%.9e b1=%.9e g2=%.9e b2=%.9e)"
+                                                        + " eq(g1=%.9e b1=%.9e g2=%.9e b2=%.9e)%n",
+                                                contingencies.get(ci).contingencyId(), so.branch().getId(),
+                                                so.side(), soElem, hits,
+                                                sopi.getG1(), sopi.getB1(), sopi.getG2(), sopi.getB2(),
+                                                cbRow[1], cbRow[3], cbRow[2], cbRow[4]);
+                                    }
+                                    r1OvSlotElemList.add(s);
+                                    r1OvSlotElemList.add(soElem);
+                                    for (double v : cbRow) {
+                                        r1OvValList.add(v);
+                                    }
+                                }
                             }
                             for (LfBranch branch : branches) {
                                 int idx = elementMapper.getElementIndex(branch);          // qualification guarantees >= 0
@@ -430,6 +593,11 @@ final class GpuBatchChunkSolver {
                             }
                             disabledIdx[s] = eis;
                             nActive[s] -= frozenRowsByIndex[ci].length;  // islanded buses' equations leave the CPU index
+                            if (System.getenv("OLF_GPU_SA_RESID") != null) {
+                                System.err.printf("DEV_NACTIVE ctg=%s n=%d frozen=%d nActive=%d%n",
+                                        contingencies.get(ci).contingencyId(), n,
+                                        frozenRowsByIndex[ci].length, nActive[s]);
+                            }
                             for (LfBranch branch : branches) {           // var-carrying outaged branches: the CPU drops
                                 int eIdx = elementMapper.getElementIndex(branch);   // the rho/a1 identity equations too
                                 if (eIdx >= 0 && eIdx < elementMapper.getClosedBranchCount()) {
@@ -450,11 +618,75 @@ final class GpuBatchChunkSolver {
                                     // ...held at a CLEAN flat state (V=1, phi=0) via the target override, NOT the base
                                     // equation target (a P/Q value that gives a nonsensical islanded voltage/angle).
                                     overrides.add(s * n + frozen[k], frozenTargets[k]);
+                                    // ...and START that row AT its target. It is an identity row, so its
+                                    // solution IS the target and seeding it costs nothing — but leaving it
+                                    // at the base state hands the convergence test a residual OLF never
+                                    // sees, because OLF REMOVES an islanded bus's equations rather than
+                                    // freezing them. Measured on rte6515 LINE-4413-5: the islanded bus's
+                                    // angle row sits at -1.050832654 rad against a frozen target of 0, and
+                                    // that 1.050832654 IS the device's whole initial |F|inf for the solve,
+                                    // against OLF's 0.1296557068. The device then needs an extra Newton
+                                    // iteration, lands at 1.68e-06 where OLF stops at 8.04e-04, and the
+                                    // distributed-slack loop reads a slack mismatch 7.43e-04 different —
+                                    // which is the entire branch-family error (8.328e-05 kV).
+                                    frozenSeedSlot.add(s);
+                                    frozenSeedRow.add(frozen[k]);
+                                    frozenSeedValue.add(frozenTargets[k]);
+                                    if (System.getenv("OLF_GPU_SA_RESID") != null) {
+                                        System.err.printf("FROZEN ctg=%s row=%d target=%.9f base=%.9f |F0|=%.9f%n",
+                                                contingencies.get(ci).contingencyId(), frozen[k], frozenTargets[k],
+                                                baseState[frozen[k]], Math.abs(baseState[frozen[k]] - frozenTargets[k]));
+                                    }
+                                }
+                                // A frozen row that was a remote gen-VC group's BASE CARRIER (the free
+                                // member's row hosting the pilot's reactive balance): the device's mode scan
+                                // moves that balance to the next live member's row from the first Newton
+                                // solve on, but that row's TARGET is its own DISTR_Q one (0) - the kernel
+                                // that stamps the pilot's target on the carrier runs only inside the
+                                // outer-loop passes, and the host re-applies its overrides at every pass.
+                                // Stamp it here, by the kernel's own rule (relocChoose: first candidate
+                                // whose mode is neither identity nor pinned). Measured on the remote-control
+                                // fixture, b1 islanded: OLF's BUS_TARGET_Q at the pilot off by exactly its
+                                // load, b2 0.45 kV; rte6515: five busbar sections up to 1.3 kV.
+                                int[] qrPtr = gpuData.qrPtr();
+                                int[] qrRows = gpuData.qrRows();
+                                for (int g = 0; qrPtr != null && g + 1 < qrPtr.length; g++) {
+                                    int baseCarrier = -1;
+                                    int newCarrier = -1;
+                                    for (int c = qrPtr[g] + 1; c < qrPtr[g + 1]; c++) {
+                                        int r = qrRows[c];
+                                        if (baseCarrier < 0 && baseRowMode[r] != 0 && baseRowMode[r] != 4) {
+                                            baseCarrier = r;
+                                        }
+                                        if (newCarrier < 0 && row[r] != 0 && row[r] != 4) {
+                                            newCarrier = r;
+                                        }
+                                    }
+                                    if (baseCarrier >= 0 && newCarrier >= 0 && newCarrier != baseCarrier
+                                            && row[baseCarrier] == 0 && baseRowMode[baseCarrier] != 0) {
+                                        overrides.add(s * n + newCarrier, baseTargets[baseCarrier]);
+                                        if (System.getenv("OLF_GPU_SA_RESID") != null) {
+                                            System.err.printf("CARRIER_MOVED ctg=%s group=%d from=%d to=%d pilotQ=%.9f%n",
+                                                    contingencies.get(ci).contingencyId(), g, baseCarrier, newCarrier,
+                                                    baseTargets[baseCarrier]);
+                                        }
+                                    }
                                 }
                                 rowModePerScenario[s] = row;
                             }
                             for (LfBranch ziOut : contingencies.get(ci).outagedZiBranches()) {
                                 Integer ze = ziElemByNumAll.get(ziOut.getNum());
+                                // OLF_GPU_ZITREE_TRACE: does this scenario OPEN a coupler the tree relocation
+                                // moved rows onto? Such a scenario deactivates the coupler's ZERO_V/ZERO_PHI,
+                                // which the relocation put on the CHILD bus's rows, and pins its dummies with
+                                // DUMMY_TARGET identities those rows no longer host — the per-scenario gap.
+                                // childSide (ziIdx slot 10, bits 1-2) is nonzero exactly when rows moved.
+                                if (System.getenv("OLF_GPU_ZITREE_TRACE") != null
+                                        && ((gpuData.ziIdx()[ze * 11 + 10] >> 1) & 3) != 0) {
+                                    System.err.println("ZITREE_OPEN ctg=" + contingencies.get(ci).contingencyId()
+                                            + " coupler=" + ziOut.getId()
+                                            + " childSide=" + ((gpuData.ziIdx()[ze * 11 + 10] >> 1) & 3));
+                                }
                                 ziOffSlotElemList.add(s);
                                 ziOffSlotElemList.add(ze);
                                 // the decoupled branch's ZERO_V/ZERO_PHI rows become identities again
@@ -466,6 +698,73 @@ final class GpuBatchChunkSolver {
                                 rowZi[dqRow] = 0;
                                 overrides.add(s * n + dpRow, 0.0);
                                 overrides.add(s * n + dqRow, 0.0);
+                                // The RELOCATION gave this coupler's ZERO_V the CHILD bus's own V row. With the
+                                // coupler open that equation is gone, and OLF's post-contingency system has
+                                // BUS_TARGET_V active on that bus instead (read off the CPU dump for
+                                // BUS-6014_BBS_2: bus_target_v6283 ACTIVE, zero_v9043 inactive). The device
+                                // must make the same move, or the row is left EMPTY - the P balance comes back
+                                // through the stock-placement fallback, but nothing restores the V identity.
+                                // Only for a bus that is still VOLTAGE-CONTROLLED: a PQ child's reactive
+                                // balance returns to this row through that same fallback instead.
+                                int relocBits = gpuData.ziIdx()[ze * 11 + 10];
+                                int childSide = (relocBits >> 1) & 3;
+                                if ((relocBits & 8) != 0 && childSide != 0) {
+                                    LfBus child = childSide == 1 ? ziOut.getBus1() : ziOut.getBus2();
+                                    int childVRow = gpuData.ziIdx()[ze * 11 + (childSide == 1 ? 6 : 7)];
+                                    var childVc = child == null ? java.util.Optional.<GeneratorVoltageControl>empty()
+                                            : child.getGeneratorVoltageControl();
+                                    boolean applied = childVRow >= 0 && child != null && !child.isDisabled()
+                                            && child.isGeneratorVoltageControlled() && childVc.isPresent();
+                                    if (applied) {
+                                        rowZi[childVRow] = 0;
+                                        overrides.add(s * n + childVRow, childVc.orElseThrow().getTargetValue());
+                                    }
+                                    // The TARGET must travel with the equation. The child's P balance lives on
+                                    // this coupler's DUMMY_P while it is closed, so its target (the bus's net
+                                    // scheduled injection, and whatever the distributed slack has shifted it
+                                    // to) sits there too. The stock-placement fallback moves the EQUATION back
+                                    // to the child's own PHI row when the coupler opens; without moving the
+                                    // target with it the bus's whole injection is left on a row that is now a
+                                    // DUMMY_TARGET identity, and the slack absorbs it — measured on
+                                    // BUS-6014_BBS_2 as 7.386 MW of distributed active power against the CPU
+                                    // and every bus shifted 2-4e-2 kV in one direction.
+                                    int childPhiRow = childSide == 1 ? gpuData.ziIdx()[ze * 11 + 8]
+                                            : gpuData.ziIdx()[ze * 11 + 9];
+                                    // ...unless the child is in the ISLAND this outage created. Then the
+                                    // freeze already holds its rows at a clean flat state (V=1, phi=0) and
+                                    // OLF has removed the bus, so moving an injection target onto them would
+                                    // overwrite the freeze - these overrides are applied after it.
+                                    int[] frozenForCtg = frozenRowsByIndex[ci];
+                                    boolean childFrozen = false;
+                                    for (int fr : frozenForCtg) {
+                                        if (fr == childPhiRow || fr == childVRow) {
+                                            childFrozen = true;
+                                            break;
+                                        }
+                                    }
+                                    if (childFrozen) {
+                                        continue;
+                                    }
+                                    if (childPhiRow >= 0 && dpRow >= 0) {
+                                        overrides.add(s * n + childPhiRow, baseTargets[dpRow]);
+                                    }
+                                    // A child that is NOT voltage-controlled has its reactive balance on the
+                                    // coupler's DUMMY_Q instead, so its Q target follows the same way.
+                                    if (!applied && childVRow >= 0 && dqRow >= 0) {
+                                        overrides.add(s * n + childVRow, baseTargets[dqRow]);
+                                    }
+                                    if (System.getenv("OLF_GPU_ZITREE_TRACE") != null) {
+                                        System.err.println("ZITREE_VID coupler=" + ziOut.getId()
+                                                + " child=" + (child == null ? "-" : child.getId())
+                                                + " vRow=" + childVRow
+                                                + " disabled=" + (child != null && child.isDisabled())
+                                                + " vc=" + (child != null && child.isGeneratorVoltageControlled())
+                                                + " baseMode=" + (childVRow >= 0 ? baseRowMode[childVRow] : -1)
+                                                + " target=" + (childVc.isPresent()
+                                                        ? childVc.orElseThrow().getTargetValue() : Double.NaN)
+                                                + " applied=" + applied);
+                                    }
+                                }
                                 rowModePerScenario[s] = rowZi;
                             }
                             for (LfBranch reclosed : contingencies.get(ci).reclosedBranches()) {
@@ -508,10 +807,89 @@ final class GpuBatchChunkSolver {
                                         // on an ALREADY-PQ bus losing fixed-Q gens (#21)
                                         overrides.add(s * n + go.vRow(), go.qTarget());
                                     }
+                                    if (go.killsPilotVoltageIdentity()) {
+                                        // The pilot's voltage identity goes NOW, with the member's
+                                        // mode-4 row, so the two halves of the dead control land in
+                                        // the same fill.
+                                        int[] row = rowModePerScenario[s] == baseRowMode
+                                                ? baseRowMode.clone() : rowModePerScenario[s];
+                                        row[go.deadPilotVRow()] = 1;
+                                        rowModePerScenario[s] = row;
+                                        overrides.add(s * n + go.deadPilotVRow(), go.deadPilotQTarget());
+                                    }
                                     if (go.toPq()) {
                                         int[] row = rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rowModePerScenario[s];
-                                        row[go.vRow()] = 1;  // BUS_V row becomes the reactive-power equation (PV→PQ)
+                                        row[go.vRow()] = go.pqRowModeOrDefault();   // BUS_V row becomes the
+                                                                                    // reactive-power equation (PV→PQ)
                                         rowModePerScenario[s] = row;
+                                    }
+                                    if (go.silencesReactiveLimitEntry()) {
+                                        // Nothing left to control voltage at that bus: mask its
+                                        // reactive-limit entry for this scenario, the same channel a
+                                        // contingency-stranded controller uses. A bus the BASE loadflow
+                                        // pinned PQ otherwise keeps a seeded limit type and can switch
+                                        // BACK to PV with its only generator gone.
+                                        rlIslandedList.add(s);
+                                        rlIslandedList.add(go.rlEntry());
+                                    }
+                                    if (go.deactivatesDqMember()) {
+                                        dqInactList.add(s);
+                                        dqInactList.add(go.inactiveDqMember());
+                                    }
+                                    if (go.overridesDqMemberTargetQ() && gpuData.dqMemberBusNum() != null) {
+                                        dqTqOvKey.add(s * gpuData.dqMemberBusNum().length
+                                                + go.dqTargetQOvMember());
+                                        dqTqOvVal.add(go.dqTargetQOvValue());
+                                    }
+                                    if (go.seedsDqTargets()) {
+                                        for (int t = 0; t < go.dqTargetRows().length; t++) {
+                                            overrides.add(s * n + go.dqTargetRows()[t], go.dqTargetValues()[t]);
+                                        }
+                                    }
+                                    if (go.flipsPilotRowWhenAllPinned()) {
+                                        pfSlot.add(s);                     // handled IN the solve
+                                        pfRow.add(go.pinnedPilotVRow());
+                                        pfQTarget.add(go.pinnedPilotQTarget());
+                                        pfRlCount.add(go.pilotGroupSurvivorRlEntries().length);
+                                        for (int rl : go.pilotGroupSurvivorRlEntries()) {
+                                            pfRlPool.add(rl);
+                                        }
+                                    } else if (go.needsPilotPinCheck()) {
+                                        // No pilot row to move the balance onto (the outaged bus is not
+                                        // the pilot): still a runtime reject.
+                                        pilotPinCheck.put(s, go.pilotGroupSurvivorRlEntries());
+                                    }
+                                    if (go.shrinksReactiveLimits()) {
+                                        // The bus KEEPS voltage control, so its reactive-limit entry is
+                                        // still read — and the device's aggregate still holds the lost
+                                        // generator's capability, which OLF's bus.getMinQ() does not.
+                                        rlQOvSlot.add(s);
+                                        rlQOvSlot.add(go.rlEntry());
+                                        rlQOvVal.add(go.minQDelta());
+                                        rlQOvVal.add(go.maxQDelta());
+                                        rlQOvVal.add(go.loadQDelta());
+                                    }
+                                    if (go.pRow() >= 0 && curveEntriesByPRow.containsKey(go.pRow())) {
+                                        // The CURVE channel reconstructs each generator's OWN active
+                                        // power from the bus row target, to re-evaluate its capability
+                                        // curve there. A generator loss skews that reconstruction three
+                                        // ways, and all three are repaired here, per scenario:
+                                        //  - the lost generator's entry must stop evaluating (its base
+                                        //    capability is already taken off by minQDelta/maxQDelta);
+                                        //    a pure LOAD loss loses nobody and only needs the second;
+                                        //  - the step the outage itself puts in the row target is not
+                                        //    distributed-slack power and must move nobody's curve;
+                                        //  - the survivors now share the bus's slack over their own
+                                        //    factors alone, so each one's share renormalizes.
+                                        for (int e : curveEntriesByPRow.get(go.pRow())) {
+                                            double busFactor = rlCurves.cvBusFactor()[e];
+                                            double left = busFactor - go.lostFactorSum();
+                                            boolean dead = go.lostGenIds().contains(rlCurves.cvGenId()[e]);
+                                            cvOvSlot.add(s);
+                                            cvOvSlot.add(e);
+                                            cvOvVal.add(go.pStep());
+                                            cvOvVal.add(dead || left <= 0 ? -1 : busFactor / left);
+                                        }
                                     }
                                     if (hasDs && go.dsBus() >= 0) {   // lost gen(s) on a DS-participant bus: per-scenario reweight
                                         dsOvBus[s] = go.dsBus();
@@ -519,6 +897,19 @@ final class GpuBatchChunkSolver {
                                         dsOvBaseDelta[s] = go.dsBaseDelta();
                                         dsOvMaxDelta[s] = go.dsMaxDelta();
                                         dsOvMinDelta[s] = go.dsMinDelta();
+                                        // ...and WHICH generators left, as slots in the DS generator pack. With the
+                                        // identity the outaged bus's SURVIVORS can take part in the per-generator
+                                        // water-fill like any others, instead of the bus riding on one aggregate
+                                        // entry — which is what leaves their own P unknown (genCum stays zero
+                                        // there) and sends the curve channel back to the share model that
+                                        // per-generator clamping breaks.
+                                        String[] dgIds = gpuData.dgGenId();
+                                        for (int g = 0; dgIds != null && g < dgIds.length; g++) {
+                                            if (go.lostGenIds().contains(dgIds[g])) {
+                                                dsLostGenList.add(s);
+                                                dsLostGenList.add(g);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -536,10 +927,15 @@ final class GpuBatchChunkSolver {
                         // (GpuBatchLossPreDistribution) and hand it to the device as the strategy-pair
                         // trio: participant target overrides + anchor shifts + the slack's own share.
                         for (int s = 0; s < realCount; s++) {
+                            // The amount OLF's DefaultContingencyActivePowerLossDistribution returns for this
+                            // contingency (mismatch - remaining, pu), as the replay below distributes it.
+                            int preIdx = group.get(chunkStart + s);
                             if (preLossBySlot[s] == 0) {
+                                preDistributedByIndex[preIdx] = 0.0;
                                 continue;
                             }
                             if (!hasDs) {
+                                preDistributedByIndex[preIdx] = preLossBySlot[s];   // the slack generator takes it all
                                 // SLACK-ONLY (the slack bus is the only participant): OLF distributes
                                 // the whole scheduled loss into the slack generator's own target, so
                                 // its target for this scenario is base + loss. The device has no
@@ -593,7 +989,27 @@ final class GpuBatchChunkSolver {
                                     dsOvFactorDelta.length > 0 ? dsOvFactorDelta[s] : 0,
                                     dsOvBaseDelta.length > 0 ? dsOvBaseDelta[s] : 0,
                                     dsOvMaxDelta.length > 0 ? dsOvMaxDelta[s] : 0,
-                                    dsOvMinDelta.length > 0 ? dsOvMinDelta[s] : 0, islandedDs);
+                                    dsOvMinDelta.length > 0 ? dsOvMinDelta[s] : 0, islandedDs,
+                                    lostSlotsOf(dsLostGenList, s));
+                            // OLF_GPU_SEED_DUMP=<file>: the per-bus SHARE the host-side loss
+                            // pre-distribution seeds, against OLF's own pre-distribution section in
+                            // OLF_DS_SPLIT. The two totals can agree while the SPLIT does not, and the
+                            // split is what the first solve sees — so the mismatch the DS loop then
+                            // measures, and everything after it, inherits the difference.
+                            if (System.getenv("OLF_GPU_SEED_DUMP") != null && shares != null) {
+                                try (java.io.PrintWriter w = new java.io.PrintWriter(
+                                        new java.io.FileWriter(System.getenv("OLF_GPU_SEED_DUMP"), true))) {
+                                    w.printf("# SEED ctg=%s%n",
+                                            contingencies.get(group.get(chunkStart + s)).contingencyId());
+                                    for (int i = 0; i < nds; i++) {
+                                        if (shares[i] != 0) {
+                                            w.printf("%d %.12f%n", i, shares[i]);
+                                        }
+                                    }
+                                } catch (java.io.IOException e) {
+                                    throw new java.io.UncheckedIOException(e);
+                                }
+                            }
                             if (System.getenv("OLF_GPU_PRELOSS_TRACE") != null) {
                                 double absorbed = 0;
                                 if (shares != null) {
@@ -622,8 +1038,14 @@ final class GpuBatchChunkSolver {
                                         countTrue(islandedDs));
                             }
                             if (shares == null) {
+                                preDistributedByIndex[preIdx] = 0.0;
                                 continue;
                             }
+                            double preDistributed = 0;
+                            for (double share : shares) {                 // participants + the slack's own share
+                                preDistributed += share;
+                            }
+                            preDistributedByIndex[preIdx] = preDistributed;
                             // The pre-distribution is a DISPLACEMENT from the anchor, not a new anchor.
                             // OLF's post-contingency DS calls resetToInitialState, which UNDOES it and
                             // returns it as previousMismatch, then water-fills
@@ -644,34 +1066,12 @@ final class GpuBatchChunkSolver {
                             }
                         }
                     }
-                    // SIMPLE (WITH_GENERATOR) transformer VC: OLF's initialize() enables continuous VC
-                    // BEFORE the first solve — apply the VC-ON activation deltas now, and keep the
-                    // pre-TVC override lists for the round-to-tap re-solve.
                     // CONTINUOUS phase control: OLF's initialize() enables the CONTROLLER-mode controls
-                    // BEFORE the first solve — keep the pre-enable override lists for the pinned re-solves.
-                    List<Integer> prePcOvIdx = null;
-                    List<Double> prePcOvVal = null;
-                    if (continuousPhaseControllers != null && !continuousPhaseControllers.isEmpty()) {
-                        prePcOvIdx = new ArrayList<>(overrides.indexList());
-                        prePcOvVal = new ArrayList<>(overrides.valueList());
-                        GpuBatchContinuousPhase.applyPhaseOn(realCount, n, continuousPhaseControllers,
-                                rowModePerScenario, baseRowMode, disabledMask, overrides.mutableIndexList(), overrides.mutableValueList());
-                    }
-                    List<Integer> preShuntOvIdx = null;
-                    List<Double> preShuntOvVal = null;
-                    if (config.simpleShuntControl() && simpleShuntGroups != null && !simpleShuntGroups.isEmpty()) {
-                        preShuntOvIdx = new ArrayList<>(overrides.indexList());
-                        preShuntOvVal = new ArrayList<>(overrides.valueList());
-                        GpuBatchSimpleShuntVc.applyVcOn(realCount, n, simpleShuntGroups,
-                                rowModePerScenario, baseRowMode, disabledMask, overrides.mutableIndexList(), overrides.mutableValueList());
-                    }
-                    List<Integer> preTvcOvIdx = null;
-                    List<Double> preTvcOvVal = null;
-                    if (config.simpleTransformerControl() && transformerControllers != null && !transformerControllers.isEmpty()) {
-                        preTvcOvIdx = new ArrayList<>(overrides.indexList());
-                        preTvcOvVal = new ArrayList<>(overrides.valueList());
-                        GpuBatchSimpleTvc.applyVcOn(realCount, n, transformerControllers,
-                                rowModePerScenario, baseRowMode, disabledMask, baseState, overrides.mutableIndexList(), overrides.mutableValueList());
+                    // BEFORE the first solve. This is the loop's initialize(), not an orchestrator — the
+                    // in-kernel phase expects the activation to already carry it.
+                    if (phases.continuousPhase() != null && !phases.continuousPhase().isEmpty()) {
+                        GpuBatchContinuousPhase.applyPhaseOn(realCount, n, phases.continuousPhase(),
+                                rowModePerScenario, baseRowMode, disabledMask, overrides);
                     }
                     int[] targetOverrideIndex = overrides.indexArray();
                     double[] targetOverrideValue = overrides.valueArray();
@@ -716,6 +1116,30 @@ final class GpuBatchChunkSolver {
                     // Pair phase: warm continuation from each parent contingency's state + RL pinning.
                     double[] x0Full = null;
                     int[] rlStateIn = null;
+                    int[] x0SeedIdx = null;
+                    double[] x0SeedVal = null;
+                    if (!frozenSeedSlot.isEmpty()) {         // islanding in this chunk: seed the frozen rows
+                        // Only the frozen rows differ from the base state: send them as seeds the device writes over
+                        // its own tiling of the base, instead of chunkSize * n doubles (372 MB per chunk on rte6515,
+                        // 1.5 GB for a single 14,260-scenario chunk). The HVDC freeze reads its warm start from the
+                        // same seeds.
+                        if (X0_SEEDS) {
+                            x0SeedIdx = new int[frozenSeedSlot.size()];
+                            x0SeedVal = new double[frozenSeedSlot.size()];
+                            for (int k = 0; k < frozenSeedSlot.size(); k++) {
+                                x0SeedIdx[k] = frozenSeedSlot.get(k) * n + frozenSeedRow.get(k);
+                                x0SeedVal[k] = frozenSeedValue.get(k);
+                            }
+                        } else {
+                            x0Full = new double[chunkSize * n];
+                            for (int s = 0; s < chunkSize; s++) {
+                                System.arraycopy(baseState, 0, x0Full, s * n, n);
+                            }
+                            for (int k = 0; k < frozenSeedSlot.size(); k++) {
+                                x0Full[frozenSeedSlot.get(k) * n + frozenSeedRow.get(k)] = frozenSeedValue.get(k);
+                            }
+                        }
+                    }
                     // Strategy-leg DS re-anchoring: OLF's processContingency calls
                     // setGeneratorsInitialTargetPToTargetP() before the strategy re-solve, so the CPU's strategy
                     // leg distributes only the INCREMENT from the parent contingency's already-distributed
@@ -760,6 +1184,11 @@ final class GpuBatchChunkSolver {
                             for (int i = 0; i < n; i++) {
                                 x0Full[s * n + i] = parent != null ? parent[i] : baseState[i];
                             }
+                            for (int k = 0; k < frozenSeedSlot.size(); k++) {
+                                if (frozenSeedSlot.get(k) == s) {   // a frozen row stays AT its frozen state
+                                    x0Full[s * n + frozenSeedRow.get(k)] = frozenSeedValue.get(k);
+                                }
+                            }
                             if (rlStateIn != null) {
                                 System.arraycopy(parentRl != null ? parentRl : baseRlSeed, 0, rlStateIn, s * nrl, nrl);
                             }
@@ -800,20 +1229,35 @@ final class GpuBatchChunkSolver {
                     // HVDC AC-emulation: snapshot the pre-freeze override lists (the round rebuild base),
                     // then OLF's FreezingHvdcACEmulation freezes every live hvdc at its scenario's
                     // WARM-START flows BEFORE the first solve.
-                    List<Integer> preHvdcOvIdx = null;
-                    List<Double> preHvdcOvVal = null;
+                    GpuBatchOverrides.Snapshot preHvdcOverrides = null;
                     int[][] hvdcStatus = null;
                     double[] hvAppliedD1 = null;
                     double[] hvAppliedD2 = null;
                     if (hvdcControllers != null && !hvdcControllers.isEmpty()) {
                         hvAppliedD1 = new double[chunkSize * hvdcControllers.size()];
                         hvAppliedD2 = new double[chunkSize * hvdcControllers.size()];
-                        preHvdcOvIdx = new ArrayList<>(overrides.indexList());
-                        preHvdcOvVal = new ArrayList<>(overrides.valueList());
+                        preHvdcOverrides = overrides.snapshot();
+                        if (System.getenv("OLF_GPU_HVDC_TRACE") != null) {
+                            for (int s = 0; s < realCount; s++) {
+                                System.err.println("HVDC_SLOT s=" + s + " ctg="
+                                        + contingencies.get(group.get(chunkStart + s)).contingencyId());
+                                // the PRE-freeze override entries on this slot's converter-bus P rows: the freeze
+                                // composes on top of them, so a stale one here is a double count downstream
+                                for (GpuBatchHvdcAcEmulation.Ctl c : hvdcControllers) {
+                                    for (int k = 0; k < preHvdcOverrides.index().length; k++) {
+                                        int r = preHvdcOverrides.index()[k] - s * n;
+                                        if (r == c.bus1PRow() || r == c.bus2PRow()) {
+                                            System.err.printf("HVDC_PREOV s=%d row=%d value=%.9f base=%.9f%n", s, r,
+                                                    preHvdcOverrides.value()[k], baseTargets[r]);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         if (config.hvdcFreezing()) {
                             hvdcStatus = GpuBatchHvdcAcEmulation.applyFreeze(chunkSize, realCount, n, hvdcControllers,
-                                    baseState, x0Full, disabledMask, baseTargets, overrides.mutableIndexList(),
-                                    overrides.mutableValueList(), hvAppliedD1, hvAppliedD2);
+                                    baseState, x0Full, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null,
+                                    disabledMask, baseTargets, overrides, hvAppliedD1, hvAppliedD2);
                             targetOverrideIndex = overrides.indexArray();
                             targetOverrideValue = overrides.valueArray();
                         } else {
@@ -827,12 +1271,28 @@ final class GpuBatchChunkSolver {
                                 hvdcStatus, disabledMask);
                     }
                     boolean dbgPairRl = pairPhase && nrl > 0 && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_RL"));
-                    boolean svcActive = svcControllers != null && !svcControllers.ctls().isEmpty();
-                    boolean monActive = monitoringControllers != null && !monitoringControllers.isEmpty();
+                    boolean svcActive = phases.secondaryVc() != null && !phases.secondaryVc().ctls().isEmpty();
+                    boolean monActive = phases.monitoring() != null && !phases.monitoring().isEmpty();
                     int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl || svcActive || monActive
+                            || !pilotPinCheck.isEmpty()
                             || System.getenv("OLF_GPU_RL_TRACE") != null) && nrl > 0 ? new int[chunkSize * nrl] : null;
                     // DISTR_Q weight overrides: per-chunk context state (orchestrator re-solves keep
                     // the slot assignment); cleared when the chunk has none.
+                    // Context state, like the qPct overrides beside it: a monitoring or secondary-VC
+                    // re-solve on this context must not drop it (as a solve PARAMETER it did — the
+                    // re-solve passed null and the DISTR_Q target was recomputed with the dead
+                    // controller's key back in the denominator, clobbering the right target).
+                    GpuAcNewtonSolver.setBatchDqInactiveMembers(handle,
+                            dqInactList.isEmpty() ? null : dqInactList.stream().mapToInt(Integer::intValue).toArray());
+                    GpuAcNewtonSolver.setBatchFrozenRows(handle,
+                            frozenSeedSlot.isEmpty() ? null : java.util.stream.IntStream
+                                    .range(0, frozenSeedSlot.size())
+                                    .flatMap(k -> java.util.stream.IntStream.of(
+                                            frozenSeedSlot.get(k), frozenSeedRow.get(k)))
+                                    .toArray());
+                    GpuAcNewtonSolver.setBatchDsLostGenerators(handle,
+                            dsLostGenList.isEmpty() ? null
+                                    : dsLostGenList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchDqWeightOverrides(handle,
                             dqOvIdxList.isEmpty() ? null : dqOvIdxList.stream().mapToInt(Integer::intValue).toArray(),
                             dqOvWList.isEmpty() ? null : dqOvWList.stream().mapToDouble(Double::doubleValue).toArray());
@@ -840,100 +1300,76 @@ final class GpuBatchChunkSolver {
                             drOvIdxList.isEmpty() ? null : drOvIdxList.stream().mapToInt(Integer::intValue).toArray(),
                             drOvCList.isEmpty() ? null : drOvCList.stream().mapToDouble(Double::doubleValue).toArray());
                     GpuAcNewtonSolver.setBatchActiveRowCounts(handle, nActive);
-                    // Per-generator participants: run-constant, but the context is per chunk.
-                    GpuAcNewtonSolver.setBatchDsGenerators(handle, gpuData.dgBus(), gpuData.dgFactor(),
-                            gpuData.dgMaxDelta(), gpuData.dgMinDelta(),
-                            gpuData.dgMarginUp(), gpuData.dgMarginDown(),
-                            gpuData.busGenStart(), gpuData.busGenEnd());
                     // Cleared when the chunk strands nobody, so a chunk never inherits the previous
                     // chunk's participant mask through the reused context.
                     GpuAcNewtonSolver.setBatchDsIslanded(handle,
                             dsIslandedList.isEmpty() ? null : dsIslandedList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchRlIslanded(handle,
                             rlIslandedList.isEmpty() ? null : rlIslandedList.stream().mapToInt(Integer::intValue).toArray());
+                    GpuAcNewtonSolver.setBatchDqMemberTargetQOverrides(handle,
+                            dqTqOvKey.isEmpty() ? null : dqTqOvKey.stream().mapToInt(Integer::intValue).toArray(),
+                            dqTqOvKey.isEmpty() ? null : dqTqOvVal.stream().mapToDouble(Double::doubleValue).toArray());
+                    GpuAcNewtonSolver.setBatchPilotAllPinnedFlip(handle,
+                            pfSlot.isEmpty() ? null : pfSlot.stream().mapToInt(Integer::intValue).toArray(),
+                            pfSlot.isEmpty() ? null : pfRow.stream().mapToInt(Integer::intValue).toArray(),
+                            pfSlot.isEmpty() ? null : pfQTarget.stream().mapToDouble(Double::doubleValue).toArray(),
+                            pfSlot.isEmpty() ? null : pfRlCount.stream().mapToInt(Integer::intValue).toArray(),
+                            pfSlot.isEmpty() ? null : pfRlPool.stream().mapToInt(Integer::intValue).toArray());
                     // The two HVDC AC-emulation loops run as DRIVER PHASES, in OLF's own position
                     // between DistributedSlack and ReactiveLimits. Running them instead as host
                     // orchestrators after the whole solve put them out of OLF's order and left one
                     // differing violation line over 2000 rte6515 branch contingencies.
                     byte[] ctgOutOf = null;
                     boolean hasHvdcDriverLoops = hvdcControllers != null && !hvdcControllers.isEmpty();
-                    if (hasHvdcDriverLoops) {
-                        int nh = hvdcControllers.size();
-                        int[] hvElem = new int[nh];
-                        int[] hvB1 = new int[nh];
-                        int[] hvB2 = new int[nh];
-                        double[] hvIn = new double[nh * 9];
-                        for (int h = 0; h < nh; h++) {
-                            GpuBatchHvdcAcEmulation.Ctl c = hvdcControllers.get(h);
-                            hvElem[h] = c.hvElemIndex();          // GLOBAL element index
-                            hvB1[h] = c.bus1PRow();
-                            hvB2[h] = c.bus2PRow();
-                            hvIn[h * 9] = c.p0();
-                            hvIn[h * 9 + 1] = c.k();
-                            hvIn[h * 9 + 2] = c.pMax12();
-                            hvIn[h * 9 + 3] = c.pMax21();
-                            hvIn[h * 9 + 4] = c.loss1();
-                            hvIn[h * 9 + 5] = c.loss2();
-                            hvIn[h * 9 + 6] = c.r();
-                            hvIn[h * 9 + 7] = c.baseD1();
-                            hvIn[h * 9 + 8] = c.baseD2();
-                        }
-                        ctgOutOf = new byte[chunkSize * nh];
-                        byte[] ctgOut = ctgOutOf;
-                        int[] flatStatus = new int[chunkSize * nh];
-                        for (int s2 = 0; s2 < chunkSize; s2++) {
-                            for (int h = 0; h < nh; h++) {
-                                flatStatus[s2 * nh + h] = hvdcStatus[s2][h];
-                                // "the contingency outaged it" is the bit set on a LINEAR entry
-                                ctgOut[s2 * nh + h] = (byte) (hvdcStatus[s2][h] == GpuBatchHvdcAcEmulation.LINEAR
-                                        && disabledMask[s2][hvdcControllers.get(h).hvElemIndex()] ? 1 : 0);
-                            }
-                        }
-                        GpuAcNewtonSolver.setBatchHvdcLoops(handle, hvElem, hvB1, hvB2, hvIn, ctgOut,
-                                flatStatus, hvAppliedD1, hvAppliedD2, config.hvdcLimits() ? 1 : 0);
-                    } else {
-                        GpuAcNewtonSolver.setBatchHvdcLoops(handle, null, null, null, null, null, null, null, null, 0);
-                    }
+                    ctgOutOf = GpuBatchHvdcAcEmulation.installDriverLoops(handle,
+                            hasHvdcDriverLoops ? hvdcControllers : null, chunkSize, hvdcStatus, disabledMask,
+                            hvAppliedD1, hvAppliedD2, config.hvdcLimits());
                     // MonitoringVoltage as a DRIVER PHASE, in OLF's own slot (order 6, between the
                     // HVDC loops and ReactiveLimits) instead of as a host orchestrator after the whole
                     // solve. Run-constant table, but the context is per chunk.
                     boolean monInKernel = monActive;
-                    if (monInKernel) {
-                        int nc = monitoringControllers.size();
-                        int[] monVRow = new int[nc];
-                        double[] monBand = new double[nc * 4];
-                        int[] deltaPtr = new int[nc + 1];
-                        List<Integer> dRow = new ArrayList<>();
-                        List<Integer> dMode = new ArrayList<>();
-                        List<Double> dTgt = new ArrayList<>();
-                        for (int c = 0; c < nc; c++) {
-                            GpuBatchVoltageMonitoring.Ctl ctl = monitoringControllers.get(c);
-                            monVRow[c] = ctl.vRow();
-                            monBand[c * 4] = ctl.lowThreshold();
-                            monBand[c * 4 + 1] = ctl.highThreshold();
-                            monBand[c * 4 + 2] = ctl.lowTargetV();
-                            monBand[c * 4 + 3] = ctl.highTargetV();
-                            deltaPtr[c] = dRow.size();
-                            for (int k = 0; k < ctl.deltaRows().length; k++) {
-                                dRow.add(ctl.deltaRows()[k]);
-                                dMode.add(ctl.deltaModesOn()[k]);
-                                dTgt.add(ctl.deltaTargetsOn()[k]);
-                            }
-                        }
-                        deltaPtr[nc] = dRow.size();
-                        GpuAcNewtonSolver.setBatchMonitoringLoops(handle, monVRow, monBand, deltaPtr,
-                                dRow.stream().mapToInt(Integer::intValue).toArray(),
-                                dMode.stream().mapToInt(Integer::intValue).toArray(),
-                                dTgt.stream().mapToDouble(Double::doubleValue).toArray());
-                    } else {
-                        GpuAcNewtonSolver.setBatchMonitoringLoops(handle, null, null, null, null, null, null);
+                    GpuBatchVoltageMonitoring.installDriverLoop(handle, monInKernel ? phases.monitoring() : null);
+                    // SecondaryVoltageControl as a DRIVER PAUSE at its OLF slot (order 4). Run as a host
+                    // orchestrator it executed AFTER the whole device sweep — i.e. after the control loops
+                    // OLF puts at orders 7-10 — so each decided on a state the other had already moved
+                    // (1.7e-3 kV on a zone whose pilot bus feeds an AFTER_GENERATOR transformer; the
+                    // pre-2026-09-15 host chain was worse still at 2.4e-1 kV, its re-solves not composing).
+                    // Pausing puts it back in OLF's order with no new maths: the same decision code runs on
+                    // the paused states and hands its target moves back as flat deltas.
+                    // SecondaryVoltageControl, in OLF's order (order 4). Preferred form: an IN-KERNEL phase,
+                    // the whole check on the device. Where the kernel refuses the zone set (wider than its
+                    // dense system, or an observable on an unpacked element) the driver PAUSES at the same
+                    // slot and the same decision runs on the host instead. OLF_GPU_SVC_HOST_ORCHESTRATOR=1
+                    // falls all the way back to the pre-2026-09-15 after-the-sweep orchestrator for A/B.
+                    boolean svcHostFallback = "1".equals(System.getenv("OLF_GPU_SVC_HOST_ORCHESTRATOR"));
+                    // Three layers, most faithful first: the IN-KERNEL phase owns the loop; where it refuses
+                    // the tables (a zone set wider than its dense system, or an observable on an element the
+                    // batch does not pack) the driver PAUSES at the same slot and the same decision runs on
+                    // the host; OLF_GPU_SVC_HOST_ORCHESTRATOR=1 falls all the way back to the
+                    // pre-2026-09-15 after-the-sweep orchestrator, for A/B only.
+                    boolean svcInKernel = svcActive && !svcHostFallback
+                            && GpuBatchSecondaryVc.uploadToDevice(handle, phases.secondaryVc());
+                    if (!svcInKernel) {
+                        GpuBatchSecondaryVc.uploadToDevice(handle, null);   // clear a cached context's table
                     }
+                    boolean svcAsDriverPause = svcActive && rlStateOut != null && !svcHostFallback && !svcInKernel;
+                    GpuAcNewtonSolver.setBatchHostLoop(handle, svcAsDriverPause ? 1 : 0);
+                    long solveCountBefore = GpuAcNewtonSolver.readBatchSolveCount(handle);
+                    // Seeds only where no full per-scenario state goes (the pair phase builds its own from the parents).
+                    GpuAcNewtonSolver.setBatchX0Seeds(handle, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null);
+                    // -Dolf.gpu.sa.fixedInnerIters=K: K Newton steps per inner solve, tested once at the end (a
+                    // performance comparison against the per-iteration test; unconverged scenarios go to the CPU).
+                    GpuAcNewtonSolver.setBatchFixedIter(handle, Integer.getInteger("olf.gpu.sa.fixedInnerIters", 0));
                     long tSolve0 = System.nanoTime();
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
                             dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
                             null, null,
-                            parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                            rlQOvSlot.stream().mapToInt(Integer::intValue).toArray(),
+                            rlQOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
+                            cvOvSlot.stream().mapToInt(Integer::intValue).toArray(),
+                            cvOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
+                                                        parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                             config.lsMode(), config.maxDv(), config.maxDphi(),
                             config.lsMode() == 2 ? varType : null, x0Full,
                             shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
@@ -949,6 +1385,71 @@ final class GpuBatchChunkSolver {
                             nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
                     tMainSolveNs += System.nanoTime() - tSolve0;
+                    if (svcAsDriverPause) {
+                        long tSvc0 = System.nanoTime();
+                        int nSvcCtl = phases.secondaryVc().ctls().size();
+                        double[][] svcTargetV = new double[chunkSize][nSvcCtl];
+                        for (int s2 = 0; s2 < chunkSize; s2++) {
+                            for (int c = 0; c < nSvcCtl; c++) {
+                                svcTargetV[s2][c] = phases.secondaryVc().ctls().get(c).baseTargetV();
+                            }
+                        }
+                        // The driver re-pauses at the SVC slot on EVERY sweep restart, and a reactive-limit
+                        // switch restarts the sweep — so the pause count is bounded by the whole outer-loop
+                        // budget, not by the number of zone adjustments. The kernel retires a scenario whose
+                        // budget a host-UNSTABLE verdict exhausts, so this cap is only a safety net; stopping
+                        // early would leave the context PAUSED and the chunk holding mid-sweep states.
+                        int maxSvcRounds = 16 * (config.maxOuterIterations() > 0 ? config.maxOuterIterations() : 20);
+                        int svcRounds = 0;
+                        while (GpuAcNewtonSolver.readBatchDriverPaused(handle) == GpuAcNewtonSolver.HOST_LOOP_SVC
+                                && svcRounds++ < maxSvcRounds) {
+                            var dec = GpuBatchSecondaryVc.decideAtPause(handle, chunkSize, realCount, n, nrl,
+                                    chunkResults, phases.secondaryVc(), rlStateOut, svcTargetV, baseState);
+                            if (dec.targetRows() != null && dec.targetRows().length > 0) {
+                                GpuAcNewtonSolver.setBatchTargetDeltas(handle, dec.targetRows(), dec.targetValues());
+                            }
+                            if (dec.unpinPairs() != null && dec.unpinPairs().length > 0) {
+                                GpuAcNewtonSolver.setBatchRlUnpin(handle, dec.unpinPairs(), dec.unpinTargets());
+                            }
+                            GpuAcNewtonSolver.setBatchDriverResume(handle, dec.hostChanged());
+                            chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
+                                    rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
+                                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
+                                    dec.rlVtSlotIdx(), dec.rlVtValues(),
+                                    rlQOvSlot.stream().mapToInt(Integer::intValue).toArray(),
+                                    rlQOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
+                                    cvOvSlot.stream().mapToInt(Integer::intValue).toArray(),
+                                    cvOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
+                                                                        parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                                    config.lsMode(), config.maxDv(), config.maxDphi(),
+                                    config.lsMode() == 2 ? varType : null, x0Full,
+                                    shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                    shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                    null, rlStateOut,
+                                    r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                    r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
+                                    config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0,
+                                    nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
+                                    ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
+                        }
+                        if (GpuAcNewtonSolver.readBatchDriverPaused(handle) != 0) {
+                            // Safety net only: the budget bookkeeping above should always end the cycle.
+                            // Mid-sweep states must never be reported — cancel and let the CPU replay them.
+                            LOGGER.warn("Secondary VC driver pause did not settle in {} rounds — chunk routed to the CPU",
+                                    maxSvcRounds);
+                            GpuAcNewtonSolver.cancelBatchDriverPause(handle);
+                            for (int s2 = 0; s2 < realCount; s2++) {
+                                if (chunkResults[s2] != null) {
+                                    chunkResults[s2][n + 2] = GpuBatchStatus.STATUS_REJECTED;
+                                }
+                            }
+                        }
+                        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+                            System.err.printf("SVC_PAUSE rounds=%d stillPaused=%d%n", svcRounds,
+                                    GpuAcNewtonSolver.readBatchDriverPaused(handle));
+                        }
+                        orchNs.merge("SecondaryVc.driverPause", System.nanoTime() - tSvc0, Long::sum);
+                    }
                     if (monInKernel) {
                         // Keep ACTIVATIONS meaningful with the loop in the driver: it is the guard
                         // that a case really exercises the automaton, not orchestrator bookkeeping.
@@ -966,20 +1467,26 @@ final class GpuBatchChunkSolver {
                             for (int s2 = 0; s2 < chunkSize; s2++) {
                                 System.arraycopy(devStatus, s2 * nh, hvdcStatus[s2], 0, nh);
                             }
+                            if (System.getenv("OLF_GPU_HVDC_TRACE") != null) {
+                                // the status each scenario ENDED with (0 linear, 1/2 saturated, 3 frozen)
+                                for (int s2 = 0; s2 < realCount; s2++) {
+                                    StringBuilder sb = new StringBuilder();
+                                    for (int h = 0; h < nh; h++) {
+                                        sb.append(' ').append(hvdcStatus[s2][h]);
+                                    }
+                                    System.err.println("HVDC_END s=" + s2 + " ctg="
+                                            + contingencies.get(group.get(chunkStart + s2)).contingencyId() + " status:" + sb);
+                                }
+                            }
                             // Re-derive the host's OVERRIDE LIST and hv bits from those statuses, on
                             // top of the PRE-FREEZE list. Syncing only the bits is not enough: every
                             // orchestrator that runs next rebuilds its targets from this list, so a
                             // stale post-freeze list re-applies a freeze the kernel already lifted
                             // (measured: 566 differing lines over 2000 with only the bits synced).
-                            List<Integer> idx = new ArrayList<>(preHvdcOvIdx);
-                            List<Double> val = new ArrayList<>(preHvdcOvVal);
+                            overrides.restore(preHvdcOverrides);
                             GpuBatchHvdcAcEmulation.applyStatusOverrides(chunkSize, realCount, n,
-                                    hvdcControllers, hvdcStatus, ctgOutOf, disabledMask, baseTargets, idx, val,
+                                    hvdcControllers, hvdcStatus, ctgOutOf, disabledMask, baseTargets, overrides,
                                     hvAppliedD1, hvAppliedD2);
-                            overrides.mutableIndexList().clear();
-                            overrides.mutableIndexList().addAll(idx);
-                            overrides.mutableValueList().clear();
-                            overrides.mutableValueList().addAll(val);
                             targetOverrideIndex = overrides.indexArray();
                             targetOverrideValue = overrides.valueArray();
                         }
@@ -994,6 +1501,22 @@ final class GpuBatchChunkSolver {
                             System.err.printf("ITER ctg=%s iters=%d%n",
                                     contingencies.get(group.get(chunkStart + s)).contingencyId(),
                                     (int) chunkResults[s][n]);
+                        }
+                    }
+                    if (System.getenv("OLF_GPU_DS_FINAL_DUMP") != null && nds > 0 && !pairPhase) {
+                        // Every participant's FINAL distributed-slack delta for slot 0, against the same
+                        // anchor the water-fill resets to. Two water-fills that move the same TOTAL can
+                        // still split it differently, and only the per-participant deltas say so (the
+                        // CPU counterpart is OLF's DS_GEN trace under OLF_DS_TRACE).
+                        double[] ftd = GpuAcNewtonSolver.readBatchTargets(handle);
+                        for (int i = 0; i < nds; i++) {
+                            int row = gpuData.dsPhiRow()[i];
+                            double d = ftd[row] - gpuData.dsBaseTargetP()[i];
+                            if (d != 0) {
+                                System.err.printf("DS_FINAL_ROW ctg=%s i=%d row=%d base=%.12e final=%.12e delta=%.12e factor=%.12e%n",
+                                        contingencies.get(group.get(chunkStart)).contingencyId(), i, row,
+                                        gpuData.dsBaseTargetP()[i], ftd[row], d, gpuData.dsFactor()[i]);
+                            }
                         }
                     }
                     if (System.getenv("OLF_GPU_PRELOSS_TRACE") != null && nds > 0 && !pairPhase) {
@@ -1036,13 +1559,14 @@ final class GpuBatchChunkSolver {
                         for (int s = 0; s < realCount; s++) {
                             String id = contingencies.get(group.get(chunkStart + s)).contingencyId();
                             for (int i = 0; i < nds; i++) {
-                                System.err.printf("GPU_DS_TARGET ctg=%s i=%d target=%s%n",
-                                        id, i, Double.toString(ft[s * n + gpuData.dsPhiRow()[i]]));
+                                System.err.printf("GPU_DS_TARGET ctg=%s i=%d row=%d target=%s%n",
+                                        id, i, gpuData.dsPhiRow()[i],
+                                        Double.toString(ft[s * n + gpuData.dsPhiRow()[i]]));
                             }
                         }
                     }
                     if (System.getenv("OLF_GPU_RL_TRACE") != null && rlStateOut != null) {
-                        // rlStateOut packs (limitType & 3) | (switchCount << 2) per (controller, scenario):
+                        // rlStateOut packs (limitType & 7) | (switchCount << 3) per (controller, scenario):
                         // switchCount > 0 means the DEVICE switched that controller during THIS solve, which
                         // is exactly the decision OLF's ReactiveLimitsOuterLoop makes (and logs) on the CPU.
                         for (int s = 0; s < realCount; s++) {
@@ -1051,20 +1575,20 @@ final class GpuBatchChunkSolver {
                             StringBuilder ids = new StringBuilder();
                             for (int i = 0; i < nrl; i++) {
                                 int v = rlStateOut[s * nrl + i];
-                                if ((v & 3) != 0) {
+                                if ((v & 7) != 0) {
                                     pinned++;
                                     if (ids.length() < 4000) {
                                         // vRow identifies WHICH controller: it is the bus's stable device
                                         // row, the same number the DISTR_Q / target dumps print.
                                         ids.append(" p").append(i).append("(vRow=").append(gpuData.rlVrow()[i])
-                                           .append(",lt=").append(v & 3).append(')');
+                                           .append(",lt=").append(v & 7).append(')');
                                     }
                                 }
-                                if ((v >> 2) > 0) {
+                                if ((v >> 3) > 0) {
                                     switched++;
                                     if (ids.length() < 300) {
                                         ids.append(" rl").append(i).append("(vRow=")
-                                           .append(gpuData.rlVrow()[i]).append(",lt=").append(v & 3).append(')');
+                                           .append(gpuData.rlVrow()[i]).append(",lt=").append(v & 7).append(')');
                                     }
                                 }
                             }
@@ -1090,8 +1614,8 @@ final class GpuBatchChunkSolver {
                             StringBuilder sb = new StringBuilder("GPU-PAIR-RL " + contingencies.get(group.get(chunkStart + s2)).contingencyId().replace(GpuBatchStatus.STRATEGY_KEY_SEP, '|'));
                             for (int i2 = 0; i2 < nrl; i2++) {
                                 int v = rlStateOut[s2 * nrl + i2];
-                                if ((v & 3) != 0) {
-                                    sb.append(" ctl").append(i2).append("=lt").append(v & 3).append("/sc").append(v >> 2);
+                                if ((v & 7) != 0) {
+                                    sb.append(" ctl").append(i2).append("=lt").append(v & 7).append("/sc").append(v >> 3);
                                 }
                             }
                             System.err.println(sb);
@@ -1111,6 +1635,30 @@ final class GpuBatchChunkSolver {
                             for (int s = 0; s < realCount; s++) {
                                 slackAbsorbedByIndex.put(group.get(chunkStart + s), absorbed[s]);
                             }
+                        }
+                    }
+                    // OLF_GPU_ROWMODE_DUMP_CTG=<contingency id>: the DEVICE's final per-scenario row modes
+                    // and targets for that scenario, as the rows that DIFFER from the base. This is the other
+                    // half of the comparison against OLF_GPU_EQ_DUMP_CTG (OLF's post-contingency equations):
+                    // together they say, row by row, which equation each side has where.
+                    String rmCtg = System.getenv("OLF_GPU_ROWMODE_DUMP_CTG");
+                    if (rmCtg != null && !rmCtg.isEmpty()) {
+                        int[] devModes = GpuAcNewtonSolver.readBatchRowModes(handle);
+                        double[] devTargets = GpuAcNewtonSolver.readBatchTargets(handle);
+                        for (int s = 0; s < realCount; s++) {
+                            if (!rmCtg.equals(contingencies.get(group.get(chunkStart + s)).contingencyId())) {
+                                continue;
+                            }
+                            StringBuilder sb = new StringBuilder();
+                            for (int r = 0; r < n; r++) {
+                                int m = devModes[s * n + r];
+                                if (m != baseRowMode[r]) {
+                                    sb.append(String.format("  row=%d mode=%d<-%d target=%.9g%n",
+                                            r, m, baseRowMode[r], devTargets[s * n + r]));
+                                }
+                            }
+                            System.err.print("ROWMODE_DUMP ctg=" + rmCtg + " slot=" + s
+                                    + " rows differing from base:\n" + sb);
                         }
                     }
                     if (!pairPhase && nds > 0 && !pairIdxList.isEmpty()) {
@@ -1134,162 +1682,61 @@ final class GpuBatchChunkSolver {
                             dsTargetsByIndex.put(group.get(chunkStart + s), slice);
                         }
                     }
-                    if (incrementalTvcControllers != null && !incrementalTvcControllers.isEmpty()) {
-                        long t00 = System.nanoTime();   // TIMED_GpuBatchIncrementalTvcorchestrate
-                        chunkResults = GpuBatchIncrementalTvc.orchestrate(handle, chunkSize, realCount, n,
-                                chunkResults, incrementalTvcControllers, rowModePerScenario, baseRowMode, disabledMask,
-                                targetOverrideIndex, targetOverrideValue,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("IncrementalTvc.orchestrate", System.nanoTime() - t00, Long::sum);
-                    }
-                    if (monActive && !monInKernel && rlStateOut != null) {
-                        long tOr3 = System.nanoTime();   // TIMED_GpuBatchVoltageMonitoring
-                        chunkResults = GpuBatchVoltageMonitoring.orchestrate(handle, chunkSize, realCount, n, nrl,
-                                chunkResults, monitoringControllers, rlStateOut, rlSolvedPerScenario,
-                                rowModePerScenario, baseRowMode, disabledMask,
-                                targetOverrideIndex, targetOverrideValue,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("VoltageMonitoring.orchestrate", System.nanoTime() - tOr3, Long::sum);
-                    }
-                    if (svcActive && rlStateOut != null) {
-                        long tOr4 = System.nanoTime();   // TIMED_GpuBatchSecondaryVc
-                        chunkResults = GpuBatchSecondaryVc.orchestrate(handle, chunkSize, realCount, n, nrl,
-                                chunkResults, svcControllers, rlStateOut,
-                                rowModePerScenario, baseRowMode, disabledMask,
-                                targetOverrideIndex, targetOverrideValue,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("SecondaryVc.orchestrate", System.nanoTime() - tOr4, Long::sum);
-                    }
-                    if (continuousPhaseControllers != null && !continuousPhaseControllers.isEmpty()) {
-                        long tOr5 = System.nanoTime();   // TIMED_GpuBatchContinuousPhase
-                        chunkResults = GpuBatchContinuousPhase.orchestrate(handle, chunkSize, realCount, n,
-                                chunkResults, continuousPhaseControllers, esContext,
-                                rowModePerScenario, baseRowMode, disabledMask,
-                                prePcOvIdx, prePcOvVal,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("ContinuousPhase.orchestrate", System.nanoTime() - tOr5, Long::sum);
-                    }
-                    if (config.simpleShuntControl() && simpleShuntGroups != null && !simpleShuntGroups.isEmpty()) {
-                        long tOr6 = System.nanoTime();   // TIMED_GpuBatchSimpleShuntVc
-                        chunkResults = GpuBatchSimpleShuntVc.roundAndResolve(handle, chunkSize, realCount, n,
-                                chunkResults, simpleShuntGroups, rowModePerScenario, baseRowMode, disabledMask,
-                                preShuntOvIdx, preShuntOvVal,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                dsAnchorShift, dsSlackShift,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("SimpleShuntVc.roundAndResolve", System.nanoTime() - tOr6, Long::sum);
-                    }
-                    if (config.simpleTransformerControl() && transformerControllers != null && !transformerControllers.isEmpty()) {
-                        long tOr7 = System.nanoTime();   // TIMED_GpuBatchSimpleTvc
-                        chunkResults = GpuBatchSimpleTvc.roundAndResolve(handle, chunkSize, realCount, n,
-                                chunkResults, transformerControllers, rowModePerScenario, baseRowMode, disabledMask,
-                                preTvcOvIdx, preTvcOvVal,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                dsAnchorShift, dsSlackShift,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("SimpleTvc.roundAndResolve", System.nanoTime() - tOr7, Long::sum);
-                    }
-                    if (incrementalFlowControllers != null && !incrementalFlowControllers.isEmpty()) {
-                        long tOr8 = System.nanoTime();   // TIMED_GpuBatchIncrementalFlowControl
-                        chunkResults = GpuBatchIncrementalFlowControl.orchestrate(handle, chunkSize, realCount, n,
-                                chunkResults, incrementalFlowControllers, esContext, rowModePerScenario, baseRowMode, disabledMask,
-                                targetOverrideIndex, targetOverrideValue,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("IncrementalFlowControl.orchestrate", System.nanoTime() - tOr8, Long::sum);
-                    }
-                    if (incrementalShuntControllers != null && !incrementalShuntControllers.isEmpty()) {
-                        long tOr9 = System.nanoTime();   // TIMED_GpuBatchIncrementalShuntVc
-                        chunkResults = GpuBatchIncrementalShuntVc.orchestrate(handle, chunkSize, realCount, n,
-                                chunkResults, incrementalShuntControllers, rowModePerScenario, baseRowMode, disabledMask,
-                                targetOverrideIndex, targetOverrideValue,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                r1OvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                r1OvValList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                shOvSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                shOvGbList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                                config.lsMode() == 2 ? varType : null, config);
-                        orchNs.merge("IncrementalShuntVc.orchestrate", System.nanoTime() - tOr9, Long::sum);
-                    }
-                    if (config.transformerControl() && transformerControllers != null && !transformerControllers.isEmpty()) {
-                        long tOr10 = System.nanoTime();   // TIMED_GpuBatchTransformerControl
-                        chunkResults = GpuBatchTransformerControl.orchestrateTransformerControl(handle, chunkSize, realCount, n,
-                                chunkResults, transformerControllers, rowModePerScenario, baseRowMode, disabledMask,
-                                targetOverrideIndex, targetOverrideValue,
-                                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                                nds > 0 ? gpuData.dsPhiRow() : null, nds > 0 ? gpuData.dsFactor() : null,
-                                drOvIdxList.isEmpty() ? null : drOvIdxList.stream().mapToInt(Integer::intValue).toArray(),
-                                drOvCList.isEmpty() ? null : drOvCList.stream().mapToDouble(Double::doubleValue).toArray(),
-                                gpuData.drRow(),
-                                baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, varType,
-                                config);
-                        orchNs.merge("TransformerControl.orchestrateTransformerControl", System.nanoTime() - tOr10, Long::sum);
-                    }
+                    // HOST ORCHESTRATORS — in OLF's DefaultAcOuterLoopConfig order.
+                    // In-kernel: DS(0), HVDC(1,2), Monitoring(5), RL(6) already ran in the main solve.
+                    // Post-RL host orchestrators below: SVC(4), Monitoring(5), Phase(7), TVC(8), TRPC(9), Shunt(10).
+
                     tOrchestratorNs += System.nanoTime() - tOrch0;
+                    // OLF_GPU_FINAL_TARGET_ROW=<row>: the target the device ENDED UP solving that row
+                    // against, after every per-scenario kernel and orchestrator. The base+override
+                    // view (OLF_GPU_TARGET_ROW) shows what was UPLOADED; this shows what survived.
+                    if (System.getenv("OLF_GPU_FINAL_TARGET_ROW") != null) {
+                        // Comma-separated rows, so a shape that spans a group (pilot + its members)
+                        // is read in ONE run instead of one run per row.
+                        double[] ftp = GpuAcNewtonSolver.readBatchTargets(handle);
+                        int[] fmode = GpuAcNewtonSolver.readBatchRowModes(handle);
+                        for (String tok : System.getenv("OLF_GPU_FINAL_TARGET_ROW").split(",")) {
+                            int probe = Integer.parseInt(tok.trim());
+                            for (int s = 0; s < realCount; s++) {
+                                // setupMode is what the HOST asked for; devMode is what the device
+                                // ENDED with. They differ exactly when an outer-loop kernel rewrote the
+                                // row -- which is the thing worth seeing.
+                                int setupMode = rowModePerScenario != null && rowModePerScenario[s] != null
+                                        ? rowModePerScenario[s][probe] : baseRowMode[probe];
+                                System.err.printf("FINAL_TARGET ctg=%s row=%d base=%.9f final=%.9f"
+                                                + " setupMode=%d devMode=%d%n",
+                                        contingencies.get(group.get(chunkStart + s)).contingencyId(), probe,
+                                        baseTargets[probe], ftp[s * n + probe], setupMode,
+                                        fmode == null ? -99 : fmode[s * n + probe]);
+                            }
+                        }
+                    }
+                    // OLF_GPU_GENCUM_DUMP=<file>: each GENERATOR's own cumulative P movement as the
+                    // device computed it, which is what the curve channel now evaluates its capability
+                    // at. Joined against OLF's per-generator movement (OLF_DS_SPLIT's G lines) it says
+                    // whether the device and OLF put the same power on the same machine — the question
+                    // the per-bus totals cannot answer.
+                    if (System.getenv("OLF_GPU_GENCUM_DUMP") != null && gpuData.dgGenId() != null) {
+                        double[] gc = GpuAcNewtonSolver.readBatchDsGenCum(handle);
+                        String[] ids = gpuData.dgGenId();
+                        if (gc != null && ids.length > 0) {
+                            try (java.io.PrintWriter w = new java.io.PrintWriter(
+                                    new java.io.FileWriter(System.getenv("OLF_GPU_GENCUM_DUMP"), true))) {
+                                for (int s2 = 0; s2 < realCount; s2++) {
+                                    w.printf("# GENCUM ctg=%s%n",
+                                            contingencies.get(group.get(chunkStart + s2)).contingencyId());
+                                    for (int g = 0; g < ids.length; g++) {
+                                        double v = gc[s2 * ids.length + g];
+                                        if (v != 0) {
+                                            w.printf("%s %.12f%n", ids[g], v);
+                                        }
+                                    }
+                                }
+                            } catch (java.io.IOException e) {
+                                throw new java.io.UncheckedIOException(e);
+                            }
+                        }
+                    }
                     if (System.getenv("OLF_GPU_DS_TARGET_DUMP") != null && nds > 0) {
                         // The FINAL distributed target on every participant row, after every
                         // orchestrator. Both arms are converged, so if their reported states differ
@@ -1297,10 +1744,21 @@ final class GpuBatchChunkSolver {
                         double[] ft = GpuAcNewtonSolver.readBatchTargets(handle);
                         for (int s = 0; s < realCount; s++) {
                             String id = contingencies.get(group.get(chunkStart + s)).contingencyId();
+                            double tot = 0;
                             for (int i = 0; i < nds; i++) {
-                                System.err.printf("GPU_DS_TARGET ctg=%s i=%d target=%s%n",
-                                        id, i, Double.toString(ft[s * n + gpuData.dsPhiRow()[i]]));
+                                int row = gpuData.dsPhiRow()[i];
+                                double effBase = baseTargets[row] - (dsOvBus[s] == i ? dsOvBaseDelta[s] : 0.0);
+                                tot += ft[s * n + row] - effBase;
+                                System.err.printf("GPU_DS_TARGET ctg=%s i=%d target=%s delta=%s%n",
+                                        id, i, Double.toString(ft[s * n + row]),
+                                        Double.toString(ft[s * n + row] - effBase));
                             }
+                            // The CUMULATIVE distributed active power. OLF's own DS re-distributes the
+                            // cumulative amount from the INITIAL target P on every pass, so this total is
+                            // directly comparable to the LAST `effective` OLF_DS_TRACE reports for the
+                            // same contingency.
+                            System.err.printf("GPU_DS_TOTAL ctg=%s distributed=%.9f%n", id, tot)
+;
                         }
                     }
                     if (System.getenv("OLF_GPU_RL_TRACE") != null && rlStateOut != null) {
@@ -1312,23 +1770,62 @@ final class GpuBatchChunkSolver {
                         for (int s = 0; s < realCount; s++) {
                             int pinned = 0;
                             for (int i = 0; i < nrl; i++) {
-                                if ((rlStateOut[s * nrl + i] & 3) != 0) {
+                                if ((rlStateOut[s * nrl + i] & 7) != 0) {
                                     pinned++;
                                 }
                             }
                             StringBuilder ids = new StringBuilder();
                             for (int i = 0; i < nrl; i++) {
-                                if ((rlStateOut[s * nrl + i] & 3) != 0) {
+                                if ((rlStateOut[s * nrl + i] & 7) != 0) {
                                     ids.append(' ').append(i).append("(vRow=").append(gpuData.rlVrow()[i])
-                                       .append(",lt=").append(rlStateOut[s * nrl + i] & 3).append(')');
+                                       .append(",lt=").append(rlStateOut[s * nrl + i] & 7).append(')');
                                 }
                             }
                             System.err.printf("GPU_RL_FINAL ctg=%s pinnedTotal=%d%s%n",
                                     contingencies.get(group.get(chunkStart + s)).contingencyId(), pinned, ids);
                         }
                     }
+                    // A deactivated pilot keeps its Q balance on a SURVIVING controller's row. If every
+                    // one of those controllers pinned, the reactive-limit machinery took their rows for
+                    // their own pinned balances and the pilot's balance is no longer enforced anywhere —
+                    // the solve still converges, on an equation system missing a row. Whether they pin is
+                    // a runtime outcome, so it is caught here and the CPU replays the scenario.
+                    if (!pilotPinCheck.isEmpty() && rlStateOut != null) {
+                        for (var e : pilotPinCheck.entrySet()) {
+                            int s = e.getKey();
+                            if (s >= realCount || chunkResults[s] == null) {
+                                continue;
+                            }
+                            boolean allPinned = true;
+                            for (int entry : e.getValue()) {
+                                if ((rlStateOut[s * nrl + entry] & 7) == 0) {
+                                    allPinned = false;
+                                    break;
+                                }
+                            }
+                            if (allPinned) {
+                                chunkResults[s][n + 2] = GpuBatchStatus.STATUS_REJECTED;
+                                com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus
+                                        .record("RUNTIME:DISTR_Q_PILOT_ALL_PINNED");
+                            }
+                        }
+                    }
+                    if (!pairPhase && (hasDs || dsSlackOnly)
+                            && GpuAcNewtonSolver.readBatchSolveCount(handle) - solveCountBefore == 1) {
+                        recordDistributedActivePower(handle, gpuData, realCount, chunkSize, n, group, chunkStart,
+                                dsSlackOnly, dsOvBus, dsOvBaseDelta, preDistributedByIndex, distributedByIndex);
+                    }
                     for (int s = 0; s < realCount; s++) {
                         resultsByIndex[group.get(chunkStart + s)] = chunkResults[s];
+                        // OLF_GPU_CPU_ROUTED=1: name every scenario the device hands back to the CPU, with
+                        // the status that decided it (-2 rejected, -1 diverged, 1 max-iter). The aggregate
+                        // "precomputed on device: N / M" says how many, never which.
+                        if (System.getenv("OLF_GPU_CPU_ROUTED") != null && chunkResults[s] != null
+                                && (int) chunkResults[s][n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
+                            System.err.printf("GPU_CPU_ROUTED ctg=%s status=%d%n",
+                                    contingencies.get(group.get(chunkStart + s)).contingencyId(),
+                                    (int) chunkResults[s][n + 2]);
+                        }
                     }
                 }
             }
@@ -1348,6 +1845,68 @@ final class GpuBatchChunkSolver {
         } catch (RuntimeException e) {
             GpuBatchContextCache.clearContextCache();   // a failed solve may leave the context inconsistent — rebuild next time
             throw e;
+        }
+    }
+
+    /**
+     * The active power the device distributed for each scenario of a chunk — what OLF's security analysis
+     * reports as {@code preDistributedActivePower + loadFlowResult.getDistributedActivePower()}: the
+     * contingency's loss pre-distribution plus every distributed-slack pass of the post-contingency load flow.
+     *
+     * <p>Each device pass re-derives the WHOLE distribution from the anchor (OLF's resetToInitialState), so
+     * after the last pass that fired the participants carry it in their per-generator cumulative shares and
+     * the slack its retained share: Σ genCum + retain — the same two read-backs the base load flow writes
+     * back as targets ({@code GpuNewtonRaphson.writeBackDistributedSlack}). When no pass fired the
+     * distribution is the pre-distribution alone. Slack-only participation keeps everything in the slack's
+     * absorbed total. Only valid when ONE solve covered the chunk (the read-backs are per solve): the caller
+     * checks; a scenario left NaN reports the pre-distribution as before.
+     */
+    private static void recordDistributedActivePower(long handle, GpuAcData gpuData, int realCount, int chunkSize, int n,
+                                                     List<Integer> group, int chunkStart, boolean dsSlackOnly,
+                                                     int[] dsOvBus, double[] dsOvBaseDelta,
+                                                     double[] preDistributedByIndex, double[] distributedByIndex) {
+        if (dsSlackOnly) {
+            double[] absorbed = GpuAcNewtonSolver.readBatchSlackAbsorbed(handle);
+            for (int s = 0; s < realCount && absorbed != null; s++) {
+                distributedByIndex[group.get(chunkStart + s)] = absorbed[s];
+            }
+            return;
+        }
+        double[] retain = GpuAcNewtonSolver.readBatchDsRetain(handle);
+        if (retain == null) {
+            return;
+        }
+        int ngen = gpuData.dgBus() == null ? 0 : gpuData.dgBus().length;
+        double[] genCum = null;
+        double[] targets = null;
+        for (int s = 0; s < realCount; s++) {
+            int idx = group.get(chunkStart + s);
+            if (Double.isNaN(retain[s])) {                   // no pass fired: the pre-distribution alone
+                distributedByIndex[idx] = preDistributedByIndex[idx];
+                continue;
+            }
+            double participants = 0;
+            if (ngen > 0) {
+                if (genCum == null) {
+                    genCum = GpuAcNewtonSolver.readBatchDsGenCum(handle);
+                }
+                if (genCum == null) {
+                    continue;
+                }
+                for (int g = 0; g < ngen; g++) {
+                    participants += genCum[s * ngen + g];
+                }
+            } else {                                         // bus-level participants: targets from the anchor
+                if (targets == null) {
+                    targets = GpuAcNewtonSolver.readBatchTargets(handle);
+                }
+                int ov = dsOvBus != null && dsOvBus.length > 0 ? dsOvBus[s] : -1;
+                for (int i = 0; i < gpuData.dsPhiRow().length; i++) {
+                    double anchor = gpuData.dsBaseTargetP()[i] - (ov == i ? dsOvBaseDelta[s] : 0.0);
+                    participants += targets[s * n + gpuData.dsPhiRow()[i]] - anchor;
+                }
+            }
+            distributedByIndex[idx] = participants + retain[s];
         }
     }
 }

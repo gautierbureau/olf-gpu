@@ -114,10 +114,17 @@ final class GpuContingencyMapper {
         List<LoadLoss> out = new java.util.ArrayList<>();
         for (Map.Entry<String, com.powsybl.openloadflow.network.PowerShift> e : pc.getLoadIdsToLose().entrySet()) {
             com.powsybl.iidm.network.Load load = network.getLoad(e.getKey());
-            if (load == null || load.getTerminal().getBusView().getBus() == null) {
-                return null;
+            if (load == null) {
+                return null;                                 // an LCC station's load share: CPU
             }
-            LfBus bus = net.getBusById(load.getTerminal().getBusView().getBus().getId());
+            // The load's LfBus through OLF's OWN map (loadsById), never through the bus view: a
+            // node-breaker level's bus-view buses and its breaker-mode LfBuses share the "<VL>_<n>"
+            // id pattern but partition the level differently (the bus view merges across every
+            // closed breaker, the LfNetwork keeps retained ones), so "GIU_0" named a different
+            // physical bus in each. Measured on network.xiidm / LJBS: the island's two loads (26 MW,
+            // 106 MVar) were removed from the neighbour GIU_0 instead of the frozen GIU_1 — 3.1 kV.
+            com.powsybl.openloadflow.network.LfLoad lfLoad = net.getLoadById(e.getKey());
+            LfBus bus = lfLoad != null ? lfLoad.getBus() : null;
             if (bus == null || bus.isDisabled()) {
                 return null;
             }
@@ -139,6 +146,25 @@ final class GpuContingencyMapper {
                 return null;
             }
             out.add(new ShuntShift(shunt, -e.getValue().getG(), -e.getValue().getB()));
+        }
+        return out;
+    }
+
+    /** OLF's {@code LfContingency.processLostGenerators}: losing a STATIC VAR COMPENSATOR that carries
+     *  a stand-by automaton shunt also zeroes that shunt ({@code shuntsShift.put(svcShunt, new
+     *  AdmittanceShift(0, svcShunt.getB())); svcShunt.setB(0)}). The device packs the stand-by shunt as
+     *  a plain fixed-shunt element, so the outage is that element's per-scenario admittance override -
+     *  the same channel a section shift uses. Without it the compensator's susceptance kept injecting:
+     *  measured on network.xiidm / HSMC, 59.5 MVar left on HSJF_0 and 3.148 kV network-wide (HPVN:
+     *  28 MVar, 1.058 kV), with four GPU-only HIGH_VOLTAGE violations. */
+    static List<ShuntShift> svcStandbyShuntShifts(List<LfGenerator> lostGenerators) {
+        List<ShuntShift> out = new java.util.ArrayList<>();
+        for (LfGenerator g : lostGenerators) {
+            if (g instanceof com.powsybl.openloadflow.network.LfStaticVarCompensator svc) {
+                svc.getStandByAutomatonShunt()
+                        .filter(sh -> !sh.isDisabled() && sh.getB() != 0)
+                        .ifPresent(sh -> out.add(new ShuntShift(sh, -sh.getG(), -sh.getB())));
+            }
         }
         return out;
     }
@@ -212,6 +238,24 @@ final class GpuContingencyMapper {
                         branch.getBus1() == bus ? 1 : 2));
             }
         }
+        // Does the side-open set actually COVER the disconnection? Freezing a lost bus's rows makes
+        // its own equations trivial; it does NOT stop a branch from injecting into the LIVE bus at the
+        // far end. So every branch incident to a lost bus needs a side-open, and any shortfall leaves
+        // a phantom flow into the surviving network.
+        if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+            int incident = 0;
+            for (String busId : pc.getBusIdsToLose()) {
+                var b = net.getBusById(busId);
+                if (b != null) {
+                    incident += b.getBranches().size();
+                }
+            }
+            System.err.printf("QUALIFY_TRACE sideOpen-cover %s: busIdsToLose=%d resolved=%d"
+                            + " incidentBranches=%d sideOpens=%d branchIdsToOpen=%d%n",
+                    pc.getContingency().getId(), pc.getBusIdsToLose().size(),
+                    (int) pc.getBusIdsToLose().stream().filter(id -> net.getBusById(id) != null).count(),
+                    incident, out.size(), pc.getBranchIdsToOpen().size());
+        }
         return out;
     }
 
@@ -230,9 +274,22 @@ final class GpuContingencyMapper {
                 continue;
             }
             LfBranch branch = net.getBranchById(e.getKey());
-            if (branch == null || branch.getBus1() == null || branch.getBus2() == null) {
-                trace(pc, "unresolvable " + e.getKey());
+            if (branch == null || (branch.getBus1() == null && branch.getBus2() == null)) {
+                // name the ELEMENT KIND too: an id alone does not say which family
+                trace(pc, "unresolvable " + e.getKey() + " kind=" + pc.getContingency().getElements().stream()
+                        .map(el -> el.getType().name()).distinct().toList()
+                        + (branch == null ? " lfBranch=absent" : " bus1=false bus2=false"));
                 return null;
+            }
+            if (branch.getBus1() == null || branch.getBus2() == null) {
+                // A branch already open at ONE end in the base: the device packs it as an open-branch
+                // element (the connected end's view of it), so its outage is that element's disabled
+                // bit, like a closed branch's. It used to be "unresolvable": 2049 of network.xiidm's
+                // 11249 branch outages (380 of the first 2000), every one replayed on the CPU - most
+                // of the GPU arm's wall time there. It cuts nothing, so the validator's connectivity
+                // check (which skips half-open branches) is unaffected.
+                branches.add(branch);
+                continue;
             }
             if (e.getValue() != DisabledBranchStatus.BOTH_SIDES) {
                 continue;                                    // ONE-SIDE opening: handled by sideOpens()

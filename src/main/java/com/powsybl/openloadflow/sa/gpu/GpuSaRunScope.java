@@ -70,15 +70,20 @@ final class GpuSaRunScope {
         // DISABLED (no DISTR_RHO coupling ever activates), so a shared group is purely the
         // one-tap-at-a-time round-robin over the merged controllers — ported in
         // GpuBatchIncrementalTvc.orchestrate, grouped by the MAIN control's controlled bus.
+        // 2026-09-15: generator voltage controls UNDER the transformer-controlled level no longer gate the
+        // run — the in-kernel phase runs OLF's GeneratorVoltageControlManager freeze/unfreeze and the
+        // fixTransformerVoltageControls check, as long as every candidate is a LOCAL controller and every
+        // transformer controller has a tap table (generatorFreezeSupported).
         boolean transformerControlBatchable =
                 olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL
-                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
-        // INCREMENTAL (OLF's default TVC mode): the DEVICE runs the loop's decisions per scenario around
-        // batched solves with in-kernel dV/drho sensitivities (GpuBatchIncrementalTvc); stage-1 scope is
-        // the same as the continuous port (no generator VC under the transformer-controlled level).
+                && (GpuBatchTransformerControl.transformerControlSupported(lfNetwork)
+                        || GpuBatchTransformerControl.generatorFreezeSupported(lfNetwork,
+                                olfGuardParams.getGeneratorVoltageControlMinNominalVoltage()));
+        // INCREMENTAL (OLF's default TVC mode): an in-kernel driver phase (LOOP_TVC_KERNEL). The loop never
+        // freezes generators (no GeneratorVoltageControlManager), so the gen-under-the-controlled-level
+        // gate that the AFTER_GENERATOR port needed never applied here — lifted 2026-09-15.
         boolean incrementalTvcBatchable =
-                olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL
-                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
+                olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.INCREMENTAL_VOLTAGE_CONTROL;
         // INCREMENTAL shunt VC: same per-scenario orchestrator pattern (GpuBatchIncrementalShuntVc)
         // with in-kernel dV/dB sensitivities.
         boolean incrementalShuntBatchable =
@@ -113,17 +118,16 @@ final class GpuSaRunScope {
         // monitoring SVC is local with an automaton — slope-less plain-VOLTAGE SVCs need no loop support
         // (ordinary generator-VC buses on the device).
         boolean monitoringBatchable = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring.supported(lfNetwork);
-        // CONTINUOUS phase control (GpuBatchContinuousPhase): CONTROLLER mode batches LOCAL and REMOTE
-        // (2026-09-05 — cbPcSide carries the controller's a1 column); LIMITER must stay LOCAL (OLF's
-        // own loop reads the controller's I terms).
-        boolean continuousPhaseBatchable = lfNetwork.getBranches().stream()
-                .map(b -> b.getPhaseControl().orElse(null))
-                .filter(java.util.Objects::nonNull)
-                .allMatch(pc -> pc.getMode() == com.powsybl.openloadflow.network.TransformerPhaseControl.Mode.CONTROLLER
-                        || pc.getControlledBranch() == pc.getControllerBranch());
+        // CONTINUOUS phase control (GpuBatchContinuousPhase): both modes batch LOCAL and REMOTE.
+        // CONTROLLER since 2026-09-05 (cbPcSide carries the controller's a1 column); LIMITER since
+        // 2026-09-16 — OLF's PhaseControlOuterLoop is local BY CONSTRUCTION there, reading the
+        // CONTROLLER branch's own I terms and differentiating them, so the controlled branch never
+        // enters the decision and a remote LIMITER is the same computation.
+        boolean continuousPhaseBatchable = true;
+        // (SimpleTransformerVoltageControlOuterLoop has no generator freeze either — no gen-under-level
+        // gate, lifted 2026-09-15.)
         boolean simpleTvcBatchable =
-                olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL
-                && GpuBatchTransformerControl.transformerControlSupported(lfNetwork);
+                olfGuardParams.getTransformerVoltageControlMode() == OpenLoadFlowParameters.TransformerVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL;
         // REMOTE/DISTRIBUTED generator VC groups + reactive limits. Both modes run the full
         // pin/unpin dynamics: NON-free members via mode-4 transitions + own-q accumulation
         // (plan-B3), the FREE member via the pilot-Q relocation candidate groups (plan-B4), and
@@ -146,15 +150,17 @@ final class GpuSaRunScope {
         // chain does not model; co-presence with a transformer/phase/RPC/SecondaryVc loop (or
         // VoltageMonitoring with actual SVCs — the loop is inert otherwise) keeps the whole run on
         // the CPU exactly as before (DS/RL/HVDC phases are in-kernel and compose fine).
-        java.util.Set<String> shuntVcConflicts = java.util.Set.of(
-                "TransformerVoltageControl", "SimpleTransformerVoltageControl", "IncrementalTransformerVoltageControl",
-                "PhaseControl", "IncrementalPhaseControl", "IncrementalTransformerReactivePowerControl",
-                "SecondaryVoltageControl");
+        // 2026-09-15: the co-presence gate is gone entirely. Every transformer, phase, RPC, monitoring and shunt
+        // loop is an in-kernel DRIVER PHASE now, swept in OLF's own order with OLF's restart-on-UNSTABLE
+        // semantics, so simultaneously unstable loops interleave exactly as on the CPU.
         boolean simpleShuntVcBatchable =
-                olfGuardParams.getShuntVoltageControlMode() == OpenLoadFlowParameters.ShuntVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL
-                && acParameters.getOuterLoops().stream().map(AcOuterLoop::getName)
-                        .noneMatch(name -> shuntVcConflicts.contains(name)
-                                || "VoltageMonitoring".equals(name) && !noSvc);
+                olfGuardParams.getShuntVoltageControlMode() == OpenLoadFlowParameters.ShuntVoltageControlMode.WITH_GENERATOR_VOLTAGE_CONTROL;
+        // SecondaryVoltageControl sits at OLF order 4, BEFORE every control loop (phase 7, transformer 8,
+        // RPC 9, shunt 10). As a HOST ORCHESTRATOR it ran AFTER the whole device sweep, so each decided on
+        // a state the other had already moved — the inverse of OLF's order (1.7e-3 kV on a zone whose pilot
+        // bus feeds an AFTER_GENERATOR transformer; 2.4e-1 kV with the pre-2026-09-15 host chain, whose
+        // re-solves do not compose). Since 2026-09-15 the chunk path runs SVC as a DRIVER PAUSE at its own
+        // slot, so the order is OLF's and no co-presence gate is needed (tasks #48).
         // DEVICE (CUDA outer loops) vs JAVA (OLF's Java outer loops per scenario) — §5.1 of the design.
         OuterLoopMode outerLoopMode = readOuterLoopMode();
         LoadFlowParameters lfGuardParams = securityAnalysisParameters.getLoadFlowParameters();
@@ -293,10 +299,15 @@ final class GpuSaRunScope {
         };
         // Device inner Newton uses OLF's exact criterion for UNIFORM_CRITERIA (so switch decisions are made at
         // the same convergence depth as the CPU); the device infinity-norm floor otherwise.
+        // -Dolf.gpu.sa.deviceCriterion=infnorm: the device infinity-norm floor (||F||inf < GPU_TOLERANCE) whatever
+        // the criteria type — a performance comparison; the final status is still judged by OLF's criteria.
         double convEpsPerEq = switch (olfParams.getNewtonRaphsonStoppingCriteriaType()) {
             case UNIFORM_CRITERIA -> olfParams.getNewtonRaphsonConvEpsPerEq();
             case PER_EQUATION_TYPE_CRITERIA -> 0.0;
         };
+        if ("infnorm".equals(System.getProperty("olf.gpu.sa.deviceCriterion"))) {
+            convEpsPerEq = 0.0;
+        }
         // MAX_VOLTAGE_CHANGE state-vector scaling: apply the SAME per-step clamp in the batched device
         // solve as the CPU per-contingency Newton (per scenario). Without this the batch takes raw full
         // steps, PV/PQ switch decisions read different intermediate states, and converged states drift
@@ -328,7 +339,13 @@ final class GpuSaRunScope {
                                 olfParams.getMaxActivePowerMismatch(), olfParams.getMaxReactivePowerMismatch(),
                                 olfParams.getMaxVoltageMismatch(), olfParams.getMaxAngleMismatch(),
                                 olfParams.getMaxRatioMismatch(), olfParams.getMaxSusceptanceMismatch())
-                        : null);
+                        : null,
+                olfGuardParams.getGeneratorVoltageControlMinNominalVoltage(),
+                // voltageRemoteControlRobustMode (OLF default TRUE): the RL kernel's realistic-V criteria.
+                acParameters.isVoltageRemoteControlRobustMode(),
+                acParameters.getMinRealisticVoltage(), acParameters.getMaxRealisticVoltage(),
+                acParameters.getMinNominalVoltageRealisticVoltageCheck(),
+                com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOuterLoopTables.realisticFixingLoop(acParameters));
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
     }
@@ -428,13 +445,10 @@ final class GpuSaRunScope {
                     // control toggles the BRANCH_TARGET_P row, which the activation extractor maps to the
                     // batch row mode 3 (the cb family re-emits the controlled side's P block at the α1 row) —
                     // the hybrid re-extracts activation after every loop mutation, and the rounding/limiter
-                    // tap moves reach the device via the per-scenario pi-model refresh. CONTROLLER mode may
-                    // be REMOTE (2026-09-05); LIMITER stays local (OLF's own loop is local-only).
-                    || "PhaseControl".equals(name) && lfNetwork.getBranches().stream()
-                            .map(b -> b.getPhaseControl().orElse(null))
-                            .filter(java.util.Objects::nonNull)
-                            .allMatch(pc -> pc.getMode() == com.powsybl.openloadflow.network.TransformerPhaseControl.Mode.CONTROLLER
-                                    || pc.getControlledBranch() == pc.getControllerBranch())
+                    // tap moves reach the device via the per-scenario pi-model refresh. Either mode may be
+                    // REMOTE — CONTROLLER since 2026-09-05, LIMITER since 2026-09-16 (OLF's loop reads the
+                    // CONTROLLER's own I terms, so remoteness changes nothing about the decision).
+                    || "PhaseControl".equals(name)
                     // SecondaryVoltageControl: adjusts GENERATOR-VC TARGET VALUES only (pilot-point regulation);
                     // targets are re-read per round and the engine isolates every MAIN generator VC's target per
                     // scenario (vcSnap), so the hybrid replays OLF's loop verbatim.

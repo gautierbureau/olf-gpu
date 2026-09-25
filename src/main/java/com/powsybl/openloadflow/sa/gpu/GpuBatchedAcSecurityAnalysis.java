@@ -31,6 +31,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchedSecurityAnalysisSo
 import com.powsybl.openloadflow.graph.GraphConnectivityFactory;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
+import com.powsybl.openloadflow.network.LfGenerator;
 import com.powsybl.openloadflow.network.LfContingency;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LoadFlowModel;
@@ -121,6 +122,15 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     static final java.util.concurrent.atomic.AtomicInteger LAST_GPU_PRECOMPUTED_COUNT =
             new java.util.concurrent.atomic.AtomicInteger(-1);
 
+    /** How many contingencies of the last run had their loss distribution answered from the batch's replay
+     *  instead of OLF's host call ({@link ReplayedLossDistribution}); reset with the counter above. */
+    static final java.util.concurrent.atomic.AtomicInteger LAST_REPLAYED_LOSS_COUNT =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    /** How many base-state restores of the last run were targeted ({@link #TARGETED_RESTORE_PROPERTY}). */
+    static final java.util.concurrent.atomic.AtomicInteger LAST_TARGETED_RESTORE_COUNT =
+            new java.util.concurrent.atomic.AtomicInteger();
+
     /** Separator inside the precomputed-state key of a (contingency, strategy) pair — the SOLVER's
      *  constant, which also drives its two-phase warm-continuation ordering. */
     private static final char STRATEGY_KEY_SEP = GpuBatchStatus.STRATEGY_KEY_SEP;
@@ -133,6 +143,431 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      *  lfNetwork/context and LOAD STATES INTO B's equation system while B was mid-solve — one
      *  corrupted scenario (the 19/1 MAX_ITERATION flake) or an NPE inside B's JacobianMatrix on
      *  pure CPU stacks (both observed, threadCountAboveOneRunsSafelyOnGpuProvider). */
+    /** System property: answer OLF's per-contingency loss distribution from the batch's replay for
+     *  device-solved contingencies instead of running it on the host (default on). Set to false for the
+     *  A/B: the reported distributed active power must agree to rounding (see OLF_GPU_PRELOSS_CHECK). */
+    public static final String REPLAY_LOSS_DISTRIBUTION_PROPERTY = "olf.gpu.sa.replayLossDistribution";
+
+    private static boolean replayLossDistributionEnabled() {
+        return Boolean.parseBoolean(System.getProperty(REPLAY_LOSS_DISTRIBUTION_PROPERTY, "true"));
+    }
+
+    /**
+     * OLF's contingency loss distribution, answered from the batch where that is exact. For a device-solved
+     * contingency the device state already embodies the distribution (the batch replays it to seed the
+     * solve), and all the host call still contributes is its RETURN value — the amount every
+     * PostContingencyResult reports — which the replay carries too (6e-14 pu worst on rte6515). Running it
+     * anyway rescanned every bus per contingency and changed participating generators' target P, which
+     * the next base-state restore then had to set back through the network listeners.
+     *
+     * <p>OLF's call still runs for a contingency: not solved on the device (CPU route); without a replayed
+     * value; with contingency-specific load flow parameters (the replay used the run's); or targeted by any
+     * operator strategy, because a strategy condition on an injection's ACTIVE_POWER reads the target P it sets
+     * ({@code ThresholdConditionEvaluator}; the batch's own strategy composition reads IIDM base targets and does
+     * not depend on it). The report OLF adds is reproduced.
+     */
+    private final class ReplayedLossDistribution implements ContingencyActivePowerLossDistribution {
+
+        private final ContingencyActivePowerLossDistribution delegate;
+
+        private ReplayedLossDistribution(ContingencyActivePowerLossDistribution delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public String getName() {
+            return delegate.getName();
+        }
+
+        @Override
+        public double run(LfNetwork network, com.powsybl.openloadflow.network.LfContingency lfContingency,
+                          com.powsybl.contingency.Contingency contingency, SecurityAnalysisParameters securityAnalysisParameters,
+                          com.powsybl.openloadflow.LoadFlowParametersOverride loadFlowParametersOverride,
+                          com.powsybl.commons.report.ReportNode reportNode) {
+            RunState rs = runState.get();
+            Double replayed = rs.precomputed.states().containsKey(contingency.getId())
+                    ? rs.precomputed.preDistributedActivePower().get(contingency.getId())
+                    : null;
+            if (replayed == null || loadFlowParametersOverride != null
+                    || targetedByOperatorStrategy(rs.operatorStrategies, contingency.getId())) {
+                return delegate.run(network, lfContingency, contingency, securityAnalysisParameters,
+                        loadFlowParametersOverride, reportNode);
+            }
+            double mismatch = lfContingency.getActivePowerLoss();
+            if (Math.abs(mismatch) > 0) {                    // a replayed value exists only with distributed slack on
+                com.powsybl.openloadflow.util.Reports.reportContingencyActivePowerLossDistribution(reportNode,
+                        mismatch * PerUnit.SB, (mismatch - replayed) * PerUnit.SB);
+            }
+            LAST_REPLAYED_LOSS_COUNT.incrementAndGet();
+            rs.lossReplayedFor = contingency.getId();
+            return replayed;
+        }
+    }
+
+    @Override
+    protected void restoreBaseState(com.powsybl.openloadflow.network.NetworkState networkState, LfNetwork network,
+                                    com.powsybl.openloadflow.network.LfContingency lfContingency) {
+        RunState rs = runState.get();
+        boolean targeted = targetedRestoreEnabled()
+                && lfContingency.getId().equals(rs.lossReplayedFor)
+                && lfContingency.getId().equals(rs.deviceStateInjectedFor)
+                && !(GpuRestoreCheck.ENABLED && !rs.restoreCheck.hasReference(network));   // the check's reference is a full restore
+        rs.lossReplayedFor = null;
+        rs.deviceStateInjectedFor = null;
+        if (targeted) {
+            java.util.Set<LfBus> buses = touchedBuses(network, lfContingency, rs);
+            networkState.restore(buses, lfContingency.getDisabledNetwork().getBranchesStatus().keySet());
+            LAST_TARGETED_RESTORE_COUNT.incrementAndGet();
+        } else {
+            super.restoreBaseState(networkState, network, lfContingency);
+        }
+        if (GpuRestoreCheck.ENABLED) {
+            GpuRestoreCheck check = runState.get().restoreCheck;
+            if (check.hasReference(network)) {
+                check.check(network, lfContingency.getId());
+            } else {
+                check.setReference(network);                // the first restore is a full one
+            }
+        }
+    }
+
+    /** System property: after a contingency the device solved and whose loss distribution the replay answered,
+     *  restore only that contingency's own elements and the bus voltages instead of the whole network (default
+     *  on). Set to false for the A/B; OLF_GPU_RESTORE_CHECK proves the two leave the same network. */
+    public static final String TARGETED_RESTORE_PROPERTY = "olf.gpu.sa.targetedRestore";
+
+    private static boolean targetedRestoreEnabled() {
+        return Boolean.parseBoolean(System.getProperty(TARGETED_RESTORE_PROPERTY, "true"));
+    }
+
+    /**
+     * The buses a device-solved contingency changed beyond their voltage: what LfContingency.apply touched — the
+     * buses it disabled and those of the loads, generators and shunts it lost or shifted — closed over their
+     * voltage and reactive-power control groups, because enabling or disabling a controller recomputes its
+     * whole group's reactive targets.
+     */
+    private static java.util.Set<LfBus> touchedBuses(LfNetwork network, com.powsybl.openloadflow.network.LfContingency c,
+                                                     RunState rs) {
+        java.util.Set<LfBus> touched = new java.util.LinkedHashSet<>(c.getDisabledNetwork().getBuses());
+        c.getLostLoads().keySet().forEach(l -> touched.add(l.getBus()));
+        c.getLostGenerators().forEach(g -> touched.add(g.getBus()));
+        if (!c.getShuntsShift().isEmpty()) {
+            if (rs.shuntBus == null) {
+                rs.shuntBus = new java.util.IdentityHashMap<>();
+                for (LfBus b : network.getBuses()) {
+                    b.getShunt().ifPresent(sh -> rs.shuntBus.put(sh, b));
+                    b.getControllerShunt().ifPresent(sh -> rs.shuntBus.put(sh, b));
+                    b.getSvcShunt().ifPresent(sh -> rs.shuntBus.put(sh, b));
+                }
+            }
+            c.getShuntsShift().keySet().forEach(sh -> {
+                LfBus b = rs.shuntBus.get(sh);
+                if (b != null) {
+                    touched.add(b);
+                }
+            });
+        }
+        java.util.Set<LfBus> closed = new java.util.LinkedHashSet<>(touched);
+        for (LfBus b : touched) {
+            b.getGeneratorVoltageControl().ifPresent(vc -> {
+                closed.add(vc.getControlledBus());
+                closed.addAll(vc.getMergedControllerElements());
+            });
+            b.getGeneratorReactivePowerControl().ifPresent(rpc -> closed.addAll(rpc.getControllerBuses()));
+        }
+        return closed;
+    }
+
+    /** System property: after injecting a device state, refresh only the flows of the branches the violation
+     *  detection will read (default on). Set to false for the A/B. */
+    public static final String PARTIAL_FLOWS_PROPERTY = "olf.gpu.sa.partialFlows";
+
+    /** OLF_GPU_PARTIAL_FLOW_CHECK=1: after each partial-flow detection, detect again with every flow refreshed from
+     *  the same state and require the same violations, bit for bit. */
+    private static final boolean PARTIAL_FLOW_CHECK = System.getenv("OLF_GPU_PARTIAL_FLOW_CHECK") != null;
+
+    /** Tally of OLF_GPU_PARTIAL_FLOW_CHECK. */
+    static final class PartialFlowCheck {
+        private long checked;
+        private long differing;
+        private long branchesRead;
+        private final List<String> samples = new java.util.ArrayList<>();
+
+        void compare(String contingencyId, List<com.powsybl.contingency.violations.LimitViolation> partial,
+                     List<com.powsybl.contingency.violations.LimitViolation> full, int branches) {
+            checked++;
+            branchesRead += branches;
+            List<String> a = partial.stream().map(PartialFlowCheck::key).toList();
+            List<String> b = full.stream().map(PartialFlowCheck::key).toList();
+            if (!a.equals(b)) {
+                differing++;
+                if (samples.size() < 10) {
+                    samples.add(contingencyId + ": partial " + a.size() + " violations, full " + b.size()
+                            + " | first partial-only " + a.stream().filter(k -> !b.contains(k)).findFirst().orElse("-")
+                            + " | first full-only " + b.stream().filter(k -> !a.contains(k)).findFirst().orElse("-"));
+                }
+            }
+        }
+
+        private static String key(com.powsybl.contingency.violations.LimitViolation v) {
+            return v.getSubjectId() + "|" + v.getLimitType() + "|" + v.getSide() + "|" + v.getLimitName()
+                    + "|" + Double.doubleToLongBits(v.getValue()) + "|" + Double.doubleToLongBits(v.getLimit());
+        }
+
+        void print() {
+            System.err.printf("PARTIAL_FLOW_CHECK contingencies compared=%d identical=%d differing=%d | mean branches read %.1f%n",
+                    checked, checked - differing, differing, checked > 0 ? (double) branchesRead / checked : 0.0);
+            samples.forEach(x -> System.err.println("PARTIAL_FLOW_CHECK   " + x));
+        }
+    }
+
+    /** EXPERIMENTAL system property: the device DECIDES the post-contingency violations with OLF's strict
+     *  comparison on its own values, and the host only builds them — no candidate confirm, no branch flow on the
+     *  host (default off). Reported values then differ from stock OLF's in the last bits. */
+    public static final String DEVICE_VIOLATIONS_PROPERTY = "olf.gpu.sa.deviceViolations";
+
+    private static boolean deviceViolationsEnabled() {
+        return Boolean.parseBoolean(System.getProperty(DEVICE_VIOLATIONS_PROPERTY, "false"));
+    }
+
+    /** OLF_GPU_DEVICE_VIOLATIONS_CHECK=1: after each device decision, run the host's exact detection on the same
+     *  state and compare — the violation SET (subject, type, side, limit) and how far the values are apart. */
+    private static final boolean DEVICE_VIOLATIONS_CHECK = System.getenv("OLF_GPU_DEVICE_VIOLATIONS_CHECK") != null;
+
+    /** Tally of OLF_GPU_DEVICE_VIOLATIONS_CHECK. */
+    static final class DeviceViolationCheck {
+        private long checked;
+        private long setDiffers;
+        private long valuesBitIdentical;
+        private long violations;
+        private double worstRelative;
+        private String worstWhere = "-";
+        private final List<String> samples = new java.util.ArrayList<>();
+
+        void compare(String contingencyId, List<com.powsybl.contingency.violations.LimitViolation> device,
+                     List<com.powsybl.contingency.violations.LimitViolation> host) {
+            checked++;
+            java.util.Map<String, Double> d = new java.util.LinkedHashMap<>();
+            device.forEach(v -> d.put(key(v), v.getValue()));
+            java.util.Map<String, Double> h = new java.util.LinkedHashMap<>();
+            host.forEach(v -> h.put(key(v), v.getValue()));
+            if (!d.keySet().equals(h.keySet())) {
+                setDiffers++;
+                if (samples.size() < 10) {
+                    samples.add(contingencyId + ": device " + d.size() + ", host " + h.size() + " | device-only "
+                            + d.keySet().stream().filter(k -> !h.containsKey(k)).findFirst().orElse("-")
+                            + " | host-only " + h.keySet().stream().filter(k -> !d.containsKey(k)).findFirst().orElse("-"));
+                }
+            }
+            boolean identical = true;
+            for (var e : d.entrySet()) {
+                Double hv = h.get(e.getKey());
+                if (hv == null) {
+                    continue;
+                }
+                violations++;
+                if (Double.doubleToLongBits(hv) != Double.doubleToLongBits(e.getValue())) {
+                    identical = false;
+                    double rel = Math.abs(hv - e.getValue()) / Math.max(1e-300, Math.abs(hv));
+                    if (rel > worstRelative) {
+                        worstRelative = rel;
+                        worstWhere = contingencyId + " " + e.getKey();
+                    }
+                }
+            }
+            if (identical) {
+                valuesBitIdentical++;
+            }
+        }
+
+        private static String key(com.powsybl.contingency.violations.LimitViolation v) {
+            return v.getSubjectId() + "|" + v.getLimitType() + "|" + v.getSide() + "|" + v.getLimitName();
+        }
+
+        void print() {
+            System.err.printf("DEVICE_VIOLATIONS_CHECK contingencies=%d same-set=%d different-set=%d | values bit-identical in %d"
+                            + " | %d violations compared, worst relative value difference %.3e (%s)%n",
+                    checked, checked - setDiffers, setDiffers, valuesBitIdentical, violations, worstRelative, worstWhere);
+            samples.forEach(x -> System.err.println("DEVICE_VIOLATIONS_CHECK   " + x));
+        }
+    }
+
+    private static boolean partialFlowsEnabled() {
+        return Boolean.parseBoolean(System.getProperty(PARTIAL_FLOWS_PROPERTY, "true"));
+    }
+
+    /**
+     * The branches whose flows anything reads after a device state is injected for {@code contingencyId}, or null
+     * for "refresh them all". With the device violation screen on, the detection reads only the branches of the
+     * limits the screen flagged for this contingency and the branches it does not cover (GpuLimitScanner). Every
+     * other reader forces the full refresh: a branch or three-windings transformer state monitor (network results),
+     * an operator strategy on the contingency (threshold conditions on branch flows), the first contingency (the
+     * screen is built during its detection), and the diagnostics that read flows — OLF_GPU_VIOL_CROSSCHECK among them,
+     * which runs the stock detection over EVERY branch.
+     */
+    private int[] flowReadSet(RunState rs, String contingencyId) {
+        if (!partialFlowsEnabled() || rs.violationScreen == null || rs.candidates == null || flowsMonitored()
+                || targetedByOperatorStrategy(rs.operatorStrategies, contingencyId)
+                || System.getenv("OLF_GPU_Q_PROBE") != null || System.getenv("OLF_GPU_SA_RESID") != null
+                || System.getenv("OLF_GPU_VIOL_CROSSCHECK") != null) {
+            return null;
+        }
+        GpuLimitTable table = rs.limitTable;
+        java.util.BitSet nums = new java.util.BitSet();
+        if (rs.decided != null) {                            // the device decided: only uncovered branches are read
+            if (!rs.decided.containsKey(contingencyId) || DEVICE_VIOLATIONS_CHECK) {
+                return null;
+            }
+            for (int b : rs.uncoveredBranches) {
+                nums.set(table.branches()[b].getNum());
+            }
+            rs.sideOpened.forEach(branch -> nums.set(branch.getNum()));
+            return nums.stream().toArray();
+        }
+        int[] candidates = rs.candidates.get(contingencyId);
+        if (candidates == null) {
+            return null;                                     // the detection would screen it on the host: read all
+        }
+        for (int c : candidates) {
+            if (c < table.limitCount()) {                    // bus records come after the limits: they read bus V only
+                nums.set(table.branches()[table.groupBranch(table.limitGroup(c))].getNum());
+            }
+        }
+        for (int b : rs.uncoveredBranches) {
+            nums.set(table.branches()[b].getNum());
+        }
+        rs.sideOpened.forEach(branch -> nums.set(branch.getNum()));
+        return nums.stream().toArray();
+    }
+
+    /** The branches a contingency opened at one side only: still in the network, but in a topology the screen — built
+     *  on the base — does not evaluate (it would read them closed). */
+    private static List<LfBranch> sideOpenedBranches(LfContingency lfContingency) {
+        List<LfBranch> sideOpened = null;
+        for (var e : lfContingency.getDisabledNetwork().getBranchesStatus().entrySet()) {
+            if (e.getValue() != com.powsybl.openloadflow.network.DisabledBranchStatus.BOTH_SIDES) {
+                if (sideOpened == null) {
+                    sideOpened = new java.util.ArrayList<>();
+                }
+                sideOpened.add(e.getKey());
+            }
+        }
+        return sideOpened != null ? sideOpened : List.of();
+    }
+
+    /** The current contingency's side-opened branches as limit-table indices (null when none has limits): their
+     *  screen records are dropped and the host scans them in full, in table order. */
+    private static java.util.BitSet sideOpenedTableIndices(RunState rs, LfNetwork network) {
+        if (rs.sideOpened.isEmpty()) {
+            return null;
+        }
+        GpuLimitTable table = rs.limitTable;
+        if (rs.tableIndexOfBranchNum == null) {
+            rs.tableIndexOfBranchNum = new int[network.getBranches().size()];
+            java.util.Arrays.fill(rs.tableIndexOfBranchNum, -1);
+            for (int b = 0; b < table.branches().length; b++) {
+                rs.tableIndexOfBranchNum[table.branches()[b].getNum()] = b;
+            }
+        }
+        java.util.BitSet sideOpened = new java.util.BitSet();
+        for (LfBranch branch : rs.sideOpened) {
+            int b = rs.tableIndexOfBranchNum[branch.getNum()];
+            if (b >= 0 && table.groupStart(b) != table.groupEnd(b)) {
+                sideOpened.set(b);
+            }
+        }
+        return sideOpened.isEmpty() ? null : sideOpened;
+    }
+
+    /** True when a state monitor asks for branch or three-windings transformer results, which read flows. */
+    private boolean flowsMonitored() {
+        java.util.List<com.powsybl.security.monitor.StateMonitor> monitors = new java.util.ArrayList<>();
+        monitors.add(monitorIndex.getAllStateMonitor());
+        monitors.add(monitorIndex.getNoneStateMonitor());
+        monitors.addAll(monitorIndex.getSpecificStateMonitors().values());
+        return monitors.stream().anyMatch(m -> m != null
+                && (!m.getBranchIds().isEmpty() || !m.getThreeWindingsTransformerIds().isEmpty()));
+    }
+
+    private static boolean targetedByOperatorStrategy(List<OperatorStrategy> strategies, String contingencyId) {
+        for (OperatorStrategy strategy : strategies) {
+            var ctx = strategy.getContingencyContext();
+            boolean targets = switch (ctx.getContextType()) {
+                case ALL, ONLY_CONTINGENCIES -> true;
+                case SPECIFIC -> contingencyId.equals(ctx.getContingencyId());
+                case NONE -> false;
+            };
+            if (targets) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * {@code OLF_GPU_PRELOSS_CHECK=1}: runs OLF's own contingency loss distribution UNCHANGED and compares,
+     * per device-solved contingency, the amount it returns with the one the batch replayed
+     * ({@link PrecomputedBatch#preDistributedActivePower()}). Measures whether the replay could stand in
+     * for the host call (assessment lead L2) before anything relies on it.
+     */
+    private final class LossDistributionCheck implements ContingencyActivePowerLossDistribution {
+
+        private final ContingencyActivePowerLossDistribution delegate;
+        private long compared;
+        private long differing;
+        private long missing;
+        private double worst;
+        private String worstId = "-";
+        private final java.util.List<String> samples = new java.util.ArrayList<>();
+
+        private LossDistributionCheck(ContingencyActivePowerLossDistribution delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public String getName() {
+            return delegate.getName();
+        }
+
+        @Override
+        public double run(LfNetwork network, com.powsybl.openloadflow.network.LfContingency lfContingency,
+                          com.powsybl.contingency.Contingency contingency, SecurityAnalysisParameters securityAnalysisParameters,
+                          com.powsybl.openloadflow.LoadFlowParametersOverride loadFlowParametersOverride,
+                          com.powsybl.commons.report.ReportNode reportNode) {
+            double olf = delegate.run(network, lfContingency, contingency, securityAnalysisParameters,
+                    loadFlowParametersOverride, reportNode);
+            PrecomputedBatch precomputed = runState.get().precomputed;
+            if (precomputed.states().containsKey(contingency.getId())) {
+                Double replayed = precomputed.preDistributedActivePower().get(contingency.getId());
+                if (replayed == null) {
+                    missing++;
+                } else {
+                    compared++;
+                    double d = Math.abs(olf - replayed);
+                    if (d != 0) {
+                        differing++;
+                        if (samples.size() < 5) {
+                            samples.add(String.format("%s olf=%s replayed=%s pu", contingency.getId(),
+                                    Double.toString(olf), Double.toString(replayed)));
+                        }
+                    }
+                    if (d > worst) {
+                        worst = d;
+                        worstId = contingency.getId();
+                    }
+                }
+            }
+            return olf;
+        }
+
+        private void print() {
+            System.err.printf("PRELOSS_CHECK device-solved contingencies compared=%d bit-identical=%d differing=%d "
+                    + "no-replayed-value=%d | worst |olf - replayed| = %.3e pu (%.3e MW) on %s%n",
+                    compared, compared - differing, differing, missing, worst, worst * PerUnit.SB, worstId);
+            samples.forEach(x -> System.err.println("PRELOSS_CHECK   " + x));
+        }
+    }
+
     private static final class RunState {
         private List<PropagatedContingency> contingencies = List.of();
         private List<OperatorStrategy> operatorStrategies = List.of();
@@ -144,6 +579,28 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         private PrecomputedBatch precomputed = PrecomputedBatch.empty();
         /** The state injector's row permutation, kept across this partition's contingencies. */
         private final GpuStateInjector.Remap remap = new GpuStateInjector.Remap();
+        private final PartialFlowCheck partialFlowCheck = new PartialFlowCheck();
+        /** OLF_GPU_RESTORE_CHECK: this partition's restores against the state a full restore produces. */
+        private final GpuRestoreCheck restoreCheck = new GpuRestoreCheck();
+        /** The contingency whose loss distribution the replay answered, and the one whose state the device supplied:
+         *  when both name the contingency just simulated, only its own elements and the bus voltages changed. */
+        private String lossReplayedFor;
+        private String deviceStateInjectedFor;
+        /** Shunt -> its bus, for the shunts a contingency shifts (LfShunt does not know its bus). Built once. */
+        private java.util.Map<com.powsybl.openloadflow.network.LfShunt, LfBus> shuntBus;
+        /** Per bus num: does the realistic-voltage band apply (not fictitious, nominal V at or above the
+         *  check's minimum)? Built once for {@link #realisticBandNetwork}. */
+        private boolean[] realisticBandApplies;
+        private LfNetwork realisticBandNetwork;
+        /** Per bus num: its BUS_V / BUS_PHI row in the device state (base layout), for the extraction they were
+         *  built from; null when the base system is not exactly one V and one angle per bus (the walk is used). */
+        private int[] vRowOfBus;
+        private int[] phiRowOfBus;
+        private Map<Variable<AcVariableType>, Integer> busRowsFor;
+        private boolean busRowsUsable;
+        private long busArrayChecked;
+        private long busArrayDiffering;
+        private String busArrayFirstDiff;
         // The run's actual outer loops, captured in runSimulations: the device must run the distributed-slack /
         // reactive-limits passes ONLY when OLF would (i.e. when the outer loop is in the configured list), never
         // unconditionally from network capability. Default to OLF's defaults until runSimulations sets them.
@@ -176,8 +633,16 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         /** Non-null when the state is screened against the table instead of fully scanned. */
         private GpuViolationScreen violationScreen;
         private int[] uncoveredBranches = new int[0];
+        /** The current contingency's branches opened at ONE side (a bus or busbar loss): the screen evaluates every
+         *  branch in the base topology, so their records are not used and they are scanned on the host. */
+        private List<LfBranch> sideOpened = List.of();
+        /** Limit-table index per branch num, -1 = no limits (built with the table). */
+        private int[] tableIndexOfBranchNum;
         /** Every scenario's screened candidates, computed in one pass over the precomputed states. */
         private Map<String, int[]> candidates = Map.of();
+        /** EXPERIMENTAL olf.gpu.sa.deviceViolations: the device's decision per scenario (absent = host path). */
+        private Map<String, GpuViolationScreen.Decided> decided;
+        private final DeviceViolationCheck deviceViolationCheck = new DeviceViolationCheck();
     }
 
     private final ThreadLocal<RunState> runState = ThreadLocal.withInitial(RunState::new);
@@ -289,10 +754,44 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             acParameters.setSolverFactory(new GpuNewtonRaphsonFactory(), securityAnalysisParameters.getLoadFlowParameters());
             LOGGER.info("GPU batched SA: base + fall-through load flows run on the GPU Newton-Raphson (CUDA pre-warm)");
         }
+        // OLF_GPU_SA_BASE_ONLY=1: solve the BASE and stop - no contingency simulated. The network
+        // was built for the whole contingency list (the retained switches, the structure the base
+        // has to factor), which is the point: the full busbar scope's base on the device without the
+        // 20 minutes of replays behind it. Debug lever for the base work; the result carries the
+        // pre-contingency state only.
+        List<PropagatedContingency> toSimulate = "1".equals(System.getenv("OLF_GPU_SA_BASE_ONLY"))
+                ? List.of() : propagatedContingencies;
+        ContingencyActivePowerLossDistribution lossDistribution;
+        if (System.getenv("OLF_GPU_PRELOSS_CHECK") != null) {
+            lossDistribution = new LossDistributionCheck(contingencyActivePowerLossDistribution);
+        } else if (replayLossDistributionEnabled()) {
+            lossDistribution = new ReplayedLossDistribution(contingencyActivePowerLossDistribution);
+        } else {
+            lossDistribution = contingencyActivePowerLossDistribution;
+        }
         try {
-            return super.runSimulations(lfNetwork, propagatedContingencies, acParameters, securityAnalysisParameters,
-                    operatorStrategies, actions, limitReductions, contingencyActivePowerLossDistribution);
+            return super.runSimulations(lfNetwork, toSimulate, acParameters, securityAnalysisParameters,
+                    operatorStrategies, actions, limitReductions, lossDistribution);
         } finally {
+            if (lossDistribution instanceof LossDistributionCheck check) {
+                check.print();
+            }
+            if (PARTIAL_FLOW_CHECK) {
+                runState.get().partialFlowCheck.print();
+            }
+            if (BUS_ARRAY_CHECK) {
+                RunState check = runState.get();
+                System.err.printf("BUS_ARRAY_CHECK contingencies=%d identical=%d differing=%d | array path usable=%b | first difference: %s%n",
+                        check.busArrayChecked, check.busArrayChecked - check.busArrayDiffering, check.busArrayDiffering,
+                        check.busRowsUsable, check.busArrayFirstDiff == null ? "-" : check.busArrayFirstDiff);
+            }
+            if (DEVICE_VIOLATIONS_CHECK) {
+                runState.get().deviceViolationCheck.print();
+            }
+            if (GpuRestoreCheck.ENABLED) {
+                runState.get().restoreCheck.print();
+                System.err.println("RESTORE_CHECK targeted restores (cumulative this run): " + LAST_TARGETED_RESTORE_COUNT.get());
+            }
             runState.remove();                               // pooled partition threads must not leak a run's state
             if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
                 // CUMULATIVE over the JVM, never cleared: threadCount > 1 runs one partition per
@@ -310,10 +809,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     }
 
     /** True when the base load flow's batch-of-one drives OLF's outer loops on the DEVICE, so this
-     *  analysis must not also drive them in Java. */
+     *  analysis must not also drive them in Java. DEFAULT since 2026-09-16: a batch of one is still a
+     *  batch, and running the base through the same driver as the chunks is what keeps the two on one
+     *  trajectory — rte6515 parity is identical either way (9040/9042, the same 2 knife-edge lines) and
+     *  the driver is never slower. {@code OLF_GPU_DRIVER_OUTER_LOOPS=0} or
+     *  {@code -Dolf.gpu.driverOuterLoops=false} puts OLF's Java engine back in charge of the base. */
     static boolean driverOuterLoopsEnabled() {
-        return Boolean.getBoolean("olf.gpu.driverOuterLoops")
-                || "1".equals(System.getenv("OLF_GPU_DRIVER_OUTER_LOOPS"));
+        return !"0".equals(System.getenv("OLF_GPU_DRIVER_OUTER_LOOPS"))
+                && !"false".equalsIgnoreCase(System.getProperty("olf.gpu.driverOuterLoops", "true"));
     }
 
     @Override
@@ -408,8 +911,14 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 // Screen the WHOLE run at once: the states are all precomputed already, and one
                 // device call per 512 scenarios is what makes the kernel worth its upload.
                 long tScreen = System.nanoTime();
-                rs.candidates = rs.violationScreen.screenAll(rs.precomputed.states(),
-                        rs.precomputed.baseVariableRows().size());
+                if (deviceViolationsEnabled()) {
+                    rs.decided = rs.violationScreen.decideAll(rs.precomputed.states(),
+                            rs.precomputed.baseVariableRows().size());
+                    rs.candidates = new java.util.HashMap<>();   // undecided scenarios screen on the host
+                } else {
+                    rs.candidates = rs.violationScreen.screenAll(rs.precomputed.states(),
+                            rs.precomputed.baseVariableRows().size());
+                }
                 PHASE_NS.computeIfAbsent("  violation screen (all scenarios)",
                         k -> new java.util.concurrent.atomic.LongAdder()).add(System.nanoTime() - tScreen);
                 if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
@@ -420,11 +929,24 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 }
             }
         }
-        if (rs.violationScreen != null) {
+        GpuViolationScreen.Decided decision = rs.decided != null ? rs.decided.get(contingencyId) : null;
+        java.util.BitSet sideOpened = rs.violationScreen != null ? sideOpenedTableIndices(rs, network) : null;
+        if (decision != null) {
+            rs.limitScanner.reportDecided(network, manager, decision, rs.uncoveredBranches, sideOpened);
+            if (DEVICE_VIOLATIONS_CHECK) {
+                var es = rs.precomputed.equationSystem();
+                es.getStateVector().setValuesOnly(es.getStateVector().get().clone());   // every flow, same state
+                var host = new LimitViolationManager(reference, limitReductions, saParameters.getIncreasedViolationsParameters());
+                rs.limitScanner.detectFromCandidates(network, host,
+                        rs.violationScreen.screen(rs.precomputed.states().get(contingencyId)),
+                        rs.violationScreen, rs.uncoveredBranches, sideOpened);
+                rs.deviceViolationCheck.compare(contingencyId, manager.getLimitViolations(), host.getLimitViolations());
+            }
+        } else if (rs.violationScreen != null) {
             int[] candidates = rs.candidates.get(contingencyId);
             rs.limitScanner.detectFromCandidates(network, manager,
                     candidates != null ? candidates : rs.violationScreen.screen(rs.precomputed.states().get(contingencyId)),
-                    rs.violationScreen, rs.uncoveredBranches);
+                    rs.violationScreen, rs.uncoveredBranches, sideOpened);
         } else {
             rs.limitScanner.detectViolations(network, manager);
         }
@@ -592,16 +1114,253 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                         0.0)));
     }
 
+    /** OLF's residual at the injected device state, worst rows first — see {@code OLF_GPU_SA_RESID}. */
+    private static void reportOlfResidual(AcLoadFlowContext context,
+                                          com.powsybl.openloadflow.equations.EquationSystem<com.powsybl.openloadflow.ac.equations.AcVariableType,
+                                                  com.powsybl.openloadflow.ac.equations.AcEquationType> es,
+                                          String contingencyId, int topN,
+                                          Map<com.powsybl.openloadflow.equations.Variable<com.powsybl.openloadflow.ac.equations.AcVariableType>,
+                                                  Integer> baseVariableRows,
+                                          int[] islandedBusNums) {
+        var ev = context.getEquationVector();
+        var tv = context.getTargetVector();
+        ev.minus(tv);
+        double[] fx = ev.getArray();
+        System.err.printf("SA_RESID ctg=%s olfActiveEquations=%d%n", contingencyId, fx.length);
+        Integer[] order = new Integer[fx.length];
+        for (int i = 0; i < fx.length; i++) {
+            order[i] = i;
+        }
+        java.util.Arrays.sort(order, (a, b) -> Double.compare(Math.abs(fx[b]), Math.abs(fx[a])));
+        for (int i = 0; i < Math.min(topN, order.length); i++) {
+            int row = order[i];
+            var eq = es.getIndex().getEquationAtColumn(row);
+            var elem = context.getNetwork().getElement(eq.getType().getElementType(), eq.getElementNum());
+            // OLF's own TARGET for that row, and the DEVICE row the same quantity lives on. A residual
+            // is (state - target): printing OLF's target next to the device row lets the two be
+            // compared directly (point OLF_GPU_FINAL_TARGET_ROW at devRow), which separates "the
+            // device solved a different TARGET" from "the device assembled a different EQUATION" —
+            // indistinguishable from the residual alone.
+            int devRow = -1;
+            if (baseVariableRows != null && eq != null) {
+                var vr = es.getVariableSet().getVariable(eq.getElementNum(),
+                        eq.getType() == com.powsybl.openloadflow.ac.equations.AcEquationType.BUS_TARGET_P
+                                ? com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_PHI
+                                : com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_V);
+                Integer r = vr == null ? null : baseVariableRows.get(vr);
+                devRow = r == null ? -1 : r;
+            }
+            // SIGNED, not |F|. Two buses whose residuals are equal and OPPOSITE are the two ends of a
+            // branch whose flow term is missing from both balances; two buses off the same way are not.
+            // The magnitude alone cannot tell those apart.
+            // Is this bus a NEIGHBOUR OF THE ISLAND? The island is frozen at a flat 1<0 while the live
+            // network sits at its real voltages, so any branch still bridging the two would push power
+            // into the live side. If the erring buses turn out NOT to touch the island, that whole
+            // explanation is dead and the injection comes from somewhere else entirely.
+            int toIsland = 0;
+            int degree = 0;
+            double islandShunt = Double.NaN;
+            if (islandedBusNums != null && elem instanceof com.powsybl.openloadflow.network.LfBus b) {
+                java.util.Set<Integer> isl = new java.util.HashSet<>();
+                for (int bn : islandedBusNums) {
+                    isl.add(bn);
+                }
+                for (var br : b.getBranches()) {
+                    degree++;
+                    var other = br.getBus1() == b ? br.getBus2() : br.getBus1();
+                    if (other != null && isl.contains(other.getNum())) {
+                        toIsland++;
+                        // The QUANTITATIVE test of "the device dropped the dangling half": if that is
+                        // what happened, the residual should be this branch's connected-side shunt
+                        // term, b_side * v^2, which OLF keeps and the device deletes with the element.
+                        var pi = br.getPiModel();
+                        double bSide = br.getBus1() == b ? pi.getB1() : pi.getB2();
+                        double v = b.getV();
+                        islandShunt = bSide * v * v;
+                    }
+                }
+            }
+            // WHAT IS ATTACHED to the bus whose equation is violated. A residual that is the same
+            // round number in every contingency is a fixed missing TERM, not a solve difference,
+            // and only the bus's own inventory says which term: a shunt's b, the generators' and
+            // loads' reactive, and whether OLF considers the bus disabled at all.
+            if (elem instanceof LfBus rb) {
+                double shB = rb.getShunt().map(sh -> sh.getB()).orElse(0.0)
+                        + rb.getControllerShunt().map(sh -> sh.getB()).orElse(0.0)
+                        + rb.getSvcShunt().map(sh -> sh.getB()).orElse(0.0);
+                double genQ = 0;
+                for (LfGenerator g : rb.getGenerators()) {
+                    genQ += g.getTargetQ();
+                }
+                System.err.printf("SA_RESID_BUS ctg=%s id=%s disabled=%s v=%.9f shuntB=%.9f"
+                        + " nGen=%d genTargetQ=%.9f loadTargetQ=%.9f vcEnabled=%s%n",
+                        contingencyId, rb.getId(), rb.isDisabled(), rb.getV(), shB,
+                        rb.getGenerators().size(), genQ, rb.getLoadTargetQ(),
+                        rb.isGeneratorVoltageControlEnabled());
+            }
+            // EVERY branch of the network incident to this bus, disabled ones included. getBranches()
+            // is the bus's LIVE list and came back empty while the equation still evaluated non-zero,
+            // so one of the two is lying; this says which, and names the branch either way.
+            if (elem instanceof LfBus ib) {
+                for (LfBranch nb : context.getNetwork().getBranches()) {
+                    if (nb.getBus1() == ib || nb.getBus2() == ib) {
+                        System.err.printf("SA_RESID_INC ctg=%s bus=%s branch=%s num=%d disabled=%s"
+                                + " zeroImp=%s side=%d%n", contingencyId, ib.getId(), nb.getId(),
+                                nb.getNum(), nb.isDisabled(),
+                                nb.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC),
+                                nb.getBus1() == ib ? 1 : 2);
+                    }
+                }
+            }
+            // The TERMS of the violated equation, each with its element and its value at the
+            // device's state. A bus with no branches and no shunt should have a Q balance with no
+            // terms at all; when it evaluates to a round non-zero number something IS in there, and
+            // only the term list says what.
+            {
+                int shown = 0;
+                for (var t : eq.<com.powsybl.openloadflow.equations.EquationTerm<AcVariableType,
+                        AcEquationType>>getTerms()) {
+                    if (!t.isActive() || shown++ >= 12) {
+                        continue;
+                    }
+                    double termVal;
+                    try {
+                        termVal = t.eval();
+                    } catch (RuntimeException ex) {
+                        termVal = Double.NaN;
+                    }
+                    // Name the term by its VARIABLES. The element number of an
+                    // EquationTermArrayElementImpl is the array wrapper's, not the branch's, so it
+                    // identifies nothing; the variable list distinguishes a branch flow (v/phi of
+                    // two buses) from a zero-impedance DUMMY_Q, which is the whole question when a
+                    // bus has no branches left.
+                    StringBuilder vars = new StringBuilder();
+                    try {
+                        for (var vv : t.getVariables()) {
+                            vars.append(' ').append(vv.getType()).append('#').append(vv.getElementNum());
+                            if (vv.getType() == AcVariableType.BUS_V || vv.getType() == AcVariableType.BUS_PHI) {
+                                LfBus vb = context.getNetwork().getBus(vv.getElementNum());
+                                vars.append('(').append(vb == null ? "?" : vb.getId())
+                                        .append(vb != null && vb.isDisabled() ? ",DISABLED" : "").append(')');
+                            }
+                        }
+                    } catch (RuntimeException ex) {
+                        vars.append(" <unavailable>");
+                    }
+                    System.err.printf("SA_RESID_TERM ctg=%s row=%d term=%s elemType=%s value=%.9f vars:%s%n",
+                            contingencyId, row, t.getClass().getSimpleName(),
+                            t.getElementType(), termVal, vars);
+                }
+            }
+            // For a violated DISTR_Q, OLF's own q for EVERY member of the group, evaluated at the
+            // DEVICE's state. The device believes its sharing equation is satisfied there; if OLF
+            // disagrees, these are the numbers that say which member's q the two compute
+            // differently - the equation residual alone cannot.
+            if (eq.getType() == AcEquationType.DISTR_Q && elem instanceof LfBus db) {
+                db.getGeneratorVoltageControl().ifPresent(vc -> {
+                    for (LfBus m : vc.getMergedControllerElements()) {
+                        System.err.printf("SA_RESID_Q ctg=%s member=%s qPercent=%.9f qAtDeviceState=%.9f"
+                                + " loadQ=%.9f v=%.9f%n", contingencyId, m.getId(),
+                                m.getRemoteControlReactivePercent(), m.getQ().eval(),
+                                m.getLoadTargetQ(), m.getV());
+                    }
+                });
+            }
+            System.err.printf("SA_RESID ctg=%s row=%d F=%+.9e eq=%s elem=%d id=%s olfTarget=%.9f devRow=%d"
+                            + " degree=%d toIsland=%d islandBranchShunt=%+.9f%n",
+                    contingencyId, row, fx[row], eq.getType(), eq.getElementNum(),
+                    elem == null ? "?" : elem.getId(), tv.getArray()[row], devRow, degree, toIsland,
+                    islandShunt);
+        }
+    }
+
+    /**
+     * {@code OLF_GPU_EQ_DUMP_CTG=<contingency id>}: writes OLF's OWN equation set for the POST-CONTINGENCY
+     * state — {@code lfContingency.apply()} has already run when this is called, so the system here is the
+     * one the CPU actually solves for that scenario, with inactive equations in {@code [ ]}.
+     *
+     * <p>This is the reference the device side has been missing. Reasoning about where a relocated row COULD
+     * go produced two wrong fixes in a row (a DISTR_Q routed back to its bus's V row made the worst bus
+     * difference 150x larger), because a coupler opening does not merely free a row: it changes the GROUP, and
+     * OLF re-evaluates {@code updateRemoteVoltageControlEquations} over the live controllers, which can
+     * DEACTIVATE an equation rather than move it. The only way to know is to read what OLF has.
+     *
+     * <p>Written to {@code OLF_GPU_EQ_DUMP_CTG_FILE}, or {@code <id>.olf.post} in the working directory.
+     * Also lists the contingency's own elements, so the dump identifies which couplers opened.
+     */
+    private void dumpPostContingencyEquations(AcLoadFlowContext context, Contingency contingency,
+                                              LfContingency lfContingency, LfNetwork network) {
+        String want = System.getenv("OLF_GPU_EQ_DUMP_CTG");
+        if (want == null || !want.equals(contingency.getId())) {
+            return;
+        }
+        String path = System.getenv().getOrDefault("OLF_GPU_EQ_DUMP_CTG_FILE",
+                contingency.getId().replaceAll("[^A-Za-z0-9_.-]", "_") + ".olf.post");
+        try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(path))) {
+            w.write("# OLF's POST-CONTINGENCY equation system for " + contingency.getId()
+                    + " (inactive equations in [ ])\n");
+            w.write("# disabled buses: " + lfContingency.getDisabledNetwork().getBuses().stream()
+                    .map(LfBus::getId).sorted().toList() + "\n");
+            w.write("# disabled branches: " + lfContingency.getDisabledNetwork().getBranches().stream()
+                    .map(LfBranch::getId).sorted().toList() + "\n");
+            // OLF's own mismatch to distribute, the reference for the device's scheduledActivePowerLoss
+            // (OLF_GPU_LOSS_TRACE prints that one): gen - load over the DISABLED buses plus the named lost
+            // loads/generators that are not on them.
+            w.write(String.format("# OLF activePowerLoss=%.9f pu (disconnectedGeneration=%.9f"
+                            + " disconnectedLoad=%.9f)%n", lfContingency.getActivePowerLoss(),
+                    lfContingency.getDisconnectedGenerationActivePower(),
+                    lfContingency.getDisconnectedLoadActivePower()));
+            for (LfBus b : lfContingency.getDisabledNetwork().getBuses()) {
+                w.write(String.format("#   disabled bus %s: generationTargetP=%.9f loadTargetP=%.9f%n",
+                        b.getId(), b.getGenerationTargetP(), b.getLoadTargetP()));
+            }
+            // OLF writes equations as <symbol><elementNum>, so a legend is what makes the file readable
+            // next to the device's row dump, which names elements by id.
+            w.write("# bus legend: num = id\n");
+            for (LfBus b : network.getBuses()) {
+                w.write("#   bus " + b.getNum() + " = " + b.getId() + (b.isDisabled() ? "  [DISABLED]" : "") + "\n");
+            }
+            w.write("# branch legend: num = id\n");
+            for (LfBranch br : network.getBranches()) {
+                w.write("#   branch " + br.getNum() + " = " + br.getId()
+                        + (br.isDisabled() ? "  [DISABLED]" : "") + "\n");
+            }
+            context.getEquationSystem().write(w, true);
+        } catch (java.io.IOException | RuntimeException e) {
+            LOGGER.warn("OLF_GPU_EQ_DUMP_CTG failed: {}", e.toString());
+        }
+        System.err.println("EQ_DUMP_CTG wrote " + path + " for " + contingency.getId());
+    }
+
     @Override
     protected PostContingencyResult runPostContingencySimulation(LfNetwork network, AcLoadFlowContext context, Contingency contingency,
                                                                  LfContingency lfContingency, LimitViolationManager preContingencyLimitViolationManager,
                                                                  SecurityAnalysisParameters securityAnalysisParameters,
                                                                  PreContingencyNetworkResult preContingencyNetworkResult, boolean createResultExtension,
                                                                  List<LimitReduction> limitReductions, double preDistributedActivePower) {
+        dumpPostContingencyEquations(context, contingency, lfContingency, network);
         PrecomputedBatch precomputed = runState.get().precomputed;
+        if (precomputed.isReady() && precomputed.exhausted().contains(contingency.getId())) {
+            // The device carried this scenario through OLF's whole Newton budget without
+            // convergence. OLF's own path (AbstractSecurityAnalysis.runPostContingencySimulation)
+            // reports MAX_ITERATION_REACHED with an empty network result and no violations for
+            // that outcome; the same result is built here, from the contingency already applied.
+            logPostContingencyStart(network, lfContingency);
+            return new PostContingencyResult(contingency, PostContingencyComputationStatus.MAX_ITERATION_REACHED,
+                    new LimitViolationsResult(List.of()),
+                    new NetworkResult(List.of(), List.of(), List.of()),
+                    new ConnectivityResult(lfContingency.getCreatedSynchronousComponentsCount(), 0,
+                            lfContingency.getDisconnectedLoadActivePower() * PerUnit.SB,
+                            lfContingency.getDisconnectedGenerationActivePower() * PerUnit.SB,
+                            lfContingency.getDisconnectedElementIds()),
+                    // what the device's own slack passes placed before the budget ran out, as OLF reports for its
+                    // own failed run; the pre-distribution alone where the device did not report a total
+                    precomputed.distributedActivePower()
+                            .getOrDefault(contingency.getId(), preDistributedActivePower) * PerUnit.SB);
+        }
         double[] state = precomputed.states().get(contingency.getId());
         if (state == null || !precomputed.isReady()) {
-            // not batched (multi-element / islanding / out of scope / diverged) — standard CPU path
+            // not batched (multi-element / islanding / out of scope / rejected) — standard CPU path
             return super.runPostContingencySimulation(network, context, contingency, lfContingency, preContingencyLimitViolationManager,
                     securityAnalysisParameters, preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
         }
@@ -612,13 +1371,31 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         logPostContingencyStart(network, lfContingency);
         Stopwatch stopwatch = Stopwatch.createStarted();
 
+        // What OLF reports on the result: the pre-distribution PLUS the load flow's own distributed-slack passes
+        // (AbstractSecurityAnalysis: preDistributedActivePower + result.getDistributedActivePower()). The device
+        // total covers both; where it is unknown the pre-distribution alone is reported, as before.
+        double distributedActivePower = precomputed.distributedActivePower()
+                .getOrDefault(contingency.getId(), preDistributedActivePower);
         long tInj = System.nanoTime();
+        runState.get().deviceStateInjectedFor = contingency.getId();
+        runState.get().sideOpened = sideOpenedBranches(lfContingency);
+        int[] flowReadSet = flowReadSet(runState.get(), contingency.getId());
         GpuStateInjector.injectState(precomputed.equationSystem(), precomputed.baseVariableRows(), state,
-                runState.get().remap);
+                runState.get().remap, flowReadSet);
         long tUpd = System.nanoTime();
         PHASE_NS.computeIfAbsent("   injectState()", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(tUpd - tInj);
-        AcSolverUtil.updateNetwork(network, precomputed.equationSystem());
+        // OLF_GPU_SA_RESID=<n>: OLF's OWN residual at the state the device returned, on OLF's
+        // CONTINGENCY-updated equation system (lfContingency.apply() ran above). The batched path's
+        // analogue of OLF_GPU_RESIDUAL_TRACE: a large value on a row means the device solved a
+        // DIFFERENT equation there — a row-assembly bug — not that it failed to converge. Prints the
+        // n worst rows with the equation OLF has on each, which names the family to look at.
+        if (System.getenv("OLF_GPU_SA_RESID") != null) {
+            reportOlfResidual(context, precomputed.equationSystem(), contingency.getId(),
+                    Integer.parseInt(System.getenv("OLF_GPU_SA_RESID")), precomputed.baseVariableRows(),
+                    precomputed.islandedBuses().get(contingency.getId()));
+        }
+        boolean unrealistic = updateBusesFromState(state, precomputed, network, context.getParameters(), runState.get());
         PHASE_NS.computeIfAbsent("   AcSolverUtil.updateNetwork()", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tUpd);
         PHASE_NS.computeIfAbsent("  state injection + network update", k -> new java.util.concurrent.atomic.LongAdder())
@@ -647,6 +1424,43 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                             + "distrQResid=%s minQ=%.9f maxQ=%.9f overMaxBy=%.9f%n",
                             contingency.getId(), b.getId(), q, b.getGenerationTargetQ(), b.getLoadTargetQ(),
                             b.getRemoteControlReactivePercent(), resid, b.getMinQ(), b.getMaxQ(), q - b.getMaxQ());
+                    // Every term of OLF's BUS_TARGET_Q equation at this state (value + variables): the
+                    // device's row must carry the same terms, or a pin lands at a different q (a
+                    // zero-impedance dummy, a load-model part, a shunt the pack routes elsewhere).
+                    precomputed.equationSystem().getEquation(b.getNum(), AcEquationType.BUS_TARGET_Q).ifPresent(eq -> {
+                        for (var t : eq.getTerms()) {
+                            System.err.printf("Q_PROBE_TERM ctg=%s bus=%s active=%b term=%s value=%.9f vars=%s%n",
+                                    contingency.getId(), b.getId(), t.isActive(), t.getClass().getSimpleName(),
+                                    t.isActive() ? t.eval() : Double.NaN,
+                                    t.getVariables().stream().map(v -> v.getType() + "#" + v.getElementNum()).toList());
+                        }
+                    });
+                    // Every incident branch: OLF's pi model next to the row the device pack carries for
+                    // it (matched by the two phi columns) — a q that lands 0.2 MVar off its pin with the
+                    // same terms on both arms is a pi-model disagreement on one of these.
+                    var gd = precomputed.gpuData();
+                    if (gd != null) {
+                        int cbCount = gd.cbIn().length / 8;
+                        int idxStride = cbCount > 0 ? gd.cbIdx().length / cbCount : 0;
+                        for (var br : b.getBranches()) {
+                            var pm = br.getPiModel();
+                            Integer ph1 = br.getBus1() == null ? null : precomputed.baseVariableRows().get(precomputed.equationSystem().getVariableSet()
+                                    .getVariable(br.getBus1().getNum(), AcVariableType.BUS_PHI));
+                            Integer ph2 = br.getBus2() == null ? null : precomputed.baseVariableRows().get(precomputed.equationSystem().getVariableSet()
+                                    .getVariable(br.getBus2().getNum(), AcVariableType.BUS_PHI));
+                            String pack = "absent";
+                            for (int e = 0; e < cbCount && idxStride > 0; e++) {
+                                if (ph1 != null && ph2 != null && gd.cbIdx()[e * idxStride] == ph1 && gd.cbIdx()[e * idxStride + 2] == ph2) {
+                                    double[] r = java.util.Arrays.copyOfRange(gd.cbIn(), e * 8, e * 8 + 8);
+                                    pack = String.format("cb=%d y=%.9f g1=%.9f g2=%.9f b1=%.9f b2=%.9f ksi=%.9f r1=%.9f a1=%.9f",
+                                            e, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+                                }
+                            }
+                            System.err.printf("Q_PROBE_BRANCH ctg=%s bus=%s branch=%s num=%d disabled=%b sides=%b/%b olf: y=%.9f g1=%.9f g2=%.9f b1=%.9f b2=%.9f ksi=%.9f r1=%.9f a1=%.9f | pack: %s%n",
+                                    contingency.getId(), b.getId(), br.getId(), br.getNum(), br.isDisabled(), br.isConnectedSide1(), br.isConnectedSide2(),
+                                    pm.getY(), pm.getG1(), pm.getG2(), pm.getB1(), pm.getB2(), pm.getKsi(), pm.getR1(), pm.getA1(), pack);
+                        }
+                    }
                     // A CURVE reactive limit is a function of the GENERATOR's targetP, so a limit that
                     // disagrees between arms is a P disagreement, not a limit-model disagreement.
                     for (var g : b.getGenerators()) {
@@ -661,8 +1475,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         // rejected result reports NO violations at all. Skipping that check does not make the GPU
         // arm optimistic by a violation or two — it makes it report a full violation set where the
         // CPU reports none.
-        PostContingencyComputationStatus status = isStateUnrealistic(precomputed.equationSystem(), network,
-                context.getParameters())
+        PostContingencyComputationStatus status = unrealistic
                 ? PostContingencyComputationStatus.FAILED
                 : PostContingencyComputationStatus.CONVERGED;
         var postContingencyLimitViolationManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions,
@@ -684,7 +1497,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                             lfContingency.getDisconnectedLoadActivePower() * PerUnit.SB,
                             lfContingency.getDisconnectedGenerationActivePower() * PerUnit.SB,
                             lfContingency.getDisconnectedElementIds()),
-                    preDistributedActivePower * PerUnit.SB);
+                    distributedActivePower * PerUnit.SB);
         }
         long tRes = System.nanoTime();
         postContingencyNetworkResult.update();
@@ -695,6 +1508,18 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 preContingencyLimitViolationManager, securityAnalysisParameters, contingency.getId());
         PHASE_NS.computeIfAbsent("   detectViolations()", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tDet);
+        if (flowReadSet != null && PARTIAL_FLOW_CHECK) {
+            // Same state, every flow refreshed, the detection again: any branch the partial refresh left stale
+            // and the detection read shows up as a differing violation.
+            var es = precomputed.equationSystem();
+            es.getStateVector().setValuesOnly(es.getStateVector().get().clone());
+            var fullManager = new LimitViolationManager(preContingencyLimitViolationManager, limitReductions,
+                    securityAnalysisParameters.getIncreasedViolationsParameters());
+            detectViolations(network, fullManager, limitReductions, preContingencyLimitViolationManager,
+                    securityAnalysisParameters, contingency.getId());
+            runState.get().partialFlowCheck.compare(contingency.getId(), postContingencyLimitViolationManager.getLimitViolations(),
+                    fullManager.getLimitViolations(), flowReadSet.length);
+        }
         PHASE_NS.computeIfAbsent("  result build + violation detection", k -> new java.util.concurrent.atomic.LongAdder())
                 .add(System.nanoTime() - tRes);
 
@@ -714,7 +1539,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 GpuStateInjector.filterIslanded(network, precomputed.islandedBuses().get(contingency.getId()), contingency.getId(),
                         new NetworkResult(postContingencyNetworkResult.getBranchResults(), postContingencyNetworkResult.getBusResults(),
                                 postContingencyNetworkResult.getThreeWindingsTransformerResults())),
-                connectivityResult, preDistributedActivePower * PerUnit.SB);
+                connectivityResult, distributedActivePower * PerUnit.SB);
     }
 
     /**
@@ -765,6 +1590,163 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      *
      * <p>{@code OLF_GPU_UNREALISTIC_TRACE} names the offending buses.
      */
+    /** OLF_GPU_BUS_ARRAY_CHECK=1: after each array update, run the variable walk too and require every bus's V,
+     *  angle and the realistic-voltage verdict to be bit-identical. */
+    private static final boolean BUS_ARRAY_CHECK = System.getenv("OLF_GPU_BUS_ARRAY_CHECK") != null;
+
+    /**
+     * Bus voltages and angles straight from the device state, and the realistic-voltage check, in one loop over the
+     * buses. The device state is in the BASE row layout and every enabled bus keeps its base V and angle variables,
+     * so {@code state[vRowOfBus[b]]} is exactly the value the injection put in the state vector for that bus; a
+     * disabled bus has no variable in the contingency's index, and {@code AcSolverUtil.updateNetwork} never touched
+     * it either. Replaces a walk over OLF's ~13k variable objects per contingency (1.9 s cold on rte6515). Falls
+     * back to {@link #updateNetworkAndCheckRealistic} unless the base system is exactly one BUS_V and one BUS_PHI
+     * per bus.
+     */
+    private static boolean updateBusesFromState(double[] state, PrecomputedBatch precomputed, LfNetwork network,
+                                                AcLoadFlowParameters parameters, RunState rs) {
+        Map<Variable<AcVariableType>, Integer> baseRows = precomputed.baseVariableRows();
+        if (rs.busRowsFor != baseRows) {
+            rs.busRowsFor = baseRows;
+            int nb = network.getBuses().size();
+            int[] vRow = new int[nb];
+            int[] phiRow = new int[nb];
+            java.util.Arrays.fill(vRow, -1);
+            java.util.Arrays.fill(phiRow, -1);
+            boolean usable = true;
+            for (Map.Entry<Variable<AcVariableType>, Integer> e : baseRows.entrySet()) {
+                Variable<AcVariableType> v = e.getKey();
+                if (v.getType() == AcVariableType.BUS_V && v.getElementNum() < nb) {
+                    vRow[v.getElementNum()] = e.getValue();
+                } else if (v.getType() == AcVariableType.BUS_PHI && v.getElementNum() < nb) {
+                    phiRow[v.getElementNum()] = e.getValue();
+                } else {
+                    usable = false;                          // another kind of variable: keep the exact walk
+                }
+            }
+            for (int b = 0; b < nb && usable; b++) {
+                usable = vRow[b] >= 0 && phiRow[b] >= 0;
+            }
+            rs.vRowOfBus = vRow;
+            rs.phiRowOfBus = phiRow;
+            rs.busRowsUsable = usable;
+        }
+        if (!rs.busRowsUsable || state == null) {
+            return updateNetworkAndCheckRealistic(precomputed.equationSystem(), network, parameters, rs);
+        }
+        if (rs.realisticBandApplies == null || rs.realisticBandNetwork != network) {
+            double minNominalV = parameters.getMinNominalVoltageRealisticVoltageCheck();
+            boolean[] applies = new boolean[network.getBuses().size()];
+            for (LfBus b : network.getBuses()) {
+                applies[b.getNum()] = !b.isFictitious() && b.getNominalV() >= minNominalV;
+            }
+            rs.realisticBandApplies = applies;
+            rs.realisticBandNetwork = network;
+        }
+        boolean[] applies = rs.realisticBandApplies;
+        double minV = parameters.getMinRealisticVoltage();
+        double maxV = parameters.getMaxRealisticVoltage();
+        boolean trace = System.getenv("OLF_GPU_UNREALISTIC_TRACE") != null;
+        int[] vRow = rs.vRowOfBus;
+        int[] phiRow = rs.phiRowOfBus;
+        List<LfBus> buses = network.getBuses();
+        boolean unrealistic = false;
+        for (int num = 0; num < vRow.length; num++) {
+            LfBus bus = buses.get(num);
+            if (bus.isDisabled()) {
+                continue;
+            }
+            double value = state[vRow[num]];
+            bus.setV(value);
+            bus.setAngle(state[phiRow[num]]);
+            if ((!unrealistic || trace) && (value < minV || value > maxV) && applies[num]) {
+                unrealistic = true;
+                if (trace) {
+                    System.err.printf("UNREALISTIC bus=%s v=%.9f nominalV=%.3f band=[%.3f, %.3f]%n",
+                            bus.getId(), value, bus.getNominalV(), minV, maxV);
+                }
+            }
+        }
+        if (BUS_ARRAY_CHECK) {
+            double[] v = new double[vRow.length];
+            double[] a = new double[vRow.length];
+            for (int num = 0; num < vRow.length; num++) {
+                v[num] = buses.get(num).getV();
+                a[num] = buses.get(num).getAngle();
+            }
+            boolean walked = updateNetworkAndCheckRealistic(precomputed.equationSystem(), network, parameters, rs);
+            rs.busArrayChecked++;
+            String diff = walked != unrealistic ? "realistic verdict " + unrealistic + " vs " + walked : null;
+            for (int num = 0; num < vRow.length && diff == null; num++) {
+                LfBus bus = buses.get(num);
+                if (Double.doubleToLongBits(v[num]) != Double.doubleToLongBits(bus.getV())
+                        || Double.doubleToLongBits(a[num]) != Double.doubleToLongBits(bus.getAngle())) {
+                    diff = "bus " + bus.getId() + " v " + v[num] + " vs " + bus.getV() + " angle " + a[num] + " vs " + bus.getAngle();
+                }
+            }
+            if (diff != null) {
+                rs.busArrayDiffering++;
+                if (rs.busArrayFirstDiff == null) {
+                    rs.busArrayFirstDiff = diff;
+                }
+            }
+        }
+        return unrealistic;
+    }
+
+    /**
+     * {@code AcSolverUtil.updateNetwork} and {@link #isStateUnrealistic} in ONE walk over the variables. Both
+     * walked the ~13k variables of rte6515 once per contingency (2.9 s of the GPU arm, nearly all of it memory
+     * traffic), the second one with two bus lookups per variable. Only BUS_V / BUS_PHI are handled here —
+     * the only kinds the batch solves — so any other kind in the system falls back to the two original
+     * calls. Which buses the realistic-voltage band applies to is a per-network constant, cached per run.
+     */
+    private static boolean updateNetworkAndCheckRealistic(EquationSystem<AcVariableType, AcEquationType> es,
+                                                          LfNetwork network, AcLoadFlowParameters parameters,
+                                                          RunState rs) {
+        List<Variable<AcVariableType>> vars = es.getIndex().getSortedVariablesToFind();
+        for (Variable<AcVariableType> v : vars) {
+            if (v.getType() != AcVariableType.BUS_V && v.getType() != AcVariableType.BUS_PHI) {
+                AcSolverUtil.updateNetwork(network, es);
+                return isStateUnrealistic(es, network, parameters);
+            }
+        }
+        if (rs.realisticBandApplies == null || rs.realisticBandNetwork != network) {
+            double minNominalV = parameters.getMinNominalVoltageRealisticVoltageCheck();
+            boolean[] applies = new boolean[network.getBuses().size()];
+            for (LfBus b : network.getBuses()) {
+                applies[b.getNum()] = !b.isFictitious() && b.getNominalV() >= minNominalV;
+            }
+            rs.realisticBandApplies = applies;
+            rs.realisticBandNetwork = network;
+        }
+        boolean[] applies = rs.realisticBandApplies;
+        double minV = parameters.getMinRealisticVoltage();
+        double maxV = parameters.getMaxRealisticVoltage();
+        boolean trace = System.getenv("OLF_GPU_UNREALISTIC_TRACE") != null;
+        com.powsybl.openloadflow.equations.StateVector sv = es.getStateVector();
+        boolean unrealistic = false;
+        for (Variable<AcVariableType> v : vars) {
+            double value = sv.get(v.getRow());
+            LfBus bus = network.getBus(v.getElementNum());
+            if (v.getType() == AcVariableType.BUS_PHI) {
+                bus.setAngle(value);
+                continue;
+            }
+            bus.setV(value);
+            if (!unrealistic || trace) {
+                if ((value < minV || value > maxV) && applies[v.getElementNum()]) {
+                    unrealistic = true;
+                    if (trace) {
+                        System.err.printf("UNREALISTIC bus=%s v=%.9f nominalV=%.3f band=[%.3f, %.3f]%n",
+                                bus.getId(), value, bus.getNominalV(), minV, maxV);
+                    }
+                }
+            }
+        }
+        return unrealistic;
+    }
+
     private static boolean isStateUnrealistic(EquationSystem<AcVariableType, AcEquationType> es,
                                               LfNetwork network, AcLoadFlowParameters parameters) {
         double minNominalV = parameters.getMinNominalVoltageRealisticVoltageCheck();

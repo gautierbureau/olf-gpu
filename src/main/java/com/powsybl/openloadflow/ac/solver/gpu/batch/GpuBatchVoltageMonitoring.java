@@ -63,7 +63,7 @@ public final class GpuBatchVoltageMonitoring {
 
     /** One monitored bus: its V row, RL pack index, the automaton band + setpoints, and the VC-ON
      *  activation deltas (row modes + targets; the V-row target is replaced per direction). */
-    record Ctl(int vRow, int rlIdx, double lowThreshold, double highThreshold,
+    public record Ctl(int vRow, int rlIdx, double lowThreshold, double highThreshold,
                double lowTargetV, double highTargetV,
                int[] deltaRows, int[] deltaModesOn, double[] deltaTargetsOn) {
     }
@@ -84,7 +84,7 @@ public final class GpuBatchVoltageMonitoring {
         return true;
     }
 
-    static List<Ctl> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+    public static List<Ctl> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                       com.powsybl.openloadflow.equations.TargetVector<AcVariableType, AcEquationType> targetVector,
                                       GpuAcActivation baseActivation, double[] baseTargets, int[] rlVrow) {
         Map<Integer, Integer> busVRows = new LinkedHashMap<>();
@@ -113,7 +113,8 @@ public final class GpuBatchVoltageMonitoring {
             Integer vRow = busVRows.get(bus.getNum());
             Integer rlIdx = vRow != null ? rlIdxOfVRow.get(vRow) : null;
             if (automatonOpt.isEmpty() || vRow == null || rlIdx == null || bus.isGeneratorVoltageControlEnabled()) {
-                LOGGER.info("Monitoring SVC bus {} not representable on the GPU batch — skipped", bus.getId());
+                GpuBatchSkips.record(GpuBatchSkips.Slot.MONITORING, LOGGER,
+                        "Monitoring SVC bus {} not representable on the GPU batch — skipped", bus.getId());
                 continue;
             }
             var automaton = automatonOpt.orElseThrow();
@@ -144,239 +145,8 @@ public final class GpuBatchVoltageMonitoring {
         return out;
     }
 
-    @SuppressWarnings({"java:S107", "java:S3776"})
-    static double[][] orchestrate(long handle, int chunkSize, int realCount, int n, int nrl,
-            double[][] chunkResults, List<Ctl> ctls, int[] rlState, boolean[] rlSolved,
-            int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
-            int[] targetOverrideIndex, double[] targetOverrideValue,
-            int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
-            int[] dsPhiRow, double[] dsFactor,
-            int[] r1OvSlotElem, double[] r1OvVal, int[] shOvSlotElem, double[] shOvGb,
-            int nziBase, int[] ziOnSlotElem, int[] ziOffSlotElem,
-            double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
-            double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, int[] varType,
-            BatchConfig config) {
-        int nc = ctls.size();
-        if (nc == 0 || rlState == null) {
-            return chunkResults;
-        }
-        // DS target carry (same three coupled pieces as GpuBatchTransformerControl): the MAIN
-        // solve's slack distribution must ride into the activation/RL re-solves, or the kernel
-        // re-derives it from the re-uploaded baseTargets along a trajectory the CPU never takes.
-        int nds = dsPhiRow != null ? dsPhiRow.length : 0;
-        double[] dsAnchorCarry = nds > 0 ? new double[chunkSize * nds] : null;
-        double[] dsSlackCarry = nds > 0 ? new double[chunkSize] : null;
-        double[] dsSeed = nds > 0 ? new double[chunkSize * nds] : null;
-        if (nds > 0) {
-            GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
-                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
-        }
-        double[][] activatedTargetV = new double[chunkSize][nc];   // NaN = still standing by
-        for (double[] row : activatedTargetV) {
-            java.util.Arrays.fill(row, Double.NaN);
-        }
-        int maxRounds = config.maxOuterIterations() > 0 ? config.maxOuterIterations() : 20;
 
-        // ---- PHASE A: OLF's loop ORDER puts VoltageMonitoring BEFORE ReactiveLimits — the checks run
-        // at DS-stable / PRE-RL states (the chunk's main solve was made with skipRlPhase=1). Iterate
-        // activations at DS-only states until monitoring is stable there. ----
-        for (int round = 0; round < maxRounds; round++) {
-            // ---- OLF check(): standing-by monitored buses whose V left the automaton band ----
-            boolean[] affected = new boolean[chunkSize];
-            boolean any = false;
-            for (int s = 0; s < realCount; s++) {
-                double[] r = chunkResults[s];
-                if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
-                    continue;
-                }
-                for (int c = 0; c < nc; c++) {
-                    Ctl ctl = ctls.get(c);
-                    if (!Double.isNaN(activatedTargetV[s][c])) {
-                        continue;                            // already switched — a normal PV bus now
-                    }
-                    double v = r[ctl.vRow()];
-                    if (MON_TRACE) {                     // OLF_GPU_MON_TRACE: the per-unit band check
-                        System.err.printf("MON s=%d c=%d v=%.6f band=[%.6f,%.6f]%n",
-                                s, c, v, ctl.lowThreshold(), ctl.highThreshold());
-                    }
-                    if (v > ctl.highThreshold()) {
-                        activatedTargetV[s][c] = ctl.highTargetV();
-                    } else if (v < ctl.lowThreshold()) {
-                        activatedTargetV[s][c] = ctl.lowTargetV();
-                    } else {
-                        continue;
-                    }
-                    ACTIVATIONS.increment();
-                    affected[s] = true;
-                    any = true;
-                }
-            }
-            if (!any) {
-                break;
-            }
-            // ---- apply the activations: VC-ON deltas with the chosen setpoint, rlVtOv, re-solve ----
-            List<Integer> ovIdx = new ArrayList<>();
-            List<Double> ovVal = new ArrayList<>();
-            for (int i = 0; i < targetOverrideIndex.length; i++) {
-                ovIdx.add(targetOverrideIndex[i]);
-                ovVal.add(targetOverrideValue[i]);
-            }
-            GpuBatchTransformerControl.seedDsTargets(nds, dsPhiRow, dsSeed, chunkResults, realCount, n, ovIdx, ovVal);
-            double[] x0Full = new double[chunkSize * n];
-            for (int s = 0; s < chunkSize; s++) {
-                double[] src = s < realCount && chunkResults[s] != null ? chunkResults[s] : baseState;
-                System.arraycopy(src, 0, x0Full, s * n, n);
-            }
-            applyActivations(realCount, n, ctls, activatedTargetV, rowModePerScenario, ovIdx, ovVal);
-            GpuBatchPhaseStats.bump("VoltageMonitoring.solvesPreRl");
-            double[][] r2 = resolve(handle, chunkSize, n, nrl, ctls, activatedTargetV, rlState, 1,
-                    rowModePerScenario, baseRowMode, disabledMask, ovIdx, ovVal, x0Full,
-                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorCarry, dsSlackCarry,
-                    r1OvSlotElem, r1OvVal, shOvSlotElem, shOvGb, nziBase, ziOnSlotElem, ziOffSlotElem,
-                    baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, varType,
-                    config, realCount);
-            for (int s = 0; s < realCount; s++) {
-                if (affected[s]) {                           // untouched scenarios KEEP their DS-only state
-                    chunkResults[s] = r2[s];
-                }
-            }
-            if (nds > 0) {                                   // this solve may have distributed further
-                GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
-                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed, affected);
-            }
-        }
-        // ---- PHASE B: monitoring stable at DS-only states — run the FULL solve (RL enabled) for the
-        // scenarios that still OWE one, then keep re-checking monitoring at the post-RL states (the
-        // engine re-checks it after every RL re-solve).
-        //
-        // A scenario owes the solve when its state has not been through the reactive-limits phase (the
-        // main solve skips it while monitoring is interleaved) or when its automaton just switched
-        // PQ -> PV. A scenario that owes NEITHER is one both loops would report STABLE on, and the CPU
-        // runs no Newton for a stable scenario: re-solving it and keeping the result drifts it off the
-        // CPU by the solver's own convergence slack (measured 1e-3 kV when another scenario in the same
-        // chunk activated), and when NO scenario owes anything the whole batched solve is pure waste
-        // (measured 4.5 s of a 20 s batch on rte6515 at 2000 contingencies). So phase B follows the same
-        // "untouched scenarios KEEP their converged state" rule as every other orchestrator. ----
-        boolean[] owed = new boolean[chunkSize];
-        for (int s = 0; s < realCount; s++) {
-            owed[s] = rlSolved == null || !rlSolved[s];
-            for (int c = 0; c < nc && !owed[s]; c++) {
-                owed[s] = !Double.isNaN(activatedTargetV[s][c]);
-            }
-        }
-        for (int round = 0; round < maxRounds; round++) {
-            if (noneOwed(realCount, owed)) {
-                if (round == 0) {
-                    GpuBatchPhaseStats.bump("VoltageMonitoring.skippedConfirmSolves");
-                    SKIPPED_CONFIRM_SOLVES.increment();
-                }
-                break;
-            }
-            List<Integer> ovIdx = new ArrayList<>();
-            List<Double> ovVal = new ArrayList<>();
-            for (int i = 0; i < targetOverrideIndex.length; i++) {
-                ovIdx.add(targetOverrideIndex[i]);
-                ovVal.add(targetOverrideValue[i]);
-            }
-            GpuBatchTransformerControl.seedDsTargets(nds, dsPhiRow, dsSeed, chunkResults, realCount, n, ovIdx, ovVal);
-            double[] x0Full = new double[chunkSize * n];
-            for (int s = 0; s < chunkSize; s++) {
-                double[] src = s < realCount && chunkResults[s] != null ? chunkResults[s] : baseState;
-                System.arraycopy(src, 0, x0Full, s * n, n);
-            }
-            applyActivations(realCount, n, ctls, activatedTargetV, rowModePerScenario, ovIdx, ovVal);
-            GpuBatchPhaseStats.bump("VoltageMonitoring.solvesRl");
-            double[][] r2 = resolve(handle, chunkSize, n, nrl, ctls, activatedTargetV, rlState, 0,
-                    rowModePerScenario, baseRowMode, disabledMask, ovIdx, ovVal, x0Full,
-                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorCarry, dsSlackCarry,
-                    r1OvSlotElem, r1OvVal, shOvSlotElem, shOvGb, nziBase, ziOnSlotElem, ziOffSlotElem,
-                    baseState, baseTargets, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, varType,
-                    config, realCount);
-            if (GpuBatchPhaseStats.ENABLED) {
-                int itMax = 0;
-                for (int s = 0; s < realCount; s++) {
-                    itMax = Math.max(itMax, (int) r2[s][n]);
-                }
-                GpuBatchPhaseStats.add("VoltageMonitoring.iterMax", itMax);
-            }
-            for (int s = 0; s < realCount; s++) {
-                if (owed[s]) {                               // untouched scenarios KEEP their converged state
-                    chunkResults[s] = r2[s];
-                }
-            }
-            if (nds > 0) {                                   // this solve may have distributed further
-                GpuBatchTransformerControl.captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
-                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed, owed);
-            }
-            // post-RL monitoring re-check: only a scenario that switches now owes the NEXT solve
-            owed = new boolean[chunkSize];
-            boolean any = false;
-            for (int s = 0; s < realCount; s++) {
-                double[] r = chunkResults[s];
-                if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
-                    continue;
-                }
-                for (int c = 0; c < nc; c++) {
-                    Ctl ctl = ctls.get(c);
-                    if (!Double.isNaN(activatedTargetV[s][c])) {
-                        continue;
-                    }
-                    double v = r[ctl.vRow()];
-                    if (v > ctl.highThreshold()) {
-                        activatedTargetV[s][c] = ctl.highTargetV();
-                        ACTIVATIONS.increment();
-                        owed[s] = true;
-                        any = true;
-                    } else if (v < ctl.lowThreshold()) {
-                        activatedTargetV[s][c] = ctl.lowTargetV();
-                        ACTIVATIONS.increment();
-                        owed[s] = true;
-                        any = true;
-                    }
-                }
-            }
-            if (!any) {
-                break;
-            }
-        }
-        return chunkResults;
-    }
 
-    /** True when no scenario still owes a reactive-limits solve — every outer loop would report STABLE. */
-    private static boolean noneOwed(int realCount, boolean[] owed) {
-        for (int s = 0; s < realCount; s++) {
-            if (owed[s]) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /** Fold every activated (scenario, bus) into the row modes and override lists. */
-    private static void applyActivations(int realCount, int n, List<Ctl> ctls, double[][] activatedTargetV,
-                                         int[][] rowModePerScenario, List<Integer> ovIdx, List<Double> ovVal) {
-        for (int s = 0; s < realCount; s++) {
-            int[] row = null;
-            for (int c = 0; c < ctls.size(); c++) {
-                Ctl ctl = ctls.get(c);
-                double target = activatedTargetV[s][c];
-                if (Double.isNaN(target)) {
-                    continue;
-                }
-                if (row == null) {
-                    row = rowModePerScenario[s].clone();
-                }
-                for (int k = 0; k < ctl.deltaRows().length; k++) {
-                    row[ctl.deltaRows()[k]] = ctl.deltaModesOn()[k];
-                    ovIdx.add(s * n + ctl.deltaRows()[k]);
-                    ovVal.add(ctl.deltaRows()[k] == ctl.vRow() ? target : ctl.deltaTargetsOn()[k]);
-                }
-            }
-            if (row != null) {
-                rowModePerScenario[s] = row;
-            }
-        }
-    }
 
     @SuppressWarnings("java:S107")
     private static double[][] resolve(long handle, int chunkSize, int n, int nrl, List<Ctl> ctls,
@@ -409,6 +179,8 @@ public final class GpuBatchVoltageMonitoring {
                 dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorCarry, dsSlackCarry,
                 vtSlotIdx.stream().mapToInt(Integer::intValue).toArray(),
                 vtVal.stream().mapToDouble(Double::doubleValue).toArray(),
+                null, null,
+                null, null,
                 parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
                 config.lsMode(), config.maxDv(), config.maxDphi(),
                 config.lsMode() == 2 ? varType : null, x0Full,
@@ -418,5 +190,72 @@ public final class GpuBatchVoltageMonitoring {
                 nziBase, ziOnSlotElem, ziOffSlotElem);
         System.arraycopy(rlStateOut, 0, rlState, 0, rlStateOut.length);
         return r2;
+    }
+
+    /** Install the MonitoringVoltage driver phase's table on a batch context (null/empty clears it).
+     *  Shared by the batched SA's chunk contexts and the base load flow's batch-of-one. */
+    public static void installDriverLoop(long handle, List<Ctl> ctls) {
+        if (ctls == null || ctls.isEmpty()) {
+            GpuAcNewtonSolver.setBatchMonitoringLoops(handle, null, null, null, null, null, null);
+            return;
+        }
+        int nc = ctls.size();
+        int[] monVRow = new int[nc];
+        double[] monBand = new double[nc * 4];
+        int[] deltaPtr = new int[nc + 1];
+        List<Integer> dRow = new ArrayList<>();
+        List<Integer> dMode = new ArrayList<>();
+        List<Double> dTgt = new ArrayList<>();
+        for (int c = 0; c < nc; c++) {
+            Ctl ctl = ctls.get(c);
+            monVRow[c] = ctl.vRow();
+            monBand[c * 4] = ctl.lowThreshold();
+            monBand[c * 4 + 1] = ctl.highThreshold();
+            monBand[c * 4 + 2] = ctl.lowTargetV();
+            monBand[c * 4 + 3] = ctl.highTargetV();
+            deltaPtr[c] = dRow.size();
+            for (int k = 0; k < ctl.deltaRows().length; k++) {
+                dRow.add(ctl.deltaRows()[k]);
+                dMode.add(ctl.deltaModesOn()[k]);
+                dTgt.add(ctl.deltaTargetsOn()[k]);
+            }
+        }
+        deltaPtr[nc] = dRow.size();
+        GpuAcNewtonSolver.setBatchMonitoringLoops(handle, monVRow, monBand, deltaPtr,
+                dRow.stream().mapToInt(Integer::intValue).toArray(),
+                dMode.stream().mapToInt(Integer::intValue).toArray(),
+                dTgt.stream().mapToDouble(Double::doubleValue).toArray());
+    }
+
+    /** Give the driver's activations (scenario 0: the chosen target per controller, NaN = standing by)
+     *  back to the network exactly as OLF's MonitoringVoltageOuterLoop.switchPqPv does: voltage control
+     *  on with the recomputed Q target, the SVC in VOLTAGE control, the automaton's target as setpoint. */
+    public static void writeBack(LfNetwork network, List<Ctl> ctls, double[] activated, int[] rlBusNum) {
+        if (ctls == null || ctls.isEmpty() || activated == null || rlBusNum == null) {
+            return;
+        }
+        for (int c = 0; c < ctls.size() && c < activated.length; c++) {
+            double t = activated[c];
+            Ctl ctl = ctls.get(c);
+            if (Double.isNaN(t) || ctl.rlIdx() < 0 || ctl.rlIdx() >= rlBusNum.length) {
+                continue;
+            }
+            LfBus bus = network.getBus(rlBusNum[ctl.rlIdx()]);
+            if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+                System.err.println("WB_MON bus=" + (bus == null ? "?" : bus.getId()) + " activatedTarget=" + t
+                        + " vcEnabled=" + (bus != null && bus.isGeneratorVoltageControlEnabled()));
+            }
+            if (bus == null || bus.isGeneratorVoltageControlEnabled()) {
+                continue;
+            }
+            bus.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(true);
+            for (LfGenerator g : bus.getGenerators()) {
+                if (g.getGeneratorControlType() == LfGenerator.GeneratorControlType.MONITORING_VOLTAGE) {
+                    g.setGeneratorControlType(LfGenerator.GeneratorControlType.VOLTAGE);
+                    break;
+                }
+            }
+            bus.getGeneratorVoltageControl().ifPresent(vc -> vc.setTargetValue(t));
+        }
     }
 }

@@ -18,6 +18,11 @@ import com.powsybl.openloadflow.equations.Variable;
 import com.powsybl.openloadflow.network.LfBranch;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
+import com.powsybl.openloadflow.network.LfVscConverterStation;
+import com.powsybl.openloadflow.network.PiModel;
+import com.powsybl.openloadflow.network.PiModelArray;
+import com.powsybl.openloadflow.network.TransformerVoltageControl;
+import com.powsybl.openloadflow.network.VoltageControl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -47,9 +52,10 @@ public final class GpuBatchTransformerControl {
      *  coefficients do NOT renormalize — the DISTR_RHO cross terms to a control-disabled member
      *  stay). {@code clampNeedsCpu}: clamping this member re-picks the group's FREE role (its
      *  off-delta touches other members' rows) — per-scenario CPU route, out of stage-1 scope. */
-    record Member(int rhoRow, double minR1, double maxR1, double initialR1,
+    public record Member(int rhoRow, double minR1, double maxR1, double initialR1,
                   double[] taps, double[][] tapRows, int elemIndex,
-                  int[] offDeltaRows, int[] offDeltaModes, double[] offDeltaTargets, boolean clampNeedsCpu) {
+                  int[] offDeltaRows, int[] offDeltaModes, double[] offDeltaTargets, boolean clampNeedsCpu,
+                  int branchNum, int baseTapIdx) {
         double closestTap(double r1) {
             if (taps.length == 0) {
                 return r1;                                   // no tap table: keep the continuous ratio
@@ -85,9 +91,10 @@ public final class GpuBatchTransformerControl {
      *  controlled-bus V col, target/deadband, the row-mode/target DELTAS between control-off (base)
      *  and ALL-members-on activations (plan-group-member-dynamics A3 — captured by toggling the
      *  WHOLE group, never one member alone), and the members. */
-    record TransformerController(int vCol, double targetV, double halfDeadband,
+    public record TransformerController(int vCol, double targetV, double halfDeadband,
                                  int[] deltaRows, int[] deltaModesOn, double[] deltaTargetsOn,
-                                 Member[] members, boolean useInitialTapPosition) {
+                                 Member[] members, boolean useInitialTapPosition,
+                                 int[] deltaModesOff, double[] deltaTargetsOff) {
     }
 
     /** OLF's {@code TransformerRatioManager} SHARED behavior ({@code useInitialTapPosition=true}),
@@ -136,16 +143,6 @@ public final class GpuBatchTransformerControl {
      *  voltage controls at buses under the max transformer-controlled nominal voltage. Porting
      *  the frozen-Q flip is stage 2 — until then a network that would NEED it must stay on the
      *  CPU path (the provider's guard calls this). */
-    /** True when any transformer voltage control has more than one merged controller (a SHARED
-     *  group, DISTR_RHO coupling). The AFTER_GENERATOR/WITH_GENERATOR orchestrators handle groups
-     *  since plan-group-member-dynamics A3 (group-level toggle-diff controllers); INCREMENTAL and
-     *  the useInitialTapPosition shared-ratio manager do not — the scope gates those combinations. */
-    public static boolean sharedGroupPresent(LfNetwork network) {
-        return network.getControlledBuses(com.powsybl.openloadflow.network.VoltageControl.Type.TRANSFORMER).stream()
-                .map(b -> b.getTransformerVoltageControl().orElse(null))
-                .filter(java.util.Objects::nonNull)
-                .anyMatch(vc -> vc.getMergedControllerElements().size() > 1);
-    }
 
     public static boolean transformerControlSupported(LfNetwork network) {
         double maxControlledNominalV = network.<LfBranch>getControllerElements(com.powsybl.openloadflow.network.VoltageControl.Type.TRANSFORMER).stream()
@@ -164,10 +161,392 @@ public final class GpuBatchTransformerControl {
         return !genUnderThreshold;
     }
 
+    /** OLF's GeneratorVoltageControlManager, static part: the min nominal voltage limit (the override,
+     *  or the max nominal voltage over the transformer-controlled buses whose controllers all connect two
+     *  DIFFERENT voltage levels — Double.MIN_VALUE when none). */
+    static double minNominalVoltageLimit(LfNetwork network, double override) {
+        if (override >= 0) {
+            return override;
+        }
+        double limit = Double.MIN_VALUE;
+        for (LfBus bus : network.getBuses()) {
+            if (bus.isDisabled() || !bus.isTransformerVoltageControlled()) {
+                continue;
+            }
+            TransformerVoltageControl tvc = bus.getTransformerVoltageControl().orElse(null);
+            if (tvc == null) {
+                continue;
+            }
+            boolean valid = true;
+            for (LfBranch branch : tvc.getControllerElements()) {
+                if (!branch.isConnectedAtBothSides() || branch.getBus1().getNominalV() == branch.getBus2().getNominalV()) {
+                    valid = false;
+                }
+            }
+            if (valid) {
+                limit = Math.max(limit, bus.getNominalV());
+            }
+        }
+        return limit;
+    }
+
+    /** OLF's GeneratorVoltageControlManager.hasStepUpTransformers, verbatim. */
+    static boolean hasStepUpTransformers(LfBus bus, double limit) {
+        if (bus.getGenerators().stream().anyMatch(LfVscConverterStation.class::isInstance)) {
+            return true;
+        }
+        if (bus.getBranches().stream().anyMatch(b -> b.getVoltageControl().isPresent())) {
+            return false;
+        }
+        double startingNominalVoltage = bus.getNominalV();
+        double minConnectedVoltageLevel = bus.getBranches().stream()
+                .filter(LfBranch::isConnectedAtBothSides)
+                .mapToDouble(b -> Math.max(b.getBus1().getNominalV(), b.getBus2().getNominalV()))
+                .min()
+                .orElse(-1);
+        return minConnectedVoltageLevel > startingNominalVoltage && minConnectedVoltageLevel > limit;
+    }
+
+    /** The generator voltage controls OLF's manager would freeze under the transformer-controlled level:
+     *  the controller buses (in merged order) of every generator-controlled bus at or under the limit that
+     *  have no step-up exemption. OLF freezes a REMOTE controller exactly like a local one, and so does the
+     *  kernel — through the reactive-limit remote PIN (row mode 4) rather than a V identity flip — as long
+     *  as the member has a reactive-limit ENTRY, which is what carries the limit type the DISTR_Q key
+     *  renormalization reads. A remote candidate without one (equal Q limits, no pilot column) has no slot
+     *  to mark and still gates the run: null. */
+    private static List<LfBus> freezeCandidates(LfNetwork network, double limit) {
+        List<LfBus> out = new ArrayList<>();
+        for (LfBus bus : network.getControlledBuses(VoltageControl.Type.GENERATOR)) {
+            if (bus.getNominalV() > limit) {
+                continue;
+            }
+            var vc = bus.getGeneratorVoltageControl().orElse(null);
+            if (vc == null) {
+                continue;
+            }
+            for (LfBus controller : vc.getMergedControllerElements()) {
+                if (hasStepUpTransformers(controller, limit)) {
+                    continue;
+                }
+                if (controller != bus && !remoteFreezeRepresentable(controller)) {
+                    return null;                             // no reactive-limit entry to carry the type
+                }
+                out.add(controller);
+            }
+        }
+        return out;
+    }
+
+    /** Can a REMOTE controller be frozen in-kernel? It is frozen as a reactive-limit remote PIN, and the
+     *  limit type that marks it lives on its reactive-limit ENTRY — which the pack creates for a MAIN
+     *  generator voltage control with distinct Q limits. This is the network-only half of the condition,
+     *  so the whole-run gate can be decided before the extraction exists; {@link #buildFreezeTables}
+     *  checks the entry really is there and fails loudly if the two ever disagree. */
+    private static boolean remoteFreezeRepresentable(LfBus controller) {
+        return controller.getGeneratorVoltageControl()
+                .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                .isPresent() && controller.getMinQ() < controller.getMaxQ();
+    }
+
+    /** The reactive-limit pack entry of a bus, or −1. */
+    private static int rlEntryOf(int[] rlBusNum, int busNum) {
+        if (rlBusNum == null) {
+            return -1;
+        }
+        for (int i = 0; i < rlBusNum.length; i++) {
+            if (rlBusNum[i] == busNum) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** True when the AFTER_GENERATOR loop's generator freeze can run IN-KERNEL on this network: every
+     *  candidate is a LOCAL controller and every transformer controller has a tap table (the kernel
+     *  phase owns the control). Complements {@link #transformerControlSupported} (no candidates at all). */
+    public static boolean generatorFreezeSupported(LfNetwork network, double minNominalVOverride) {
+        double limit = minNominalVoltageLimit(network, minNominalVOverride);
+        if (freezeCandidates(network, limit) == null) {
+            return false;
+        }
+        return network.<LfBranch>getControllerElements(VoltageControl.Type.TRANSFORMER).stream()
+                .allMatch(b -> tapModels(b.getPiModel()).length > 0);
+    }
+
+    /**
+     * The GeneratorVoltageControlManager + fixTransformerVoltageControls tables of the in-kernel phase.
+     *
+     * <p>{@code fixPvRow} is the UNIVERSE the connectivity fix looks at: the {@code BUS_V} row of every
+     * generator-voltage-controlled bus, in a fixed order. A member's component is then a BITMASK over
+     * that universe, {@code fixWords} ints per member, and the kernel asks which of those buses is
+     * still PV in its own scenario.
+     *
+     * <p>Two masks, because OLF's component is not computable from one. It cuts the CONTINGENCY's
+     * branches and the ENABLED controller branches; the device knows the contingency host-side but
+     * learns the enabled set only inside the solve. So the host brackets it: {@code minMask} cuts every
+     * controller branch (a SUBSET of OLF's component, since OLF cuts only the enabled ones) and
+     * {@code maxMask} cuts none (a SUPERSET). A PV bus in the min mask means OLF sees one too — keep the
+     * control. No PV bus in the max mask means OLF sees none either — disable it. In between, the answer
+     * depends on which controllers this scenario enabled, and the scenario goes to the CPU.
+     */
+    public record FreezeTables(int[] vRow, double[] loadQ, int[] busNum, int[] rlEntry,
+                               int[] fixPvRow, int fixWords, int[] minMask, int[] maxMask, int nMembers,
+                               FixMaskBuilder builder) {
+        public boolean hasCandidates() {
+            return vRow.length > 0;
+        }
+
+        public boolean hasFix() {
+            return fixPvRow.length > 0 && nMembers > 0;
+        }
+    }
+
+    /** Build the freeze tables: per candidate its controlled-bus V row and load Q (OLF freezes the
+     *  generation target at {@code q.eval()}, the NET injection — the row target is that minus the load);
+     *  per member the V rows of the generator-controlled buses in its not-controlled side's component with
+     *  every transformer controller edge removed (OLF removes the ENABLED ones and the contingency's
+     *  branches — at the base neither exists yet; the kernel then asks which of those buses is still ON).
+     *  Null when a candidate is a remote controller. */
+    public static FreezeTables buildFreezeTables(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
+                                                 List<TransformerController> tcs, double minNominalVOverride,
+                                                 int[] rlBusNum) {
+        double limit = minNominalVoltageLimit(network, minNominalVOverride);
+        List<LfBus> candidates = freezeCandidates(network, limit);
+        if (candidates == null) {
+            return null;
+        }
+        java.util.Map<Integer, Integer> busVRows = new java.util.HashMap<>();
+        for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
+            if (v.getType() == AcVariableType.BUS_V) {
+                busVRows.put(v.getElementNum(), v.getRow());
+            }
+        }
+        int[] vRow = new int[candidates.size()];
+        double[] loadQ = new double[candidates.size()];
+        int[] busNum = new int[candidates.size()];
+        int[] rlEntry = new int[candidates.size()];
+        for (int c = 0; c < candidates.size(); c++) {
+            LfBus bus = candidates.get(c);
+            Integer row = busVRows.get(bus.getNum());
+            if (row == null) {
+                return null;
+            }
+            vRow[c] = row;
+            loadQ[c] = bus.getLoadTargetQ();
+            busNum[c] = bus.getNum();
+            // REMOTE controller (the controlled bus is not this one): the kernel freezes it as a
+            // reactive-limit remote pin and marks its ENTRY, so the DISTR_Q shares renormalize.
+            boolean remote = bus.getGeneratorVoltageControl().map(c2 -> c2.getControlledBus() != bus).orElse(false);
+            rlEntry[c] = remote ? rlEntryOf(rlBusNum, bus.getNum()) : -1;
+            if (remote && rlEntry[c] < 0) {
+                // The gate admitted it on the network-only condition but the pack has no entry, so
+                // nothing would carry the frozen limit type and the group's DISTR_Q shares would not
+                // renormalize. Silently skipping the freeze is the one outcome worth refusing.
+                throw new com.powsybl.commons.PowsyblException("GPU batch: remote generator voltage controller '"
+                        + bus.getId() + "' is a freeze candidate with no reactive-limit entry");
+            }
+        }
+        int nMembers = 0;
+        for (TransformerController tc : tcs) {
+            nMembers += tc.members().length;
+        }
+        // The universe of the connectivity fix: every generator-voltage-CONTROLLED bus, in bus order.
+        // OLF's test is isGeneratorVoltageControlled() && isGeneratorVoltageControlEnabled(); the first
+        // half is structural and lives here, the second is the per-scenario row mode the kernel reads.
+        List<LfBus> pvBuses = new ArrayList<>();
+        List<Integer> pvRows = new ArrayList<>();
+        for (LfBus bus : network.getBuses()) {
+            Integer row = bus.isGeneratorVoltageControlled() ? busVRows.get(bus.getNum()) : null;
+            if (row != null) {
+                pvBuses.add(bus);
+                pvRows.add(row);
+            }
+        }
+        int words = (pvBuses.size() + 31) / 32;
+        int[] fixPvRow = pvRows.stream().mapToInt(Integer::intValue).toArray();
+        int[] memberBranchNum = new int[nMembers];
+        int mi = 0;
+        for (TransformerController tc : tcs) {
+            for (Member mem : tc.members()) {
+                memberBranchNum[mi++] = mem.branchNum();
+            }
+        }
+        FixMaskBuilder builder = new FixMaskBuilder(network, memberBranchNum, pvBuses, words);
+        int[] minMask = new int[nMembers * words];
+        int[] maxMask = new int[nMembers * words];
+        builder.fill(List.of(), minMask, 0, maxMask, 0);       // base topology: no contingency branches
+        return new FreezeTables(vRow, loadQ, busNum, rlEntry, fixPvRow, words, minMask, maxMask, nMembers, builder);
+    }
+
+    /**
+     * Builds the two connectivity masks of {@link FreezeTables} for one scenario's topology.
+     *
+     * <p>Held per run and called per scenario, because OLF re-runs {@code fixTransformerVoltageControls}
+     * on the post-contingency network: the base-topology masks are wrong the moment a contingency splits
+     * a not-controlled side's component. The cost is two connectivity sessions per scenario, each
+     * {@code O(pv buses + members)} — the component NUMBER of every PV bus is read once and members look
+     * their own component's mask up, rather than walking a component per member.
+     */
+    public static final class FixMaskBuilder {
+
+        private final LfNetwork network;
+        private final int[] memberBranchNum;
+        private final List<LfBus> pvBuses;
+        private final int words;
+
+        /** Members are named by BRANCH NUMBER, which is all the connectivity question needs — and lets a
+         *  test build one from a bare network without the whole controller pack. */
+        FixMaskBuilder(LfNetwork network, int[] memberBranchNum, List<LfBus> pvBuses, int words) {
+            this.network = network;
+            this.memberBranchNum = memberBranchNum;
+            this.pvBuses = pvBuses;
+            this.words = words;
+        }
+
+        public int words() {
+            return words;
+        }
+
+        public int nMembers() {
+            return memberBranchNum.length;
+        }
+
+        /** Fill {@code minMask} (every controller branch cut) and {@code maxMask} (none cut) for a
+         *  scenario whose contingency opens {@code outaged}, each at its own offset. */
+        public void fill(List<LfBranch> outaged, int[] minMask, int minOff, int[] maxMask, int maxOff) {
+            session(outaged, true, minMask, minOff);
+            session(outaged, false, maxMask, maxOff);
+        }
+
+        private void session(List<LfBranch> outaged, boolean cutControllers, int[] mask, int off) {
+            var connectivity = network.getConnectivity();
+            connectivity.startTemporaryChanges();
+            try {
+                java.util.Set<LfBranch> removed = new java.util.HashSet<>();
+                for (LfBranch b : outaged) {
+                    if (b.getBus1() != null && b.getBus2() != null && removed.add(b)) {
+                        connectivity.removeEdge(b);
+                    }
+                }
+                if (cutControllers) {
+                    for (LfBranch b : network.getBranches()) {
+                        if (!b.isDisabled() && b.isVoltageController()
+                                && b.getBus1() != null && b.getBus2() != null && removed.add(b)) {
+                            connectivity.removeEdge(b);
+                        }
+                    }
+                }
+                // component number -> the PV buses it holds, built once per session
+                java.util.Map<Integer, int[]> byComponent = new java.util.HashMap<>();
+                for (int i = 0; i < pvBuses.size(); i++) {
+                    Integer comp = componentOf(connectivity, pvBuses.get(i));
+                    if (comp != null) {
+                        byComponent.computeIfAbsent(comp, k -> new int[words])[i >> 5] |= 1 << (i & 31);
+                    }
+                }
+                int[] all = new int[words];                    // "every PV bus": OLF skips the check entirely
+                for (int i = 0; i < pvBuses.size(); i++) {
+                    all[i >> 5] |= 1 << (i & 31);
+                }
+                for (int m = 0; m < memberBranchNum.length; m++) {
+                    LfBranch branch = network.getBranch(memberBranchNum[m]);
+                    var vc = branch != null ? branch.getVoltageControl().orElse(null) : null;
+                    int[] src;
+                    if (vc == null) {
+                        src = all;                             // defensive: OLF never disables such a member
+                    } else {
+                        LfBus notControlled = vc.getControlledBus() == branch.getBus1() ? branch.getBus2()
+                                : vc.getControlledBus() == branch.getBus2() ? branch.getBus1() : null;
+                        Integer comp = notControlled != null ? componentOf(connectivity, notControlled) : null;
+                        src = comp == null ? all : byComponent.getOrDefault(comp, new int[words]);
+                    }
+                    System.arraycopy(src, 0, mask, off + m * words, words);
+                }
+            } finally {
+                connectivity.undoTemporaryChanges();
+            }
+        }
+
+        private static Integer componentOf(com.powsybl.openloadflow.graph.GraphConnectivity<LfBus, LfBranch> c, LfBus bus) {
+            try {
+                return c.getComponentNumber(bus);
+            } catch (RuntimeException e) {
+                return null;                                   // a bus outside the graph (disabled): no component
+            }
+        }
+    }
+
+    /** Install the freeze tables on a context whose discrete TVC tables {@link #uploadToDevice} just
+     *  installed (AFTER_GENERATOR only). */
+    public static void uploadFreeze(long handle, FreezeTables fz) {
+        if (fz == null) {
+            GpuAcNewtonSolver.setBatchDiscreteTvcFreeze(handle, null, null, null, null);
+            return;
+        }
+        GpuAcNewtonSolver.setBatchDiscreteTvcFreeze(handle, fz.vRow(), fz.loadQ(), fz.rlEntry(), fz.fixPvRow());
+        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            System.err.printf("TVD_FREEZE_UPLOAD nCandidates=%d fixPvBuses=%d members=%d%n",
+                    fz.vRow().length, fz.fixPvRow().length, fz.nMembers());
+        }
+    }
+
+    /**
+     * Per-scenario connectivity masks for the chunk about to solve: OLF re-runs
+     * {@code fixTransformerVoltageControls} on the POST-CONTINGENCY network, so each scenario gets its
+     * own pair. Padding slots repeat the base-topology masks, which is what an unused slot would have
+     * used anyway.
+     */
+    public static void uploadFixMasks(long handle, FreezeTables fz, List<BatchContingency> scenarios, int chunkSize) {
+        if (fz == null || !fz.hasFix()) {
+            GpuAcNewtonSolver.setBatchDiscreteTvcFixMasks(handle, null, null, 0);
+            return;
+        }
+        int stride = fz.nMembers() * fz.fixWords();
+        int[] minMask = new int[chunkSize * stride];
+        int[] maxMask = new int[chunkSize * stride];
+        for (int s = 0; s < chunkSize; s++) {
+            if (s < scenarios.size()) {
+                List<LfBranch> outaged = new ArrayList<>(scenarios.get(s).outagedBranches());
+                outaged.addAll(scenarios.get(s).outagedZiBranches());
+                fz.builder().fill(outaged, minMask, s * stride, maxMask, s * stride);
+            } else {
+                System.arraycopy(fz.minMask(), 0, minMask, s * stride, stride);
+                System.arraycopy(fz.maxMask(), 0, maxMask, s * stride, stride);
+            }
+        }
+        GpuAcNewtonSolver.setBatchDiscreteTvcFixMasks(handle, minMask, maxMask, fz.fixWords());
+    }
+
+    /** Give the freeze state back to the network (batch-of-one): a frozen candidate is
+     *  {@code freezeGenerationTargetQAndDisableGeneratorVoltageControl(rowTarget + loadQ)} (OLF's
+     *  generation target is the net injection), an unfrozen one whose network state still shows OUR
+     *  freeze (control off, target frozen, no reactive-limit type) is re-enabled like
+     *  {@code enableGeneratorVoltageControlsUnderMaxControlledNominalVoltage}. */
+    public static void writeBackFreeze(LfNetwork network, FreezeTables fz, double[] state) {
+        if (fz == null || state == null) {
+            return;
+        }
+        for (int c = 0; c < fz.vRow().length && c * 2 + 1 < state.length; c++) {
+            LfBus bus = network.getBus(fz.busNum()[c]);
+            if (bus == null) {
+                continue;
+            }
+            boolean frozen = (int) state[c * 2] != 0;
+            if (frozen) {
+                if (bus.isGeneratorVoltageControlEnabled()) {
+                    bus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(state[c * 2 + 1] + fz.loadQ()[c]);
+                }
+            } else if (!bus.isGeneratorVoltageControlEnabled() && bus.isGenerationTargetQFrozen()
+                    && bus.getQLimitType().isEmpty()) {
+                bus.setGeneratorVoltageControlEnabledAndRecomputeTargetQ(true);
+            }
+        }
+    }
+
     /** Build the orchestrator's controller pack by TOGGLING each control on the shared equation
      *  system and diffing the activation — the ON recipe is exactly what the engine itself would
      *  produce, no hand-crafted modes. The network is restored before returning. */
-    static List<TransformerController> buildTransformerControllers(
+    public static List<TransformerController> buildTransformerControllers(
             LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
             TargetVector<AcVariableType, AcEquationType> targetVector,
             GpuAcActivation baseActivation, double[] baseTargets, GpuBatchElementMapper elementMapper,
@@ -198,7 +577,8 @@ public final class GpuBatchTransformerControl {
                     && memberBranches.stream().allMatch(b -> branchR1Cols.get(b.getNum()) != null
                             && elementMapper.getElementIndex(b) >= 0);
             if (!representable) {
-                LOGGER.info("Transformer control of {} not representable on the GPU batch — skipped (results follow the base taps)",
+                GpuBatchSkips.record(GpuBatchSkips.Slot.TVC, LOGGER,
+                        "Transformer control of {} not representable on the GPU batch — skipped (results follow the base taps)",
                         controlled.getId());
                 continue;
             }
@@ -206,22 +586,34 @@ public final class GpuBatchTransformerControl {
             boolean[] wasEnabled = new boolean[memberBranches.size()];
             for (int m = 0; m < memberBranches.size(); m++) {
                 wasEnabled[m] = memberBranches.get(m).isVoltageControlEnabled();
+                memberBranches.get(m).setVoltageControlEnabled(false);   // the WHOLE group OFF: the control-off activation
+            }
+            GpuAcActivation offAct = GpuAcActivation.fromEquationSystem(network, es);
+            double[] offTargets = offAct.applyTargets(targetVector.getArray());
+            for (int m = 0; m < memberBranches.size(); m++) {
                 memberBranches.get(m).setVoltageControlEnabled(true);    // the WHOLE group ON (A3)
             }
             GpuAcActivation onAct = GpuAcActivation.fromEquationSystem(network, es);
             double[] onTargets = onAct.applyTargets(targetVector.getArray());
+            // the ON/OFF deltas are diffed against each other, not against the caller's base: a base
+            // extracted with the control already ON (the WITH_GENERATOR base load flow, whose network
+            // OLF's initialize switched on) yields the same rows as a control-off base
             List<Integer> dRows = new ArrayList<>();
             for (int r = 0; r < baseTargets.length; r++) {
-                if (onAct.rowMode()[r] != baseActivation.rowMode()[r] || onTargets[r] != baseTargets[r]) {
+                if (onAct.rowMode()[r] != offAct.rowMode()[r] || onTargets[r] != offTargets[r]) {
                     dRows.add(r);
                 }
             }
             int[] deltaRows = dRows.stream().mapToInt(Integer::intValue).toArray();
             int[] deltaModesOn = new int[deltaRows.length];
             double[] deltaTargetsOn = new double[deltaRows.length];
+            int[] deltaModesOff = new int[deltaRows.length];
+            double[] deltaTargetsOff = new double[deltaRows.length];
             for (int k = 0; k < deltaRows.length; k++) {
                 deltaModesOn[k] = onAct.rowMode()[deltaRows[k]];
                 deltaTargetsOn[k] = onTargets[deltaRows[k]];
+                deltaModesOff[k] = offAct.rowMode()[deltaRows[k]];
+                deltaTargetsOff[k] = offTargets[deltaRows[k]];
             }
             Member[] members = new Member[memberBranches.size()];
             for (int m = 0; m < memberBranches.size(); m++) {
@@ -251,19 +643,150 @@ public final class GpuBatchTransformerControl {
                     offDeltaModes[k] = mOff.rowMode()[offDeltaRows[k]];
                     offDeltaTargets[k] = mOffTargets[offDeltaRows[k]];
                 }
+                double[][] tapRows = tapModels(branch.getPiModel());
+                int baseTap = 0;
+                for (int t = 1; t < tapRows.length; t++) {   // the CURRENT tap: OLF's rounding starts there
+                    if (Math.abs(tapRows[t][6] - branch.getPiModel().getR1()) < Math.abs(tapRows[baseTap][6] - branch.getPiModel().getR1())) {
+                        baseTap = t;
+                    }
+                }
                 members[m] = new Member(rhoRow, branch.getPiModel().getMinR1(), branch.getPiModel().getMaxR1(),
                         branch.getPiModel().getR1(),             // individual initial (base) ratio
-                        tapR1Values(branch.getPiModel()), tapModels(branch.getPiModel()),
+                        tapR1Values(branch.getPiModel()), tapRows,
                         elementMapper.getElementIndex(branch),
-                        offDeltaRows, offDeltaModes, offDeltaTargets, cpuOnly);
+                        offDeltaRows, offDeltaModes, offDeltaTargets, cpuOnly, branch.getNum(), baseTap);
             }
             for (int m = 0; m < memberBranches.size(); m++) {
                 memberBranches.get(m).setVoltageControlEnabled(wasEnabled[m]);
             }
             out.add(new TransformerController(vCol, vc.getTargetValue(), halfDeadband,
-                    deltaRows, deltaModesOn, deltaTargetsOn, members, useInitialTapPosition));
+                    deltaRows, deltaModesOn, deltaTargetsOn, members, useInitialTapPosition,
+                    deltaModesOff, deltaTargetsOff));
         }
         return out;
+    }
+
+    /** Install the controls for the in-kernel DISCRETE TransformerVoltageControl phase (OLF order 8):
+     *  {@code mode} 0 = AFTER_GENERATOR (TransformerVoltageControlOuterLoop), 1 = WITH_GENERATOR
+     *  (SimpleTransformerVoltageControlOuterLoop); {@code entryOn} = the activation the solve starts from
+     *  already carries the control ON (the WITH_GENERATOR base load flow — OLF's initialize ran on the
+     *  network). Returns true when the kernel loop owns them (every member has a tap table). */
+    public static boolean uploadToDevice(long handle, List<TransformerController> tcs, int mode, boolean entryOn) {
+        if (tcs == null || tcs.isEmpty()) {
+            GpuAcNewtonSolver.setBatchDiscreteTvc(handle, 0, 0, null, null, null, null, null, null, null, null, null,
+                    null, null, null, null, null, null, null, null, null, null);
+            return false;
+        }
+        int nG = tcs.size();
+        int[] grpPtr = new int[nG + 1];
+        int[] grpVRow = new int[nG];
+        double[] grpTargetV = new double[nG];
+        double[] grpHalfDb = new double[nG];
+        int[] grpUseInit = new int[nG];
+        int[] deltaPtr = new int[nG + 1];
+        List<Integer> dRow = new ArrayList<>();
+        List<Integer> dModeOn = new ArrayList<>();
+        List<Integer> dModeOff = new ArrayList<>();
+        List<Double> dTgtOn = new ArrayList<>();
+        List<Double> dTgtOff = new ArrayList<>();
+        List<Integer> memRhoRow = new ArrayList<>();
+        List<Integer> memElem = new ArrayList<>();
+        List<Integer> memBaseTap = new ArrayList<>();
+        List<Integer> memTapPtr = new ArrayList<>();
+        List<Double> memMin = new ArrayList<>();
+        List<Double> memMax = new ArrayList<>();
+        List<Double> memInit = new ArrayList<>();
+        List<Double> tapData = new ArrayList<>();
+        boolean tables = true;
+        for (int g = 0; g < nG; g++) {
+            TransformerController tc = tcs.get(g);
+            grpPtr[g] = memRhoRow.size();
+            grpVRow[g] = tc.vCol();
+            grpTargetV[g] = tc.targetV();
+            grpHalfDb[g] = tc.halfDeadband();
+            grpUseInit[g] = tc.useInitialTapPosition() ? 1 : 0;
+            deltaPtr[g] = dRow.size();
+            for (int k = 0; k < tc.deltaRows().length; k++) {
+                dRow.add(tc.deltaRows()[k]);
+                dModeOn.add(tc.deltaModesOn()[k]);
+                dModeOff.add(tc.deltaModesOff()[k]);
+                dTgtOn.add(tc.deltaTargetsOn()[k]);
+                dTgtOff.add(tc.deltaTargetsOff()[k]);
+            }
+            for (Member m : tc.members()) {
+                memRhoRow.add(m.rhoRow());
+                memElem.add(m.elemIndex());
+                memBaseTap.add(m.baseTapIdx());
+                memTapPtr.add(tapData.size() / 8);
+                memMin.add(m.minR1());
+                memMax.add(m.maxR1());
+                memInit.add(m.initialR1());
+                tables &= m.tapRows().length > 0;
+                for (double[] row : m.tapRows()) {
+                    for (double d : row) {
+                        tapData.add(d);
+                    }
+                }
+            }
+        }
+        grpPtr[nG] = memRhoRow.size();
+        deltaPtr[nG] = dRow.size();
+        memTapPtr.add(tapData.size() / 8);
+        boolean owned = tables && GpuAcNewtonSolver.setBatchDiscreteTvc(handle, mode, entryOn ? 1 : 0,
+                grpPtr, grpVRow, grpTargetV, grpHalfDb, grpUseInit,
+                deltaPtr, dRow.stream().mapToInt(Integer::intValue).toArray(),
+                dModeOn.stream().mapToInt(Integer::intValue).toArray(), dModeOff.stream().mapToInt(Integer::intValue).toArray(),
+                dTgtOn.stream().mapToDouble(Double::doubleValue).toArray(), dTgtOff.stream().mapToDouble(Double::doubleValue).toArray(),
+                memRhoRow.stream().mapToInt(Integer::intValue).toArray(), memElem.stream().mapToInt(Integer::intValue).toArray(),
+                memBaseTap.stream().mapToInt(Integer::intValue).toArray(), memTapPtr.stream().mapToInt(Integer::intValue).toArray(),
+                memMin.stream().mapToDouble(Double::doubleValue).toArray(), memMax.stream().mapToDouble(Double::doubleValue).toArray(),
+                memInit.stream().mapToDouble(Double::doubleValue).toArray(),
+                tapData.stream().mapToDouble(Double::doubleValue).toArray()) != 0;
+        if (!owned) {
+            GpuAcNewtonSolver.setBatchDiscreteTvc(handle, 0, 0, null, null, null, null, null, null, null, null, null,
+                    null, null, null, null, null, null, null, null, null, null);
+        }
+        LOGGER.info("Uploaded {} discrete transformer voltage controls ({} members, mode {}) to device: {}",
+                nG, memRhoRow.size(), mode == 1 ? "WITH_GENERATOR" : "AFTER_GENERATOR", owned ? "in-kernel loop" : "host orchestrator");
+        if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
+            System.err.printf("TVD_UPLOAD mode=%d entryOn=%b nGroups=%d nMembers=%d kernel=%b%n", mode, entryOn, nG, memRhoRow.size(), owned);
+        }
+        return owned;
+    }
+
+    /** Give the in-kernel phase's decisions back to the network (batch-of-one base load flow), exactly as
+     *  OLF's own loop leaves it: a FIXED member had {@code setR1(roundFrom); roundR1ToClosestTap()} and
+     *  its control disabled ({@code roundR1ToExtremeTapPosition} / {@code roundVoltageRatios}); a member
+     *  never enabled keeps its base tap. {@code state} is readBatchDiscreteTvcState's layout. */
+    public static void writeBack(LfNetwork network, List<TransformerController> tcs, double[] state) {
+        if (tcs == null || tcs.isEmpty() || state == null) {
+            return;
+        }
+        int m = 0;
+        for (TransformerController tc : tcs) {
+            for (Member mem : tc.members()) {
+                int k = m++ * 3;
+                if (k + 2 >= state.length) {
+                    return;
+                }
+                LfBranch branch = network.getBranch(mem.branchNum());
+                if (branch == null || (int) state[k] != 2) {
+                    continue;
+                }
+                var pm = branch.getPiModel();
+                int pos = pm.getTapPositionRange().getMinimum() + (int) state[k + 1];
+                if (pm.getTapPosition() != pos) {
+                    pm.setR1(state[k + 2]);
+                    pm.roundR1ToClosestTap();
+                    if (pm.getTapPosition() != pos) {        // tie on a different start tap: take the device's
+                        pm.setTapPosition(pos);
+                    }
+                }
+                if (branch.isVoltageControlEnabled()) {
+                    branch.setVoltageControlEnabled(false);
+                }
+            }
+        }
     }
 
     /** Discrete tap r1 values, snapshotted read-only (reflection on PiModelArray.models; an
@@ -277,592 +800,26 @@ public final class GpuBatchTransformerControl {
         return taps;
     }
 
-    /** Full per-tap static branch rows, snapshotted read-only via reflection on
-     *  PiModelArray.models: one row [y, g1, g2, b1, b2, ksi, r1, a1] per tap position — the
-     *  EXACT cbIn packing, so a tap/PST action's override is the target row verbatim (empty
-     *  when not a tap array or inaccessible). */
+    /** Full per-tap static branch rows, snapshotted read-only from {@code PiModelArray.getModels()}:
+     *  one row [y, g1, g2, b1, b2, ksi, r1, a1] per tap position — the EXACT cbIn packing, so a
+     *  tap/PST action's override is the target row verbatim.
+     *
+     *  <p>Empty means the branch carries a continuous {@code SimplePiModel} and has no taps at all.
+     *  It used to also mean "reflection on the private field did not work", which turned a JVM
+     *  configuration into silently unrounded ratios and into whole-run CPU fallbacks that no gate
+     *  explained; the accessor is public on the patched OLF, so that failure mode is gone. */
     public static double[][] tapModels(Object piModel) {
-        try {
-            if (!"PiModelArray".equals(piModel.getClass().getSimpleName())) {
-                return new double[0][];
-            }
-            java.lang.reflect.Field f = piModel.getClass().getDeclaredField("models");
-            f.setAccessible(true);
-            List<?> models = (List<?>) f.get(piModel);
-            String[] getters = {"getY", "getG1", "getG2", "getB1", "getB2", "getKsi", "getR1", "getA1"};
-            double[][] taps = new double[models.size()][getters.length];
-            for (int i = 0; i < models.size(); i++) {
-                for (int g = 0; g < getters.length; g++) {
-                    taps[i][g] = (double) models.get(i).getClass().getMethod(getters[g]).invoke(models.get(i));
-                }
-            }
-            return taps;
-        } catch (ReflectiveOperationException | RuntimeException e) {
-            LOGGER.info("Transformer tap table not accessible ({}) — continuous ratios will not be rounded", e.toString());
+        if (!(piModel instanceof PiModelArray array)) {
             return new double[0][];
         }
+        List<PiModel> models = array.getModels();
+        double[][] taps = new double[models.size()][8];
+        for (int i = 0; i < models.size(); i++) {
+            PiModel m = models.get(i);
+            taps[i] = new double[] {m.getY(), m.getG1(), m.getG2(), m.getB1(), m.getB2(),
+                                    m.getKsi(), m.getR1(), m.getA1()};
+        }
+        return taps;
     }
 
-    /**
-     * Per-scenario port of TransformerVoltageControlOuterLoop (AFTER_GENERATOR mode), run as a
-     * Java orchestrator around repeated batched solves on THIS chunk, mirroring the CPU steps:
-     * INITIAL (deadband check on the solved states -> enable out-of-band controls via the
-     * activation-diffed row/target deltas), CONTROL (clamp continuous r1 outside [minR1,maxR1]
-     * to the extreme and disable, iterate), then round to the closest discrete tap, final solve.
-     * Scenarios re-solve WARM from their previous states (x0PerScenario). Returns the merged
-     * chunk results (unaffected slots keep the incoming ones). Stage-1 scope: no generator
-     * voltage controls under the transformer-controlled level (checked by the provider guard).
-     */
-    static double[][] orchestrateTransformerControl(long handle, int chunkSize, int realCount, int n,
-            double[][] chunkResults, List<TransformerController> tcs,
-            int[][] rowModePerScenario, int[] baseRowMode, boolean[][] disabledMask,
-            int[] targetOverrideIndex, double[] targetOverrideValue,
-            int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta, double[] dsOvMaxDelta, double[] dsOvMinDelta,
-            int[] dsPhiRow, double[] dsFactor,
-            int[] chunkDrOvIdx, double[] chunkDrOvC, int[] drRowByContrib,
-            double[] baseState, double[] baseTargets, NewtonRaphsonParameters parameters,
-            double tol, double reactiveLimitTol, double slackDistTol, double convEpsPerEq, int[] varType,
-            BatchConfig config) {
-        // per-member flat indexing across all controls: memberBase[c] + m
-        int[] memberBase = new int[tcs.size()];
-        int totalMembers = 0;
-        for (int c = 0; c < tcs.size(); c++) {
-            memberBase[c] = totalMembers;
-            totalMembers += tcs.get(c).members().length;
-        }
-        // INITIAL: which (slot, CONTROL) pairs are out of deadband on the converged first solve?
-        List<int[]> enabled = new ArrayList<>();             // {slot, controlIdx}
-        for (int slot = 0; slot < realCount; slot++) {
-            double[] r = chunkResults[slot];
-            if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
-                continue;
-            }
-            for (int c = 0; c < tcs.size(); c++) {
-                TransformerController tc = tcs.get(c);
-                boolean anySurvivor = false;                 // plan-A6: a FREE-member outage re-picks the
-                for (Member m : tc.members()) {              // carrier (mode-scan scatter + offDelta encode
-                    anySurvivor |= !disabledMask[slot][m.elemIndex()];   // it); only a fully-outaged group skips
-                }
-                if (!anySurvivor) {
-                    continue;
-                }
-                if (Math.abs(tc.targetV() - r[tc.vCol()]) > tc.halfDeadband()) {
-                    enabled.add(new int[] {slot, c});
-                }
-            }
-        }
-        if (enabled.isEmpty()) {
-            return chunkResults;
-        }
-        java.util.Set<Integer> affected = new java.util.TreeSet<>();
-        boolean[][] on = new boolean[chunkSize][tcs.size()];
-        // useInitialTapPosition: the CPU builds its TransformerRatioManager at the INITIAL step
-        // over the just-enabled controllers — per scenario that is the ON control's non-outaged
-        // members, and the stats stay frozen for the run (later clamps do not rebuild them).
-        SharedRatio[][] shared = new SharedRatio[chunkSize][tcs.size()];
-        for (int[] e : enabled) {
-            affected.add(e[0]);
-            on[e[0]][e[1]] = true;
-            if (tcs.get(e[1]).useInitialTapPosition()) {
-                shared[e[0]][e[1]] = SharedRatio.of(tcs.get(e[1]).members(), disabledMask[e[0]]);
-            }
-        }
-        LOGGER.info("Transformer control: {} out-of-deadband controls across {} scenario(s) of the chunk", enabled.size(), affected.size());
-
-        // Base per-scenario overrides (islanding/gen-outage) are kept and extended per call.
-        List<Integer> ovIdx = new ArrayList<>();
-        List<Double> ovVal = new ArrayList<>();
-        double[] rounded = new double[chunkSize * totalMembers];   // fixed r1 once clamped/rounded (NaN = still continuous)
-        boolean[] polish = new boolean[chunkSize];           // slot owes OLF's post-clamp COMPLETE solve
-        java.util.Arrays.fill(rounded, Double.NaN);
-
-        // DS target carry: OLF's targets are STATEFUL across outer-loop re-solves, but every device
-        // call re-uploads baseTargets — so the slack distribution applied by PREVIOUS solves on this
-        // handle must be carried into each machine step: water-fill anchors (pure absorption per
-        // participant), the slack's own absorbed share, and absolute DS-row target seeds (the same
-        // three coupled pieces as the strategy-leg re-anchoring in GpuBatchChunkSolver). Without it
-        // the VC-on solve re-derived the whole distribution from scratch and took an extra Newton
-        // step the CPU never takes (1.7e-4 kV drift on the shared-TVC member-outage scenario).
-        int nds = dsPhiRow != null ? dsPhiRow.length : 0;
-        double[] dsAnchorCarry = nds > 0 ? new double[chunkSize * nds] : null;
-        double[] dsSlackCarry = nds > 0 ? new double[chunkSize] : null;
-        double[] dsSeed = nds > 0 ? new double[chunkSize * nds] : null;
-        if (nds > 0) {
-            captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
-                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed);
-        }
-        int[][] rowMode = new int[chunkSize][];
-        for (int step = 0; step < 8; step++) {               // INITIAL solve, clamp iterations, final rounded solve
-            ovIdx.clear();
-            ovVal.clear();
-            for (int k = 0; k < targetOverrideIndex.length; k++) {
-                ovIdx.add(targetOverrideIndex[k]);
-                ovVal.add(targetOverrideValue[k]);
-            }
-            // DS-row target seeds at the carried values (shared index-backed merge — the inline
-            // lastIndexOf scan this replaced was quadratic in realCount * nds)
-            seedDsTargets(nds, dsPhiRow, dsSeed, chunkResults, realCount, n, ovIdx, ovVal);
-            double[] x0Full = new double[chunkSize * n];
-            List<Integer> r1OvSlotElem = new ArrayList<>();  // fixed members' FULL tap pi rows (per-step
-            List<Double> r1OvVal = new ArrayList<>();        // R/X/G/B follow the rounded tap, like the CPU)
-            for (int slot = 0; slot < chunkSize; slot++) {
-                double[] r = slot < realCount ? chunkResults[slot] : null;
-                for (int i = 0; i < n; i++) {
-                    x0Full[slot * n + i] = r != null ? r[i] : baseState[i];
-                }
-                rowMode[slot] = rowModePerScenario[slot];
-                if (!affected.contains(slot)) {
-                    continue;
-                }
-                int[] row = rowModePerScenario[slot].clone();
-                for (int c = 0; c < tcs.size(); c++) {
-                    if (on[slot][c]) {
-                        applyControlDeltas(slot, n, tcs.get(c), disabledMask, rounded, memberBase[c],
-                                totalMembers, baseState, row, ovIdx, ovVal, r1OvSlotElem, r1OvVal);
-                    }
-                }
-                rowMode[slot] = row;
-            }
-            // OLF-faithful re-solve initialization (same fix as the JAVA hybrid engine): OLF's re-solves
-            // re-read every variable from the NETWORK (PreviousValueVoltageInitializer) — which equals the
-            // previous state for everything EXCEPT what the outer loop just mutated. Here the only mutation is
-            // a clamped/rounded ratio, so re-initialize EXACTLY that: the rho variable starts the next Newton
-            // AT its pinned fixedR1 (the pi-model value the CPU would re-read). Snapping OTHER identity rows to
-            // their targets would deviate from OLF — the CPU keeps a long-pinned row at its previous value
-            // (target ± the stopping residual), and that difference alone leaves ~1e-6 vs the CPU's ~1e-13.
-            for (int slot : affected) {
-                for (int c = 0; c < tcs.size(); c++) {
-                    Member[] members = tcs.get(c).members();
-                    for (int m = 0; m < members.length; m++) {
-                        double fixedR1 = rounded[slot * totalMembers + memberBase[c] + m];
-                        if (!Double.isNaN(fixedR1)) {
-                            x0Full[slot * n + members[m].rhoRow()] = fixedR1;
-                        }
-                    }
-                }
-            }
-            // plan-A6: the CURRENT carrier's packed DISTR_RHO contributions must gate OFF per
-            // scenario (its row hosts the pilot's relocated Q). Merge zero-entries for each slot's
-            // carrier row AFTER the chunk-level drOv (the kernel's scan is last-match-wins) and
-            // (re)install the channel — the carrier can move between steps as clamps accumulate.
-            if (drRowByContrib != null && drRowByContrib.length > 0) {
-                List<Integer> drIdx = new ArrayList<>();
-                List<Double> drC = new ArrayList<>();
-                if (chunkDrOvIdx != null) {
-                    for (int k = 0; k < chunkDrOvIdx.length; k++) {
-                        drIdx.add(chunkDrOvIdx[k]);
-                    }
-                    for (double v : chunkDrOvC) {
-                        drC.add(v);
-                    }
-                }
-                for (int slot : affected) {
-                    for (int c = 0; c < tcs.size(); c++) {
-                        if (!on[slot][c]) {
-                            continue;
-                        }
-                        Member[] mems = tcs.get(c).members();
-                        int carrier = -1;
-                        for (int m = 0; m < mems.length; m++) {
-                            if (!disabledMask[slot][mems[m].elemIndex()]
-                                    && Double.isNaN(rounded[slot * totalMembers + memberBase[c] + m])) {
-                                carrier = m;
-                                break;
-                            }
-                        }
-                        if (carrier <= 0) {
-                            continue;                        // base carrier's row has no packed contributions
-                        }
-                        int carrierRow = mems[carrier].rhoRow();
-                        for (int k = 0; k < drRowByContrib.length; k++) {
-                            if (drRowByContrib[k] == carrierRow) {
-                                drIdx.add(slot);
-                                drIdx.add(k);
-                                drC.add(0.0);
-                            }
-                        }
-                    }
-                }
-                GpuAcNewtonSolver.setBatchDrCoefOverrides(handle,
-                        drIdx.isEmpty() ? null : drIdx.stream().mapToInt(Integer::intValue).toArray(),
-                        drC.isEmpty() ? null : drC.stream().mapToDouble(Double::doubleValue).toArray());
-            }
-            double[][] r2 = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
-                    rowMode, baseRowMode, disabledMask,
-                    ovIdx.stream().mapToInt(Integer::intValue).toArray(),
-                    ovVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                    dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta,
-                    dsAnchorCarry, dsSlackCarry, null, null,
-                    parameters.getMaxIterations(), tol, reactiveLimitTol, slackDistTol, convEpsPerEq,
-                    config.lsMode(), config.maxDv(), config.maxDphi(),
-                    config.lsMode() == 2 ? varType : null, x0Full, null, null, null, null,
-                    r1OvSlotElem.isEmpty() ? null : r1OvSlotElem.stream().mapToInt(Integer::intValue).toArray(),
-                    r1OvVal.isEmpty() ? null : r1OvVal.stream().mapToDouble(Double::doubleValue).toArray(),
-                    config.maxOuterIterations(), config.maxPqPvSwitch(), config.dsRejectResidualFlag(), 0, 0, null, null);
-            boolean[] taken = new boolean[chunkSize];
-            for (int slot : affected) {
-                chunkResults[slot] = r2[slot];
-                taken[slot] = true;
-            }
-            if (nds > 0) {                                   // this solve may have distributed further
-                captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
-                        dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, dsAnchorCarry, dsSlackCarry, dsSeed, taken);
-            }
-            if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
-                traceStep(step, affected, chunkResults, tcs, n, rounded, memberBase, totalMembers, disabledMask);
-            }
-            int action = clampOrRoundStep(affected, chunkResults, n, tcs, on, rounded, memberBase, totalMembers, disabledMask, shared, polish);
-            if (action == 0) {
-                // A slot whose LAST continuous member was fixed by a CLAMP (not a round) owes one
-                // more solve: OLF's controlStep returns UNSTABLE "in any case", so the COMPLETE
-                // transition triggers one more NR — and OLF's NewtonRaphson ALWAYS takes at least
-                // one Newton step before testing (no early exit on a converged start), so that
-                // "no-op" solve perturbs the state by ~1e-6 pu (measured 9.2e-4 kV without it).
-                // The round path needs none: rounding and COMPLETE share the same controlStep.
-                java.util.Set<Integer> needPolish = new java.util.TreeSet<>();
-                for (int slot : affected) {
-                    if (polish[slot]) {
-                        polish[slot] = false;
-                        needPolish.add(slot);
-                    }
-                }
-                if (needPolish.isEmpty()) {
-                    break;                                   // everything fixed and re-solved: done
-                }
-                affected = needPolish;                       // one extra pinned solve for those slots
-            }
-        }
-        return chunkResults;
-    }
-
-    /** One CONTROL decision per machine step: clamp out-of-range continuous ratios (returns 1 —
-     *  re-solve with them fixed); when none, round ALL remaining continuous ones (returns 2 — one
-     *  final solve); when nothing is continuous anymore, returns 0 (done). Sets {@code polish} for
-     *  a slot whose clamp fixed its last continuous member (it still owes OLF's COMPLETE solve). */
-    private static int clampOrRoundStep(java.util.Set<Integer> affected, double[][] chunkResults, int n,
-            List<TransformerController> tcs, boolean[][] on, double[] rounded, int[] memberBase, int totalMembers,
-            boolean[][] disabledMask, SharedRatio[][] shared, boolean[] polish) {
-        boolean anyClamped = false;
-        boolean anyContinuous = false;
-        for (int slot : affected) {
-            double[] r = chunkResults[slot];
-            if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
-                continue;
-            }
-            boolean slotClamped = false;
-            boolean slotContinuous = false;
-            for (int c = 0; c < tcs.size(); c++) {
-                TransformerController tc = tcs.get(c);
-                if (!on[slot][c]) {
-                    continue;
-                }
-                Member[] members = tc.members();
-                for (int m = 0; m < members.length; m++) {
-                    Member mem = members[m];
-                    if (!Double.isNaN(rounded[slot * totalMembers + memberBase[c] + m])
-                            || disabledMask[slot][mem.elemIndex()]) {
-                        continue;                        // fixed already, or outaged (pinned at base)
-                    }
-                    double r1 = r[mem.rhoRow()];
-                    SharedRatio sr = tc.useInitialTapPosition() ? shared[slot][c] : null;
-                    if (sr != null && (r1 < sr.minR1() || r1 > sr.maxR1())) {
-                        // SHARED-ratio clamp (useInitialTapPosition): the COMMON continuous ratio
-                        // trips the GROUP-AVERAGED bounds, so every alive member clamps in the
-                        // SAME pass — OLF sets each to the group extreme, rounds to its OWN
-                        // closest tap and disables it; the whole control ends together, so no
-                        // mid-flight carrier re-pick can arise (the plan-A6 rejection below is
-                        // individual-mode only).
-                        rounded[slot * totalMembers + memberBase[c] + m] =
-                                mem.closestTap(r1 > sr.maxR1() ? sr.maxR1() : sr.minR1());
-                        slotClamped = true;
-                        continue;
-                    }
-                    if (sr == null && (r1 < mem.minR1() || r1 > mem.maxR1())) {
-                        // plan-A6 remaining: clamping the CURRENT CARRIER while other members
-                        // stay continuous re-picks the pilot-Q role MID-FLIGHT; the re-picked
-                        // system sits on the CPU's 1-MW DS-threshold knife edge (measured
-                        // 1.7e-9 trajectory offset flipping a 1.0045-MW distribution decision)
-                        // — per-scenario CPU route until the trajectory is exactly replicated.
-                        boolean isCarrier = true;
-                        for (int mm = 0; mm < m; mm++) {
-                            if (!disabledMask[slot][members[mm].elemIndex()]
-                                    && Double.isNaN(rounded[slot * totalMembers + memberBase[c] + mm])) {
-                                isCarrier = false;       // an earlier alive member carries the pilot Q
-                                break;
-                            }
-                        }
-                        boolean otherAlive = false;
-                        for (int mm = 0; mm < members.length; mm++) {
-                            if (mm != m && !disabledMask[slot][members[mm].elemIndex()]
-                                    && Double.isNaN(rounded[slot * totalMembers + memberBase[c] + mm])) {
-                                otherAlive = true;
-                            }
-                        }
-                        if (isCarrier && otherAlive) {
-                            chunkResults[slot][n + 2] = GpuBatchStatus.STATUS_REJECTED;
-                            continue;
-                        }
-                        rounded[slot * totalMembers + memberBase[c] + m] = Math.max(mem.minR1(), Math.min(mem.maxR1(), r1));
-                        slotClamped = true;
-                    } else {
-                        slotContinuous = true;
-                    }
-                }
-            }
-            if ((int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
-                continue;                                    // rejected mid-slot: no further solves for it
-            }
-            anyClamped |= slotClamped;
-            anyContinuous |= slotContinuous;
-            if (slotClamped && !slotContinuous) {
-                polish[slot] = true;                         // clamp ended the whole control: COMPLETE solve owed
-            }
-        }
-        if (anyClamped) {
-            return 1;                                        // re-solve with the clamped ones fixed
-        }
-        if (anyContinuous) {                                 // round ALL remaining continuous ratios, one final solve
-            for (int slot : affected) {
-                double[] r = chunkResults[slot];
-                if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
-                    continue;
-                }
-                for (int c = 0; c < tcs.size(); c++) {
-                    TransformerController tc = tcs.get(c);
-                    if (!on[slot][c]) {
-                        continue;
-                    }
-                    Member[] members = tc.members();
-                    SharedRatio srr = tc.useInitialTapPosition() ? shared[slot][c] : null;
-                    for (int m = 0; m < members.length; m++) {
-                        if (Double.isNaN(rounded[slot * totalMembers + memberBase[c] + m])
-                                && !disabledMask[slot][members[m].elemIndex()]) {
-                            // useInitialTapPosition: OLF's updateContinuousRatio remaps the COMMON
-                            // solved ratio to each member's spread-preserving individual value
-                            // right before roundVoltageRatios rounds it (same check, one re-solve
-                            // after) — compose remap + round here.
-                            double cont = r[members[m].rhoRow()];
-                            rounded[slot * totalMembers + memberBase[c] + m] =
-                                    members[m].closestTap(srr != null ? srr.remap(members[m], cont) : cont);
-                        }
-                    }
-                }
-            }
-            return 2;                                        // the final solve runs with every control fixed
-        }
-        return 0;                                            // everything fixed and re-solved: done
-    }
-
-    /** Applies one control's per-step row/target deltas for one scenario: the group's ON deltas while
-     *  any member is still continuous (fixed/outaged members swapped to their OFF-deltas + rho pins),
-     *  or plain pins at the rounded taps once every member is fixed. Fixed members also emit their
-     *  rounded tap's FULL pi row as an r1 override — rounding to a non-base tap switches the CPU
-     *  branch's per-step R/X/G/B, not just rho. */
-    @SuppressWarnings("java:S107")
-    private static void applyControlDeltas(int slot, int n, TransformerController tc,
-            boolean[][] disabledMask, double[] rounded, int base, int totalMembers, double[] baseState,
-            int[] row, List<Integer> ovIdx, List<Double> ovVal, List<Integer> r1OvSlotElem, List<Double> r1OvVal) {
-        Member[] members = tc.members();
-        boolean allFixed = true;
-        for (int m = 0; m < members.length; m++) {
-            allFixed &= !Double.isNaN(rounded[slot * totalMembers + base + m])
-                    || disabledMask[slot][members[m].elemIndex()];
-        }
-        if (!allFixed) {                                     // control ACTIVE: build the group's rows for the
-            // EFFECTIVE role set (plan-A6). Pairwise offDeltas do NOT compose when a clamp and an
-            // outage combine (the free member's offDelta encodes a re-pick to a member that may
-            // itself be outaged this scenario), so member rho rows are constructed DIRECTLY:
-            //  - the CARRIER (first alive member — OLF's free-role rule) hosts the pilot's
-            //    relocated Q (the group mode-scan scatter routes the flows; the target is the one
-            //    captured for the BASE carrier's row);
-            //  - other alive members host DISTR_RHO (target 0);
-            //  - clamped / outaged members get identity pins (clamp value / base-state rho).
-            // Non-member delta rows (the pilot's v identity) apply as captured.
-            int carrier = -1;
-            for (int m = 0; m < members.length; m++) {
-                if (!disabledMask[slot][members[m].elemIndex()]
-                        && Double.isNaN(rounded[slot * totalMembers + base + m])) {
-                    carrier = m;
-                    break;
-                }
-            }
-            double pilotQTarget = 0;
-            for (int k = 0; k < tc.deltaRows().length; k++) {
-                if (tc.deltaRows()[k] == members[0].rhoRow()) {
-                    pilotQTarget = tc.deltaTargetsOn()[k];   // the BASE carrier's captured pilot-Q target
-                }
-            }
-            java.util.Set<Integer> memberRows = new java.util.HashSet<>();
-            for (Member mem : members) {
-                memberRows.add(mem.rhoRow());
-            }
-            for (int k = 0; k < tc.deltaRows().length; k++) {
-                if (memberRows.contains(tc.deltaRows()[k])) {
-                    continue;                                // member rho rows are built by ROLE below
-                }
-                row[tc.deltaRows()[k]] = tc.deltaModesOn()[k];
-                ovIdx.add(slot * n + tc.deltaRows()[k]);
-                ovVal.add(tc.deltaTargetsOn()[k]);
-            }
-            for (int m = 0; m < members.length; m++) {
-                Member mem = members[m];
-                boolean outaged = disabledMask[slot][mem.elemIndex()];
-                double fixedR1 = rounded[slot * totalMembers + base + m];
-                if (!outaged && Double.isNaN(fixedR1)) {     // ALIVE: carrier or DISTR_RHO
-                    row[mem.rhoRow()] = 1;
-                    ovIdx.add(slot * n + mem.rhoRow());
-                    ovVal.add(m == carrier ? pilotQTarget : 0.0);
-                    continue;
-                }
-                row[mem.rhoRow()] = 0;                       // identity pin
-                ovIdx.add(slot * n + mem.rhoRow());
-                // outaged: pin at the BASE-STATE rho — matching the warm start, so the row's
-                // residual is exactly 0 (the CPU REMOVES the equation; a captured stale target
-                // injected a unit residual that cost an extra Newton iterate — 2.4e-4 kV drift).
-                // clamped: pinned at the CLAMP value, not the base tap.
-                ovVal.add(outaged ? baseState[mem.rhoRow()] : fixedR1);
-                if (!outaged) {
-                    emitTapRow(slot, mem, fixedR1, r1OvSlotElem, r1OvVal);
-                }
-            }
-        } else {                                             // every member fixed: back to base rows + pins
-            for (int m = 0; m < members.length; m++) {
-                Member mem = members[m];
-                if (disabledMask[slot][mem.elemIndex()]) {
-                    continue;                                // outaged: base identity + base target already
-                }
-                double fixedR1 = rounded[slot * totalMembers + base + m];
-                ovIdx.add(slot * n + mem.rhoRow());
-                ovVal.add(fixedR1);
-                emitTapRow(slot, mem, fixedR1, r1OvSlotElem, r1OvVal);
-            }
-        }
-    }
-
-    @SuppressWarnings("java:S106")
-    private static void traceStep(int step, java.util.Set<Integer> affected, double[][] chunkResults,
-            List<TransformerController> tcs, int n, double[] rounded, int[] memberBase, int totalMembers,
-            boolean[][] disabledMask) {
-        for (int slot : affected) {
-            double[] r = chunkResults[slot];
-            StringBuilder sb = new StringBuilder("TVC_TRACE step=" + step + " slot=" + slot
-                    + " status=" + (r != null ? (int) r[n + 2] : -9));
-            for (int c = 0; c < tcs.size(); c++) {
-                for (int m = 0; m < tcs.get(c).members().length; m++) {
-                    Member mem = tcs.get(c).members()[m];
-                    sb.append(String.format(" m%d[r1=%.6f fx=%.6f out=%b]", m,
-                            r != null ? r[mem.rhoRow()] : Double.NaN,
-                            rounded[slot * totalMembers + memberBase[c] + m],
-                            disabledMask[slot][mem.elemIndex()]));
-                }
-            }
-            System.err.println(sb);
-        }
-    }
-
-    private static void emitTapRow(int slot, Member mem, double fixedR1,
-            List<Integer> r1OvSlotElem, List<Double> r1OvVal) {
-        double[] tapRow = mem.closestTapRow(fixedR1);
-        if (tapRow != null) {                                // the fixed tap's FULL pi row
-            r1OvSlotElem.add(slot);
-            r1OvSlotElem.add(mem.elemIndex());
-            for (double d : tapRow) {
-                r1OvVal.add(d);
-            }
-        }
-    }
-
-    /** Reads the LAST solve's final per-scenario targets off the context and derives the carried
-     *  distributed-slack state: per-participant pure absorption (final minus the scenario's own
-     *  effective base), the slack's own absorbed share at the scenario's effective factor sum, and
-     *  the absolute DS-row targets for seeding the next call. Dead or non-converged slots carry 0. */
-    @SuppressWarnings("java:S107")
-    /** Merge the carried absolute DS-row target seeds into an override list — replace an existing
-     *  entry for the row, never duplicate it (the device scatter has no ordering). Shared by every
-     *  orchestrator that re-solves after the main chunk solve.
-     *
-     *  <p>The lookup goes through a flat-row → position INDEX, not a scan: this runs
-     *  {@code realCount * nds} times over a list that ends up the same size, so the obvious
-     *  {@code lastIndexOf} made it quadratic — measured on a 6.5k-bus network with 554 DS
-     *  participants and 500 scenarios, the two orchestrators that re-solve (HVDC AC-emulation and
-     *  VoltageMonitoring) spent 97 s of a 101 s batch in here, against 1.5 s of actual device
-     *  solving. */
-    static void seedDsTargets(int nds, int[] dsPhiRow, double[] dsSeed, double[][] chunkResults,
-            int realCount, int n, List<Integer> ovIdx, List<Double> ovVal) {
-        if (nds <= 0) {
-            return;
-        }
-        java.util.Map<Integer, Integer> posOf = new java.util.HashMap<>(2 * ovIdx.size() + 16);
-        for (int k = 0; k < ovIdx.size(); k++) {
-            posOf.put(ovIdx.get(k), k);                      // later duplicates win, as lastIndexOf did
-        }
-        for (int s2 = 0; s2 < realCount; s2++) {
-            double[] r = chunkResults[s2];
-            if (r == null || (int) r[n + 2] != GpuBatchStatus.STATUS_CONVERGED) {
-                continue;
-            }
-            for (int i = 0; i < nds; i++) {
-                int flat = s2 * n + dsPhiRow[i];
-                Integer at = posOf.get(flat);
-                if (at != null) {
-                    ovVal.set(at, dsSeed[s2 * nds + i]);
-                } else {
-                    posOf.put(flat, ovIdx.size());
-                    ovIdx.add(flat);
-                    ovVal.add(dsSeed[s2 * nds + i]);
-                }
-            }
-        }
-    }
-
-    static void captureDsCarry(long handle, int chunkSize, int realCount, int n,
-            int[] dsPhiRow, double[] dsFactor, double[] baseTargets,
-            int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta,
-            double[][] chunkResults, double[] anchor, double[] slack, double[] seed) {
-        captureDsCarry(handle, chunkSize, realCount, n, dsPhiRow, dsFactor, baseTargets,
-                dsOvBus, dsOvFactorDelta, dsOvBaseDelta, chunkResults, anchor, slack, seed, null);
-    }
-
-    /**
-     * As above, but capturing ONLY the scenarios in {@code taken} (null = all of them).
-     *
-     * <p>The distribution is read from the DEVICE's target buffer, which a batched solve rewrites for
-     * every scenario in the chunk — including the ones an orchestrator solved but whose result it then
-     * threw away, because they were already stable and the CPU would never have re-run Newton on them
-     * ("untouched scenarios KEEP their converged state"). Capturing those slots too hands the next
-     * solve a slack distribution belonging to a trajectory the scenario never took, while its state
-     * says otherwise. So the mask that decides which results are kept must also decide which carries
-     * are captured; an untouched slot keeps the carry that matches the state it kept.
-     */
-    @SuppressWarnings("java:S107")
-    static void captureDsCarry(long handle, int chunkSize, int realCount, int n,
-            int[] dsPhiRow, double[] dsFactor, double[] baseTargets,
-            int[] dsOvBus, double[] dsOvFactorDelta, double[] dsOvBaseDelta,
-            double[][] chunkResults, double[] anchor, double[] slack, double[] seed, boolean[] taken) {
-        int nds = dsPhiRow.length;
-        double fsBase = 0;
-        for (double fv : dsFactor) {
-            fsBase += fv;
-        }
-        double[] finalTargets = GpuAcNewtonSolver.readBatchTargets(handle);
-        for (int s = 0; s < chunkSize; s++) {
-            if (taken != null && s < realCount && !taken[s]) {
-                continue;                                    // result discarded — its carry stays as it was
-            }
-            boolean liveSlot = s < realCount && chunkResults[s] != null
-                    && (int) chunkResults[s][n + 2] == GpuBatchStatus.STATUS_CONVERGED;
-            double absorbedSum = 0;
-            for (int i = 0; i < nds; i++) {
-                int row = dsPhiRow[i];
-                double ovDelta = dsOvBus != null && dsOvBus[s] == i ? dsOvBaseDelta[s] : 0.0;
-                double effBase = baseTargets[row] - ovDelta;
-                double shift = liveSlot ? finalTargets[s * n + row] - effBase : 0.0;
-                anchor[s * nds + i] = shift;
-                absorbedSum += shift;
-                seed[s * nds + i] = effBase + shift;
-            }
-            double fs = fsBase - (dsOvBus != null && dsOvBus[s] >= 0 ? dsOvFactorDelta[s] : 0.0);
-            slack[s] = fs > 0 ? (1.0 - fs) / fs * absorbedSum : 0.0;
-        }
-    }
 }

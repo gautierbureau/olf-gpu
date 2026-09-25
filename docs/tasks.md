@@ -2682,3 +2682,37 @@ Next: find why `updatePilotVeqBatch` leaves the pilot row at mode 0 for an enrol
 `lost` test is `relocChoose(...) == 0`, and for a pilot-self group candidate 0 IS the pilot's own row, so
 "fell back to candidate 0" and "correctly chose the pilot" are indistinguishable there. That conflation is the
 most likely reason the flip never happens, and it is a property of the pilot-self shape specifically.
+
+**The all-pinned pilot-self assembly, measured row by row (`OLF_GPU_ROW_PROBE`, rotation ON).** A correction
+first: the claim that `updatePilotVeqBatch` "never fires" was read off `OLF_GPU_EQ_DUMP`, which prints the
+HOST-side extracted `activation.rowMode()`, not the device's live modes — it cannot see a mid-solve flip. The
+probe shows the flip DOES happen:
+
+```
+pilot  row 12560: outer=0..5 target=1.103000000000e+00 F=0            (V identity, satisfied)
+pilot  row 12560: outer=6    target=-2.556000000000e+00 F=1.736762045429e+00
+member row 12562: outer=0..6 target=0                   F=~1.8e-08   (DISTR_Q, satisfied)
+```
+
+Two defects in that assembly, and together they are the divergence:
+
+1. The flipped pilot target is **-2.556**, which is `maxQ - q` (0.955 - 3.511, the audit's `over=2.556`
+   negated), not the pinned limit `maxQ - loadQ = 0.955`. `updatePilotVeqBatch` writes
+   `target[pi] = pilotQ[fi]`, the group's captured relocated-Q target — right for a pilot that is NOT one of
+   its own controllers, wrong for a pilot-self pilot that has itself PINNED, whose row must carry its own
+   Q LIMIT. The row is left with F = 1.74 pu (174 MW) that no Newton step can clear.
+2. The member's row keeps `target=0` through the pass that pinned it, so its own pinned Q limit is never
+   enforced: that row is the pilot-Q CARRIER, and the carrier/DISTR_Q target update overwrites what
+   `reactiveLimitsBatch` wrote there (`target[ridx] = rliMax - rlLoadQ[rli]`).
+
+So both pinned controllers' Q limits are missing from the system and one unsatisfiable row is present — one
+constraint too many and two too few. Newton walks away exactly as observed.
+
+WHAT OLF DOES, and it is the simplest possible assembly: once every controller of the group is pinned there is
+no relocation and no carrier at all. Each controller's own `BUS_TARGET_Q` sits on its own row with its own
+limit as target, and `BUS_TARGET_V` is dropped (control lost). The device already has the per-row form for
+this — mode 4 with the member's own-q ALTERNATE placement — so the fix direction is to make the all-pinned
+case take that plain form for EVERY member including the pilot, instead of routing it through the carrier
+machinery, whose whole purpose (finding a row for the pilot's relocated Q) is moot when no controller is free.
+
+Rotation stays OFF by default: with it on the base still diverges and takes a SECOND fallback.

@@ -208,9 +208,7 @@ public final class GpuAcOuterLoopPacks {
      * each with a correct q of 1.921012507 pu against a 0.7536 limit), then diverged at outer pass 7.
      */
     public static GeneratorVoltageControl mainGenVc(LfBus bus) {
-        return bus.getGeneratorVoltageControl()
-                .<GeneratorVoltageControl>map(VoltageControl::getMainVoltageControl)
-                .orElse(null);
+        return GpuAcRowIndexing.mainGenVc(bus);              // ONE definition, shared with the row indexing
     }
 
     static RmqPack remoteMemberQPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,

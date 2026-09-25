@@ -175,10 +175,26 @@ final class GpuAcRowIndexing {
      *  updateRemoteVoltageControlEquations) is the group's pilot-Q carrier and keeps the
      *  structure-frozen encoding; the others take the canonical suppressed-dest/mode-4 one. */
     static boolean isRemoteGenVcMember(LfBus bus) {
+        GeneratorVoltageControl vc = mainGenVc(bus);
+        return vc != null && isRemoteGenVcControllerElement(bus) && vc.getControlledBus() != bus;
+    }
+
+    /**
+     * The bus's MAIN generator voltage control, resolved the way {@link #isRemoteGenVcControllerElement}
+     * already resolves it and for the same reason: a control MERGED into another is DEPENDENT, and on the
+     * dependent object the controlled bus is the member ITSELF, so a {@code getMergeStatus() == MAIN} filter
+     * answers "not a member" for every member of a merged group but one.
+     *
+     * <p>Both predicates here did filter that way, so {@link ExtractionColumns}'s own-row alternate loop
+     * skipped those members and left them with {@code qRowAlt = -1}. A row then put in mode 4 by a
+     * reactive-limit pin assembles EMPTY: measured on rte6515's base, where the pinned pass gave F = -target
+     * exactly on both members of a pilot-self group, two identical rows and a dead DUMMY_Q column — a
+     * singular matrix KLU refuses to factor.
+     */
+    static GeneratorVoltageControl mainGenVc(LfBus bus) {
         return bus.getGeneratorVoltageControl()
-                .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
-                .map(c -> c.getControlledBus() != bus)
-                .orElse(false);
+                .<GeneratorVoltageControl>map(VoltageControl::getMainVoltageControl)
+                .orElse(null);
     }
 
     /** True when the bus is a CONTROLLER ELEMENT of a remote (non-local) generator voltage control
@@ -263,11 +279,10 @@ final class GpuAcRowIndexing {
 
     /** The FREE member: the first ENABLED merged controller. None when every controller is pinned. */
     static boolean isFreeRemoteGenVcMember(LfBus bus) {
-        return bus.getGeneratorVoltageControl()
-                .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
-                .map(c -> c.getMergedControllerElements().stream()
-                        .filter(c::isControllerEnabled).findFirst().map(m -> m == bus).orElse(false))
-                .orElse(false);
+        GeneratorVoltageControl vc = mainGenVc(bus);
+        return vc != null && isRemoteGenVcControllerElement(bus)
+                && vc.getMergedControllerElements().stream()
+                        .filter(vc::isControllerEnabled).findFirst().map(m -> m == bus).orElse(false);
     }
 
     static int[] computeQRowAlt(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,

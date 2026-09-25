@@ -2811,3 +2811,44 @@ carrier, `BUS_TARGET_V` dropped. Touches `ExtractionColumns` (a member's `qRowAl
 tables, which today point a member's q at the PILOT's row (`cb#8699.q2@alt` on row 12560) for the relocation
 case rather than back at the member's own row for the pinned case — so the alt channel needs to distinguish
 those two destinations, not merely toggle.
+
+### FIX 2: the same MAIN-control bug in the PLACEMENT predicates — the singularity is gone (2026-09-25)
+
+The placement gap has the SAME root cause as FIX 1, in two more predicates.
+`GpuAcRowIndexing.isRemoteGenVcMember` and `isFreeRemoteGenVcMember` both filtered
+`getMergeStatus() == MAIN` on the bus's OWN control, so a merged member — whose own control is DEPENDENT and
+regulates itself — answered "not a member". `ExtractionColumns`'s own-row alternate loop is gated on exactly
+that predicate, so those members fell through it AND through the pilot-self loop beside it (whose `MAIN`
+filter rejects them too) and kept `qRowAlt = -1`. Fixed by resolving the main control, exactly as
+`isRemoteGenVcControllerElement` in the same file already did — and whose javadoc had already recorded this
+trap in detail. One definition now: `GpuAcOuterLoopPacks.mainGenVc` delegates to `GpuAcRowIndexing.mainGenVc`.
+
+Nothing else had to change: both the build side (`buildCbDynDest`, whose comment already reads "suppressed
+frozen dest (remote member): select on the ALT row itself (mode 4)") and the runtime selection
+(`ziDynDest`'s `(mode[sr] == 0 || mode[sr] == 4) ? alt : frozen`) were already written for this case and were
+simply never reached.
+
+MEASURED on the base's pinned pass, before -> after:
+
+| | before | after |
+| --- | --- | --- |
+| `dupRows` | 12590,12592 | **-1,-1 (none)** |
+| `deadCols` | 1 (col 13185) | **0** |
+| `tinyDiag` | 1 (row 13185) | **0** |
+| member row 12590 | 2 nonzero, `F = -target` | **6 nonzero incl. both coupler couplings, F = 1.167** |
+| member row 12592 | identical to 12590 | **distinct, 3 nonzero incl. (13185,-1.0)** |
+| KLU | **REFUSED, KLU_SINGULAR** | **factors it** |
+
+So the rank deficiency this whole thread was chasing is FIXED: each pinned member's row now carries its own
+reactive balance with its own limit as target, which is OLF's assembly. Suite 299/0, checkstyle 214.
+
+STILL DIVERGING, for a DIFFERENT and newly visible reason. KLU factors the matrix but the solve is meaningless
+(`||dx||inf=3.196391e+15`, residual ratio 1.518), and the null direction is now a set of zero-impedance DUMMY
+columns (13199..13224, all mode 1, diag -1, F ~ 0). Column 13207 is touched by rows **12834 (+1.0) and 12836
+(+1.0)** — two couplings of the SAME SIGN, where a `DUMMY_Q` needs an OPPOSING pair to be determined. Its
+coupler is `zi#36 BUS-6112_COUPLER_1`, whose `qRows=[12836,-1]` the equation dump ALREADY flags as INCOMPLETE,
+and whose bus1 (V row 12834) is another pilot-self bus whose q was relocated onto 12836. So the new member
+alternate and the pilot-Q relocation now both write into that coupling, one of them with the wrong sign, and
+bus2's `-dQ` is missing altogether. That interaction is the next thing to fix, and the existing
+INCOMPLETE-coupling section of `GpuEquationDump` plus a sign check on each coupler's pair is the instrument
+for it.

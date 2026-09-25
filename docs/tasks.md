@@ -2506,49 +2506,41 @@ in-kernel pass fires on its own trajectory. A less-converged state underestimate
 distributes slightly less, and the remainder hides under the deadband. Prediction: tightening
 `OLF_GPU_DBG_CONV_EPS` on BOTH arms shrinks the 0.066 MW.
 
-**Defect 2 ANSWERED: the two arms solve the same system, and they agree at machine precision when both are
-actually converged.** The user rejected the first answer ("if the two system solved are the same they should
-agree at machine precision") and was right to: "within tolerance" explains nothing by itself, since two Newton
-runs on the same J and F from the same start must stop at the same iterate and agree to last-ulp. Sweeping
-`newtonRaphsonConvEpsPerEq` on BOTH arms, on the base reproducer:
+**Defect 2 ANSWERED, at the DEFAULT criteria: the device's Newton matches OLF's iteration for iteration,
+and the 0.066 MW is a symptom of the base DIVERGING at outer pass 7 and being retried.**
 
-| `newtonRaphsonConvEpsPerEq` (BOTH arms) | cpu | gpu | diff |
-| --- | --- | --- | --- |
-| 1e-4 (the RTE default) | 14.359916553 | 14.294298359 | 6.56e-02 MW |
-| 1e-6 | 14.381761494 | 14.381763087 | 1.59e-06 MW |
-| 1e-8 | 14.381761494 | 14.381763087 | 1.59e-06 MW |
-| 1e-10 | 14.381763285 | 14.381763087 | 1.98e-07 MW |
-| 1e-12 | 14.381763285 | 14.381763287 | **1.12e-09 MW** |
+A first answer here leaned on a tolerance sweep (tighten `newtonRaphsonConvEpsPerEq` on both arms, watch the
+gap collapse to 1.1e-09 MW at 1e-12). The user rejected that, rightly and emphatically: "with the default
+criteria and the default precision both cpu and gpu should agree at machine precision... you should be
+FORBIDDEN to change the tolerance as you always do it and it is NOT the answer". The sweep only shows both
+arms share a fixed point; it says NOTHING about why they take different paths at the settings that ship, and
+reaching for it hid the defect for most of a day. The rule for this repo: a tolerance change is a diagnostic
+of last resort, never an answer, and never a recommended workaround.
 
-1.12e-09 MW on 14.38 MW is 7.8e-11 relative, and the GPU against ITSELF (cold vs warm, same binary, same
-network) differs by 9.79e-10 MW at that tolerance — so the CPU-vs-GPU gap is the size of the device's own
-atomicAdd reassociation floor, printed now beside it by `OLF_GPU_SA_BASE_ONLY=1`. There is no room left for an
-equation difference. (An intermediate claim made here earlier was WRONG and is retracted: the 1e-6/1e-8
-plateau was read as a fixed floor, hence as evidence of a residual difference. It is not a floor — the two
-criteria simply first trip at the SAME Newton iterate, and the gap resumes shrinking at 1e-10.)
+Measured instead, at the DEFAULT 1e-4, with `OLF_GPU_DBG_NR=1` (new: attaches an appender to OLF's own
+`NewtonRaphson` + `MaxVoltageChangeStateVectorScaling` loggers) beside the device's `OLF_GPU_CONV_TRACE`:
 
-WHY the default criterion gives 0.066 MW, which is the part worth remembering: the distributed amount is read
-off the SLACK ROW of the mismatch vector, and at `convEpsPerEq=1e-4` that row's own residual is ~0.2 MW
-(`sqrt(1e-4^2*n)` = 1.1e-02 pu with n=13040). The amount is therefore FIRST-ORDER sensitive to which iterate
-the DS pass fires on, and the existing `[DS-CONV]` probe (`OLF_GPU_DS_DEBUG=1`) shows the two arms firing at
-different ones:
+| iterate | CPU `\|f(x)\|` | device `norm2` |
+| --- | --- | --- |
+| x0 | 117.84475774904828 | 1.17844757749047915e+02 |
+| 0 | 5.463108973064748 | 5.46310897084124392e+00 |
+| 1 | 0.22833996913869184 | 2.28339969965081657e-01 |
+| 2 | 0.0024533278213928313 | 2.45332782110154910e-03 (converged) |
 
-```
-outer=0 innerNewtonIters=3 ||F||2=2.453e-03 slackMismatchFromAnchor=0.143599166   <- equals the CPU's 14.359916553
-outer=0 innerNewtonIters=2 ||F||2=3.866e-04 slackMismatchFromAnchor=0.142942984   <- the 14.294 the run reports
-```
+The two Newtons are the SAME trajectory — including OLF's `Step size: 0.9345794392523364 (3 dv ...)`
+MAX_VOLTAGE_CHANGE clamp at iteration 0, which the device reproduces (its `maxVoltageChangeFactorBatch` takes
+the largest |dv| and scales the whole step, algebraically OLF's `min(stepSize, maxDv/|dx|)`). And the DS pass
+that fires on that trajectory reads `slackMismatchFromAnchor=0.143599166` pu — the CPU's 14.359916553 MW to
+9 digits. Parity, at the default criteria, with no knob touched.
 
-Both states pass OLF's own test (2.45e-03 and 3.87e-04 are both under 1.1e-02), so OLF's default parameters do
-not pin this quantity down to better than a few hundredths of a MW on EITHER arm — its own number moves
-0.022 MW between 1e-4 and 1e-6. Consequences for any future work here: a distributed-power parity assertion
-must either set `OLF_GPU_DBG_CONV_EPS=1e-6` or carry ~0.1 MW (~1.1 MW per contingency, because the 1 MW
-deadband amplifies it); and a GPU-vs-CPU difference in a quantity read off a converged-to-1e-4 state should be
-compared against the GPU-vs-GPU floor of that same quantity BEFORE it is called a bug.
+The reported 14.294298359 comes from a SECOND base solve. `[DS-CONV]` shows two complete outer sequences: the
+first runs outer=0,1 then DIVERGES at outer=7 (norm2 climbing 2.72 -> 12.78 -> 24.58 -> 36.37 -> 48.22 ->
+60.15, monotonic, 30 inner iterations), the base falls back (`fallbacks=1`), and the retry re-derives the
+distribution from a different starting state — 2 inner iterations instead of 3, reading 0.142942984. The
+0.066 MW is the distance between those two legitimate in-deadband distributions.
 
-The 15 per-contingency outliers at 0.5-1.5 MW are this same sensitivity amplified by the 1 MW
-`slackBusPMaxMismatch` deadband: where the arms' mismatch straddles it, OLF fires a pass the device does not,
-and the device then reports the pre-distribution alone (`recordDistributedActivePower`: `retain[s]` NaN = "no
-pass fired"), which is why those GPU values are round numbers like -19.3 and 31.6.
-
-What stays open from this thread: nothing about the equations. The base fallback at outer=6 remains the real
-open item.
+So this thread ends where the previous one did, on the SAME open item, now with its blast radius known: the
+base's failure at outer pass 7 does not merely cost one fallback, it silently changes the reported
+distributed power, and every contingency starts from that retried base state — which is the first thing to
+re-measure once the divergence is fixed. Note the failure is a DIVERGING Newton (the norm grows smoothly),
+not only the "unfactorable system" the earlier entry recorded from `max-iter-bad-solve`.

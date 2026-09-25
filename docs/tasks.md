@@ -2544,3 +2544,58 @@ base's failure at outer pass 7 does not merely cost one fallback, it silently ch
 distributed power, and every contingency starts from that retried base state — which is the first thing to
 re-measure once the divergence is fixed. Note the failure is a DIVERGING Newton (the norm grows smoothly),
 not only the "unfactorable system" the earlier entry recorded from `max-iter-bad-solve`.
+
+### The base's outer-6 divergence: pilot-self members have no Q placement and no q (2026-09-25)
+
+Root cause of the base failure, with direct evidence at DEFAULT settings. The pass sequence
+(`OLF_GPU_BATCH_TRACE=1`) against OLF's own (`OLF_GPU_DBG_NR=1`, which now also attaches an appender to
+`AcloadFlowEngine`, whose "Start outer loop '<name>' iteration <n>" is the CPU counterpart):
+
+```
+device: DS(0) -> DS(1) -> HvdcFreeze(2) -> HvdcLimits(3) -> Monitoring(4) -> RL(5) -> RL(6) pinned=16 iters=30 DIVERGES
+OLF:    DS(0) -> RL(1) -> RL(2) -> CONVERGED, distributedActivePower=14.35991655253323
+```
+
+The diverging pass is REACTIVE LIMITS, and the two arms pin DIFFERENT SETS: OLF's first RL pass switches **19**
+buses PV->PQ, the device pins **16**. The three OLF pins the device misses are
+`VL-5997_1`, `VL-6003_1`, `VL-6003_2` — and they are exactly the non-first members of two PILOT-SELF groups:
+
+```
+gvc pilot=VL-6003_0 controlled=VL-6003_0 pilotIsController=true qRowAlt=12588 members=3:
+    VL-6003_0[vCol=12588 qRowAlt=12588]  VL-6003_1[vCol=12590 qRowAlt=-1]  VL-6003_2[vCol=12592 qRowAlt=-1]
+
+row=12588 BUS_V(VL-6003_0) mode=0 terms=[cb#1921.q2@alt]        <- own reactive balance, so it CAN pin
+row=12590 BUS_V(VL-6003_1) mode=1 terms=[dq[k=201 ...], ...]    <- DISTR_Q only, no own q anywhere
+row=12592 BUS_V(VL-6003_2) mode=1 terms=[dq[k=207 ...], ...]    <- DISTR_Q only
+```
+
+Only the PILOT gets a Q-row placement (`qRowAlt`); every other member has `qRowAlt=-1`. So a member's row
+carries DISTR_Q and nothing else, the RL check reads its q from `qBuf[row]` — the DISTR_Q residual, ~0 at
+convergence, always inside the limits — and it never pins, while OLF computes the controller's own q and sees
+`q=192.10 > maxQ=75.36` (and `q=229.12 > maxQ=119.27`, `q=-82.69 < minQ=0.0`). Nor is there a remote-member q
+entry to supply the real value: `OLF_GPU_RMQ_TRACE=12590` prints NOTHING, i.e. `fillRemoteMemberQBatch` never
+writes that row, although the context does carry the tables (`CTX_FLAGS ... nRlRemote=75 nRmq=193`, checked —
+the "the base has no rmq" guess was wrong).
+
+The device's OWN audit says the same thing without the CPU, which is the cheapest reproduction:
+`OLF_GPU_RL_AUDIT=1e-6` returns entries UNPINNED and far outside their limits at the final state, e.g.
+`entry=949 vrow=12560 mode=0 q=3.511 min=0.0 max=0.955 over=2.556` (that is `VL-5997_0`). OLF's outer loop
+only ends after a check finds nothing to switch, so any such line is a fixpoint the device never reached.
+
+WHY IT DIVERGES rather than merely answering differently: when the pilot pins, its row is taken by its own
+pinned balance, and no member can host the group's reactive balance because none has a placement. The group's
+balance is then enforced NOWHERE — the documented rank-deficiency shape — and Newton walks away smoothly
+(norm2 2.72 -> 12.78 -> 24.58 -> ... -> 293 over 30 iterations), which is what a under-determined direction
+looks like, not a hard problem.
+
+This REFRAMES the earlier entry "TESTED AND REJECTED: that this is the pilot-self degeneracy". What that test
+actually showed is that the pilot-self ROTATION AS IMPLEMENTED does not fix the base — which is consistent
+with this root cause and explains why: the rotation moves the pilot's balance onto the first enabled member's
+row, but the members have no Q placement at all (`qRowAlt=-1`) and no q for the RL check, so the rotation
+addressed a later step than the one that is broken. The pilot-self SHAPE is directly implicated; keep the
+rotation property off, and fix the placement + the q first.
+
+Next: give every non-first member of a pilot-self group its own Q-row placement and an rmq entry, so (a) the
+RL check sees each controller's real q and pins the same set as OLF, and (b) a pinned pilot has somewhere to
+put the group's balance. Then re-measure the base (`OLF_GPU_SA_BASE_ONLY=1` prints the distributed power, and
+the 0.066 MW should go with the retry it comes from).

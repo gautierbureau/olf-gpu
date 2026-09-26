@@ -3069,3 +3069,45 @@ having on its own merits (it is a different defect, on `network.xiidm`'s battery
 Suite 300/0 with its new test. Checkstyle went 214 -> 215 on the imported test (a double blank line triggering
 `noConsecutiveLines`); collapsing it gives **213**, one under the previous baseline, so the baseline for this
 branch is now 213.
+
+### Settled: the two bookkeepings AGREE; the device and OLF disagree on the PIN (2026-09-26)
+
+RETRACTED, by measurement: the previous entry's "the RL `limitType` and the row mode genuinely disagree for
+that entry". They do not. A new line in the dump replay prints the gate's own inputs per pilot-self group, and
+every one of the 27 groups is internally consistent:
+
+```
+PS g=24 pilotEntry=997 limitType=0 fallbackRow=12834 rowMode=0 psSkip=1
+counts: 21 x (limitType=0, rowMode=0, psSkip=1)   4 x (limitType=2, rowMode=4, psSkip=0)   2 x (limitType=1, rowMode=4, psSkip=0)
+```
+
+Zero groups have `rowMode=4` with `psSkip=1`. The claim came from MIXING CONFIGURATIONS: `mode[12834]=4` was
+measured with the rotation OFF and `psSkip=1` with it ON, and the placement differs between them (rotation ON
+keeps the pilot's row a mode-0 identity and routes its q to the carrier). That is the FOURTH time a
+cross-configuration mix-up has produced a wrong conclusion here — always state the config with the number.
+
+The real disagreement is device-against-OLF, on the PIN itself:
+
+```
+RL_VROW s=0 entry=997 lt=0 q=1.218000000 minQ=-0.774 maxQ=0.774 mode=0 loadQ=1.218000000
+CPU_RL  Switch bus 'VL-6112_0' PV -> PQ, q=91.05402338186495 > maxQ=77.4        (0.9105 pu against 0.774)
+```
+
+The device's `q` equals its `loadQ` EXACTLY, so `qBuf[12834] = 0`: the bus's own reactive injection never
+reaches the RL check. OLF computes 0.9105 pu, so `qBuf[12834]` should be about -0.3075. With the rotation OFF
+the entry pins anyway — 1.218 and 0.9105 are on the same side of 0.774, a right outcome from a wrong number —
+and with it ON the entry never pins at all (no `WB_RL` line).
+
+WHY the q is missing, and why this is probably a CONSEQUENCE rather than a second independent defect: the RL
+diagnostic refill deliberately uses the FROZEN routing (`RelocTables{}`, "the relocation only concerns the
+Newton residual, not this diagnostic Q"), and this pilot's frozen q dest is -1 (suppressed), so only the rmq
+twin can supply its q. It HAS an rmq entry (`RMQ_WHY ... skipped=-`), and the terms that entry sums for this bus
+are the coupler's `DUMMY_Q` contributions — `dummyQ` being exactly the variable left underdetermined by the
+extra `+1.0` on column 13207. An underdetermined dummy gives a meaningless q, which gives a wrong pin decision.
+
+So the root remains the `DUMMY_Q` determinacy, and the thing to remove is still the DISTR_Q `kind=3` pair at row
+12836 that OLF drops once the pilot pins (`w=0.818182 + 0.181818 = 1.0`). Next: make that member's DISTR_Q
+inactive for the scenario — the qr carrier gate is the intended mechanism and it is now reachable (FIX 3), but
+it is correctly held off by `psSkip` while the device believes the pilot is unpinned, which is itself downstream
+of the wrong q. Break the loop at the q: give a pilot-self entry a diagnostic q that does not depend on the
+dummy it is meant to help determine.

@@ -1635,6 +1635,26 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
                             pss.assign(ctx->dPsSkip.cap / sizeof(char), 0);
                             CUDA_CHECK(cudaMemcpy(pss.data(), ctx->dPsSkip.p, pss.size() * sizeof(char), cudaMemcpyDeviceToHost));
                         }
+                        // The gate's OWN inputs for each pilot-self group, so "psSkip says unpinned" can be
+                        // told from "the pin never booked a limitType". pilotSelfGateBatch sets
+                        // psSkip = (limitType[psPilotEntry[g]] == 0), and the row mode is the other opinion.
+                        if (ctx->hasPilotSelf && ctx->dPsPilotEntry.p && ctx->dRlLimitType.p && ctx->nrl > 0) {
+                            std::vector<int> pe(ctx->st->nQr, -1);
+                            std::vector<char> lt(static_cast<size_t>(ctx->nrl) * nS, 0);
+                            CUDA_CHECK(cudaMemcpy(pe.data(), ctx->dPsPilotEntry.p, pe.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                            CUDA_CHECK(cudaMemcpy(lt.data(), ctx->dRlLimitType.p, lt.size() * sizeof(char), cudaMemcpyDeviceToHost));
+                            for (int g = 0; g < ctx->st->nQr; g++) {
+                                int e = pe[g];
+                                if (e < 0) {
+                                    continue;
+                                }
+                                int fallbackRow = ctx->st->hQrPtr.empty() ? -1 : ctx->st->hQrRows[ctx->st->hQrPtr[g]];
+                                std::fprintf(stderr, "    PS g=%d pilotEntry=%d limitType=%d fallbackRow=%d"
+                                             " rowMode=%d psSkip=%d\n", g, e, (int) lt[static_cast<size_t>(s) * ctx->nrl + e],
+                                             fallbackRow, fallbackRow >= 0 && fallbackRow < n ? ms[fallbackRow] : -99,
+                                             pss.empty() ? -1 : (int) pss[static_cast<size_t>(s) * ctx->st->nQr + g]);
+                            }
+                        }
                         for (int c = 0; c < ctx->ndq; c++) {
                             if (dk[c] != 3 || de[c] != want) {
                                 continue;                    // kind 3 = zero-impedance DUMMY_Q, elem = its column

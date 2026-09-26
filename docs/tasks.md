@@ -2958,3 +2958,52 @@ So the next measurement is to establish WHICH extraction produced the dumped mat
 currently say: add the structure identity (or the packer's `qRow`/`qRowAlt` for the traced rows) to the
 `VALS_DUMP` header, then re-read column 13207 with that known. Until that is pinned down, any change to the
 selection would be aimed at a placement that may not be the one in force.
+
+### The instrument, and a retraction: the zi emission is CORRECT and the imbalance is pre-existing (2026-09-26)
+
+`OLF_GPU_VALS_DUMP_COL=<variable column>` now REPLAYS `ziDynDest`'s two-way choice on the host, from the same
+tables and the same per-scenario modes the fill kernel reads, and prints it beside the dumped matrix. It exists
+because a dumped matrix alone cannot say WHICH placement built it, and the base is extracted more than once
+with different placements. Measured at the pinned fill:
+
+```
+VALS_DUMP_COL col=13207 zi=36 dummyP=13206 dummyQ=13207 frozenQ=[-1,-1] ziDyn=1
+    slot=0(F) frozen=-1 alt=-12836 sel=12834 selMode=4 -> -12836      (alt encodes -2-row, so row 12834)
+    slot=1(F) frozen=-1 alt=-12838 sel=12836 selMode=1 -> -1
+    slot=2(J) frozen=-1 alt=89495  sel=12834 selMode=4 -> 89495
+    slot=3(J) frozen=-1 alt=89516  sel=12836 selMode=1 -> -1
+```
+
+RETRACTED: the previous entry's diagnosis ("the two-way select keys on the carrier, so the +dQ is emitted
+twice; make the sel the bus's own row"). It is WRONG. Extraction #2 is the one in force (`frozenQ=[-1,-1]`),
+the select rows are ALREADY the buses' own rows (12834 and 12836), and the zi channel emits the coupling
+exactly ONCE — at 12834, because that row is mode 4 — and correctly emits no `-dQ`, because the free member
+has no Q equation in OLF either. Nothing in the zi selection needs changing, and the per-side "own V row" field
+that entry called for is not needed.
+
+So the extra `+1.0` at row 12836 comes from ANOTHER channel (by elimination, the DISTR_Q `kind=3` term the host
+tables show at that row: `dq[k=271 elem=13207 side=0 kind=3 w=-1.00000]`).
+
+What the null direction looks like, against its healthy analogues — this is the shape to fix:
+
+```
+col=13207 touchedBy=3 colSum=+1.0  (12834 mode=4 +1) (12836 mode=1 +1) (13207 mode=1 -1)   <- one too many
+col=13209 touchedBy=2 colSum= 0.0  (12840 mode=1 +1) (13209 mode=1 -1)                      <- healthy
+col=13199 touchedBy=2 colSum= 0.0  (12734 mode=1 +1) (13199 mode=1 -1)                      <- healthy
+```
+
+A healthy coupler dummy column carries `+1` in ONE bus row and `-1` in the dummy variable's own row, summing
+to zero. 13207 carries a third entry and sums to +1.
+
+TWO further negatives, both measured:
+- **`-Dolf.gpu.pilotSelfRotation=true` does not remove it.** The qr gate in `fillDistrQBatch` that deactivates
+  the re-picked free member's DISTR_Q (OLF's "DISTR_Q for every enabled controller except the FIRST", which
+  after the pilot pins should strip VL-6112_1's) does not fire even with the group enrolled: the column is
+  unchanged, and the base still diverges with a second fallback. Rotation stays OFF.
+- **The imbalance is PRE-EXISTING and independent of FIX 2.** Column 13207 is byte-identical in the pre-FIX-2
+  dump and the post-FIX-2 dump — same three entries, same `colSum=+1`, same modes. FIX 2 repaired the
+  VL-6003/VL-5997 rows (dupRows, dead column, KLU_SINGULAR) and left this coupler exactly as it was. So the
+  remaining `||dx||inf = 3.2e+15` is an OLDER defect that the singularity was masking, not a regression.
+
+Next: extend the same replay to the DQ channel (dest, elem, kind, weight, and whether each gate fires) for the
+chosen column, which names the third writer directly instead of by elimination.

@@ -1561,6 +1561,55 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
                 dumped = true;
                 std::fprintf(stderr, "VALS_DUMP wrote %s (n=%d nnz=%d outer=%d seq=%d mode4=%d)\n",
                              dumpPath, n, nnz, outer, it, modeCount[4]);
+                // OLF_GPU_VALS_DUMP_COL=<variable column>: WHICH PLACEMENT built this matrix, for the zero-
+                // impedance element that owns that column. A dumped matrix alone cannot say: the base is
+                // extracted more than once, with DIFFERENT qRow/qRowAlt per extraction (measured on rte6515's
+                // VL-6112 pilot: qRow=12836/qRowAlt=-1 in one, qRow=-1/qRowAlt=12834 in the other), and each
+                // placement is internally consistent, so reading a column's entries without knowing which one
+                // is in force invites aiming a fix at a placement that was never live. The host holds the same
+                // inputs the fill kernel reads, so REPLAY ziDynDest's two-way choice here rather than guess it.
+                const char* colEnv = std::getenv("OLF_GPU_VALS_DUMP_COL");
+                if (colEnv != nullptr && ctx->nzi > 0) {
+                    int want = std::atoi(colEnv);
+                    std::vector<int> zidx(static_cast<size_t>(ctx->nzi) * 11);
+                    std::vector<int> zdst(static_cast<size_t>(ctx->nzi) * 14);
+                    std::vector<int> zalt(static_cast<size_t>(ctx->nzi) * 8, -1);
+                    std::vector<int> zsel(static_cast<size_t>(ctx->nzi) * 8, -1);
+                    CUDA_CHECK(cudaMemcpy(zidx.data(), ctx->st->dZiIdx.p, zidx.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(zdst.data(), ctx->st->dZiDest.p, zdst.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                    if (ctx->st->dZiAltDest.p) {
+                        CUDA_CHECK(cudaMemcpy(zalt.data(), ctx->st->dZiAltDest.p, zalt.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                    }
+                    if (ctx->st->dZiSelRow.p) {
+                        CUDA_CHECK(cudaMemcpy(zsel.data(), ctx->st->dZiSelRow.p, zsel.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                    }
+                    const int* ms = mode.data() + static_cast<size_t>(s) * n;
+                    for (int e = 0; e < ctx->nzi; e++) {
+                        const int* z = zidx.data() + static_cast<size_t>(e) * 11;
+                        if (z[4] != want && z[5] != want) {
+                            continue;                        // not this element's dummyP / dummyQ column
+                        }
+                        std::fprintf(stderr, "VALS_DUMP_COL col=%d zi=%d dummyP=%d dummyQ=%d"
+                                     " frozenQ=[%d,%d] ziDyn=%d\n",
+                                     want, e, z[4], z[5], z[1], z[3], ctx->st->ziDyn ? 1 : 0);
+                        for (int slot = 0; slot < 4; slot++) {   // F1,F2 then J1,J2 of the dummyQ coupling
+                            size_t o = static_cast<size_t>(e) * 8 + slot;
+                            int frozen = zdst[static_cast<size_t>(e) * 14 + (slot < 2 ? 2 + slot : 4 + slot)];
+                            int sr = zsel[o];
+                            int selMode = sr >= 0 && sr < n ? ms[sr] : (sr <= -2 && (-2 - sr) < n ? ms[-2 - sr] : -99);
+                            int resolved = frozen;
+                            if (ctx->st->ziDyn) {
+                                if (sr <= -2) {
+                                    resolved = selMode == 0 ? zalt[o] : frozen;
+                                } else if (sr >= 0) {
+                                    resolved = (selMode == 0 || selMode == 4) ? zalt[o] : frozen;
+                                }
+                            }
+                            std::fprintf(stderr, "    slot=%d(%s) frozen=%d alt=%d sel=%d selMode=%d -> %d\n",
+                                         slot, slot < 2 ? "F" : "J", frozen, zalt[o], sr, selMode, resolved);
+                        }
+                    }
+                }
             }
         }
         std::fprintf(stderr, "VALS_SCAN outer=%d it=%d slot=%d nnz=%d finite=%s maxAbs=%.6e at row=%d col=%d"

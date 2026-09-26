@@ -1609,6 +1609,62 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
                                          slot, slot < 2 ? "F" : "J", frozen, zalt[o], sr, selMode, resolved);
                         }
                     }
+                    // ...and the DISTR_Q channel's kind-3 contributions on the SAME column, with each gate of
+                    // fillDistrQBatch replayed. A dummy column carries +1 in ONE bus row and -1 in the dummy
+                    // variable's own row when it is healthy; a THIRD entry means some channel emitted where it
+                    // should not, and the zi replay above rules that channel out. Naming the writer by
+                    // elimination cost two wrong diagnoses in this area, and the device-side printf in
+                    // fillDistrQBatch (OLF_GPU_DQ_TRACE) never reaches this harness's log — hence this.
+                    if (ctx->ndq > 0) {
+                        std::vector<int> de(ctx->ndq), dk(ctx->ndq), dd(static_cast<size_t>(ctx->ndq) * 6);
+                        std::vector<double> dw(ctx->ndq);
+                        std::vector<int> jm(ctx->ndq, -1), mqg;
+                        std::vector<char> pss;
+                        CUDA_CHECK(cudaMemcpy(de.data(), ctx->st->dDqElem.p, de.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpy(dk.data(), ctx->st->dDqKind.p, dk.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpy(dw.data(), ctx->st->dDqWeight.p, dw.size() * sizeof(double), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpy(dd.data(), ctx->st->dDqDest.p, dd.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                        if (ctx->dDqJMember.p) {
+                            CUDA_CHECK(cudaMemcpy(jm.data(), ctx->dDqJMember.p, jm.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                        }
+                        if (ctx->hasDqQrGroups && ctx->dDqMemberQrGroup.p) {
+                            mqg.assign(ctx->dDqMemberQrGroup.cap / sizeof(int), -1);
+                            CUDA_CHECK(cudaMemcpy(mqg.data(), ctx->dDqMemberQrGroup.p, mqg.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                        }
+                        if (ctx->hasPilotSelf && ctx->dPsSkip.p) {
+                            pss.assign(ctx->dPsSkip.cap / sizeof(char), 0);
+                            CUDA_CHECK(cudaMemcpy(pss.data(), ctx->dPsSkip.p, pss.size() * sizeof(char), cudaMemcpyDeviceToHost));
+                        }
+                        for (int c = 0; c < ctx->ndq; c++) {
+                            if (dk[c] != 3 || de[c] != want) {
+                                continue;                    // kind 3 = zero-impedance DUMMY_Q, elem = its column
+                            }
+                            int d0 = dd[static_cast<size_t>(c) * 6];
+                            int fRow = d0 <= -2 ? -2 - d0 : -1;
+                            bool gateMode4 = fRow >= 0 && fRow < n && ms[fRow] == 4;
+                            int g = !mqg.empty() && jm[c] >= 0 && jm[c] < static_cast<int>(mqg.size()) ? mqg[jm[c]] : -1;
+                            bool psGateOff = !pss.empty() && g >= 0
+                                    && pss[static_cast<size_t>(s) * ctx->st->nQr + g] != 0;
+                            int carrier = -1;
+                            if (g >= 0 && !ctx->st->hQrPtr.empty()) {
+                                int p0 = ctx->st->hQrPtr[g];
+                                int cnt = ctx->st->hQrPtr[g + 1] - p0;
+                                int pick = 0;
+                                for (int cc = 1; cc < cnt; cc++) {
+                                    int m2 = ms[ctx->st->hQrRows[p0 + cc]];
+                                    if (m2 != 0 && m2 != 4) { pick = cc; break; }
+                                }
+                                carrier = ctx->st->hQrRows[p0 + pick];
+                            }
+                            bool gateCarrier = g >= 0 && !psGateOff && fRow >= 0 && fRow == carrier;
+                            std::fprintf(stderr, "    DQ c=%d kind=3 elem=%d w=%.6g fRow=%d fRowMode=%d"
+                                         " jMember=%d qrGroup=%d carrier=%d psSkip=%d"
+                                         " gateMode4=%d gateCarrier=%d -> %s\n",
+                                         c, de[c], dw[c], fRow, fRow >= 0 ? ms[fRow] : -99, jm[c], g, carrier,
+                                         psGateOff ? 1 : 0, gateMode4 ? 1 : 0, gateCarrier ? 1 : 0,
+                                         (gateMode4 || gateCarrier) ? "SUPPRESSED" : "EMITTED");
+                        }
+                    }
                 }
             }
         }

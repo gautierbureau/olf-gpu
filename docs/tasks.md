@@ -3007,3 +3007,43 @@ TWO further negatives, both measured:
 
 Next: extend the same replay to the DQ channel (dest, elem, kind, weight, and whether each gate fires) for the
 chosen column, which names the third writer directly instead of by elimination.
+
+### The third writer, NAMED, and a one-line clobber fixed (2026-09-26)
+
+The DQ half of the replay (same `OLF_GPU_VALS_DUMP_COL`) names it directly, no elimination — `OLF_GPU_DQ_TRACE`
+could not, because it is a DEVICE printf and device printf output never reaches this harness's log (the same
+reason the earlier `OLF_GPU_RMQ_TRACE` looked empty and sent this investigation down a wrong path):
+
+```
+DQ c=265 kind=3 elem=13207 w=0.818182 fRow=12836 fRowMode=1 jMember=58 qrGroup=-1 carrier=-1 psSkip=0
+        gateMode4=0 gateCarrier=0 -> EMITTED
+DQ c=268 kind=3 elem=13207 w=0.181818 fRow=12836 fRowMode=1 jMember=59 qrGroup=-1 carrier=-1 psSkip=0
+        gateMode4=0 gateCarrier=0 -> EMITTED
+```
+
+Two DISTR_Q `kind=3` contributions at row 12836, weights **0.818182 + 0.181818 = 1.000000** — exactly the extra
+`+1.0` on column 13207. They are the group's two reactive keys. Per OLF, once the pilot pins, `VL-6112_1` is
+the FIRST enabled controller and must LOSE its DISTR_Q; the device keeps it because neither gate fires
+(`gateMode4` cannot: that row is mode 1; `gateCarrier` cannot: `qrGroup=-1`).
+
+**FIX 3 (one line): `ExtractionColumns`'s pilot-self alternate loop clobbered the qr enrolment.** Its guard was
+`qRowAlt[bn] < 0`, and a group encoding is `-2 - groupId`, which is also negative — so the loop overwrote the
+enrolment the loop above had just made, silently, and only for pilots whose q is suppressed at extraction,
+which is exactly the unpinned pilot-self case the rotation exists for. `== -1` is the correct test. This is why
+`-Dolf.gpu.pilotSelfRotation=true` had NO observable effect on this group in every earlier test: the property
+enrolled the group and the next loop un-enrolled it.
+
+Measured with FIX 3 + rotation ON: the DQ contributions now report `qrGroup=24 carrier=12836`, so the
+enrolment reaches them; one base attempt converges in **4 inner iterations instead of 30**; and the base's
+distributed power moves from **14.294298358 to 14.381569177** against the CPU's 14.359916553 — note 14.3816 is
+essentially the 14.381763 both arms reach when fully converged, so the device's base is now solving the right
+system far better than before.
+
+STILL NOT DONE, and the next link is exact: the carrier gate is disabled by `psSkip=1`, which asserts "this
+group's pilot is NOT pinned this scenario" while `mode[12834] = 4` says it is. `pilotSelfGateBatch` derives it
+from `limitType[psPilotEntry[g]] == 0`, the flag IS recomputed from current pin states before every fill, and
+`psEntry[g]` is matched by the pilot's own V row — so the RL bookkeeping (`limitType = 0`, unpinned) and the
+row mode (4, pinned) genuinely disagree for that entry. Resolve which of the two is wrong before touching the
+gate: if the row mode is right, the pin never booked a limitType; if the limitType is right, something set
+mode 4 without pinning. Rotation stays OFF by default and FIX 3 is inert without it (a non-pilot-self pilot
+fails that loop's `controlledBus == bus` test, so nothing else was being clobbered). Suite 299/0, checkstyle 214.

@@ -3047,3 +3047,25 @@ row mode (4, pinned) genuinely disagree for that entry. Resolve which of the two
 gate: if the row mode is right, the pin never booked a limitType; if the limitType is right, something set
 mode 4 without pinning. Rotation stays OFF by default and FIX 3 is inert without it (a non-pilot-self pilot
 fails that loop's `controlledBus == bus` test, so nothing else was being clobbered). Suite 299/0, checkstyle 214.
+
+### Taken from `injection-scope`: a curve-limit parity fix (2026-09-26)
+
+Fetched `origin/injection-scope` (3 commits, branched from the same `main` as this branch) and took all three;
+they cherry-pick cleanly, the test file auto-merging with this branch's harness edits.
+
+- `45ce19c` **Move a bus limit only for the generators that actually set it** — a real parity fix in
+  `GpuBatchRlCurves.packBusCurves`. `AbstractLfBus.getLimitQ` takes a generator's own limit only in VOLTAGE or
+  REMOTE_REACTIVE_POWER control and its fixed targetQ otherwise, so a non-controlling machine is a CONSTANT in
+  the bus's Q box; the curve channel packed every participating curve generator and the kernel then moved the
+  box by a slope OLF holds still. Comes with its own regression test.
+- `f7da13c` its `docs/numbers.md` row, `75a6f81` a harness change (compare one contingency inside the scope
+  that produces it).
+
+MEASURED AGAINST OUR CASE: it does NOT touch the outer-6 divergence. With the fix in, rte6515's busbar base is
+unchanged — `gpu=14.294298358` against `cpu=14.359916553` (diff 6.56e-02 MW), one fallback, 30 inner iterations
+at outer=6, and the two DISTR_Q kind-3 contributions on column 13207 still `EMITTED` with `qrGroup=-1`. Worth
+having on its own merits (it is a different defect, on `network.xiidm`'s battery curve), not a lead for this one.
+
+Suite 300/0 with its new test. Checkstyle went 214 -> 215 on the imported test (a double blank line triggering
+`noConsecutiveLines`); collapsing it gives **213**, one under the previous baseline, so the baseline for this
+branch is now 213.

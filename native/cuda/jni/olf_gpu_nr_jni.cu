@@ -1536,7 +1536,11 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
         // offline in seconds (scipy / KLU on the same matrix) instead of by more 8-minute device runs.
         static bool dumped = false;
         const char* dumpPath = std::getenv("OLF_GPU_VALS_DUMP");
-        if (!dumped && dumpPath != nullptr && *dumpPath != '\0' && modeCount[4] > 0) {
+        // OLF_GPU_VALS_DUMP_ANY=1: dump the FIRST fill instead of waiting for a mode-4 row. The pinned pass is
+        // the interesting one for a rank question, but a wrong VALUE is better read on the UNPINNED base, where
+        // the matrix is well determined and nothing is confounded by the rank deficiency.
+        static const bool dumpAny = std::getenv("OLF_GPU_VALS_DUMP_ANY") != nullptr;
+        if (!dumped && dumpPath != nullptr && *dumpPath != '\0' && (dumpAny || modeCount[4] > 0)) {
             std::vector<double> hf(n);
             CUDA_CHECK(cudaMemcpy(hf.data(), static_cast<const double*>(ctx->dF.p) + static_cast<size_t>(s) * n,
                                   n * sizeof(double), cudaMemcpyDeviceToHost));

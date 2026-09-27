@@ -3142,3 +3142,62 @@ not pin VL-6112_0 where OLF does -> with the rotation ON the group never reaches
 Next: compare that one coupler's through-flow against OLF on the unpinned base — the ZERO_V/ZERO_PHI pair and
 the two endpoint Q rows for zi#36 — which is a well-determined system, so a discrepancy there is a plain
 assembly difference and not a rank question.
+
+### THE FIX IS FOUND AND MEASURED — but it over-reaches, so it is not committed (2026-09-27)
+
+The controlled run first CORRECTS the previous entry. In the SHIPPING config (rotation off) the device's
+diagnostic q for the pilot is RIGHT and so is its pin:
+
+```
+RL_VROW entry=997 lt=0 q=0.910540234 minQ=0 maxQ=0 mode=0            (limits not yet refreshed)
+RL_VROW entry=997 lt=2 q=0.910540234 minQ=-0.774 maxQ=0.774 mode=4   <- pins, at OLF's pass
+CPU_RL  VL-6112_0 q=91.05402338186495 > maxQ=77.4                     (0.9105402338 pu)
+```
+
+Nine digits against OLF. So the "0.603 against 0.9105, a 0.3075 pu gap in the DUMMY_Q" of the previous entry is
+RETRACTED: 0.603 came from the rotation-ON run (a different trajectory) and 1.218 from AFTER the blow-up
+(v=1.855). Third comparison across configurations to produce a wrong conclusion; the shipping config is the
+only one whose numbers mean anything unless the property is the subject.
+
+WHAT THE PIN ACTUALLY DOES, which is the whole defect: unpinned, the coupler's DUMMY_Q column is BALANCED
+(`col 13207 = (12836,+1.0), (13207,-1.0)`, colSum 0 — the 12834 slot is wiped by the mode-0 identity, exactly
+like the healthy `col 13209`). Pinning makes 12834 mode 4, so the pilot's `+dQ` now lands there — WITHOUT
+removing the member's DISTR_Q `+dQ` at 12836. OLF SWAPS the two (activates the pinned pilot's `BUS_TARGET_Q`,
+deactivates the DISTR_Q of the controller that becomes FIRST ENABLED); the device only ADDS. colSum 0 -> +1.
+
+**THE FIX THAT WORKS.** `qrGroupOfPilot` exists precisely to separate "this pilot has a candidate table" from
+"route this pilot's Q through the carrier" (its own comment says so). Enrolling pilot-self groups for the TABLE
+ONLY — `groupOfPilot[bus] = g` without `qRowAlt[bus] = -2 - g` — makes `fillDistrQBatch`'s carrier gate
+reachable, and on rte6515's busbar base:
+
+| | before | after |
+| --- | --- | --- |
+| the two kind-3 contributions | `gateCarrier=0 -> EMITTED` | `psSkip=0 gateCarrier=1 -> SUPPRESSED` |
+| outer pass 6 | 30 iterations, diverging | 1-5 iterations, converging |
+| fallbacks | 1 | **0** |
+| base distributed power | gpu=14.294298358 (diff 6.56e-02 MW) | **gpu=14.359916553, diff 3.46e-10 MW** |
+
+That is the machine-precision agreement at DEFAULT settings that this whole thread has been chasing, with no
+knob touched.
+
+**WHY IT IS NOT COMMITTED:** the table also switches on the other group-keyed kernels —
+`updatePilotVeqBatch` (flips a pilot's V identity when the mode scan finds no carrier) and
+`updateDistrQTargetsBatch` (hands the pilot's Q target to the carrier row) — and three tests fail:
+`deviceMiddleSectionLossRenormalizesDistrQTargetMatchesCpu` and
+`deviceMiddleSectionLossWithShuntOnIslandMatchesCpu` (bus vl3_b 401.69025542177314 -> 401.36950114185817) plus
+`GpuVsCpuRte6515SaTest`'s own DAP assertion on the default branch scope (worst 1.2115417243381827 MW). Suite
+300/3.
+
+ALSO TRIED AND REJECTED, measured: implementing OLF's "all enabled except the FIRST" directly in
+`fillDistrQBatch` — suppress a contribution whose row-owner member is the group's current first-enabled,
+derived from the `(mRlEntry, limitType)` data the dynamic keys already read. It needs no table, fixes the
+divergence (outer 6 back to 2 iterations) but leaves the base at 14.405802445 (diff 4.59e-02 MW) with one
+fallback, and it is far worse elsewhere: **suite 300/37**, mostly "the batch must ENGAGE ... census={}". The
+predicate is wrong — at extraction the host has already removed the first-enabled member's DISTR_Q, so
+recomputing "first enabled" per scenario suppresses rows that legitimately carry one. Reverted.
+
+NEXT, and it is narrow: keep the table-only enrolment and find which of the two other group-keyed kernels
+breaks the middle-section tests, then gate THAT one on the group not being pilot-self. The two failing tests
+name the machinery directly (DistrQ TARGET renormalization), so `updateDistrQTargetsBatch` is the first
+suspect: for a pilot-self group whose Q is NOT re-routed, handing the pilot's Q target to the carrier row
+writes a target that belongs nowhere.

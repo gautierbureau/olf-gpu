@@ -1785,6 +1785,75 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 "the batch must precompute with the whole group pinned in the base (or the test proves nothing)");
     }
 
+    /** A remote voltage-control group that LOST CONTROL IN THE BASE and gets it back in a contingency.
+     *  The pilot vlp is a pure transit bus (a load, no generator); its two controllers gc1/gc2 hold it
+     *  at 412 kV from vlc1/vlc2. In the base a strong 420 kV source next door keeps vlp above target
+     *  even with both controllers absorbing at their minQ, so both are pinned MIN_Q, the group controls
+     *  nothing and the pilot's BUS_TARGET_V is inactive. Losing the direct line l0p drops vlp well
+     *  below 412: both controllers want back (MIN_Q pinned, v below target), and OLF restores the
+     *  pilot's V equation IN THE SAME PASS it unpins them (updateRemoteVoltageControlEquations).
+     *
+     *  <p>The device had no such restore for a group that came in lost: the pilot's row rode its own
+     *  local reactive-limit entry — an empty [0, 0] range with a pin type GUESSED from where its target
+     *  sat — and that entry's own voltage test decides on the pilot's V against the group target with
+     *  the guessed type, which is the wrong trigger: for a MAX guess (the pilot carries no load Q, so
+     *  the guess lands there, as on network.xiidm/IZUM_0) it needs v ABOVE target and never fires
+     *  while the members unpin on v BELOW it. The device then solved a pass with two sharing rows and
+     *  no voltage identity. On network.xiidm/LNER that one pass put the distributed slack 0.151 MW off.
+     *  Now updatePilotVeqBatch restores the row from the members' state; the local entry is inert.
+     *  With that restore disabled this fails at 407.08 kV against the CPU's 412.00 - the group never
+     *  gets its voltage back. Three earlier shapes of this fixture PASSED without the fix and proved
+     *  nothing: the members never unpinned, because active power through a near-lossless line moves
+     *  angles, not magnitudes, and the pilot stayed above target. GPU SA == CPU SA at 1e-12, and the
+     *  contingency must batch. */
+    @org.junit.jupiter.api.Test
+    void deviceRemoteGroupLostInBaseRegainsControlInSamePassMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = Network.create("lost-in-base-remote-group", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vlp", "vlc1", "vlc2")) {
+            com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(vl).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            v.getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        // the strong source: 425 kV one SHORT line from the pilot, so the base holds vlp ABOVE the
+        // group's 412 whatever the two controllers absorb
+        network.getVoltageLevel("vl0").newGenerator().setId("g0").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(800).setTargetV(425).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl0").newLoad().setId("ld0").setBus("vl0_b").setConnectableBus("vl0_b").setP0(100).setQ0(0).add();
+        // the pilot: a heavy load with NO reactive part (so the guessed pin type of its empty range
+        // is MAX, as on IZUM_0); once the short line is gone it hangs off two LONG paths and sags
+        network.getVoltageLevel("vlp").newLoad().setId("ldp").setBus("vlp_b").setConnectableBus("vlp_b").setP0(300).setQ0(0).add();
+        for (String c : List.of("c1", "c2")) {
+            network.getVoltageLevel("vl" + c).newGenerator().setId("g" + c).setBus("vl" + c + "_b").setConnectableBus("vl" + c + "_b")
+                    .setMinP(0).setMaxP(500).setTargetP(120).setTargetQ(0).setTargetV(412).setVoltageRegulatorOn(true)
+                    .setRegulatingTerminal(network.getLoad("ldp").getTerminal()).add();
+            // enough MAX_Q to hold 412 once the short line is gone: the group must END in control
+            network.getGenerator("g" + c).newMinMaxReactiveLimits().setMinQ(-20).setMaxQ(200).add();
+        }
+        // R matters here: active power through a lossless line moves angles, not magnitudes, and
+        // the pilot has to SAG once the short line is gone - the long paths are resistive.
+        java.util.function.BiConsumer<String[], double[]> line = (ends, rx) -> network.newLine().setId(ends[0])
+                .setVoltageLevel1(ends[1]).setBus1(ends[1] + "_b").setConnectableBus1(ends[1] + "_b")
+                .setVoltageLevel2(ends[2]).setBus2(ends[2] + "_b").setConnectableBus2(ends[2] + "_b")
+                .setR(rx[0]).setX(rx[1]).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        line.accept(new String[] {"l0p", "vl0", "vlp"}, new double[] {0.4, 5});     // the short path that props vlp up
+        line.accept(new String[] {"lpc1", "vlp", "vlc1"}, new double[] {20, 50});   // the long ones it falls back on
+        line.accept(new String[] {"lpc2", "vlp", "vlc2"}, new double[] {20, 50});
+        line.accept(new String[] {"l0c1", "vl0", "vlc1"}, new double[] {20, 50});
+        line.accept(new String[] {"l0c2", "vl0", "vlc2"}, new double[] {20, 50});
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0_0"));
+        assertGpuMatchesCpu(network, List.of(new Contingency("l0p", new com.powsybl.contingency.LineContingency("l0p"))),
+                1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the contingency must batch with the group lost in the base (or the test proves nothing)");
+    }
+
     /** A remote voltage-control group whose members are ALL pinned at MAX_Q in the base (a radial
      *  200 MVar load at vlq) and all UNPINNED by the contingency (losing that radial line). OLF's unpin
      *  recomputes each member's targetQ from its generators (0 here) and the group then shares its

@@ -4366,15 +4366,28 @@ __global__ void capturePilotQBatch(int nQr, int nScenarios, int n, const int* qr
 // Flip the pilot row to a POWER row carrying the group's captured pilot-Q target (the scatter
 // already lands the pilot's balance there via the same fallback); when a member unpins again,
 // restore the V identity and its saved target. Flag-guarded per (scenario, group): only rows
-// THIS kernel flipped are ever flipped back — a base-lost-control pilot row is already a power
-// row in the pushed base modes and stays untouched. A flip (either direction) marks the scenario
-// switched: the row swap needs a re-solve even when it rides a no-switch warm-continuation pass.
+// THIS kernel flipped are ever flipped back — with one exception. A group that lost control in the
+// BASE (every member pinned there) has its pilot row pushed as a power row with no flag, and when a
+// member unpins in a contingency OLF gives the pilot its V equation back IN THAT SAME PASS
+// (updateRemoteVoltageControlEquations runs on every switch). Nothing did that here: the pilot's own
+// local entry — an empty reactive range with a guessed pin type — restored the row on ITS OWN
+// voltage test, which is the wrong trigger and fires a pass late or never. Measured on
+// network.xiidm/LNER: the three members of IZUM_0's group unpinned on a 1.2e-6 pu knife-edge, the
+// device solved one pass with three sharing rows and no voltage identity, re-pinned two of the three
+// where OLF re-pinned all three, and the distributed slack ended 0.151 MW apart. The restore below
+// takes the group's V target from the pilot's local entry (qrPilotRlEntry), per-scenario overrides
+// included, and the local entry itself no longer decides anything. A flip (either direction) marks
+// the scenario switched: the row swap needs a re-solve even when it rides a no-switch
+// warm-continuation pass.
 __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
                                     const int* qrPtr, const int* qrRows, const char* qrGenVc,
                                     const double* pilotQ, int* mode, double* target,
                                     char* veqOff, double* savedVTarget,
                                     const char* rlActive, char* switched,
-                                    int nFrozen, const int* frozenSlotRow) {
+                                    int nFrozen, const int* frozenSlotRow,
+                                    const int* qrPilotRlEntry, const double* rlVtarget, int nrl,
+                                    int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
+                                    const double* svcRlVt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nQr * nScenarios) return;
     int g = tid % nQr;
@@ -4402,6 +4415,13 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
         mode[pi] = 0;
         target[pi] = savedVTarget[fi];
         veqOff[fi] = 0;
+        switched[s] = 1;
+    } else if (!lost && mode[pi] == 1 && qrPilotRlEntry != nullptr && qrPilotRlEntry[g] >= 0) {
+        // control lost in the BASE, a member just unpinned: the V identity comes back with the
+        // group's target (the base carried no saved one — the pilot's local entry has it)
+        int pe = qrPilotRlEntry[g];
+        mode[pi] = 0;
+        target[pi] = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, pe, rlVtarget[pe]);
         switched[s] = 1;
     }
 }
@@ -4846,11 +4866,13 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
     // entry, q at +-1.2e-12 against limits of exactly 0. The pin flips the pilot's row to its own Q
     // balance for a pass, which perturbs the whole group, and once per ~2000 contingencies it
     // changes a real downstream pin (8.178e-05 kV on the KUMB group).
-    // Only the PIN is refused, and only while the entry is unpinned: a pilot row that came in PINNED
-    // from the base seed still reaches the switch-back below and gives the group its voltage
-    // identity back. That matters - blocking both directions instead (an `else if` that swallowed
-    // the pinned branch) left network.xiidm/LKPH 0.32 kV off, because nothing restored the row.
-    if (liMin >= liMax && limitType[st] == 0) {
+    // Neither direction is this entry's to decide. The pin is refused (above), and the switch-back
+    // is not its either: the pilot's row follows its MEMBERS — updatePilotVeqBatch drops the V
+    // identity when the last member pins and gives it back when one unpins, base-lost groups
+    // included. Blocking both directions used to leave network.xiidm/LKPH 0.32 kV off because
+    // nothing restored the row then; now something does, in the same pass OLF does it, and this
+    // entry's own voltage test (a pin type guessed for an empty range) fired a pass late on LNER.
+    if (liMin >= liMax) {
         swLogPut(passSwitched[st], qBuf[idx] + rlLoadQ[li], liMin, liMax, x[idx], x[idx],
                  rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]));
         return;
@@ -5902,6 +5924,8 @@ struct BatchSolverContext {
                                                            // those get the all-pinned pilot-vEq flip)
     DeviceBuf dQrVeqOff;                                   // per (scenario, qr group): 1 = the pilot's V equation was
     DeviceBuf dQrSavedVT;                                  // flipped OFF by updatePilotVeqBatch (+ the saved V target)
+    DeviceBuf dQrPilotRlEntry;                             // per qr group: the pilot's own LOCAL reactive-limit entry
+                                                           // (its row + the group's V target), -1 = none
     int nRmq = 0;                                          // remote-member OWN-q contributions (plan-B3): a twin
     DeviceBuf dRmqRow;                                     // of the DISTR_Q assembly accumulating each member's own
     DeviceBuf dRmqElem;                                    // bus q into dQbuf at its own row (that slot is free —
@@ -8354,6 +8378,33 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             capturePilotQBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nQr, nS, n,
                     ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), dBaseMode.as<int>(),
                     ctx->dTargetBase.as<double>(), ctx->dQrPilotQ.as<double>());
+            if (!ctx->dQrPilotRlEntry.p) {
+                // Per group, the pilot's own LOCAL reactive-limit entry: a pilot whose group lost control
+                // in the BASE (every member pinned there) enters the pack as a local entry with an empty
+                // reactive range, and that entry carries the group's V target — the value the pilot row
+                // takes back when a member unpins (updatePilotVeqBatch). Built once per context.
+                int nQr = ctx->st->nQr;
+                std::vector<int> ptr(nQr + 1);
+                CUDA_CHECK(cudaMemcpy(ptr.data(), ctx->st->dQrPtr.p, ptr.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                std::vector<int> rows(std::max(ptr[nQr], 1));
+                CUDA_CHECK(cudaMemcpy(rows.data(), ctx->st->dQrRows.p, static_cast<size_t>(ptr[nQr]) * sizeof(int), cudaMemcpyDeviceToHost));
+                std::vector<int> vrow(std::max(ctx->nrl, 1));
+                std::vector<char> rem(std::max(ctx->nrl, 1), 0);
+                if (ctx->nrl > 0) {
+                    CUDA_CHECK(cudaMemcpy(vrow.data(), ctx->dRlVrow.p, static_cast<size_t>(ctx->nrl) * sizeof(int), cudaMemcpyDeviceToHost));
+                    if (ctx->dRlRemote.p) {
+                        CUDA_CHECK(cudaMemcpy(rem.data(), ctx->dRlRemote.p, static_cast<size_t>(ctx->nrl), cudaMemcpyDeviceToHost));
+                    }
+                }
+                std::vector<int> pe(std::max(nQr, 1), -1);
+                for (int g = 0; g < nQr; g++) {
+                    int pilotRow = rows[ptr[g]];
+                    for (int i = 0; i < ctx->nrl; i++) {
+                        if (!rem[i] && vrow[i] == pilotRow) { pe[g] = i; break; }
+                    }
+                }
+                ctx->dQrPilotRlEntry.upload(pe.data(), pe.size() * sizeof(int));
+            }
             if (nS == 1 && std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
                 CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
                 int nQr = ctx->st->nQr;
@@ -9113,7 +9164,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dQrPilotQ.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
                     ctx->dQrVeqOff.as<char>(), ctx->dQrSavedVT.as<double>(),
                     ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(),
-                    ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr);
+                    ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
+                    ctx->dQrPilotRlEntry.p ? ctx->dQrPilotRlEntry.as<int>() : nullptr,
+                    ctx->dRlVtarget.as<double>(), ctx->nrl,
+                    nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
+                    nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
+                    ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr);
         }
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         std::vector<char> rej(nS);
@@ -10300,7 +10356,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->dQrPilotQ.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
                         ctx->dQrVeqOff.as<char>(), ctx->dQrSavedVT.as<double>(),
                         ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(),
-                        ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr);
+                        ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
+                        ctx->dQrPilotRlEntry.p ? ctx->dQrPilotRlEntry.as<int>() : nullptr,
+                        ctx->dRlVtarget.as<double>(), ctx->nrl,
+                        nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
+                        nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
+                        ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr);
             }
             if (ctx->nPilotFlip > 0) {                      // pilot stopped controlling AND every survivor pinned
                 pilotRowAllPinnedBatch<<<grid(ctx->nPilotFlip), BLOCK, 0, ctx->stream>>>(

@@ -3282,3 +3282,29 @@ right effect; the mixed-pin state that follows needs the rotation FINISHED (the 
 onto the first enabled member's row while the pilot's row keeps BUS_TARGET_V), not the table alone. FIX 4's
 separation of "has a table" from "Q re-routed" is correct and will be needed when that work resumes;
 `GpuBatchChunkSolver`'s carrier re-pick and the two device consumers must all honour it.
+
+### The rotation path never pinned its pilot because it counted the pilot's q TWICE (2026-09-27)
+
+Under `-Dolf.gpu.pilotSelfRotation=true` the pilot's diagnostic q read 0.603080467 where OLF has 0.910540234,
+and the arithmetic on those measured numbers is exact: `1.218 (loadQ) + 2 * (0.910540234 - 1.218) = 0.603080`.
+The injection is counted twice. `patchFrozenGroupDests` points a group-relocated output's frozen role-0 dest at
+the table's FALLBACK row so that the diagnostic fill (frozen routing) puts the pilot's own injection there — and
+for a pilot-self group the fallback row IS the pilot's own row, which ALSO has an rmq twin entry
+(`remoteMemberQPack` includes a pilot that is a controller). A non-pilot-self pilot has no rmq entry, so only
+this shape doubles. FIX 5: `remoteMemberQPack` skips a pilot-self pilot whose `qRowAlt <= -2`. Measured under
+the property: `q=0.910540234`, pins at OLF's pass with `lt=2`. Inert with the property off (suite 300/0).
+
+With the q right, the rotation path reaches the state its gate describes and the dump shows the remaining
+defect exactly: at the pinned pass column 13207 is BALANCED (the DQ pair `SUPPRESSED`, the zi coupling routed to
+the carrier 12836), but the pin's mode/target landed on the pilot's OWN row —
+
+```
+row 12834 (pilot):   mode=4 target=-0.444  F=4.44e-01  nonzero=[(12834,-1),(12836,+1)]   <- no q content: F = -target
+row 12836 (carrier): mode=1 target= 0.000  F=-4.18e-01 nonzero=[(12834,-1),(12836,+1),(13207,+1)]
+```
+
+— while its q content went to the carrier, which is solved against target 0. The `rlPilotSelfMixedGate`
+comment names the layout OLF has here: "keeps the pilot's V identity AND activates the pilot's own Q balance,
+hosting it on the reference member's row — a relocation this group has no table for". Under the property the
+table now exists, so the remaining change is the pin itself: leave the pilot's row a V identity, put
+`limit - loadQ` on the carrier, keep the carrier's DISTR_Q gated (already), and stop rejecting the mixed state.

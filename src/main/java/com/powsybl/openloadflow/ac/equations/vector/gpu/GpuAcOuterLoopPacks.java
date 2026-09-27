@@ -232,6 +232,17 @@ public final class GpuAcOuterLoopPacks {
                 if (!member || vCol[bus.getNum()] < 0 || !(bus.getMinQ() < bus.getMaxQ())) {
                     continue;                                // mirror the RL pack's remote-entry condition
                 }
+                // A pilot-self pilot whose Q is RE-ROUTED through a candidate table (qRowAlt = -2-g) already gets
+                // its own injection at its own row from the diagnostic fill: patchFrozenGroupDests points the
+                // group's frozen role-0 dest at the table's FALLBACK row, which for such a pilot IS its own row.
+                // Adding the rmq twin on top counted it TWICE. Measured on rte6515 VL-6112_0 with the rotation
+                // property on: q read 0.603080467 where OLF has 0.910540234, and
+                // 1.218 (loadQ) + 2 * (0.910540234 - 1.218) = 0.603080 — the doubled injection, to six digits.
+                // The reactive-limit check then never saw the pilot beyond its limit and never pinned it, which
+                // is what kept the rotation path from ever reaching the pinned arrangement it exists for.
+                if (isPilotSelfEntry(bus) && columns.qRowAlt()[bus.getNum()] <= -2) {
+                    continue;
+                }
                 var vc = bus.getGeneratorVoltageControl().orElseThrow();
                 if (vCol[vc.getControlledBus().getNum()] < 0) {
                     continue;

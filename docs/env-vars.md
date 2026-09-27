@@ -94,6 +94,7 @@ Safe to add. These are the instruments; several are the only reason a defect was
 | `OLF_GPU_GENOUT_SHAPE` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchInjectionOutages.java:231 |
 | `OLF_GPU_GENOUT_TRACE` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchInjectionOutages.java:396 |
 | `OLF_GPU_ITER_TRACE` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchChunkSolver.java:1136 |
+| `OLF_GPU_ITER_TRACE_CTG` | src/main/java/com/powsybl/openloadflow/ac/solver/gpu/batch/GpuBatchChunkSolver.java — `<id>[,<id>]`: with OLF_GPU_ITER_TRACE, the main-solve iteration count of NAMED scenarios at any chunk size (the per-scenario print is otherwise gated on chunks of <= 4); line it up against OLF_LF_STEPS_TRACE on the CPU arm |
 | `OLF_GPU_LIN_RESID` | native/cuda/jni/olf_gpu_nr_jni.cu (both the sequential and the batched solve) — prints `\|\|J.dx-F\|\|inf` per iteration, i.e. how exactly cuDSS solved the system it was handed |
 | `OLF_GPU_CONV_TRACE` | native/cuda/jni/olf_gpu_nr_jni.cu (batched solve) — `<slot>` or `all`: the stopping DECISION per iteration (norm2, its threshold, the active row count, inf-norm, per-row flag) plus `CONV_TOP`, the eight worst rows by index; OLF's `OLF_NR_ITER_TRACE` prints `NR_TOP` with the same shape, so the two lists name the rows where a step differs |
 | `OLF_GPU_HAZ_TRACE` | native/cuda/jni/olf_gpu_nr_jni.cu (`hazRepairVals`) — device printf `HAZ_NODONOR s= row= donors=`: a zero-diagonal row none of its candidate donors could repair this scenario (lands in the surefire dumpstream) |
@@ -121,6 +122,7 @@ Safe to add. These are the instruments; several are the only reason a defect was
 | `OLF_GPU_RMQ_TRACE` | native/cuda/jni/olf_gpu_nr_jni.cu:8658 |
 | `OLF_GPU_ROW_PROBE` | native/cuda/jni/olf_gpu_nr_jni.cu — `<deviceRow>`: that row in every scenario at every inner iteration (residual, state, target, non-zero Jacobian entries) AND, with `OLF_GPU_BATCH_TRACE`, the slot-0 target AND residual of that row on every `pass done` line (`probeRow=... target=... F=...`): a target a loop PHASE mutates between solves (HVDC freeze/unfreeze, DS anchor reset) is invisible to the per-iteration print. Found the doubled-corridor unfreeze race (2026-09-22) |
 | `OLF_GPU_SA_BUSDIFF` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:348 |
+| `OLF_GPU_SA_BUSDIFF_CTG` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java — `<id>[,<id>]`: bus-diff those contingencies INSIDE the full scope (one scoped StateMonitor per id, so the heap holds a handful of results, not 10540 x 13202). The list decides the retained switches on a node-breaker network, so a contingency that differs in the full scope cannot be studied alone (CTG_ONLY) |
 | `OLF_GPU_SA_DEBUG_CTG` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuProductionSaBenchmarkTest.java:164 |
 | `OLF_GPU_SA_INVENTORY` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:205 |
 | `OLF_GPU_SA_MON_BRANCH` | src/test/java/com/powsybl/openloadflow/sa/gpu/GpuVsCpuRte6515SaTest.java:353 +1 |

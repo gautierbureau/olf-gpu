@@ -3111,3 +3111,34 @@ inactive for the scenario — the qr carrier gate is the intended mechanism and 
 it is correctly held off by `psSkip` while the device believes the pilot is unpinned, which is itself downstream
 of the wrong q. Break the loop at the q: give a pilot-self entry a diagnostic q that does not depend on the
 dummy it is meant to help determine.
+
+**No duplicated term, and the gap is the DUMMY_Q's VALUE on the UNPINNED base (2026-09-27).**
+`OLF_GPU_VALS_DUMP_ROW=<row>` lists every remote-member-q contribution summing into a row's diagnostic slot.
+For the pilot:
+
+```
+RMQ row=12834 c=144 kind=0 elem=8783 side=0 w=1
+RMQ row=12834 c=145 kind=0 elem=8925 side=1 w=1
+RMQ row=12834 c=146 kind=3 elem=13207 side=0 w=1 x[elem]=-0.417689
+RMQ row=12834 contributions=3
+```
+
+REFUTED: the factor-2 reading of "device 0.603 / OLF 0.9105 / loadQ 1.218 are equally spaced by 0.3075" as a
+doubled contribution. There are exactly three terms and no duplicate.
+
+So `qBuf[12834] = q(8783) + q(8925) + x[13207]`. The device's early q of 0.603 gives `qBuf = -0.615`, so the
+branch pair sums to -0.1973; OLF's 0.9105 gives `qBuf = -0.3075` and therefore implies `dummyQ = -0.1102`,
+against the device's **-0.417689**. The entire 0.3075 pu gap is the coupler `DUMMY_Q` variable's VALUE.
+
+AND THAT MATTERS FOR WHERE TO LOOK: this q is read on the CONVERGED UNPINNED base — `mode4Rows` is empty
+there, `dupRows=-1,-1`, `deadCols=0`, and KLU factors it. So the wrong dummy is NOT downstream of the pinned
+pass's rank deficiency, as the previous entry concluded; the two arms disagree about this coupler's reactive
+through-flow in a system that is perfectly well determined. The later `q = 1.218` exactly (`qBuf = 0`) is the
+pinned pass's singular state and is the symptom, not the cause.
+
+The chain, now end to end: the device's `DUMMY_Q` for BUS-6112_COUPLER_1 is 0.3075 pu off OLF's on the unpinned
+base -> the pilot's diagnostic q reads 0.603 against a 0.774 limit instead of OLF's 0.9105 -> the device does
+not pin VL-6112_0 where OLF does -> with the rotation ON the group never reaches the pinned arrangement at all.
+Next: compare that one coupler's through-flow against OLF on the unpinned base — the ZERO_V/ZERO_PHI pair and
+the two endpoint Q rows for zi#36 — which is a well-determined system, so a discrepancy there is a plain
+assembly difference and not a rank question.

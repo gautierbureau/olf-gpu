@@ -1635,6 +1635,37 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
                             pss.assign(ctx->dPsSkip.cap / sizeof(char), 0);
                             CUDA_CHECK(cudaMemcpy(pss.data(), ctx->dPsSkip.p, pss.size() * sizeof(char), cudaMemcpyDeviceToHost));
                         }
+                    // OLF_GPU_VALS_DUMP_ROW=<device row>: every REMOTE-MEMBER-Q contribution summing into
+                    // that row's diagnostic q slot, which is what the reactive-limit check reads as
+                    // `q = qBuf[row] + loadQ`. A term counted twice makes the check compare a doubled q
+                    // against OLF's limits, and on rte6515's VL-6112_0 the device's q sits exactly one
+                    // -0.3075 pu step past OLF's (0.603 against 0.9105 with loadQ 1.218), which is what a
+                    // duplicated contribution looks like.
+                    const char* rowEnv = std::getenv("OLF_GPU_VALS_DUMP_ROW");
+                    if (rowEnv != nullptr && ctx->nRmq > 0) {
+                        int wantRow = std::atoi(rowEnv);
+                        std::vector<int> rr(ctx->nRmq), re(ctx->nRmq), rs(ctx->nRmq), rk(ctx->nRmq);
+                        std::vector<double> rw(ctx->nRmq);
+                        CUDA_CHECK(cudaMemcpy(rr.data(), ctx->dRmqRow.p, rr.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpy(re.data(), ctx->dRmqElem.p, re.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpy(rs.data(), ctx->dRmqSide.p, rs.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpy(rk.data(), ctx->dRmqKind.p, rk.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpy(rw.data(), ctx->dRmqWeight.p, rw.size() * sizeof(double), cudaMemcpyDeviceToHost));
+                        std::vector<double> hx(n);
+                        CUDA_CHECK(cudaMemcpy(hx.data(), static_cast<const double*>(ctx->dX.p) + static_cast<size_t>(s) * n,
+                                              n * sizeof(double), cudaMemcpyDeviceToHost));
+                        int cnt = 0;
+                        for (int c = 0; c < ctx->nRmq; c++) {
+                            if (rr[c] != wantRow) {
+                                continue;
+                            }
+                            cnt++;
+                            std::fprintf(stderr, "    RMQ row=%d c=%d kind=%d elem=%d side=%d w=%.9g%s\n",
+                                         wantRow, c, rk[c], re[c], rs[c], rw[c],
+                                         rk[c] == 3 ? (std::string(" x[elem]=") + std::to_string(hx[re[c]])).c_str() : "");
+                        }
+                        std::fprintf(stderr, "    RMQ row=%d contributions=%d\n", wantRow, cnt);
+                    }
                         // The gate's OWN inputs for each pilot-self group, so "psSkip says unpinned" can be
                         // told from "the pin never booked a limitType". pilotSelfGateBatch sets
                         // psSkip = (limitType[psPilotEntry[g]] == 0), and the row mode is the other opinion.

@@ -1540,12 +1540,23 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
         // the interesting one for a rank question, but a wrong VALUE is better read on the UNPINNED base, where
         // the matrix is well determined and nothing is confounded by the rank deficiency.
         static const bool dumpAny = std::getenv("OLF_GPU_VALS_DUMP_ANY") != nullptr;
-        if (!dumped && dumpPath != nullptr && *dumpPath != '\0' && (dumpAny || modeCount[4] > 0)) {
+        // OLF_GPU_VALS_DUMP_NTH=<n>: dump the n-th ELIGIBLE fill instead of the first, so a later context (the
+        // contingency batch after the base) can be read; with DUMP_ANY every first fill of a solve is eligible.
+        static const int dumpNth = std::getenv("OLF_GPU_VALS_DUMP_NTH") != nullptr ? std::atoi(std::getenv("OLF_GPU_VALS_DUMP_NTH")) : 1;
+        static int eligibleSeen = 0;
+        // `it` runs on across contexts (the contingency batch after the base starts at it=5, not 0), so the
+        // first fill of a solve is "outer 0 after a scan that was not outer 0", not "it == 0".
+        static int prevOuter = -1;
+        bool firstOfSolve = outer == 0 && prevOuter != 0;
+        prevOuter = outer;
+        bool eligible = dumpPath != nullptr && *dumpPath != '\0' && (dumpAny ? firstOfSolve : modeCount[4] > 0);
+        if (eligible) eligibleSeen++;
+        if (!dumped && eligible && eligibleSeen == dumpNth) {
             std::vector<double> hf(n);
             CUDA_CHECK(cudaMemcpy(hf.data(), static_cast<const double*>(ctx->dF.p) + static_cast<size_t>(s) * n,
                                   n * sizeof(double), cudaMemcpyDeviceToHost));
             if (std::FILE* f = std::fopen(dumpPath, "w")) {
-                std::fprintf(f, "n %d nnz %d outer %d seq %d slot %d\n", n, nnz, outer, it, s);
+                std::fprintf(f, "n %d nnz %d outer %d seq %d slot %d nS %d\n", n, nnz, outer, it, s, nS);
                 for (int r = 0; r <= n; r++) {
                     std::fprintf(f, "%d%c", rowPtr[r], r == n ? '\n' : ' ');
                 }
@@ -1561,10 +1572,26 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
                 for (int r = 0; r < n; r++) {
                     std::fprintf(f, "%d%c", mode[static_cast<size_t>(s) * n + r], r == n - 1 ? '\n' : ' ');
                 }
+                // lines 7 and 8: the STATE and the TARGET this fill was evaluated against. F = eval - target with
+                // an identical Jacobian can differ through either, and only the vectors say which (the row-10
+                // difference between a table-enrolled and a plain pilot-self group was exactly that question).
+                {
+                    std::vector<double> hx(n), ht(n);
+                    CUDA_CHECK(cudaMemcpy(hx.data(), static_cast<const double*>(ctx->dX.p) + static_cast<size_t>(s) * n,
+                                          n * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(ht.data(), static_cast<const double*>(ctx->dTarget.p) + static_cast<size_t>(s) * n,
+                                          n * sizeof(double), cudaMemcpyDeviceToHost));
+                    for (int r = 0; r < n; r++) {
+                        std::fprintf(f, "%.17g%c", hx[r], r == n - 1 ? '\n' : ' ');
+                    }
+                    for (int r = 0; r < n; r++) {
+                        std::fprintf(f, "%.17g%c", ht[r], r == n - 1 ? '\n' : ' ');
+                    }
+                }
                 std::fclose(f);
                 dumped = true;
-                std::fprintf(stderr, "VALS_DUMP wrote %s (n=%d nnz=%d outer=%d seq=%d mode4=%d)\n",
-                             dumpPath, n, nnz, outer, it, modeCount[4]);
+                std::fprintf(stderr, "VALS_DUMP wrote %s (n=%d nnz=%d outer=%d seq=%d mode4=%d nS=%d nth=%d)\n",
+                             dumpPath, n, nnz, outer, it, modeCount[4], nS, eligibleSeen);
                 // OLF_GPU_VALS_DUMP_COL=<variable column>: WHICH PLACEMENT built this matrix, for the zero-
                 // impedance element that owns that column. A dumped matrix alone cannot say: the base is
                 // extracted more than once, with DIFFERENT qRow/qRowAlt per extraction (measured on rte6515's
@@ -1718,6 +1745,25 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
                                          c, de[c], dw[c], fRow, fRow >= 0 ? ms[fRow] : -99, jm[c], g, carrier,
                                          psGateOff ? 1 : 0, gateMode4 ? 1 : 0, gateCarrier ? 1 : 0,
                                          (gateMode4 || gateCarrier) ? "SUPPRESSED" : "EMITTED");
+                        }
+                        // ...and EVERY DISTR_Q contribution whose residual lands in OLF_GPU_VALS_DUMP_ROW, all kinds,
+                        // with the STATIC weight (the dynamic renormalization over survivors is applied in-kernel
+                        // and is not replayed here — a row whose static weights are 1/3 with one member islanded
+                        // should assemble as 1/2 on the device, which the dumped VALUES show).
+                        const char* rowEnv2 = std::getenv("OLF_GPU_VALS_DUMP_ROW");
+                        if (rowEnv2 != nullptr) {
+                            int wantRow2 = std::atoi(rowEnv2);
+                            for (int c = 0; c < ctx->ndq; c++) {
+                                int d0 = dd[static_cast<size_t>(c) * 6];
+                                int fRow = d0 <= -2 ? -2 - d0 : -1;
+                                if (fRow != wantRow2) {
+                                    continue;
+                                }
+                                int g = !mqg.empty() && jm[c] >= 0 && jm[c] < static_cast<int>(mqg.size()) ? mqg[jm[c]] : -1;
+                                bool psGateOff = !pss.empty() && g >= 0 && pss[static_cast<size_t>(s) * ctx->st->nQr + g] != 0;
+                                std::fprintf(stderr, "    DQROW row=%d c=%d kind=%d elem=%d w=%.6g jMember=%d qrGroup=%d psSkip=%d rowMode=%d\n",
+                                             wantRow2, c, dk[c], de[c], dw[c], jm[c], g, psGateOff ? 1 : 0, ms[wantRow2]);
+                            }
                         }
                     }
                 }
@@ -4160,6 +4206,17 @@ __device__ inline double rlTargetOf(int nRlVtOv, const int* rlVtOvSlotIdx, const
 #define RL_LIMIT_FROZEN 5
 #define RL_BASE_RELOCATED 6
 
+// Bisection of the pilot-self TABLE-ONLY enrolment (docs/tasks.md 2026-09-27): OLF_GPU_PS_MASK bit 1 skips
+// updateDistrQTargetsBatch's carrier hand-off for pilot-self groups, bit 2 skips updatePilotVeqBatch for them.
+static int psMaskEnv() {
+    static const int m = std::getenv("OLF_GPU_PS_MASK") != nullptr ? std::atoi(std::getenv("OLF_GPU_PS_MASK")) : 0;
+    return m;
+}
+template <typename Ctx>
+static const int* psEntryPtr(Ctx* ctx) {
+    return ctx->hasPilotSelf && ctx->dPsPilotEntry.p != nullptr ? ctx->dPsPilotEntry.template as<int>() : nullptr;
+}
+
 // PILOT-SELF gate, per (scenario, group): 1 = skip this group's relocated raw q because its pilot is one of
 // its own controllers and is NOT pinned this scenario. While the pilot controls, its q belongs in the
 // group's DISTR_Q rows WEIGHTED (it has no Q balance of its own), so emitting it raw at the carrier row
@@ -4426,13 +4483,17 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                                          int nDqInact, const int* dqInactSlotMember,
                                          int nFrozen, const int* frozenSlotRow,
                                          int nTqOv, const int* tqOvKey, const double* tqOvVal,
-                                         const int* mTgtPtr, const int* mTgtPeer) {
+                                         const int* mTgtPtr, const int* mTgtPeer,
+                                         const int* psEntry, int psMask) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nMembers * nScenarios) return;
     int k = tid % nMembers;
     int s = tid / nMembers;
     if (!rlActive[s]) return;
     int qg = mQrGroup != nullptr ? mQrGroup[k] : -1;
+    // OLF_GPU_PS_MASK bit 1: for a PILOT-SELF group, behave as before its table existed — no carrier
+    // target hand-off (its Q is NOT re-routed, so the carrier row hosts no pilot balance to target).
+    if ((psMask & 1) && psEntry != nullptr && qg >= 0 && psEntry[qg] >= 0) qg = -1;
     if (!mHasRow[k] && qg < 0) return;                       // only members owning a packed DISTR_Q row
                                                              // (or linked to a relocation group, plan-B4)
     if (mRow[k] >= 0 && rowIsFrozen(nFrozen, frozenSlotRow, s, mRow[k])) {
@@ -4534,12 +4595,16 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
                                     const double* pilotQ, int* mode, double* target,
                                     char* veqOff, double* savedVTarget,
                                     const char* rlActive, char* switched,
-                                    int nFrozen, const int* frozenSlotRow) {
+                                    int nFrozen, const int* frozenSlotRow,
+                                    const int* psEntry, int psMask) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nQr * nScenarios) return;
     int g = tid % nQr;
     int s = tid / nQr;
     if (!rlActive[s] || !qrGenVc[g]) return;
+    // OLF_GPU_PS_MASK bit 2: leave a PILOT-SELF group's V identity alone (bisection of the table-only
+    // enrolment: which group-keyed kernel breaks the middle-section DistrQ-target tests).
+    if ((psMask & 2) && psEntry != nullptr && psEntry[g] >= 0) return;
     int pilotRow = qrRows[qrPtr[g]];
     // An ISLANDED pilot has no equation at all on the CPU: OLF removes the bus. Its row here is
     // frozen to a flat voltage identity, and every member row is frozen to identity too, so the
@@ -9273,7 +9338,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dQrPilotQ.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
                     ctx->dQrVeqOff.as<char>(), ctx->dQrSavedVT.as<double>(),
                     ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(),
-                    ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr);
+                    ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
+                        psEntryPtr(ctx), psMaskEnv());
         }
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         std::vector<char> rej(nS);
@@ -10451,7 +10517,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
                         ctx->nDqTqOv, ctx->nDqTqOv ? ctx->dDqTqOvKey.as<int>() : nullptr,
                         ctx->nDqTqOv ? ctx->dDqTqOvVal.as<double>() : nullptr,
-                        ctx->dDqMemberTgtPtr.as<int>(), ctx->dDqMemberTgtPeer.as<int>());
+                        ctx->dDqMemberTgtPtr.as<int>(), ctx->dDqMemberTgtPeer.as<int>(),
+                        psEntryPtr(ctx), psMaskEnv());
             }
             if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {    // all-pinned corner: pilot vEq flip/restore
                 updatePilotVeqBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
@@ -10460,7 +10527,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->dQrPilotQ.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
                         ctx->dQrVeqOff.as<char>(), ctx->dQrSavedVT.as<double>(),
                         ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(),
-                        ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr);
+                        ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
+                        psEntryPtr(ctx), psMaskEnv());
             }
             if (ctx->nPilotFlip > 0) {                      // pilot stopped controlling AND every survivor pinned
                 pilotRowAllPinnedBatch<<<grid(ctx->nPilotFlip), BLOCK, 0, ctx->stream>>>(

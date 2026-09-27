@@ -3201,3 +3201,84 @@ breaks the middle-section tests, then gate THAT one on the group not being pilot
 name the machinery directly (DistrQ TARGET renormalization), so `updateDistrQTargetsBatch` is the first
 suspect: for a pilot-self group whose Q is NOT re-routed, handing the pilot's Q target to the carrier row
 writes a target that belongs nowhere.
+
+### The table-only enrolment, taken apart on the middle-section fixture — and it regresses the batch (2026-09-27)
+
+Bisecting the three failures of the table-only enrolment with a per-group mask (`OLF_GPU_PS_MASK`: bit 1
+skips `updateDistrQTargetsBatch`'s carrier hand-off for pilot-self groups, bit 2 skips `updatePilotVeqBatch`)
+gave an answer I did not expect: the two middle-section tests fail IDENTICALLY under every mask
+(`vl3_b 401.36950114185817` at 0, 1, 2 and 3), while the base stays fixed under every mask (mask 3:
+`diff=5.55e-11 MW`, 2 iterations, no fallback). So neither of those kernels is what breaks the fixture, and
+the base fix comes purely from the DISTR_Q carrier gate.
+
+The fixture has 16 rows, so the two arms were compared vector by vector at the contingency batch's first fill
+(the dump now records `nS`, selects a later context with `OLF_GPU_VALS_DUMP_NTH` — `it` runs on across
+contexts, so "first fill of a solve" is `outer==0` after a non-zero outer — and writes `x` and `target`):
+
+```
+row  mode  F(with)        F(without)     x(with)     x(without)  target(with)   target(without)
+ 10  1/1   2.488544e-01   3.155211e-01   1.0125      1.0125      -0.133333333   -0.200000000   <-- TARGET differs
+```
+
+Identical Jacobian, identical incoming state, only the TARGET of the surviving member's DISTR_Q row differs —
+and `-0.2` is OLF's post-contingency `distr_q5 = -0.5*q(bus5) + 0.5*q(bus3)` (weights renormalized 1/3 -> 1/2
+over the two survivors). `OLF_GPU_TARGET_ROW=10` then named the producer: with the table, row 10 receives TWO
+overrides, `-0.133333333` (the base value) and `-0.200000000` (the renormalized one), and the base value wins;
+without it, only `-0.2`. The extra one is `GpuBatchChunkSolver`'s carrier re-pick on islanding
+(`overrides.add(s*n + newCarrier, baseTargets[baseCarrier])`), which moves "the pilot's relocated balance" from
+a frozen base carrier to the next live member — correct for a re-routed group, wrong for a table-only one,
+which carries no relocated balance at all.
+
+FIX 4 (in the tree, not committed): a per-group `qrRerouted` flag, computed in `ExtractionColumns` where the
+decision is made (1 for transformer/shunt groups and re-routed gen-VC groups, 0 for a table-only pilot-self
+group), carried on `GpuAcData` beside `qrPtr`/`qrRows`, and honoured by that block. Both middle-section tests
+pass with it (2/0).
+
+BUT THE TABLE REGRESSES THE BATCH, measured, and this is the decisive fact of the day:
+
+| scope | committed tree | table-only enrolment (+FIX 4) |
+| --- | --- | --- |
+| branch scope, on device | 9040 / 9042 | 9034 / 9042 |
+| branch scope, DAP | 725 differ, **worst 7.3e-07 MW** | 952-1156 differ, **worst 1.0-1.2 MW** |
+| branch scope, violations | **diff 0** | diff 399 |
+| busbar window [5000,6000), on device | 900 / 1000 | **0 / 1000** (`RUNTIME:status=-2=976`) |
+| busbar base | falls back, 6.56e-02 MW | no fallback, 3.5e-10 MW |
+
+So the enrolment fixes the one base and breaks nearly everything else: the branch scope was essentially
+PERFECT at the committed tree (DAP to 7e-07 MW, zero violation difference), and the window goes from 900 to
+ZERO scenarios on the device — the outcome the standing directive forbids. The table has too many consumers,
+and the ones the mask covers are not the ones doing this (the base is unaffected by them). The runtime
+rejections' reasons (`OLF_GPU_REJECT_TRACE`) are the next measurement; until they are known, the enrolment
+stays OUT of any commit. What IS established and stays: the base's defect is the DISTR_Q of the controller that
+becomes first-enabled when the pilot pins, and the carrier gate that deactivates it is the right mechanism —
+it needs a way to reach pilot-self groups WITHOUT the rest of the table's machinery.
+
+**The window's rejections named, the two device consumers masked, and the decision (2026-09-27).**
+`OLF_GPU_REJECT_TRACE` on the full window with the table: the batch churns to **outer pass 36** —
+`974 x max-iter-bad-solve outer=36`, `62 x pilot-self-mixed-pin outer=35`, one `outer-loop-budget outer=29`
+— a batch-wide outer-loop runaway that a 50-scenario range never reaches (49/50 on device at mask 0, 50/50 at
+mask 3). Masking the two device consumers (`OLF_GPU_PS_MASK=3`) on the full window restores the batch and
+keeps the base fix, but not the rest:
+
+| full window [5000,6000) | committed tree | table + FIX 4, mask 3 |
+| --- | --- | --- |
+| on device | 900 / 1000 | 972 / 1000 |
+| base distributed power | falls back, diff 6.56e-02 MW | diff 2e-09 MW, no fallback |
+| outer passes | normal | still churns to 35-36 (`pilot-self-mixed-pin` x 71) |
+| violations | diff 19 | **diff 163** |
+| DAP worst | 1.057 MW | **4.470 MW** |
+| branch scope (9042) | diff 0, worst 7.3e-07 MW | diff 399, worst 1.0 MW |
+
+So the table enrolment half-enables the UNFINISHED pilot-self rotation (the `pilot-self-mixed-pin` gate
+exists precisely because the device cannot yet hold a pilot-self group with some controllers pinned and some
+not), and the pin/unpin cycle it starts costs more than the one base it fixes. REVERTED: the table-only
+enrolment and the `qrRerouted` plumbing (FIX 4) are out of the tree; the diagnostics stay (`VALS_DUMP_ANY`,
+`VALS_DUMP_NTH`, `VALS_DUMP_ROW`, the `x`/`target` lines in the dump, the `PS`/`DQ`/`DQROW`/`RMQ` replays, and
+the `OLF_GPU_PS_MASK` gate in the two kernels, inert without a pilot-self table).
+
+What stays established, all measured: the base's defect is exactly "a pilot-self pilot pins, and the
+controller that becomes first-enabled keeps a DISTR_Q that OLF deactivates"; the DISTR_Q carrier gate is the
+right effect; the mixed-pin state that follows needs the rotation FINISHED (the pilot's pinned balance moving
+onto the first enabled member's row while the pilot's row keeps BUS_TARGET_V), not the table alone. FIX 4's
+separation of "has a table" from "Q re-routed" is correct and will be needed when that work resumes;
+`GpuBatchChunkSolver`'s carrier re-pick and the two device consumers must all honour it.

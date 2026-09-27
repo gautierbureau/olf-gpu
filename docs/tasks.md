@@ -3308,3 +3308,60 @@ comment names the layout OLF has here: "keeps the pilot's V identity AND activat
 hosting it on the reference member's row — a relocation this group has no table for". Under the property the
 table now exists, so the remaining change is the pin itself: leave the pilot's row a V identity, put
 `limit - loadQ` on the carrier, keep the carrier's DISTR_Q gated (already), and stop rejecting the mixed state.
+
+### The rotation finished: the pilot's pin rides the carrier, "control lost" is pilot-self aware, the base matches OLF's outer sequence (2026-09-27, rotation ON)
+
+All under `-Dolf.gpu.pilotSelfRotation=true`, window [5000,6000) busbar base (the WINDOW changes the base network —
+busbar contingencies retain different switches — so `5000:5001` is another base: 14 pins, no pilot-self churn;
+every number below is the [5000,6000) base). Method: `OLF_GPU_DBG_RL=1` (CPU per-bus PV<->PQ decisions, TRACE) beside
+`OLF_GPU_SW_TRACE=0` (every device entry that switched, with q/min/max/v/vt), plus two new device traces:
+`PSG` (per pass, every pilot-self group: pilot pin state, own-row mode/target, `veqOff`, every candidate row with
+its mode and the relocChoose pick — needs `OLF_GPU_BATCH_TRACE`) and `OLF_GPU_PSG_STEP=<g>` (the same for one group
+after EACH kernel of the RL pass, so a row change is charged to the kernel between two lines).
+
+Four defects, each measured then fixed:
+
+1. **The pin landed on the pilot's own row** (`reactiveLimitsBatch` mode 4, no q content, F = −target, the
+   `pilot-self-mixed-pin` reject). Now an ENROLLED pilot (`isEnrolledPilot`: `psEntry[g] == i`) pins WITHOUT
+   touching its row; `updateDistrQTargetsBatch`'s carrier hand-off writes `limit − loadQ[pilot]` on the carrier
+   when the pilot is pinned (falls through to the normal DISTR_Q target when unpinned); `rlPilotSelfMixedGate`
+   skips enrolled pilots. Group VL-6112 (g=24): pilot row 12834 stays `mode=0 target=1.055`, carrier 12836
+   `mode=1 target=-0.444`, q = 0.774 = OLF's limit from the pinned pass on.
+2. **`updatePilotVeqBatch` toggled its own verdict.** A pilot-self pilot is merged controller #0, so its OWN row
+   is candidate 1 of its group: once flipped to a power row (mode 1) `relocChoose` read it as a live member and
+   the next pass restored it — groups VL-5997 (g=17) and VL-6003 (g=19) went mode 1/0 every pass to the
+   outer-loop budget (`PSG`: `pick=1` iff `mode=1`). And the flipped row's target was `pilotQ` = 0 (the group's
+   captured target) where OLF's BUS_TARGET_Q is the pilot's LIMIT. Now for a pilot-self group: lost = pilot pinned
+   AND every OTHER candidate row in {0, 4}; flip target = `limit − loadQ` by limitType (re-stamped on drift);
+   an unpinned pilot is never "lost". g=19 holds q = 0.747700000 = maxQ from the pinned pass on.
+3. **Write-back froze the V target as a Q limit.** `writeBackReactiveLimits` read `deviceTargets[vRow] + loadQ`;
+   for an enrolled pinned pilot that row holds the VOLTAGE target: VL-6112_0 frozen at 1.055 + 1.218 = 2.273
+   against 0.774 → the CPU-side criterion saw the residual and the base was `MAX_ITERATION_REACHED` with DAP 0.
+   `pinnedBalanceRow` repeats the device's pick from `readBatchRowModes`: own row unless it is mode 0 and a
+   qr group has it as fallback, then the first other live candidate (the carrier).
+4. **Kernel order inside the RL pass.** `updateDistrQTargetsBatch` ran before `updatePilotVeqBatch`, so the
+   carrier hand-off picked the carrier while the pilot's row was still flipped (= the pilot's own row) and the
+   member that had just switched back kept a DISTR_Q target of 0; the fills then routed the pilot's balance to
+   that row against 0, forcing q_pilot = 3.511 instead of 0.955 and the member's q to −1.655 < minQ 0 — re-pin,
+   unpin, re-pin until maxSwitch (device outer 7..10, CPU none). The flip/restore now runs first.
+
+Result, base [5000,6000), rotation ON vs OLF (`CPU_RL` / `CPU_NR`):
+
+| pass | CPU | device |
+| --- | --- | --- |
+| initial NR | 3 it | 3 it |
+| DistributedSlack | 1 it | 1 it |
+| RL#1 | 19 PV→PQ (same 19 buses), 2 it | 19 pins, **3 it** |
+| RL#2 | VL-6106_0 PV→PQ, VL-5997_1 PQ→PV, 1 it | same two switches, 1 it |
+| RL#3 | stable | stable |
+| result | CONVERGED | CONVERGED, no fallback, no reject |
+| distributedActivePower | 14.359916553 MW | 14.359852249 MW (diff 6.4e-05) |
+
+Same outer sequence, same pin set, same decisions. The two remaining differences are one thing: the device iterates
+to 1e-8 pu infnorm where OLF stops at ITS criterion (default `DefaultNewtonRaphsonStoppingCriteria`) — one extra
+Newton iteration at RL#1 and a DS amount read off a deeper-converged slack mismatch (6.4e-5 MW of 14.36; OLF's
+own residual at its stop is up to 1e-4 pu). Machine-precision parity and equal inner counts need the device to
+apply OLF's stopping test, not a tighter one — the next item, and NOT a tolerance change (the standing rule).
+
+Kept, env-gated: `PSG`, `OLF_GPU_PSG_STEP`. Edge noted: `updateDistrQTargetsBatch`'s hand-off takes the nearer limit
+for realistic-V pins (3/4) — `rlInitTgtQ` is not in that kernel's tables (the flip in `updatePilotVeqBatch` has it).

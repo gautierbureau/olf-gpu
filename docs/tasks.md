@@ -3497,3 +3497,19 @@ Open: the 16 multi-control re-merges (a new remote group after the split — nee
 21 runtime rejects (8 × max-iter-bad-solve, 1 × budget), the DAP tail (1.34 MW worst), the ulp class (~480
 contingencies between 1e-9 and 1e-6 MW), and a re-homed PV bus's reactive limits (its RL entry stays a remote
 member: OLF checks it as a local PV bus and may pin it; the device does not).
+
+### A re-homed PV bus keeps its reactive limits (2026-09-28)
+
+BUS-6113_BBS_1 (DAP 1.33 MW, 7.1 kV at BUS-6113_BBS_2): the re-homed survivor VL-6113_1 is pinned by OLF at RL#1
+(q = −323 < minQ −77.4) while the device never looked — its reactive-limit entry is packed as a REMOTE member of
+the base group and the RL kernel drops a remote member whose row is an identity. Now a re-homed control's entry
+travels as a (slot, entry, own V target) triple (`GenOutage.reHomesRlEntry`, `setBatchRlLocal`, `dRlLocalOv`/
+`dRlLocalVt`): `reactiveLimitsBatch` takes the LOCAL path for it (pin on its own row, switch-back on its own
+voltage at its own target) — and pins with mode 4, not 1: a base-packed member's own q reaches its row only
+through the ALTERNATE dest, a mode-1 row is empty (the first try failed its linear solve and the CPU replay
+produced the "parity"; the census line is what showed it — `RUNTIME:status=-3=1`, 0/1 on device). Measured:
+1/1 on device, worst bus 4.0e-11 kV, DAP 6.5e-9 MW, violations equal. Window [5000,6000): 956/1000 on device,
+violations diff 0, DAP worst **0.141 MW** (was 1.34; BUS-6003_BBS_3's 0.60 went with it), 20 runtime rejects.
+The seven `injection-scope` commits (base-lost pilot restore through the pilot's local entry, no DISTR_Q share
+seeded onto a base-pinned member, loop/iteration traces addressed by contingency) are cherry-picked; the
+base-lost restore and the pilot-self `veqOff` booking coexist (`pe < 0` selects the former).

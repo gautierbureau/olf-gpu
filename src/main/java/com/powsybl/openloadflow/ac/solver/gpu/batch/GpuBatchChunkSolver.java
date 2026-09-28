@@ -403,6 +403,8 @@ final class GpuBatchChunkSolver {
                     // strands in another synchronous component (see distributeSlackBatch).
                     List<Integer> dsIslandedList = new ArrayList<>();
                     List<Integer> rlIslandedList = new ArrayList<>();
+                    List<Integer> rlLocalList = new ArrayList<>();     // (slot, entry): re-homed PV buses checked as LOCAL
+                    List<Double> rlLocalVt = new ArrayList<>();        // their own voltage target (pu)
                     // {slot, rlEntry} pairs + {dMinQ, dMaxQ}: the reactive capability a lost generator
                     // takes with it, at a bus that still controls voltage.
                     List<Integer> rlQOvSlot = new ArrayList<>();
@@ -845,6 +847,11 @@ final class GpuBatchChunkSolver {
                                         row[go.vRow()] = go.pqRowModeOrDefault();   // BUS_V row becomes the
                                                                                     // reactive-power equation (PV→PQ)
                                         rowModePerScenario[s] = row;
+                                    }
+                                    if (go.reHomesRlEntry()) {
+                                        rlLocalList.add(s);
+                                        rlLocalList.add(go.rlEntry());
+                                        rlLocalVt.add(go.qTarget());
                                     }
                                     if (go.silencesReactiveLimitEntry()) {
                                         // Nothing left to control voltage at that bus: mask its
@@ -1329,6 +1336,9 @@ final class GpuBatchChunkSolver {
                             dsIslandedList.isEmpty() ? null : dsIslandedList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchRlIslanded(handle,
                             rlIslandedList.isEmpty() ? null : rlIslandedList.stream().mapToInt(Integer::intValue).toArray());
+                    GpuAcNewtonSolver.setBatchRlLocal(handle,
+                            rlLocalList.isEmpty() ? null : rlLocalList.stream().mapToInt(Integer::intValue).toArray(),
+                            rlLocalList.isEmpty() ? null : rlLocalVt.stream().mapToDouble(Double::doubleValue).toArray());
                     GpuAcNewtonSolver.setBatchDqMemberTargetQOverrides(handle,
                             dqTqOvKey.isEmpty() ? null : dqTqOvKey.stream().mapToInt(Integer::intValue).toArray(),
                             dqTqOvKey.isEmpty() ? null : dqTqOvVal.stream().mapToDouble(Double::doubleValue).toArray());

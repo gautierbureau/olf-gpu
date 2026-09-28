@@ -5118,7 +5118,8 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                                     const double* rlInitTgtQ, double vLoRobust, double vHiRobust,
                                     int robust,
                                     int noPinRow, int swLogSlot, double* swLog, int* swLogCnt, int passId,
-                                    const int* psEntry, int nQr) {
+                                    const int* psEntry, int nQr,
+                                    const char* rlLocalOv, const double* rlLocalVt) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -5157,7 +5158,11 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         r[6] = vOwn; r[7] = cmpV; r[8] = vt; r[9] = limitType[(size_t) s * nrl + i];
         r[10] = switchCount[(size_t) s * nrl + i]; r[11] = s;
     };
-    if (rlRemote != nullptr && rlRemote[i]) {
+    // A RE-HOMED voltage control (GpuBatchQualification.reHomedControls): this scenario the bus is a plain PV
+    // bus, so its entry — packed as a remote member of the base group — takes the LOCAL path below, at its
+    // own voltage target. OLF checks it as the PV bus it now is (BUS-6113_BBS_1: VL-6113_1 pinned at RL#1).
+    bool localOv = rlLocalOv != nullptr && rlLocalOv[(size_t) s * nrl + i];
+    if (rlRemote != nullptr && rlRemote[i] && !localOv) {
         // REMOTE group member (plan-B3). Unpinned = its DISTR_Q row (mode 1, limitType 0);
         // pinned = mode 4 ("row hosts its own Q balance"). BOTH switch conditions test the
         // PILOT's voltage (rlCmpVrow) against the GROUP target — B0-verified CPU semantics.
@@ -5310,7 +5315,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         if (q < liMin - tol) {
             savedTarget[st] = target[idx];                   // remember the row target for the switch-back
             savedMode[st] = static_cast<char>(mode[idx]);   // and the PV form (0, or 2 for a slope SVC)
-            mode[idx] = 1;
+            mode[idx] = localOv ? 4 : 1;                 // a re-homed member: own Q through its ALTERNATE dest
             target[idx] = liMin - rlLoadQ[li];
             limitType[st] = 1;
             switchCount[st]++;
@@ -5319,7 +5324,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         } else if (q > liMax + tol) {
             savedTarget[st] = target[idx];
             savedMode[st] = static_cast<char>(mode[idx]);
-            mode[idx] = 1;
+            mode[idx] = localOv ? 4 : 1;                 // a re-homed member: own Q through its ALTERNATE dest
             target[idx] = liMax - rlLoadQ[li];
             limitType[st] = 2;
             switchCount[st]++;
@@ -5328,7 +5333,8 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         }
     } else if (limitType[st] != 0) {                    // pinned at a limit — check switchback
         double v = x[idx];
-        double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]);
+        double vt = localOv ? rlLocalVt[(size_t) s * nrl + i]
+                  : rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]);
         // OLF never back-switches a slope-SVC bus: checkPqBus runs with
         // canSwitchToPv = !bus.hasGeneratorsWithSlope() ("we don't support switching PQ to PV
         // for bus with one controller with slope") — once pinned, a slope row stays PQ.
@@ -6584,6 +6590,8 @@ struct BatchSolverContext {
     // Same idea for the reactive-limits pass: per (scenario, controller), 1 = its bus is in another
     // synchronous component in this scenario, so the loop must not look at it.
     int nRlIslanded = 0;
+    DeviceBuf dRlLocalOv, dRlLocalVt;                        // re-homed PV buses: (scenario, entry) mask + own V target
+    int nRlLocal = 0;
     DeviceBuf dRlIslanded;
     int nDqTqOv = 0;                                       // per-scenario member targetQ overrides
     DeviceBuf dDqTqOvKey;
@@ -10807,7 +10815,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->rlVLoRobust, ctx->rlVHiRobust, ctx->rlRobust, rlNoPinRow,
                     swLogSlot, ctx->dSwLog.p ? ctx->dSwLog.as<double>() : nullptr,
                     ctx->dSwLogCnt.p ? ctx->dSwLogCnt.as<int>() : nullptr, outer,
-                    psEntryPtr(ctx), ctx->st->nQr);
+                    psEntryPtr(ctx), ctx->st->nQr,
+                    ctx->nRlLocal > 0 ? ctx->dRlLocalOv.as<char>() : nullptr,
+                    ctx->nRlLocal > 0 ? ctx->dRlLocalVt.as<double>() : nullptr);
 psgStep(ctx, nS, n, outer, "afterRL");
             if (ctx->nRlPilotSelf > 0) {
                 // a pilot that is its own controller pinned while a member of its group is not (or
@@ -11246,7 +11256,9 @@ psgStep(ctx, nS, n, outer, "afterAllPinned");
                 ctx->rlVLoRobust, ctx->rlVHiRobust, ctx->rlRobust, -1,
                 swLogSlot, ctx->dSwLog.p ? ctx->dSwLog.as<double>() : nullptr,
                 ctx->dSwLogCnt.p ? ctx->dSwLogCnt.as<int>() : nullptr, 999999,
-                    psEntryPtr(ctx), ctx->st->nQr);
+                    psEntryPtr(ctx), ctx->st->nQr,
+                    ctx->nRlLocal > 0 ? ctx->dRlLocalOv.as<char>() : nullptr,
+                    ctx->nRlLocal > 0 ? ctx->dRlLocalVt.as<double>() : nullptr);
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         std::vector<char> aSw(nS), aPs(static_cast<size_t>(ctx->nrl) * nS);
         CUDA_CHECK(cudaMemcpy(aSw.data(), ctx->dRlSwitched.p, nS, cudaMemcpyDeviceToHost));
@@ -13532,6 +13544,41 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
     ctx->dRlIslanded.upload(mask.data(), maskLen);
     ctx->nRlIslanded = nPairs;
+}
+
+// Re-homed voltage controls (GpuBatchQualification.reHomedControls): per (slot, entry) pair the entry is
+// checked by the reactive-limits pass as a LOCAL controller at the given voltage target (pu) — the bus is
+// a plain PV bus this scenario, whatever its base packing. Null clears the context's list.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlLocal(
+        JNIEnv* env, jclass, jlong handle, jintArray jPairs, jdoubleArray jVt) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jPairs == nullptr || jVt == nullptr || env->GetArrayLength(jPairs) == 0 || ctx->nrl == 0) {
+        ctx->nRlLocal = 0;
+        return;
+    }
+    size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nrl;
+    std::vector<char> mask(len, 0);
+    std::vector<double> vt(len, 0.0);
+    int nPairs = env->GetArrayLength(jPairs) / 2;
+    jint* pairs = env->GetIntArrayElements(jPairs, nullptr);
+    jdouble* vts = env->GetDoubleArrayElements(jVt, nullptr);
+    for (int k = 0; k < nPairs; k++) {
+        int s = pairs[2 * k];
+        int i = pairs[2 * k + 1];
+        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nrl) {
+            mask[(size_t) s * ctx->nrl + i] = 1;
+            vt[(size_t) s * ctx->nrl + i] = vts[k];
+        }
+    }
+    env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jVt, vts, JNI_ABORT);
+    ctx->dRlLocalOv.upload(mask.data(), len);
+    ctx->dRlLocalVt.upload(vt.data(), len * sizeof(double));
+    ctx->nRlLocal = nPairs;
 }
 
 // Per-scenario member targetQ overrides for the DISTR_Q target kernel: {key, value} where key is

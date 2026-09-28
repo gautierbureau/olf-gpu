@@ -393,6 +393,11 @@ public final class GpuAcNewtonSolver {
      */
     public static native void setBatchRlIslanded(long handle, int[] slotControllerPairs);
 
+    /** Re-homed voltage controls (GpuBatchQualification.reHomedControls): per (slot, entry) pair the entry is
+     *  checked by the reactive-limits pass as a LOCAL controller at {@code vTargets[k]} — the bus is a plain PV
+     *  bus this scenario, whatever its base packing. Null clears the context's list. */
+    public static native void setBatchRlLocal(long handle, int[] slotEntryPairs, double[] vTargets);
+
     /** Per-scenario member targetQ overrides for the DISTR_Q target kernel, as {@code key = slot *
      *  nDqMembers + memberIndex} with the member's post-contingency targetQ. Needed because that kernel
      *  RECOMPUTES the group's row targets from the base member targetQ on every reactive-limits pass, so

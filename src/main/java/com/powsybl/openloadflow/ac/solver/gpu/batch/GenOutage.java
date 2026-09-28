@@ -143,6 +143,13 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
     }
 
     /** The bus keeps NO generator: its reactive-limit entry is not a controller in this scenario. */
+    /** A re-homed voltage control (see {@link #ROW_V_IDENTITY}): its bus is a plain PV bus this scenario, so its
+     *  reactive-limit entry — packed as a remote member of the base group — is checked as a LOCAL controller
+     *  (pin on its own row, switch back on its own voltage) at the target {@code qTarget} carries. */
+    public boolean reHomesRlEntry() {
+        return pqRowMode == ROW_V_IDENTITY && rlEntry >= 0;
+    }
+
     public boolean silencesReactiveLimitEntry() {
         return rlEntry >= 0 && allGensLost;
     }

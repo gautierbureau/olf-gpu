@@ -531,10 +531,25 @@ final class GpuBatchQualification {
     }
 
     /** Row-mode-only GenOutage: the bus's V row becomes a VOLTAGE IDENTITY at {@code vTarget} (a re-homed control). */
-    private static GenOutage reHomedPvEntry(int vRow, double vTarget) {
+    private static GenOutage reHomedPvEntry(int vRow, double vTarget, int rlEntry) {
         return new GenOutage(-1, 0, vRow, vTarget, true, true,
-                -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
+                -1, 0, 0, 0, 0, rlEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
                 new int[0], new double[0], GenOutage.ROW_V_IDENTITY, -1, 0, -1, 0, -1, 0);
+    }
+
+    /** The bus's reactive-limit entry, or -1: a re-homed bus is checked as a LOCAL controller by the device
+     *  (OLF checks it as the PV bus it now is; BUS-6113_BBS_1 pinned VL-6113_1 at RL#1, the device never
+     *  looked — 7.1 kV). */
+    private static int rlEntryOf(GpuAcData gpuData, LfBus bus) {
+        int[] rlBusNum = gpuData.rlBusNum();
+        if (rlBusNum != null) {
+            for (int e = 0; e < rlBusNum.length; e++) {
+                if (rlBusNum[e] == bus.getNum()) {
+                    return e;
+                }
+            }
+        }
+        return -1;
     }
 
     static int deadControlRowMode(GpuAcData gpuData, LfBus survivor) {
@@ -890,7 +905,7 @@ final class GpuBatchQualification {
                                 live = null;
                                 break;
                             }
-                            live.add(reHomedPvEntry(vVar.getRow(), e.getValue()));
+                            live.add(reHomedPvEntry(vVar.getRow(), e.getValue(), rlEntryOf(gpuData, e.getKey())));
                         }
                     }
                     if (live == null) {
@@ -1026,7 +1041,7 @@ final class GpuBatchQualification {
                             ok = false;
                             break;
                         }
-                        pvOn.add(reHomedPvEntry(vVar.getRow(), e.getValue()));
+                        pvOn.add(reHomedPvEntry(vVar.getRow(), e.getValue(), rlEntryOf(gpuData, e.getKey())));
                     }
                     if (!ok) {
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:VC_REMERGE_NO_VROW");

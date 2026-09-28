@@ -364,6 +364,16 @@ public final class GpuAcOuterLoopPacks {
             // instead. Read from qrGroupOfPilot, NOT decoded from qRowAlt: table membership and Q
             // re-routing are separate facts that happened to share one encoding.
             int qrGroup = columns.qrGroupOfPilot()[pilot.getNum()];
+            if (System.getenv("OLF_GPU_QR_TRACE") != null) {  // the raw reactive keys THIS extraction packs
+                StringBuilder sb = new StringBuilder("QR_TRACE keys pilot=" + pilot.getId() + " members=");
+                for (int i = 0; i < controllers.size(); i++) {
+                    sb.append(controllers.get(i).getId()).append(':').append(rawKeys[i])
+                            .append("(range=").append(controllers.get(i).getMaxQ() - controllers.get(i).getMinQ()).append(") ");
+                }
+                StackTraceElement[] st = new Throwable().getStackTrace();
+                sb.append(" caller=").append(st.length > 4 ? st[4].getClassName().replaceAll(".*\\.", "") + "." + st[4].getMethodName() + ":" + st[4].getLineNumber() : "?");
+                System.err.println(sb);
+            }
             for (int i = 0; i < controllers.size(); i++) {
                 LfBus m = controllers.get(i);
                 mt.memberIdxByBusNum().put(m.getNum(), mt.key().size());

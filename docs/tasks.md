@@ -3577,3 +3577,27 @@ Observed on the way: the BASE's distributed active power differs from the CPU's 
 identical code (1.1e-8, 4.2e-6, 2.3e-7 MW in three runs; cold=warm within one JVM) — the last-digit drift
 (8–10 agreeing digits per iterate) amplified through the DistributedSlack loop. When it lands at 4.2e-6 the whole
 window shifts with it (468 contingencies move from ≤1e-6 into the 4.25e-6 class). That drift is the open ulp item.
+
+### The DISTR_Q weight override builder corrupted the network's reactive percents (2026-09-28)
+
+The [5000,6000) window's distributed-active-power tail (0.141 / 0.042 / 0.026 / 0.0076 / 0.0037 MW …) had ONE
+mechanism behind most of it. `GpuBatchQualification.distrQWeightOverrides` toggles a contingency's lost generators
+OFF, calls `updateReactiveKeys`, re-extracts the whole network and diffs `dqWeight` index by index against the SA
+extraction (`OLF_GPU_DQOV_TRACE=<ctg>` lists each override with its members, `DQOV_PACK` the two packs' metadata at
+each differing index). It called `updateReactiveKeys` on each touched bus's OWN control — for a member that is the
+DEPENDENT (merged) control whose element list is just the member, so its reactive percent became 1.0, and the
+restore in `finally` repeated the same call: the corruption stayed in the LfNetwork and ACCUMULATED across the
+qualification (differing entries 0, 10, 15, 27, 35, 45, 51, 56 … as the contingency list went on). Every later
+contingency then carried bogus overrides for every pilot-self group an earlier one had touched: on BUS-612_BBS_2
+(slot 945) the VL-5967 DISTR_Q row became the pilot's raw q alone (weights 1.0 / 0 instead of 0.5 / −0.5; the
+row's first-fill residual −0.782 at the base solution, `DQROW2` and `CBROW ... lt/psSkip` cleared the gate and the
+keys as suspects), the group's Q split was (1.694, −1.574) against OLF's (0.912, −0.782), and the RL check pinned
+both members plus four other groups' pilots (`SW_PASS`, act=1) where OLF pinned none. Fix: `updateMainReactiveKeys`
+— the key update on the MAIN control, as OLF does. Measured: no override for an unrelated contingency any more
+(`differing=0`); window 958/1000 on device, violations diff 0; DAP tail above 1e-4 MW from 11 contingencies to 4
+(BUS-536 = OLF's own non-convergence, BUS-612_BBS_2 0.141 unchanged, BUS-6112_BBS_2 0.0037, BUS-5997_BBS_2
+0.0024), above 1e-6 from 19 to 8. BUS-612_BBS_2 has a second cause (its first post-contingency solve takes 3 scaled
+steps on the device against OLF's single step) — the next trace.
+Lesson: a diagnostic that re-extracts the live LfNetwork must leave it EXACTLY as found; a diff against the SA
+extraction turns any leftover into overrides on unrelated scenarios. Diffing counts (`DQOV_PACK differing=`)
+that grow with the contingency index are the signature.

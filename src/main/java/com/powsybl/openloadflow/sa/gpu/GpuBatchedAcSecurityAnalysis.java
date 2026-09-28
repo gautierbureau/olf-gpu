@@ -1326,6 +1326,35 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                         + (br.isDisabled() ? "  [DISABLED]" : "") + "\n");
             }
             context.getEquationSystem().write(w, true);
+            // ...and OLF's OWN f(x0) - target per ACTIVE equation at the post-contingency start (the residual
+            // its first |f(x0)| line is the norm of), the contingency counterpart of OLF_GPU_F0_TRACE: lined
+            // up against the device's first fill of that slot (OLF_GPU_VALS_SCAN_SLOT + OLF_GPU_VALS_DUMP), it
+            // names the equation the two arms evaluate differently before any step blurs it.
+            try {
+                double[] fx0 = context.getEquationVector().getArray();
+                double[] tg0 = context.getTargetVector().getArray();
+                double n2 = 0;
+                w.write("# F0: column type elementNum id residual (f(x0) - target)\n");
+                for (int c = 0; c < fx0.length; c++) {
+                    double v = fx0[c] - (c < tg0.length ? tg0[c] : 0.0);
+                    n2 += v * v;
+                    var eq = context.getEquationSystem().getIndex().getEquationAtColumn(c);
+                    String id;
+                    try {
+                        id = switch (eq.getType().getElementType()) {
+                            case BUS -> network.getBus(eq.getElementNum()).getId();
+                            case BRANCH -> network.getBranch(eq.getElementNum()).getId();
+                            default -> "#" + eq.getElementNum();
+                        };
+                    } catch (RuntimeException e) {
+                        id = "#" + eq.getElementNum();
+                    }
+                    w.write("F0 " + c + " " + eq.getType() + " " + eq.getElementNum() + " " + id + " " + v + "\n");
+                }
+                w.write("# F0 norm2=" + Math.sqrt(n2) + "\n");
+            } catch (RuntimeException e) {
+                w.write("# F0 unavailable: " + e + "\n");
+            }
         } catch (java.io.IOException | RuntimeException e) {
             LOGGER.warn("OLF_GPU_EQ_DUMP_CTG failed: {}", e.toString());
         }

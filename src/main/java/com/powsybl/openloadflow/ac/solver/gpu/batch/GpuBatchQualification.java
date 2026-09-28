@@ -355,23 +355,42 @@ final class GpuBatchQualification {
             if (toggled.isEmpty()) {
                 return new double[][] {new double[0], new double[0]};
             }
+            // On the MAIN control (the merged group), as OLF does: a member's OWN control is the DEPENDENT one
+            // whose element list is just itself, and updateReactiveKeys on it set that member's reactive
+            // percent to 1.0 — permanently, since the restore below repeated the same call. Measured on
+            // rte6515's [5000,6000) busbar window: the number of re-weighted entries grew with every
+            // contingency (0, 10, 15, 27, 35, 45, 51, 56 ...), each late contingency carrying bogus overrides
+            // for every group an earlier one had touched; BUS-612_BBS_2's VL-5967 DISTR_Q row became the
+            // pilot's raw q alone (weights 1.0 / 0), the split (1.694, -1.574) against OLF's (0.912, -0.782)
+            // pinned both members spuriously, and the distributed power ended 0.141 MW off.
             for (LfBus bus : touched) {
-                bus.getGeneratorVoltageControl().ifPresent(
-                        com.powsybl.openloadflow.network.GeneratorVoltageControl::updateReactiveKeys);
+                updateMainReactiveKeys(bus);
             }
-            double[] newW = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
-                    .extract(network, es, false, false).dqWeight();
+            GpuAcData nd = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
+                    .extract(network, es, false, false);
+            double[] newW = nd.dqWeight();
             double[] baseW = gpuData.dqWeight();
             if (newW.length != baseW.length) {
                 return null;                                 // structural drift — not a pure reweight
             }
             List<Double> idx = new ArrayList<>();
             List<Double> w = new ArrayList<>();
+            boolean dqOvTrace = System.getenv("OLF_GPU_DQOV_TRACE") != null;
+            int traced = 0;
             for (int k = 0; k < newW.length; k++) {
                 if (newW[k] != baseW[k]) {
                     idx.add((double) k);
                     w.add(newW[k]);
+                    if (dqOvTrace && traced++ < 12) {        // the two packs' metadata at a differing index
+                        System.err.printf("DQOV_PACK k=%d old(row=%d kind=%d elem=%d side=%d w=%.6f) new(row=%d kind=%d elem=%d side=%d w=%.6f)%n",
+                                k, gpuData.dqRow()[k], gpuData.dqKind()[k], gpuData.dqElem()[k], gpuData.dqSide()[k], baseW[k],
+                                nd.dqRow()[k], nd.dqKind()[k], nd.dqElem()[k], nd.dqSide()[k], newW[k]);
+                    }
                 }
+            }
+            if (dqOvTrace) {
+                System.err.println("DQOV_PACK lost=" + lost.stream().map(g -> g.getId()).toList() + " differing=" + idx.size()
+                        + " of " + newW.length + " oldFlags(ds,rl)=? newFlags=(false,false)");
             }
             return new double[][] {idx.stream().mapToDouble(Double::doubleValue).toArray(),
                 w.stream().mapToDouble(Double::doubleValue).toArray()};
@@ -380,10 +399,17 @@ final class GpuBatchQualification {
                 g.setGeneratorControlType(com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.VOLTAGE);
             }
             for (LfBus bus : touched) {
-                bus.getGeneratorVoltageControl().ifPresent(
-                        com.powsybl.openloadflow.network.GeneratorVoltageControl::updateReactiveKeys);
+                updateMainReactiveKeys(bus);
             }
         }
+    }
+
+    /** OLF's own key update: on the group's MAIN control, never on a member's dependent one. */
+    private static void updateMainReactiveKeys(LfBus bus) {
+        bus.getGeneratorVoltageControl()
+                .<com.powsybl.openloadflow.network.GeneratorVoltageControl>map(
+                        com.powsybl.openloadflow.network.VoltageControl::getMainVoltageControl)
+                .ifPresent(com.powsybl.openloadflow.network.GeneratorVoltageControl::updateReactiveKeys);
     }
 
     /** The contingency's SCHEDULED active power loss (pu): mirror of LfContingency's
@@ -959,6 +985,22 @@ final class GpuBatchQualification {
                     }
                     dqOvContribByIndex[i] = java.util.Arrays.stream(ov[0]).mapToInt(d -> (int) d).toArray();
                     dqOvWByIndex[i] = ov[1];
+                    String dqOvTrace = System.getenv("OLF_GPU_DQOV_TRACE");   // <contingency id>: every reweighted entry
+                    if (dqOvTrace != null && dqOvTrace.equals(c.contingencyId())) {
+                        int[] mBus = gpuData.dqMemberBusNum();
+                        for (int k = 0; k < ov[0].length; k++) {
+                            int cc = (int) ov[0][k];
+                            int kM = gpuData.dqKMember() != null ? gpuData.dqKMember()[cc] : -1;
+                            int jM = gpuData.dqJMember() != null ? gpuData.dqJMember()[cc] : -1;
+                            System.err.printf("DQOV_TRACE ctg=%s c=%d row=%d kind=%d elem=%d oldW=%.6f newW=%.6f kMember=%s jMember=%s%n",
+                                    c.contingencyId(), cc, gpuData.dqRow()[cc], gpuData.dqKind()[cc], gpuData.dqElem()[cc],
+                                    gpuData.dqWeight()[cc], ov[1][k],
+                                    kM >= 0 && mBus != null ? goneForKeys.get(0).getBus().getNetwork().getBus(mBus[kM]).getId() : "?",
+                                    jM >= 0 && mBus != null ? goneForKeys.get(0).getBus().getNetwork().getBus(mBus[jM]).getId() : "?");
+                        }
+                        System.err.println("DQOV_TRACE ctg=" + c.contingencyId() + " total=" + ov[0].length
+                                + " lostGens=" + goneForKeys.stream().map(g -> g.getId()).toList());
+                    }
                 }
                 genOutagesByIndex[i] = gos;
                 activePowerLossByIndex[i] = scheduledActivePowerLoss(c, q.islandedBuses());

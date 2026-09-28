@@ -1842,11 +1842,14 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
                 if (d0 > -2 || -2 - d0 != wantRow) continue;
                 int kM = km.empty() ? -1 : km[c];
                 int kRe = kM >= 0 ? mre[kM] : -1;
+                int jM = jm.empty() ? -1 : jm[c];
+                int jRe = jM >= 0 && !mre.empty() ? mre[jM] : -1;
                 std::fprintf(stderr, "    DQROW2 outer=%d it=%d row=%d c=%d kind=%d elem=%d side=%d w=%.6g dests=[%d %d %d %d %d %d]"
-                             " jMember=%d kMember=%d kKey=%.6g kRlEntry=%d kLimitType=%d nDqDyn=%d nDqInact=%d rowMode=%d\n",
+                             " jMember=%d jKey=%.6g jLt=%d kMember=%d kKey=%.6g kRlEntry=%d kLimitType=%d nDqDyn=%d nDqInact=%d rowMode=%d\n",
                              outer, it, wantRow, c, dk[c], de[c], ds[c], dw[c], dd[c * 6], dd[c * 6 + 1], dd[c * 6 + 2],
-                             dd[c * 6 + 3], dd[c * 6 + 4], dd[c * 6 + 5], jm.empty() ? -1 : jm[c], kM,
-                             kM >= 0 ? mk[kM] : 0.0, kRe, kRe >= 0 ? (int) lt[kRe] : -1, ctx->nDqDyn, ctx->nDqInact,
+                             dd[c * 6 + 3], dd[c * 6 + 4], dd[c * 6 + 5], jM, jM >= 0 && !mk.empty() ? mk[jM] : 0.0,
+                             jRe >= 0 ? (int) lt[static_cast<size_t>(s) * ctx->nrl + jRe] : -1, kM,
+                             kM >= 0 ? mk[kM] : 0.0, kRe, kRe >= 0 ? (int) lt[static_cast<size_t>(s) * ctx->nrl + kRe] : -1, ctx->nDqDyn, ctx->nDqInact,
                              mode[static_cast<size_t>(s) * n + wantRow]);
             }
         }
@@ -1854,7 +1857,14 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
         // per-scenario facts the scatter decides on (the select row's mode, the element's disabled flag, its
         // relocation group). For the scenario OLF_GPU_VALS_SCAN_SLOT names (else slot 0).
         if (static const char* cbRowEnv = std::getenv("OLF_GPU_VALS_DUMP_ROW"); cbRowEnv != nullptr && s == 0 && ctx->st->cb.ne > 0) {
-            int wantRow = std::atoi(cbRowEnv);
+            // comma-separated rows: "12488,12490" replays both (the pilot row and the carrier of one group)
+            std::vector<int> wantRows;
+            for (const char* q = cbRowEnv; *q != '\0';) {
+                wantRows.push_back(std::atoi(q));
+                while (*q != '\0' && *q != ',') q++;
+                if (*q == ',') q++;
+            }
+            for (int wantRow : wantRows) {
             int slotDev = scanSlot > 0 && scanSlot < nS ? scanSlot : 0;
             size_t nOut = static_cast<size_t>(ctx->st->cb.ne) * CB_NOUT;
             std::vector<int> cdest(nOut), calt(nOut, -1), csel(nOut, -1), cgrp(nOut, -1);
@@ -1871,7 +1881,15 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
                 std::fprintf(stderr, "    CBROW st=%p nQr=%d nS=%d groupsOf(%d):", (void*) ctx->st.get(), ctx->st->nQr, nS, wantRow);
                 for (int g = 0; g < ctx->st->nQr; g++) {
                     for (int c = ctx->st->hQrPtr[g]; c < ctx->st->hQrPtr[g + 1]; c++) {
-                        if (ctx->st->hQrRows[c] == wantRow) std::fprintf(stderr, " g%d[cand %d]", g, c - ctx->st->hQrPtr[g]);
+                        if (ctx->st->hQrRows[c] == wantRow) {
+                            // the PILOT-SELF gate inputs of that group for the replayed scenario: the pilot entry's
+                            // limit type (the gate is "unpinned = skip the raw q") and the gate value itself
+                            int pe = -1; char plt = -1, psk = -1;
+                            if (ctx->dPsPilotEntry.p) CUDA_CHECK(cudaMemcpy(&pe, static_cast<const int*>(ctx->dPsPilotEntry.p) + g, sizeof(int), cudaMemcpyDeviceToHost));
+                            if (pe >= 0 && ctx->dRlLimitType.p) CUDA_CHECK(cudaMemcpy(&plt, static_cast<const char*>(ctx->dRlLimitType.p) + static_cast<size_t>(slotDev) * ctx->nrl + pe, 1, cudaMemcpyDeviceToHost));
+                            if (ctx->dPsSkip.p) CUDA_CHECK(cudaMemcpy(&psk, static_cast<const char*>(ctx->dPsSkip.p) + static_cast<size_t>(slotDev) * ctx->st->nQr + g, 1, cudaMemcpyDeviceToHost));
+                            std::fprintf(stderr, " g%d[cand %d pilotEntry=%d lt=%d psSkip=%d]", g, c - ctx->st->hQrPtr[g], pe, (int) plt, (int) psk);
+                        }
                     }
                 }
                 std::fprintf(stderr, "\n");
@@ -1892,6 +1910,7 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
                     for (int c = ctx->st->hQrPtr[g]; c < ctx->st->hQrPtr[g + 1]; c++) std::fprintf(stderr, "%d(m%d),", ctx->st->hQrRows[c], modeDev[ctx->st->hQrRows[c]]);
                 }
                 std::fprintf(stderr, "\n");
+            }
             }
         }
         std::fprintf(stderr, "VALS_SCAN outer=%d it=%d slot=%d nnz=%d finite=%s maxAbs=%.6e at row=%d col=%d"

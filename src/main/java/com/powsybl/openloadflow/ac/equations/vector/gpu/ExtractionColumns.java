@@ -160,7 +160,17 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                 }
                 System.err.println(sb);
             }
-            for (LfBus bus : network.getBuses()) {
+            for (LfBus bus : network.getBuses()) {           // every generator-VC controller: its state at THIS extraction
+                if (bus.getGeneratorVoltageControl().isPresent()) {
+                    System.err.println("QR_TRACE ctl bus=" + bus.getId() + " vRow=" + vCol[bus.getNum()]
+                            + " enabled=" + bus.isGeneratorVoltageControlEnabled()
+                            + " qLimit=" + bus.getQLimitType().map(Object::toString).orElse("-")
+                            + " minQ=" + bus.getMinQ() + " maxQ=" + bus.getMaxQ()
+                            + " genTargetQ=" + bus.getGenerationTargetQ() + " loadQ=" + bus.getLoadTargetQ()
+                            + " q=" + (bus.getQ() != null ? bus.getQ().eval() : Double.NaN)
+                            + " controlled=" + bus.getGeneratorVoltageControl().map(c -> c.getControlledBus().getId()).orElse("-")
+                            + " main=" + bus.getGeneratorVoltageControl().map(c -> c.getMergeStatus().name()).orElse("-"));
+                }
                 if (vCol[bus.getNum()] >= 0 && qRowAlt[bus.getNum()] != -1) {
                     System.err.println("QR_TRACE bus=" + bus.getId() + " vRow=" + vCol[bus.getNum()]
                             + " qRowAlt=" + qRowAlt[bus.getNum()]

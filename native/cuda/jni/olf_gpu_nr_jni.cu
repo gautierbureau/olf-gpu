@@ -230,7 +230,16 @@ inline int irSteps(bool hasZeroImpedance) {
     if (e != nullptr && *e != '\0') {
         return std::atoi(e);
     }
-    return hasZeroImpedance ? 2 : IR_N_STEPS;
+    // 4, not 2, since 2026-09-28. The accuracy of the batched factorization on the repaired
+    // zero-diagonal rows depends on which OTHER matrices share the batch: network.xiidm/LLAX (a
+    // line whose loss islands three buses; its weak pivots are the DUMMY rows of couplers BDTG and
+    // BDXR) solved to a linear residual of 2.5e-06 (ratio 3.1e-06) in one chunk composition and
+    // 2.2e-08 in another, for the same matrix and the same right-hand side. The inaccurate step
+    // stopped the first solve at a slightly different iterate, the slack pass read it, and 22
+    // large-loss islanding contingencies ended 2-4e-06 MW off where the same scope at another
+    // chunk size had them at 1e-08. Two more refinement steps take that residual to 1.1e-11 in the
+    // bad composition and leave no contingency worse by 1e-07 than before (99 better).
+    return hasZeroImpedance ? 4 : IR_N_STEPS;
 }
 
 // ---------------------------------------------------------------------------------

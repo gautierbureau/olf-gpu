@@ -5734,8 +5734,10 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                (fsGlobal > 0.0 && fabs(rem) > fsGlobal * slackDistTol) ? 1 : 0);
     }
     if (gateLast != nullptr) {                              // what this gate saw, host-readable (no printf)
-        gateLast[2 * s] = rem;
-        gateLast[2 * s + 1] = (fsGlobal > 0.0 && fabs(rem) > fsGlobal * slackDistTol) ? 1.0 : 0.0;
+        gateLast[4 * s] = rem;
+        gateLast[4 * s + 1] = (fsGlobal > 0.0 && fabs(rem) > fsGlobal * slackDistTol) ? 1.0 : 0.0;
+        gateLast[4 * s + 2] = qBuf[(size_t) s * n + slackPhiRow];   // the two halves of the mismatch, so a
+        gateLast[4 * s + 3] = slackTgt;                              // gate that differs from OLF's can be split
     }
     if (fsGlobal <= 0.0 || fabs(rem) <= fsGlobal * slackDistTol) {
         return;
@@ -6949,7 +6951,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
         }
         ctx->dsFactorSum = factorSum > 0 ? factorSum : 1.0;
         ctx->dDsRetain.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
-        ctx->dDsGateLast.alloc(static_cast<size_t>(nScenarios) * 2 * sizeof(double));
+        ctx->dDsGateLast.alloc(static_cast<size_t>(nScenarios) * 4 * sizeof(double));   // {rem, fired, slackP, slackTgt}
         ctx->dDsRetainApplied.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
     }
 
@@ -10293,7 +10295,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         {
             static const char* dxPath = std::getenv("OLF_GPU_DX_DUMP");   // read once, not per iteration
             static bool dumped = false;
-            if (dxPath != nullptr && !dumped && it == 0) {
+            // With OLF_GPU_LOOP_TRACE_CTG set, the dump is that contingency's slot in its own chunk
+            // (the host sets loopTraceSlot to -1 for the chunks that do not hold it); slot 0 of the
+            // first solve otherwise, as before.
+            const int dumpSlot = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : (std::getenv("OLF_GPU_LOOP_TRACE_CTG") != nullptr ? -1 : 0);
+            if (dxPath != nullptr && !dumped && it == 0 && dumpSlot >= 0) {
                 dumped = true;
                 CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
                 std::vector<double> hv(nnz);
@@ -10303,13 +10309,13 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 std::vector<int> hci(nnz);
                 std::vector<int> hmode(n);
                 std::vector<double> hb(n);                   // the RHS as SOLVED (row-repaired, see hazRepairRhs)
-                CUDA_CHECK(cudaMemcpy(hb.data(), ctx->dB.p, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(hv.data(), ctx->dVals.p, (size_t) nnz * sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(hd.data(), ctx->dDx.p, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(hff.data(), ctx->dF.p, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(hb.data(), ctx->dB.as<double>() + (size_t) dumpSlot * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(hv.data(), ctx->dVals.as<double>() + (size_t) dumpSlot * nnz, (size_t) nnz * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(hd.data(), ctx->dDx.as<double>() + (size_t) dumpSlot * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(hff.data(), ctx->dF.as<double>() + (size_t) dumpSlot * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
                 CUDA_CHECK(cudaMemcpy(hrp.data(), ctx->st->dRowPtr.p, (size_t) (n + 1) * sizeof(int), cudaMemcpyDeviceToHost));
                 CUDA_CHECK(cudaMemcpy(hci.data(), ctx->st->dColIdx.p, (size_t) nnz * sizeof(int), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(hmode.data(), ctx->dMode.p, (size_t) n * sizeof(int), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(hmode.data(), ctx->dMode.as<int>() + (size_t) dumpSlot * n, (size_t) n * sizeof(int), cudaMemcpyDeviceToHost));
                 FILE* f = std::fopen(dxPath, "w");
                 if (f != nullptr) {
                     std::fprintf(f, "N %d %d\n", n, nnz);
@@ -10323,7 +10329,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         }
                     }
                     std::fclose(f);
-                    std::fprintf(stderr, "OLF_GPU_DX_DUMP wrote %s (n=%d nnz=%d)\n", dxPath, n, nnz);
+                    std::fprintf(stderr, "OLF_GPU_DX_DUMP wrote %s (n=%d nnz=%d slot=%d)\n", dxPath, n, nnz, dumpSlot);
                 }
             }
         }
@@ -11114,14 +11120,14 @@ psgStep(ctx, nS, n, outer, "afterAllPinned");
     // scenario from one run to the next (IZUZ: slot 170, then 18)
     const int loopTraceSlot = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : (loopTraceEnv != nullptr ? std::atoi(loopTraceEnv) : -1);
     if (loopTraceSlot >= 0 && loopTraceSlot < nS) {
-        double gate[2] = {0.0, 0.0};                        // the DS gate this slot last evaluated: rem, fired
+        double gate[4] = {0.0, 0.0, 0.0, 0.0};              // the DS gate this slot last evaluated: rem, fired, slackP, slackTgt
         if (ctx->dDsGateLast.p) {
-            CUDA_CHECK(cudaMemcpy(gate, ctx->dDsGateLast.as<double>() + 2 * loopTraceSlot, 2 * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(gate, ctx->dDsGateLast.as<double>() + 4 * loopTraceSlot, 4 * sizeof(double), cudaMemcpyDeviceToHost));
         }
-        std::fprintf(stderr, "LOOP_PASS s=%d outer=%d loopIdx=%d kind=%d solved=%d switched=%d nChanged=%d live=%d status=%d dsRem=%.12f dsFire=%d nrIters=%d\n",
+        std::fprintf(stderr, "LOOP_PASS s=%d outer=%d loopIdx=%d kind=%d solved=%d switched=%d nChanged=%d live=%d status=%d dsRem=%.12f dsFire=%d nrIters=%d slackP=%.12f slackTgt=%.12f\n",
                      loopTraceSlot, outer, loopIdx, loopOrder[loopIdx], solvePass ? 1 : 0,
                      (int) rlSwitched[loopTraceSlot], nChanged, (int) live[loopTraceSlot], res.status[loopTraceSlot],
-                     gate[0], (int) gate[1], res.iters[loopTraceSlot]);
+                     gate[0], (int) gate[1], res.iters[loopTraceSlot], gate[2], gate[3]);
     }
     if (nChanged > 0) {                                     // this outer loop is still unstable
         for (int s = 0; s < nS; s++) {

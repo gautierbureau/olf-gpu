@@ -3601,3 +3601,25 @@ steps on the device against OLF's single step) — the next trace.
 Lesson: a diagnostic that re-extracts the live LfNetwork must leave it EXACTLY as found; a diff against the SA
 extraction turns any leftover into overrides on unrelated scenarios. Diffing counts (`DQOV_PACK differing=`)
 that grow with the contingency index are the signature.
+
+### An islanded member's frozen row took a survivor's DISTR_Q target (2026-09-28)
+
+BUS-612_BBS_2 (slot 945), the DAP tail's 0.141 MW after the reactive-key fix: the device's first post-contingency
+solve took three MAX_VOLTAGE_CHANGE-clamped iterations (norms 1.168 → 0.700 → 0.233 → 1.7e-4) where OLF took one
+(30.48 → 0.0045), so the distributed-slack decision was taken at another residual level and the two arms distributed
+0.141 MW apart while every bus agreed to 1.6e-4 kV. `OLF_GPU_TARGET_ROW=1324` (VL-612_1's V row, an islanded
+bus) showed TWO overrides for the slot: the frozen flat 1.0 and a later 0.0 that won — a survivor's renormalized
+DISTR_Q target from `islandedDistrQEntries`, whose inactive set held only the split's and the re-homing's controllers
+(VL-612_2, the re-homed one) and not the ISLANDED packed members themselves, so VL-612_1 counted as a survivor and
+its own (frozen) row got the target. The identity row then drove that dead bus's V from 1.0 to 0 in clamped steps,
+scaling the whole step with it. Fix: the islanded packed members join the inactive set, and no entry may target a
+frozen row (`GenOutage.withoutFrozenTargetRows`). Measured: slot 945 first solve 1 iteration to 4.5005e-3 (OLF
+4.500510e-3), DS solve to 1.8959e-6 (OLF 1.8958917e-6), bus diff 1.2e-10 kV; window 958/1000 on device, violations
+diff 0, DAP worst 3.7e-3 MW (BUS-6112_BBS_2, then BUS-5997_BBS_2 2.4e-3; the tail above 1e-4 MW is those two plus
+OLF's own non-convergence BUS-536), above 1e-6 8 contingencies.
+Lesson: two overrides on one (slot,row) is always a bug; `OLF_GPU_TARGET_ROW` names both writers. A frozen row
+belongs to a bus OLF removes from the system — nothing else may write it.
+Suites after this fix: rotation ON 304/0; rotation OFF 303/1 once — `javaLoadBasedDistributedSlackMatchesCpu`
+missed its 1e-12 kV bus-voltage assertion by 1.02e-12 kV (133.19640118822167 vs …065) and passed on two
+immediate reruns: the run-to-run last-digit drift, not this change (no island, no frozen row in that fixture).
+It is the same open ulp item as the base's run-dependent distributed power; the tolerance stays.

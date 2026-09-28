@@ -947,7 +947,22 @@ final class GpuBatchQualification {
                     // RENORMALIZE: the islanded controllers' keys leave the group (weights below,
                     // through the rediff); their DISTR_Q row targets and inactive-member entries go
                     // the way a generator outage's do.
-                    live.addAll(GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, islandLostVcControllers));
+                    // The ISLANDED packed members count as inactive too, not only the controllers the split or
+                    // the re-homing listed: a survivor's renormalized target was otherwise written onto an islanded
+                    // member's own DISTR_Q row — a FROZEN identity row — as a second override, and the identity
+                    // then drove that bus's V from 1.0 to 0 in MAX_VOLTAGE_CHANGE-clamped steps (BUS-612_BBS_2:
+                    // three scaled iterations on the device against OLF's one, the distributed-slack decision
+                    // taken at another residual level, 0.141 MW of distributed active power). No entry may target
+                    // a frozen row at all: those rows belong to buses OLF removes from the system.
+                    List<LfBus> inactiveForTargets = new ArrayList<>(islandLostVcControllers);
+                    for (LfBus ib : q.islandedBuses()) {
+                        if (!inactiveForTargets.contains(ib) && GpuBatchInjectionOutages.dqMemberSlot(gpuData, ib) >= 0) {
+                            inactiveForTargets.add(ib);
+                        }
+                    }
+                    for (GenOutage go : GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, inactiveForTargets)) {
+                        live.add(go.withoutFrozenTargetRows(frozenSet));
+                    }
                     gos = live.toArray(new GenOutage[0]);
                     frozenRowsByIndex[i] = fi.rows();
                     frozenTargetsByIndex[i] = fi.targets();

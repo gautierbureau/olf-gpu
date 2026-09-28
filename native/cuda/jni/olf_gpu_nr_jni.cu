@@ -5657,7 +5657,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                                               const int* busGenStart, const int* busGenEnd,
                                               double* genCum, char* genCumValid, char* genRemoved, double* genFactorWork,
                                               int nDsLostGen, const int* dsLostGen,
-                                              double* target, char* switched, char* dsResidual, double* retainApplied, int dbgTrace) {
+                                              double* target, char* switched, char* dsResidual, double* retainApplied, double* gateLast, int dbgTrace) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     if (!rlActive[s]) return;
@@ -5721,6 +5721,10 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         printf("[DS-GATE] slackMismatch=%.9f retain=%.9f rem=%.9f fsGlobal=%.9f tol=%.9f slackTgt=%.9f fire=%d\n",
                qBuf[(size_t) s * n + slackPhiRow] - slackTgt, dsRetain[s], rem, fsGlobal, slackDistTol, slackTgt,
                (fsGlobal > 0.0 && fabs(rem) > fsGlobal * slackDistTol) ? 1 : 0);
+    }
+    if (gateLast != nullptr) {                              // what this gate saw, host-readable (no printf)
+        gateLast[2 * s] = rem;
+        gateLast[2 * s + 1] = (fsGlobal > 0.0 && fabs(rem) > fsGlobal * slackDistTol) ? 1.0 : 0.0;
     }
     if (fsGlobal <= 0.0 || fabs(rem) <= fsGlobal * slackDistTol) {
         return;
@@ -6402,6 +6406,7 @@ struct BatchSolverContext {
     DeviceBuf dDsMarginUp, dDsMarginDown;                  //   dependent per-bus margins, normalized in-kernel)
     double dsSlackMarginUp = 0.0, dsSlackMarginDown = 0.0; //   the slack's own margins (its retained share)
     DeviceBuf dDsRetain;
+    DeviceBuf dDsGateLast;                                   // per scenario {rem, fired} at the last DS gate (LOOP_TRACE reads it)
     DeviceBuf dDsRetainApplied;                              // per scenario: dsRetain at the last check that FIRED,
                                                              // NaN while no distribution happened in this solve
     long long solveCount = 0;                                // solveBatchContext calls on this context: the DS
@@ -6932,6 +6937,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
         }
         ctx->dsFactorSum = factorSum > 0 ? factorSum : 1.0;
         ctx->dDsRetain.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
+        ctx->dDsGateLast.alloc(static_cast<size_t>(nScenarios) * 2 * sizeof(double));
         ctx->dDsRetainApplied.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
     }
 
@@ -10726,6 +10732,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->nDsLostGen, ctx->nDsLostGen > 0 ? ctx->dDsLostGen.as<int>() : nullptr,
                     ctx->dTarget.as<double>(), ctx->dRlSwitched.as<char>(), ctx->dDsResidual.as<char>(),
                     ctx->dDsRetainApplied.as<double>(),
+                    ctx->dDsGateLast.p ? ctx->dDsGateLast.as<double>() : nullptr,
                     dsDebugTraceSlot());
         }
     } else {                                               // reactive-limits outer loop: switch PV->PQ over Q limit
@@ -11063,9 +11070,14 @@ psgStep(ctx, nS, n, outer, "afterAllPinned");
     static const char* loopTraceEnv = std::getenv("OLF_GPU_LOOP_TRACE");
     static const int loopTraceSlot = loopTraceEnv != nullptr ? std::atoi(loopTraceEnv) : -1;
     if (loopTraceSlot >= 0 && loopTraceSlot < nS) {
-        std::fprintf(stderr, "LOOP_PASS s=%d outer=%d loopIdx=%d kind=%d solved=%d switched=%d nChanged=%d live=%d status=%d\n",
+        double gate[2] = {0.0, 0.0};                        // the DS gate this slot last evaluated: rem, fired
+        if (ctx->dDsGateLast.p) {
+            CUDA_CHECK(cudaMemcpy(gate, ctx->dDsGateLast.as<double>() + 2 * loopTraceSlot, 2 * sizeof(double), cudaMemcpyDeviceToHost));
+        }
+        std::fprintf(stderr, "LOOP_PASS s=%d outer=%d loopIdx=%d kind=%d solved=%d switched=%d nChanged=%d live=%d status=%d dsRem=%.12f dsFire=%d nrIters=%d\n",
                      loopTraceSlot, outer, loopIdx, loopOrder[loopIdx], solvePass ? 1 : 0,
-                     (int) rlSwitched[loopTraceSlot], nChanged, (int) live[loopTraceSlot], res.status[loopTraceSlot]);
+                     (int) rlSwitched[loopTraceSlot], nChanged, (int) live[loopTraceSlot], res.status[loopTraceSlot],
+                     gate[0], (int) gate[1], res.iters[loopTraceSlot]);
     }
     if (nChanged > 0) {                                     // this outer loop is still unstable
         for (int s = 0; s < nS; s++) {

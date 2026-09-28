@@ -3751,3 +3751,27 @@ BUS-6112_BBS_2, BUS-5997_BBS_2, BUS-612_BBS_2, BUS-6003_BBS_2 — all agree to ~
 contingencies in the window exceed 1e-5 MW (BUS-536_BBS, 8.5 MW, is OLF's own non-convergence and is not
 asserted). Suites 304/0 with the rotation on and off. The limits-off window also passes (worst 1.74e-05 MW,
 violations diff 0).
+
+### Status of the FULL busbar scope with today's code (2026-09-28, measured)
+
+Everything above was measured on the [5000,6000) window (1000 of the 6876 busbar-section contingencies). The full
+scope, run with the same code (`OLF_GPU_SA_CTG_KINDS=busbar OLF_GPU_SA_BUSBAR_TOP=99999`, no range), is a different
+regime and is NOT at parity:
+- **251 of 6876 on device.** The census is `RUNTIME:status=-3=6357` (LINEAR_SOLVE_FAILED) plus
+  `status=-2=59`, `MAPPER:no-batchable-element=209`, `PLAN:VC_REMERGE_MULTI=47`, `PLAN:SIDE_OPEN_UNPACKED=1`,
+  `VALIDATOR:ISLANDS_SLACK=1`. The −3 rejects are essentially all the plain sections (6352 `BUS-*`, 5 `GEN-*`), so
+  the device barely engages and the CPU replays the rest — which is why the statuses match exactly
+  (CONVERGED 6602, FAILED 5, MAX_ITERATION_REACHED 60 on both arms) and the timing is 0.86x (GPU cold 862 s
+  against CPU 1-thread 744 s).
+- **The BASE itself is 6.56e-02 MW apart** (cpu 14.359916545, gpu 14.294298358) — the 0.066 MW item recorded on
+  2026-09-25 and this branch's namesake. Nearly every contingency inherits it: the DAP worst is 1.07 MW with a
+  dense cluster around 1.063 MW and ~4180 contingencies above 1e-5 MW. Violations: CPU 503,923 vs GPU 503,905
+  (diff 18, within the harness's 0.01% tolerance).
+- The base's START is exact: the device's first fill is norm2 = 1.19599687948394333e+02 against OLF's
+  |f(x0)| = 119.59968794839484, identical to 15 digits. The arms then DIVERGE: OLF converges in 4 outer loops /
+  8 Newton iterations, the device takes 18 iterations across 15 solves and pins 36–37 buses where the window's
+  base pins 19. So the extraction and assembly are right at this scope and the OUTER-LOOP sequence is not.
+Order of work, from this measurement: (1) the base's outer-loop sequence at full scope (the 0.066 MW; compare the
+RL pass-by-pass pin sets, `OLF_GPU_DBG_RL` against `SW_PASS`, as the window work did), then (2) the 6357
+linear-solve failures, which is what keeps the device out of 96% of the scope. The window remains the fast
+regression gate; it is evidently a benign subset, so a window result must not be reported as a full-scope one.

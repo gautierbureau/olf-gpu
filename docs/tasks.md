@@ -3542,3 +3542,38 @@ does not converge them either — the device reproduces OLF's divergence to 10+ 
 Batch observation: BUS-536's non-convergence drives the DistributedSlack loop for 30 batch passes (`nChanged=1`
 for 28 of them), each a full-width re-solve — the budget is per scenario and correct, but the pass count is a
 cost the CPU never pays; a scenario whose solve has failed should stop driving the loop.
+
+### The SA extraction must be CANONICAL — the base pin state leaked into the batch structure (2026-09-28)
+
+BUS-6088_BBS (slot 893 of the [5000,6000) busbar window, `max-iter-bad-solve` at RL#2): the CPU and the device
+take the same RL#1 decision (pin VL-5997_1, the sibling of the pilot-self pilot VL-5997_0), and the device's re-solve
+then fails because the just-pinned member's row 12562 (mode 4) assembles EMPTY (pre-repair nnz=0, F=−target) while
+the same pinned row is FULL in the base at outer 6. The per-row scatter replay (`OLF_GPU_VALS_DUMP_ROW=<row>`, the
+`CBROW` lines: every closed-branch output whose frozen or alternate dest is the row, with the select row's mode, the
+element's disabled flag and its relocation group) showed the two contexts hold DIFFERENT structures: in the base,
+row 12562 is the ALTERNATE of the member's two lines (8568/8700, `mode 4` selects it); in the batch, it is the
+FROZEN dest of the pilot's line 8699 under relocation group 17 and the member's lines have no route to it at all.
+`OLF_GPU_SA_EQ_DUMP=<path>` (the SA extraction's row map, same format as `OLF_GPU_EQ_DUMP`) named the cause: the
+batched SA extracts AFTER the base load flow has pinned buses, and `computeQRow` / the DISTR_Q pack / the member
+alternate loop all read that state — a pinned pilot-self pilot has BUS_TARGET_Q active, so it fell into the
+"regular pilot" branch (its q frozen onto the first ENABLED member's row, 12562), the member became the "free"
+member whose own control's controlled bus is itself (never in the pilot set) and lost its alternate, and the DISTR_Q
+row on 12562 became the PILOT's equation (weights −1/0) instead of the member's (+0.5/−0.5). The kernels' rotation
+dynamics assume the base layout, which is only canonical by luck (nothing is pinned when the base extracts).
+
+Fix: a group with a candidate table (`GpuAcRowIndexing.hasCandidateTable`, now the ONE enrolment predicate
+ExtractionColumns uses) is encoded as if every controller were enabled — every controller element's frozen q row
+suppressed (own row through the alternate, mode 4), a non-controller pilot's q on the FIRST member (re-picked per
+scenario by the mode scan), the DISTR_Q pack's free controller = the first member, `distrQHostMember` = the first
+member; `GpuAcData.sameStructureInputsAs` now includes the candidate tables. The per-scenario side stays
+state-based: `GpuAcActivationExtractor` puts an ACTIVE Q balance on `GpuAcRowIndexing.stateQRow` (a pinned member's
+own V row; the pilot's on the first ENABLED member's row, or its own row once every controller is pinned) — the
+canonical row collided with a pinned first member's own Q (12 remote-group fixtures failed, `assigned twice`) and a
+pinned pilot-self pilot indexed −1 (the whole precompute fell to the CPU: `GPU_PRECOMPUTE_FAILED` now prints its top
+frames unconditionally). Measured: window 958/1000 on device (BUS-6088_BBS now at 1.2e-8 MW; only OLF's own
+non-convergences BUS-536_BBS and BUS-6079_BBS remain), violations diff 0, DAP worst 0.141 MW (BUS-612_BBS_2,
+unchanged); suites 304/0 with the rotation on and off; base 3/1/2/1 iteration-for-iteration.
+Observed on the way: the BASE's distributed active power differs from the CPU's by a run-dependent amount with
+identical code (1.1e-8, 4.2e-6, 2.3e-7 MW in three runs; cold=warm within one JVM) — the last-digit drift
+(8–10 agreeing digits per iterate) amplified through the DistributedSlack loop. When it lands at 4.2e-6 the whole
+window shifts with it (468 contingencies move from ≤1e-6 into the 4.25e-6 class). That drift is the open ulp item.

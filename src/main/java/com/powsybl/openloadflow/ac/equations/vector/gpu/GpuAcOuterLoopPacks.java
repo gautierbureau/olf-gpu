@@ -1057,8 +1057,12 @@ public final class GpuAcOuterLoopPacks {
                 continue;
             }
             List<LfBus> controllers = gvc.getMergedControllerElements();
-            LfBus freeCtl = controllers.stream()
-                    .filter(b -> gvc.isControllerEnabled(b)).findFirst().orElse(null);
+            // CANONICAL for a group with a candidate table: the free (reference) controller is the FIRST
+            // member, as in the all-enabled state — the per-scenario row modes and the carrier gate decide
+            // which DISTR_Q rows are live. Else (no table) the extraction-time free member, as before.
+            LfBus freeCtl = GpuAcRowIndexing.hasCandidateTable(gvc, es)
+                    ? controllers.get(0)
+                    : controllers.stream().filter(b -> gvc.isControllerEnabled(b)).findFirst().orElse(null);
             if (System.getenv("OLF_GPU_FREECTL_TRACE") != null) {
                 System.err.printf("FREECTL pilot=%s members=%s freeCtl=%s olfHasDistrQ=%s%n",
                         gvc.getControlledBus().getId(),

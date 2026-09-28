@@ -210,8 +210,34 @@ class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowN
     }
 
     /** compare() with a parameter customizer applied to BOTH arms and a configurable tolerance. */
+    /** OLF_GPU_DBG_RL: OLF's own reactive-limit decisions (TRACE) as CPU_RL lines — the same hook the rte6515
+     *  harness installs, so a fixture's CPU arm can be read decision by decision. */
+    private static void installRlTrace() {
+        if (System.getenv("OLF_GPU_DBG_RL") == null) {
+            return;
+        }
+        ch.qos.logback.classic.Logger root = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                .getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.classic.encoder.PatternLayoutEncoder enc = new ch.qos.logback.classic.encoder.PatternLayoutEncoder();
+        enc.setContext(root.getLoggerContext());
+        enc.setPattern("CPU_RL %msg%n");
+        enc.start();
+        ch.qos.logback.core.ConsoleAppender<ch.qos.logback.classic.spi.ILoggingEvent> ca = new ch.qos.logback.core.ConsoleAppender<>();
+        ca.setContext(root.getLoggerContext());
+        ca.setEncoder(enc);
+        ca.start();
+        for (String n : new String[] {"com.powsybl.openloadflow.ac.outerloop.ReactiveLimitsOuterLoop",
+                                      "com.powsybl.openloadflow.ac.AcloadFlowEngine"}) {
+            ch.qos.logback.classic.Logger lg = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(n);
+            lg.setLevel(ch.qos.logback.classic.Level.TRACE);
+            lg.setAdditive(false);
+            lg.addAppender(ca);
+        }
+    }
+
     private void compareWithParams(Supplier<Network> networkSupplier, String label,
                                    java.util.function.Consumer<LoadFlowParameters> customize, double tolKv) {
+        installRlTrace();
         LoadFlow.Runner runner = new LoadFlow.Runner(new OpenLoadFlowProvider(new DenseMatrixFactory()));
 
         Network cpuNetwork = networkSupplier.get();
@@ -314,6 +340,49 @@ class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowN
             createLine(network, prev, b, "c" + i, 0.0, 0.0);
             prev = b;
         }
+        return network;
+    }
+
+    /** A pilot-self group whose second controller sits on a dead-end STUB behind a zero-impedance coupler
+     *  (rte6515 VL-5997: sections _0 and _1 coupled), and whose stub generator PINS at a non-zero limit in
+     *  the base load flow. The stub's V row hosts the coupler's ZERO_V equation; its reactive balance lives
+     *  on the coupler's DUMMY_Q row — a pin written on the V row turns "v_stub − v_pilot = 0" into
+     *  "= limit − loadQ" (BUS-6088_BBS in the [5000,6000) batch, 30 iterations and a bad solve). */
+    @Test
+    void pilotSelfGroupWithStubMemberPinning() {
+        long before = com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
+        compareWithParams(GpuLoadFlowTest::pilotSelfStubMemberNetwork, "pilot-self group, stub member pins",
+                p -> {
+                    p.setDistributedSlack(true).setUseReactiveLimits(true);
+                    OpenLoadFlowParameters.create(p).setVoltageRemoteControl(true);
+                }, 1e-10);
+        org.junit.jupiter.api.Assertions.assertEquals(before,
+                com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
+                "the stub-member pin must solve ON the GPU (no CPU fallback)");
+    }
+
+    private static Network pilotSelfStubMemberNetwork() {
+        Network network = Network.create("pilot-self-stub", "code");
+        com.powsybl.iidm.network.Bus b0 = createBus(network, "s0", "b0");
+        com.powsybl.iidm.network.Bus b1 = createBus(network, "s1", "b1");   // the pilot: its own generator
+        com.powsybl.iidm.network.Bus b2 = createBus(network, "s1", "b2");   // the stub: coupled to b1, no other branch
+        com.powsybl.iidm.network.Bus b3 = createBus(network, "s0", "b3");
+        createGenerator(b0, "g0", 3, 1.0);                                   // slack side
+        createLoad(b3, "ld3", 4, 3.0);                                      // a reactive load the group must feed
+        createLoad(b0, "ld0", 1, 0.5);
+        createLine(network, b0, b1, "l01", 0.1);
+        createLine(network, b1, b3, "l13", 0.1);
+        createLine(network, b0, b3, "l03", 0.1);
+        createLine(network, b1, b2, "c12", 0.0, 0.0);                        // the zero-impedance coupler
+        createGenerator(b1, "g1", 1, 1.02);                                  // pilot controls its own bus
+        network.getGenerator("g1").newMinMaxReactiveLimits().setMinQ(-100).setMaxQ(100).add();
+        var g2 = b2.getVoltageLevel().newGenerator()
+                .setId("g2").setBus("b2").setConnectableBus("b2")
+                .setTargetP(1).setMinP(0).setMaxP(10).setVoltageRegulatorOn(true)
+                .setTargetV(1.02 * b1.getVoltageLevel().getNominalV())
+                .setRegulatingTerminal(network.getGenerator("g1").getTerminal())
+                .add();
+        g2.newMinMaxReactiveLimits().setMinQ(-0.5).setMaxQ(0.5).add();      // pins at maxQ = 0.005 pu, not 0
         return network;
     }
 

@@ -140,7 +140,9 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(vdlIn, other.vdlIn) && java.util.Arrays.equals(vdlIdx, other.vdlIdx)
                 // structure input too: the phase-control alt-dest tables (pcDest/pcSel) are built from it
                 && java.util.Arrays.equals(cbPcSide, other.cbPcSide)
-                && java.util.Arrays.equals(obQAlt, other.obQAlt) && java.util.Arrays.equals(ziQAlt, other.ziQAlt);
+                && java.util.Arrays.equals(obQAlt, other.obQAlt) && java.util.Arrays.equals(ziQAlt, other.ziQAlt)
+                // the candidate tables build the group relocation pools (buildCbDynDest & co.)
+                && java.util.Arrays.equals(qrPtr, other.qrPtr) && java.util.Arrays.equals(qrRows, other.qrRows);
     }
 
     /**

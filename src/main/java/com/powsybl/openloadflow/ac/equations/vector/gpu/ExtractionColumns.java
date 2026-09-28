@@ -130,24 +130,14 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             // this lands; without it such a group keeps a relocation frozen at extraction, which is what
             // leaves rte6515's busbar base rank-deficient.
             boolean pilotSelf = gvc != null && gvc.getMergedControllerElements().contains(bus);
-            boolean pilotSelfRotates = pilotSelf && GpuAcRowIndexing.pilotSelfRotationEnabled()
-                    && gvc.getMergedControllerElements().size() >= 2;
-            boolean pilotSelfExcluded = pilotSelf && !pilotSelfRotates;
-            if (gvc == null || gvc.getMergedControllerElements().isEmpty() || vCol[bus.getNum()] < 0
-                    || pilotSelfExcluded) {
+            // the ONE enrolment predicate (GpuAcRowIndexing.hasCandidateTable): the same answer decides the
+            // canonical, pin-state-independent encoding of the group's q rows and DISTR_Q pack
+            if (!GpuAcRowIndexing.hasCandidateTable(gvc, es)) {
                 continue;
             }
             List<Integer> memberRows = new ArrayList<>();
-            boolean allResolvable = true;
             for (LfBus m : gvc.getMergedControllerElements()) {
-                if (vCol[m.getNum()] < 0) {
-                    allResolvable = false;
-                    break;
-                }
                 memberRows.add(vCol[m.getNum()]);
-            }
-            if (!allResolvable) {
-                continue;
             }
             int g = qrPtr.size();
             qrPtr.add(qrRows.size());
@@ -162,6 +152,24 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             }
         }
         qrPtr.add(qrRows.size());
+        if (System.getenv("OLF_GPU_QR_TRACE") != null) {   // every relocation group of THIS extraction
+            for (int g = 0; g + 1 < qrPtr.size(); g++) {
+                StringBuilder sb = new StringBuilder("QR_TRACE group=" + g + " rows=");
+                for (int c = qrPtr.get(g); c < qrPtr.get(g + 1); c++) {
+                    sb.append(qrRows.get(c)).append(c == qrPtr.get(g) ? "|" : ",");
+                }
+                System.err.println(sb);
+            }
+            for (LfBus bus : network.getBuses()) {
+                if (vCol[bus.getNum()] >= 0 && qRowAlt[bus.getNum()] != -1) {
+                    System.err.println("QR_TRACE bus=" + bus.getId() + " vRow=" + vCol[bus.getNum()]
+                            + " qRowAlt=" + qRowAlt[bus.getNum()]
+                            + " gvcMain=" + bus.getGeneratorVoltageControl().map(c -> c.getMergeStatus().name()).orElse("-")
+                            + " vcOn=" + bus.isGeneratorVoltageControlled()
+                            + " pinned=" + (bus.getGeneratorVoltageControl().isPresent() && !bus.isGeneratorVoltageControlEnabled()));
+                }
+            }
+        }
 
         // Remote gen-VC group members (plan-B2), CANONICAL encoding independent of the base pin
         // state: the frozen q dest is SUPPRESSED and the member's OWN row is the ALTERNATE,
@@ -178,8 +186,9 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             int bn = bus.getNum();
             if (vCol[bn] >= 0 && GpuAcRowIndexing.isRemoteGenVcMember(bus)
                     && (!GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)
-                        || qrPilotBuses.contains(bus.getGeneratorVoltageControl().orElseThrow()
-                                .getControlledBus().getNum()))) {
+                        // the MAIN control's pilot: on a member's own (merged, dependent) control the
+                        // controlled bus is the member itself, which is never in the pilot set
+                        || qrPilotBuses.contains(GpuAcRowIndexing.mainGenVc(bus).getControlledBus().getNum()))) {
                 qRow[bn] = -1;
                 qRowAlt[bn] = vCol[bn];
             }

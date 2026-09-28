@@ -566,7 +566,11 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             // the same loop, in the same order, the same number of times.
             for (String n : new String[] {"com.powsybl.openloadflow.ac.solver.NewtonRaphson",
                                           "com.powsybl.openloadflow.ac.solver.MaxVoltageChangeStateVectorScaling",
-                                          "com.powsybl.openloadflow.ac.AcloadFlowEngine"}) {
+                                          "com.powsybl.openloadflow.ac.AcloadFlowEngine",
+                                          // "Contingency '<id>' impact on network ..." (DEBUG): heads each
+                                          // post-contingency block, so a block can be addressed by id inside
+                                          // the full window (with OLF_GPU_SA_CPU_THREADS=1 they do not interleave)
+                                          "com.powsybl.openloadflow.sa.AbstractSecurityAnalysis"}) {
                 ch.qos.logback.classic.Logger lg = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(n);
                 lg.setLevel(ch.qos.logback.classic.Level.DEBUG);
                 lg.setAdditive(false);

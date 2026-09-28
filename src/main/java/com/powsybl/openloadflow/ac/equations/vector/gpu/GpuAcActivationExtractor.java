@@ -13,6 +13,7 @@ import com.powsybl.openloadflow.ac.equations.AcVariableType;
 import com.powsybl.openloadflow.equations.EquationSystem;
 import com.powsybl.openloadflow.equations.SingleEquation;
 import com.powsybl.openloadflow.equations.Variable;
+import com.powsybl.openloadflow.network.GeneratorVoltageControl;
 import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.VoltageControl;
 import com.powsybl.openloadflow.network.LfNetwork;
@@ -125,6 +126,17 @@ public final class GpuAcActivationExtractor {
             if (q >= 0) {
                 // Q row = V row, the controlling rho row, or the DUMMY_Q row on a dead-end stub
                 int qr = stubBr >= 0 ? dummyQCol[stubBr] : qRow[bus.getNum()];
+                GeneratorVoltageControl mainVc = GpuAcRowIndexing.mainGenVc(bus);
+                if (stubBr < 0 && mainVc != null && GpuAcRowIndexing.hasCandidateTable(mainVc, es)) {
+                    // A group with a candidate table is extracted CANONICALLY (pin-state independent: every
+                    // controller's frozen q row suppressed, the pilot's on the FIRST member), but this target map
+                    // is per scenario, so the row is the one the in-kernel mode scan picks in THIS state: a pinned
+                    // member's own V row (mode 4 below, its alternate dest); the pilot's balance on the first
+                    // ENABLED member's V row (the carrier), or on its own V row once every controller is pinned
+                    // (its V identity gone, the row is a power row). Measured: the canonical row collided with the
+                    // pinned first member's own Q (deviceRemoteFreeMemberBasePinnedMatchesCpu & co., 12 tests).
+                    qr = GpuAcRowIndexing.stateQRow(bus, vCol);
+                }
                 assign(es, targetMap, qr, q, AcEquationType.BUS_TARGET_Q, bus.getNum());
                 // ACTIVE own-Q balance at a (non-free) remote gen-VC member = the RL-PINNED state:
                 // row mode 4, so the family fills route the member's own q here (the frozen dest is

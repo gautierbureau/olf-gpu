@@ -1429,6 +1429,25 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
     int it = seq++;                                          // fill sequence: orders these against LIN_RESID
     int sMax = std::min(nS, 2);
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    // OLF_GPU_VALS_SCAN_SLOT=<slot>: scan/dump THAT scenario by cloning its fill (vals, F, mode, x, target) over
+    // slot 0 first — slot 0 then behaves as the traced slot for the rest of the solve, which is fine for a
+    // diagnostic run and avoids copying nS x nnz values to the host. A batch-only defect (fine when run alone,
+    // since the single-contingency base retains other switches) is only readable this way.
+    static const char* scanSlotEnv = std::getenv("OLF_GPU_VALS_SCAN_SLOT");
+    static const int scanSlot = scanSlotEnv != nullptr ? std::atoi(scanSlotEnv) : -1;
+    if (scanSlot > 0 && scanSlot < nS) {
+        CUDA_CHECK(cudaMemcpy(ctx->dVals.p, static_cast<const double*>(ctx->dVals.p) + static_cast<size_t>(scanSlot) * nnz,
+                              static_cast<size_t>(nnz) * sizeof(double), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->dF.p, static_cast<const double*>(ctx->dF.p) + static_cast<size_t>(scanSlot) * n,
+                              static_cast<size_t>(n) * sizeof(double), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->dMode.p, static_cast<const int*>(ctx->dMode.p) + static_cast<size_t>(scanSlot) * n,
+                              static_cast<size_t>(n) * sizeof(int), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->dX.p, static_cast<const double*>(ctx->dX.p) + static_cast<size_t>(scanSlot) * n,
+                              static_cast<size_t>(n) * sizeof(double), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->dTarget.p, static_cast<const double*>(ctx->dTarget.p) + static_cast<size_t>(scanSlot) * n,
+                              static_cast<size_t>(n) * sizeof(double), cudaMemcpyDeviceToDevice));
+        sMax = 1;
+    }
     std::vector<double> hv(static_cast<size_t>(nnz) * sMax);
     CUDA_CHECK(cudaMemcpy(hv.data(), ctx->dVals.p, hv.size() * sizeof(double), cudaMemcpyDeviceToHost));
     std::vector<int> rowPtr(n + 1);
@@ -1560,8 +1579,14 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
         // first fill of a solve is "outer 0 after a scan that was not outer 0", not "it == 0".
         static int prevOuter = -1;
         bool firstOfSolve = outer == 0 && prevOuter != 0;
+        bool firstOfOuter = outer != prevOuter;
         prevOuter = outer;
-        bool eligible = dumpPath != nullptr && *dumpPath != '\0' && (dumpAny ? firstOfSolve : modeCount[4] > 0);
+        // OLF_GPU_VALS_DUMP_OUTER=<outer>: dump the FIRST fill of that outer pass (the post-switch system of a
+        // reactive-limits re-solve, say) instead of the first mode-4 / first-of-solve fill.
+        static const char* dumpOuterEnv = std::getenv("OLF_GPU_VALS_DUMP_OUTER");
+        static const int dumpOuter = dumpOuterEnv != nullptr ? std::atoi(dumpOuterEnv) : -1;
+        bool eligible = dumpPath != nullptr && *dumpPath != '\0'
+                && (dumpOuter >= 0 ? (outer == dumpOuter && firstOfOuter) : (dumpAny ? firstOfSolve : modeCount[4] > 0));
         if (eligible) eligibleSeen++;
         if (!dumped && eligible && eligibleSeen == dumpNth) {
             std::vector<double> hf(n);
@@ -1823,6 +1848,50 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
                              dd[c * 6 + 3], dd[c * 6 + 4], dd[c * 6 + 5], jm.empty() ? -1 : jm[c], kM,
                              kM >= 0 ? mk[kM] : 0.0, kRe, kRe >= 0 ? (int) lt[kRe] : -1, ctx->nDqDyn, ctx->nDqInact,
                              mode[static_cast<size_t>(s) * n + wantRow]);
+            }
+        }
+        // OLF_GPU_VALS_DUMP_ROW: every closed-branch output whose frozen or ALTERNATE dest is the row, with the
+        // per-scenario facts the scatter decides on (the select row's mode, the element's disabled flag, its
+        // relocation group). For the scenario OLF_GPU_VALS_SCAN_SLOT names (else slot 0).
+        if (static const char* cbRowEnv = std::getenv("OLF_GPU_VALS_DUMP_ROW"); cbRowEnv != nullptr && s == 0 && ctx->st->cb.ne > 0) {
+            int wantRow = std::atoi(cbRowEnv);
+            int slotDev = scanSlot > 0 && scanSlot < nS ? scanSlot : 0;
+            size_t nOut = static_cast<size_t>(ctx->st->cb.ne) * CB_NOUT;
+            std::vector<int> cdest(nOut), calt(nOut, -1), csel(nOut, -1), cgrp(nOut, -1);
+            CUDA_CHECK(cudaMemcpy(cdest.data(), ctx->st->cb.dest.p, nOut * sizeof(int), cudaMemcpyDeviceToHost));
+            if (ctx->st->cb.altDest.p) CUDA_CHECK(cudaMemcpy(calt.data(), ctx->st->cb.altDest.p, nOut * sizeof(int), cudaMemcpyDeviceToHost));
+            if (ctx->st->cb.selRow.p) CUDA_CHECK(cudaMemcpy(csel.data(), ctx->st->cb.selRow.p, nOut * sizeof(int), cudaMemcpyDeviceToHost));
+            if (ctx->st->cb.relocGroup.p) CUDA_CHECK(cudaMemcpy(cgrp.data(), ctx->st->cb.relocGroup.p, nOut * sizeof(int), cudaMemcpyDeviceToHost));
+            std::vector<char> dis(ctx->nElements, 0);
+            if (ctx->dDisabled.p) CUDA_CHECK(cudaMemcpy(dis.data(), static_cast<const char*>(ctx->dDisabled.p) + static_cast<size_t>(slotDev) * ctx->nElements, ctx->nElements, cudaMemcpyDeviceToHost));
+            std::vector<int> modeDev(n);
+            CUDA_CHECK(cudaMemcpy(modeDev.data(), static_cast<const int*>(ctx->dMode.p) + static_cast<size_t>(slotDev) * n, n * sizeof(int), cudaMemcpyDeviceToHost));
+            auto rowOfSlot = [&](int d) { if (d <= -2) return -2 - d; if (d < 0) return -1; int lo = 0, hi = n; while (hi - lo > 1) { int mid = (lo + hi) / 2; if (rowPtr[mid] <= d) lo = mid; else hi = mid; } return lo; };
+            {
+                std::fprintf(stderr, "    CBROW st=%p nQr=%d nS=%d groupsOf(%d):", (void*) ctx->st.get(), ctx->st->nQr, nS, wantRow);
+                for (int g = 0; g < ctx->st->nQr; g++) {
+                    for (int c = ctx->st->hQrPtr[g]; c < ctx->st->hQrPtr[g + 1]; c++) {
+                        if (ctx->st->hQrRows[c] == wantRow) std::fprintf(stderr, " g%d[cand %d]", g, c - ctx->st->hQrPtr[g]);
+                    }
+                }
+                std::fprintf(stderr, "\n");
+            }
+            std::vector<int> cix(static_cast<size_t>(ctx->st->cb.ne) * 12);
+            CUDA_CHECK(cudaMemcpy(cix.data(), ctx->st->cb.ix.p, cix.size() * sizeof(int), cudaMemcpyDeviceToHost));
+            for (size_t o = 0; o < nOut; o++) {
+                int rf = rowOfSlot(cdest[o]), ra = rowOfSlot(calt[o]);
+                if (rf != wantRow && ra != wantRow) continue;
+                int e = static_cast<int>(o / CB_NOUT), k = static_cast<int>(o % CB_NOUT);
+                int sr = csel[o];
+                std::fprintf(stderr, "    CBROW row=%d slot=%d elem=%d out=%d frozenRow=%d altRow=%d sel=%d modeAtSel=%d disabled=%d group=%d ix=[%d %d %d %d]",
+                             wantRow, slotDev, e, k, rf, ra, sr, sr >= 0 ? modeDev[sr] : (sr <= -2 ? modeDev[-2 - sr] : -99),
+                             (int) dis[ctx->cbOffset + e], cgrp[o], cix[e * 12], cix[e * 12 + 1], cix[e * 12 + 2], cix[e * 12 + 3]);
+                if (cgrp[o] >= 0) {
+                    int g = cgrp[o];
+                    std::fprintf(stderr, " groupRows=");
+                    for (int c = ctx->st->hQrPtr[g]; c < ctx->st->hQrPtr[g + 1]; c++) std::fprintf(stderr, "%d(m%d),", ctx->st->hQrRows[c], modeDev[ctx->st->hQrRows[c]]);
+                }
+                std::fprintf(stderr, "\n");
             }
         }
         std::fprintf(stderr, "VALS_SCAN outer=%d it=%d slot=%d nnz=%d finite=%s maxAbs=%.6e at row=%d col=%d"
@@ -9375,8 +9444,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx));
         applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>());
+        // OLF_GPU_VALS_SCAN_PREREPAIR: scan/dump the fill BEFORE the zero-diagonal repair rewrites hazard rows
+        // (a row that reads as a borrowed donor after the repair was EMPTY before it — the defect is upstream).
+        static const bool scanPreRepair = std::getenv("OLF_GPU_VALS_SCAN_PREREPAIR") != nullptr;
+        if (scanPreRepair) scanValsFinite(ctx, nS, n, nnz, outer);
         hazRepairValues(ctx, nS, ctx->dVals.as<double>());
-        scanValsFinite(ctx, nS, n, nnz, outer);               // OLF_GPU_VALS_SCAN: is the matrix sound at all?
+        if (!scanPreRepair) scanValsFinite(ctx, nS, n, nnz, outer);   // OLF_GPU_VALS_SCAN: is the matrix sound at all?
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: stream-ordered into the solve, no host sync
     };
     // ---- IncrementalTransformerVoltageControl as a DRIVER PHASE (OLF order 8). OLF's own rule, per

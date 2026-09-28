@@ -95,8 +95,13 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
         return deadPilotVRow >= 0;
     }
 
+    /** {@code pqRowMode} value meaning "the V row becomes a VOLTAGE IDENTITY (mode 0)": a merged voltage
+     *  control re-homed to this bus by a zero-impedance split (see GpuBatchQualification.reHomedControls),
+     *  with {@code qTarget} then carrying the bus's own voltage target. 0 is the "default" (1). */
+    public static final int ROW_V_IDENTITY = -1;
+
     public int pqRowModeOrDefault() {
-        return pqRowMode == 0 ? 1 : pqRowMode;
+        return pqRowMode == 0 ? 1 : pqRowMode < 0 ? 0 : pqRowMode;
     }
 
     public boolean seedsDqTargets() {

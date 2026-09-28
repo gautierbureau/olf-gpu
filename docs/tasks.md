@@ -3462,3 +3462,38 @@ that member's DISTR_Q target, not a pilot Q. Now skipped for such a group (pilot
 among the candidates; unpinned ⇔ OLF's base kind of its class-2 RL entry is not 1..4). Both fixtures pass
 (2/2). Note: `GpuBatchOverrides.add` APPENDS duplicates (`duplicateAppends`) and the device kept the first —
 worth a hard error some day; today the wrong producer is removed instead.
+
+### OLF re-merges voltage controls per zero-impedance network — now emulated; rotation ON by default (2026-09-28)
+
+Two of the window's worst contingencies, run alone (`OLF_GPU_SA_CTG_ONLY`, both reproduce): BUS-6029_BBS_1 (DAP
+1.632 MW, bus diff 5.3 kV at the surviving VL-6029 sections, identical pins and limit updates on both arms, the
+pre-distributed loss equal to 2e-14 pu) and BUS-6002_BBS_2 (29 phantom violations, 8.7 kV at VL-6002_2, NOT
+rotation-specific). `OLF_GPU_EQ_DUMP_CTG` names it: OLF keeps `bus_target_v` ACTIVE on the surviving section
+(VL-6029_1 at 394.82 kV) with no DISTR_Q — `LfZeroImpedanceNetwork.updateVoltageControlMergeStatus` re-runs on the
+post-contingency zero-impedance networks: within each, the controls are re-merged with the highest target (then
+controlled-bus id) as MAIN, so a section whose controlled bus is lost, or that a coupler outage separates,
+re-elects its own main; a single-bus cluster with a local control is a plain PV bus at its own target. The
+device applied "control dies → survivors PQ at targetQ" (right only for a survivor that regulated the LOST bus
+remotely — `deviceBusLossIslandingMergedPilotSurvivorMatchesCpu` still holds).
+
+`GpuBatchQualification.reHomedControls` now replays that merge (islanded buses + `outagedZiBranches` split the
+group's controlled buses into clusters; a cluster without the base main re-elects; one LOCAL control → V identity
+at its target via `GenOutage.ROW_V_IDENTITY`, its controllers leave the group's DISTR_Q through the RENORMALIZE
+channel; several controls or a remote controller → `PLAN:VC_REMERGE_MULTI`, CPU). Two device details followed:
+`updateDistrQTargetsBatch` wrote the member's DISTR_Q target over the re-homed row's VOLTAGE target at the first
+RL pass (1.039 → 0.000, MAX_ITERATION) — an identity-mode member row now never receives one; an extra "inactive
+member" early return was tried and dropped (it moved `javaOuterLoopModeMatchesCpu` by 1.1e-12 kV).
+
+| | before | after |
+| --- | --- | --- |
+| BUS-6029_BBS_1 | DAP 1.632 MW, 5.3 kV | DAP 1.5e-08 MW, worst bus 8.9e-11 kV, violations equal |
+| BUS-6002_BBS_2 | 29 phantom violations, 8.7 kV | violations equal, worst bus 8.6e-11 kV, DAP 6e-10 MW |
+| window [5000,6000) rotation ON | 966/1000, violations diff 48, DAP worst 1.63 MW | **955/1000** (16 × VC_REMERGE_MULTI to the CPU by design, 21 runtime), **violations diff 0**, DAP worst 1.34 MW |
+| window rotation OFF | ~900/1000, diff 19 | 903/1000, diff 145 (61 × pilot-self-mixed-pin, 112 × max-iter-bad-solve — OFF's own defects, two contingencies with 0 device violations) |
+
+Rotation ON is better on every count (base parity, coverage, violations) and the suite is green with it, so
+`olf.gpu.pilotSelfRotation` now defaults to TRUE (`-Dolf.gpu.pilotSelfRotation=false` keeps the old layout).
+Open: the 16 multi-control re-merges (a new remote group after the split — needs per-scenario group tables), the
+21 runtime rejects (8 × max-iter-bad-solve, 1 × budget), the DAP tail (1.34 MW worst), the ulp class (~480
+contingencies between 1e-9 and 1e-6 MW), and a re-homed PV bus's reactive limits (its RL entry stays a remote
+member: OLF checks it as a local PV bus and may pin it; the device does not).

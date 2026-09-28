@@ -335,7 +335,7 @@ final class GpuAcRowIndexing {
      * enabled controller except the FIRST, BUS_TARGET_Q for every pinned one).
      */
     static boolean pilotSelfRotationEnabled() {
-        return Boolean.parseBoolean(System.getProperty("olf.gpu.pilotSelfRotation", "false"));
+        return Boolean.parseBoolean(System.getProperty("olf.gpu.pilotSelfRotation", "true"));
     }
 
     static boolean ziTreeRelocationEnabled() {

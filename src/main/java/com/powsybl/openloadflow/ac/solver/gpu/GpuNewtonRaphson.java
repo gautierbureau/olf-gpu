@@ -223,7 +223,8 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
         }
         writeBackDistributedSlack(deviceTargets,
                 GpuAcNewtonSolver.readBatchDsGenCum(handle), GpuAcNewtonSolver.readBatchDsRetain(handle), data);
-        writeBackReactiveLimits(data, deviceTargets);
+        writeBackReactiveLimits(data, deviceTargets,
+                data.rlRemote() != null ? GpuAcNewtonSolver.readBatchRowModes(handle) : null);
         if (tvcOwned && tvcCtls != null) {
             GpuBatchIncrementalTvc.writeBackTaps(network, tvcCtls, GpuAcNewtonSolver.readBatchTvcTaps(handle));
         }
@@ -352,7 +353,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      *  target vector picks the limit up. A pin the device released (a PQ→PV switch-back) is undone the
      *  way OLF undoes it. Limit types 3/4 are robust mode's MIN/MAX_REALISTIC_V freezes: the pin is the
      *  same, only the recorded type differs (and OLF never re-freezes those at a moved Q limit). */
-    private void writeBackReactiveLimits(GpuAcData data, double[] deviceTargets) {
+    private void writeBackReactiveLimits(GpuAcData data, double[] deviceTargets, int[] devModes) {
         if (rlStateOut == null || data == null || data.rlBusNum() == null) {
             return;
         }
@@ -379,8 +380,15 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 // voltage for an SVC (OLF freezes at bus.getMinQ()/getMaxQ() read at the check, the same
                 // live value); the packed base-V aggregate is 1.3e-4 pu off on rte6515's VL-6226_0.
                 int vRow = data.rlVrow()[i];
-                double qLimit = deviceTargets != null && vRow >= 0 && vRow < deviceTargets.length
-                        ? deviceTargets[vRow] + data.rlLoadQ()[i]
+                // A pilot-self pilot enrolled in the candidate table keeps BUS_TARGET_V on its own row while
+                // pinned: its pinned balance rides the first enabled member's row (the carrier), or its own
+                // row only once the group lost control (flipped to a power row). Read the limit where the
+                // device put it — its own row's target here is the VOLTAGE target (measured: 1.055 + loadQ
+                // 1.218 = a 2.273 "limit" frozen on VL-6112_0 against the real 0.774, and the base judged
+                // MAX_ITERATION_REACHED on that residual).
+                int limitRow = pinnedBalanceRow(data, i, vRow, devModes);
+                double qLimit = deviceTargets != null && limitRow >= 0 && limitRow < deviceTargets.length
+                        ? deviceTargets[limitRow] + data.rlLoadQ()[i]
                         : (limitType == 1 ? data.rlMinQ()[i]
                            : limitType == 2 ? data.rlMaxQ()[i] : data.rlInitTargetQ()[i]);
                 bus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(qLimit);
@@ -397,6 +405,38 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 bus.setQLimitType(null);
             }
         }
+    }
+
+    /** The row whose target holds RL entry {@code i}'s pinned balance ({@code target + loadQ = the limit}).
+     *  Its own V row, except for a pilot-self pilot enrolled in the candidate table (its V row is
+     *  candidate 0 of a group and still a V identity, mode 0, while pinned): then the same pick the
+     *  device's {@code relocChoose} makes — the first OTHER candidate whose row is neither identity nor
+     *  pinned (the carrier) — and its own row when none is live (the group lost control and the device
+     *  flipped that row to a power row, mode 1). */
+    private static int pinnedBalanceRow(GpuAcData data, int i, int vRow, int[] devModes) {
+        if (devModes == null || data.rlRemote() == null || data.rlRemote()[i] != 2 || data.qrPtr() == null
+                || vRow < 0 || vRow >= devModes.length || devModes[vRow] != 0) {
+            return vRow;
+        }
+        int[] qrPtr = data.qrPtr();
+        int[] qrRows = data.qrRows();
+        for (int g = 0; g + 1 < qrPtr.length; g++) {
+            if (qrRows[qrPtr[g]] != vRow) {
+                continue;
+            }
+            for (int c = qrPtr[g] + 1; c < qrPtr[g + 1]; c++) {
+                int r = qrRows[c];
+                if (r == vRow) {
+                    continue;
+                }
+                int m = devModes[r];
+                if (m != 0 && m != 4) {
+                    return r;
+                }
+            }
+            return vRow;
+        }
+        return vRow;
     }
 
     /** Read the bands out of the run's OWN configured loops, so the device decides at OLF's threshold. */
@@ -495,6 +535,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
 
     /** OLF_GPU_EQ_DUMP: written once per run (see dumpEquationsOnce). */
     private boolean equationsDumped;
+
+    /** OLF_GPU_F0_TRACE: written once per run (see runImpl). */
+    private boolean f0Traced;
 
     private GpuAcActivation activation;
 
@@ -808,6 +851,39 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             }
             double[] target = activation.applyTargets(targetVector.getArray());
             double[] x0 = equationSystem.getStateVector().get().clone();
+            // OLF_GPU_F0_TRACE=<path>: OLF's OWN mismatch vector at x0 (f(x0) - target, the residual its first
+            // |f(x0)| line is the norm of), one line per equation with its type, element and id. Lined up
+            // against the device's first fill (OLF_GPU_VALS_DUMP_ANY) it names the equation the two arms
+            // evaluate differently BEFORE any step is taken — the only place a difference is not yet blurred
+            // by different iterates. Written once per run.
+            String f0Path = System.getenv("OLF_GPU_F0_TRACE");
+            if (f0Path != null && !f0Path.isEmpty() && !f0Traced) {
+                f0Traced = true;
+                double[] fx0 = equationVector.getArray();
+                double[] tg0 = targetVector.getArray();
+                double n2 = 0;
+                try (java.io.PrintWriter pw = new java.io.PrintWriter(java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(f0Path)))) {
+                    for (int c = 0; c < fx0.length; c++) {
+                        double v = fx0[c] - (c < tg0.length ? tg0[c] : 0.0);
+                        n2 += v * v;
+                        var eq = equationSystem.getIndex().getEquationAtColumn(c);
+                        String id;
+                        try {
+                            id = switch (eq.getType().getElementType()) {
+                                case BUS -> network.getBus(eq.getElementNum()).getId();
+                                case BRANCH -> network.getBranch(eq.getElementNum()).getId();
+                                default -> "#" + eq.getElementNum();
+                            };
+                        } catch (RuntimeException e) {
+                            id = "#" + eq.getElementNum();
+                        }
+                        pw.println(c + " " + eq.getType() + " " + eq.getElementNum() + " " + id + " " + v);
+                    }
+                } catch (java.io.IOException e) {
+                    LOGGER.warn("OLF_GPU_F0_TRACE failed: {}", e.toString());
+                }
+                System.err.println("F0_TRACE wrote " + f0Path + " rows=" + fx0.length + " norm2=" + Math.sqrt(n2));
+            }
             rlStateOut = driverOuterLoops && cachedData.rlVrow().length > 0 ? new int[cachedData.rlVrow().length] : null;
             int[] rlStateIn = null;
             if (restart && rlCarry != null && rlStateOut != null) {

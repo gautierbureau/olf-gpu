@@ -561,8 +561,12 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             nrApp.setContext(nrRoot.getLoggerContext());
             nrApp.setEncoder(nrEnc);
             nrApp.start();
+            // AcloadFlowEngine logs "Start outer loop '<name>' iteration <n>", the CPU counterpart of the
+            // device's OLF_GPU_BATCH_TRACE pass line: the two SEQUENCES are what say whether the device ran
+            // the same loop, in the same order, the same number of times.
             for (String n : new String[] {"com.powsybl.openloadflow.ac.solver.NewtonRaphson",
-                                          "com.powsybl.openloadflow.ac.solver.MaxVoltageChangeStateVectorScaling"}) {
+                                          "com.powsybl.openloadflow.ac.solver.MaxVoltageChangeStateVectorScaling",
+                                          "com.powsybl.openloadflow.ac.AcloadFlowEngine"}) {
                 ch.qos.logback.classic.Logger lg = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(n);
                 lg.setLevel(ch.qos.logback.classic.Level.DEBUG);
                 lg.setAdditive(false);

@@ -149,8 +149,21 @@ public final class GpuAcActivationExtractor {
                 boolean pilotSelf = bus.getGeneratorVoltageControl()
                         .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                         .map(c -> c.getControlledBus() == bus).orElse(false);
+                // ...EXCEPT a pilot-self pilot ENROLLED in the candidate table (rotation): its pinned balance is
+                // a POWER row — the carrier's row while a sibling controls, its own row once the group lost
+                // control — routed to by the in-kernel mode scan, and mode 4 there is what the scan SKIPS. The
+                // same predicate ExtractionColumns enrols with. Measured on rte6515's [5000,6000) busbar batch:
+                // the carriers of VL-5997 and VL-6112 came in at mode 4, the scan fell back to the identity pilot
+                // rows, the raw q and the couplers' DUMMY_Q vanished (dead columns 13171/13207) and every
+                // scenario failed its first linear solve (976 x LINEAR_SOLVE_FAILED).
+                boolean enrolled = pilotSelf && GpuAcRowIndexing.pilotSelfRotationEnabled()
+                        && bus.getGeneratorVoltageControl()
+                                .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
+                                .map(c -> c.getMergedControllerElements().size() >= 2
+                                        && c.getMergedControllerElements().stream().allMatch(m -> vCol[m.getNum()] >= 0))
+                                .orElse(false);
                 if (GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
-                        && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus))) {
+                        && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) && !enrolled) {
                     mode[qr] = 4;
                 }
             }

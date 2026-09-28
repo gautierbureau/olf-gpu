@@ -197,7 +197,13 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         // controls, its row is a mode-0 BUS_TARGET_V identity.
         for (LfBus bus : network.getBuses()) {
             int bn = bus.getNum();
-            if (vCol[bn] >= 0 && qRow[bn] < 0 && qRowAlt[bn] < 0
+            // `== -1` and NOT `< 0`: a group encoding is -2-groupId, which is also negative, so a `< 0`
+            // test CLOBBERED the enrolment the loop above had just made — silently, and only for the
+            // pilots whose q is suppressed at extraction, which is exactly the unpinned pilot-self case the
+            // rotation exists for. Measured on rte6515's VL-6112 group: with the rotation property ON the
+            // DISTR_Q contributions still reported qrGroup=-1, so the carrier gate in fillDistrQBatch could
+            // never fire and the re-picked free member kept a DISTR_Q equation OLF had deactivated.
+            if (vCol[bn] >= 0 && qRow[bn] < 0 && qRowAlt[bn] == -1
                     && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
                     && bus.getGeneratorVoltageControl()
                             .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)

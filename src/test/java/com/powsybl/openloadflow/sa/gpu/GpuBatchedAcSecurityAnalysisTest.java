@@ -2090,7 +2090,6 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 List.of(new Contingency("bus-vl1", new com.powsybl.contingency.BusbarSectionContingency("bbs1"))));
     }
 
-
     /** The remote-control group (b1/b2/b3 regulating pilot b4) hung off a meshed main component by the
      *  single tie LTIE, so outaging LTIE islands the entire group — pilot included. */
     private static Network islandableRemoteControlGroupNetwork() {

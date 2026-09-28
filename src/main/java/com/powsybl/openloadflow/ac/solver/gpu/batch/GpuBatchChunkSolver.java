@@ -662,8 +662,31 @@ final class GpuBatchChunkSolver {
                                             newCarrier = r;
                                         }
                                     }
+                                    // A PILOT-SELF group (rotation: the fallback row is itself a candidate) whose pilot is
+                                    // UNPINNED in the base carries no pilot balance on its carrier: that row hosts its OWN
+                                    // DISTR_Q, and the base carrier's target is that member's DISTR_Q target, not a pilot
+                                    // Q — stamping it on the next member overwrote the renormalized target the outage
+                                    // seeding had just put there (middle-section fixture: −0.1333 over −0.2, bus-mid
+                                    // 0.32 kV off). Only a PINNED pilot's balance travels with the carrier.
+                                    boolean unpinnedPilotSelf = false;
+                                    int fallbackRow = qrRows[qrPtr[g]];
+                                    for (int c = qrPtr[g] + 1; c < qrPtr[g + 1]; c++) {
+                                        if (qrRows[c] == fallbackRow) {
+                                            unpinnedPilotSelf = true;
+                                            break;
+                                        }
+                                    }
+                                    if (unpinnedPilotSelf && gpuData.rlVrow() != null && gpuData.rlRemote() != null) {
+                                        for (int e = 0; e < gpuData.rlVrow().length; e++) {
+                                            if (gpuData.rlVrow()[e] == fallbackRow && gpuData.rlRemote()[e] == 2) {
+                                                byte lt = gpuData.rlBaseQLimitType() != null ? gpuData.rlBaseQLimitType()[e] : 0;
+                                                unpinnedPilotSelf = lt < 1 || lt > 4;
+                                                break;
+                                            }
+                                        }
+                                    }
                                     if (baseCarrier >= 0 && newCarrier >= 0 && newCarrier != baseCarrier
-                                            && row[baseCarrier] == 0 && baseRowMode[baseCarrier] != 0) {
+                                            && row[baseCarrier] == 0 && baseRowMode[baseCarrier] != 0 && !unpinnedPilotSelf) {
                                         overrides.add(s * n + newCarrier, baseTargets[baseCarrier]);
                                         if (System.getenv("OLF_GPU_SA_RESID") != null) {
                                             System.err.printf("CARRIER_MOVED ctg=%s group=%d from=%d to=%d pilotQ=%.9f%n",

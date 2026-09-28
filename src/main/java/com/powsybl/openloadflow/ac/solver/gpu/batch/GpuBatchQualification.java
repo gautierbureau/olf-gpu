@@ -434,6 +434,109 @@ final class GpuBatchQualification {
      *  balanced the bus: rte6515 BUS-1055_BBS_1 (pilot VL-1055_0 islanded, merged section VL-1055_1
      *  surviving) - OLF's BUS_TARGET_Q at the survivor off by 0.039 pu, 1.3 kV. A survivor that is
      *  not a packed DISTR_Q member keeps the plain reactive row. */
+
+    /** The outcome of OLF's voltage-control RE-MERGE after a contingency: buses that become plain PV buses at their
+     *  own target, the controllers that thereby leave their base group's DISTR_Q, or a reject tag. */
+    record ReHomed(java.util.LinkedHashMap<LfBus, Double> pvTargets, List<LfBus> leftControllers, String reject) {
+    }
+
+    /**
+     * OLF merges the voltage controls of one zero-impedance network into one MAIN (LfZeroImpedanceNetwork
+     * .updateVoltageControlMergeStatus: highest target, then controlled-bus id) and re-runs that merge on the
+     * post-contingency networks. So a merged group whose controlled section is lost, or whose sections a coupler
+     * outage separates, does NOT die: every surviving cluster of its controlled buses re-elects a main, and a
+     * cluster of ONE bus with a LOCAL control is a plain PV bus at its own target — its controllers leave the
+     * base group's DISTR_Q. Measured on rte6515 [5000,6000): BUS-6029_BBS_1 (section VL-6029_0 islanded, OLF
+     * keeps bus_target_v(VL-6029_1) active — the device applied "control dies", 5.3 kV and 1.632 MW of slack) and
+     * BUS-6002_BBS_2 (coupler open, VL-6002_2 8.7 kV off, 29 phantom violations). A cluster with several controls
+     * or a remote controller is a NEW remote group the tables cannot host — CPU, tagged.
+     */
+    static ReHomed reHomedControls(List<LfBus> islandedBuses, List<LfBranch> outagedZiBranches) {
+        java.util.Set<LfBus> islanded = new java.util.HashSet<>(islandedBuses);
+        java.util.Set<LfBranch> outaged = new java.util.HashSet<>(outagedZiBranches);
+        java.util.LinkedHashSet<com.powsybl.openloadflow.network.GeneratorVoltageControl> mains = new java.util.LinkedHashSet<>();
+        java.util.function.Consumer<LfBus> addMain = b -> {
+            if (b != null) {
+                b.getGeneratorVoltageControl()
+                        .<com.powsybl.openloadflow.network.GeneratorVoltageControl>map(
+                                com.powsybl.openloadflow.network.VoltageControl::getMainVoltageControl)
+                        .filter(m -> !m.getMergedDependentVoltageControls().isEmpty())
+                        .ifPresent(mains::add);
+            }
+        };
+        islandedBuses.forEach(addMain);
+        for (LfBranch br : outagedZiBranches) {
+            addMain.accept(br.getBus1());
+            addMain.accept(br.getBus2());
+        }
+        java.util.LinkedHashMap<LfBus, Double> pv = new java.util.LinkedHashMap<>();
+        List<LfBus> left = new ArrayList<>();
+        for (var main : mains) {
+            java.util.Map<LfBus, com.powsybl.openloadflow.network.VoltageControl<LfBus>> controlOf = new java.util.LinkedHashMap<>();
+            controlOf.put(main.getControlledBus(), main);
+            for (var d : main.getMergedDependentVoltageControls()) {
+                controlOf.put(d.getControlledBus(), d);
+            }
+            java.util.Set<LfBus> alive = new java.util.LinkedHashSet<>();
+            for (LfBus b : controlOf.keySet()) {
+                if (!islanded.contains(b) && !b.isDisabled()) {
+                    alive.add(b);
+                }
+            }
+            java.util.Set<LfBus> seen = new java.util.HashSet<>();
+            for (LfBus start : alive) {
+                if (!seen.add(start)) {
+                    continue;
+                }
+                List<LfBus> cluster = new ArrayList<>(List.of(start));   // BFS over the surviving zero-impedance edges
+                for (int k = 0; k < cluster.size(); k++) {
+                    for (LfBranch br : cluster.get(k).getBranches()) {
+                        if (!br.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC) || outaged.contains(br)
+                                || br.isDisabled()) {
+                            continue;
+                        }
+                        LfBus other = br.getBus1() == cluster.get(k) ? br.getBus2() : br.getBus1();
+                        if (other != null && alive.contains(other) && seen.add(other)) {
+                            cluster.add(other);
+                        }
+                    }
+                }
+                if (cluster.contains(main.getControlledBus())) {
+                    continue;                                // the base main keeps this cluster
+                }
+                var newMain = cluster.stream().map(controlOf::get)
+                        .sorted(java.util.Comparator.<com.powsybl.openloadflow.network.VoltageControl<LfBus>>comparingDouble(
+                                com.powsybl.openloadflow.network.VoltageControl::getTargetValue).reversed()
+                                .thenComparing(vc -> vc.getControlledBus().getId()))
+                        .findFirst().orElseThrow();
+                boolean local = cluster.size() == 1
+                        && newMain.getControllerElements().stream().allMatch(ce -> ce == newMain.getControlledBus());
+                if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                    System.err.printf("QUALIFY_TRACE reHome main=%s cluster=%s newMain=%s target=%.6f local=%b%n",
+                            main.getControlledBus().getId(), cluster.stream().map(LfBus::getId).toList(),
+                            newMain.getControlledBus().getId(), newMain.getTargetValue(), local);
+                }
+                if (!local) {
+                    return new ReHomed(pv, left, "VC_REMERGE_MULTI");
+                }
+                pv.put(newMain.getControlledBus(), newMain.getTargetValue());
+                for (LfBus ce : newMain.getControllerElements()) {
+                    if (!left.contains(ce)) {
+                        left.add(ce);
+                    }
+                }
+            }
+        }
+        return new ReHomed(pv, left, null);
+    }
+
+    /** Row-mode-only GenOutage: the bus's V row becomes a VOLTAGE IDENTITY at {@code vTarget} (a re-homed control). */
+    private static GenOutage reHomedPvEntry(int vRow, double vTarget) {
+        return new GenOutage(-1, 0, vRow, vTarget, true, true,
+                -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
+                new int[0], new double[0], GenOutage.ROW_V_IDENTITY, -1, 0, -1, 0, -1, 0);
+    }
+
     static int deadControlRowMode(GpuAcData gpuData, LfBus survivor) {
         int slot = GpuBatchInjectionOutages.dqMemberSlot(gpuData, survivor);
         if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
@@ -722,6 +825,17 @@ final class GpuBatchQualification {
                     List<com.powsybl.openloadflow.network.LfHvdc> islandedHvdcs = new ArrayList<>();
                     VcSplit vcSplit = classifyVcSplit(es, q.islandedBuses(), lostVcControllers, deadControlBuses,
                             islandedHvdcs);
+                    ReHomed reHomed = reHomedControls(q.islandedBuses(), c.outagedZiBranches());
+                    if (reHomed.reject() != null) {
+                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:" + reHomed.reject());
+                        continue;
+                    }
+                    deadControlBuses.removeAll(reHomed.pvTargets().keySet());   // re-homed, not dead
+                    for (LfBus lb : reHomed.leftControllers()) {
+                        if (!lostVcControllers.contains(lb)) {
+                            lostVcControllers.add(lb);
+                        }
+                    }
                     islandLostVcControllers.addAll(lostVcControllers);
                     if (!islandedHvdcs.isEmpty()) {
                         islandedHvdcsByIndex[i] = islandedHvdcs;   // masked in the chunk solver, as on the tail
@@ -768,6 +882,20 @@ final class GpuBatchQualification {
                             com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");
                             continue;
                         }
+                    }
+                    if (live != null) {
+                        for (var e : reHomed.pvTargets().entrySet()) {
+                            var vVar = es.getVariableSet().getVariable(e.getKey().getNum(), AcVariableType.BUS_V);
+                            if (vVar == null || vVar.getRow() < 0 || frozenSet.contains(vVar.getRow())) {
+                                live = null;
+                                break;
+                            }
+                            live.add(reHomedPvEntry(vVar.getRow(), e.getValue()));
+                        }
+                    }
+                    if (live == null) {
+                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:VC_REMERGE_NO_VROW");
+                        continue;
                     }
                     if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                         System.err.printf("QUALIFY_TRACE island-outage %s: split=%s frozenRows=%d dropped=%d"
@@ -833,6 +961,20 @@ final class GpuBatchQualification {
                 List<com.powsybl.openloadflow.network.LfHvdc> islandedHvdcs = new ArrayList<>();
                 VcSplit vcSplit = classifyVcSplit(es, q.islandedBuses(), lostVcControllers, deadControlBuses,
                         islandedHvdcs);
+                ReHomed reHomed = reHomedControls(q.islandedBuses(), c.outagedZiBranches());
+                if (reHomed.reject() != null) {
+                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:" + reHomed.reject());
+                    continue;
+                }
+                deadControlBuses.removeAll(reHomed.pvTargets().keySet());
+                for (LfBus lb : reHomed.leftControllers()) {
+                    if (!lostVcControllers.contains(lb)) {
+                        lostVcControllers.add(lb);
+                    }
+                }
+                if (!reHomed.leftControllers().isEmpty() && vcSplit == VcSplit.CONTAINED) {
+                    vcSplit = VcSplit.RENORMALIZE;           // the group goes on without them
+                }
                 if (!islandedHvdcs.isEmpty()) {
                     islandedHvdcsByIndex[i] = islandedHvdcs;
                 }
@@ -871,6 +1013,26 @@ final class GpuBatchQualification {
                         continue;                            // no V row to flip — CPU
                     }
                     genOutagesByIndex[i] = vcOff.toArray(new GenOutage[0]);
+                }
+                if (!reHomed.pvTargets().isEmpty()) {
+                    List<GenOutage> pvOn = new ArrayList<>();
+                    if (genOutagesByIndex[i] != null) {
+                        pvOn.addAll(java.util.Arrays.asList(genOutagesByIndex[i]));
+                    }
+                    boolean ok = true;
+                    for (var e : reHomed.pvTargets().entrySet()) {
+                        var vVar = es.getVariableSet().getVariable(e.getKey().getNum(), AcVariableType.BUS_V);
+                        if (vVar == null || vVar.getRow() < 0) {
+                            ok = false;
+                            break;
+                        }
+                        pvOn.add(reHomedPvEntry(vVar.getRow(), e.getValue()));
+                    }
+                    if (!ok) {
+                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:VC_REMERGE_NO_VROW");
+                        continue;
+                    }
+                    genOutagesByIndex[i] = pvOn.toArray(new GenOutage[0]);
                 }
                 if (vcSplit == VcSplit.RENORMALIZE) {
                     // The group survives without its islanded controller(s). Renormalize its reactive

@@ -98,12 +98,31 @@ class GpuZiCouplerTreeRelocationTest extends AbstractLoadFlowNetworkFactory {
                     d.cbIn(), d.cbIdx(), d.obIn(), d.obIdx(), d.shIn(), d.shIdx(), d.hvIn(), d.hvIdx(),
                     d.dqElem(), d.dqSide(), d.dqWeight(), d.dqRow(), d.dqKind(),
                     d.ziIn(), d.ziIdx(),
-                    d.drRow(), d.drCol(), d.drCoef(), d.dbRow(), d.dbCol(), d.dbCoef());
+                    d.drRow(), d.drCol(), d.drCoef(), d.dbRow(), d.dbCol(), d.dbCoef(),
+                // the group tables + ob/zi alternates travel with the packs: a pilot-self group enrolled
+                // in the candidate table (rotation) encodes -2-g in the q alternates, refused without them
+                d.qrPtr(), d.qrRows(), d.obQAlt(), d.ziQAlt());
 
             StateVector sv = es.getStateVector();
             sv.set(x0.clone());
             try (JacobianMatrix<AcVariableType, AcEquationType> j = new JacobianMatrix<>(es, new DenseMatrixFactory())) {
                 eq.minus(target);
+                if (System.getenv("OLF_GPU_F0_TRACE") != null) {
+                    // OLF's own f(x0) - target per equation, beside the device's first fill (OLF_GPU_VALS_DUMP_ANY):
+                    // the row the two arms evaluate differently, before any step blurs it (see GpuNewtonRaphson)
+                    double[] f0 = eq.getArray();
+                    for (int c = 0; c < f0.length; c++) {
+                        var e = es.getIndex().getEquationAtColumn(c);
+                        System.err.println("F0_TRACE chain=" + couplers + " col=" + c + " " + e.getType() + " elem=" + e.getElementNum()
+                                + " f0=" + f0[c]);
+                    }
+                    try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(
+                            System.getenv("OLF_GPU_F0_TRACE") + ".chain" + couplers + ".eq"))) {
+                        GpuEquationDump.write(w, network, es, d, activation.rowMode());
+                    } catch (java.io.IOException ex) {
+                        throw new java.io.UncheckedIOException(ex);
+                    }
+                }
                 double[] dx = eq.getArray().clone();
                 j.solveTransposed(dx);
                 sv.minus(dx);

@@ -2544,3 +2544,956 @@ base's failure at outer pass 7 does not merely cost one fallback, it silently ch
 distributed power, and every contingency starts from that retried base state — which is the first thing to
 re-measure once the divergence is fixed. Note the failure is a DIVERGING Newton (the norm grows smoothly),
 not only the "unfactorable system" the earlier entry recorded from `max-iter-bad-solve`.
+
+### The base's outer-6 divergence: pilot-self members have no Q placement and no q (2026-09-25)
+
+Root cause of the base failure, with direct evidence at DEFAULT settings. The pass sequence
+(`OLF_GPU_BATCH_TRACE=1`) against OLF's own (`OLF_GPU_DBG_NR=1`, which now also attaches an appender to
+`AcloadFlowEngine`, whose "Start outer loop '<name>' iteration <n>" is the CPU counterpart):
+
+```
+device: DS(0) -> DS(1) -> HvdcFreeze(2) -> HvdcLimits(3) -> Monitoring(4) -> RL(5) -> RL(6) pinned=16 iters=30 DIVERGES
+OLF:    DS(0) -> RL(1) -> RL(2) -> CONVERGED, distributedActivePower=14.35991655253323
+```
+
+The diverging pass is REACTIVE LIMITS, and the two arms pin DIFFERENT SETS: OLF's first RL pass switches **19**
+buses PV->PQ, the device pins **16**. The three OLF pins the device misses are
+`VL-5997_1`, `VL-6003_1`, `VL-6003_2` — and they are exactly the non-first members of two PILOT-SELF groups:
+
+```
+gvc pilot=VL-6003_0 controlled=VL-6003_0 pilotIsController=true qRowAlt=12588 members=3:
+    VL-6003_0[vCol=12588 qRowAlt=12588]  VL-6003_1[vCol=12590 qRowAlt=-1]  VL-6003_2[vCol=12592 qRowAlt=-1]
+
+row=12588 BUS_V(VL-6003_0) mode=0 terms=[cb#1921.q2@alt]        <- own reactive balance, so it CAN pin
+row=12590 BUS_V(VL-6003_1) mode=1 terms=[dq[k=201 ...], ...]    <- DISTR_Q only, no own q anywhere
+row=12592 BUS_V(VL-6003_2) mode=1 terms=[dq[k=207 ...], ...]    <- DISTR_Q only
+```
+
+Only the PILOT gets a Q-row placement (`qRowAlt`); every other member has `qRowAlt=-1`. So a member's row
+carries DISTR_Q and nothing else, the RL check reads its q from `qBuf[row]` — the DISTR_Q residual, ~0 at
+convergence, always inside the limits — and it never pins, while OLF computes the controller's own q and sees
+`q=192.10 > maxQ=75.36` (and `q=229.12 > maxQ=119.27`, `q=-82.69 < minQ=0.0`). Nor is there a remote-member q
+entry to supply the real value: `OLF_GPU_RMQ_TRACE=12590` prints NOTHING, i.e. `fillRemoteMemberQBatch` never
+writes that row, although the context does carry the tables (`CTX_FLAGS ... nRlRemote=75 nRmq=193`, checked —
+the "the base has no rmq" guess was wrong).
+
+The device's OWN audit says the same thing without the CPU, which is the cheapest reproduction:
+`OLF_GPU_RL_AUDIT=1e-6` returns entries UNPINNED and far outside their limits at the final state, e.g.
+`entry=949 vrow=12560 mode=0 q=3.511 min=0.0 max=0.955 over=2.556` (that is `VL-5997_0`). OLF's outer loop
+only ends after a check finds nothing to switch, so any such line is a fixpoint the device never reached.
+
+WHY IT DIVERGES rather than merely answering differently: when the pilot pins, its row is taken by its own
+pinned balance, and no member can host the group's reactive balance because none has a placement. The group's
+balance is then enforced NOWHERE — the documented rank-deficiency shape — and Newton walks away smoothly
+(norm2 2.72 -> 12.78 -> 24.58 -> ... -> 293 over 30 iterations), which is what a under-determined direction
+looks like, not a hard problem.
+
+This REFRAMES the earlier entry "TESTED AND REJECTED: that this is the pilot-self degeneracy". What that test
+actually showed is that the pilot-self ROTATION AS IMPLEMENTED does not fix the base — which is consistent
+with this root cause and explains why: the rotation moves the pilot's balance onto the first enabled member's
+row, but the members have no Q placement at all (`qRowAlt=-1`) and no q for the RL check, so the rotation
+addressed a later step than the one that is broken. The pilot-self SHAPE is directly implicated; keep the
+rotation property off, and fix the placement + the q first.
+
+Next: give every non-first member of a pilot-self group its own Q-row placement and an rmq entry, so (a) the
+RL check sees each controller's real q and pins the same set as OLF, and (b) a pinned pilot has somewhere to
+put the group's balance. Then re-measure the base (`OLF_GPU_SA_BASE_ONLY=1` prints the distributed power, and
+the 0.066 MW should go with the retry it comes from).
+
+**FIX 1 (committed): the pin set now matches OLF, 16 -> 19.** The cause was not a missing q and not a missing
+rmq entry — both of those guesses were WRONG and are corrected here. `OLF_GPU_RL_TRACE_VROW=12590` shows the
+device computing `q=1.921012507` pu for `VL-6003_1`, which is OLF's `192.1012507165038` MW exactly, with
+correct limits `±0.7536`. (The earlier "`OLF_GPU_RMQ_TRACE` prints nothing, so the row is never filled" was an
+artefact: those are device-side `printf`s that did not reach the log, not evidence of a missing fill.)
+
+What actually dropped the member is one line in `reactiveLimitsBatch`:
+
+```cpp
+int pvForm = rlRemote[i] == 2 ? 0 : 1;   // 2 = a PILOT that is one of its own controllers
+if (limitType[rst] == 0) {
+    if (mode[ridx] != pvForm) return;    // member row is mode 1 (DISTR_Q), pvForm 0 -> returns before reading q
+```
+
+and every member of a pilot-self group was tagged `rlRemote=2` with its OWN row as the pilot row. The
+classification asked `bus.getGeneratorVoltageControl()` — a merged group keeps ONE **MAIN** control and leaves
+every other member holding a **DEPENDENT** control that regulates ITSELF, so `isRemoteMemberEntry`'s
+`MergeStatus.MAIN` filter dropped the members (returning false) and `isPilotSelfEntry` then answered true for
+each of them. Fixed by resolving the MAIN control (`mainGenVc`, mirroring `isRemoteGenVcControllerElement`
+right beside it, which already did this) in both predicates and in the pack's own `controlledBus` / target /
+nominal-V reads, plus the same resolution in `GpuBatchRlCurves` (whose comment already noted that "a pilot
+whose own control is merged is reached through the main control"). The ENTRY SET is unchanged — only the class
+and the pilot row — so the curve enumeration cannot drift.
+
+Measured: the members are now `remote=1 pilotVRow=12560/12588`, and the base pins **19**, the same count OLF
+switches in its first RL pass. Suite 299/0, checkstyle 214 (baseline).
+
+**STILL OPEN: the base still diverges at outer=6 and still falls back**, with the base's distributed power
+unchanged at 14.294298358 against the CPU's 14.359916553. So the pin PARITY was necessary but not sufficient,
+and the remaining cause is most likely the corner the pin parity has now opened for the first time on this
+network: `VL-6003`'s three members and `VL-5997`'s two now ALL pin, so each group is FULLY pinned, which is
+exactly the case the kernel comments call out ("When the LAST live member pins, `updatePilotVeqBatch` flips
+the pilot's V identity to a power row (control lost) and restores it on the first unpin"). Next: check the row
+modes of both groups after the outer-6 pass — whether the pilot's V identity flipped, and where the group's Q
+balance ended up — before reading anything else into the divergence.
+
+### Iteration parity as the standard, and the divergence narrowed to the post-pin assembly (2026-09-25)
+
+Standing requirement from the user, now the working invariant here: **the GPU and the CPU must agree on the
+number of outer-loop iterations AND on the inner Newton iteration count of every solve.** Any difference is a
+defect to find, not a tolerance to widen. Measured on the base at default settings
+(`OLF_GPU_BATCH_TRACE=1` against `OLF_GPU_DBG_NR=1`):
+
+| solve | OLF inner iterations | device inner iterations |
+| --- | --- | --- |
+| 1 (initial) | 3 | 3 |
+| 2 (after DS distributes) | 1 | 1 |
+| 3 (after RL pins) | **2, converges** | **30, diverges** |
+
+OLF's whole base is `outerLoopIterations=3, solverIterations=7` (3+1+2+1). The device matches solve 1 and
+solve 2 EXACTLY, and after FIX 1 it also pins the SAME 19 buses — verified by name, not just by count
+(`comm` on the two lists: empty both ways). So the two arms are in the same state, making the same decisions,
+and then the device's third solve runs away. The fault is therefore in the ASSEMBLY AFTER THE PIN, which is
+the narrowest this has ever been.
+
+What the assembly looks like at that pass (`OLF_GPU_EQ_DUMP`, which fires on the first mode-4 pass), for
+`VL-5997` whose TWO controllers both pin:
+
+```
+row=12560 BUS_V(VL-5997_0) mode=0 terms=[]                 <- still a V IDENTITY
+row=12562 BUS_V(VL-5997_1) mode=4 terms=[cb#8699.q2, ...]  <- hosts the PILOT's q (12560's "q2@alt" before)
+```
+
+OLF's system once every controller is pinned is: `BUS_TARGET_Q` for `_0` on 12560, `BUS_TARGET_Q` for `_1` on
+12562, and `BUS_TARGET_V` INACTIVE (control lost, no enabled controller). The device keeps the V identity on
+the pilot row, moves the pilot's q onto the member's row, and so the member's OWN pinned balance is enforced
+nowhere — one constraint too many and one too few, which is what Newton walks away from.
+
+The device HAS a kernel for this corner, `updatePilotVeqBatch`: when `relocChoose` finds no unpinned carrier it
+flips the pilot's V identity to a power row. It never fires for these groups because they are not in the qr
+candidate table (`qRowAlt=12588`, a direct row, not the `-2-group` encoding; `nQr=3`).
+
+RETESTED AND STILL NOT THE FIX: `-Dolf.gpu.pilotSelfRotation=true`, which enrols them (`nQr` 3 -> 30,
+`qRowAlt=-19`, pilot q on `qRow=12562`). The base diverges at outer=6 with the same 30 iterations, adds a
+second fallback, and row 12560 is STILL `mode=0` — the V identity does not flip. This retest matters because
+the earlier rejection of the rotation was run with the members MISCLASSIFIED (FIX 1), so it could have been
+void; it is not. Enrolment alone does not make the all-pinned corner work for a pilot-self group.
+
+Next: find why `updatePilotVeqBatch` leaves the pilot row at mode 0 for an enrolled pilot-self group — its
+`lost` test is `relocChoose(...) == 0`, and for a pilot-self group candidate 0 IS the pilot's own row, so
+"fell back to candidate 0" and "correctly chose the pilot" are indistinguishable there. That conflation is the
+most likely reason the flip never happens, and it is a property of the pilot-self shape specifically.
+
+**The all-pinned pilot-self assembly, measured row by row (`OLF_GPU_ROW_PROBE`, rotation ON).** A correction
+first: the claim that `updatePilotVeqBatch` "never fires" was read off `OLF_GPU_EQ_DUMP`, which prints the
+HOST-side extracted `activation.rowMode()`, not the device's live modes — it cannot see a mid-solve flip. The
+probe shows the flip DOES happen:
+
+```
+pilot  row 12560: outer=0..5 target=1.103000000000e+00 F=0            (V identity, satisfied)
+pilot  row 12560: outer=6    target=-2.556000000000e+00 F=1.736762045429e+00
+member row 12562: outer=0..6 target=0                   F=~1.8e-08   (DISTR_Q, satisfied)
+```
+
+Two defects in that assembly, and together they are the divergence:
+
+1. The flipped pilot target is **-2.556**, which is `maxQ - q` (0.955 - 3.511, the audit's `over=2.556`
+   negated), not the pinned limit `maxQ - loadQ = 0.955`. `updatePilotVeqBatch` writes
+   `target[pi] = pilotQ[fi]`, the group's captured relocated-Q target — right for a pilot that is NOT one of
+   its own controllers, wrong for a pilot-self pilot that has itself PINNED, whose row must carry its own
+   Q LIMIT. The row is left with F = 1.74 pu (174 MW) that no Newton step can clear.
+2. The member's row keeps `target=0` through the pass that pinned it, so its own pinned Q limit is never
+   enforced: that row is the pilot-Q CARRIER, and the carrier/DISTR_Q target update overwrites what
+   `reactiveLimitsBatch` wrote there (`target[ridx] = rliMax - rlLoadQ[rli]`).
+
+So both pinned controllers' Q limits are missing from the system and one unsatisfiable row is present — one
+constraint too many and two too few. Newton walks away exactly as observed.
+
+WHAT OLF DOES, and it is the simplest possible assembly: once every controller of the group is pinned there is
+no relocation and no carrier at all. Each controller's own `BUS_TARGET_Q` sits on its own row with its own
+limit as target, and `BUS_TARGET_V` is dropped (control lost). The device already has the per-row form for
+this — mode 4 with the member's own-q ALTERNATE placement — so the fix direction is to make the all-pinned
+case take that plain form for EVERY member including the pilot, instead of routing it through the carrier
+machinery, whose whole purpose (finding a row for the pilot's relocated Q) is moot when no controller is free.
+
+Rotation stays OFF by default: with it on the base still diverges and takes a SECOND fallback.
+
+### VERIFIED: the pinned pass assembles a SINGULAR matrix, and the defect is named (2026-09-25)
+
+The diagnosis above was checked with instruments that do not depend on it. All of the following is MEASURED,
+on the base, at default settings, rotation OFF (the shipping config).
+
+`OLF_GPU_VALS_DUMP` wrote the fill at the pinned pass (`outer=6`, `mode4=6`), and `GpuDumpedMatrixRankTest`
+factored it with the CPU's own solver:
+
+```
+DUMP n=13228 nnz=93161 mode4Rows=[12560 12562 12588 12590 12592 12834]
+KLU REFUSED to factor this matrix: klu_factor error KLU_SINGULAR
+```
+
+So the matrix the device assembles once the reactive-limit pass pins is **structurally singular**, which by
+that test's own premise is OUR assembly's defect and cannot be rescued by any ordering, pivot type or
+matching. This also sharpens the earlier record, which had only "unfactorable, ratio 8.1e+11" from
+`max-iter-bad-solve`: the failure is rank, not conditioning. And the six mode-4 rows are EXACTLY the
+pilot-self group rows identified from the pin-set diff, plus 12834 (entry 997, which `OLF_GPU_RL_AUDIT`
+independently flagged as unpinned-but-over-limit).
+
+`OLF_GPU_VALS_SCAN` at that same pass names the deficiency:
+
+```
+dupRows=12590,12592  deadCols=1 firstDeadCol=13185  tinyDiag=1 firstBadRow=13185
+modes[0..4]=982,12240,0,0,6
+```
+
+and the equation dump identifies what 13185 is:
+
+```
+zi#25 branch=BUS-6003_COUPLER_2 b1=VL-6003_1 b2=VL-6003_2 qRow1=12590 qRow2=12592 dummyQ=13185 qAlt=[-1,-1]
+```
+
+So the two DUPLICATE rows are the two endpoints of a ZERO-IMPEDANCE COUPLER, and the DEAD column is that
+coupler's own `DUMMY_Q`. This is the part the earlier description missed: these pilot-self members are the SAME
+electrical node split by switches (`VL-6003_0 -COUPLER_1- VL-6003_1 -COUPLER_2- VL-6003_2`), so their two rows
+are distinguishable ONLY by the dummy coupling (+dQ in one endpoint's row, -dQ in the other's). At the pinned
+pass that coupling is gone from the values, so the rows collapse into duplicates AND the dummy variable is left
+unconstrained — one rank deficiency each, which is why KLU refuses. The invariant the repo already documents
+for this ("a DUMMY_Q needs an OPPOSING pair to be determined at all") is broken by the pin, not by the
+extraction: the HOST tables still list both couplings
+(`row=12590 ... zi#24.q2(-dQ), zi#25.q1(+dQ)`, `row=12592 ... zi#25.q2(-dQ)`).
+
+RULED OUT as the mechanism: `applyRowMode`, which returns immediately unless `mode[r] == 0` and so never
+touches a mode-4 row. The coupling is therefore lost during the FILL, in the per-scenario destination
+selection (`ziDynDest`), not by the identity stamp.
+
+NOT YET VERIFIED, and the next measurement rather than a thing to reason about: WHICH branch of `ziDynDest`
+drops it. Its two-way form is `mode[-2-sr] == 0 ? alt[slot] : frozen`, the group form is a `relocChoose`
+mode-scan, and `qAlt=[-1,-1]` on this coupler means one of those branches yields "no destination". A first
+reading suggested the pinned mode-4 rows take the `frozen` branch and would KEEP the term, which contradicts
+the measured dead column — so the selection must be reached another way (the `sel` row may be the pilot's, or
+the group branch may apply). Trace the zi q-slot destination per slot per pass for zi#24/zi#25 before
+changing anything: a wrong guess here would move a coupling that is currently correct in every other scenario.
+
+### ROOT CAUSE, measured from the dumped matrix: a pinned member's row has no own-q placement
+
+The dumped CSR at the pinned pass settles it without any further inference (parsed straight out of
+`OLF_GPU_VALS_DUMP`'s file):
+
+```
+row 12588 (PILOT,  mode 4): 5 nonzero — (1768,-29.752) (1769,-3.635) (12588,27.090) (12589,3.635) (13183,+1.0)
+row 12590 (member, mode 4): 2 nonzero — (12590,-1.0) (12592,+1.0)   F=-7.536000e-01
+row 12592 (member, mode 4): 2 nonzero — (12590,-1.0) (12592,+1.0)   F=-1.192700e+00
+rows 12590 and 12592 literally identical: True
+column 13185: slot present in rows 12590, 12592, 13183, 13185 — every value 0.0
+```
+
+`F = -target` EXACTLY on both member rows (-0.7536 and -1.1927 are those buses' own maxQ), so no q was
+evaluated on them at all: every term the host tables list for those rows — `cb#8717.q2`, `zi#24.q2(-dQ)`,
+`zi#25.q1(+dQ)` — is absent from the values. What is left is a single +-1 pair on the two V columns, the same
+in both rows, hence the duplicate pair; and the coupler's `DUMMY_Q` column is all zeros, hence the dead
+column. The PILOT's mode-4 row, by contrast, is assembled correctly, so this is specific to NON-PILOT members.
+
+The mechanism is the design note on `RmqPack`: "that slot is free because **the main qBuf fill suppresses
+member rows**". The suppression is deliberate — it frees the member row's qBuf slot for the diagnostic own-q
+that the reactive-limit check reads — but it NEVER LIFTS when the member pins and its row must host its own Q
+balance. The pilot escapes because it has an own-q placement (`qRowAlt=12588`); the members have `qRowAlt=-1`.
+
+So the very first hypothesis of this investigation was right about the PLACEMENT and wrong about the symptom.
+The members' rows genuinely have no own-q placement; what was wrong was calling their q "invisible" (it is
+computed correctly, 1.921012507 pu, by the rmq fill into the same row's qBuf slot). FIX 1 (the MAIN-control
+classification) made those members pin for the first time, which turned a latent placement gap into a singular
+matrix. Both defects are real and FIX 1 stays: without it the device silently solved a different system from
+OLF's (16 pins against 19).
+
+THE FIX: give every merged-group member an own-q placement on its OWN row, selected when that row's mode is 4,
+exactly as the pilot already has. Then a pinned member's row carries `q_member - limit_member` (its
+`BUS_TARGET_Q`), the coupler's +-dQ couplings land on it again (reviving column 13185), the two rows stop being
+identical, and the assembly matches what OLF builds: each controller's own BUS_TARGET_Q on its own row, no
+carrier, `BUS_TARGET_V` dropped. Touches `ExtractionColumns` (a member's `qRowAlt`) and the cb/zi ALT dest
+tables, which today point a member's q at the PILOT's row (`cb#8699.q2@alt` on row 12560) for the relocation
+case rather than back at the member's own row for the pinned case — so the alt channel needs to distinguish
+those two destinations, not merely toggle.
+
+### FIX 2: the same MAIN-control bug in the PLACEMENT predicates — the singularity is gone (2026-09-25)
+
+The placement gap has the SAME root cause as FIX 1, in two more predicates.
+`GpuAcRowIndexing.isRemoteGenVcMember` and `isFreeRemoteGenVcMember` both filtered
+`getMergeStatus() == MAIN` on the bus's OWN control, so a merged member — whose own control is DEPENDENT and
+regulates itself — answered "not a member". `ExtractionColumns`'s own-row alternate loop is gated on exactly
+that predicate, so those members fell through it AND through the pilot-self loop beside it (whose `MAIN`
+filter rejects them too) and kept `qRowAlt = -1`. Fixed by resolving the main control, exactly as
+`isRemoteGenVcControllerElement` in the same file already did — and whose javadoc had already recorded this
+trap in detail. One definition now: `GpuAcOuterLoopPacks.mainGenVc` delegates to `GpuAcRowIndexing.mainGenVc`.
+
+Nothing else had to change: both the build side (`buildCbDynDest`, whose comment already reads "suppressed
+frozen dest (remote member): select on the ALT row itself (mode 4)") and the runtime selection
+(`ziDynDest`'s `(mode[sr] == 0 || mode[sr] == 4) ? alt : frozen`) were already written for this case and were
+simply never reached.
+
+MEASURED on the base's pinned pass, before -> after:
+
+| | before | after |
+| --- | --- | --- |
+| `dupRows` | 12590,12592 | **-1,-1 (none)** |
+| `deadCols` | 1 (col 13185) | **0** |
+| `tinyDiag` | 1 (row 13185) | **0** |
+| member row 12590 | 2 nonzero, `F = -target` | **6 nonzero incl. both coupler couplings, F = 1.167** |
+| member row 12592 | identical to 12590 | **distinct, 3 nonzero incl. (13185,-1.0)** |
+| KLU | **REFUSED, KLU_SINGULAR** | **factors it** |
+
+So the rank deficiency this whole thread was chasing is FIXED: each pinned member's row now carries its own
+reactive balance with its own limit as target, which is OLF's assembly. Suite 299/0, checkstyle 214.
+
+STILL DIVERGING, for a DIFFERENT and newly visible reason. KLU factors the matrix but the solve is meaningless
+(`||dx||inf=3.196391e+15`, residual ratio 1.518), and the null direction is now a set of zero-impedance DUMMY
+columns (13199..13224, all mode 1, diag -1, F ~ 0). Column 13207 is touched by rows **12834 (+1.0) and 12836
+(+1.0)** — two couplings of the SAME SIGN, where a `DUMMY_Q` needs an OPPOSING pair to be determined. Its
+coupler is `zi#36 BUS-6112_COUPLER_1`, whose `qRows=[12836,-1]` the equation dump ALREADY flags as INCOMPLETE,
+and whose bus1 (V row 12834) is another pilot-self bus whose q was relocated onto 12836. So the new member
+alternate and the pilot-Q relocation now both write into that coupling, one of them with the wrong sign, and
+bus2's `-dQ` is missing altogether. That interaction is the next thing to fix, and the existing
+INCOMPLETE-coupling section of `GpuEquationDump` plus a sign check on each coupler's pair is the instrument
+for it.
+
+**The remaining defect, named: the RL pin writes mode 4 on the entry's OWN row even when that bus's Q balance
+is RELOCATED.** Measured placement for the group behind the same-signed pair (post-FIX 2):
+
+```
+gvc pilot=VL-6112_0 vCol=12834 qRow=12836 qRowAlt=-1 members=2:
+    VL-6112_0[vCol=12834 qRow=12836 qRowAlt=-1 enabled=false]   VL-6112_1[vCol=12836 qRow=-1 qRowAlt=-1 enabled=true]
+zi#36 BUS-6112_COUPLER_1 b1=VL-6112_0 b2=VL-6112_1 qRow1=12836 qRow2=-1 dummyQ=13207
+```
+
+This pilot is ALREADY PINNED at extraction (`enabled=false`, its `BUS_TARGET_Q` active), so `computeQRow`
+relocates its Q balance to the free member's row (12836) and its own row 12834 keeps `BUS_TARGET_V` — which a
+sibling controller still needs. That placement is CORRECT and it is why FIX 2's two loops both skip this group
+(the pilot has `qRow >= 0`, the member is the free one). The pilot-self pinned pilot cannot host both
+`BUS_TARGET_V` and `BUS_TARGET_Q` on one row, and relocating the Q is the device's answer.
+
+What is wrong is the ROW MODE. `reactiveLimitsBatch` pins by writing `mode[ridx] = 4` with
+`ridx = s*n + rlVrow[i]`, and `rlVrow` is "the transition WRITE row: the member's own bus row". For a bus whose
+Q balance is relocated to a carrier, mode 4 must go on the CARRIER's row (12836) while its own row stays the
+mode-0 `BUS_TARGET_V` identity. Today row 12834 is told "host your own Q" while that q is emitted at 12836, so
+the coupler's `+dQ` appears at BOTH rows (measured: column 13207 touched by 12834 +1.0 and 12836 +1.0, no
+opposing `-dQ`) and the `DUMMY_Q` is left underdetermined — `||dx||inf = 3.2e+15` on an otherwise factorable
+matrix.
+
+So the fix is to make the pin's write row follow the RELOCATION, not the bus: `rlVrow` (or a second per-entry
+"pin row") must be `qRow[bus]` when that differs from `vCol[bus]`. Note this is the same quantity
+`GpuAcOuterLoopPacks` already computes for the DISTR_Q member table, where the comment records the identical
+lesson for the coupler-tree case ("The member's DISTR_Q row, NOT simply its V column ... Pointing this
+bookkeeping at the V row made the DISTR_Q target updater write there"). Check both `rlVrow` uses (the pin write
+and the `q = qBuf[row] + loadQ` read) before changing either: the READ must stay on the row that carries the
+bus's own q, which for a relocated bus is the carrier, so the two may already need to differ from `vCol`.
+
+**WHAT NEEDS TO CHANGE, from the tables themselves.** The free member's row, as the host tables list it:
+
+```
+row=12836 BUS_V(VL-6112_1) mode=4 terms=[cb#8783.q1, cb#8925.q2, zi#36.q1(+dQ),
+                                         dq[k=271 elem=13207 side=0 kind=3 w=-1.00000],
+                                         dq[k=274 elem=13207 side=1 kind=3 w=-0.00000]]
+```
+
+`zi#36.q1(+dQ)` is bus1's (the PILOT's) coupling and its frozen dest is 12836, because `qRow1 = 12836` — the
+pilot's balance rides the carrier. When the pilot's OWN row (12834) goes mode 4, the same term ALSO resolves
+there through the alternate, so column 13207 gets +1.0 twice with no opposing -dQ. The kind-3 `dq` term on the
+same column (weight -1.0) is correctly gated off by mode 4, so that gate is NOT the problem — it works.
+
+The emission must happen EXACTLY ONCE, at whichever row hosts that bus's Q balance this scenario, and the
+two-way channel can already express that. It simply keys on the wrong row:
+
+```cpp
+selRow[o] = stockSel <= -2 ? stockSel : (rc.row >= 0 ? rc.row : altRow);   // frozen exists -> select on the CARRIER
+```
+
+For a bus whose alternate is its OWN row and whose frozen dest is a DIFFERENT row (a relocation carrier), the
+select row must be the OWN row: mode 4 -> alt (own row), else -> frozen (carrier). One emission either way.
+The `sel = altRow` branch already does exactly this when the frozen dest is SUPPRESSED (-1); it needs to
+extend to the relocated case. What blocks a one-line change is that the build must know `altRow` IS the bus's
+own V row, which the cb/zi index tables do not carry today (they carry the frozen q dest and `qRowAlt`, not
+the bus's V column for that side) — so this needs either a new per-side field or an explicit sel shipped from
+Java, which is where the next change starts.
+
+Two method notes worth keeping. (1) `GpuEquationDump`'s `gvc` line recomputes `ExtractionColumns.of(network,
+es)` AT DUMP TIME, so its `qRow`/`qRowAlt` are NOT the values the running structure uses — reading a pinned-pass
+dump as if they were sent this investigation after a placement that was never in play. The dumped MATRIX is
+the ground truth. (2) `mode4Rows` differs between the first pinned fill and the end of the run
+(`[12560 12562 12588 12590 12592 12834]` then `[12562 12588 12590 12592 12836]`), so always state WHICH fill a
+mode observation comes from.
+
+**What the two `rlVrow` uses need, and three refuted explanations for the same-signed pair (2026-09-25).**
+
+The two uses genuinely need DIFFERENT rows, so they must not be moved together:
+- the q READ (`q = qBuf[rlVrow] + loadQ`) must stay the bus's OWN row, because that is where
+  `remoteMemberQPack` writes the diagnostic own-q (`int row = vCol[bus.getNum()]`);
+- the pin WRITE (`mode[ridx] = 4`, `target[ridx] = limit`) must be the row that HOSTS that bus's Q balance,
+  which for a relocated bus is the carrier.
+
+`relocatedPinCode` already freezes an entry whose pin lives elsewhere, and it is not firing here for a good
+reason: at the extraction that matters the pilot is UNPINNED (`qRow = -1`), so nothing is relocated yet and
+there is nothing to freeze. That path is correct.
+
+The decisive new fact, from `OLF_GPU_DBG_ROW=12834` — the packer's own inputs, not a recomputation — is that
+the base is extracted TWICE with DIFFERENT placements:
+
+```
+#1  b1=VL-6112_0(vCol=12834 qRow=12836 qRowAlt=-1)   b2=VL-6112_1(vCol=12836 qRow=-1 qRowAlt=-1)
+#2  b1=VL-6112_0(vCol=12834 qRow=-1 qRowAlt=12834)   b2=VL-6112_1(vCol=12836 qRow=-1 qRowAlt=12836)
+```
+
+Each is INTERNALLY CONSISTENT: #1 (pilot pinned at extraction) emits the pilot's `+dQ` at the carrier 12836;
+#2 (pilot unpinned, both loops of FIX 2 firing) emits it at 12834 when that row goes mode 4, and correctly
+emits no `-dQ` because the free member has no Q equation in OLF either. Neither placement alone can put +1.0
+on BOTH rows, which is what the dumped matrix shows.
+
+REFUTED, each by reading the mechanism rather than guessing:
+1. "The cached structure aliased a different placement." `GpuAcData.sameStructureInputsAs` compares `cbIdx`,
+   `ziIdx`, `dqRow` and the rest — all of which embed `qRow`/`qRowAlt` — so two placements cannot content-match.
+2. "A pattern slot kept a stale value after the destination moved." The value array is memset on EVERY full
+   fill (`fillActiveBatch(false)`).
+3. "Row mode 4 triggers F-only fills that reuse a stale J across the pin." `fOnly = it == maxIter ||
+   (ctx->mode == 4 && it > 0)` is the cuDSS SOLVE STRATEGY (line 6159: 0 per-scenario, 1 batched, 2
+   block-diagonal, 3 UBATCH, 6 robust), where 4 is the chord strategy factorizing at iteration 0 only. It has
+   nothing to do with row mode 4.
+
+So the next measurement is to establish WHICH extraction produced the dumped matrix, which the dump does not
+currently say: add the structure identity (or the packer's `qRow`/`qRowAlt` for the traced rows) to the
+`VALS_DUMP` header, then re-read column 13207 with that known. Until that is pinned down, any change to the
+selection would be aimed at a placement that may not be the one in force.
+
+### The instrument, and a retraction: the zi emission is CORRECT and the imbalance is pre-existing (2026-09-26)
+
+`OLF_GPU_VALS_DUMP_COL=<variable column>` now REPLAYS `ziDynDest`'s two-way choice on the host, from the same
+tables and the same per-scenario modes the fill kernel reads, and prints it beside the dumped matrix. It exists
+because a dumped matrix alone cannot say WHICH placement built it, and the base is extracted more than once
+with different placements. Measured at the pinned fill:
+
+```
+VALS_DUMP_COL col=13207 zi=36 dummyP=13206 dummyQ=13207 frozenQ=[-1,-1] ziDyn=1
+    slot=0(F) frozen=-1 alt=-12836 sel=12834 selMode=4 -> -12836      (alt encodes -2-row, so row 12834)
+    slot=1(F) frozen=-1 alt=-12838 sel=12836 selMode=1 -> -1
+    slot=2(J) frozen=-1 alt=89495  sel=12834 selMode=4 -> 89495
+    slot=3(J) frozen=-1 alt=89516  sel=12836 selMode=1 -> -1
+```
+
+RETRACTED: the previous entry's diagnosis ("the two-way select keys on the carrier, so the +dQ is emitted
+twice; make the sel the bus's own row"). It is WRONG. Extraction #2 is the one in force (`frozenQ=[-1,-1]`),
+the select rows are ALREADY the buses' own rows (12834 and 12836), and the zi channel emits the coupling
+exactly ONCE — at 12834, because that row is mode 4 — and correctly emits no `-dQ`, because the free member
+has no Q equation in OLF either. Nothing in the zi selection needs changing, and the per-side "own V row" field
+that entry called for is not needed.
+
+So the extra `+1.0` at row 12836 comes from ANOTHER channel (by elimination, the DISTR_Q `kind=3` term the host
+tables show at that row: `dq[k=271 elem=13207 side=0 kind=3 w=-1.00000]`).
+
+What the null direction looks like, against its healthy analogues — this is the shape to fix:
+
+```
+col=13207 touchedBy=3 colSum=+1.0  (12834 mode=4 +1) (12836 mode=1 +1) (13207 mode=1 -1)   <- one too many
+col=13209 touchedBy=2 colSum= 0.0  (12840 mode=1 +1) (13209 mode=1 -1)                      <- healthy
+col=13199 touchedBy=2 colSum= 0.0  (12734 mode=1 +1) (13199 mode=1 -1)                      <- healthy
+```
+
+A healthy coupler dummy column carries `+1` in ONE bus row and `-1` in the dummy variable's own row, summing
+to zero. 13207 carries a third entry and sums to +1.
+
+TWO further negatives, both measured:
+- **`-Dolf.gpu.pilotSelfRotation=true` does not remove it.** The qr gate in `fillDistrQBatch` that deactivates
+  the re-picked free member's DISTR_Q (OLF's "DISTR_Q for every enabled controller except the FIRST", which
+  after the pilot pins should strip VL-6112_1's) does not fire even with the group enrolled: the column is
+  unchanged, and the base still diverges with a second fallback. Rotation stays OFF.
+- **The imbalance is PRE-EXISTING and independent of FIX 2.** Column 13207 is byte-identical in the pre-FIX-2
+  dump and the post-FIX-2 dump — same three entries, same `colSum=+1`, same modes. FIX 2 repaired the
+  VL-6003/VL-5997 rows (dupRows, dead column, KLU_SINGULAR) and left this coupler exactly as it was. So the
+  remaining `||dx||inf = 3.2e+15` is an OLDER defect that the singularity was masking, not a regression.
+
+Next: extend the same replay to the DQ channel (dest, elem, kind, weight, and whether each gate fires) for the
+chosen column, which names the third writer directly instead of by elimination.
+
+### The third writer, NAMED, and a one-line clobber fixed (2026-09-26)
+
+The DQ half of the replay (same `OLF_GPU_VALS_DUMP_COL`) names it directly, no elimination — `OLF_GPU_DQ_TRACE`
+could not, because it is a DEVICE printf and device printf output never reaches this harness's log (the same
+reason the earlier `OLF_GPU_RMQ_TRACE` looked empty and sent this investigation down a wrong path):
+
+```
+DQ c=265 kind=3 elem=13207 w=0.818182 fRow=12836 fRowMode=1 jMember=58 qrGroup=-1 carrier=-1 psSkip=0
+        gateMode4=0 gateCarrier=0 -> EMITTED
+DQ c=268 kind=3 elem=13207 w=0.181818 fRow=12836 fRowMode=1 jMember=59 qrGroup=-1 carrier=-1 psSkip=0
+        gateMode4=0 gateCarrier=0 -> EMITTED
+```
+
+Two DISTR_Q `kind=3` contributions at row 12836, weights **0.818182 + 0.181818 = 1.000000** — exactly the extra
+`+1.0` on column 13207. They are the group's two reactive keys. Per OLF, once the pilot pins, `VL-6112_1` is
+the FIRST enabled controller and must LOSE its DISTR_Q; the device keeps it because neither gate fires
+(`gateMode4` cannot: that row is mode 1; `gateCarrier` cannot: `qrGroup=-1`).
+
+**FIX 3 (one line): `ExtractionColumns`'s pilot-self alternate loop clobbered the qr enrolment.** Its guard was
+`qRowAlt[bn] < 0`, and a group encoding is `-2 - groupId`, which is also negative — so the loop overwrote the
+enrolment the loop above had just made, silently, and only for pilots whose q is suppressed at extraction,
+which is exactly the unpinned pilot-self case the rotation exists for. `== -1` is the correct test. This is why
+`-Dolf.gpu.pilotSelfRotation=true` had NO observable effect on this group in every earlier test: the property
+enrolled the group and the next loop un-enrolled it.
+
+Measured with FIX 3 + rotation ON: the DQ contributions now report `qrGroup=24 carrier=12836`, so the
+enrolment reaches them; one base attempt converges in **4 inner iterations instead of 30**; and the base's
+distributed power moves from **14.294298358 to 14.381569177** against the CPU's 14.359916553 — note 14.3816 is
+essentially the 14.381763 both arms reach when fully converged, so the device's base is now solving the right
+system far better than before.
+
+STILL NOT DONE, and the next link is exact: the carrier gate is disabled by `psSkip=1`, which asserts "this
+group's pilot is NOT pinned this scenario" while `mode[12834] = 4` says it is. `pilotSelfGateBatch` derives it
+from `limitType[psPilotEntry[g]] == 0`, the flag IS recomputed from current pin states before every fill, and
+`psEntry[g]` is matched by the pilot's own V row — so the RL bookkeeping (`limitType = 0`, unpinned) and the
+row mode (4, pinned) genuinely disagree for that entry. Resolve which of the two is wrong before touching the
+gate: if the row mode is right, the pin never booked a limitType; if the limitType is right, something set
+mode 4 without pinning. Rotation stays OFF by default and FIX 3 is inert without it (a non-pilot-self pilot
+fails that loop's `controlledBus == bus` test, so nothing else was being clobbered). Suite 299/0, checkstyle 214.
+
+### Taken from `injection-scope`: a curve-limit parity fix (2026-09-26)
+
+Fetched `origin/injection-scope` (3 commits, branched from the same `main` as this branch) and took all three;
+they cherry-pick cleanly, the test file auto-merging with this branch's harness edits.
+
+- `45ce19c` **Move a bus limit only for the generators that actually set it** — a real parity fix in
+  `GpuBatchRlCurves.packBusCurves`. `AbstractLfBus.getLimitQ` takes a generator's own limit only in VOLTAGE or
+  REMOTE_REACTIVE_POWER control and its fixed targetQ otherwise, so a non-controlling machine is a CONSTANT in
+  the bus's Q box; the curve channel packed every participating curve generator and the kernel then moved the
+  box by a slope OLF holds still. Comes with its own regression test.
+- `f7da13c` its `docs/numbers.md` row, `75a6f81` a harness change (compare one contingency inside the scope
+  that produces it).
+
+MEASURED AGAINST OUR CASE: it does NOT touch the outer-6 divergence. With the fix in, rte6515's busbar base is
+unchanged — `gpu=14.294298358` against `cpu=14.359916553` (diff 6.56e-02 MW), one fallback, 30 inner iterations
+at outer=6, and the two DISTR_Q kind-3 contributions on column 13207 still `EMITTED` with `qrGroup=-1`. Worth
+having on its own merits (it is a different defect, on `network.xiidm`'s battery curve), not a lead for this one.
+
+Suite 300/0 with its new test. Checkstyle went 214 -> 215 on the imported test (a double blank line triggering
+`noConsecutiveLines`); collapsing it gives **213**, one under the previous baseline, so the baseline for this
+branch is now 213.
+
+### Settled: the two bookkeepings AGREE; the device and OLF disagree on the PIN (2026-09-26)
+
+RETRACTED, by measurement: the previous entry's "the RL `limitType` and the row mode genuinely disagree for
+that entry". They do not. A new line in the dump replay prints the gate's own inputs per pilot-self group, and
+every one of the 27 groups is internally consistent:
+
+```
+PS g=24 pilotEntry=997 limitType=0 fallbackRow=12834 rowMode=0 psSkip=1
+counts: 21 x (limitType=0, rowMode=0, psSkip=1)   4 x (limitType=2, rowMode=4, psSkip=0)   2 x (limitType=1, rowMode=4, psSkip=0)
+```
+
+Zero groups have `rowMode=4` with `psSkip=1`. The claim came from MIXING CONFIGURATIONS: `mode[12834]=4` was
+measured with the rotation OFF and `psSkip=1` with it ON, and the placement differs between them (rotation ON
+keeps the pilot's row a mode-0 identity and routes its q to the carrier). That is the FOURTH time a
+cross-configuration mix-up has produced a wrong conclusion here — always state the config with the number.
+
+The real disagreement is device-against-OLF, on the PIN itself:
+
+```
+RL_VROW s=0 entry=997 lt=0 q=1.218000000 minQ=-0.774 maxQ=0.774 mode=0 loadQ=1.218000000
+CPU_RL  Switch bus 'VL-6112_0' PV -> PQ, q=91.05402338186495 > maxQ=77.4        (0.9105 pu against 0.774)
+```
+
+The device's `q` equals its `loadQ` EXACTLY, so `qBuf[12834] = 0`: the bus's own reactive injection never
+reaches the RL check. OLF computes 0.9105 pu, so `qBuf[12834]` should be about -0.3075. With the rotation OFF
+the entry pins anyway — 1.218 and 0.9105 are on the same side of 0.774, a right outcome from a wrong number —
+and with it ON the entry never pins at all (no `WB_RL` line).
+
+WHY the q is missing, and why this is probably a CONSEQUENCE rather than a second independent defect: the RL
+diagnostic refill deliberately uses the FROZEN routing (`RelocTables{}`, "the relocation only concerns the
+Newton residual, not this diagnostic Q"), and this pilot's frozen q dest is -1 (suppressed), so only the rmq
+twin can supply its q. It HAS an rmq entry (`RMQ_WHY ... skipped=-`), and the terms that entry sums for this bus
+are the coupler's `DUMMY_Q` contributions — `dummyQ` being exactly the variable left underdetermined by the
+extra `+1.0` on column 13207. An underdetermined dummy gives a meaningless q, which gives a wrong pin decision.
+
+So the root remains the `DUMMY_Q` determinacy, and the thing to remove is still the DISTR_Q `kind=3` pair at row
+12836 that OLF drops once the pilot pins (`w=0.818182 + 0.181818 = 1.0`). Next: make that member's DISTR_Q
+inactive for the scenario — the qr carrier gate is the intended mechanism and it is now reachable (FIX 3), but
+it is correctly held off by `psSkip` while the device believes the pilot is unpinned, which is itself downstream
+of the wrong q. Break the loop at the q: give a pilot-self entry a diagnostic q that does not depend on the
+dummy it is meant to help determine.
+
+**No duplicated term, and the gap is the DUMMY_Q's VALUE on the UNPINNED base (2026-09-27).**
+`OLF_GPU_VALS_DUMP_ROW=<row>` lists every remote-member-q contribution summing into a row's diagnostic slot.
+For the pilot:
+
+```
+RMQ row=12834 c=144 kind=0 elem=8783 side=0 w=1
+RMQ row=12834 c=145 kind=0 elem=8925 side=1 w=1
+RMQ row=12834 c=146 kind=3 elem=13207 side=0 w=1 x[elem]=-0.417689
+RMQ row=12834 contributions=3
+```
+
+REFUTED: the factor-2 reading of "device 0.603 / OLF 0.9105 / loadQ 1.218 are equally spaced by 0.3075" as a
+doubled contribution. There are exactly three terms and no duplicate.
+
+So `qBuf[12834] = q(8783) + q(8925) + x[13207]`. The device's early q of 0.603 gives `qBuf = -0.615`, so the
+branch pair sums to -0.1973; OLF's 0.9105 gives `qBuf = -0.3075` and therefore implies `dummyQ = -0.1102`,
+against the device's **-0.417689**. The entire 0.3075 pu gap is the coupler `DUMMY_Q` variable's VALUE.
+
+AND THAT MATTERS FOR WHERE TO LOOK: this q is read on the CONVERGED UNPINNED base — `mode4Rows` is empty
+there, `dupRows=-1,-1`, `deadCols=0`, and KLU factors it. So the wrong dummy is NOT downstream of the pinned
+pass's rank deficiency, as the previous entry concluded; the two arms disagree about this coupler's reactive
+through-flow in a system that is perfectly well determined. The later `q = 1.218` exactly (`qBuf = 0`) is the
+pinned pass's singular state and is the symptom, not the cause.
+
+The chain, now end to end: the device's `DUMMY_Q` for BUS-6112_COUPLER_1 is 0.3075 pu off OLF's on the unpinned
+base -> the pilot's diagnostic q reads 0.603 against a 0.774 limit instead of OLF's 0.9105 -> the device does
+not pin VL-6112_0 where OLF does -> with the rotation ON the group never reaches the pinned arrangement at all.
+Next: compare that one coupler's through-flow against OLF on the unpinned base — the ZERO_V/ZERO_PHI pair and
+the two endpoint Q rows for zi#36 — which is a well-determined system, so a discrepancy there is a plain
+assembly difference and not a rank question.
+
+### THE FIX IS FOUND AND MEASURED — but it over-reaches, so it is not committed (2026-09-27)
+
+The controlled run first CORRECTS the previous entry. In the SHIPPING config (rotation off) the device's
+diagnostic q for the pilot is RIGHT and so is its pin:
+
+```
+RL_VROW entry=997 lt=0 q=0.910540234 minQ=0 maxQ=0 mode=0            (limits not yet refreshed)
+RL_VROW entry=997 lt=2 q=0.910540234 minQ=-0.774 maxQ=0.774 mode=4   <- pins, at OLF's pass
+CPU_RL  VL-6112_0 q=91.05402338186495 > maxQ=77.4                     (0.9105402338 pu)
+```
+
+Nine digits against OLF. So the "0.603 against 0.9105, a 0.3075 pu gap in the DUMMY_Q" of the previous entry is
+RETRACTED: 0.603 came from the rotation-ON run (a different trajectory) and 1.218 from AFTER the blow-up
+(v=1.855). Third comparison across configurations to produce a wrong conclusion; the shipping config is the
+only one whose numbers mean anything unless the property is the subject.
+
+WHAT THE PIN ACTUALLY DOES, which is the whole defect: unpinned, the coupler's DUMMY_Q column is BALANCED
+(`col 13207 = (12836,+1.0), (13207,-1.0)`, colSum 0 — the 12834 slot is wiped by the mode-0 identity, exactly
+like the healthy `col 13209`). Pinning makes 12834 mode 4, so the pilot's `+dQ` now lands there — WITHOUT
+removing the member's DISTR_Q `+dQ` at 12836. OLF SWAPS the two (activates the pinned pilot's `BUS_TARGET_Q`,
+deactivates the DISTR_Q of the controller that becomes FIRST ENABLED); the device only ADDS. colSum 0 -> +1.
+
+**THE FIX THAT WORKS.** `qrGroupOfPilot` exists precisely to separate "this pilot has a candidate table" from
+"route this pilot's Q through the carrier" (its own comment says so). Enrolling pilot-self groups for the TABLE
+ONLY — `groupOfPilot[bus] = g` without `qRowAlt[bus] = -2 - g` — makes `fillDistrQBatch`'s carrier gate
+reachable, and on rte6515's busbar base:
+
+| | before | after |
+| --- | --- | --- |
+| the two kind-3 contributions | `gateCarrier=0 -> EMITTED` | `psSkip=0 gateCarrier=1 -> SUPPRESSED` |
+| outer pass 6 | 30 iterations, diverging | 1-5 iterations, converging |
+| fallbacks | 1 | **0** |
+| base distributed power | gpu=14.294298358 (diff 6.56e-02 MW) | **gpu=14.359916553, diff 3.46e-10 MW** |
+
+That is the machine-precision agreement at DEFAULT settings that this whole thread has been chasing, with no
+knob touched.
+
+**WHY IT IS NOT COMMITTED:** the table also switches on the other group-keyed kernels —
+`updatePilotVeqBatch` (flips a pilot's V identity when the mode scan finds no carrier) and
+`updateDistrQTargetsBatch` (hands the pilot's Q target to the carrier row) — and three tests fail:
+`deviceMiddleSectionLossRenormalizesDistrQTargetMatchesCpu` and
+`deviceMiddleSectionLossWithShuntOnIslandMatchesCpu` (bus vl3_b 401.69025542177314 -> 401.36950114185817) plus
+`GpuVsCpuRte6515SaTest`'s own DAP assertion on the default branch scope (worst 1.2115417243381827 MW). Suite
+300/3.
+
+ALSO TRIED AND REJECTED, measured: implementing OLF's "all enabled except the FIRST" directly in
+`fillDistrQBatch` — suppress a contribution whose row-owner member is the group's current first-enabled,
+derived from the `(mRlEntry, limitType)` data the dynamic keys already read. It needs no table, fixes the
+divergence (outer 6 back to 2 iterations) but leaves the base at 14.405802445 (diff 4.59e-02 MW) with one
+fallback, and it is far worse elsewhere: **suite 300/37**, mostly "the batch must ENGAGE ... census={}". The
+predicate is wrong — at extraction the host has already removed the first-enabled member's DISTR_Q, so
+recomputing "first enabled" per scenario suppresses rows that legitimately carry one. Reverted.
+
+NEXT, and it is narrow: keep the table-only enrolment and find which of the two other group-keyed kernels
+breaks the middle-section tests, then gate THAT one on the group not being pilot-self. The two failing tests
+name the machinery directly (DistrQ TARGET renormalization), so `updateDistrQTargetsBatch` is the first
+suspect: for a pilot-self group whose Q is NOT re-routed, handing the pilot's Q target to the carrier row
+writes a target that belongs nowhere.
+
+### The table-only enrolment, taken apart on the middle-section fixture — and it regresses the batch (2026-09-27)
+
+Bisecting the three failures of the table-only enrolment with a per-group mask (`OLF_GPU_PS_MASK`: bit 1
+skips `updateDistrQTargetsBatch`'s carrier hand-off for pilot-self groups, bit 2 skips `updatePilotVeqBatch`)
+gave an answer I did not expect: the two middle-section tests fail IDENTICALLY under every mask
+(`vl3_b 401.36950114185817` at 0, 1, 2 and 3), while the base stays fixed under every mask (mask 3:
+`diff=5.55e-11 MW`, 2 iterations, no fallback). So neither of those kernels is what breaks the fixture, and
+the base fix comes purely from the DISTR_Q carrier gate.
+
+The fixture has 16 rows, so the two arms were compared vector by vector at the contingency batch's first fill
+(the dump now records `nS`, selects a later context with `OLF_GPU_VALS_DUMP_NTH` — `it` runs on across
+contexts, so "first fill of a solve" is `outer==0` after a non-zero outer — and writes `x` and `target`):
+
+```
+row  mode  F(with)        F(without)     x(with)     x(without)  target(with)   target(without)
+ 10  1/1   2.488544e-01   3.155211e-01   1.0125      1.0125      -0.133333333   -0.200000000   <-- TARGET differs
+```
+
+Identical Jacobian, identical incoming state, only the TARGET of the surviving member's DISTR_Q row differs —
+and `-0.2` is OLF's post-contingency `distr_q5 = -0.5*q(bus5) + 0.5*q(bus3)` (weights renormalized 1/3 -> 1/2
+over the two survivors). `OLF_GPU_TARGET_ROW=10` then named the producer: with the table, row 10 receives TWO
+overrides, `-0.133333333` (the base value) and `-0.200000000` (the renormalized one), and the base value wins;
+without it, only `-0.2`. The extra one is `GpuBatchChunkSolver`'s carrier re-pick on islanding
+(`overrides.add(s*n + newCarrier, baseTargets[baseCarrier])`), which moves "the pilot's relocated balance" from
+a frozen base carrier to the next live member — correct for a re-routed group, wrong for a table-only one,
+which carries no relocated balance at all.
+
+FIX 4 (in the tree, not committed): a per-group `qrRerouted` flag, computed in `ExtractionColumns` where the
+decision is made (1 for transformer/shunt groups and re-routed gen-VC groups, 0 for a table-only pilot-self
+group), carried on `GpuAcData` beside `qrPtr`/`qrRows`, and honoured by that block. Both middle-section tests
+pass with it (2/0).
+
+BUT THE TABLE REGRESSES THE BATCH, measured, and this is the decisive fact of the day:
+
+| scope | committed tree | table-only enrolment (+FIX 4) |
+| --- | --- | --- |
+| branch scope, on device | 9040 / 9042 | 9034 / 9042 |
+| branch scope, DAP | 725 differ, **worst 7.3e-07 MW** | 952-1156 differ, **worst 1.0-1.2 MW** |
+| branch scope, violations | **diff 0** | diff 399 |
+| busbar window [5000,6000), on device | 900 / 1000 | **0 / 1000** (`RUNTIME:status=-2=976`) |
+| busbar base | falls back, 6.56e-02 MW | no fallback, 3.5e-10 MW |
+
+So the enrolment fixes the one base and breaks nearly everything else: the branch scope was essentially
+PERFECT at the committed tree (DAP to 7e-07 MW, zero violation difference), and the window goes from 900 to
+ZERO scenarios on the device — the outcome the standing directive forbids. The table has too many consumers,
+and the ones the mask covers are not the ones doing this (the base is unaffected by them). The runtime
+rejections' reasons (`OLF_GPU_REJECT_TRACE`) are the next measurement; until they are known, the enrolment
+stays OUT of any commit. What IS established and stays: the base's defect is the DISTR_Q of the controller that
+becomes first-enabled when the pilot pins, and the carrier gate that deactivates it is the right mechanism —
+it needs a way to reach pilot-self groups WITHOUT the rest of the table's machinery.
+
+**The window's rejections named, the two device consumers masked, and the decision (2026-09-27).**
+`OLF_GPU_REJECT_TRACE` on the full window with the table: the batch churns to **outer pass 36** —
+`974 x max-iter-bad-solve outer=36`, `62 x pilot-self-mixed-pin outer=35`, one `outer-loop-budget outer=29`
+— a batch-wide outer-loop runaway that a 50-scenario range never reaches (49/50 on device at mask 0, 50/50 at
+mask 3). Masking the two device consumers (`OLF_GPU_PS_MASK=3`) on the full window restores the batch and
+keeps the base fix, but not the rest:
+
+| full window [5000,6000) | committed tree | table + FIX 4, mask 3 |
+| --- | --- | --- |
+| on device | 900 / 1000 | 972 / 1000 |
+| base distributed power | falls back, diff 6.56e-02 MW | diff 2e-09 MW, no fallback |
+| outer passes | normal | still churns to 35-36 (`pilot-self-mixed-pin` x 71) |
+| violations | diff 19 | **diff 163** |
+| DAP worst | 1.057 MW | **4.470 MW** |
+| branch scope (9042) | diff 0, worst 7.3e-07 MW | diff 399, worst 1.0 MW |
+
+So the table enrolment half-enables the UNFINISHED pilot-self rotation (the `pilot-self-mixed-pin` gate
+exists precisely because the device cannot yet hold a pilot-self group with some controllers pinned and some
+not), and the pin/unpin cycle it starts costs more than the one base it fixes. REVERTED: the table-only
+enrolment and the `qrRerouted` plumbing (FIX 4) are out of the tree; the diagnostics stay (`VALS_DUMP_ANY`,
+`VALS_DUMP_NTH`, `VALS_DUMP_ROW`, the `x`/`target` lines in the dump, the `PS`/`DQ`/`DQROW`/`RMQ` replays, and
+the `OLF_GPU_PS_MASK` gate in the two kernels, inert without a pilot-self table).
+
+What stays established, all measured: the base's defect is exactly "a pilot-self pilot pins, and the
+controller that becomes first-enabled keeps a DISTR_Q that OLF deactivates"; the DISTR_Q carrier gate is the
+right effect; the mixed-pin state that follows needs the rotation FINISHED (the pilot's pinned balance moving
+onto the first enabled member's row while the pilot's row keeps BUS_TARGET_V), not the table alone. FIX 4's
+separation of "has a table" from "Q re-routed" is correct and will be needed when that work resumes;
+`GpuBatchChunkSolver`'s carrier re-pick and the two device consumers must all honour it.
+
+### The rotation path never pinned its pilot because it counted the pilot's q TWICE (2026-09-27)
+
+Under `-Dolf.gpu.pilotSelfRotation=true` the pilot's diagnostic q read 0.603080467 where OLF has 0.910540234,
+and the arithmetic on those measured numbers is exact: `1.218 (loadQ) + 2 * (0.910540234 - 1.218) = 0.603080`.
+The injection is counted twice. `patchFrozenGroupDests` points a group-relocated output's frozen role-0 dest at
+the table's FALLBACK row so that the diagnostic fill (frozen routing) puts the pilot's own injection there — and
+for a pilot-self group the fallback row IS the pilot's own row, which ALSO has an rmq twin entry
+(`remoteMemberQPack` includes a pilot that is a controller). A non-pilot-self pilot has no rmq entry, so only
+this shape doubles. FIX 5: `remoteMemberQPack` skips a pilot-self pilot whose `qRowAlt <= -2`. Measured under
+the property: `q=0.910540234`, pins at OLF's pass with `lt=2`. Inert with the property off (suite 300/0).
+
+With the q right, the rotation path reaches the state its gate describes and the dump shows the remaining
+defect exactly: at the pinned pass column 13207 is BALANCED (the DQ pair `SUPPRESSED`, the zi coupling routed to
+the carrier 12836), but the pin's mode/target landed on the pilot's OWN row —
+
+```
+row 12834 (pilot):   mode=4 target=-0.444  F=4.44e-01  nonzero=[(12834,-1),(12836,+1)]   <- no q content: F = -target
+row 12836 (carrier): mode=1 target= 0.000  F=-4.18e-01 nonzero=[(12834,-1),(12836,+1),(13207,+1)]
+```
+
+— while its q content went to the carrier, which is solved against target 0. The `rlPilotSelfMixedGate`
+comment names the layout OLF has here: "keeps the pilot's V identity AND activates the pilot's own Q balance,
+hosting it on the reference member's row — a relocation this group has no table for". Under the property the
+table now exists, so the remaining change is the pin itself: leave the pilot's row a V identity, put
+`limit - loadQ` on the carrier, keep the carrier's DISTR_Q gated (already), and stop rejecting the mixed state.
+
+### The rotation finished: the pilot's pin rides the carrier, "control lost" is pilot-self aware, the base matches OLF's outer sequence (2026-09-27, rotation ON)
+
+All under `-Dolf.gpu.pilotSelfRotation=true`, window [5000,6000) busbar base (the WINDOW changes the base network —
+busbar contingencies retain different switches — so `5000:5001` is another base: 14 pins, no pilot-self churn;
+every number below is the [5000,6000) base). Method: `OLF_GPU_DBG_RL=1` (CPU per-bus PV<->PQ decisions, TRACE) beside
+`OLF_GPU_SW_TRACE=0` (every device entry that switched, with q/min/max/v/vt), plus two new device traces:
+`PSG` (per pass, every pilot-self group: pilot pin state, own-row mode/target, `veqOff`, every candidate row with
+its mode and the relocChoose pick — needs `OLF_GPU_BATCH_TRACE`) and `OLF_GPU_PSG_STEP=<g>` (the same for one group
+after EACH kernel of the RL pass, so a row change is charged to the kernel between two lines).
+
+Four defects, each measured then fixed:
+
+1. **The pin landed on the pilot's own row** (`reactiveLimitsBatch` mode 4, no q content, F = −target, the
+   `pilot-self-mixed-pin` reject). Now an ENROLLED pilot (`isEnrolledPilot`: `psEntry[g] == i`) pins WITHOUT
+   touching its row; `updateDistrQTargetsBatch`'s carrier hand-off writes `limit − loadQ[pilot]` on the carrier
+   when the pilot is pinned (falls through to the normal DISTR_Q target when unpinned); `rlPilotSelfMixedGate`
+   skips enrolled pilots. Group VL-6112 (g=24): pilot row 12834 stays `mode=0 target=1.055`, carrier 12836
+   `mode=1 target=-0.444`, q = 0.774 = OLF's limit from the pinned pass on.
+2. **`updatePilotVeqBatch` toggled its own verdict.** A pilot-self pilot is merged controller #0, so its OWN row
+   is candidate 1 of its group: once flipped to a power row (mode 1) `relocChoose` read it as a live member and
+   the next pass restored it — groups VL-5997 (g=17) and VL-6003 (g=19) went mode 1/0 every pass to the
+   outer-loop budget (`PSG`: `pick=1` iff `mode=1`). And the flipped row's target was `pilotQ` = 0 (the group's
+   captured target) where OLF's BUS_TARGET_Q is the pilot's LIMIT. Now for a pilot-self group: lost = pilot pinned
+   AND every OTHER candidate row in {0, 4}; flip target = `limit − loadQ` by limitType (re-stamped on drift);
+   an unpinned pilot is never "lost". g=19 holds q = 0.747700000 = maxQ from the pinned pass on.
+3. **Write-back froze the V target as a Q limit.** `writeBackReactiveLimits` read `deviceTargets[vRow] + loadQ`;
+   for an enrolled pinned pilot that row holds the VOLTAGE target: VL-6112_0 frozen at 1.055 + 1.218 = 2.273
+   against 0.774 → the CPU-side criterion saw the residual and the base was `MAX_ITERATION_REACHED` with DAP 0.
+   `pinnedBalanceRow` repeats the device's pick from `readBatchRowModes`: own row unless it is mode 0 and a
+   qr group has it as fallback, then the first other live candidate (the carrier).
+4. **Kernel order inside the RL pass.** `updateDistrQTargetsBatch` ran before `updatePilotVeqBatch`, so the
+   carrier hand-off picked the carrier while the pilot's row was still flipped (= the pilot's own row) and the
+   member that had just switched back kept a DISTR_Q target of 0; the fills then routed the pilot's balance to
+   that row against 0, forcing q_pilot = 3.511 instead of 0.955 and the member's q to −1.655 < minQ 0 — re-pin,
+   unpin, re-pin until maxSwitch (device outer 7..10, CPU none). The flip/restore now runs first.
+
+Result, base [5000,6000), rotation ON vs OLF (`CPU_RL` / `CPU_NR`):
+
+| pass | CPU | device |
+| --- | --- | --- |
+| initial NR | 3 it | 3 it |
+| DistributedSlack | 1 it | 1 it |
+| RL#1 | 19 PV→PQ (same 19 buses), 2 it | 19 pins, **3 it** |
+| RL#2 | VL-6106_0 PV→PQ, VL-5997_1 PQ→PV, 1 it | same two switches, 1 it |
+| RL#3 | stable | stable |
+| result | CONVERGED | CONVERGED, no fallback, no reject |
+| distributedActivePower | 14.359916553 MW | 14.359852249 MW (diff 6.4e-05) |
+
+Same outer sequence, same pin set, same decisions. The two remaining differences are one thing: the device iterates
+to 1e-8 pu infnorm where OLF stops at ITS criterion (default `DefaultNewtonRaphsonStoppingCriteria`) — one extra
+Newton iteration at RL#1 and a DS amount read off a deeper-converged slack mismatch (6.4e-5 MW of 14.36; OLF's
+own residual at its stop is up to 1e-4 pu). Machine-precision parity and equal inner counts need the device to
+apply OLF's stopping test, not a tighter one — the next item, and NOT a tolerance change (the standing rule).
+
+Kept, env-gated: `PSG`, `OLF_GPU_PSG_STEP`. Edge noted: `updateDistrQTargetsBatch`'s hand-off takes the nearer limit
+for realistic-V pins (3/4) — `rlInitTgtQ` is not in that kernel's tables (the flip in `updatePilotVeqBatch` has it).
+
+### The rotation's first fill: the gate ran after the fills it gates (2026-09-28, rotation ON)
+
+The smallest witness of the base's x0 difference (device |f(x0)| 117.908 vs OLF 117.845) is
+`GpuLoadFlowTest.remoteVoltageControlWithPilotAsController` (4 buses, 8 rows; failed under the property).
+Method: `OLF_GPU_F0_TRACE=<path>` (new: OLF's own f(x0) − target per equation, with type/element/id) beside the
+device's first fill (`OLF_GPU_VALS_DUMP_ANY` + `OLF_GPU_VALS_SCAN`), rotation ON and OFF. Seven rows equal to the
+digit; row 0 — the free member's row hosting the pilot's DISTR_Q (`distrQRow`) — had F −1.451 against OLF's
+−5.715 and no angle columns at all. The DISTR_Q pack was identical in both configs (`DQROW2`, a standalone row
+replay that no longer needs zero-impedance branches), so the extra came from another kernel: the pilot's RAW q
+(+1.0 · q_pilot on the carrier; the θ columns cancel against the −0.75 weighted terms, F −5.715 + 4.264). Cause:
+`pilotSelfGateBatch` (psSkip) was launched just before the DISTR_Q fill, AFTER the closed/open-branch and shunt
+fills that route the pilot's raw q through it — so the FIRST fill of every context read an unset gate. Moved to
+the head of the fill lambda. Measured: the fixture's first fill equals OLF's f(x0) to the last digit
+(6.635650652927396 vs …395) and the test passes on device; rte6515's base [5000,6000):
+
+| pass | CPU | device |
+| --- | --- | --- |
+| initial NR | 117.84475774904828 → 5.4631090 → 0.22833997 → 2.4533278e-3 (3 it) | 117.844757749047915 → 5.4631090 → 0.22833997 → 2.4533278e-3 (3 it) |
+| DistributedSlack | 2.8654457e-5 (1 it) | 2.8654458e-5 (1 it) |
+| RL#1 | 0.063687079 → 3.3781509e-5 (2 it) | 0.063687079 → 3.3781509e-5 (**2 it**, was 3) |
+| RL#2 | 1.5247732e-3 (1 it) | 1.5247732e-3 (1 it) |
+| distributedActivePower | 14.359916553 MW | 14.359916008 MW (diff 5.4e-07, was 6.4e-05) |
+
+Same outer sequence, same inner counts, residuals to 8–9 digits. OLF's `|f(x0)|` of ~31 at each outer-loop
+START is its own print (it precedes the target refresh) — the post-step norms are what agree. What remains is
+the last-digits drift (8–9 significant digits at every iterate, 5.4e-7 MW on the DS amount): a linear-solve /
+summation-order class, next.
+
+Also fixed: the two chain-step harnesses (`GpuZeroImpedanceControllerChainTest`, `GpuZiCouplerTreeRelocationTest`)
+called the legacy `GpuAcNewtonSolver.solve` overload that ships NO group table — with an enrolled group the q
+alternates carry −2−g and structure creation refused them ("bad cbIdx.qAlt … −2 (allowed [−1, 16))"); they now
+pass the packs' tables. Still open under the property: the batch's seeding of a pilot pinned IN THE BASE
+(`relocatedPinCode` marks relocation only for `qRowAlt == −1`, so an enrolled pinned pilot gets mode 4 stamped on
+its own V row while the table routes its q to the carrier — the window's 976 × `LINEAR_SOLVE_FAILED`), and the
+four `GpuBatchedAcSecurityAnalysisTest` pilot-group fixtures.
+
+### The batch under rotation: the activation stamped mode 4 on the CARRIER (2026-09-28, rotation ON)
+
+The [5000,6000) window under the property put 0/1000 on device — every scenario `LINEAR_SOLVE_FAILED` at outer 0,
+it 1 with `||J·dx − B||∞ = ||F||∞ = 2.556` (an EMPTY row whose residual is exactly −target: VL-5997's carrier).
+The slice knobs cannot reproduce it (`OLF_GPU_SA_MAX_CTG`, a shorter `CTG_RANGE`: the busbar contingency list
+decides which switches the base network retains, so a smaller list is ANOTHER base — 5000:5001 has 14 pins,
+5000:5050 has nQr=5 and no pilot-self pin); the full batch's first fill had to be dumped (`OLF_GPU_VALS_DUMP_NTH=2`
+with `_ANY`, 3 MB): rows 12562 (VL-5997's carrier) and 12836 (VL-6112's) came in at **mode 4** with the pilot's
+`limit − loadQ` as target and only the ±1 zero-impedance coupling as content; `relocChoose` skips mode 4, the
+pilot's raw q and the couplers' DUMMY_Q fell to the identity pilot rows and vanished — dead columns 13171 and
+13207, singular. Two seeding defects had been fixed first and were NOT it (they stay, both keyed on `psEntry`):
+`initRlLimitTypeBatch` now takes an enrolled pilot's base pin from OLF's own kind (its V row is never mode 4),
+`seedRlModeFromState` no longer stamps its row, and both hand-off kernels (`updateDistrQTargetsBatch`,
+`updatePilotVeqBatch`, now lambdas) run once after the seeding so the first fill sees the seeded pins on the rows;
+`updatePilotVeqBatch` books a group that lost control IN THE BASE as flipped (`veqOff`) so a later switch-back
+restores the V identity. The cause was `GpuAcActivationExtractor`: "a pilot that is one of its own controllers
+gets mode 4 whenever its own Q balance is active" — right for the pre-rotation alternate-dest layout, wrong for an
+ENROLLED group whose pinned balance is a POWER row (the carrier, or its own row once lost) that the scan routes to.
+Now `!enrolled` (the same predicate `ExtractionColumns` enrols with).
+
+| [5000,6000), rotation ON | before | after |
+| --- | --- | --- |
+| on device | 0 / 1000 (976 × LINEAR_SOLVE_FAILED) | **966 / 1000** (9 × max-iter-bad-solve, 1 × outer-loop-budget, 24 unmappable) |
+| base | CONVERGED on device (DAP diff 2.7e-07 MW) | same |
+| violations | — (all replayed on the CPU, diff 0) | CPU 71553 vs GPU 71601, diff 48 |
+| distributedActivePower | — | 482/974 > 1e-9 MW (the last-digit class, ~1e-7), worst **1.63 MW** |
+
+Rotation OFF on the same window: ~900/1000, violations diff 19, DAP worst 1.06 MW — the rotation now covers more
+scenarios than the fallback path and its remaining parity gap is of the same order; the per-contingency work
+(the 1.63 MW worst, the 48 violations) continues. Still failing under the property: the two middle-section
+fixtures (`deviceMiddleSectionLoss*`, bus-mid 401.69 vs 401.37 kV — a section loss inside a pilot-self group),
+and the two chain-STEP harnesses, which go through the legacy non-batch `solveContext` path where the pilot-self
+gate (`psSkip`) does not exist — the same chain network through the LoadFlow (batch-of-one) path passes
+(`GpuLoadFlowTest.zeroImpedanceControllerChain`, new).
+
+### The chain-step harnesses: the legacy solve path had no pilot-self gate (2026-09-28, rotation ON)
+
+`GpuZiCouplerTreeRelocationTest` / `GpuZeroImpedanceControllerChainTest` (one Newton step against OLF's own
+Jacobian) failed under the property by 1.9e-3 while the same chain network through the LoadFlow path stepped
+exactly (`GpuLoadFlowTest.zeroImpedanceControllerChain`, new). The harnesses use `GpuAcNewtonSolver.solve`, the
+non-batch `SolverContext`, which already passes `withPilotSelf(...)` to its fills but never had `hasPilotSelf`
+or `dPsSkip` set — so an enrolled pilot's raw q was routed to the carrier on top of its DISTR_Q terms. Now
+`createContext` derives the pilot-self groups from the candidate table alone (the fallback row reappears among
+the member candidates) and sets a constant skip of 1 for them: that path has no reactive-limits pass, so such a
+pilot is unpinned for the whole solve. Both harnesses pass under the property (2/2).
+
+### The middle-section fixtures: the carrier re-pick stamped a member's DISTR_Q target as a pilot Q (2026-09-28, rotation ON)
+
+`deviceMiddleSectionLoss*` (bus-mid 401.69 vs 401.37 kV under the property). OLF post-contingency
+(`OLF_GPU_EQ_DUMP_CTG=bus-mid`): `distr_q3` (the pilot's) inactive, `distr_q5 = −0.5·q5 + 0.5·q3` — the
+survivor at weight 1/2. The device's first fill had the same row with the 0.5 weights but the BASE target −0.1333
+(1/3), corrected to −0.2 only by the RL-pass hand-off, after which nothing re-solved. `OLF_GPU_TARGET_ROW=10`:
+rotation OFF uploads one override (−0.2, the outage seeding's renormalized target); rotation ON uploads TWO
+(−0.1333 then −0.2) and the first survives. The extra one is the chunk solver's carrier re-pick (plan-B4: "a
+frozen base carrier's pilot Q moves to the next live member's row"), which exists only when a qr group exists:
+for a PILOT-SELF group with its pilot UNPINNED the carrier hosts its OWN DISTR_Q, so the base carrier's target is
+that member's DISTR_Q target, not a pilot Q. Now skipped for such a group (pilot-self ⇔ the fallback row reappears
+among the candidates; unpinned ⇔ OLF's base kind of its class-2 RL entry is not 1..4). Both fixtures pass
+(2/2). Note: `GpuBatchOverrides.add` APPENDS duplicates (`duplicateAppends`) and the device kept the first —
+worth a hard error some day; today the wrong producer is removed instead.
+
+### OLF re-merges voltage controls per zero-impedance network — now emulated; rotation ON by default (2026-09-28)
+
+Two of the window's worst contingencies, run alone (`OLF_GPU_SA_CTG_ONLY`, both reproduce): BUS-6029_BBS_1 (DAP
+1.632 MW, bus diff 5.3 kV at the surviving VL-6029 sections, identical pins and limit updates on both arms, the
+pre-distributed loss equal to 2e-14 pu) and BUS-6002_BBS_2 (29 phantom violations, 8.7 kV at VL-6002_2, NOT
+rotation-specific). `OLF_GPU_EQ_DUMP_CTG` names it: OLF keeps `bus_target_v` ACTIVE on the surviving section
+(VL-6029_1 at 394.82 kV) with no DISTR_Q — `LfZeroImpedanceNetwork.updateVoltageControlMergeStatus` re-runs on the
+post-contingency zero-impedance networks: within each, the controls are re-merged with the highest target (then
+controlled-bus id) as MAIN, so a section whose controlled bus is lost, or that a coupler outage separates,
+re-elects its own main; a single-bus cluster with a local control is a plain PV bus at its own target. The
+device applied "control dies → survivors PQ at targetQ" (right only for a survivor that regulated the LOST bus
+remotely — `deviceBusLossIslandingMergedPilotSurvivorMatchesCpu` still holds).
+
+`GpuBatchQualification.reHomedControls` now replays that merge (islanded buses + `outagedZiBranches` split the
+group's controlled buses into clusters; a cluster without the base main re-elects; one LOCAL control → V identity
+at its target via `GenOutage.ROW_V_IDENTITY`, its controllers leave the group's DISTR_Q through the RENORMALIZE
+channel; several controls or a remote controller → `PLAN:VC_REMERGE_MULTI`, CPU). Two device details followed:
+`updateDistrQTargetsBatch` wrote the member's DISTR_Q target over the re-homed row's VOLTAGE target at the first
+RL pass (1.039 → 0.000, MAX_ITERATION) — an identity-mode member row now never receives one; an extra "inactive
+member" early return was tried and dropped (it moved `javaOuterLoopModeMatchesCpu` by 1.1e-12 kV).
+
+| | before | after |
+| --- | --- | --- |
+| BUS-6029_BBS_1 | DAP 1.632 MW, 5.3 kV | DAP 1.5e-08 MW, worst bus 8.9e-11 kV, violations equal |
+| BUS-6002_BBS_2 | 29 phantom violations, 8.7 kV | violations equal, worst bus 8.6e-11 kV, DAP 6e-10 MW |
+| window [5000,6000) rotation ON | 966/1000, violations diff 48, DAP worst 1.63 MW | **955/1000** (16 × VC_REMERGE_MULTI to the CPU by design, 21 runtime), **violations diff 0**, DAP worst 1.34 MW |
+| window rotation OFF | ~900/1000, diff 19 | 903/1000, diff 145 (61 × pilot-self-mixed-pin, 112 × max-iter-bad-solve — OFF's own defects, two contingencies with 0 device violations) |
+
+Rotation ON is better on every count (base parity, coverage, violations) and the suite is green with it, so
+`olf.gpu.pilotSelfRotation` now defaults to TRUE (`-Dolf.gpu.pilotSelfRotation=false` keeps the old layout).
+Open: the 16 multi-control re-merges (a new remote group after the split — needs per-scenario group tables), the
+21 runtime rejects (8 × max-iter-bad-solve, 1 × budget), the DAP tail (1.34 MW worst), the ulp class (~480
+contingencies between 1e-9 and 1e-6 MW), and a re-homed PV bus's reactive limits (its RL entry stays a remote
+member: OLF checks it as a local PV bus and may pin it; the device does not).

@@ -4766,7 +4766,13 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
     if (tid >= nQr * nScenarios) return;
     int g = tid % nQr;
     int s = tid / nQr;
-    if (!rlActive[s] || !qrGenVc[g]) return;
+    if (!qrGenVc[g]) return;
+    // The RL phase owns the flip/restore below (rlActive); the BOOKING of a group lost in the base runs at the
+    // post-seed launch too, when rlActive is still 0 — without it the unpin of such a pilot at its first RL pass
+    // found veqOff = 0, restored nothing, and the pilot's row stayed a power row with its raw q gated off
+    // (unpinned ⇒ psSkip): an empty row and a bad solve (rte6515 [5000,6000] BUS-6003_BBS_2, slot 797,
+    // max-iter-bad-solve at RL#2).
+    bool act = rlActive[s] != 0;
     // OLF_GPU_PS_MASK bit 2: leave a PILOT-SELF group's V identity alone (bisection of the table-only
     // enrolment: which group-keyed kernel breaks the middle-section DistrQ-target tests).
     if ((psMask & 2) && psEntry != nullptr && psEntry[g] >= 0) return;
@@ -4811,18 +4817,18 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
     } else {
         lost = relocChoose(g, qrPtr, qrRows, mode + (size_t) s * n) == 0;
     }
-    if (lost && !veqOff[fi] && mode[pi] == 0) {
+    if (act && lost && !veqOff[fi] && mode[pi] == 0) {
         savedVTarget[fi] = target[pi];
         mode[pi] = 1;
         target[pi] = flipTarget;
         veqOff[fi] = 1;
         switched[s] = 1;
-    } else if (!lost && veqOff[fi]) {
+    } else if (act && !lost && veqOff[fi]) {
         mode[pi] = 0;
         target[pi] = savedVTarget[fi];
         veqOff[fi] = 0;
         switched[s] = 1;
-    } else if (lost && veqOff[fi] && pe >= 0 && fabs(target[pi] - flipTarget) > 1e-12) {
+    } else if (act && lost && veqOff[fi] && pe >= 0 && fabs(target[pi] - flipTarget) > 1e-12) {
         target[pi] = flipTarget;                             // the pinned pilot's limit moved (curve limits)
         switched[s] = 1;
     } else if (lost && !veqOff[fi] && pe >= 0 && mode[pi] == 1 && rlVtarget != nullptr) {
@@ -4832,7 +4838,7 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
         // pilot stayed a power row beside a member that had resumed control.
         veqOff[fi] = 1;
         savedVTarget[fi] = rlVtarget[pe];
-    } else if (!lost && mode[pi] == 1 && pe < 0 && qrPilotRlEntry != nullptr && qrPilotRlEntry[g] >= 0) {
+    } else if (act && !lost && mode[pi] == 1 && pe < 0 && qrPilotRlEntry != nullptr && qrPilotRlEntry[g] >= 0) {
         // control lost in the BASE, a member just unpinned: the V identity comes back with the
         // group's target (the base carried no saved one — the pilot's local entry has it). A
         // pilot-self group (pe >= 0) books the same state as flipped above and restores through veqOff.

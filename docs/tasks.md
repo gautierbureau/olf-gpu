@@ -3527,3 +3527,18 @@ run ALONE — the single-contingency base retains different switches — so they
 in the window by SLOT (`OLF_GPU_LOOP_TRACE=<slot>`, `OLF_GPU_SW_TRACE=<slot>`, one per run; slots are stable for a
 fixed list and chunk size) with `OLF_GPU_SA_BUSDIFF_CTG=<ids>` for the in-scope bus diffs. `OLF_GPU_LOOP_TRACE_CTG`
 now says when the named id is not batched at all (a plan reject — BUS-6002_BBS_2 is one of the 16).
+
+### A group lost in the base is booked at seed time, not in the RL phase (2026-09-28)
+
+BUS-6003_BBS_2 in the [5000,6000) batch (slot 797, `max-iter-bad-solve` at RL#2): at RL#1 the pilot-self pilot
+VL-6003_0 UNPINS (v 1.134 > vt 0.993, its group lost in the base) and the re-solve fails in 30 iterations. The
+`veqOff` booking that lets `updatePilotVeqBatch` restore the V identity on that unpin is done at the post-seed
+launch — where the kernel returned early on `!rlActive[s]` (the RL phase is not active at seed time), so the
+pilot's row stayed a power row while its raw q was gated off (unpinned ⇒ `psSkip`): an empty row, a bad solve.
+The booking now runs regardless of `rlActive`; only the flip/restore/re-stamp branches stay RL-phase gated.
+Measured: slot 797 converges (RL passes 36–39, status 0); window 957/1000 on device, violations diff 0, DAP
+worst 0.141 MW; fixtures 177/0 both ways; suite 303/0. Chunk rejects left: BUS-536_BBS and BUS-6079_BBS (OLF
+does not converge them either — the device reproduces OLF's divergence to 10+ digits) and BUS-6088_BBS (slot 893).
+Batch observation: BUS-536's non-convergence drives the DistributedSlack loop for 30 batch passes (`nChanged=1`
+for 28 of them), each a full-width re-solve — the budget is per scenario and correct, but the pass count is a
+cost the CPU never pays; a scenario whose solve has failed should stop driving the loop.

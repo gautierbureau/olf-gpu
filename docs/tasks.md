@@ -3623,3 +3623,30 @@ Suites after this fix: rotation ON 304/0; rotation OFF 303/1 once — `javaLoadB
 missed its 1e-12 kV bus-voltage assertion by 1.02e-12 kV (133.19640118822167 vs …065) and passed on two
 immediate reruns: the run-to-run last-digit drift, not this change (no island, no frozen row in that fixture).
 It is the same open ulp item as the base's run-dependent distributed power; the tolerance stays.
+
+### The two tail contingencies left after the 2026-09-28 fixes (measured, open)
+
+- **BUS-5997_BBS_2** (slot 787, DAP 2.4e-3 MW, worst bus 7.8e-6 kV): it islands VL-5997_1 — the only sibling of the
+  base-pinned pilot-self pilot VL-5997_0 — and removes GEN-5997#0. The row layout is right (`OLF_GPU_ROWMODE_DUMP_CTG`:
+  the pilot's own row flips to its Q balance at 0.955 − 3.511, the sibling's rows and the coupler dummies are
+  identities; OLF's post-contingency dump has `bus_target_q[6280]` active and `bus_target_v6280` inactive, the same
+  shape). The SEQUENCE differs: OLF's first solve takes two iterations (0.0898, then 1.25e-4) and its DistributedSlack
+  fires at iteration 0 (the lost generation), the device's first solve converges in one (2.7e-3), its slack loop does
+  not fire until pass 40 (remainder 1.36 MW) and its first reactive-limit check switches something OLF never does
+  (`LOOP_PASS switched=1` at pass 35, no `SW_PASS` line — the switch trace did not name it). The 2.4e-3 MW is the
+  slack-loop remainder landing differently. Next: name the pass-35 switch (RL_TRACE by row), then the first solve's
+  per-equation residual against OLF's (the F0 port in the post-contingency dump evaluates a stale state — 82.2 vs
+  OLF's 30.48 — it needs OLF's own NR-start evaluation).
+- **BUS-6112_BBS_2** (slot 924, DAP 3.7e-3 MW, worst bus 4.2e-6 kV): first solve, slack distribution and HVDC pass
+  match OLF (3.365e-4 vs 3.373e-4 after the HVDC re-solve); the reactive-limit passes do not. OLF's RL 2 pins seven
+  buses (VL-6490_0, 6489_0, 6055_0, 6090_0, 6139_1, 6139_3, 6231_0) and adjusts VL-6226_0's limit, RL 3 pins
+  VL-6139_2 and VL-6139_4; the device pins the same buses EXCEPT VL-6055_0 at RL#1 (row 12710, a local PV entry) and
+  catches it at RL#2 — OLF sees q = 190.24 MVAr against a 152.4 limit there, a 38 MVAr excess the device's q at
+  RL#1 cannot have shown. Next: VL-6055_0's device q at RL#1 (`OLF_GPU_RL_TRACE_VROW=12710`).
+  Measured (`OLF_GPU_RL_TRACE_VROW=12710`, prints `RL_VROW`): at the device's first reactive-limit check VL-6055_0
+  reads q = 1.4744 pu (base 1.4757; limits ±1.524) where OLF reads 1.9024 at its first check — after the device's
+  own RL#1 pins and re-solve it reads 1.8995 and pins. So the two arms' states BEFORE the first reactive-limit
+  check differ by ~43 MVAr at that bus while the final buses agree to 4.2e-6 kV: the first-solve residuals are
+  close (0.196 / 7.9e-5 against OLF's 0.2124 / 1.456e-4) but not equal, and the slack pass distributes 21.4 MW
+  on the device. Next: an intermediate-state comparison (the device's x at the RL#1 check against OLF's state
+  before its RL 2 — OLF logs no intermediate state, so a CPU-side hook on the outer-loop check is needed).

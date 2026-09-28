@@ -3365,3 +3365,39 @@ apply OLF's stopping test, not a tighter one — the next item, and NOT a tolera
 
 Kept, env-gated: `PSG`, `OLF_GPU_PSG_STEP`. Edge noted: `updateDistrQTargetsBatch`'s hand-off takes the nearer limit
 for realistic-V pins (3/4) — `rlInitTgtQ` is not in that kernel's tables (the flip in `updatePilotVeqBatch` has it).
+
+### The rotation's first fill: the gate ran after the fills it gates (2026-09-28, rotation ON)
+
+The smallest witness of the base's x0 difference (device |f(x0)| 117.908 vs OLF 117.845) is
+`GpuLoadFlowTest.remoteVoltageControlWithPilotAsController` (4 buses, 8 rows; failed under the property).
+Method: `OLF_GPU_F0_TRACE=<path>` (new: OLF's own f(x0) − target per equation, with type/element/id) beside the
+device's first fill (`OLF_GPU_VALS_DUMP_ANY` + `OLF_GPU_VALS_SCAN`), rotation ON and OFF. Seven rows equal to the
+digit; row 0 — the free member's row hosting the pilot's DISTR_Q (`distrQRow`) — had F −1.451 against OLF's
+−5.715 and no angle columns at all. The DISTR_Q pack was identical in both configs (`DQROW2`, a standalone row
+replay that no longer needs zero-impedance branches), so the extra came from another kernel: the pilot's RAW q
+(+1.0 · q_pilot on the carrier; the θ columns cancel against the −0.75 weighted terms, F −5.715 + 4.264). Cause:
+`pilotSelfGateBatch` (psSkip) was launched just before the DISTR_Q fill, AFTER the closed/open-branch and shunt
+fills that route the pilot's raw q through it — so the FIRST fill of every context read an unset gate. Moved to
+the head of the fill lambda. Measured: the fixture's first fill equals OLF's f(x0) to the last digit
+(6.635650652927396 vs …395) and the test passes on device; rte6515's base [5000,6000):
+
+| pass | CPU | device |
+| --- | --- | --- |
+| initial NR | 117.84475774904828 → 5.4631090 → 0.22833997 → 2.4533278e-3 (3 it) | 117.844757749047915 → 5.4631090 → 0.22833997 → 2.4533278e-3 (3 it) |
+| DistributedSlack | 2.8654457e-5 (1 it) | 2.8654458e-5 (1 it) |
+| RL#1 | 0.063687079 → 3.3781509e-5 (2 it) | 0.063687079 → 3.3781509e-5 (**2 it**, was 3) |
+| RL#2 | 1.5247732e-3 (1 it) | 1.5247732e-3 (1 it) |
+| distributedActivePower | 14.359916553 MW | 14.359916008 MW (diff 5.4e-07, was 6.4e-05) |
+
+Same outer sequence, same inner counts, residuals to 8–9 digits. OLF's `|f(x0)|` of ~31 at each outer-loop
+START is its own print (it precedes the target refresh) — the post-step norms are what agree. What remains is
+the last-digits drift (8–9 significant digits at every iterate, 5.4e-7 MW on the DS amount): a linear-solve /
+summation-order class, next.
+
+Also fixed: the two chain-step harnesses (`GpuZeroImpedanceControllerChainTest`, `GpuZiCouplerTreeRelocationTest`)
+called the legacy `GpuAcNewtonSolver.solve` overload that ships NO group table — with an enrolled group the q
+alternates carry −2−g and structure creation refused them ("bad cbIdx.qAlt … −2 (allowed [−1, 16))"); they now
+pass the packs' tables. Still open under the property: the batch's seeding of a pilot pinned IN THE BASE
+(`relocatedPinCode` marks relocation only for `qRowAlt == −1`, so an enrolled pinned pilot gets mode 4 stamped on
+its own V row while the table routes its q to the carrier — the window's 976 × `LINEAR_SOLVE_FAILED`), and the
+four `GpuBatchedAcSecurityAnalysisTest` pilot-group fixtures.

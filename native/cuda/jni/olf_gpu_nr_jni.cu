@@ -1769,6 +1769,50 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
                 }
             }
         }
+        // OLF_GPU_VALS_DUMP_ROW=<row>, standalone (the replay above needs zero-impedance branches): every
+        // DISTR_Q contribution whose residual lands in the row, with its static weight, dests, and the
+        // DYNAMIC-key inputs the kernel renormalizes with (owner member, its RL entry and limit type, keys).
+        // Printed on the same fills VALS_SCAN reports, once per fill for the first scenario.
+        if (static const char* dqRowEnv = std::getenv("OLF_GPU_VALS_DUMP_ROW"); dqRowEnv != nullptr && ctx->ndq > 0 && s == 0) {
+            int wantRow = std::atoi(dqRowEnv);
+            std::vector<int> dd(static_cast<size_t>(ctx->ndq) * 6), dk(ctx->ndq), de(ctx->ndq), ds(ctx->ndq);
+            std::vector<double> dw(ctx->ndq);
+            CUDA_CHECK(cudaMemcpy(dd.data(), ctx->st->dDqDest.p, dd.size() * sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(dk.data(), ctx->st->dDqKind.p, dk.size() * sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(de.data(), ctx->st->dDqElem.p, de.size() * sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(ds.data(), ctx->st->dDqSide.p, ds.size() * sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(dw.data(), ctx->st->dDqWeight.p, dw.size() * sizeof(double), cudaMemcpyDeviceToHost));
+            std::vector<int> jm, km, mre;
+            std::vector<double> mk;
+            if (ctx->nDqDyn || ctx->hasDqQrGroups) {
+                jm.resize(ctx->ndq);
+                CUDA_CHECK(cudaMemcpy(jm.data(), ctx->dDqJMember.p, jm.size() * sizeof(int), cudaMemcpyDeviceToHost));
+            }
+            if (ctx->nDqDyn) {
+                km.resize(ctx->ndq);
+                CUDA_CHECK(cudaMemcpy(km.data(), ctx->dDqKMember.p, km.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                mre.resize(ctx->nDqMembers);
+                mk.resize(ctx->nDqMembers);
+                CUDA_CHECK(cudaMemcpy(mre.data(), ctx->dDqMemberRlEntry.p, mre.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(mk.data(), ctx->dDqMemberKey.p, mk.size() * sizeof(double), cudaMemcpyDeviceToHost));
+            }
+            std::vector<char> lt(static_cast<size_t>(std::max(ctx->nrl, 1)) * nS, 0);
+            if (ctx->nrl > 0 && ctx->dRlLimitType.p) {
+                CUDA_CHECK(cudaMemcpy(lt.data(), ctx->dRlLimitType.p, static_cast<size_t>(ctx->nrl) * nS, cudaMemcpyDeviceToHost));
+            }
+            for (int c = 0; c < ctx->ndq; c++) {
+                int d0 = dd[static_cast<size_t>(c) * 6];
+                if (d0 > -2 || -2 - d0 != wantRow) continue;
+                int kM = km.empty() ? -1 : km[c];
+                int kRe = kM >= 0 ? mre[kM] : -1;
+                std::fprintf(stderr, "    DQROW2 outer=%d it=%d row=%d c=%d kind=%d elem=%d side=%d w=%.6g dests=[%d %d %d %d %d %d]"
+                             " jMember=%d kMember=%d kKey=%.6g kRlEntry=%d kLimitType=%d nDqDyn=%d nDqInact=%d rowMode=%d\n",
+                             outer, it, wantRow, c, dk[c], de[c], ds[c], dw[c], dd[c * 6], dd[c * 6 + 1], dd[c * 6 + 2],
+                             dd[c * 6 + 3], dd[c * 6 + 4], dd[c * 6 + 5], jm.empty() ? -1 : jm[c], kM,
+                             kM >= 0 ? mk[kM] : 0.0, kRe, kRe >= 0 ? (int) lt[kRe] : -1, ctx->nDqDyn, ctx->nDqInact,
+                             mode[static_cast<size_t>(s) * n + wantRow]);
+            }
+        }
         std::fprintf(stderr, "VALS_SCAN outer=%d it=%d slot=%d nnz=%d finite=%s maxAbs=%.6e at row=%d col=%d"
                              " | noDiagSlot=%d tinyDiag=%d firstBadRow=%d nHaz=%d dupRows=%d,%d"
                              " modes[0..4]=%d,%d,%d,%d,%d deadCols=%d firstDeadCol=%d mode4Rows=[%s]\n",
@@ -9078,6 +9122,19 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     //      LINE_SEARCH backtrack below can re-evaluate at a reduced step, like the sequential
     //      solveContext's fillAndNorm. ----
     auto fillActiveBatch = [&](bool fOnly) {
+        if (ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr && ctx->st->nQr > 0) {
+            // Recompute the PILOT-SELF gate from the CURRENT pin states BEFORE any family fill: such a pilot
+            // has a Q balance to relocate only once a reactive limit has pinned it, and the RL pass moves
+            // pins between passes. The closed/open-branch and shunt fills are what route the pilot's raw q
+            // through it (ziDynDest), so it must be current when THEY run — launched after them (before the
+            // DISTR_Q fill only) the FIRST fill of every context read an unset gate and put the unpinned
+            // pilot's raw q on the carrier row on top of its DISTR_Q terms: row 0 of the 4-bus
+            // pilot-as-controller fixture assembled -1.451 against OLF's -5.715 (= OLF + 1.0 * q_pilot), and
+            // rte6515's base started from |f(x0)| 117.908 against OLF's 117.845.
+            pilotSelfGateBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
+                    ctx->st->nQr, nS, ctx->nrl, ctx->dPsPilotEntry.as<int>(),
+                    ctx->dRlLimitType.as<char>(), ctx->dPsSkip.as<char>());
+        }
         if (!fOnly) {
             CUDA_CHECK(cudaMemsetAsync(ctx->dVals.p, 0, static_cast<size_t>(nnz) * nS * sizeof(double), ctx->stream));
         }
@@ -9127,13 +9184,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             }
         }
     int dqTraceRow = gpuDqTraceRow();
-    if (ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr && ctx->st->nQr > 0) {
-        // Recompute the PILOT-SELF gate from the CURRENT pin states: such a pilot has a Q balance to
-        // relocate only once a reactive limit has pinned it, and the RL pass moves pins between passes.
-        pilotSelfGateBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
-                ctx->st->nQr, nS, ctx->nrl, ctx->dPsPilotEntry.as<int>(),
-                ctx->dRlLimitType.as<char>(), ctx->dPsSkip.as<char>());
-    }
     if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqInact,
                 ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
                 ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr ? ctx->dPsSkip.as<char>() : nullptr, ctx->st->nQr, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr, ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), dqTraceRow);

@@ -536,6 +536,9 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
     /** OLF_GPU_EQ_DUMP: written once per run (see dumpEquationsOnce). */
     private boolean equationsDumped;
 
+    /** OLF_GPU_F0_TRACE: written once per run (see runImpl). */
+    private boolean f0Traced;
+
     private GpuAcActivation activation;
 
     // per-row variable kind (0=BUS_PHI, 1=BUS_V, 2=other) for the MAX_VOLTAGE_CHANGE device step
@@ -848,6 +851,39 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             }
             double[] target = activation.applyTargets(targetVector.getArray());
             double[] x0 = equationSystem.getStateVector().get().clone();
+            // OLF_GPU_F0_TRACE=<path>: OLF's OWN mismatch vector at x0 (f(x0) - target, the residual its first
+            // |f(x0)| line is the norm of), one line per equation with its type, element and id. Lined up
+            // against the device's first fill (OLF_GPU_VALS_DUMP_ANY) it names the equation the two arms
+            // evaluate differently BEFORE any step is taken — the only place a difference is not yet blurred
+            // by different iterates. Written once per run.
+            String f0Path = System.getenv("OLF_GPU_F0_TRACE");
+            if (f0Path != null && !f0Path.isEmpty() && !f0Traced) {
+                f0Traced = true;
+                double[] fx0 = equationVector.getArray();
+                double[] tg0 = targetVector.getArray();
+                double n2 = 0;
+                try (java.io.PrintWriter pw = new java.io.PrintWriter(java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(f0Path)))) {
+                    for (int c = 0; c < fx0.length; c++) {
+                        double v = fx0[c] - (c < tg0.length ? tg0[c] : 0.0);
+                        n2 += v * v;
+                        var eq = equationSystem.getIndex().getEquationAtColumn(c);
+                        String id;
+                        try {
+                            id = switch (eq.getType().getElementType()) {
+                                case BUS -> network.getBus(eq.getElementNum()).getId();
+                                case BRANCH -> network.getBranch(eq.getElementNum()).getId();
+                                default -> "#" + eq.getElementNum();
+                            };
+                        } catch (RuntimeException e) {
+                            id = "#" + eq.getElementNum();
+                        }
+                        pw.println(c + " " + eq.getType() + " " + eq.getElementNum() + " " + id + " " + v);
+                    }
+                } catch (java.io.IOException e) {
+                    LOGGER.warn("OLF_GPU_F0_TRACE failed: {}", e.toString());
+                }
+                System.err.println("F0_TRACE wrote " + f0Path + " rows=" + fx0.length + " norm2=" + Math.sqrt(n2));
+            }
             rlStateOut = driverOuterLoops && cachedData.rlVrow().length > 0 ? new int[cachedData.rlVrow().length] : null;
             int[] rlStateIn = null;
             if (restart && rlCarry != null && rlStateOut != null) {

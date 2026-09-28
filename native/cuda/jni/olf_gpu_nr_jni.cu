@@ -9980,6 +9980,33 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     std::fprintf(stderr, "BATCH_TRACE s=%d it=%d infnorm=%.17e norm2=%.17e thr=%.17e conv=%d\n",
                                  s, it, norm, std::sqrt(ssq), thr2Of(s), converged ? 1 : 0);
                 }
+                if (s == ctx->loopTraceSlot) {
+                    // The traced scenario's Newton step, host-side: the norms the convergence test saw,
+                    // the MAX_VOLTAGE_CHANGE factor the step was scaled by, and the row that carries the
+                    // largest residual with what sits on it. OLF's NR_EXIT prints the same norms after
+                    // each of ITS iterations; a different iteration COUNT on the same system is where
+                    // two converged answers part (network.xiidm/IZUZ: OLF 1 iteration, device 2).
+                    std::vector<double> hF(n), hT(n), hX(n);
+                    std::vector<int> hM(n);
+                    double fac = 1.0;
+                    CUDA_CHECK(cudaMemcpy(hF.data(), ctx->dF.as<double>() + (size_t) s * n, n * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(hT.data(), ctx->dTarget.as<double>() + (size_t) s * n, n * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(hX.data(), ctx->dX.as<double>() + (size_t) s * n, n * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(hM.data(), ctx->dMode.as<int>() + (size_t) s * n, n * sizeof(int), cudaMemcpyDeviceToHost));
+                    if (ctx->clampStep && ctx->dStepFactor.p) {
+                        CUDA_CHECK(cudaMemcpy(&fac, ctx->dStepFactor.as<double>() + s, sizeof(double), cudaMemcpyDeviceToHost));
+                    }
+                    int wr = 0;
+                    for (int r = 1; r < n; r++) if (std::fabs(hF[r]) > std::fabs(hF[wr])) wr = r;
+                    // ...and the RAW step's largest entry (dDx still holds it), which is what the
+                    // MAX_VOLTAGE_CHANGE factor was computed from
+                    std::vector<double> hDx(n);
+                    CUDA_CHECK(cudaMemcpy(hDx.data(), ctx->dDx.as<double>() + (size_t) s * n, n * sizeof(double), cudaMemcpyDeviceToHost));
+                    int wd = 0;
+                    for (int r = 1; r < n; r++) if (std::fabs(hDx[r]) > std::fabs(hDx[wd])) wd = r;
+                    std::fprintf(stderr, "SLOT_TRACE s=%d it=%d infnorm=%.17e norm2=%.17e thr=%.17e conv=%d stepFactor=%.9f worstRow=%d F=%.12e mode=%d target=%.9f x=%.9f maxDxRow=%d dx=%.9f\n",
+                                 s, it, norm, std::sqrt(ssq), thr2Of(s), converged ? 1 : 0, fac, wr, hF[wr], hM[wr], hT[wr], hX[wr], wd, hDx[wd]);
+                }
                 res.iters[s] = it;
                 res.norm[s] = norm;
                 if (deviceFixedIter) {
@@ -10351,6 +10378,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 double mm = 0;
                 double mf = 0;
                 double mdx = 0;
+                double ssq = 0;                              // ||F||2 too: OLF's default stopping test is on the 2-norm
                 int argp = -1;
                 int argm = -1;
                 for (int i = 0; i < n; i++) {
@@ -10358,13 +10386,14 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     if (std::fabs(hrp[t]) > mp) { mp = std::fabs(hrp[t]); argp = i; }
                     if (std::fabs(hrm[t]) > mm) { mm = std::fabs(hrm[t]); argm = i; }
                     mf = std::max(mf, std::fabs(hf[t]));
+                    ssq += hf[t] * hf[t];
                     mdx = std::max(mdx, std::fabs(hdx[t]));
                 }
                 double best = std::min(mp, mm);
                 int argw = mp < mm ? argp : argm;
-                std::fprintf(stderr, "LIN_RESID it=%d slot=%d n=%d ||J.dx-F||inf=%.6e ||F||inf=%.6e "
+                std::fprintf(stderr, "LIN_RESID it=%d slot=%d n=%d ||J.dx-F||inf=%.6e ||F||inf=%.6e ||F||2=%.17e "
                              "||dx||inf=%.6e ratio=%.3e worstRow=%d\n",
-                             it, s, n, best, mf, mdx, mf > 0 ? best / mf : 0.0, argw);
+                             it, s, n, best, mf, std::sqrt(ssq), mdx, mf > 0 ? best / mf : 0.0, argw);
             }
         }
         // LINEAR-SOLVE GUARD, first iteration of the first pass of every batched solve: a

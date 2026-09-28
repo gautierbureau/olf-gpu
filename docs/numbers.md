@@ -196,3 +196,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-25 | 45ce19c | 12.14 | 10.43 | 27.51 | x2.64 | 0/0/0 | 7.27 | 4.19 | 499/500 | 122/133 (92%) | curve limits: only VOLTAGE/REMOTE_REACTIVE_POWER generators move a bus's Q box |
 | 2026-09-27 | ccdcac7 | 12.65 | 10.61 | 28.35 | x2.67 | 0/0/0 | 7.46 | 4.20 | 499/500 | 122/133 (92%) | base-lost remote group: pilot V restored in the pass a member unpins (LNER 5.4e-04 -> 6.5e-11 kV) |
 | 2026-09-28 | 4f78e67 | 12.12 | 10.40 | 27.54 | x2.65 | 0/0/0 | 7.25 | 4.19 | 499/500 | 122/133 (92%) | base-pinned member keeps its Q when a sibling is lost (IZUZ 1.6e-03 -> 1.0e-10 kV; full branch gate passes) |
+| 2026-09-28 | 2d99f31 | 12.63 | 10.55 | 28.16 | x2.67 | 0/0/0 | 7.52 | 4.24 | 499/500 | 122/133 (92%) | merge base-outer7-divergence (VC re-merge fixes FUKE 7.5e-04 -> 8.6e-09 MW; pilot-self rotation ON regresses 22 islanding ctg to ~4e-06 MW on network.xiidm) |

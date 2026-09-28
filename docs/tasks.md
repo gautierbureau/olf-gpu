@@ -3447,3 +3447,18 @@ or `dPsSkip` set — so an enrolled pilot's raw q was routed to the carrier on t
 `createContext` derives the pilot-self groups from the candidate table alone (the fallback row reappears among
 the member candidates) and sets a constant skip of 1 for them: that path has no reactive-limits pass, so such a
 pilot is unpinned for the whole solve. Both harnesses pass under the property (2/2).
+
+### The middle-section fixtures: the carrier re-pick stamped a member's DISTR_Q target as a pilot Q (2026-09-28, rotation ON)
+
+`deviceMiddleSectionLoss*` (bus-mid 401.69 vs 401.37 kV under the property). OLF post-contingency
+(`OLF_GPU_EQ_DUMP_CTG=bus-mid`): `distr_q3` (the pilot's) inactive, `distr_q5 = −0.5·q5 + 0.5·q3` — the
+survivor at weight 1/2. The device's first fill had the same row with the 0.5 weights but the BASE target −0.1333
+(1/3), corrected to −0.2 only by the RL-pass hand-off, after which nothing re-solved. `OLF_GPU_TARGET_ROW=10`:
+rotation OFF uploads one override (−0.2, the outage seeding's renormalized target); rotation ON uploads TWO
+(−0.1333 then −0.2) and the first survives. The extra one is the chunk solver's carrier re-pick (plan-B4: "a
+frozen base carrier's pilot Q moves to the next live member's row"), which exists only when a qr group exists:
+for a PILOT-SELF group with its pilot UNPINNED the carrier hosts its OWN DISTR_Q, so the base carrier's target is
+that member's DISTR_Q target, not a pilot Q. Now skipped for such a group (pilot-self ⇔ the fallback row reappears
+among the candidates; unpinned ⇔ OLF's base kind of its class-2 RL entry is not 1..4). Both fixtures pass
+(2/2). Note: `GpuBatchOverrides.add` APPENDS duplicates (`duplicateAppends`) and the device kept the first —
+worth a hard error some day; today the wrong producer is removed instead.

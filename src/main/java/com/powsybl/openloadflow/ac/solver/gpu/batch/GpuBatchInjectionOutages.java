@@ -658,6 +658,16 @@ final class GpuBatchInjectionOutages {
             }
             dqTargetRows = rows.stream().mapToInt(Integer::intValue).toArray();
             dqTargetValues = values.stream().mapToDouble(Double::doubleValue).toArray();
+            if (System.getenv("OLF_GPU_RL_TRACE") != null) {
+                StringBuilder sb = new StringBuilder();
+                for (int m = gs; m < gs + gc; m++) {
+                    sb.append(" m").append(m).append("[bus=").append(mBusNum[m]).append(" hasRow=").append(mHasRow[m])
+                            .append(" row=").append(mRow[m]).append(" key=").append(mKey[m])
+                            .append(" keeps=").append(memberKeepsKey(bus, mBusNum[m], m, inactiveDqMember)).append(']');
+                }
+                System.err.println("DQSEED bus=" + bus.getId() + " anchor=" + dqAnchor + " inactive=" + inactiveDqMember
+                        + " vcSurvives=" + vcSurvives + " keySum=" + keySum + " rows=" + rows + " values=" + values + sb);
+            }
         }
         int[] pilotSurvivorRlEntries = new int[0];
         if (vcSurvives) {

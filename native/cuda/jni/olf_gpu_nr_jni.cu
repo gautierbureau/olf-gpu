@@ -4861,7 +4861,9 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
                                     const double* rlVtarget,
                                     const int* qrPilotRlEntry,
                                     int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
-                                    const double* svcRlVt) {
+                                    const double* svcRlVt,
+                                    int nDqMembers, const int* dqMemberQrGroup, const int* dqMemberRlEntry,
+                                    const char* rlIslandedMask) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nQr * nScenarios) return;
     int g = tid % nQr;
@@ -4903,8 +4905,38 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
     if (rowIsFrozen(nFrozen, frozenSlotRow, s, pilotRow)) return;
     size_t pi = (size_t) s * n + pilotRow;
     size_t fi = (size_t) s * nQr + g;
+    // OLF's own test for "this group has no controller": its ENABLED controllers
+    // (VoltageControl.isControllerEnabled -> isGeneratorVoltageControlEnabled). On the device that fact is the
+    // members' REACTIVE-LIMIT state, which is per (scenario, entry) and current from the seeding onwards —
+    // unlike the row modes this kernel used to infer it from, which at seed time are still ambiguous (a member
+    // row reads mode 0 both for a frozen island and for an identity that means the member controls). With the
+    // fact in hand the layout can follow it from the FIRST fill, which is where OLF has it: a pilot whose only
+    // sibling this contingency islands, and which the base itself pinned, has no BUS_TARGET_V at all in OLF,
+    // while the device used to hold that identity until its reactive-limits phase (rte6515 BUS-6112_BBS_2: the
+    // pilot VL-6112_0 sat at v = 1.055 through the whole slack phase, VL-6055_0's q read 1.474 against OLF's
+    // 1.902, and the run ended 3.7e-3 MW apart in distributed active power).
+    bool entryKnown = false;
+    bool anyEnabled = false;
+    if (pe >= 0 && dqMemberQrGroup != nullptr && dqMemberRlEntry != nullptr && limitType != nullptr && nrl > 0) {
+        for (int m = 0; m < nDqMembers; m++) {
+            if (dqMemberQrGroup[m] != g) continue;
+            int re = dqMemberRlEntry[m];
+            if (re < 0 || re >= nrl) continue;
+            if (rlIslandedMask != nullptr && rlIslandedMask[(size_t) s * nrl + re]) continue;   // OLF disables it
+            entryKnown = true;
+            if (limitType[(size_t) s * nrl + re] == 0) {                                        // still controlling
+                anyEnabled = true;
+                break;
+            }
+        }
+    }
+    // Only with at least one member entry to read: a group whose members have none (reactive limits disabled for
+    // the run, an empty q range) cannot be judged this way, and its layout stays what the extraction gave it.
+    const bool factKnown = entryKnown;
     bool lost;
-    if (pe >= 0) {
+    if (factKnown) {
+        lost = !anyEnabled;
+    } else if (pe >= 0) {
         lost = plt != 0;                                     // an unpinned pilot still controls its own bus
         int p0 = qrPtr[g];
         int cnt = qrPtr[g + 1] - p0;
@@ -4917,17 +4949,20 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
     } else {
         lost = relocChoose(g, qrPtr, qrRows, mode + (size_t) s * n) == 0;
     }
-    if (act && lost && !veqOff[fi] && mode[pi] == 0) {
+    // With the fact known the layout is applied EVERY pass, the first fill included; otherwise it stays where it
+    // was — inside the reactive-limits phase, which is all the row-mode inference could support.
+    const bool layoutNow = factKnown || act;
+    if (layoutNow && lost && !veqOff[fi] && mode[pi] == 0) {
         savedVTarget[fi] = target[pi];
         mode[pi] = 1;
         target[pi] = flipTarget;
         veqOff[fi] = 1;
-        switched[s] = 1;
-    } else if (act && !lost && veqOff[fi]) {
+        switched[s] = act ? 1 : switched[s];                 // only the RL phase drives the outer loop's stability
+    } else if (layoutNow && !lost && veqOff[fi]) {
         mode[pi] = 0;
         target[pi] = savedVTarget[fi];
         veqOff[fi] = 0;
-        switched[s] = 1;
+        switched[s] = act ? 1 : switched[s];
     } else if (act && lost && veqOff[fi] && pe >= 0 && fabs(target[pi] - flipTarget) > 1e-12) {
         target[pi] = flipTarget;                             // the pinned pilot's limit moved (curve limits)
         switched[s] = 1;
@@ -8933,7 +8968,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dQrPilotRlEntry.p ? ctx->dQrPilotRlEntry.as<int>() : nullptr,
                     nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
                     nRlVtOv > 0 ? dRlVtOvVal.as<double>() : nullptr,
-                    ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr);
+                    ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
+                    ctx->nDqMembers, ctx->dDqMemberQrGroup.p ? ctx->dDqMemberQrGroup.as<int>() : nullptr,
+                    ctx->dDqMemberRlEntry.p ? ctx->dDqMemberRlEntry.as<int>() : nullptr,
+                    ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr);
         }
     };
     auto launchDistrQTargetsInner = [&]() {

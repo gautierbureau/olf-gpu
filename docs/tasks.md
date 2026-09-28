@@ -3731,9 +3731,16 @@ Also measured and reverted with them: `relocChoose` returning the pilot's own ro
 identity, and the pilot-self gate keying on the same fact instead of the limit type alone. Both are no-ops on this
 case (a pilot-self group's candidate 1 IS the pilot's row) and together they still failed 3 fixtures, so they are
 not free either.
-What the fix needs: OLF's layout for a group with no enabled controller applied FROM THE FIRST FILL and re-evaluated
-every pass (identity off while no controller is enabled, back on when one switches to PV), with `lost` read from
-the same per-scenario modes the fills use — not decided once at plan time, and not read before the scenario's own
-overrides are in place. The measurement above is the acceptance test: the device's q at VL-6055_0 must be
-1.902356914 at the first check, and the window's DAP worst must be 1.55e-05 MW with violations equal and the
-fixtures green.
+The fix (landed): read the fact OLF reads. A group's controllers are ENABLED or not, and on the device that is
+the members' per-(scenario, entry) REACTIVE-LIMIT state — current from the seeding onwards — not the row modes the
+kernel used to infer it from (at seed time a member row reads mode 0 both for a frozen island and for an identity
+that means the member controls, which is why the ungated flip fired on groups that DO control). With the members'
+entries in hand (`dqMemberQrGroup` + `dqMemberRlEntry` + the islanded mask, all already per scenario),
+`updatePilotVeqBatch` judges "no enabled controller" directly and applies the layout EVERY pass, the first fill
+included; the restore is the same test, so a member switching back to PV brings the identity back. A group whose
+members have no entries at all (limits off, empty q range) is left exactly as the extraction laid it out.
+Measured: suite 304/0 (the four fixtures that broke under the row-mode version pass), window violations diff 0,
+BUS-6112_BBS_2 from 3.70e-03 to **5.18e-04 MW**, its q at VL-6055_0 from 1.474 to 1.683 (OLF 1.902). So the
+identity now goes at the right time and the REST of that group's post-death layout is still not OLF's. The
+window's worst is now BUS-5997_BBS_2 at 2.35e-03 MW, untouched by this. The acceptance test stands: q =
+1.902356914 at the first check, DAP worst 1.55e-05 MW.

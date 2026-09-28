@@ -3731,16 +3731,23 @@ Also measured and reverted with them: `relocChoose` returning the pilot's own ro
 identity, and the pilot-self gate keying on the same fact instead of the limit type alone. Both are no-ops on this
 case (a pilot-self group's candidate 1 IS the pilot's row) and together they still failed 3 fixtures, so they are
 not free either.
-The fix (landed): read the fact OLF reads. A group's controllers are ENABLED or not, and on the device that is
-the members' per-(scenario, entry) REACTIVE-LIMIT state — current from the seeding onwards — not the row modes the
-kernel used to infer it from (at seed time a member row reads mode 0 both for a frozen island and for an identity
-that means the member controls, which is why the ungated flip fired on groups that DO control). With the members'
-entries in hand (`dqMemberQrGroup` + `dqMemberRlEntry` + the islanded mask, all already per scenario),
-`updatePilotVeqBatch` judges "no enabled controller" directly and applies the layout EVERY pass, the first fill
-included; the restore is the same test, so a member switching back to PV brings the identity back. A group whose
-members have no entries at all (limits off, empty q range) is left exactly as the extraction laid it out.
-Measured: suite 304/0 (the four fixtures that broke under the row-mode version pass), window violations diff 0,
-BUS-6112_BBS_2 from 3.70e-03 to **5.18e-04 MW**, its q at VL-6055_0 from 1.474 to 1.683 (OLF 1.902). So the
-identity now goes at the right time and the REST of that group's post-death layout is still not OLF's. The
-window's worst is now BUS-5997_BBS_2 at 2.35e-03 MW, untouched by this. The acceptance test stands: q =
-1.902356914 at the first check, DAP worst 1.55e-05 MW.
+The fix, in two parts, both landed:
+1. **Read the fact OLF reads, every pass.** A group's controllers are ENABLED or not, and on the device that is the
+   members' per-(scenario, entry) REACTIVE-LIMIT state — current from the seeding onwards — not the row modes the
+   kernel used to infer it from (at seed time a member row reads mode 0 both for a frozen island and for an
+   identity that means the member controls, which is why the ungated flip fired on groups that DO control).
+   `updatePilotVeqBatch` now judges it from `dqMemberQrGroup` + `dqMemberRlEntry` + the islanded mask and applies
+   the layout EVERY pass, the first fill included; the restore is the same test, so a member switching back to PV
+   brings the identity back. A group whose members have no entries at all (limits off, empty q range) is left
+   exactly as the extraction laid it out.
+2. **Stamp the flipped row's target from the STATIC limits at seed time.** The curve-evaluated arrays are still
+   zero then (`rlCurveLimitsBatch` runs in the reactive-limits phase), so the seed-time flip stamped the pilot's
+   own-Q target as 0 instead of (limit − loadQ): row 12834 sat CONVERGED at target 0 through outer 32, the RL
+   phase re-stamped −0.444, and the solve had to catch up — still one pass behind OLF. The kernel's re-stamp
+   branch keeps the value current once the curve limits exist, so the static value is a correct starting point.
+Measured together: window **DAP worst 1.38e-05 MW** (was 3.70e-03; the assertion is 1e-3, and the window test now
+PASSES), violations diff **0**, 958/1000 on device; the four contingencies that carried the tail —
+BUS-6112_BBS_2, BUS-5997_BBS_2, BUS-612_BBS_2, BUS-6003_BBS_2 — all agree to ~2.5e-07 MW, and only two
+contingencies in the window exceed 1e-5 MW (BUS-536_BBS, 8.5 MW, is OLF's own non-convergence and is not
+asserted). Suites 304/0 with the rotation on and off. The limits-off window also passes (worst 1.74e-05 MW,
+violations diff 0).

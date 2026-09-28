@@ -8949,7 +8949,14 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     int maxOuter = fullLoadflow ? 8 * RL_MAX_OUTER : 1;
     // The two kernels that lay a group's rows out from the CURRENT pin states (the RL pass runs them after
     // its pins; the seeding below runs them once so the FIRST fill sees the seeded pins on the rows).
-    auto launchPilotVeqInner = [&]() {
+    // `staticLimits`: use the STATIC reactive-limit arrays rather than the curve-evaluated ones. At SEED time the
+    // dynamic arrays are still zero (rlCurveLimitsBatch runs in the reactive-limits phase), so a seed-time flip
+    // stamped the pilot's own-Q target as 0 instead of (limit - loadQ) and the whole slack phase ran against it —
+    // measured on rte6515 BUS-6112_BBS_2: row 12834 converged at target 0 through outer 32, then the RL phase
+    // re-stamped -0.444 and the solve had to catch up, one pass behind OLF. The re-stamp branch in the kernel
+    // keeps the value current once the curve limits exist, so the static value is a correct starting point.
+    auto launchPilotVeqInner = [&](bool staticLimits = false) {
+        const bool useDyn = useDynRlLimits && !staticLimits;
         if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {
             updatePilotVeqBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
                         ctx->st->nQr, nS, n,
@@ -8960,10 +8967,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
                         psEntryPtr(ctx), psMaskEnv(),
                     ctx->dRlLimitType.p ? ctx->dRlLimitType.as<char>() : nullptr, ctx->nrl,
-                    useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
-                    useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
-                    useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(),
-                    ctx->rlRobust ? ctx->dRlInitTgtQ.as<double>() : nullptr, useDynRlLimits ? 1 : 0,
+                    useDyn ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
+                    useDyn ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
+                    useDyn ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(),
+                    ctx->rlRobust ? ctx->dRlInitTgtQ.as<double>() : nullptr, useDyn ? 1 : 0,
                     ctx->dRlVtarget.p ? ctx->dRlVtarget.as<double>() : nullptr,
                     ctx->dQrPilotRlEntry.p ? ctx->dQrPilotRlEntry.as<int>() : nullptr,
                     nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
@@ -9136,7 +9143,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         // The seeded pin states must reach the ROWS before the first fill: a pinned enrolled pilot's balance
         // goes on the carrier's target (its DISTR_Q target otherwise), and a group that lost control in the
         // base has its pilot row flipped already. Both kernels are idempotent; the RL pass runs them again.
-        launchPilotVeqInner();
+        launchPilotVeqInner(true);                           // seed: the curve limits do not exist yet
         launchDistrQTargetsInner();
         if (ctx->nds > 0) {                                  // slack-retained share: 0 until frozen at the first pass
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsRetain.p, 0, nS * sizeof(double), ctx->stream));

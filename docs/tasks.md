@@ -3436,3 +3436,14 @@ fixtures (`deviceMiddleSectionLoss*`, bus-mid 401.69 vs 401.37 kV — a section 
 and the two chain-STEP harnesses, which go through the legacy non-batch `solveContext` path where the pilot-self
 gate (`psSkip`) does not exist — the same chain network through the LoadFlow (batch-of-one) path passes
 (`GpuLoadFlowTest.zeroImpedanceControllerChain`, new).
+
+### The chain-step harnesses: the legacy solve path had no pilot-self gate (2026-09-28, rotation ON)
+
+`GpuZiCouplerTreeRelocationTest` / `GpuZeroImpedanceControllerChainTest` (one Newton step against OLF's own
+Jacobian) failed under the property by 1.9e-3 while the same chain network through the LoadFlow path stepped
+exactly (`GpuLoadFlowTest.zeroImpedanceControllerChain`, new). The harnesses use `GpuAcNewtonSolver.solve`, the
+non-batch `SolverContext`, which already passes `withPilotSelf(...)` to its fills but never had `hasPilotSelf`
+or `dPsSkip` set — so an enrolled pilot's raw q was routed to the carrier on top of its DISTR_Q terms. Now
+`createContext` derives the pilot-self groups from the candidate table alone (the fallback row reappears among
+the member candidates) and sets a constant skip of 1 for them: that path has no reactive-limits pass, so such a
+pilot is unpinned for the whole solve. Both harnesses pass under the property (2/2).

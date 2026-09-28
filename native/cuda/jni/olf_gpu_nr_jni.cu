@@ -3135,6 +3135,31 @@ SolverContext* createContext(const SharedStructurePtr& st) {
     ctx->ndr = st->ndr;
     ctx->ndb = st->ndb;
     ctx->hF.resize(n);
+    // PILOT-SELF groups (rotation), read off the candidate table alone: the fallback row (candidate 0) is itself
+    // one of the member candidates. This path has no reactive-limits pass, so such a pilot stays UNPINNED for
+    // the whole solve and its raw q must never be routed to the carrier (it feeds the DISTR_Q rows) — the batch
+    // path's psSkip, here a constant 1 per such group. Without it the one-step harnesses double-counted the
+    // pilot's q (GpuZiCouplerTreeRelocationTest: 1.9e-3 off OLF's first step; the same network through the
+    // LoadFlow path, which has the gate, steps exactly).
+    if (st->nQr > 0 && !st->hQrPtr.empty()) {
+        std::vector<char> skip(st->nQr, 0);
+        bool any = false;
+        for (int g = 0; g < st->nQr; g++) {
+            int p0 = st->hQrPtr[g];
+            for (int c = p0 + 1; c < st->hQrPtr[g + 1]; c++) {
+                if (st->hQrRows[c] == st->hQrRows[p0]) {
+                    skip[g] = 1;
+                    any = true;
+                    break;
+                }
+            }
+        }
+        if (any) {
+            ctx->dPsSkip.alloc(skip.size() * sizeof(char));
+            ctx->dPsSkip.upload(skip.data(), skip.size() * sizeof(char));
+            ctx->hasPilotSelf = true;
+        }
+    }
 
     // ---- device state (persists across solves) ----
     ctx->dX.alloc(n * sizeof(double));

@@ -3676,3 +3676,23 @@ suites 304/0 both ways.
 Newly REACHABLE, not a regression: with limits off every batched scenario is now runtime-rejected
 (`RUNTIME:status=-2=976`, 0/1000 on device) — the CPU-replayed results are what agree above. That batch path had
 never run before, because the base failed first. Next.
+
+### Reactive limits OFF: monitored buses need a limit entry, or the whole run falls back (2026-09-28)
+
+With the gate fixed the limits-off base converged, and the next gate showed itself: 976 of 976 batchable
+contingencies were CPU-replayed (`RUNTIME:status=-2=976`, 0/1000 on device) with no native reject line at all.
+The refusal is host-side and total — `GpuBatchPhaseOwnership.batchable()` returns false and
+`GpuBatchedSecurityAnalysisSolver` leaves every `resultsByIndex` null — because `GpuBatchVoltageMonitoring`
+records a SKIP for every standby-automaton SVC bus: it maps a bus to its reactive-limit entry, and with limits
+disabled the pack has no entries. The run's own loop list HAS VoltageMonitoring (`GPU_DRIVER_ENGINE
+loops=[DistributedSlack, AcHvdcAcEmulationLimits, VoltageMonitoring]`), so the loop is real and unrepresentable.
+Fix: `reactiveLimitsPack` emits entries for MONITORING_VOLTAGE buses whatever the reactive-limits flag (5 of them
+here). Their limits are dormant — no RL loop runs — but the entry is what the monitoring phase activates through.
+Measured (limits off): 958/1000 on device (was 0), violations diff 0 (75,735 both), DAP worst 4.0e-5 MW, 18 runtime
+rejects. Limits ON unchanged: 958/1000, violations diff 0, DAP worst 3.7e-3 MW; suites 304/0 both ways.
+
+**What the limits-off arm then says about the production tail**: with reactive limits disabled the two tail
+contingencies AGREE — BUS-6112_BBS_2 within 1.6e-7 MW (against 3.7e-3 with limits on), BUS-5997_BBS_2 exactly,
+BUS-612_BBS_2 within 3.6e-7 — and the whole window's DAP worst drops to 4.0e-5 MW (BUS-6011_BBS). So the equations,
+the slack distribution and the HVDC passes are not the tail: the tail is entirely a REACTIVE-LIMIT decision
+difference. BUS-536_BBS (6.4 MW apart, limits off too) is OLF's own non-convergence.

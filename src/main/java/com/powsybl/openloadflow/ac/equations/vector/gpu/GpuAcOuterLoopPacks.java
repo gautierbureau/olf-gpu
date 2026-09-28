@@ -541,6 +541,17 @@ public final class GpuAcOuterLoopPacks {
         rlV2Base.add(v2);
     }
 
+    /** A bus whose generators include a standby-automaton MONITORING_VOLTAGE one: the VoltageMonitoring phase's
+     *  controllers, which need a reactive-limit entry to be activated through even when limits are disabled. */
+    private static boolean isMonitoringSvcBus(LfBus bus) {
+        return bus.getGenerators().stream()
+                .anyMatch(g -> g.getGeneratorControlType() == LfGenerator.GeneratorControlType.MONITORING_VOLTAGE);
+    }
+
+    private static boolean anyMonitoringSvc(LfNetwork network) {
+        return network.getBuses().stream().anyMatch(GpuAcOuterLoopPacks::isMonitoringSvcBus);
+    }
+
     static RlPack reactiveLimitsPack(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                      ExtractionColumns columns, boolean reactiveLimits) {
         int[] vCol = columns.vCol();
@@ -612,7 +623,14 @@ public final class GpuAcOuterLoopPacks {
             }
         }
         try {
-        if (reactiveLimits) {                                   // empty pack when the RL outer loop is disabled
+        // Reactive limits OFF: the pack is empty EXCEPT for standby-automaton MONITORING SVC buses. Such a bus
+        // needs an entry not for its limits (no RL loop runs, so they are dormant) but for the pin machinery the
+        // VoltageMonitoring phase activates it through: GpuBatchVoltageMonitoring maps a bus to its rl entry and,
+        // finding none, recorded a SKIP for every monitored controller — which the all-or-nothing phase gate
+        // (GpuBatchPhaseOwnership.batchable) turns into "route the whole run to the CPU". Measured with
+        // OLF_GPU_SA_NO_RL=1 on rte6515's busbar window: 976 of 976 batchable contingencies CPU-replayed
+        // (RUNTIME:status=-2=976, 0/1000 on device) while the run's own loop list HAS VoltageMonitoring.
+        if (reactiveLimits || anyMonitoringSvc(network)) {
             // This enumeration is WIDER than OLF's, on purpose but knowingly:
             // ReactiveLimitsOuterLoop walks getControllerElements(GENERATOR) and nothing else, while
             // getGeneratorVoltageControl().isPresent() also answers yes on the CONTROLLED (pilot)
@@ -624,6 +642,9 @@ public final class GpuAcOuterLoopPacks {
             // from the base still needs the switch-back to hand the group's voltage identity back.
             // 7 such buses here: CQHT_0/1/3/5, HMDR_0, IZUM_0, KUNQ_3.
             for (LfBus bus : network.getBuses()) {
+                if (!reactiveLimits && !isMonitoringSvcBus(bus)) {
+                    continue;                                  // limits off: monitored buses only (see above)
+                }
                 int bn = bus.getNum();
                 boolean vActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_V) >= 0;
                 boolean qActive = GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_Q) >= 0;

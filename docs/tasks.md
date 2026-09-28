@@ -3401,3 +3401,38 @@ pass the packs' tables. Still open under the property: the batch's seeding of a 
 (`relocatedPinCode` marks relocation only for `qRowAlt == −1`, so an enrolled pinned pilot gets mode 4 stamped on
 its own V row while the table routes its q to the carrier — the window's 976 × `LINEAR_SOLVE_FAILED`), and the
 four `GpuBatchedAcSecurityAnalysisTest` pilot-group fixtures.
+
+### The batch under rotation: the activation stamped mode 4 on the CARRIER (2026-09-28, rotation ON)
+
+The [5000,6000) window under the property put 0/1000 on device — every scenario `LINEAR_SOLVE_FAILED` at outer 0,
+it 1 with `||J·dx − B||∞ = ||F||∞ = 2.556` (an EMPTY row whose residual is exactly −target: VL-5997's carrier).
+The slice knobs cannot reproduce it (`OLF_GPU_SA_MAX_CTG`, a shorter `CTG_RANGE`: the busbar contingency list
+decides which switches the base network retains, so a smaller list is ANOTHER base — 5000:5001 has 14 pins,
+5000:5050 has nQr=5 and no pilot-self pin); the full batch's first fill had to be dumped (`OLF_GPU_VALS_DUMP_NTH=2`
+with `_ANY`, 3 MB): rows 12562 (VL-5997's carrier) and 12836 (VL-6112's) came in at **mode 4** with the pilot's
+`limit − loadQ` as target and only the ±1 zero-impedance coupling as content; `relocChoose` skips mode 4, the
+pilot's raw q and the couplers' DUMMY_Q fell to the identity pilot rows and vanished — dead columns 13171 and
+13207, singular. Two seeding defects had been fixed first and were NOT it (they stay, both keyed on `psEntry`):
+`initRlLimitTypeBatch` now takes an enrolled pilot's base pin from OLF's own kind (its V row is never mode 4),
+`seedRlModeFromState` no longer stamps its row, and both hand-off kernels (`updateDistrQTargetsBatch`,
+`updatePilotVeqBatch`, now lambdas) run once after the seeding so the first fill sees the seeded pins on the rows;
+`updatePilotVeqBatch` books a group that lost control IN THE BASE as flipped (`veqOff`) so a later switch-back
+restores the V identity. The cause was `GpuAcActivationExtractor`: "a pilot that is one of its own controllers
+gets mode 4 whenever its own Q balance is active" — right for the pre-rotation alternate-dest layout, wrong for an
+ENROLLED group whose pinned balance is a POWER row (the carrier, or its own row once lost) that the scan routes to.
+Now `!enrolled` (the same predicate `ExtractionColumns` enrols with).
+
+| [5000,6000), rotation ON | before | after |
+| --- | --- | --- |
+| on device | 0 / 1000 (976 × LINEAR_SOLVE_FAILED) | **966 / 1000** (9 × max-iter-bad-solve, 1 × outer-loop-budget, 24 unmappable) |
+| base | CONVERGED on device (DAP diff 2.7e-07 MW) | same |
+| violations | — (all replayed on the CPU, diff 0) | CPU 71553 vs GPU 71601, diff 48 |
+| distributedActivePower | — | 482/974 > 1e-9 MW (the last-digit class, ~1e-7), worst **1.63 MW** |
+
+Rotation OFF on the same window: ~900/1000, violations diff 19, DAP worst 1.06 MW — the rotation now covers more
+scenarios than the fallback path and its remaining parity gap is of the same order; the per-contingency work
+(the 1.63 MW worst, the 48 violations) continues. Still failing under the property: the two middle-section
+fixtures (`deviceMiddleSectionLoss*`, bus-mid 401.69 vs 401.37 kV — a section loss inside a pilot-self group),
+and the two chain-STEP harnesses, which go through the legacy non-batch `solveContext` path where the pilot-self
+gate (`psSkip`) does not exist — the same chain network through the LoadFlow (batch-of-one) path passes
+(`GpuLoadFlowTest.zeroImpedanceControllerChain`, new).

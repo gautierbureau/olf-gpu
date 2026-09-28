@@ -41,7 +41,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-class GpuLoadFlowTest {
+class GpuLoadFlowTest extends com.powsybl.openloadflow.network.AbstractLoadFlowNetworkFactory {
 
     static {
         GpuTestPaths.init();
@@ -286,6 +286,35 @@ class GpuLoadFlowTest {
         org.junit.jupiter.api.Assertions.assertEquals(before,
                 com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
                 "the pilot-is-controller group must solve ON the GPU (no CPU fallback)");
+    }
+
+    /** A zero-impedance chain of generator buses (every bus a controller of the merged group, the pilot
+     *  one of them): the LoadFlow path, so the first fill can be read against OLF's f(x0)
+     *  (OLF_GPU_F0_TRACE + OLF_GPU_VALS_DUMP_ANY) when the two disagree. */
+    @Test
+    void zeroImpedanceControllerChain() {
+        long before = com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get();
+        compareWithParams(() -> ziControllerChain(3), "zero-impedance controller chain of 3",
+                p -> p.setDistributedSlack(true).setUseReactiveLimits(true), 1e-10);
+        org.junit.jupiter.api.Assertions.assertEquals(before,
+                com.powsybl.openloadflow.ac.solver.gpu.GpuNewtonRaphson.CPU_FALLBACK_COUNT.get(),
+                "the chain must solve ON the GPU (no CPU fallback)");
+    }
+
+    private static Network ziControllerChain(int couplers) {
+        Network network = Network.create("zi-chain-" + couplers, "code");
+        com.powsybl.iidm.network.Bus b0 = createBus(network, "s", "b0");
+        createLoad(b0, "ld0", couplers, couplers / 2.0);
+        com.powsybl.iidm.network.Bus prev = createBus(network, "s", "b1");
+        createGenerator(prev, "g1", 1, 1.0);
+        createLine(network, b0, prev, "l01", 0.1);
+        for (int i = 2; i <= couplers + 1; i++) {
+            com.powsybl.iidm.network.Bus b = createBus(network, "s", "b" + i);
+            createGenerator(b, "g" + i, 1, 1.0);
+            createLine(network, prev, b, "c" + i, 0.0, 0.0);
+            prev = b;
+        }
+        return network;
     }
 
     /** g1/g2/g3 (b1/b2/b3) remotely control b4, plus g4 AT b4 controlling b4 — so the group's

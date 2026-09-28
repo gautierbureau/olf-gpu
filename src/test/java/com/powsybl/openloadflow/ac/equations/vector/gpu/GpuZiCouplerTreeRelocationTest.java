@@ -107,6 +107,22 @@ class GpuZiCouplerTreeRelocationTest extends AbstractLoadFlowNetworkFactory {
             sv.set(x0.clone());
             try (JacobianMatrix<AcVariableType, AcEquationType> j = new JacobianMatrix<>(es, new DenseMatrixFactory())) {
                 eq.minus(target);
+                if (System.getenv("OLF_GPU_F0_TRACE") != null) {
+                    // OLF's own f(x0) - target per equation, beside the device's first fill (OLF_GPU_VALS_DUMP_ANY):
+                    // the row the two arms evaluate differently, before any step blurs it (see GpuNewtonRaphson)
+                    double[] f0 = eq.getArray();
+                    for (int c = 0; c < f0.length; c++) {
+                        var e = es.getIndex().getEquationAtColumn(c);
+                        System.err.println("F0_TRACE chain=" + couplers + " col=" + c + " " + e.getType() + " elem=" + e.getElementNum()
+                                + " f0=" + f0[c]);
+                    }
+                    try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(
+                            System.getenv("OLF_GPU_F0_TRACE") + ".chain" + couplers + ".eq"))) {
+                        GpuEquationDump.write(w, network, es, d, activation.rowMode());
+                    } catch (java.io.IOException ex) {
+                        throw new java.io.UncheckedIOException(ex);
+                    }
+                }
                 double[] dx = eq.getArray().clone();
                 j.solveTransposed(dx);
                 sv.minus(dx);

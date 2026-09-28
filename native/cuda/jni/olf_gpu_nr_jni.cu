@@ -978,6 +978,18 @@ __device__ inline int relocChoose(int g, const int* qrPtr, const int* qrRows, co
     return 0;
 }
 
+// The pilot of an ENROLLED pilot-self group (rotation property): its Q is re-routed through the candidate
+// table, so a pin must NOT turn its own row into a Q balance — the row keeps BUS_TARGET_V while the pinned
+// balance rides the carrier (updateDistrQTargetsBatch puts the pin limit there). Measured before this:
+// the pilot's row went mode 4 with target -0.444 and NO q content (its q had gone to the carrier), F = -target.
+__device__ inline bool isEnrolledPilot(const int* psEntry, int nQr, int i) {
+    if (psEntry == nullptr) return false;
+    for (int g = 0; g < nQr; g++) {
+        if (psEntry[g] == i) return true;
+    }
+    return false;
+}
+
 // zi q-slot dynamic pick (F/J slots {0..3} per element): group -> mode-scan candidate slot,
 // two-way -> alt when the select row is identity/pinned this scenario, else the frozen dest.
 __device__ inline int ziDynDest(int frozen, int slot, const int* alt, const int* sel,
@@ -4315,7 +4327,8 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
                                      int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal, const double* svcRlVt,
                                      const char* rlRemote, const int* rlCmpVrow,
                                      const double* target, const double* rlMinQb, const double* rlMaxQb,
-                                     const double* rlLoadQb, const char* rlBaseLt) {
+                                     const double* rlLoadQb, const char* rlBaseLt,
+                                     const int* psEntry, int nQr) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -4335,6 +4348,16 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
         // DEGENERATE here — key the direction on WHICH limit the extracted BUS_TARGET_Q target
         // equals instead (target = limit − loadQ was written by the base activation).
         limitType[st] = 0;
+        if (isEnrolledPilot(psEntry, nQr, i) && olfKind != RL_BASE_RELOCATED) {
+            // An ENROLLED pilot-self pilot (rotation) keeps its V row an identity while PINNED: the pin's
+            // balance rides the carrier (or its own row flipped to a power row once the group lost control),
+            // so the mode-4 marker below never appears on its row. OLF's own kind is the only record of its
+            // base pin — and without it the seeding left the pilot UNPINNED (psSkip = 1, raw q dropped) on a
+            // base that had it pinned: every scenario of the [5000,6000) busbar window failed its first
+            // linear solve (976 x LINEAR_SOLVE_FAILED).
+            limitType[st] = olfKind >= 1 && olfKind <= 4 ? olfKind : 0;
+            return;
+        }
         if (baseMode[vrow] == 4) {
             double tgt = target[idx];
             limitType[st] = olfKind != 0 ? olfKind
@@ -4691,7 +4714,8 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
                                     int nFrozen, const int* frozenSlotRow,
                                     const int* psEntry, int psMask,
                                     const char* limitType, int nrl, const double* rlMinQ, const double* rlMaxQ,
-                                    const double* rlLoadQ, const double* rlInitTgtQ, int cvStride) {
+                                    const double* rlLoadQ, const double* rlInitTgtQ, int cvStride,
+                                    const double* rlVtarget) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nQr * nScenarios) return;
     int g = tid % nQr;
@@ -4755,6 +4779,13 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
     } else if (lost && veqOff[fi] && pe >= 0 && fabs(target[pi] - flipTarget) > 1e-12) {
         target[pi] = flipTarget;                             // the pinned pilot's limit moved (curve limits)
         switched[s] = 1;
+    } else if (lost && !veqOff[fi] && pe >= 0 && mode[pi] == 1 && rlVtarget != nullptr) {
+        // Lost already in the BASE: the activation laid the pilot's row out as its own Q balance (OLF's
+        // BUS_TARGET_V inactive, BUS_TARGET_Q active). Book it as flipped so a member switching back later
+        // restores the V identity at the group's target — without this the restore never fired and the
+        // pilot stayed a power row beside a member that had resumed control.
+        veqOff[fi] = 1;
+        savedVTarget[fi] = rlVtarget[pe];
     }
 }
 
@@ -5018,17 +5049,6 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
 #define SW_LOG_CAP 1048576
 #define SW_LOG_W 12
 
-// The pilot of an ENROLLED pilot-self group (rotation property): its Q is re-routed through the candidate
-// table, so a pin must NOT turn its own row into a Q balance — the row keeps BUS_TARGET_V while the pinned
-// balance rides the carrier (updateDistrQTargetsBatch puts the pin limit there). Measured before this:
-// the pilot's row went mode 4 with target -0.444 and NO q content (its q had gone to the carrier), F = -target.
-__device__ inline bool isEnrolledPilot(const int* psEntry, int nQr, int i) {
-    if (psEntry == nullptr) return false;
-    for (int g = 0; g < nQr; g++) {
-        if (psEntry[g] == i) return true;
-    }
-    return false;
-}
 
 __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenarios, int n, double tol, int maxSwitch,
                                     const int* rlVrow, const double* rlMinQ, const double* rlMaxQ,
@@ -5928,7 +5948,7 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
                                     const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
                                     const char* limitType, int* mode, double* target, int cvStride,
                                     const char* rlRemote, double* savedTarget, char* savedMode,
-                                    const char* rlBaseLt) {
+                                    const char* rlBaseLt, const int* psEntry, int nQr) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -5939,6 +5959,7 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
     // the base activation. RL_LIMIT_FROZEN alone is not enough to skip on, because the run-time freeze uses
     // the same type on entries that DO own their row and must be restored here on a resumed solve.
     if (rlBaseLt != nullptr && rlBaseLt[i] == RL_BASE_RELOCATED) return;
+    if (isEnrolledPilot(psEntry, nQr, i)) return;           // its pin never lives on its own V row (rotation)
     if (lt != 0) {
         size_t idx = (size_t) s * n + rlVrow[i];
         size_t li = cvStride ? (size_t) s * nrl + i : (size_t) i;
@@ -8698,6 +8719,52 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         ctx->dRlMaxQDyn.alloc(static_cast<size_t>(ctx->nScenarios) * ctx->nrl * sizeof(double));
     }
     int maxOuter = fullLoadflow ? 8 * RL_MAX_OUTER : 1;
+    // The two kernels that lay a group's rows out from the CURRENT pin states (the RL pass runs them after
+    // its pins; the seeding below runs them once so the FIRST fill sees the seeded pins on the rows).
+    auto launchPilotVeqInner = [&]() {
+        if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {
+            updatePilotVeqBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
+                        ctx->st->nQr, nS, n,
+                        ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), ctx->dQrGenVc.as<char>(),
+                        ctx->dQrPilotQ.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
+                        ctx->dQrVeqOff.as<char>(), ctx->dQrSavedVT.as<double>(),
+                        ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(),
+                        ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
+                        psEntryPtr(ctx), psMaskEnv(),
+                    ctx->dRlLimitType.p ? ctx->dRlLimitType.as<char>() : nullptr, ctx->nrl,
+                    useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
+                    useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
+                    useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(),
+                    ctx->rlRobust ? ctx->dRlInitTgtQ.as<double>() : nullptr, useDynRlLimits ? 1 : 0,
+                    ctx->dRlVtarget.p ? ctx->dRlVtarget.as<double>() : nullptr);
+        }
+    };
+    auto launchDistrQTargetsInner = [&]() {
+        if (ctx->nRlRemote > 0 && ctx->nDqMembers > 0) {
+            updateDistrQTargetsBatch<<<grid(ctx->nDqMembers * nS), BLOCK, 0, ctx->stream>>>(
+                        ctx->nDqMembers, nS, n, ctx->nrl,
+                        ctx->dDqMemberKey.as<double>(), ctx->dDqMemberRlEntry.as<int>(),
+                        ctx->dDqMemberGroupStart.as<int>(), ctx->dDqMemberGroupCount.as<int>(),
+                        ctx->dDqMemberRow.as<int>(), ctx->dDqMemberHasRow.as<char>(),
+                        ctx->dRlVrow.as<int>(),
+                        useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
+                        useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
+                        useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(), useDynRlLimits ? 1 : 0,
+                        ctx->dTarget.as<double>(), ctx->dRlActive.as<char>(),
+                        ctx->dDqMemberTargetQ.as<double>(),
+                        ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr,
+                        ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr,
+                        ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr,
+                        ctx->dMode.as<int>(),
+                        ctx->hasDqQrGroups ? ctx->dQrPilotQ.as<double>() : nullptr, ctx->st->nQr,
+                        ctx->nDqInact, ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
+                        ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
+                        ctx->nDqTqOv, ctx->nDqTqOv ? ctx->dDqTqOvKey.as<int>() : nullptr,
+                        ctx->nDqTqOv ? ctx->dDqTqOvVal.as<double>() : nullptr,
+                        ctx->dDqMemberTgtPtr.as<int>(), ctx->dDqMemberTgtPeer.as<int>(),
+                        psEntryPtr(ctx), psMaskEnv());
+        }
+    };
     std::vector<char> rlActive(nS), rlSwitched(nS), wasActive(nS);
     // OLF_GPU_RL_AUDIT: per-scenario decision history, kept in memory and printed only for the
     // scenarios the end-of-solve audit flags. The failing scenario is not known until the solve is
@@ -8785,7 +8852,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dMode.as<int>(), ctx->dTarget.as<double>(), useDynRlLimits ? 1 : 0,
                     ctx->nRlRemote > 0 ? ctx->dRlRemote.as<char>() : nullptr,
                     ctx->dRlSavedTarget.as<double>(), ctx->dRlSavedMode.as<char>(),
-                    ctx->hasRlBaseLt ? ctx->dRlBaseLimitType.as<char>() : nullptr);
+                    ctx->hasRlBaseLt ? ctx->dRlBaseLimitType.as<char>() : nullptr,
+                    psEntryPtr(ctx), ctx->st->nQr);
         } else {
             CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitchCount.p, 0, static_cast<size_t>(ctx->nrl) * nS * sizeof(char), ctx->stream));
             if (ctx->nrl > 0) {                              // seed the pinned limit for base-PQ controllers (else all PV)
@@ -8799,9 +8867,15 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->nRlRemote > 0 ? ctx->dRlCmpVrow.as<int>() : nullptr,
                         ctx->dTarget.as<double>(), ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(),
                         ctx->dRlLoadQ.as<double>(),
-                        ctx->hasRlBaseLt ? ctx->dRlBaseLimitType.as<char>() : nullptr);
+                        ctx->hasRlBaseLt ? ctx->dRlBaseLimitType.as<char>() : nullptr,
+                        psEntryPtr(ctx), ctx->st->nQr);
             }
         }
+        // The seeded pin states must reach the ROWS before the first fill: a pinned enrolled pilot's balance
+        // goes on the carrier's target (its DISTR_Q target otherwise), and a group that lost control in the
+        // base has its pilot row flipped already. Both kernels are idempotent; the RL pass runs them again.
+        launchPilotVeqInner();
+        launchDistrQTargetsInner();
         if (ctx->nds > 0) {                                  // slack-retained share: 0 until frozen at the first pass
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsRetain.p, 0, nS * sizeof(double), ctx->stream));
             {
@@ -9488,19 +9562,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         // a target for a control that no longer exists until the next sweep reached RL again (measured
         // 0.6 kV). Same kernel, run again here — it restores the identity at COMPLETE on the same rule.
         if (ctx->hasDqQrGroups && ctx->st->nQr > 0 && ctx->nTvdFz > 0) {
-            updatePilotVeqBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
-                    ctx->st->nQr, nS, n,
-                    ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), ctx->dQrGenVc.as<char>(),
-                    ctx->dQrPilotQ.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
-                    ctx->dQrVeqOff.as<char>(), ctx->dQrSavedVT.as<double>(),
-                    ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(),
-                    ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
-                        psEntryPtr(ctx), psMaskEnv(),
-                    ctx->dRlLimitType.p ? ctx->dRlLimitType.as<char>() : nullptr, ctx->nrl,
-                    useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
-                    useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
-                    useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(),
-                    ctx->rlRobust ? ctx->dRlInitTgtQ.as<double>() : nullptr, useDynRlLimits ? 1 : 0);
+            launchPilotVeqInner();
         }
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         std::vector<char> rej(nS);
@@ -10668,45 +10730,12 @@ psgStep(ctx, nS, n, outer, "afterElect");
             // switched back was handed a target of 0 while the pilot's row was still flipped, its row then
             // hosted the pilot's balance against that 0, and it re-pinned every other pass until maxSwitch.
             if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {    // all-pinned corner: pilot vEq flip/restore
-                updatePilotVeqBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
-                        ctx->st->nQr, nS, n,
-                        ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), ctx->dQrGenVc.as<char>(),
-                        ctx->dQrPilotQ.as<double>(), ctx->dMode.as<int>(), ctx->dTarget.as<double>(),
-                        ctx->dQrVeqOff.as<char>(), ctx->dQrSavedVT.as<double>(),
-                        ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(),
-                        ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
-                        psEntryPtr(ctx), psMaskEnv(),
-                    ctx->dRlLimitType.p ? ctx->dRlLimitType.as<char>() : nullptr, ctx->nrl,
-                    useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
-                    useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
-                    useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(),
-                    ctx->rlRobust ? ctx->dRlInitTgtQ.as<double>() : nullptr, useDynRlLimits ? 1 : 0);
+                launchPilotVeqInner();
             }
 psgStep(ctx, nS, n, outer, "afterPilotVeq");
             if (ctx->nRlRemote > 0 && ctx->nDqMembers > 0) {
                 // keep the survivors' DISTR_Q row targets in step with the pin states (plan-B3)
-                updateDistrQTargetsBatch<<<grid(ctx->nDqMembers * nS), BLOCK, 0, ctx->stream>>>(
-                        ctx->nDqMembers, nS, n, ctx->nrl,
-                        ctx->dDqMemberKey.as<double>(), ctx->dDqMemberRlEntry.as<int>(),
-                        ctx->dDqMemberGroupStart.as<int>(), ctx->dDqMemberGroupCount.as<int>(),
-                        ctx->dDqMemberRow.as<int>(), ctx->dDqMemberHasRow.as<char>(),
-                        ctx->dRlVrow.as<int>(),
-                        useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
-                        useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
-                        useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(), useDynRlLimits ? 1 : 0,
-                        ctx->dTarget.as<double>(), ctx->dRlActive.as<char>(),
-                        ctx->dDqMemberTargetQ.as<double>(),
-                        ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr,
-                        ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr,
-                        ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr,
-                        ctx->dMode.as<int>(),
-                        ctx->hasDqQrGroups ? ctx->dQrPilotQ.as<double>() : nullptr, ctx->st->nQr,
-                        ctx->nDqInact, ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
-                        ctx->nFrozenRow, ctx->nFrozenRow ? ctx->dFrozenRow.as<int>() : nullptr,
-                        ctx->nDqTqOv, ctx->nDqTqOv ? ctx->dDqTqOvKey.as<int>() : nullptr,
-                        ctx->nDqTqOv ? ctx->dDqTqOvVal.as<double>() : nullptr,
-                        ctx->dDqMemberTgtPtr.as<int>(), ctx->dDqMemberTgtPeer.as<int>(),
-                        psEntryPtr(ctx), psMaskEnv());
+                launchDistrQTargetsInner();
             }
 psgStep(ctx, nS, n, outer, "afterDistrQ");
             if (ctx->nPilotFlip > 0) {                      // pilot stopped controlling AND every survivor pinned

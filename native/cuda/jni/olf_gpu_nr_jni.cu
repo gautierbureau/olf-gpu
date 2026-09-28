@@ -982,6 +982,10 @@ __device__ inline int relocChoose(int g, const int* qrPtr, const int* qrRows, co
 // table, so a pin must NOT turn its own row into a Q balance — the row keeps BUS_TARGET_V while the pinned
 // balance rides the carrier (updateDistrQTargetsBatch puts the pin limit there). Measured before this:
 // the pilot's row went mode 4 with target -0.444 and NO q content (its q had gone to the carrier), F = -target.
+// psPilotEntry marker: a PILOT-SELF group whose pilot has no reactive-limit entry (see pilotSelfGateBatch).
+// Distinct from -1 ("not a pilot-self group"), and negative so every `pe >= 0` test still reads it as "no entry".
+static constexpr int PS_NO_ENTRY = -2;
+
 __device__ inline bool isEnrolledPilot(const int* psEntry, int nQr, int i) {
     if (psEntry == nullptr) return false;
     for (int g = 0; g < nQr; g++) {
@@ -4431,7 +4435,15 @@ __global__ void pilotSelfGateBatch(int nQr, int nScenarios, int nrl, const int* 
     int g = tid % nQr;
     int s = tid / nQr;
     int e = psPilotEntry[g];
-    psSkip[(size_t) s * nQr + g] = (e >= 0 && e < nrl && limitType[(size_t) s * nrl + e] == 0) ? 1 : 0;
+    char skip;
+    if (e == PS_NO_ENTRY) {
+        skip = 1;                                            // pilot-self, never pinnable ⇒ always controlling
+    } else if (e >= 0 && e < nrl) {
+        skip = limitType[(size_t) s * nrl + e] == 0 ? 1 : 0;  // unpinned ⇒ skip; pinned ⇒ its balance rides the carrier
+    } else {
+        skip = 0;                                            // not a pilot-self group
+    }
+    psSkip[(size_t) s * nQr + g] = skip;
 }
 
 __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* rlVrow,
@@ -6931,53 +6943,67 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     ctx->dQbuf.alloc(static_cast<size_t>(n) * nScenarios * sizeof(double));
     ctx->dRlActive.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
     ctx->dRlSwitched.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
+    // OUTSIDE the `nrl > 0` block: a run with reactive limits DISABLED has no entries at all, and that is
+    // exactly when every pilot-self group needs the gate — its pilot can never pin, so it controls throughout.
+    // Built inside, the gate did not exist for such a run: the pilots' raw q was emitted at their carrier rows
+    // on top of the DISTR_Q terms and rte6515's base (limits off) started at |f(x0)| 117.908 against OLF's
+    // 117.845 and never converged.
+    // Derive the PILOT-SELF groups from the candidate table itself: the fallback row repeated among the
+    // member rows means the controlled bus is one of its own controllers. The pilot's RL entry is the one
+    // whose (row-mapped) V row is that row; without an entry the pilot can never pin and the group needs
+    // no gate. nQr is small (groups), nrl a few thousand, and this runs once per context.
+    int nQrG = ctx->st != nullptr ? ctx->st->nQr : 0;
+    if (nQrG > 0) {
+        std::vector<int> psEntry(nQrG, -1);
+        for (int g = 0; g < nQrG; g++) {
+            int p0 = ctx->st->hQrPtr[g];
+            int cnt = ctx->st->hQrPtr[g + 1] - p0;
+            int fallbackRow = ctx->st->hQrRows[p0];
+            bool pilotSelf = false;
+            for (int c = 1; c < cnt; c++) {
+                if (ctx->st->hQrRows[p0 + c] == fallbackRow) {
+                    pilotSelf = true;
+                    break;
+                }
+            }
+            if (!pilotSelf) {
+                continue;                                // not a pilot-self group: -1, no gate (raw q as always)
+            }
+            // PS_NO_ENTRY (-2), not -1: a pilot-self pilot with NO reactive-limit entry can never be PINNED
+            // (limits off for the run, or an empty q range), so it controls for the whole solve and its raw q
+            // must ALWAYS be skipped — the gate is needed MORE, not less, than for a pinnable one. Read as
+            // "no gate" (-1, the non-pilot-self value) it was emitted at the carrier row on top of the very
+            // DISTR_Q terms it feeds: with reactive limits disabled on rte6515 the base started at
+            // |f(x0)| 117.908 against OLF's 117.845 and the device's load flow never converged.
+            psEntry[g] = PS_NO_ENTRY;
+            ctx->hasPilotSelf = true;
+            for (int i = 0; i < nrl; i++) {
+                if (rowMap[rlVrow[i]] == fallbackRow) {
+                    psEntry[g] = i;
+                    break;
+                }
+            }
+        }
+        if (ctx->hasPilotSelf) {
+            ctx->dPsPilotEntry.upload(psEntry.data(), psEntry.size() * sizeof(int));
+            ctx->dPsSkip.alloc(static_cast<size_t>(nQrG) * ctx->nScenarios * sizeof(char));
+            if (std::getenv("OLF_GPU_RL_TRACE") != nullptr) {
+                int cnt = 0, noEntry = 0;
+                for (int g = 0; g < nQrG; g++) {
+                    cnt += psEntry[g] >= 0 ? 1 : 0;
+                    noEntry += psEntry[g] == PS_NO_ENTRY ? 1 : 0;
+                }
+                std::fprintf(stderr, "PILOTSELF_GATE groups=%d(+%d never-pinnable) of %d nrl=%d\n",
+                             cnt, noEntry, nQrG, nrl);
+            }
+        }
+    }
     if (nrl > 0) {
         std::vector<int> rlVrowM(nrl);
         for (int i = 0; i < nrl; i++) {
             rlVrowM[i] = rowMap[rlVrow[i]];
         }
         ctx->dRlVrow.upload(rlVrowM.data(), nrl * sizeof(int));
-        // Derive the PILOT-SELF groups from the candidate table itself: the fallback row repeated among the
-        // member rows means the controlled bus is one of its own controllers. The pilot's RL entry is the one
-        // whose (row-mapped) V row is that row; without an entry the pilot can never pin and the group needs
-        // no gate. nQr is small (groups), nrl a few thousand, and this runs once per context.
-        int nQrG = ctx->st != nullptr ? ctx->st->nQr : 0;
-        if (nQrG > 0) {
-            std::vector<int> psEntry(nQrG, -1);
-            for (int g = 0; g < nQrG; g++) {
-                int p0 = ctx->st->hQrPtr[g];
-                int cnt = ctx->st->hQrPtr[g + 1] - p0;
-                int fallbackRow = ctx->st->hQrRows[p0];
-                bool pilotSelf = false;
-                for (int c = 1; c < cnt; c++) {
-                    if (ctx->st->hQrRows[p0 + c] == fallbackRow) {
-                        pilotSelf = true;
-                        break;
-                    }
-                }
-                if (!pilotSelf) {
-                    continue;
-                }
-                for (int i = 0; i < nrl; i++) {
-                    if (rlVrowM[i] == fallbackRow) {
-                        psEntry[g] = i;
-                        ctx->hasPilotSelf = true;
-                        break;
-                    }
-                }
-            }
-            if (ctx->hasPilotSelf) {
-                ctx->dPsPilotEntry.upload(psEntry.data(), psEntry.size() * sizeof(int));
-                ctx->dPsSkip.alloc(static_cast<size_t>(nQrG) * ctx->nScenarios * sizeof(char));
-                if (std::getenv("OLF_GPU_RL_TRACE") != nullptr) {
-                    int cnt = 0;
-                    for (int g = 0; g < nQrG; g++) {
-                        cnt += psEntry[g] >= 0 ? 1 : 0;
-                    }
-                    std::fprintf(stderr, "PILOTSELF_GATE groups=%d of %d nrl=%d\n", cnt, nQrG, nrl);
-                }
-            }
-        }
         ctx->dRlMinQ.upload(rlMinQ, nrl * sizeof(double));
         ctx->dRlMaxQ.upload(rlMaxQ, nrl * sizeof(double));
         ctx->dRlLoadQ.upload(rlLoadQ, nrl * sizeof(double));

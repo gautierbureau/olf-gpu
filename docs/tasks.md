@@ -3650,3 +3650,29 @@ It is the same open ulp item as the base's run-dependent distributed power; the 
   close (0.196 / 7.9e-5 against OLF's 0.2124 / 1.456e-4) but not equal, and the slack pass distributes 21.4 MW
   on the device. Next: an intermediate-state comparison (the device's x at the RL#1 check against OLF's state
   before its RL 2 — OLF logs no intermediate state, so a CPU-side hook on the outer-loop check is needed).
+
+### The pilot-self gate did not exist when reactive limits are disabled (2026-09-28)
+
+Isolating the remaining tail with `OLF_GPU_SA_NO_RL=1` (reactive limits off on BOTH arms) exposed a defect of its
+own: the GPU arm's BASE load flow reported MAX_ITERATION_REACHED where the CPU converged, so the whole run
+produced no post-contingency results (`pre-ctg: CPU=CONVERGED GPU=MAX_ITERATION_REACHED`, 976 status mismatches,
+violations 0 vs 75,735 — the vacuous-agreement shape the census exists to catch). The device's first residual was
+|f(x0)| = 117.908 against OLF's 117.845, the double-counted pilot-q signature.
+Cause: the PILOT-SELF gate table (`psPilotEntry` → `psSkip`) is derived inside `createBatchContext`'s
+`if (nrl > 0)` block, and it marked a pilot-self group whose pilot has NO reactive-limit entry with `-1`, the same
+value as "not a pilot-self group". Both readings are backwards: a pilot that can never be PINNED controls for the
+whole solve, so its raw q must ALWAYS be skipped (it feeds the group's DISTR_Q rows weighted). With limits off
+there are no entries at all, so all 28 pilot-self groups emitted their raw q at their carrier rows on top of their
+own DISTR_Q terms. The one-step `createContext` path already did the right thing (a constant `psSkip = 1` per such
+group) and says why in its comment; the batch path was the outlier.
+Fix: the derivation moves OUT of the `nrl > 0` block, and a pilot-self group without an entry is marked
+`PS_NO_ENTRY` (-2), which `pilotSelfGateBatch` reads as "always skip"; `-1` keeps meaning "not pilot-self".
+Measured (limits off): base CONVERGED on both arms, device |f(x0)| = 117.844754887565969 against OLF's
+117.84475488756634 (15 digits), first solve 5.4631120881 / 0.2283399726 / 2.4533278552e-3 against OLF's
+5.4631121272 / 0.2283399701 / 2.4533278580e-3, base distributed power within 7.9e-8 MW; window violations diff 0
+(75,735 both arms), DAP worst 5.2e-7 MW. Limits ON is INERT — `PILOTSELF_GATE groups=27(+0 never-pinnable) of 30`,
+every group has an entry — and the window is unchanged (958/1000, violations diff 0, DAP worst 3.7e-3 MW);
+suites 304/0 both ways.
+Newly REACHABLE, not a regression: with limits off every batched scenario is now runtime-rejected
+(`RUNTIME:status=-2=976`, 0/1000 on device) — the CPU-replayed results are what agree above. That batch path had
+never run before, because the base failed first. Next.

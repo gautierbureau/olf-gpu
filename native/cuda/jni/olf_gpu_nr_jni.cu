@@ -5805,6 +5805,7 @@ __global__ void writeIdentityForInactive(int n, int nScenarios, int nnz, const i
 // - Zero-impedance: no per-scenario mask — a zero-imp outage is auto-rejected (the element
 //   mapper maps it to -1), so the fill just replicates the base.
 struct BatchSolverContext {
+    int loopTraceSlot = -1;                                  // OLF_GPU_LOOP_TRACE by CONTINGENCY: the slot the host resolved for this chunk
     SharedStructurePtr st;                                   // shared with any single-solve context on the same extraction
     int n = 0;
     int nnz = 0;
@@ -10568,7 +10569,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // it found the slot UNSTABLE (a re-solve follows) and whether the whole phase is still unstable.
     // Two arms that agree on every residual and still stop apart differ in this SEQUENCE.
     static const char* loopTraceEnv = std::getenv("OLF_GPU_LOOP_TRACE");
-    static const int loopTraceSlot = loopTraceEnv != nullptr ? std::atoi(loopTraceEnv) : -1;
+    // a slot resolved per chunk from a contingency id (setBatchLoopTraceSlot) wins over the env slot:
+    // chunk composition moves with the resolved chunk size, so a fixed slot traces a different
+    // scenario from one run to the next (IZUZ: slot 170, then 18)
+    const int loopTraceSlot = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : (loopTraceEnv != nullptr ? std::atoi(loopTraceEnv) : -1);
     if (loopTraceSlot >= 0 && loopTraceSlot < nS) {
         double gate[2] = {0.0, 0.0};                        // the DS gate this slot last evaluated: rem, fired
         if (ctx->dDsGateLast.p) {
@@ -12090,6 +12094,15 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // pushed mode-4 free-member row gates the re-picked carrier's DISTR_Q row off in fillDistrQBatch.
 // Does NOT touch nDqDyn: the hybrid's weights stay static-pack + dqOv (OLF renormalizes and the
 // engine pushes live values). Nulls clear.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchLoopTraceSlot(
+        JNIEnv*, jclass, jlong handle, jint slot) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx != nullptr) {
+        ctx->loopTraceSlot = slot;
+    }
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDqQrSuppression(
         JNIEnv* env, jclass, jlong handle, jintArray jDqJMember, jintArray jMQrGroup) {

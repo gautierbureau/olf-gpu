@@ -275,6 +275,9 @@ public final class GpuAcNewtonSolver {
      *  the convergence criterion tested after the last one only (outer loops unchanged); 0 = test every iteration. */
     public static native void setBatchFixedIter(long handle, int k);
 
+    /** OLF_GPU_LOOP_TRACE by contingency: the slot to trace in the next solve of this context, -1 = none. */
+    public static native void setBatchLoopTraceSlot(long handle, int slot);
+
     public static native double[][] solveBatchContext(long handle, double[] x0Base, double[] targetBase,
                                                        int[][] rowMode, int[] baseRowMode, boolean[][] disabledElementMask,
                                                        int[] targetOverrideIndex, double[] targetOverrideValue,

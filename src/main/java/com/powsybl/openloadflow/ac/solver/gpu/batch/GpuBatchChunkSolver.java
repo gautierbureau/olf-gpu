@@ -1361,6 +1361,23 @@ final class GpuBatchChunkSolver {
                     // performance comparison against the per-iteration test; unconverged scenarios go to the CPU).
                     GpuAcNewtonSolver.setBatchFixedIter(handle, Integer.getInteger("olf.gpu.sa.fixedInnerIters", 0));
                     long tSolve0 = System.nanoTime();
+                    // OLF_GPU_LOOP_TRACE_CTG=<id>: trace that contingency's slot in THIS chunk (a fixed slot number
+                    // follows the chunk composition, which moves with the resolved chunk size).
+                    {
+                        String traceCtg = System.getenv("OLF_GPU_LOOP_TRACE_CTG");
+                        int traceSlot = -1;
+                        if (traceCtg != null) {
+                            for (int s = 0; s < realCount; s++) {
+                                if (traceCtg.equals(contingencies.get(group.get(chunkStart + s)).contingencyId())) {
+                                    traceSlot = s;
+                                }
+                            }
+                            if (traceSlot >= 0) {
+                                System.err.println("LOOP_TRACE_CTG ctg=" + traceCtg + " slot=" + traceSlot);
+                            }
+                        }
+                        GpuAcNewtonSolver.setBatchLoopTraceSlot(handle, traceSlot);
+                    }
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
                             dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
@@ -1695,9 +1712,6 @@ final class GpuBatchChunkSolver {
                             }
                             slice[nds] = fs;
                             dsTargetsByIndex.put(group.get(chunkStart + s), slice);
-                        }
-                                }
-                            }
                         }
                     }
                     // HOST ORCHESTRATORS — in OLF's DefaultAcOuterLoopConfig order.

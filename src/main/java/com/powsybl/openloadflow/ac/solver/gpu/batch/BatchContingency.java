@@ -27,7 +27,17 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
                                List<LoadLoss> lostLoads, List<ShuntShift> shuntShifts, List<TapR1Override> tapOverrides,
                                List<LfShunt> outagedShunts, List<LfBranch> reclosedBranches,
                                List<LfBranch> outagedZiBranches, List<LfHvdc> outagedHvdcs,
-                               List<SideOpen> sideOpenBranches) {
+                               List<SideOpen> sideOpenBranches,
+                               /** The zero-impedance branches OLF has OUT of its spanning tree when it reaches
+                                *  this contingency. OLF's tree is history-dependent within one security
+                                *  analysis: removeBranchAndTryToSplit marks a disabled tree edge non-tree and
+                                *  re-elects, and addBranch never restores it, so the non-tree edge of each
+                                *  zero-impedance network is simply the last one disabled - and it sticks for
+                                *  every later contingency. The device extracts its structure before any
+                                *  contingency runs, so without this it solves every scenario on the BASE tree
+                                *  while OLF has moved on (network.xiidm: LMK at extraction, LMO, then LMQ for
+                                *  the remaining 2938 of 3528). Empty = the base tree. */
+                               List<LfBranch> stickyNonTreeZi) {
 
     /** A branch opened on ONE side by the contingency (node-breaker propagation): the closed-branch
      *  element is masked and the pre-packed side-open OB view enabled — {@code side} is the OPEN
@@ -39,6 +49,17 @@ public record BatchContingency(String contingencyId, List<LfBranch> outagedBranc
                 throw new IllegalArgumentException("side must be 1 or 2");
             }
         }
+    }
+
+    /** 11-arg compatibility constructor (base spanning tree). */
+    @SuppressWarnings("java:S107")
+    public BatchContingency(String contingencyId, List<LfBranch> outagedBranches, List<LfGenerator> lostGenerators,
+                            List<LoadLoss> lostLoads, List<ShuntShift> shuntShifts, List<TapR1Override> tapOverrides,
+                            List<LfShunt> outagedShunts, List<LfBranch> reclosedBranches,
+                            List<LfBranch> outagedZiBranches, List<LfHvdc> outagedHvdcs,
+                            List<SideOpen> sideOpenBranches) {
+        this(contingencyId, outagedBranches, lostGenerators, lostLoads, shuntShifts, tapOverrides,
+                outagedShunts, reclosedBranches, outagedZiBranches, outagedHvdcs, sideOpenBranches, List.of());
     }
 
     /** 10-arg compatibility constructor (no side-open branches). */

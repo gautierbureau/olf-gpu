@@ -1407,6 +1407,9 @@ final class GpuBatchChunkSolver {
                             }
                             if (traceSlot >= 0) {
                                 System.err.println("LOOP_TRACE_CTG ctg=" + traceCtg + " slot=" + traceSlot);
+                            } else {
+                                System.err.println("LOOP_TRACE_CTG ctg=" + traceCtg + " NOT in this chunk; realCount=" + realCount
+                                        + " first=" + (realCount > 0 ? contingencies.get(group.get(chunkStart)).contingencyId() : "-"));
                             }
                         }
                         GpuAcNewtonSolver.setBatchLoopTraceSlot(handle, traceSlot);
@@ -1434,6 +1437,17 @@ final class GpuBatchChunkSolver {
                             0,
                             nziBase, ziOnSlotElemList.stream().mapToInt(Integer::intValue).toArray(),
                             ziOffSlotElemList.stream().mapToInt(Integer::intValue).toArray());
+                    if (System.getenv("OLF_GPU_REJECT_TRACE") != null) {
+                        // slot -> contingency for every scenario the device rejected in this chunk: the native
+                        // GPU_REJECT lines name slots, and a slot only means something with the chunk's composition.
+                        for (int s = 0; s < realCount; s++) {
+                            int st = chunkResults[s].length > n + 2 ? (int) chunkResults[s][n + 2] : 0;
+                            if (st <= GpuBatchStatus.STATUS_REJECTED) {
+                                System.err.println("CHUNK_REJECT slot=" + s + " ctg=" + contingencies.get(group.get(chunkStart + s)).contingencyId()
+                                        + " status=" + st);
+                            }
+                        }
+                    }
                     tMainSolveNs += System.nanoTime() - tSolve0;
                     if (svcAsDriverPause) {
                         long tSvc0 = System.nanoTime();

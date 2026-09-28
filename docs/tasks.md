@@ -3513,3 +3513,17 @@ violations diff 0, DAP worst **0.141 MW** (was 1.34; BUS-6003_BBS_3's 0.60 went 
 The seven `injection-scope` commits (base-lost pilot restore through the pilot's local entry, no DISTR_Q share
 seeded onto a base-pinned member, loop/iteration traces addressed by contingency) are cherry-picked; the
 base-lost restore and the pilot-self `veqOff` booking coexist (`pe < 0` selects the former).
+
+### The window's runtime rejects, named (2026-09-28)
+
+`CHUNK_REJECT` (new, under `OLF_GPU_REJECT_TRACE`) maps every rejected slot to its contingency; the [5000,6000)
+busbar window batches 960 contingencies in ONE chunk (976 batchable − 16 `VC_REMERGE_MULTI`), and its 4 chunk
+rejects are: BUS-536_BBS (outer-loop budget; the CPU does not converge it either), BUS-6079_BBS (`max-iter-bad-solve`
+at outer 0 — OLF's OWN Newton oscillates there, 16.978 → 4.720 → 1.191 → 1.060 → 2.528 → 0.980 → 2.909 …, and
+the device reproduces that trajectory to 10+ digits: both arms MAX_ITERATION_REACHED, nothing to fix),
+BUS-6003_BBS_2 (slot 797, churn to outer 36: the base's pilot-self VL-6003 group) and BUS-6088_BBS (slot 893,
+churn to outer 36). The last two, like BUS-612_BBS_2 (the DAP tail's 0.141 MW), are at machine precision when
+run ALONE — the single-contingency base retains different switches — so they are batch-only and must be traced
+in the window by SLOT (`OLF_GPU_LOOP_TRACE=<slot>`, `OLF_GPU_SW_TRACE=<slot>`, one per run; slots are stable for a
+fixed list and chunk size) with `OLF_GPU_SA_BUSDIFF_CTG=<ids>` for the in-scope bus diffs. `OLF_GPU_LOOP_TRACE_CTG`
+now says when the named id is not batched at all (a plan reject — BUS-6002_BBS_2 is one of the 16).

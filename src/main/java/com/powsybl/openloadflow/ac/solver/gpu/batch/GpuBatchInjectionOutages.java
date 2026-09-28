@@ -114,6 +114,13 @@ final class GpuBatchInjectionOutages {
                     if (mHasRow[m] == 0 || mRow[m] < 0 || inactive.contains(m)) {
                         continue;                            // an islanded member's own row is frozen
                     }
+                    // ...and a member PINNED in the base has no DISTR_Q equation: its row hosts its
+                    // own reactive balance at the frozen limit, which OLF never rewrites (see the
+                    // generator-outage loop below for the measurement - this is the loop a BRANCH
+                    // outage that islands a member reaches, network.xiidm/IZUZ included).
+                    if (!any.getNetwork().getBus(mBusNum[m]).isGeneratorVoltageControlEnabled()) {
+                        continue;
+                    }
                     double qpk = keySum == 0 || !memberKeepsKey(any, mBusNum[m], m, -1) ? 0 : mKey[m] / keySum;
                     r.add(mRow[m]);
                     // targetQ over THIS member's peers — its own control's elements, as AcTargetVector sums them
@@ -640,6 +647,18 @@ final class GpuBatchInjectionOutages {
             List<Double> values = new ArrayList<>();
             for (int m = gs; m < gs + gc; m++) {
                 if (mHasRow[m] == 0 || mRow[m] < 0) {
+                    continue;
+                }
+                // A member PINNED in the base has no DISTR_Q equation: its row hosts its own reactive
+                // balance at the frozen limit (targetQ_pinned - loadQ), and OLF's updateReactiveKeys /
+                // AcTargetVector never write a share there. Seeding the share formula on it anyway
+                // handed the row -targetQ_m (no live key, so qpk = 0): the pinned Q with its sign
+                // flipped. Measured on network.xiidm/IZUZ (IZSV_0 islanded, IZTH_0 base-pinned MIN_Q):
+                // +0.276956953 against OLF's -0.276956953, a 0.5539 pu entry residual, one Newton
+                // iteration more than OLF on the first solve, and the slack pass read 0.000845 pu
+                // less - the 0.0845 MW the arms reported apart. If the member unpins later, the
+                // kernel that maintains these targets (updateDistrQTargetsBatch) writes its share then.
+                if (!bus.getNetwork().getBus(mBusNum[m]).isGeneratorVoltageControlEnabled()) {
                     continue;
                 }
                 double qpk = keySum == 0 || !memberKeepsKey(bus, mBusNum[m], m, inactiveDqMember)

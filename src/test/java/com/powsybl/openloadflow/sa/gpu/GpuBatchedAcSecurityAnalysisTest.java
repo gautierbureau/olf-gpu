@@ -1854,6 +1854,67 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 "the contingency must batch with the group lost in the base (or the test proves nothing)");
     }
 
+    /** A base-PINNED member of a remote group survives the outage that islands another member. Same
+     *  network as the base-lost fixture above (both controllers pinned MIN_Q in the base under a strong
+     *  source), but vlc2 hangs off the pilot by ONE line, so losing lpc2 islands gc2 - a member outage
+     *  by connectivity, 120 MW of generation gone, the group still lost (gc1 stays pinned).
+     *
+     *  <p>The generator-outage path re-seeds the group's DISTR_Q targets over the survivors, as OLF's
+     *  updateReactiveKeys + AcTargetVector do for the members that SHARE - and it wrote that formula on
+     *  every member with a row, a base-pinned one included. A pinned member's row is not a share: it
+     *  holds the frozen limit, targetQ_pinned - loadQ, and OLF never touches it. With no live key the
+     *  seeded value is -targetQ_m: the pinned Q with its SIGN FLIPPED. Measured on network.xiidm/IZUZ
+     *  (IZSV_0 islanded, IZTH_0 base-pinned at MIN_Q): the device's first solve ran IZTH_0 against
+     *  +0.276956953 pu where OLF had -0.276956953, entry residual 0.5539 = twice the pin, the first
+     *  Newton step left 0.1126 on that row so the solve took 2 iterations where OLF took 1, and the
+     *  distributed-slack pass that followed read -0.034956058 against OLF's -0.035800839 - the
+     *  0.0845 MW the arms reported apart, with 12781 of 13502 buses off (worst 1.648e-03 kV). The
+     *  reactive-limit loop only repaired the target later, through a curve-drift re-freeze. Here there
+     *  is no curve, so without the fix the flipped target stands to the end. GPU SA == CPU SA at 1e-12,
+     *  and the contingency must batch. */
+    @org.junit.jupiter.api.Test
+    void deviceBasePinnedMemberKeepsItsQWhenASiblingIsIslandedMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = Network.create("pinned-member-sibling-islanded", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vlp", "vlc1", "vlc2")) {
+            com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(vl).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            v.getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        network.getVoltageLevel("vl0").newGenerator().setId("g0").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(800).setTargetV(425).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl0").newLoad().setId("ld0").setBus("vl0_b").setConnectableBus("vl0_b").setP0(100).setQ0(0).add();
+        network.getVoltageLevel("vlp").newLoad().setId("ldp").setBus("vlp_b").setConnectableBus("vlp_b").setP0(300).setQ0(0).add();
+        for (String c : List.of("c1", "c2")) {
+            network.getVoltageLevel("vl" + c).newGenerator().setId("g" + c).setBus("vl" + c + "_b").setConnectableBus("vl" + c + "_b")
+                    .setMinP(0).setMaxP(500).setTargetP(120).setTargetQ(0).setTargetV(412).setVoltageRegulatorOn(true)
+                    .setRegulatingTerminal(network.getLoad("ldp").getTerminal()).add();
+            network.getGenerator("g" + c).newMinMaxReactiveLimits().setMinQ(-20).setMaxQ(200).add();
+        }
+        // a reactive load on the pinned survivor's bus, so its row target is (limit - loadQ) and a
+        // sign flip is not a symmetric no-op
+        network.getVoltageLevel("vlc1").newLoad().setId("ldc1").setBus("vlc1_b").setConnectableBus("vlc1_b").setP0(0).setQ0(15).add();
+        java.util.function.BiConsumer<String[], double[]> line = (ends, rx) -> network.newLine().setId(ends[0])
+                .setVoltageLevel1(ends[1]).setBus1(ends[1] + "_b").setConnectableBus1(ends[1] + "_b")
+                .setVoltageLevel2(ends[2]).setBus2(ends[2] + "_b").setConnectableBus2(ends[2] + "_b")
+                .setR(rx[0]).setX(rx[1]).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        line.accept(new String[] {"l0p", "vl0", "vlp"}, new double[] {0.4, 5});
+        line.accept(new String[] {"lpc1", "vlp", "vlc1"}, new double[] {20, 50});
+        line.accept(new String[] {"lpc2", "vlp", "vlc2"}, new double[] {20, 50});   // vlc2's ONLY line
+        line.accept(new String[] {"l0c1", "vl0", "vlc1"}, new double[] {20, 50});
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0_0"));
+        assertGpuMatchesCpu(network, List.of(new Contingency("lpc2", new com.powsybl.contingency.LineContingency("lpc2"))),
+                1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the islanding outage must batch (or the test proves nothing)");
+    }
+
     /** A remote voltage-control group whose members are ALL pinned at MAX_Q in the base (a radial
      *  200 MVar load at vlq) and all UNPINNED by the contingency (losing that radial line). OLF's unpin
      *  recomputes each member's targetQ from its generators (0 here) and the group then shares its

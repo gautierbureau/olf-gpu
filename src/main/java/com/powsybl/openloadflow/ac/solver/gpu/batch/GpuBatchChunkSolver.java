@@ -50,9 +50,32 @@ final class GpuBatchChunkSolver {
     /** OLF_GPU_X0_SEEDS=0: send islanded scenarios' starting state as full chunkSize * n arrays again (A/B). */
     private static final boolean X0_SEEDS = !"0".equals(System.getenv("OLF_GPU_X0_SEEDS"));
 
+    /** OLF starts EVERY solve with the zero-impedance branch flows at zero: AcSolverUtil.initStateVector
+     *  has {@code case DUMMY_P, DUMMY_Q: x[v.getRow()] = 0}, and updateNetwork never writes them back
+     *  (they have no network backing). So each post-contingency solve discards the coupler flows and
+     *  rebuilds them in its first Newton step - on network.xiidm an entry residual of 14.988 pu, the same
+     *  for every contingency, against 0.16 when they are carried. The device starts the same way, so both
+     *  arms take the same first step from the same state. */
+    private static double[] zeroZiFlows(GpuAcData gpuData, double[] baseState) {
+        int[] zi = gpuData.ziIdx();
+        if (zi == null || zi.length == 0) {
+            return baseState;
+        }
+        double[] x0 = baseState.clone();
+        for (int k = 0; k + 10 < zi.length; k += 11) {
+            if (zi[k + 4] >= 0) {
+                x0[zi[k + 4]] = 0;                           // DUMMY_P column
+            }
+            if (zi[k + 5] >= 0) {
+                x0[zi[k + 5]] = 0;                           // DUMMY_Q column
+            }
+        }
+        return x0;
+    }
+
     static void solveQualifiedInChunks(List<Integer> batchedIndices, List<BatchContingency> contingencies,
                                                GpuBatchElementMapper elementMapper, GpuAcData gpuData,
-                                               double[] baseState, double[] baseTargets, int[] baseRowMode,
+                                               double[] baseStateIn, double[] baseTargets, int[] baseRowMode,
                                                int[][] frozenRowsByIndex, double[][] frozenTargetsByIndex,
                                                GenOutage[][] genOutagesByIndex, double[] activePowerLossByIndex,
                                                java.util.Map<com.powsybl.openloadflow.network.LfHvdc, Integer> hvdcElemIndex,
@@ -67,6 +90,7 @@ final class GpuBatchChunkSolver {
                                                double[] distributedByIndex, int[] varType, GpuBatchPhases.Built phases,
                                                List<GpuBatchHvdcAcEmulation.Ctl> hvdcControllers,
                                                BatchConfig config) {
+        double[] baseState = zeroZiFlows(gpuData, baseStateIn);
         int nb = batchedIndices.size();
         // Chunk sizing is a device-memory ESTIMATE (a cuDSS probe on the shared structure). When it
         // is too optimistic the factorization fails to allocate mid-solve, and a thrown batch means
@@ -317,7 +341,8 @@ final class GpuBatchChunkSolver {
             ziElemByNumAll.put(gpuData.ziBranchNums()[z], z);
         }
         List<Integer> ziOffSlotElemList = new ArrayList<>(); // per-scenario zi-element outages (switch opens)
-        List<Integer> ziOnSlotElemList = new ArrayList<>(); // per-scenario zi-element enables (switch closes)
+        List<Integer> ziOnSlotElemList = new ArrayList<>();
+        List<Integer> ziTreeSlotElemValList = new ArrayList<>();   // {slot, ziElement, isTree} where OLF's tree moved // per-scenario zi-element enables (switch closes)
         List<Integer> shOvSlotElemList = new ArrayList<>();  // per-scenario shunt admittance overrides
         List<Double> shOvGbList = new ArrayList<>();
         List<Integer> r1OvSlotElemList = new ArrayList<>();  // per-scenario fixed-ratio tap overrides
@@ -445,6 +470,7 @@ final class GpuBatchChunkSolver {
                     int[] nActive = new int[chunkSize];
                     java.util.Arrays.fill(nActive, n);
                     ziOffSlotElemList.clear();
+                    ziTreeSlotElemValList.clear();
                     ziOnSlotElemList.clear();
                     shOvSlotElemList.clear();
                     shOvGbList.clear();
@@ -789,6 +815,47 @@ final class GpuBatchChunkSolver {
                                     }
                                 }
                                 rowModePerScenario[s] = rowZi;
+                            }
+                            // OLF's spanning tree, replayed by GpuBatchPrecomputer. The device extracted
+                            // its structure on the BASE tree; where OLF has moved on by the time it reaches
+                            // this contingency, the coupler that is out of the tree there takes the identity
+                            // rows (target 0) and the one it replaced takes the ZERO_V/ZERO_PHI coupling
+                            // back. The split is physically equivalent either way - this is about solving
+                            // the system OLF solves, from the state OLF solves it at.
+                            for (LfBranch nonTree : contingencies.get(ci).stickyNonTreeZi()) {
+                                Integer ze = ziElemByNumAll.get(nonTree.getNum());
+                                if (ze == null || gpuData.ziIdx()[ze * 11 + 10] == 0) {
+                                    continue;                // absent, or already out of the base tree
+                                }
+                                ziTreeSlotElemValList.add(s);
+                                ziTreeSlotElemValList.add(ze);
+                                ziTreeSlotElemValList.add(0);
+                                int dpRow = gpuData.ziIdx()[ze * 11 + 4];
+                                int dqRow = gpuData.ziIdx()[ze * 11 + 5];
+                                int[] row = rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rowModePerScenario[s];
+                                row[dpRow] = 0;              // identity rows, target 0
+                                row[dqRow] = 0;
+                                overrides.add(s * n + dpRow, 0.0);
+                                overrides.add(s * n + dqRow, 0.0);
+                                rowModePerScenario[s] = row;
+                            }
+                            if (!contingencies.get(ci).stickyNonTreeZi().isEmpty()) {
+                                java.util.Set<Integer> stillOut = contingencies.get(ci).stickyNonTreeZi().stream()
+                                        .map(LfBranch::getNum).collect(java.util.stream.Collectors.toSet());
+                                for (int zb = 0; zb < gpuData.ziBranchNums().length; zb++) {
+                                    if (gpuData.ziIdx()[zb * 11 + 10] != 0 || stillOut.contains(gpuData.ziBranchNums()[zb])) {
+                                        continue;            // in the base tree already, or still out
+                                    }
+                                    ziTreeSlotElemValList.add(s);
+                                    ziTreeSlotElemValList.add(zb);
+                                    ziTreeSlotElemValList.add(1);
+                                    int bdp = gpuData.ziIdx()[zb * 11 + 4];
+                                    int bdq = gpuData.ziIdx()[zb * 11 + 5];
+                                    int[] r2 = rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rowModePerScenario[s];
+                                    r2[bdp] = 1;             // back into the coupling
+                                    r2[bdq] = 1;
+                                    rowModePerScenario[s] = r2;
+                                }
                             }
                             for (LfBranch reclosed : contingencies.get(ci).reclosedBranches()) {
                                 if (reclosed.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
@@ -1386,6 +1453,10 @@ final class GpuBatchChunkSolver {
                     long tSolve0 = System.nanoTime();
                     // OLF_GPU_LOOP_TRACE_CTG=<id>: trace that contingency's slot in THIS chunk (a fixed slot number
                     // follows the chunk composition, which moves with the resolved chunk size).
+                    // OLF's tree for the scenarios of this chunk, where it has moved from the one the
+                    // structure was extracted on (empty clears the previous chunk's list).
+                    GpuAcNewtonSolver.setBatchZiTreeOverrides(handle,
+                            ziTreeSlotElemValList.stream().mapToInt(Integer::intValue).toArray());
                     {
                         String traceCtg = System.getenv("OLF_GPU_LOOP_TRACE_CTG");
                         int traceSlot = -1;

@@ -530,6 +530,30 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
     void gpuSaMatchesCpuOnRte6515Full() throws Exception {
         Network network = Network.read(CASE_FILE);
         List<Contingency> contingencies = allBranchContingencies(network);
+        // OLF_GPU_SA_CTG_FIRST=<id>[,<id>]: move these to the FRONT of the list, keeping the list
+        // itself intact (so the retained switches, and therefore the network both arms solve, are
+        // unchanged - which is what CTG_ONLY cannot do). OLF's zero-impedance spanning tree is
+        // history-dependent within one security analysis: removing a ZI tree edge re-elects the tree
+        // (LfZeroImpedanceNetwork.removeBranchAndTryToSplit) and re-adding the branch does NOT
+        // restore it, so from the first ZI contingency onwards OLF solves on a tree the saved base
+        // state's dummy flows no longer match. Running a contingency FIRST is how that history is
+        // taken out of the measurement.
+        String ctgFirst = System.getenv("OLF_GPU_SA_CTG_FIRST");
+        if (ctgFirst != null && !ctgFirst.isEmpty()) {
+            List<String> wanted = java.util.Arrays.stream(ctgFirst.split(",")).map(String::trim).toList();
+            List<Contingency> head = new ArrayList<>();
+            for (String w : wanted) {
+                contingencies.stream().filter(c -> c.getId().equals(w)).findFirst().ifPresent(head::add);
+            }
+            List<Contingency> reordered = new ArrayList<>(head);
+            for (Contingency c : contingencies) {
+                if (head.stream().noneMatch(h -> h.getId().equals(c.getId()))) {
+                    reordered.add(c);
+                }
+            }
+            contingencies = reordered;
+            System.out.printf("  CTG_FIRST: %s moved to the front (list otherwise unchanged)%n", head.stream().map(Contingency::getId).toList());
+        }
         System.out.printf("%s: %d branches → %d N-1 contingencies%n", CASE_FILE,
                 network.getBranchCount(), contingencies.size());
 

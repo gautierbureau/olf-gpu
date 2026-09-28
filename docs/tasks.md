@@ -3696,3 +3696,44 @@ contingencies AGREE — BUS-6112_BBS_2 within 1.6e-7 MW (against 3.7e-3 with lim
 BUS-612_BBS_2 within 3.6e-7 — and the whole window's DAP worst drops to 4.0e-5 MW (BUS-6011_BBS). So the equations,
 the slack distribution and the HVDC passes are not the tail: the tail is entirely a REACTIVE-LIMIT decision
 difference. BUS-536_BBS (6.4 MW apart, limits off too) is OLF's own non-convergence.
+
+### The production DAP tail, diagnosed to the digit — and why the obvious fix is not the fix (2026-09-28)
+
+The limits-off arm had shown the tail was a reactive-limit DECISION difference. The instrument that closed it was
+OLF's own q per check: a TEMPORARY `OLF_RL_Q_TRACE=<busId>` print in the OLF worktree's `ReactiveLimitsOuterLoop`
+(added, measured with, then REMOVED and the dependency reinstalled clean; it also printed each incident branch's q
+and every neighbour's v/phi). Measured on BUS-6112_BBS_2 (slot 924):
+- OLF's FIRST limit check reads q = 1.902356914 pu at VL-6055_0 and pins it; the device reads 1.474409053 and
+  pins it one pass later, after its own six other pins.
+- The device's six pins in that same pass match OLF's q to 0.0005 MVAr (VL-6490_0 145.0179 vs 145.0184, and so on),
+  so the states agree almost everywhere.
+- The device's state dump at that check: VL-6055_0's neighbour VL-6036_0 is 1.683e-3 pu off OLF while every other
+  neighbour is within 1e-7, and the bus behind it — the pilot-self pilot VL-6112_0 — still holds a BUS_TARGET_V
+  identity at v = 1.055 with a 0.86 pu residual on that row. VL-6055_0 has THREE parallel lines to VL-6036_0, so
+  1.7e-3 pu there is 0.43 pu of q here.
+- OLF has NO voltage control at VL-6112_0 in this scenario: the base load flow PINNED it at a reactive limit and
+  this contingency islands its only sibling VL-6112_1, so `updateRemoteVoltageControlEquations` finds no ENABLED
+  controller and deactivates the pilot's BUS_TARGET_V. The device keeps it until its reactive-limit phase flips it
+  (`updatePilotVeqBatch`, gated on `rlActive`), i.e. after the whole distributed-slack phase.
+
+Two implementations were measured and BOTH REVERTED:
+1. Plan-time: require a survivor in `classifyVcSplit` to be `isGeneratorVoltageControlEnabled()`, so the group takes
+   the CONTROL_DIES path. The device's q then reads 1.902356914 — OLF's value to every printed digit — it pins in
+   the SAME pass, and the window's DAP worst drops to **1.55e-05 MW** (from 3.70e-03; the assertion is 1e-3, so the
+   window test PASSED for the first time). But it is PERMANENT, and a base-pinned controller may be switched BACK
+   to PV during the scenario: 3 fixtures fail (`deviceRemoteGroupLostInBaseRegainsControlInSamePass`,
+   `deviceRemoteGroupUnpinnedByContingencyRecomputesTargetQ`, `deviceRemoteGeneratorFreezeUnderControlledLevel`).
+   It also moved BUS-6003_BBS_2's violation count 7 above the CPU's.
+2. Per-pass: run the `updatePilotVeqBatch` flip without the `rlActive` gate. BUS-6112_BBS_2 improves 7-fold
+   (3.7e-3 → 5.2e-4 MW) and violations stay equal, but 4 fixtures fail: at seed time `lost` is read before the
+   per-scenario row modes and overrides are all in place, so it fires on groups that DO control.
+Also measured and reverted with them: `relocChoose` returning the pilot's own row as soon as that row is not an
+identity, and the pilot-self gate keying on the same fact instead of the limit type alone. Both are no-ops on this
+case (a pilot-self group's candidate 1 IS the pilot's row) and together they still failed 3 fixtures, so they are
+not free either.
+What the fix needs: OLF's layout for a group with no enabled controller applied FROM THE FIRST FILL and re-evaluated
+every pass (identity off while no controller is enabled, back on when one switches to PV), with `lost` read from
+the same per-scenario modes the fills use — not decided once at plan time, and not read before the scenario's own
+overrides are in place. The measurement above is the acceptance test: the device's q at VL-6055_0 must be
+1.902356914 at the first check, and the window's DAP worst must be 1.55e-05 MW with violations equal and the
+fixtures green.

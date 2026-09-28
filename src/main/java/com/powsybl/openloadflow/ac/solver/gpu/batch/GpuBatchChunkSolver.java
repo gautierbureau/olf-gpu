@@ -1696,6 +1696,9 @@ final class GpuBatchChunkSolver {
                             slice[nds] = fs;
                             dsTargetsByIndex.put(group.get(chunkStart + s), slice);
                         }
+                                }
+                            }
+                        }
                     }
                     // HOST ORCHESTRATORS — in OLF's DefaultAcOuterLoopConfig order.
                     // In-kernel: DS(0), HVDC(1,2), Monitoring(5), RL(6) already ran in the main solve.

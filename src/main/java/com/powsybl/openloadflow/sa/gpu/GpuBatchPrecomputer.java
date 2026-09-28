@@ -438,5 +438,21 @@ final class GpuBatchPrecomputer {
         if (!Double.isNaN(r.distributedActivePower())) {
             distributed.put(r.contingencyId(), r.distributedActivePower());
         }
+        // OLF_GPU_ITER_TRACE_CTG=<id>[,<id>]: the two parts of a named scenario's distributed active
+        // power, in MW - the replayed loss pre-distribution and the device's own slack passes on top.
+        // OLF reports their sum, so a total that differs cannot say which half moved; OLF's own
+        // LF-level part is on OLF_LF_STEPS_TRACE and its pre-distribution is the reported total minus
+        // that.
+        String want = System.getenv("OLF_GPU_ITER_TRACE_CTG");
+        if (want != null) {
+            for (String w : want.split(",")) {
+                if (w.trim().equals(r.contingencyId())) {
+                    double pre = r.preDistributedActivePower() * com.powsybl.openloadflow.util.PerUnit.SB;
+                    double tot = r.distributedActivePower() * com.powsybl.openloadflow.util.PerUnit.SB;
+                    System.err.printf("DAP_CTG ctg=%s preDistributedMW=%.9f totalMW=%.9f ownDsMW=%.9f iterations=%d status=%d%n",
+                            r.contingencyId(), pre, tot, tot - pre, r.iterations(), r.convergenceStatus());
+                }
+            }
+        }
     }
 }

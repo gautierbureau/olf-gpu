@@ -3928,3 +3928,29 @@ State, all measured with the relocation enabled (`-Dolf.gpu.ziTreeRelocation=tru
 So the property defaults stay off for now: enabling them would trade a correct base for 974 CPU-replayed
 scenarios. The order from here is the per-scenario coupler-opening path, then the defaults, then part 3 (a
 relocated child that switches BACK to PV, which today has nowhere to put its voltage identity).
+
+### Branch check (2026-09-29): nothing left to import
+
+`test_inteliji-h100` (+71 commits by hash, including the whole coupler-relocation line: "Put a relocated bus's
+equations back on its own rows when a scenario opens its coupler", "Move a relocated bus's TARGET with its
+equation when its coupler opens", "Make the DISTR_Q member row follow the coupler-tree relocation", "restore the V
+identity the relocation displaced", "Relocate only the coupler trees the numeric repair cannot hold") and
+`origin/injection-scope` (+10, including "Move a bus limit only for the generators that actually set it") are
+BOTH fully contained in `base-outer7-divergence`: every one of their 81 subjects is present here, the hashes
+differ only because the work was rebased/cherry-picked, and where a file still differs the version here is the
+later one (e.g. `GpuBatchRlCurves` uses `mainGenVc` where injection-scope still has `getGeneratorVoltageControl()
+.orElseThrow()`). So the per-scenario relocation work has to be finished here, not fetched.
+
+### Where the contingency side stands with the relocation on (2026-09-29)
+
+The rejects fire at the scenario's FIRST solve (`max-iter-bad-solve outer=0 it=30`, final ratio 8.18e-02, norm
+3.34), and that solve's FIRST iteration factors cleanly (ratio 1.24e-14, and 2.59e-12 / 1.21e-15 on the next
+slots), so it is not the factorization: the Newton wanders over the 30 iterations, which is what a wrong equation
+layout looks like. The failing scenario's dumped matrix has no empty row and 18 zero-diagonal rows, and all 18 are
+shapes the BASE also carries (a pilot-self carrier row such as `BUS_V(VL-5997_1)`, which holds the PILOT's balance
+and so has no entry of its own, plus unrelocated couplers' `DUMMY_P/DUMMY_Q` rows) — i.e. the repaired shapes that
+the window already lives with when the relocation is OFF. So the defect is an equation that is wrong, not missing.
+Next measurement, the one that named every earlier defect of this kind: OLF's own post-contingency equations and
+residual for that scenario (`OLF_GPU_EQ_DUMP_CTG=<id>`, which now also writes OLF's f(x0) per equation) against
+the device's first fill of the same slot (`OLF_GPU_VALS_SCAN_SLOT=<slot>` + `OLF_GPU_VALS_DUMP`), matched row by
+row through the `.eq` map — with the relocation ON, so the comparison sees the relocated layout.

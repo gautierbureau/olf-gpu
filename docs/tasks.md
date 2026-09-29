@@ -4437,3 +4437,25 @@ failing `deviceMiddleSectionLoss…` fixtures. The 58 that neither arm converges
 non-convergences and not a device question.
 Next: scan one of the 20 inside the full list (`OLF_GPU_VALS_SCAN_SLOT=220` for `BUS-11_BBS_1`) — a singular
 matrix names its row, and the guess to test first is a dead coupler's dummy row left without an equation.
+
+### The 20 linear-solve failures: my own rule, and the fix (2026-09-29)
+
+`OLF_GPU_VALS_SCAN_SLOT=220` inside the full list named it in one line: for `BUS-11_BBS_1` the batched scenario has
+exactly ONE zero diagonal, `firstBadRow=24`, and row 24 is `BUS_V(VL-11_1)` — a relocated child's own row, holding
+`zi#1.ZERO_V` — while the same scan's `mode4Rows` list CONTAINS row 24. So the scenario pins that bus at home
+(mode 4 on its own row, because the contingency killed its coupler and the equations came back) and the stock-pair
+rule written earlier today said "dummy row is an identity ⇒ write nothing", which left the row empty.
+
+The rule needs TWO modes, not one, and `stockPairPick` now reads both (the dummy row from the group slot, the
+bus's own row through the device copy of `relocOwn`):
+
+| dummy row | own row | the bus's raw q goes to |
+|---|---|---|
+| mode 4 | — | the coupler's `DUMMY_Q` row (pinned, coupler alive) |
+| mode 0 | mode 4 | **its OWN row** (coupler dead, pinned at home) |
+| mode 0 | else | nowhere — its `DISTR_Q`, diverted home, carries it |
+| else | — | nowhere |
+
+Measured right after, full scope in exclude mode: **6552 of 6667 on device** (was 6532), and `RUNTIME:status=-3`
+is GONE from the census — all 20 fixed, and they were 20 of the 23 genuine device defects. The census also now
+reports `PLAN:ISLANDS_SLACK` where it used to mislabel that entry `SIDE_OPEN_UNPACKED`.

@@ -925,10 +925,15 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             // the batching share reports a GPU limitation that does not exist (209 of rte6515's 6876 busbar
             // sections). The CPU arm's result count IS the simulated population.
             int simulated = cpu.getPostContingencyResults().size();
-            System.out.printf("  GPU precomputed on device: %d / %d contingencies (%d of %d simulated;"
-                    + " %d simulated by neither arm)%n",
-                    gpuPrecomputed, contingencies.size(), gpuPrecomputed, simulated,
-                    contingencies.size() - simulated);
+            if (simulated > 0) {                             // 0 under OLF_GPU_SA_GPU_ONLY: no CPU arm to count
+                System.out.printf("  GPU precomputed on device: %d / %d contingencies (%d of %d simulated;"
+                        + " %d simulated by neither arm)%n",
+                        gpuPrecomputed, contingencies.size(), gpuPrecomputed, simulated,
+                        contingencies.size() - simulated);
+            } else {
+                System.out.printf("  GPU precomputed on device: %d / %d contingencies%n",
+                        gpuPrecomputed, contingencies.size());
+            }
 
             // OLF_GPU_SA_COLD_ONLY=1: no warm run (a profile of the cold run alone; "warm" then repeats cold).
             if ("1".equals(System.getenv("OLF_GPU_SA_COLD_ONLY"))) {

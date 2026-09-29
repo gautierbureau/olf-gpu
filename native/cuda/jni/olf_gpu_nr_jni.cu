@@ -625,9 +625,30 @@ inline bool stockPairOut(int frozenRow, int alt, const int* relocOwn) {
     return frozenRow < 0 && alt >= 0 && relocOwn != nullptr && relocOwn[alt] >= 0;
 }
 
-/** Pool order of a stock pair: [0] = the own row (dummy row identity), [1] = the dummy row (pinned). */
-__host__ __device__ inline int stockPairPick(int m, const int* pool, int p, int frozen) {
-    return m == 0 ? pool[p] : (m == 4 ? pool[p + 1] : frozen);
+/**
+ * Pool order of a stock pair: [0] = the bus's OWN row, [1] = the parent coupler's DUMMY_Q row. Which one takes
+ * the bus's raw q depends on TWO modes, not one:
+ *   dummy row mode 4                      -> the dummy row: a reactive limit pins it there, coupler alive;
+ *   dummy row mode 0 and own row mode 4   -> the OWN row: the coupler is dead, so the equations are back home
+ *                                            and the pin is there (measured: rte6515 BUS-11_BBS_1 put mode 4 on
+ *                                            BUS_V(VL-11_1), which holds zi#1's ZERO_V, and writing nothing left
+ *                                            that row with a zero diagonal — 20 of the 6667 scenarios failed
+ *                                            their linear solve exactly this way, all of them _BBS_1 outages);
+ *   anything else                         -> nothing: while it SHARES, its DISTR_Q row (diverted home when the
+ *                                            coupler dies) carries its q, and writing the raw q too double-counts.
+ */
+__host__ __device__ inline int stockPairPick(int m, const int* pool, int p, int frozen,
+                                             const int* mode, const int* relocOwn, int dummyRow) {
+    if (m == 4) {
+        return pool[p + 1];
+    }
+    if (m == 0 && relocOwn != nullptr) {
+        int own = relocOwn[dummyRow];
+        if (own >= 0 && mode[own] == 4) {
+            return pool[p];
+        }
+    }
+    return frozen;
 }
 
 inline int cbAltRow(const CbScatter& s, const int* ix) {
@@ -704,8 +725,9 @@ void collectCbAltPattern(int ncb, const int* cbIdx, const int* relocOwn, std::ve
             if (rc.col < 0) {
                 continue;
             }
-            if (stockPairOut(rc.row, origAlt, relocOwn)) {   // STOCK PAIR (see stockPairOut): the dummy row
-                pat.emplace_back(origAlt, rc.col);           // only — mode 0 writes nothing
+            if (stockPairOut(rc.row, origAlt, relocOwn)) {   // STOCK PAIR (see stockPairPick): both rows
+                pat.emplace_back(relocOwn[origAlt], rc.col);
+                pat.emplace_back(origAlt, rc.col);
                 continue;
             }
             if (altRow <= -2) {                              // GROUP relocation (plan-A6): union EVERY
@@ -750,7 +772,8 @@ void buildCbDynDest(int ncb, const int* cbIdx, const int* relocOwn, const CsrPat
                 if ((s.role == 1 && rc.col >= 0) || s.role == 0) {
                     relocGroup[o] = origAlt;                 // the selector is the dummy row itself
                     relocOff[o] = -static_cast<int>(relocPool.size()) - 1;
-                    relocPool.push_back(-1);                 // mode 0: the coupler is dead — write nothing
+                    int own = relocOwn[origAlt];
+                    relocPool.push_back(s.role == 1 ? pos.at(own, rc.col) : -2 - own);
                     relocPool.push_back(s.role == 1 ? pos.at(origAlt, rc.col) : -2 - origAlt);
                 }
                 continue;
@@ -811,8 +834,9 @@ void collectShAltPattern(int nsh, const int* shIdx, const int* relocOwn, std::ve
             if (rc.col < 0) {
                 continue;
             }
-            if (stockPairOut(rc.row, origAlt, relocOwn)) {   // STOCK PAIR (see stockPairOut): the dummy row
-                pat.emplace_back(origAlt, rc.col);           // only — mode 0 writes nothing
+            if (stockPairOut(rc.row, origAlt, relocOwn)) {   // STOCK PAIR (see stockPairPick): both rows
+                pat.emplace_back(relocOwn[origAlt], rc.col);
+                pat.emplace_back(origAlt, rc.col);
                 continue;
             }
             if (altRow <= -2) {
@@ -853,7 +877,8 @@ void buildShDynDest(int nsh, const int* shIdx, const int* relocOwn, const CsrPat
                 if ((s.role == 1 && rc.col >= 0) || s.role == 0) {
                     relocGroup[o] = origAlt;                 // the selector is the dummy row itself
                     relocOff[o] = -static_cast<int>(relocPool.size()) - 1;
-                    relocPool.push_back(-1);                 // mode 0: the coupler is dead — write nothing
+                    int own = relocOwn[origAlt];
+                    relocPool.push_back(s.role == 1 ? pos.at(own, rc.col) : -2 - own);
                     relocPool.push_back(s.role == 1 ? pos.at(origAlt, rc.col) : -2 - origAlt);
                 }
                 continue;
@@ -913,8 +938,9 @@ void collectObAltPattern(int nob, const int* obIdx, const int* obQAlt, const int
             if (rc.col < 0) {
                 continue;
             }
-            if (stockPairOut(rc.row, origAlt, relocOwn)) {   // STOCK PAIR (see stockPairOut): the dummy row
-                pat.emplace_back(origAlt, rc.col);           // only — mode 0 writes nothing
+            if (stockPairOut(rc.row, origAlt, relocOwn)) {   // STOCK PAIR (see stockPairPick): both rows
+                pat.emplace_back(relocOwn[origAlt], rc.col);
+                pat.emplace_back(origAlt, rc.col);
                 continue;
             }
             if (altRow <= -2) {
@@ -955,7 +981,8 @@ void buildObDynDest(int nob, const int* obIdx, const int* obQAlt, const int* rel
                 if ((s.role == 1 && rc.col >= 0) || s.role == 0) {
                     relocGroup[o] = origAlt;                 // the selector is the dummy row itself
                     relocOff[o] = -static_cast<int>(relocPool.size()) - 1;
-                    relocPool.push_back(-1);                 // mode 0: the coupler is dead — write nothing
+                    int own = relocOwn[origAlt];
+                    relocPool.push_back(s.role == 1 ? pos.at(own, rc.col) : -2 - own);
                     relocPool.push_back(s.role == 1 ? pos.at(origAlt, rc.col) : -2 - origAlt);
                 }
                 continue;
@@ -1025,6 +1052,10 @@ struct RelocTables {
     // and its raw q must NOT be emitted at the carrier row. Null = no such group, every pick as before.
     const char* psSkip = nullptr;
     int psGroups = 0;                                        // stride of psSkip (= nQr)
+    // Per row: the relocated child's OWN row for a coupler dummy row, -1 elsewhere. A stock pair needs it to
+    // tell "the coupler is dead AND this bus is PINNED at home" (its own q belongs on its own row) from
+    // "the coupler is dead and it still SHARES" (its DISTR_Q, diverted home, carries its q).
+    const int* relocOwn = nullptr;
 };
 
 // GROUP pilot-Q relocation (plan-A6): candidates = [fallback row, member rows in merged order];
@@ -1074,7 +1105,7 @@ __device__ inline int ziDynDest(int frozen, int slot, const int* alt, const int*
     int rg = rt.group != nullptr ? rt.group[slot] : -1;
     if (rg >= 0) {
         if (rt.off[slot] < 0) {                              // STOCK PAIR: group slot holds the dummy ROW
-            return stockPairPick(mode[rg], rt.pool, -rt.off[slot] - 1, frozen);
+            return stockPairPick(mode[rg], rt.pool, -rt.off[slot] - 1, frozen, mode, rt.relocOwn, rg);
         }
         if (rt.psSkip != nullptr && rt.psSkip[rg]) {
             return -1;                                       // pilot-self group, pilot unpinned: no raw q
@@ -1095,7 +1126,7 @@ __device__ void scatterAddDyn(int nout, const int* dest, const int* altDest, con
         int d;
         int rg = rt.group != nullptr ? rt.group[eOff + k] : -1;
         if (rg >= 0 && rt.off[eOff + k] < 0) {               // STOCK PAIR: group slot holds the dummy ROW
-            d = stockPairPick(mode[rg], rt.pool, -rt.off[eOff + k] - 1, dest[k]);
+            d = stockPairPick(mode[rg], rt.pool, -rt.off[eOff + k] - 1, dest[k], mode, rt.relocOwn, rg);
         } else if (rg >= 0 && rt.psSkip != nullptr && rt.psSkip[rg]) {
             continue;                                        // pilot-self group, pilot unpinned: no raw q
         } else if (rg >= 0) {
@@ -2825,6 +2856,7 @@ static RelocTables relocOf(Family& f, SharedStructure* st) {
         rt.pool = f.relocPool.as<int>();
         rt.qrPtr = st->dQrPtr.as<int>();
         rt.qrRows = st->dQrRows.as<int>();
+        rt.relocOwn = st->dRelocOwn.p != nullptr ? st->dRelocOwn.as<int>() : nullptr;
     }
     return rt;
 }
@@ -2849,6 +2881,7 @@ static RelocTables ziRelocOf(SharedStructure* st) {
         rt.pool = st->dZiRelocPool.as<int>();
         rt.qrPtr = st->dQrPtr.as<int>();
         rt.qrRows = st->dQrRows.as<int>();
+        rt.relocOwn = st->dRelocOwn.p != nullptr ? st->dRelocOwn.as<int>() : nullptr;
     }
     return rt;
 }
@@ -3978,7 +4011,7 @@ __device__ void scatterAddFDyn(int nres, const int* dest, const int* altDest, co
         int d;
         int rg = rt.group != nullptr ? rt.group[eOff + idx] : -1;
         if (rg >= 0 && rt.off[eOff + idx] < 0) {             // STOCK PAIR: group slot holds the dummy ROW
-            d = stockPairPick(mode[rg], rt.pool, -rt.off[eOff + idx] - 1, dest[idx]);
+            d = stockPairPick(mode[rg], rt.pool, -rt.off[eOff + idx] - 1, dest[idx], mode, rt.relocOwn, rg);
         } else if (rg >= 0 && rt.psSkip != nullptr && rt.psSkip[rg]) {
             continue;                                        // pilot-self group, pilot unpinned: no raw q
         } else if (rg >= 0) {

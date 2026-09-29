@@ -4141,3 +4141,31 @@ vCol)`, with the list of its consumers in its javadoc: the reactive-limit pin an
 activation target map, the families' mode-4 alternate, and this diagnostic fill. The pattern of the last three
 defects is the same one — a consumer left on the bus's own row silently reads or writes ZERO there — so the
 javadoc names it rather than letting the next consumer rediscover it.
+
+### The full-scope base now CONVERGES, on OLF's own sequence (2026-09-29)
+
+Two more consumers of "where does this bus's q/p live" were reading the bus's own row, both on the way BACK from
+the device (`GpuNewtonRaphson.writeBackDriverMutations`), which is why the device's own state was right and OLF's
+re-evaluation of it was not:
+
+- **the slack bus** was resolved by matching `dsSlackPhiRow` against each bus's `BUS_PHI` variable row, and the
+  pack ships the RELOCATED row (`pRow`), which no `BUS_PHI` owns. So the match failed, the slack's retained share
+  was never written back, and OLF measured the converged state against stale targets.
+- **the pinned limit** was read as `deviceTargets[rlVrow]`, the bus's own row — the coupler's `ZERO_V` row for a
+  relocated child — so the write-back froze a voltage target on the bus as if it were a reactive limit.
+
+`OLF_GPU_SEQ_TRACE=1` is what named it: `iters=1 norm=1.672228 devNorm=9.454597e-06 status=MAX_ITERATION_REACHED`
+— the device converged and OLF re-measured 1.67. After both fixes, the same line reads
+**`norm=9.495997519e-06 devNorm=9.454596917e-06 status=CONVERGED`**, against OLF's own final
+`|f(x)|=9.495997504e-06`: the two agree to NINE significant digits. And the sequence is OLF's, pass for pass:
+
+| solve | OLF | device |
+|---|---|---|
+| initial | 3 iterations (119.5997 → 5.5883 → 0.2284 → 0.002453) | 3 |
+| DistributedSlack 0 | 1 | 1 |
+| ReactiveLimits 1 | 2 | 2 |
+| ReactiveLimits 2 | 1 | 1 |
+| ReactiveLimits 3 | 1 | 1 |
+
+OLF makes 28 switches over those three ReactiveLimits passes (25 + 2 + 1). Next: the full-scope batch, which could
+not even start while the base failed (`precomputed on device: -1`).

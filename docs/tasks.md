@@ -3954,3 +3954,26 @@ Next measurement, the one that named every earlier defect of this kind: OLF's ow
 residual for that scenario (`OLF_GPU_EQ_DUMP_CTG=<id>`, which now also writes OLF's f(x0) per equation) against
 the device's first fill of the same slot (`OLF_GPU_VALS_SCAN_SLOT=<slot>` + `OLF_GPU_VALS_DUMP`), matched row by
 row through the `.eq` map — with the relocation ON, so the comparison sees the relocated layout.
+
+### Why the contingencies fail with the relocation on: named rows (2026-09-29)
+
+`VALS_SCAN` now also prints the three largest |F| of the scanned slot (`worstF=[row:value ...]`) — a scenario that
+spends its whole Newton budget is a handful of rows whose residual never falls, and naming them names the defect.
+On the window's failing slot 0 with the relocation on, the residual is dominated by the SAME three rows at every
+iteration: **12590 at 6.5e+02, 12588 at 1.09e+02, 13174 at 3.1e+01**. Read through the SA extraction's own row map
+(`OLF_GPU_SA_EQ_DUMP`, since the row indices differ from the base extraction's):
+- **12590 = `BUS_V(VL-6003_1)`**, the pilot-self group's carrier row (its own q via the alternate dest plus the
+  group's DISTR_Q sharing) — a 650 residual means the reactive sharing is wildly unsatisfied.
+- **12588 = `BUS_V(VL-6003_0)`**, the PILOT, `terms=[]` — an EMPTY row. A residual of 109 on an empty row is
+  exactly `F = −target`: the row carries a target and nothing assembles into it. That is the empty-row class
+  fixed twice already today, now in the relocated layout.
+- **13174 = `DUMMY_P(BUS-6002_COUPLER_2)`**, a RELOCATED coupler's dummy row hosting a bus's P equation.
+And the relocation is itself pin-state dependent, so the base and the SA get DIFFERENT structures: comparing the
+two maps in one run, 44 of 47 couplers are relocated in the base extraction against 41 in the SA's, and the three
+that differ are `BUS-5997_COUPLER_1`, `BUS-6003_COUPLER_1`, `BUS-6112_COUPLER_1` — exactly the pilot-self groups
+the base load flow PINS (`ownReactiveOnItsVRow` reads `qRow`/the DISTR_Q activation, which the pin changes). So
+the relocation must be made canonical the way the extraction was this morning, and the pilot-self candidate table
+must follow it where a member's balance has moved — the qr table still names the buses' own V rows.
+Next: make `ziTreeRelocation` pin-state independent (the same canonical rule as `hasCandidateTable`), then check
+whether the pilot's row still assembles empty in a scenario; the instrument is in place (`worstF` + the two row
+maps + `OLF_GPU_SA_EQ_DUMP`).

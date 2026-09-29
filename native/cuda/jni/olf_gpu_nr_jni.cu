@@ -1917,6 +1917,30 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
             }
             }
         }
+        // ...and WHICH equations this slot cannot satisfy: the three largest |F|. A scenario that runs its whole
+        // Newton budget without converging is not a numerical mystery — it is a handful of rows whose residual
+        // never falls, and naming them names the defect.
+        char worstF[160] = "";
+        {
+            std::vector<double> hfv(n);
+            CUDA_CHECK(cudaMemcpy(hfv.data(), static_cast<const double*>(ctx->dF.p) + (size_t) s * n,
+                                  n * sizeof(double), cudaMemcpyDeviceToHost));
+            int w[3] = {-1, -1, -1};
+            for (int r = 0; r < n; r++) {
+                for (int t = 0; t < 3; t++) {
+                    if (w[t] < 0 || std::fabs(hfv[r]) > std::fabs(hfv[w[t]])) {
+                        for (int u = 2; u > t; u--) w[u] = w[u - 1];
+                        w[t] = r;
+                        break;
+                    }
+                }
+            }
+            int off = 0;
+            for (int t = 0; t < 3 && w[t] >= 0; t++) {
+                off += std::snprintf(worstF + off, sizeof(worstF) - off, " %d:%.3e", w[t], hfv[w[t]]);
+            }
+        }
+        std::fprintf(stderr, "VALS_SCAN worstF=[%s ]\n", worstF);
         std::fprintf(stderr, "VALS_SCAN outer=%d it=%d slot=%d nnz=%d finite=%s maxAbs=%.6e at row=%d col=%d"
                              " | noDiagSlot=%d tinyDiag=%d firstBadRow=%d nHaz=%d dupRows=%d,%d"
                              " modes[0..4]=%d,%d,%d,%d,%d deadCols=%d firstDeadCol=%d mode4Rows=[%s]\n",

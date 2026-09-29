@@ -3977,3 +3977,39 @@ must follow it where a member's balance has moved — the qr table still names t
 Next: make `ziTreeRelocation` pin-state independent (the same canonical rule as `hasCandidateTable`), then check
 whether the pilot's row still assembles empty in a scenario; the instrument is in place (`worstF` + the two row
 maps + `OLF_GPU_SA_EQ_DUMP`).
+
+### The relocation made canonical: the window goes green, and what coverage it costs (2026-09-29)
+
+Two changes make the coupler-tree relocation pin-state independent, which is what the failing scenarios needed:
+
+1. **The candidate table follows the relocation.** `ExtractionColumns` now computes `ziTreeRelocation` BEFORE the
+   pilot-self candidate tables and enrols each member at the row its reactive balance actually lives on
+   (`parent >= 0 && dummyQCol[parent] >= 0 ? dummyQCol[parent] : vCol[member]`). Before this the `qr` table named
+   the members' own `BUS_V` rows, which a relocated member no longer owns — hence row 12588 assembling empty
+   (`F = −target`) and 12590 carrying 650 of unsatisfied sharing.
+2. **The child test no longer reads the pin state.** `ownReactiveOnItsVRow` was
+   `qRow[bn] == vCol[bn] || DISTR_Q active && distrQRow == vCol[bn]`; it is now
+   `qRow[bn] == vCol[bn] || isRemoteGenVcControllerElement(bus)`, i.e. a remote controller element's own V row is
+   the home of its reactive balance whatever pins it (DISTR_Q while it shares, its own Q once pinned).
+
+Measured on the 1000-section window with `-Dolf.gpu.ziTreeRelocation=true -Dolf.gpu.ziTreeRelocationMinCouplers=1`:
+**958/1000 on device, the window test PASSES, violations diff 0, distributed-power worst 2.83e-06 MW**, and the
+two extractions now relocate IDENTICALLY (41 childSide=0, 6 childSide=2 in both maps) — the 44-vs-41 split is gone.
+That is the same result as the relocation OFF, so the relocation is no longer a regression at window scope.
+
+**But the first canonical child test cost most of the coverage at full scope.** Excluding every bus that has a
+voltage control at all (`isGeneratorVoltageControlled()` etc.) relocated only **74 of 366** couplers against 329
+with the old pin-dependent rule, and the base's first factorization came back wrong again: `tinyDiag=793`,
+`||J.dx−F||inf/||F||inf = 1.3e+10`, the Newton wandering to 8.9e+24 by outer 7 (the base's reported distributed
+power still matched, which is what a retry after a divergence looks like — not a clean solve). The reason is
+MERGED controls: over a zero-impedance component OLF merges the voltage controls and only ONE of them is main and
+visible, so only that one bus gets a `BUS_TARGET_V` row, while every other controlled bus of the component owns
+nothing. The canonical owner test is therefore OLF's own `VoltageControl.findMainVisibleControlledBus()`, which is
+pin-state independent (its `isHidden` reads element DISABLE, not the reactive-limit pin), and that is what
+`hostsVoltageIdentity` now asks. Being measured: full-scope base (`tinyDiag`, `LIN_RESID` ratio, base distributed
+power, relocated count) then the window again.
+
+Still open after that: a relocated child that a contingency RE-HOMES as its section's main control has no free V
+row for the identity (the coupler is closed, so its V row holds `ZERO_V`). The component's rows are all equal in V,
+so the identity can go on the root's V row — the root's own reactive balance then has to move, exactly as OLF moves
+a controlled bus's Q. The 16 `VC_REMERGE_MULTI` plan rejects already send that shape to the CPU.

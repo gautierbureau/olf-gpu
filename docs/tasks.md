@@ -4459,3 +4459,22 @@ bus's own row through the device copy of `relocOwn`):
 Measured right after, full scope in exclude mode: **6552 of 6667 on device** (was 6532), and `RUNTIME:status=-3`
 is GONE from the census — all 20 fixed, and they were 20 of the 23 genuine device defects. The census also now
 reports `PLAN:ISLANDS_SLACK` where it used to mislabel that entry `SIDE_OPEN_UNPACKED`.
+
+### The +20 verified against the CPU (2026-09-29)
+
+Full comparison in exclude mode after the both-modes stock pair, with the 20 formerly-failing contingencies now
+solved on device:
+
+| | |
+|---|---|
+| on device | **6552 of 6667**, and `0 simulated by neither arm` |
+| statuses | CPU 6602 / 5 / 60, GPU 6601 / 6 / 60 — unchanged, so the 20 converge and agree |
+| status mismatches | 1, still only `BUS-6194_BBS_2` |
+| violations | 503923 vs 503854, diff **69** (70 before the fix) |
+| distributed power | worst 1.073628e+01 MW, unchanged |
+| runtime rejects | 60 × `status=-2`, and NO `status=-3` |
+
+So the twenty extra scenarios brought no new differences: their results agree with OLF, and the suite is unchanged
+at the two known middle-section failures. What remains of the 23 device defects is 3: `BUS-1219_BBS` and
+`BUS-6229_BBS_1` (non-converging where the CPU converges) and `BUS-6194_BBS_2` (the one status mismatch), all of
+which point at the slack loop's five-passes-for-one behaviour already written up.

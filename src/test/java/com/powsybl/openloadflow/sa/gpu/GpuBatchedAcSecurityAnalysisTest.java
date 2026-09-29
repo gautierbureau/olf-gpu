@@ -3553,6 +3553,40 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** The same HVDC outage with AC emulation OFF — SETPOINT mode. Such a link has NO element in the
+     *  equation system at all: AcEquationSystemCreator#createHvdcAcEmulationEquations builds its terms
+     *  only for an AC-emulation link and does "nothing to do" otherwise. So there is nothing to mask,
+     *  and the whole outage is the two converter stations' injection loss — which the propagation
+     *  already hands over in generatorIdsToLose and the generator-outage channel already carries.
+     *
+     *  <p>The mapper rejected it anyway (MAPPER:hvdc-outage-unsupported), sending every setpoint-mode
+     *  HVDC outage to the CPU with both its stations ALREADY resolved: measured on network.xiidm,
+     *  LVKR and LVKS composed as gens=2 hvdcs=null and were then thrown away. Letting the mapper skip
+     *  a non-AC-emulation link instead of rejecting took that scope from 269/273 to 271/273 with the
+     *  answers unchanged (violations 652/652 diff 0).
+     *
+     *  <p>VERIFIED by restoring the reject and watching the engagement assert below fail. That assert
+     *  is the whole point of this test: the ANSWER is right either way, because the CPU fallback
+     *  computes it correctly — only the batching changes, so a state-only comparison proves nothing. */
+    @org.junit.jupiter.api.Test
+    void deviceSetpointHvdcContingencyBatchesThroughTheGeneratorChannel() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.HvdcNetworkFactory.createHvdcLinkedByTwoLinesAndSwitch(
+                com.powsybl.iidm.network.HvdcConverterStation.HvdcType.VSC);
+        network.getHvdcLine("hvdc23").setMaxP(500);
+        network.getLineStream().forEach(l -> l.setR(1).setX(10));
+        List<Contingency> ctgs = List.of(
+                new Contingency("hvdc23", new com.powsybl.contingency.HvdcLineContingency("hvdc23")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setHvdcAcEmulation(false).setDistributedSlack(true).setUseReactiveLimits(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the setpoint-mode HVDC outage must BATCH — it is the only scenario here, so a CPU "
+                        + "fallback would still produce the right answer and the comparison above "
+                        + "would pass while proving nothing");
+    }
+
     /** DEVICE-mode HVDC AC emulation with the FREEZE phase active (startWithFrozenACEmulation) AND a
      *  tight pMax forcing LINEAR -> SATURATION transitions; GPU SA == CPU SA at 1e-12. */
     @org.junit.jupiter.api.Test

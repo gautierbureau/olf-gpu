@@ -47,6 +47,8 @@ final class GpuContingencyMapper {
         for (String id : pc.getGeneratorIdsToLose()) {
             LfGenerator gen = net.getGeneratorById(id);
             if (gen == null || gen.getBus() == null || gen.getBus().isDisabled()) {
+                trace(pc, "generator " + id + (gen == null ? " not in the LfNetwork"
+                        : gen.getBus() == null ? " has no bus" : " sits on a disabled bus"));
                 return null;
             }
             if (lostLfBusIds.contains(gen.getBus().getId())) {
@@ -96,8 +98,20 @@ final class GpuContingencyMapper {
         List<com.powsybl.openloadflow.network.LfHvdc> out = new java.util.ArrayList<>();
         for (String id : pc.getHvdcIdsToOpen()) {
             com.powsybl.openloadflow.network.LfHvdc hvdc = net.getHvdcById(id);
-            if (hvdc == null || hvdc.getBus1() == null || hvdc.getBus2() == null || !hvdc.isAcEmulation()) {
+            if (hvdc == null || hvdc.getBus1() == null || hvdc.getBus2() == null) {
+                trace(pc, "hvdc " + id + (hvdc == null ? " not in the LfNetwork"
+                        : " has a converter with no bus"));
                 return null;                                 // not a packed hv element — CPU
+            }
+            if (!hvdc.isAcEmulation()) {
+                // SETPOINT mode: AcEquationSystemCreator#createHvdcAcEmulationEquations builds its
+                // terms only for an AC-emulation link and does "nothing to do" otherwise, so such a
+                // link has NO element in the system and there is nothing to mask. Its whole outage is
+                // the two converter stations' injection loss, and the propagation already puts them in
+                // generatorIdsToLose — the generator channel carries it, exactly as the class comment
+                // says. Rejecting here instead sent every setpoint-mode HVDC outage to the CPU with
+                // both its stations already resolved (network.xiidm LVKR and LVKS: gens=2, hvdcs=null).
+                continue;
             }
             out.add(hvdc);
         }

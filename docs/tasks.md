@@ -4064,3 +4064,29 @@ relocated member's row got both the pilot's reactive balance and its coupler's `
 frees more buses, which is why the extra coverage surfaced it. Fixed by giving `stateQRow` the relocation (a
 `ziParentEdge`/`dummyQCol` overload, the same mapping `distrQRow`'s tree overload makes) and by mapping candidate 0
 — the pilot's own fallback row — through it too, so the table, the target map and the kernels name one row each.
+
+### Full scope with the relocation on: the base is exact, the BATCH still rejects (2026-09-29)
+
+Full 6876-section run with the defaults (relocation now on), GPU arm reject trace:
+
+| | count |
+|---|---|
+| contingencies with `status=-3` | 6616 |
+| contingencies with `status=-2` | 51 |
+| slot-level `linear-solve` rejects | 13232 |
+| slot-level `max-iter-bad-solve` | 4 |
+
+and the shape is uniform: **6616 of them reject at `outer=0 it=1`** with `ratio` around 1e+10
+(`||J.dx-B||inf` ~ 8.7e+10 against `||F||inf = 3.840`, the same residual on slot after slot). So iteration 0 of
+every batched scenario factors fine and iteration 1 does not — the pattern is fixed per context, so something the
+device does BETWEEN iterations (the per-scenario row-mode application, the pilot-self gate, the pilot-veq flip, the
+reactive-limit seeding) is what breaks the matrix, not the extraction. The same 1000-section window and the
+[5000,5050) slice batch cleanly (50/50 on device, violations diff 0, worst 1.7e-07 MW), so this is scope-dependent:
+366 couplers and 6876 scenarios against 47 and 1000.
+
+This is NOT a regression from the relocation: full scope with the relocation off was 251/6876 with 6357
+`status=-3`, the same failure. What the relocation fixed is the BASE (exact, `tinyDiag=0`, ratio 1.5e-14); the
+batch defect was always there underneath and is now the single thing between us and the full scope.
+Being measured: the slot-0 scan of the full-scope batch context at it=0 vs it=1 (`OLF_GPU_VALS_SCAN_SLOT=0` +
+`OLF_GPU_LIN_RESID`), which prints `tinyDiag` / `dupRows` / `deadCols` / `mode4Rows` per iteration and the worst
+row of the linear residual — the pair that named every earlier defect of this class.

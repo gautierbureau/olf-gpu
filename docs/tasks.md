@@ -4090,3 +4090,31 @@ batch defect was always there underneath and is now the single thing between us 
 Being measured: the slot-0 scan of the full-scope batch context at it=0 vs it=1 (`OLF_GPU_VALS_SCAN_SLOT=0` +
 `OLF_GPU_LIN_RESID`), which prints `tinyDiag` / `dupRows` / `deadCols` / `mode4Rows` per iteration and the worst
 row of the linear residual — the pair that named every earlier defect of this class.
+
+### What the full-scope batch was failing on: the mode-4 ALTERNATE row (2026-09-29)
+
+The slot-0 scan of the full-scope batch context named it in one line:
+`tinyDiag=7 firstBadRow=13985 deadCols=2 firstDeadCol=14417 mode4Rows=[2888 3364 13985 14403 14415 14417 14473
+14475 14497]`, against `tinyDiag=0 deadCols=0` for the base on the same structure, and every failing slot's
+`LIN_RESID it=1` agreeing on `worstRow=13053` with `||dx||inf = 1.5e+15`.
+
+Read through the row map, the mode-4 rows are `DUMMY_Q(BUS-1459/5997/6003/6194/6229_COUPLER_n)` — RELOCATED
+children's reactive rows, each carrying its bus's `DISTR_Q` terms (`kind=3`, weights 1/3, 1/2, 0.31…). So the
+failing shape is: a reactive limit PINS a relocated child. The pin lands on the coupler's `DUMMY_Q` row (the
+native pass diverts it there through `rlQrow`, correctly — that is where the child's balance lives), the mode-4
+flip gates off the `DISTR_Q` terms that were the only entries in that `DUMMY_Q` column, and every family writes
+the bus's OWN q to `qRowAlt[bus]`, which was still the bus's own `BUS_V` row — the row now holding the coupler's
+`ZERO_V`. Result: the coupler's dummy column has NO equation (dead column), the `ZERO_V` row is corrupted, the
+factorization is garbage from iteration 1 on, and 6616 of 6876 scenarios reject.
+
+The fix is one line in `ExtractionColumns`, beside the `qRow`/`pRow` relocation that was already there: a
+relocated child's plain own-row ALTERNATE moves to the coupler's `DUMMY_Q` row too (a candidate-table pilot's
+`-2-group` encoding is left alone). It fixes every family at once, since they all read `columns.qRowAlt()`.
+Measured right after: the full-scope base has `tinyDiag=0` at EVERY pass (it was 796 once pins landed), linear
+residual ratios of 1e-15 to 1e-12 throughout, and the 31-iteration plateau at outer pass 6 is gone — that
+plateau WAS this defect in the base. Pattern nnz drops 100086 -> 98892, as it should: the alternate now points at
+a row that already carries those columns.
+
+Open right after the fix: the full-scope base reported `MAX_ITERATION_REACHED` in a GPU-arm-only run whose
+visible scans stop at outer 6 it=8 (|F| 2.8e-3 and falling), so the later passes run in another context. Being
+measured with both arms and `OLF_GPU_DBG_NR` beside the device scans.

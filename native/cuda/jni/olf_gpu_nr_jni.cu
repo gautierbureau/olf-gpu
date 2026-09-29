@@ -4462,6 +4462,9 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
     // the bus's own V variable (VOLTAGE reads) and the row its pin state lives on, which the coupler-tree
     // relocation can move to the parent coupler's DUMMY_Q (see dRlQrow)
     int qrow = rlQrow != nullptr ? rlQrow[i] : vrow;
+    if (qrow != vrow && baseMode[qrow] == 0) {
+        qrow = vrow;                                         // that coupler is open in the BASE: equations at home
+    }
     size_t idx = (size_t) s * n + vrow;
     size_t qix = (size_t) s * n + qrow;
     size_t st = (size_t) s * nrl + i;
@@ -5317,8 +5320,15 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         // updatePilotVeqBatch flips the pilot's V identity to a power row (control lost) and
         // restores it on the first unpin — the all-pinned corner runs on-device too.
         size_t ridx = (size_t) s * n + rlVrow[i];            // the bus's own V variable: every VOLTAGE read
-        // ...and the row its reactive balance and pin live on, which the coupler-tree relocation can move:
-        size_t qidx = rlQrow != nullptr ? (size_t) s * n + rlQrow[i] : ridx;
+        // ...and the row its reactive balance and pin live on. The coupler-tree relocation moves it to the parent
+        // coupler's DUMMY_Q row — but PER SCENARIO: a contingency that OPENS that coupler sends the child's
+        // equations back to its own rows and the host pins the dummy row with a DUMMY_TARGET identity, which is
+        // exactly what mode 0 there means (the same test the zi scatter's stock-placement fallback uses).
+        size_t qidx = ridx;
+        if (rlQrow != nullptr && rlQrow[i] != rlVrow[i]) {
+            size_t relocIdx = (size_t) s * n + rlQrow[i];
+            qidx = mode[relocIdx] == 0 ? ridx : relocIdx;
+        }
         size_t rst = (size_t) s * nrl + i;
         size_t rli = cvStride ? rst : (size_t) i;
         // The quadratic delta exists only for SVC entries: rlV2Base is the packed base v², NaN when
@@ -6174,7 +6184,13 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
     if (rlBaseLt != nullptr && rlBaseLt[i] == RL_BASE_RELOCATED) return;
     if (isEnrolledPilot(psEntry, nQr, i)) return;           // its pin never lives on its own V row (rotation)
     if (lt != 0) {
-        size_t idx = (size_t) s * n + (rlQrow != nullptr ? rlQrow[i] : rlVrow[i]);   // the pin's row (see dRlQrow)
+        // the pin's row (see dRlQrow), with the relocation's per-scenario diversion: mode 0 at the relocated row
+        // means its coupler is open this scenario and the equations are back on the bus's own rows
+        int seedRow = rlQrow != nullptr ? rlQrow[i] : rlVrow[i];
+        if (seedRow != rlVrow[i] && mode[(size_t) s * n + seedRow] == 0) {
+            seedRow = rlVrow[i];
+        }
+        size_t idx = (size_t) s * n + seedRow;
         size_t li = cvStride ? (size_t) s * nrl + i : (size_t) i;
         // What the row looked like BEFORE this seed is what a later switch-back restores. Leaving it
         // unwritten let the restore read whatever the previous solve left in this slot: the buffers are

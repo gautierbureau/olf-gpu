@@ -3903,3 +3903,28 @@ Measured on the FULL busbar scope with the relocation on (`-Dolf.gpu.ziTreeReloc
 So the full-scope base now matches OLF exactly — the 0.066 MW this branch is named after. Still to do: the
 contingency side in that configuration (slot 0 of the batch still ends `status=-2` after 30 iterations), then the
 window and both suites with the relocation on, and only then the property defaults.
+
+### The fix, part 2 (per-scenario) and where it stands (2026-09-29)
+
+`dRlQrow` is a STRUCTURE fact, but the relocation is per scenario: a contingency that OPENS the coupler sends the
+child's equations back to its own rows and the host pins the dummy row with a DUMMY_TARGET identity. All three
+kernels now test for that — mode 0 at the relocated row means "coupler open this scenario, read the bus's own
+row", the same test the zi scatter's stock-placement fallback uses (`initRlLimitTypeBatch` tests the BASE mode).
+State, all measured with the relocation enabled (`-Dolf.gpu.ziTreeRelocation=true
+-Dolf.gpu.ziTreeRelocationMinCouplers=1`):
+- **Full-scope BASE: exact.** Distributed power 14.359916545 MW on both arms, diff 0.000000e+00 (was 6.56e-02),
+  both CONVERGED, first residual ratio 1.40e-14.
+- **Full-scope linear-solve rejects: 6357 → 2.** The whole `status=-3` class is gone.
+- **Full-scope worst per-contingency distributed power: 1.07 MW → 2.05e-04 MW**, 4 contingencies above 1e-4.
+- **But nothing batches: 0 of 6876 on device**, 6660 rejects now `status=-2` — `max-iter-bad-solve`, ratio ~8e-2,
+  i.e. the per-scenario solves no longer converge. The WINDOW shows the same thing faster: with the relocation on
+  it drops from 958/1000 to **2/1000** (974 × `max-iter-bad-solve`), while its matrices are clean (tinyDiag 9 in
+  the base, 18 in the batch). So this is NOT a zero-diagonal problem: with the relocation on, the scenarios that
+  OPEN a relocated coupler fail. That per-scenario return path (the `relocOwn` / `stockAltRow` channel, and
+  whatever else must follow it: DISTR_Q dests, hazard donors, the P rows) is the next thing to fix.
+- **The DEFAULT path is unaffected** by the two parts landed: window 958/1000, violations diff 0, DAP worst
+  1.68e-05 MW, suite 304/0 (the one rotation-off failure is the known flaky 1e-12 kV assertion,
+  `javaLoadBasedDistributedSlackMatchesCpu`, same digits as its earlier occurrence, which passed on reruns).
+So the property defaults stay off for now: enabling them would trade a correct base for 974 CPU-replayed
+scenarios. The order from here is the per-scenario coupler-opening path, then the defaults, then part 3 (a
+relocated child that switches BACK to PV, which today has nowhere to put its voltage identity).

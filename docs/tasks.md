@@ -4320,3 +4320,23 @@ and it is a busbar section whose couplers are relocated — the same shape as th
 `deviceMiddleSectionLoss…` fixtures. Fixing that shape is expected to fix this contingency too.
 Being measured: both arms' flows on the four branches that differ (`OLF_GPU_SA_MON_BRANCH`) plus bus diffs of
 their contingencies, which separates "the GPU never reports that branch" from "the GPU uses a different limit".
+
+### A mode for "only the contingencies that matter" (2026-09-29)
+
+`OLF_GPU_SA_CTG_EXCLUDE=<file>` drops the listed contingency ids (one per line, `#` comments) from whatever the
+kind knobs built, and `docs/rte6515-impactless-busbar-sections.txt` is that list for rte6515: the **209** busbar
+sections OLF itself does not simulate. Measured with it: `209 of 6876 dropped, 6667 kept`.
+
+Two things had to be corrected on the way:
+
+- **They are NOT out of service.** The first guess was the missing `inSolvedNetwork` filter — the busbar list is
+  the only one without it — but a run says `0 of 6876 outside the solved network`: every section is connected and
+  in the main connected and synchronous component. OLF drops those 209 for a topological reason instead
+  (`PropagatedContingency.toLfContingency` finds no branch to open, no bus to lose, no injection to drop, logs
+  "has no impact", returns empty). The harness now prints that count instead of claiming a filter would help.
+- **The batching share had the wrong denominator.** `6529 / 6876` counts 209 contingencies nobody simulates as
+  GPU shortfall. The share now prints both: the list and the SIMULATED population, which is the CPU arm's own
+  result count — `6529 / 6876 (6529 of 6667 simulated; 209 simulated by neither arm)`.
+
+The caveat is in the message the mode prints: the contingency list decides which switches the LfNetwork retains,
+so an excluded run has a different base network. Its numbers compare with other excluded runs, not with full ones.

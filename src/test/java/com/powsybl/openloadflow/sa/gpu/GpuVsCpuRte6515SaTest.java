@@ -186,9 +186,26 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             int top = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_BUSBAR_TOP", "500"));
             List<String> ids = network.getBusbarSectionStream()
                     .map(com.powsybl.iidm.network.BusbarSection::getId).sorted().limit(top).toList();
+            // This list is the ONE that does not filter on inSolvedNetwork by default (branch, generator, SVC
+            // and shunt all do), so it carries sections that are disconnected or outside the main
+            // connected/synchronous component. OLF drops those itself — PropagatedContingency.toLfContingency
+            // returns empty and logs "has no impact" — so NEITHER arm produces a post-contingency result for
+            // them, while the GPU census still counts each as MAPPER:no-batchable-element. Measured 209 of 6876
+            // at full scope, exactly the gap between 6876 and OLF's own 6667 results.
+            //
+            // MEASURED on rte6515: all 6876 sections are connected and in the main connected/synchronous
+            // component (the count below is 0), so being "outside the solved network" is NOT why 209 of them
+            // have no result. OLF drops those 209 for a topological reason instead —
+            // PropagatedContingency.toLfContingency finds no branch to open, no bus to lose, no injection to
+            // drop, logs "has no impact" and returns empty — so NEITHER arm simulates them and the GPU census
+            // still counts each as MAPPER:no-batchable-element. Drop them with OLF_GPU_SA_CTG_EXCLUDE (below).
+            long outside = ids.stream()
+                    .filter(id -> !inSolvedNetwork(network.getBusbarSection(id).getTerminal()))
+                    .count();
             ids.forEach(id -> all.add(new Contingency(id,
                     new com.powsybl.contingency.BusbarSectionContingency(id))));
-            System.out.printf("  + %d busbar section contingencies%n", ids.size());
+            System.out.printf("  + %d busbar section contingencies (%d outside the solved network)%n",
+                    ids.size(), outside);
         }
         if (kinds.contains("battery")) {
             List<String> ids = keepSolved(network.getBatteryStream().toList(),
@@ -301,6 +318,29 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // holds ~29832 bus results per contingency — 1389 generator contingencies at once is tens of
         // GB and dies with an OutOfMemoryError before it reports anything. Windows of a few hundred
         // fit, and together they are the full set.
+        // OLF_GPU_SA_CTG_EXCLUDE=<file>: drop the contingency ids listed there (one per line, '#' comments).
+        // The mode that keeps ONLY THE ONES THAT MATTER: rte6515's busbar list carries 209 sections that OLF
+        // itself does not simulate ("has no impact" — no branch opened, no bus lost, no injection dropped), and
+        // they show up as MAPPER:no-batchable-element, diluting the census and the batching share while neither
+        // arm produces a result for them. docs/rte6515-impactless-busbar-sections.txt is that list, produced
+        // from a full-scope census run (grep 'reason=MAPPER:no-batchable-element' with OLF_GPU_REJECT_TRACE=1).
+        // NOTE: the contingency list decides which switches the LfNetwork retains, so an excluded run has a
+        // DIFFERENT base network — its numbers are comparable with other excluded runs, not with full ones.
+        String exclude = System.getenv("OLF_GPU_SA_CTG_EXCLUDE");
+        if (exclude != null) {
+            try {
+                java.util.Set<String> drop = java.nio.file.Files.readAllLines(java.nio.file.Path.of(exclude))
+                        .stream().map(String::trim).filter(l -> !l.isEmpty() && !l.startsWith("#"))
+                        .collect(Collectors.toSet());
+                int before = all.size();
+                all.removeIf(c -> drop.contains(c.getId()));
+                System.out.printf("  CTG_EXCLUDE %s: %d of %d dropped, %d kept (a different base network than"
+                        + " an unfiltered run — the retained switches follow the list)%n",
+                        exclude, before - all.size(), before, all.size());
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        }
         String max = System.getenv("OLF_GPU_SA_MAX_CTG");
         int from = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_CTG_FROM", "0"));
         if (max != null || from > 0) {
@@ -880,8 +920,15 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             Map<String, Long> census = GpuBatchScopeCensus.snapshot();
             System.out.printf("  GPU CENSUS (cold): %s%n", census);
             int gpuPrecomputed = GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get();
-            System.out.printf("  GPU precomputed on device: %d / %d contingencies%n",
-                    gpuPrecomputed, contingencies.size());
+            // Two denominators, because they differ: the LIST, and the contingencies OLF actually simulates.
+            // A contingency OLF drops as having no impact has no result on either arm, so counting it against
+            // the batching share reports a GPU limitation that does not exist (209 of rte6515's 6876 busbar
+            // sections). The CPU arm's result count IS the simulated population.
+            int simulated = cpu.getPostContingencyResults().size();
+            System.out.printf("  GPU precomputed on device: %d / %d contingencies (%d of %d simulated;"
+                    + " %d simulated by neither arm)%n",
+                    gpuPrecomputed, contingencies.size(), gpuPrecomputed, simulated,
+                    contingencies.size() - simulated);
 
             // OLF_GPU_SA_COLD_ONLY=1: no warm run (a profile of the cold run alone; "warm" then repeats cold).
             if ("1".equals(System.getenv("OLF_GPU_SA_COLD_ONLY"))) {

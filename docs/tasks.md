@@ -4495,3 +4495,23 @@ table and its device screen with OLF's own detector on the same states.
 What remains of the 23 device defects is 3: `BUS-1219_BBS` and `BUS-6229_BBS_1` (non-converging where the CPU
 converges) and `BUS-6194_BBS_2` (the one status mismatch), all of which point at the slack loop's
 five-passes-for-one behaviour already written up.
+
+### Statuses agree everywhere but one contingency (2026-09-29)
+
+The standard to hold is: where OLF does not converge, the device need not either — but the two must REPORT the
+same thing. Measured across three independent full-scope runs in exclude mode, the harness's per-contingency
+status comparison says exactly that:
+
+```
+statuses: CPU={CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}
+          GPU={CONVERGED=6601, FAILED=6, MAX_ITERATION_REACHED=60}
+STATUS MISMATCHES (1): [BUS-6194_BBS_2]
+```
+
+All 60 non-converging contingencies and all 5 that OLF fails carry the same status on both arms. One in 6667
+disagrees — `BUS-6194_BBS_2`, CONVERGED on the CPU and FAILED on the GPU — and that is the slack-loop defect.
+
+The caveat worth keeping in view: for those 60 the GPU arm's status comes from the CPU FALLBACK, since the device
+declined them, so the agreement is guaranteed by construction rather than earned. The device's own verdict is
+"could not converge", which agrees in substance with OLF's max-iteration verdict, but under
+[[no-cpu-fallback-goal]] the device will have to produce that status itself instead of handing the scenario back.

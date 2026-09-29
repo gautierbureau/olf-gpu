@@ -1116,10 +1116,16 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                         continue;
                     }
                     double i1d = Math.abs(cb.getI1() - gb.getI1());
+                    // BOTH sides: a one-sided violation is usually on side TWO, and side ONE matching says
+                    // nothing about it (rte6515 BUS-125_BBS_1: LINE-2533-1468's I1 agreed to 1e-13 while only
+                    // the CPU reported a CURRENT TWO violation 21% over its limit).
+                    double i2d = Math.abs(cb.getI2() - gb.getI2());
                     System.out.printf("  BRDIFF ctg=%-14s %s I1 cpu=%.6f gpu=%.6f d=%.3e (%.3e rel) "
+                            + "| I2 cpu=%.6f gpu=%.6f d=%.3e (%.3e rel)"
                             + "| P1 cpu=%.6f gpu=%.6f | Q1 cpu=%.6f gpu=%.6f%n",
                             cp.getContingency().getId(), cb.getBranchId(), cb.getI1(), gb.getI1(),
                             i1d, i1d / Math.max(1e-9, Math.abs(cb.getI1())),
+                            cb.getI2(), gb.getI2(), i2d, i2d / Math.max(1e-9, Math.abs(cb.getI2())),
                             cb.getP1(), gb.getP1(), cb.getQ1(), gb.getQ1());
                 }
             }

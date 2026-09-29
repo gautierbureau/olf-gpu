@@ -4388,3 +4388,24 @@ That single defect explains the distributed-power tail (worst 10.74 MW), `BUS-61
 `slackDistributionFailureBehavior: FAIL`, and the fixtures' last 0.34 kV.
 Note for the fix: `OLF_GPU_DS_DEBUG=1`'s `[DS-GATE]`/`[DS-WF]` device prints did NOT appear — make them work
 first, they are the per-pass view of the water-fill.
+
+### "Plan level" is not "by design" (2026-09-29)
+
+A correction to the wording used earlier. **Plan level** means the scenario is refused by
+`GpuBatchQualification.planScenarios` (or by the validator it reads) BEFORE any device work, as opposed to a
+runtime reject where the device solved and the result was thrown away. None of the four classes is a settled
+design; they are unimplemented shapes plus one stopgap, and under the no-CPU-fallback goal all of them are open:
+
+- **`PLAN:VC_REMERGE_MULTI`, 47.** When a contingency splits a zero-impedance component that carried several
+  merged voltage controls, the surviving cluster elects a new main control (`reHomedControls`). The device
+  handles exactly ONE shape of that: a cluster of a single bus controlling itself locally
+  (`cluster.size() == 1 && every controller element is the controlled bus`). A cluster of several buses, or a new
+  main controlled remotely, is refused. Unimplemented, not intended.
+- **`PLAN:VC_REMERGE_RELOC_VROW`, 3.** The guard added today: the re-homed control's new main is a relocated
+  coupler child, whose own `BUS_V` row holds the coupler's `ZERO_V`, so its voltage identity has nowhere to go.
+  A deliberate stopgap to avoid a silently wrong answer; the fix is to move a zero-impedance component's identity
+  to its root, which is already written up above.
+- **`VALIDATOR:ISLANDS_SLACK`, 1.** The outage islands the slack/reference bus.
+- **`PLAN:SIDE_OPEN_UNPACKED`, 1 — a MISLABEL, fixed.** That site records a fixed tag for EVERY disqualified
+  validator verdict, so the one full-scope entry (an islanded-slack outage) was reported as a side-open shape.
+  It now records the validator's own reason.

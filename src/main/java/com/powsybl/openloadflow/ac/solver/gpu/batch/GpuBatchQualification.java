@@ -764,7 +764,11 @@ final class GpuBatchQualification {
         for (int i = 0; i < qualifications.size(); i++) {
             GpuBatchContingencyValidator.Qualification q = qualifications.get(i);
             if (!q.qualified()) {
-                com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:SIDE_OPEN_UNPACKED");
+                // The validator's OWN reason, not a fixed tag: this site is reached by every disqualified
+                // verdict, so recording "SIDE_OPEN_UNPACKED" for all of them misreports the census — the one
+                // entry at rte6515's full scope is an ISLANDS_SLACK outage, which reads as a side-open shape.
+                com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:"
+                        + (q.reason() != null ? q.reason() : "UNQUALIFIED"));
                 continue;
             }
             BatchContingency c = contingencies.get(i);

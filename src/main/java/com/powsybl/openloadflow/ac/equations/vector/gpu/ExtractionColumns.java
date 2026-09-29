@@ -70,6 +70,11 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         // Dynamic Q-relocation: the OTHER candidate Q row of each transformer/shunt voltage-controlled
         // bus, so the fill can follow a per-scenario control toggle on the shared structure (§11).
         int[] qRowAlt = GpuAcRowIndexing.computeQRowAlt(network, es, vCol, branchRhoCol, shuntBCol, qRow);
+        // The coupler-tree relocation, computed HERE rather than after the candidate tables: a child bus's power
+        // equations move onto its parent coupler's dummy columns, so every row of a coupler chain keeps a
+        // structurally non-zero diagonal — and the tables below must name the row that ends up hosting each
+        // member's reactive balance, which for a relocated member is that dummy column and no longer its own V row.
+        int[][] ziTreeEdges = GpuAcRowIndexing.ziTreeRelocation(network, es, phiCol, vCol, qRow, dummyPCol, dummyQCol);
         // GROUP pilot-Q relocation candidates (plan-A6): a shared transformer-VC pilot's reactive
         // balance rides on the FREE member's rho column — "first enabled", which an outage or clamp
         // of the free member RE-PICKS per scenario. Encode such pilots' alternate as -2-groupId and
@@ -135,9 +140,16 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             if (!GpuAcRowIndexing.hasCandidateTable(gvc, es)) {
                 continue;
             }
+            // Each member's row is the one that HOSTS its reactive balance, which the coupler-tree relocation can
+            // move to the parent coupler's DUMMY_Q column (exactly as GpuAcRowIndexing.distrQRow's tree overload
+            // already moves its DISTR_Q). Naming its own V row instead sent a pinned pilot's raw q onto a row the
+            // relocation had given to the coupler's ZERO_V, and left the pilot's own row empty: measured on
+            // rte6515's [5000,6000) window with the relocation on, the failing slot's residual sat on
+            // BUS_V(VL-6003_1) at 6.5e+02 and on the empty pilot row BUS_V(VL-6003_0) at 1.09e+02, every iteration.
             List<Integer> memberRows = new ArrayList<>();
             for (LfBus m : gvc.getMergedControllerElements()) {
-                memberRows.add(vCol[m.getNum()]);
+                int parent = ziTreeEdges[0][m.getNum()];
+                memberRows.add(parent >= 0 && dummyQCol[parent] >= 0 ? dummyQCol[parent] : vCol[m.getNum()]);
             }
             int g = qrPtr.size();
             qrPtr.add(qrRows.size());
@@ -253,11 +265,8 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                 ziDeadEnd[br.getNum()] = GpuAcRowIndexing.ziDeadEndSide(es, br, phiCol, vCol, qRow);
             }
         }
-        // The coupler-tree relocation: a child bus's power equations move onto its parent coupler's dummy columns,
-        // so every row of a coupler chain keeps a structurally non-zero diagonal.
-        int[][] ziTree = GpuAcRowIndexing.ziTreeRelocation(network, es, phiCol, vCol, qRow, dummyPCol, dummyQCol);
-        int[] ziParentEdge = ziTree[0];
-        int[] ziChildBus = ziTree[1];
+        int[] ziParentEdge = ziTreeEdges[0];
+        int[] ziChildBus = ziTreeEdges[1];
         int[] pRow = phiCol.clone();
         for (LfBus bus : network.getBuses()) {
             int bn = bus.getNum();

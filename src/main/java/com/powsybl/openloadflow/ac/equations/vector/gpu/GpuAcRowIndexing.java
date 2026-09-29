@@ -475,7 +475,7 @@ final class GpuAcRowIndexing {
                     LfBus other = br.getBus1() == b ? br.getBus2() : br.getBus1();
                     int otherNum = other.getNum();
                     if (seen[otherNum] || phiCol[otherNum] < 0 || vCol[otherNum] < 0
-                            || row(es, otherNum, AcEquationType.BUS_TARGET_V) >= 0) {
+                            || hostsVoltageIdentity(other, es)) {
                         continue;                            // a pilot's V row is an identity: ZERO_V cannot take it
                     }
                     seen[otherNum] = true;
@@ -516,8 +516,14 @@ final class GpuAcRowIndexing {
             if (parent < 0) {
                 continue;
             }
-            boolean ownReactiveOnItsVRow = qRow[bn] == vCol[bn]
-                    || row(es, bn, AcEquationType.DISTR_Q) >= 0 && distrQRow(es, bus) == vCol[bn];
+            // CANONICAL, i.e. pin-state independent (the lesson of the canonical extraction): a remote gen-VC
+            // controller element's q is SUPPRESSED at extraction (qRow = -1) and its own V row is where its balance
+            // comes back — its DISTR_Q while it shares, its own Q once a limit pins it — so its row is the home of
+            // its reactive balance whatever the pin state. Reading the pin state here made the base and the
+            // security analysis relocate DIFFERENTLY (measured: 44 of 47 couplers in the base extraction against
+            // 41 in the SA's, the three differing ones exactly the pilot-self groups the base load flow pins), so
+            // the two ran on different structures and every scenario failed.
+            boolean ownReactiveOnItsVRow = qRow[bn] == vCol[bn] || isRemoteGenVcControllerElement(bus);
             if (dummyPCol[parent] < 0 || dummyQCol[parent] < 0 || hostsAnotherReactiveRow[bn]
                     || !ownReactiveOnItsVRow) {
                 parentEdgeOfBus[bn] = -1;
@@ -525,6 +531,30 @@ final class GpuAcRowIndexing {
             }
         }
         return new int[][] {parentEdgeOfBus, childBusOfEdge};
+    }
+
+    /**
+     * True when this bus owns a {@code BUS_TARGET_V} identity row: it is where OLF puts the voltage equation of
+     * a control it takes part in, so that row is not free for a coupler's {@code ZERO_V}.
+     *
+     * <p>Pin-state INDEPENDENT, which asking whether the equation is active right now is not — a pilot whose
+     * controllers a reactive limit has pinned has no active identity, yet the row is still its own and comes
+     * back the moment the limit releases. The owner is OLF's own answer, {@link
+     * VoltageControl#findMainVisibleControlledBus()}: of the controls merged over a zero-impedance component
+     * exactly ONE is main and visible, and its controlled bus carries the single identity the component gets.
+     * Asking instead whether the bus has a control AT ALL excluded every merged dependent controlled bus and
+     * cost most of the coverage (measured on rte6515's full busbar scope: 74 of 366 couplers relocated against
+     * 329, 793 zero diagonals left and the base's first factorization off by a ratio of 1.3e+10).
+     */
+    private static boolean hostsVoltageIdentity(LfBus bus, EquationSystem<AcVariableType, AcEquationType> es) {
+        return row(es, bus.getNum(), AcEquationType.BUS_TARGET_V) >= 0
+                || identityOwner(bus.getGeneratorVoltageControl().orElse(null), bus)
+                || identityOwner(bus.getTransformerVoltageControl().orElse(null), bus)
+                || identityOwner(bus.getShuntVoltageControl().orElse(null), bus);
+    }
+
+    private static boolean identityOwner(VoltageControl<?> vc, LfBus bus) {
+        return vc != null && vc.findMainVisibleControlledBus().map(b -> b == bus).orElse(false);
     }
 
     private static boolean hasImpedantBranch(LfBus bus) {

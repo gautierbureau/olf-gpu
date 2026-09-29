@@ -4013,3 +4013,27 @@ Still open after that: a relocated child that a contingency RE-HOMES as its sect
 row for the identity (the coupler is closed, so its V row holds `ZERO_V`). The component's rows are all equal in V,
 so the identity can go on the root's V row — the root's own reactive balance then has to move, exactly as OLF moves
 a controlled bus's Q. The 16 `VC_REMERGE_MULTI` plan rejects already send that shape to the CPU.
+
+### The two per-scenario row flips the relocation also moves (found by reading, 2026-09-29)
+
+With the relocation ON by default, every per-scenario flip of a bus's own `BUS_V` row has to ask first whether the
+relocation gave that row to a coupler's `ZERO_V`. Two such flips live in `GpuBatchQualification`, both on the
+re-merge path (`reHomedControls`), and neither asked:
+
+- **A dead control's survivor solving its own reactive balance** (`deadControlBuses`, a `GenOutage` with
+  `vRow = vVar.getRow()` and `targetQ`, mode 4 via `deadControlRowMode`). For a relocated child that row holds
+  `ZERO_V`, while its reactive balance — and the `BUS_TARGET_Q` the activation extractor writes — are at the parent
+  coupler's `DUMMY_Q` row. So the flip must be DIVERTED to that row, exactly as the native reactive-limit pass
+  already diverts through `rlQrow`. An outaged coupler puts the equations back on the bus's own rows, so the
+  diversion is per scenario (the same test the device makes: mode 0 at the relocated row).
+- **A re-homed control's new main becoming a PV bus at its target** (`reHomed.pvTargets()`, a `reHomedPvEntry` at
+  `vVar.getRow()`). That flip turns the row into a voltage IDENTITY, and a relocated child has no free row for one:
+  taking its V row back would delete the coupler's `ZERO_V` and nothing would then tie the two ends' voltages. Until
+  the identity can move (below), such a scenario is a plan reject (`PLAN:VC_REMERGE_RELOC_VROW`) and runs on the CPU.
+
+**The design that removes the reject.** Every bus of a zero-impedance component has the same voltage, so the
+component needs ONE identity row, not one per bus that might control. The root keeps its own rows today, and its V
+row carries its reactive balance; OLF replaces a controlled bus's reactive balance with the identity, so the
+component's identity belongs on the ROOT's V row whichever of its buses is the elected main, with the root's
+reactive balance moving the way a controlled bus's does. That also removes `hostsVoltageIdentity` as a coverage
+limit: the root would be CHOSEN as the identity owner instead of every capable bus being excluded from relocation.

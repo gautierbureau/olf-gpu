@@ -683,13 +683,38 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         sap.setIncreasedViolationsParameters(new SecurityAnalysisParameters.IncreasedViolationsParameters(
                 0.5, 0.001, 0.5, 0.001, 0.001));
 
-        // CPU arm: 8 threads (production-realistic) - EXCEPT for busbar sections, which compare
-        // against ONE thread: OLF's partitioning splits the retained switches between threads, so a
-        // multi-threaded CPU arm lands on a different bus decomposition than the device's and the
-        // numbers are not comparable (the base alone differs by 8e-6 kV at 8 threads, bit-identical
-        // at 1). OLF_GPU_SA_CPU_THREADS still overrides.
-        String kindsEnv = System.getenv().getOrDefault("OLF_GPU_SA_CTG_KINDS", "");
-        String defaultThreads = kindsEnv.contains("busbar") ? "1" : "8";
+        // CPU arm: 8 threads (production-realistic) on a BUS-BREAKER case, ONE thread on a
+        // NODE-BREAKER one. OLF partitions the contingency list across threads and each partition
+        // builds its OWN LfTopoConfig, so each lands on its own retained-switch set and its own bus
+        // decomposition — while the GPU arm is single-threaded by construction and builds one network
+        // for the whole list. The two arms then solve DIFFERENT networks and the numbers are not
+        // comparable.
+        //
+        // This used to key on the KIND (busbar -> 1, everything else -> 8), which is the shape of the
+        // measurement that found it, not the cause. The cause is BREAKER MODE, and what turns it on is
+        // the contingency LIST, not the kind and not the topology: OLF is in breaker mode exactly when
+        // some contingency's propagation opens a switch or loses a bus (LfTopoConfig#isBreaker), and
+        // only then does a partition's own retained-switch set change its bus decomposition. Both these
+        // cases are node-breaker, and they differ: rte6515's branch/load/generator lists open nothing,
+        // so every partition builds the same network and 8 threads are safe (and 7x faster), while
+        // network.xiidm's lists DO open switches — 3180 of its 7495 load contingencies have a branch to
+        // open — so 8 threads split the retained switches and the arms stop being comparable.
+        //
+        // Measured on network.xiidm's full branch scope: the SAME GPU arm (3273 violations, 365 s)
+        // scores 3273 against a 1-thread CPU arm and 3187 against an 8-thread one, and the
+        // distributed-power worst goes from 1.4e-05 MW to 1.93 MW. That reads exactly like a GPU
+        // regression and cost a full bisect to clear. Ask OLF instead of guessing.
+        // OLF_GPU_SA_CPU_THREADS still overrides.
+        com.powsybl.openloadflow.network.LfTopoConfig probeTopoConfig =
+                new com.powsybl.openloadflow.network.LfTopoConfig();
+        com.powsybl.openloadflow.network.impl.PropagatedContingency.createList(network, contingencies, probeTopoConfig,
+                new com.powsybl.openloadflow.network.impl.PropagatedContingencyCreationParameters()
+                        .setContingencyPropagation(true)
+                        .setShuntCompensatorVoltageControlOn(lfp.isShuntCompensatorVoltageControlOn())
+                        .setSlackDistributionOnConformLoad(lfp.getBalanceType()
+                                == com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_CONFORM_LOAD)
+                        .setHvdcAcEmulation(lfp.isHvdcAcEmulation()));
+        String defaultThreads = probeTopoConfig.isBreaker() ? "1" : "8";
         int cpuThreads = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_CPU_THREADS", defaultThreads));
         sap.addExtension(OpenSecurityAnalysisParameters.class,
                 new OpenSecurityAnalysisParameters().setThreadCount(cpuThreads));

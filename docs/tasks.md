@@ -4189,3 +4189,28 @@ Slot-level rejects: 44 `linear-solve` (was 13232), 110 `max-iter-bad-solve`, 5 `
 Against the last measurement with the relocation off — 251 of 6876 with 6357 `status=-3` — that is the full
 scope working for the first time. What remains is a tail of 346, dominated by the 209 unbatchable elements
 (a design limit of the mapper, not a defect) and the 111 `status=-2`.
+
+### The full-scope tail: distributed power (2026-09-29)
+
+Full scope now runs end to end. What the comparison says:
+
+| | value |
+|---|---|
+| on device | 6529–6530 of 6876 |
+| base | CPU CONVERGED, GPU CONVERGED, distributed power 14.359916545 vs 14.359916553 MW |
+| statuses | CPU 6602 converged / 5 failed / 60 max-iter; GPU 6601 / 6 / 60 |
+| violations | CPU 503923, GPU 503838, diff 85 (0.017%) |
+| distributed power | 3694 of 6601 differ by > 1e-9 MW, worst **1.073628e+01 MW** (the assertion wants < 1e-3) |
+
+The worst offenders are big-loss contingencies where the DEVICE distributes MORE than OLF:
+`BUS-5962_BBS_1` 984.0996 vs 994.8359 MW (10.74), `BUS-2289_BBS` 22.228 vs 25.042 (2.81), `BUS-5988_BBS_1`
+630.954 vs 633.320 (2.37), `BUS-6193_BBS_1` 328.833 vs 331.025 (2.19), then a tail down to ~1 MW. One case is the
+mirror image: `BUS-1198_BBS` cpu 1.0459 vs gpu 0.0 — the device's slack pass never fired where OLF's did, right at
+the 1 MW `slackBusPMaxMismatch` boundary (both arms take the threshold from the same parameter, so the mismatch
+each one measures must differ slightly). `BUS-6194_BBS_2` (1.35 vs 58.26) is in the not-converged-on-both group
+and is not asserted.
+
+Note the accounting: the chunk solver composes a scenario's total as `participants + retain`, and when the LAST
+pass retained nothing (`retain` NaN) it reports the pre-distribution ALONE — which loses whatever an earlier pass
+distributed. Being measured before touching it: the bus diffs of the four worst inside the full list
+(`OLF_GPU_SA_BUSDIFF_CTG`), which separate an accounting gap (states agree) from a real difference (they do not).

@@ -3806,3 +3806,29 @@ relocation so every coupler's ZERO_V/ZERO_PHI lands where a real derivative exis
 does this for chains and still leaves 996 rows here), or a pivoted solve for the base. Acceptance: the base's
 residual ratio at iteration 0 near 1e-14 as KLU gets, the same 26 switches as OLF, and the base distributed
 power equal (today 6.56e-02 MW apart).
+
+### The unpivoted factorization at full scope is fixable with the mechanism already in the tree (2026-09-29)
+
+`ziTreeRelocation` (the coupler-tree relocation: a coupler's ZERO_V/ZERO_PHI move onto the child bus's own
+PHI/V, and the child's power equations onto the coupler's dummy columns) is behind
+`-Dolf.gpu.ziTreeRelocation`, **default false**, with a second gate `-Dolf.gpu.ziTreeRelocationMinCouplers`,
+**default 4**. At the full busbar scope that leaves every one of the 366 couplers unrelocated (`childSide=0`
+for all of them in the `.eq` dump), which is where the 996 zero diagonals come from.
+Measured on the full-scope base, three configurations:
+
+| configuration | couplers relocated | zero diagonals (pre-repair) | ratio at it=0 | first iterate |
+|---|---|---|---|---|
+| default (relocation off) | 0 of 366 | 996 (nHaz 2028) | 2.05e+11 | wrong (step 8.3e+12) |
+| relocation on, gate 4 (its default) | 23 of 366 | 928 (nHaz 1926) | 2.49e+05 | wrong |
+| relocation on, gate 1 | 329 of 366 | 111 (nHaz 222) | **1.65e-14** | 5.588341866896 vs OLF's 5.588341867362982 |
+
+So the linear-algebra half of the full-scope problem needs no new mechanism: applying the existing relocation to
+EVERY coupler tree gives the unpivoted batch a factorable structure (1.65e-14 is the quality KLU gets on the same
+matrix, 2.4e-14) and the first iterate then matches OLF to ten digits. The 111 zero diagonals left are the count
+the WINDOW also carries, i.e. the shapes the numeric repair already handles.
+What remains in that configuration: the base still ends `MAX_ITERATION_REACHED` with the distributed power
+6.56e-02 MW apart, so there is a second, outer-loop defect behind the first one — measure its pass sequence and
+switch set next (`OLF_GPU_SW_TRACE=0` + `OLF_GPU_BATCH_TRACE=1` with both properties set). Also still to check
+before considering the defaults: the window and both suites with the relocation on, since the property is off by
+default and its gate of 4 was chosen deliberately ("the numeric row repair is EXACT on short chains ... so a
+short tree keeps the proven path").

@@ -4340,3 +4340,19 @@ Two things had to be corrected on the way:
 
 The caveat is in the message the mode prints: the contingency list decides which switches the LfNetwork retains,
 so an excluded run has a different base network. Its numbers compare with other excluded runs, not with full ones.
+
+### Full scope in exclude mode: 6532 of 6667 (2026-09-29)
+
+With `OLF_GPU_SA_CTG_EXCLUDE=docs/rte6515-impactless-busbar-sections.txt`, and every fix of the day:
+
+| | |
+|---|---|
+| on device | **6532 of 6667** (98.0%) |
+| census | `status=-2` 111, `status=-3` 20, `DEVICE:MAX_ITERATION_REACHED` 4 — and no `MAPPER` class at all |
+| statuses | CPU 6602 converged / 5 failed / 60 max-iter; GPU 6601 / 6 / 60 |
+| violations | 503923 vs 503853, diff 70 (85 before the day's native fixes) |
+| distributed power | worst 1.073628e+01 MW, unchanged (`BUS-5962_BBS_1`) |
+
+`MAPPER:no-batchable-element` disappearing from the census confirms the 209 were exactly that class. The base
+network came out the same despite the shorter list (identical status counts and the same distributed-power worst),
+so for this network the retained switches did not move.

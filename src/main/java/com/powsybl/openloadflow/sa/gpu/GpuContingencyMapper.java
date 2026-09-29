@@ -214,8 +214,20 @@ final class GpuContingencyMapper {
                 continue;
             }
             LfBranch branch = net.getBranchById(e.getKey());
-            if (branch == null || branch.getBus1() == null || branch.getBus2() == null) {
+            if (branch == null) {
+                trace(pc, "one-side open " + e.getKey() + " not in the LfNetwork");
                 return null;                                 // unresolvable (closedBranchOutages nulls too)
+            }
+            if (branch.getBus1() == null || branch.getBus2() == null) {
+                // Already open at the OTHER end in the base, so opening this one leaves nothing
+                // connected at either end and there is no dangling half left to inject anywhere. That
+                // is the element's disabled bit, not a side-open view — and closedBranchOutages
+                // ALREADY returns exactly this branch for exactly this reason (it is how 2049 of
+                // network.xiidm's branch outages batch). This arm used to reject instead, so the two
+                // halves of the same map disagreed and the contingency went to the CPU with its mask
+                // already built: network.xiidm's JHKH/LOJD/LQDZ (branch scope) and
+                // ACLA/BCR/FXSW/HRZA/VXD/YFS (load scope), every one of them this shape.
+                continue;
             }
             if (branch.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
                 trace(pc, "one-side open zero-impedance " + e.getKey());

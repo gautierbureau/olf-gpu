@@ -1738,6 +1738,30 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 List.of(new Contingency("bus-mid", new com.powsybl.contingency.BusbarSectionContingency("bbs1"))));
     }
 
+    /** The same section loss, but the line on that section is ALREADY open at its far end in the
+     *  base. The propagation still puts l1 in branchIdsToOpen with a one-side status, and opening its
+     *  remaining end leaves it connected at NEITHER end — so there is no dangling half left to inject
+     *  anywhere and the outage is simply the element's disabled bit.
+     *
+     *  <p>closedBranchOutages already returns exactly this branch for exactly this reason (it is how
+     *  2049 of network.xiidm's 11249 branch outages batch), but sideOpens() rejected the same entry,
+     *  so the two halves of the same map disagreed and the contingency went to the CPU with its mask
+     *  already built. Every side-open reject on network.xiidm was this one shape and nothing else:
+     *  JHKH, LOJD, LQDZ on the branch scope and ACLA, BCR, FXSW, HRZA, VXD, YFS on the load scope.
+     *
+     *  <p>VERIFIED by restoring the reject and watching the engagement assert fail. As with the
+     *  setpoint-HVDC case the ANSWER is right either way — the CPU fallback computes it — so only the
+     *  engagement assert can tell the two apart. */
+    @org.junit.jupiter.api.Test
+    void deviceSideOpenOfAnAlreadyOpenEndedBranchBatches() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = middleSectionLossNetwork(false);
+        network.getLine("l1").getTerminal2().disconnect();    // open-ended at vl3 in the BASE
+        assertMergedPilotLossMatchesCpu(network,
+                List.of(new Contingency("bus-mid", new com.powsybl.contingency.BusbarSectionContingency("bbs1"))));
+    }
+
     /** The same loss with a fixed SHUNT on the islanded section (rte6515 BUS-1251_BBS_1): the shunt
      *  feeds the group's DISTR_Q sums, which used to reject the scenario (a masked shunt would not
      *  update the sums). On an islanded bus the shunt's row is frozen and the member's weights are

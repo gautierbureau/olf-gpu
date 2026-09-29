@@ -3832,3 +3832,25 @@ switch set next (`OLF_GPU_SW_TRACE=0` + `OLF_GPU_BATCH_TRACE=1` with both proper
 before considering the defaults: the window and both suites with the relocation on, since the property is off by
 default and its gate of 4 was chosen deliberately ("the numeric row repair is EXACT on short chains ... so a
 short tree keeps the proven path").
+
+### What blocks enabling the relocation: the reactive-limit check reads q at a row the relocation repurposed (2026-09-29)
+
+With the relocation on (gate 1) the factorization is right, and the base's SECOND defect steps forward: the first
+reactive-limit pass pins 36 buses (OLF pins 25) and the re-solve then burns all 30 iterations without converging,
+so the base ends `MAX_ITERATION_REACHED`. Diffing the switch sets in that configuration: 116 switch events over 46
+buses against OLF's 27, with **20 device-only buses** — the 8 robust ones from before (VL-2669_*, VL-4538_*,
+`lt=3`) plus q-limit pins with impossible reactive powers: VL-6049_0 at **4767 MVAr**, VL-6002_0 at 667.7,
+VL-6002_2/3 at 99.5, VL-6113_1 at −78.0, VL-6162_1 at 61.9, VL-6189_0 at 83.3, VL-6315_0 at −51.7.
+The `.eq` dump for that configuration names the cause. VL-6113_1's V row (13434) now reads
+`terms=[cb#8765.q1@alt, cb#8928.q2@alt, zi#334.ZERO_V]` and the bus is `childSide=2` of coupler 334: the
+relocation moved the COUPLER's ZERO_V onto that row, and the bus's own reactive balance onto the coupler's
+DUMMY_Q column. VL-6002_0 is `childSide=2` of coupler 316 with an EMPTY V row. But the reactive-limit machinery
+still reads each entry's q as `qBuf[rlVrow] + loadQ` at the bus's own V row — which is no longer its reactive
+balance — so the check compares a voltage-equality residual against reactive limits and pins on it.
+Fix: `rlVrow` (and the q the check reads) must FOLLOW the coupler-tree relocation, the same way
+`GpuAcRowIndexing.distrQRow`'s `(ziParentEdge, dummyQCol)` overload already makes a relocated child's DISTR_Q
+follow it. That is the blocker for enabling the relocation, which is the blocker for the full scope.
+Chain, end to end, as measured: 996 zero diagonals (relocation off) → unpivoted factorization wrong (2.05e+11) →
+wrong trajectory → 11 spurious robust pins → base 6.56e-02 MW off and 6357 scenarios rejected; with the
+relocation on the factorization is right (1.65e-14, first iterate matching OLF to ten digits) → the RL q is read
+at repurposed rows → 20 spurious pins → the pinned solve does not converge. Fix the q row, then re-measure both.

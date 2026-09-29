@@ -4169,3 +4169,23 @@ re-evaluation of it was not:
 
 OLF makes 28 switches over those three ReactiveLimits passes (25 + 2 + 1). Next: the full-scope batch, which could
 not even start while the base failed (`precomputed on device: -1`).
+
+### Full scope on device: 6530 of 6876 (2026-09-29)
+
+With the base converging, the full-scope batch runs. Census of the 6876 busbar-section contingencies:
+
+| outcome | count |
+|---|---|
+| **precomputed on device** | **6530** |
+| `MAPPER:no-batchable-element` (by design) | 209 |
+| `RUNTIME:status=-2` | 111 |
+| `PLAN:VC_REMERGE_MULTI` (by design, CPU) | 47 |
+| `RUNTIME:status=-3` | 22 |
+| `DEVICE:MAX_ITERATION_REACHED` | 4 |
+| `PLAN:VC_REMERGE_RELOC_VROW` (the new guard) | 3 |
+| `PLAN:SIDE_OPEN_UNPACKED` / `VALIDATOR:ISLANDS_SLACK` | 1 / 1 |
+
+Slot-level rejects: 44 `linear-solve` (was 13232), 110 `max-iter-bad-solve`, 5 `outer-loop-budget`.
+Against the last measurement with the relocation off — 251 of 6876 with 6357 `status=-3` — that is the full
+scope working for the first time. What remains is a tail of 346, dominated by the 209 unbatchable elements
+(a design limit of the mapper, not a defect) and the 111 `status=-2`.

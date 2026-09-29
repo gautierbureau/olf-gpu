@@ -199,3 +199,4 @@ violations) is proven at equal tolerance; the split run is a timing comparison o
 | 2026-09-28 | 2d99f31 | 12.63 | 10.55 | 28.16 | x2.67 | 0/0/0 | 7.52 | 4.24 | 499/500 | 122/133 (92%) | merge base-outer7-divergence (VC re-merge fixes FUKE 7.5e-04 -> 8.6e-09 MW; pilot-self rotation ON regresses 22 islanding ctg to ~4e-06 MW on network.xiidm) |
 | 2026-09-28 | 00dfa37 | 12.44 | 10.52 | 28.41 | x2.70 | 0/0/0 | 7.47 | 4.19 | 499/500 | 122/133 (92%) | IR=4 on zi structures: chunk-composition-dependent factorization accuracy on repaired rows (LLAX class 4e-06 -> 1e-10 kV) |
 | 2026-09-28 | 651a29c+dirty | 12.08 | 10.55 | 27.34 | x2.59 | 0/0/0 | 7.45 | 4.20 | 499/500 | 122/133 (92%) | replicate OLF's ZI spanning tree per contingency + its zeroed coupler flows at every solve start |
+| 2026-09-29 | 1e8ad30 | 12.39 | 10.67 | 28.33 | x2.66 | 0/0/0 | 7.54 | 4.19 | 499/500 | 122/133 (92%) | injection outage at the relocated coupler rows (5840792) |

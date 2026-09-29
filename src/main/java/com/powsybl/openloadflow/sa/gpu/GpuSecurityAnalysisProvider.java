@@ -78,6 +78,7 @@ public class GpuSecurityAnalysisProvider extends OpenSecurityAnalysisProvider {
     /** Reset the engagement counter to the whole-run-fallback sentinel before a run. */
     public static void resetLastGpuPrecomputedCount() {
         GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.set(-1);
+        GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_IDS.clear();
         GpuBatchedAcSecurityAnalysis.LAST_REPLAYED_LOSS_COUNT.set(0);
         GpuBatchedAcSecurityAnalysis.LAST_TARGETED_RESTORE_COUNT.set(0);
     }

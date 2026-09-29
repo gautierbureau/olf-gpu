@@ -122,6 +122,16 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     static final java.util.concurrent.atomic.AtomicInteger LAST_GPU_PRECOMPUTED_COUNT =
             new java.util.concurrent.atomic.AtomicInteger(-1);
 
+    /**
+     * The contingency ids the DEVICE solved in the last run. A comparison of the two arms' STATUSES is
+     * meaningless for a contingency the device declined: the GPU arm's status for it comes from the CPU
+     * fallback, so it is OLF's own verdict compared with OLF's own verdict. Only the ids in here carry a
+     * device verdict; for the rest the honest question is the other one — did OLF converge what the device
+     * declined? Reset with the counter above.
+     */
+    public static final java.util.Set<String> LAST_GPU_PRECOMPUTED_IDS =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     /** How many contingencies of the last run had their loss distribution answered from the batch's replay
      *  instead of OLF's host call ({@link ReplayedLossDistribution}); reset with the counter above. */
     static final java.util.concurrent.atomic.AtomicInteger LAST_REPLAYED_LOSS_COUNT =
@@ -1043,6 +1053,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         if (rs.precomputed.isReady()) {
             int solved = rs.precomputed.states().size();
             LAST_GPU_PRECOMPUTED_COUNT.updateAndGet(prev -> Math.max(prev, 0) + solved);
+            LAST_GPU_PRECOMPUTED_IDS.addAll(rs.precomputed.states().keySet());
         }
         // Sequential fall-through routing is an OPTION (2026-07-17): by DEFAULT the engine's
         // solver reverts to the stock CPU Newton-Raphson after the base LF — single-system GPU

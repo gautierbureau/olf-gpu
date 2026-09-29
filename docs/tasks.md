@@ -4511,7 +4511,15 @@ STATUS MISMATCHES (1): [BUS-6194_BBS_2]
 All 60 non-converging contingencies and all 5 that OLF fails carry the same status on both arms. One in 6667
 disagrees — `BUS-6194_BBS_2`, CONVERGED on the CPU and FAILED on the GPU — and that is the slack-loop defect.
 
-The caveat worth keeping in view: for those 60 the GPU arm's status comes from the CPU FALLBACK, since the device
-declined them, so the agreement is guaranteed by construction rather than earned. The device's own verdict is
-"could not converge", which agrees in substance with OLF's max-iteration verdict, but under
-[[no-cpu-fallback-goal]] the device will have to produce that status itself instead of handing the scenario back.
+**That agreement is worthless as evidence, and the check has been replaced.** For a contingency the device
+DECLINED, the GPU arm's status comes from the CPU fallback — so comparing it with the CPU arm's status compares
+OLF with OLF. Of the 6667, only the 6552 the device solved carry a device verdict at all; the status comparison
+covers those and nothing more.
+
+The honest question for the other 115 is the opposite one, and the harness now prints it: of the contingencies the
+device declined, how many does OLF converge? `GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_IDS` records which
+ids the device actually solved, and the report reads
+`DEVICE VERDICT: <n> of <m> simulated solved on device; of the <k> it declined, OLF converged <j>: [ids]`,
+followed by a line saying the status comparison covers only the device-solved set. A `j` of zero means every
+declined contingency is OLF's own non-convergence; today `j` is 2 (`BUS-1219_BBS`, `BUS-6229_BBS_1`), and with
+`BUS-6194_BBS_2` that is the whole list of device failures on a solvable system.

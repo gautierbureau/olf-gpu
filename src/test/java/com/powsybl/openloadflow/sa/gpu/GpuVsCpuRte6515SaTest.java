@@ -1091,6 +1091,28 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 })
                 .map(p -> p.getContingency().getId())
                 .toList();
+        // A status comparison is only evidence for a contingency the DEVICE solved: for one it declined, the
+        // GPU arm's status comes from the CPU fallback, so comparing it with the CPU arm compares OLF with OLF
+        // and validates nothing. Split the two populations and name the one that IS a device failure: a
+        // contingency the device declined and OLF converged.
+        java.util.Set<String> onDevice = GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_IDS;
+        if (!onDevice.isEmpty()) {
+            List<String> declinedButOlfConverged = cpu.getPostContingencyResults().stream()
+                    .filter(p -> !onDevice.contains(p.getContingency().getId()))
+                    .filter(p -> p.getStatus() == PostContingencyComputationStatus.CONVERGED)
+                    .map(p -> p.getContingency().getId())
+                    .toList();
+            long declined = cpu.getPostContingencyResults().stream()
+                    .filter(p -> !onDevice.contains(p.getContingency().getId())).count();
+            System.out.printf("  DEVICE VERDICT: %d of %d simulated solved on device; of the %d it declined,"
+                    + " OLF converged %d%s%n",
+                    onDevice.size(), cpu.getPostContingencyResults().size(), declined,
+                    declinedButOlfConverged.size(),
+                    declinedButOlfConverged.isEmpty() ? " (so every declined one is OLF's own non-convergence)"
+                            : ": " + declinedButOlfConverged);
+            System.out.printf("  STATUS COMPARISON covers the %d device-solved contingencies; for the rest both"
+                    + " arms report the SAME CPU computation%n", onDevice.size());
+        }
         if (!mismatched.isEmpty()) {
             System.out.printf("  STATUS MISMATCHES (%d): %s%n", mismatched.size(),
                     mismatched.subList(0, Math.min(20, mismatched.size())));

@@ -4236,3 +4236,32 @@ pre-loss it replays and the slack mismatch it measures. Next: `OLF_GPU_PRELOSS_T
 prints `PRELOSS ctg=<id> mismatch=… absorbed=… slackShare=…` per scenario, read for `BUS-5962_BBS_1` against the
 CPU's 984.0996 MW total; the per-participant split is `OLF_GPU_DS_FINAL_DUMP` on the device (slot 0 of each chunk
 only today) against OLF's own `OLF_DS_TRACE` in the dependency.
+
+### Per-scenario STOCK PLACEMENT: what a dead coupler has to give back (2026-09-29)
+
+With the relocation on by default, two `GpuBatchedAcSecurityAnalysisTest` fixtures fail
+(`deviceMiddleSectionLoss…`), and they are the general case worth naming: a busbar-section contingency kills the
+MIDDLE section, so both couplers die with it while the far section stays connected through its own line. Everything
+the relocation had moved onto those couplers' dummy rows has to come back per scenario. Landed for that:
+
+- **The flags word is not a row.** `checkRange("ziIdx", …, {…, 10}, -1, n)` validated slot 10 — spanning-tree bit,
+  child side, coupler-tree bit — as a row index, so the value 13 was rejected on any network with fewer than 14
+  rows. Four fixtures threw `bad ziIdx`; now slot 10 is checked as flags in [0, 16).
+- **A suppressed member's q needs THREE destinations**, not two: the coupler's `DUMMY_Q` row while a reactive limit
+  pins it there (mode 4), NOTHING while the coupler is dead (that row is an identity — writing the raw q into it
+  corrupts the identity), and nothing while it shares. Two of the three cannot be expressed with one alternate and
+  one selector, so the pair rides the existing reloc POOL marked by a NEGATIVE offset, with the dummy row itself in
+  the group slot as the selector (`stockPairOut` / `stockPairPick`, all three picks).
+- **The sharing equation moves too.** `buildDistrQDest` now builds a stock twin of every DISTR_Q destination at the
+  bus's own row plus a per-contribution selector, and both fills divert to it when the dummy row is an identity.
+  The CSR pattern carries the twin's entries, and `updateDistrQTargetsBatch` makes the same diversion so the target
+  follows the equation (it used to return early on "the row is an identity").
+- **The crash that hid in between**: `patchFrozenGroupDests` reads the group slot as a group id, so a stock pair's
+  ROW value indexed `qrPtr` far out of bounds and wrote a garbage destination — surfacing as
+  `CUDA error: an illegal memory access` out of `createBatchContext`. It now skips negative-offset entries.
+
+Measured on the fixture: the batch ENGAGES and converges (it was falling back at `DEVICE:MAX_ITERATION_REACHED`),
+and bus vl3_b went 395.43 -> **401.35 kV** against OLF's 401.69 — from 6.3 kV out to 0.34. So one consumer still
+reads the dead row. Next: dump the SCENARIO's row modes (the batch context, not the base — `nS 1` in a
+`OLF_GPU_VALS_DUMP` header means the sequential one) and check which of the member's tables still points at
+c12's `DUMMY_Q`: the reactive-limit entry rows, the DISTR_Q member row (`mRow`), or the injection-override rows.

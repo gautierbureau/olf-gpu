@@ -611,6 +611,25 @@ inline int stockSelRow(int frozenRow, int alt, const int* relocOwn) {
             ? -2 - frozenRow : frozenRow;
 }
 
+// A relocated child whose own q row is SUPPRESSED (a remote gen-VC member has no frozen dest: its q
+// feeds the DISTR_Q rows) needs THREE destinations, not two:
+//   the coupler's DUMMY_Q row  while a reactive limit PINS it there (that row is mode 4),
+//   its OWN row                while the parent coupler is dead this scenario (the dummy row is an
+//                              identity, mode 0 — the stock placement),
+//   nowhere at all             while it shares (mode 1: the DISTR_Q terms carry its q).
+// Two of the three cannot be expressed with one alternate and one selector, so the pair travels in the
+// reloc POOL, marked by a NEGATIVE relocOff, with the DUMMY row itself in the group slot as the selector.
+// Measured without it (relocation on by default): the middle-section-loss fixtures left the child's own
+// row empty once the contingency killed its coupler — one zero diagonal, dx 4e+12, no convergence.
+inline bool stockPairOut(int frozenRow, int alt, const int* relocOwn) {
+    return frozenRow < 0 && alt >= 0 && relocOwn != nullptr && relocOwn[alt] >= 0;
+}
+
+/** Pool order of a stock pair: [0] = the own row (dummy row identity), [1] = the dummy row (pinned). */
+__host__ __device__ inline int stockPairPick(int m, const int* pool, int p, int frozen) {
+    return m == 0 ? pool[p] : (m == 4 ? pool[p + 1] : frozen);
+}
+
 inline int cbAltRow(const CbScatter& s, const int* ix) {
     return s.rowEq == 1 ? ix[10 + s.rowEnd] : -1;
 }
@@ -685,6 +704,10 @@ void collectCbAltPattern(int ncb, const int* cbIdx, const int* relocOwn, std::ve
             if (rc.col < 0) {
                 continue;
             }
+            if (stockPairOut(rc.row, origAlt, relocOwn)) {   // STOCK PAIR (see stockPairOut): the dummy row
+                pat.emplace_back(origAlt, rc.col);           // only — mode 0 writes nothing
+                continue;
+            }
             if (altRow <= -2) {                              // GROUP relocation (plan-A6): union EVERY
                 int g = -2 - altRow;                         // candidate row's slot for this column
                 for (int c = qrPtr[g]; c < qrPtr[g + 1]; c++) {
@@ -718,6 +741,20 @@ void buildCbDynDest(int ncb, const int* cbIdx, const int* relocOwn, const CsrPat
             int altRow = stockAltRow(rc.row, origAlt, relocOwn);
             int stockSel = stockSelRow(rc.row, origAlt, relocOwn);
             size_t o = static_cast<size_t>(e) * CB_NOUT + k;
+            if (stockPairOut(rc.row, origAlt, relocOwn)) {
+                // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL pin holds it
+                // there (mode 4), NOTHING while the coupler is dead (that row is an identity — the bus is an
+                // ordinary group controller again and its DISTR_Q row, diverted to its own row, carries its q),
+                // and nothing while it shares. Writing the raw q into the dead coupler's identity row, which
+                // the plain two-way rule does on mode 0, corrupts that identity.
+                if ((s.role == 1 && rc.col >= 0) || s.role == 0) {
+                    relocGroup[o] = origAlt;                 // the selector is the dummy row itself
+                    relocOff[o] = -static_cast<int>(relocPool.size()) - 1;
+                    relocPool.push_back(-1);                 // mode 0: the coupler is dead — write nothing
+                    relocPool.push_back(s.role == 1 ? pos.at(origAlt, rc.col) : -2 - origAlt);
+                }
+                continue;
+            }
             if (altRow <= -2) {                              // GROUP relocation (plan-A6): one slot per
                 int g = -2 - altRow;                         // candidate, selected per scenario by the
                 if (s.role == 1 && rc.col >= 0) {            // first-valid-member mode scan
@@ -774,6 +811,10 @@ void collectShAltPattern(int nsh, const int* shIdx, const int* relocOwn, std::ve
             if (rc.col < 0) {
                 continue;
             }
+            if (stockPairOut(rc.row, origAlt, relocOwn)) {   // STOCK PAIR (see stockPairOut): the dummy row
+                pat.emplace_back(origAlt, rc.col);           // only — mode 0 writes nothing
+                continue;
+            }
             if (altRow <= -2) {
                 int g = -2 - altRow;
                 for (int c = qrPtr[g]; c < qrPtr[g + 1]; c++) {
@@ -803,6 +844,20 @@ void buildShDynDest(int nsh, const int* shIdx, const int* relocOwn, const CsrPat
             int altRow = stockAltRow(rc.row, origAlt, relocOwn);
             int stockSel = stockSelRow(rc.row, origAlt, relocOwn);
             size_t o = static_cast<size_t>(e) * SH_NOUT + k;
+            if (stockPairOut(rc.row, origAlt, relocOwn)) {
+                // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL pin holds it
+                // there (mode 4), NOTHING while the coupler is dead (that row is an identity — the bus is an
+                // ordinary group controller again and its DISTR_Q row, diverted to its own row, carries its q),
+                // and nothing while it shares. Writing the raw q into the dead coupler's identity row, which
+                // the plain two-way rule does on mode 0, corrupts that identity.
+                if ((s.role == 1 && rc.col >= 0) || s.role == 0) {
+                    relocGroup[o] = origAlt;                 // the selector is the dummy row itself
+                    relocOff[o] = -static_cast<int>(relocPool.size()) - 1;
+                    relocPool.push_back(-1);                 // mode 0: the coupler is dead — write nothing
+                    relocPool.push_back(s.role == 1 ? pos.at(origAlt, rc.col) : -2 - origAlt);
+                }
+                continue;
+            }
             if (altRow <= -2) {
                 int g = -2 - altRow;
                 if (s.role == 1 && rc.col >= 0) {
@@ -858,6 +913,10 @@ void collectObAltPattern(int nob, const int* obIdx, const int* obQAlt, const int
             if (rc.col < 0) {
                 continue;
             }
+            if (stockPairOut(rc.row, origAlt, relocOwn)) {   // STOCK PAIR (see stockPairOut): the dummy row
+                pat.emplace_back(origAlt, rc.col);           // only — mode 0 writes nothing
+                continue;
+            }
             if (altRow <= -2) {
                 int g = -2 - altRow;
                 for (int c = qrPtr[g]; c < qrPtr[g + 1]; c++) {
@@ -887,6 +946,20 @@ void buildObDynDest(int nob, const int* obIdx, const int* obQAlt, const int* rel
             int altRow = stockAltRow(rc.row, origAlt, relocOwn);
             int stockSel = stockSelRow(rc.row, origAlt, relocOwn);
             size_t o = static_cast<size_t>(e) * OB_NOUT + k;
+            if (stockPairOut(rc.row, origAlt, relocOwn)) {
+                // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL pin holds it
+                // there (mode 4), NOTHING while the coupler is dead (that row is an identity — the bus is an
+                // ordinary group controller again and its DISTR_Q row, diverted to its own row, carries its q),
+                // and nothing while it shares. Writing the raw q into the dead coupler's identity row, which
+                // the plain two-way rule does on mode 0, corrupts that identity.
+                if ((s.role == 1 && rc.col >= 0) || s.role == 0) {
+                    relocGroup[o] = origAlt;                 // the selector is the dummy row itself
+                    relocOff[o] = -static_cast<int>(relocPool.size()) - 1;
+                    relocPool.push_back(-1);                 // mode 0: the coupler is dead — write nothing
+                    relocPool.push_back(s.role == 1 ? pos.at(origAlt, rc.col) : -2 - origAlt);
+                }
+                continue;
+            }
             if (altRow <= -2) {
                 int g = -2 - altRow;
                 if (s.role == 1 && rc.col >= 0) {
@@ -1000,6 +1073,9 @@ __device__ inline int ziDynDest(int frozen, int slot, const int* alt, const int*
                                 const int* mode, RelocTables rt) {
     int rg = rt.group != nullptr ? rt.group[slot] : -1;
     if (rg >= 0) {
+        if (rt.off[slot] < 0) {                              // STOCK PAIR: group slot holds the dummy ROW
+            return stockPairPick(mode[rg], rt.pool, -rt.off[slot] - 1, frozen);
+        }
         if (rt.psSkip != nullptr && rt.psSkip[rg]) {
             return -1;                                       // pilot-self group, pilot unpinned: no raw q
         }
@@ -1018,10 +1094,11 @@ __device__ void scatterAddDyn(int nout, const int* dest, const int* altDest, con
     for (int k = 0; k < nout; k++) {
         int d;
         int rg = rt.group != nullptr ? rt.group[eOff + k] : -1;
-        if (rg >= 0 && rt.psSkip != nullptr && rt.psSkip[rg]) {
+        if (rg >= 0 && rt.off[eOff + k] < 0) {               // STOCK PAIR: group slot holds the dummy ROW
+            d = stockPairPick(mode[rg], rt.pool, -rt.off[eOff + k] - 1, dest[k]);
+        } else if (rg >= 0 && rt.psSkip != nullptr && rt.psSkip[rg]) {
             continue;                                        // pilot-self group, pilot unpinned: no raw q
-        }
-        if (rg >= 0) {
+        } else if (rg >= 0) {
             d = rt.pool[rt.off[eOff + k] + relocChoose(rg, rt.qrPtr, rt.qrRows, mode)];
         } else {
             int sr = selRow[k];
@@ -1129,11 +1206,18 @@ __global__ void fillHvdc(int ne, const double* in, const int* ix, const int* des
 // applyRowMode leaves it; the controllers' own per-bus Q scatter was suppressed (qRow=-1) on the host.
 __global__ void fillDistrQ(int ndq, const int* dqElem, const int* dqSide, const int* dqKind,
                            const double* dqWeight, const int* dqDest,
+                           const int* dqAlt, const int* dqSel,
                            const double* cbIn, const int* cbIx, const double* shIn, const int* shIx,
                            const double* obIn, const int* obIx,
                            const double* x, double* vals, double* F, const int* mode) {
     int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= ndq) return;
+    // the same STOCK placement the batched fill makes: an identity on the relocated row means that
+    // coupler is gone and the sharing equation belongs on the bus's own row (see buildDistrQDest)
+    if (dqSel != nullptr && dqSel[c] >= 0 && dqAlt != nullptr && mode[dqSel[c]] == 0
+            && dqAlt[c * 6] <= -2) {
+        dqDest = dqAlt;
+    }
     int e = dqElem[c];
     double w = dqWeight[c];
     const int* dst = dqDest + c * 6;
@@ -2343,24 +2427,36 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
                           int ndq, const int* dqElem, const int* dqSide, const int* dqKind, const int* dqRow,
                           int ndr, const int* drRow, const int* drCol,
                           int ndb, const int* dbRow, const int* dbCol,
-                          int nzi, const int* ziIdx,
+                          int nzi, const int* ziIdx, const int* relocOwn,
                           std::vector<std::pair<int, int>>& pat) {
     for (int c = 0; c < ndq; c++) {
-        int mappedRow = rowMap[dqRow[c]];
-        if (dqKind[c] == 1) {                                // shunt q: bus V column
-            pat.emplace_back(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 5 + 2]);
-        } else if (dqKind[c] == 2) {                         // half-open: connected-side V column
-            const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
-            pat.emplace_back(mappedRow, dqSide[c] == 0 ? oq[4] : oq[5]);
-        } else if (dqKind[c] == 3) {                         // zero-imp DUMMY_Q column
-            pat.emplace_back(mappedRow, dqElem[c]);
-        } else {                                             // closed branch: v1 v2 ph1 ph2 r1
-            const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 12;
-            pat.emplace_back(mappedRow, q[5]);
-            pat.emplace_back(mappedRow, q[7]);
-            pat.emplace_back(mappedRow, q[4]);
-            pat.emplace_back(mappedRow, q[6]);
-            if (q[9] >= 0) pat.emplace_back(mappedRow, q[9]);
+        // Twice for a relocated child's sharing row: where it lives while the coupler stands, and on the
+        // bus's OWN row, which is where it goes in any scenario that kills that coupler (see buildDistrQDest).
+        int mapped = rowMap[dqRow[c]];
+        int own = relocOwn != nullptr && mapped >= 0 ? relocOwn[mapped] : -1;
+        for (int pass = 0; pass < 2; pass++) {
+            int mappedRow = pass == 0 ? mapped : own;
+            if (mappedRow < 0) {
+                continue;
+            }
+            if (pass == 1) {
+                pat.emplace_back(mappedRow, mappedRow);      // the stock row's own diagonal
+            }
+            if (dqKind[c] == 1) {                            // shunt q: bus V column
+                pat.emplace_back(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 5 + 2]);
+            } else if (dqKind[c] == 2) {                     // half-open: connected-side V column
+                const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
+                pat.emplace_back(mappedRow, dqSide[c] == 0 ? oq[4] : oq[5]);
+            } else if (dqKind[c] == 3) {                     // zero-imp DUMMY_Q column
+                pat.emplace_back(mappedRow, dqElem[c]);
+            } else {                                         // closed branch: v1 v2 ph1 ph2 r1
+                const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 12;
+                pat.emplace_back(mappedRow, q[5]);
+                pat.emplace_back(mappedRow, q[7]);
+                pat.emplace_back(mappedRow, q[4]);
+                pat.emplace_back(mappedRow, q[6]);
+                if (q[9] >= 0) pat.emplace_back(mappedRow, q[9]);
+            }
         }
     }
     for (int c = 0; c < ndr; c++) {                          // DISTR_RHO: controller r1 column in a DISTR_RHO row
@@ -2425,6 +2521,10 @@ struct SharedStructure {
     DeviceBuf cbTrig;                                        // per closed-branch STATIC trig (6 doubles: sinKsi cosKsi sinC1 cosC1 sinC2 cosC2)
     int ndq = 0;                                             // DISTR_Q weighted reactive contributions
     DeviceBuf dDqElem, dDqSide, dDqKind, dDqWeight, dDqDest; // ndq each (dDqDest is ndq*6)
+    DeviceBuf dRelocOwn;                                     // per row: the relocated child's OWN row for a
+                                                             // coupler DUMMY row, -1 elsewhere (stock placement)
+    DeviceBuf dDqAlt, dDqSel;                                // the STOCK-placement twin of dDqDest
+                                                             // (ndq*6) and the dummy row it keys on (ndq)
     int nzi = 0;                                             // zero-impedance branches
     DeviceBuf dZiIn, dZiIdx, dZiDest;                        // nzi (dZiIn) / nzi*11 (dZiIdx) / nzi*14 (dZiDest)
     DeviceBuf dDrQrGroup;                                    // per DISTR_RHO contribution: the qr relocation group
@@ -2459,27 +2559,48 @@ using SharedStructurePtr = std::shared_ptr<SharedStructure>;
 static void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
                             int ndq, const int* dqElem, const int* dqSide, const int* dqKind,
                             const double* dqWeight, const int* dqRow,
-                            const int* cbIdx, const int* obIdx, const int* shIdx) {
+                            const int* cbIdx, const int* obIdx, const int* shIdx, const int* relocOwn) {
     st->ndq = ndq;
     if (ndq > 0) {
         std::vector<int> dqDest(static_cast<size_t>(ndq) * 6, -1);
+        // The COUPLER-TREE stock placement for a DISTR_Q row: a relocated child's sharing equation sits on
+        // its parent coupler's DUMMY_Q row, and a scenario that kills that coupler pins the row to an
+        // identity — the equation then has to be back on the bus's OWN row, exactly where OLF keeps a
+        // controller's DISTR_Q. dqAlt holds the same six destinations recomputed there and dqSel the dummy
+        // row whose per-scenario mode decides (0 = dead). Without it the middle-section-loss fixtures
+        // converged on a system one equation short: bus vl3_b 395.43 kV against OLF's 401.69.
+        std::vector<int> dqAlt(static_cast<size_t>(ndq) * 6, -1);
+        std::vector<int> dqSel(static_cast<size_t>(ndq), -1);
         for (int c = 0; c < ndq; c++) {
             int mappedRow = rowMap[dqRow[c]];
-            dqDest[c * 6 + 0] = -2 - mappedRow;              // q value -> F row
-            if (dqKind[c] == 1) {                            // shunt: dq/dv on the bus V column
-                dqDest[c * 6 + 1] = pos.at(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 5 + 2]);
-            } else if (dqKind[c] == 2) {                     // half-open: dq/dv on the connected-side V col
-                const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
-                dqDest[c * 6 + 1] = pos.at(mappedRow, dqSide[c] == 0 ? oq[4] : oq[5]);
-            } else if (dqKind[c] == 3) {                     // zero-impedance: J slot on the dummyQ column
-                dqDest[c * 6 + 1] = pos.at(mappedRow, dqElem[c]);
-            } else {                                         // closed branch
-                const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 12;
-                dqDest[c * 6 + 1] = pos.at(mappedRow, q[5]);     // dq/dv1
-                dqDest[c * 6 + 2] = pos.at(mappedRow, q[7]);     // dq/dv2
-                dqDest[c * 6 + 3] = pos.at(mappedRow, q[4]);     // dq/dph1
-                dqDest[c * 6 + 4] = pos.at(mappedRow, q[6]);     // dq/dph2
-                dqDest[c * 6 + 5] = q[9] >= 0 ? pos.at(mappedRow, q[9]) : -1;  // dq/dr1
+            int ownRow = relocOwn != nullptr && mappedRow >= 0 ? relocOwn[mappedRow] : -1;
+            // OLF_GPU_NO_DQ_STOCK=1: build the twin but never divert to it (bisection lever)
+            static const bool noDqStock = std::getenv("OLF_GPU_NO_DQ_STOCK") != nullptr;
+            if (ownRow >= 0 && !noDqStock) {
+                dqSel[c] = mappedRow;
+            }
+            for (int pass = 0; pass < 2; pass++) {           // pass 0 = the real row, pass 1 = the stock row
+                int row = pass == 0 ? mappedRow : ownRow;
+                int* d = (pass == 0 ? dqDest : dqAlt).data() + static_cast<size_t>(c) * 6;
+                if (row < 0) {
+                    continue;
+                }
+                d[0] = -2 - row;                             // q value -> F row
+                if (dqKind[c] == 1) {                        // shunt: dq/dv on the bus V column
+                    d[1] = pos.at(row, shIdx[static_cast<size_t>(dqElem[c]) * 5 + 2]);
+                } else if (dqKind[c] == 2) {                 // half-open: dq/dv on the connected-side V col
+                    const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
+                    d[1] = pos.at(row, dqSide[c] == 0 ? oq[4] : oq[5]);
+                } else if (dqKind[c] == 3) {                 // zero-impedance: J slot on the dummyQ column
+                    d[1] = pos.at(row, dqElem[c]);
+                } else {                                     // closed branch
+                    const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 12;
+                    d[1] = pos.at(row, q[5]);                // dq/dv1
+                    d[2] = pos.at(row, q[7]);                // dq/dv2
+                    d[3] = pos.at(row, q[4]);                // dq/dph1
+                    d[4] = pos.at(row, q[6]);                // dq/dph2
+                    d[5] = q[9] >= 0 ? pos.at(row, q[9]) : -1;   // dq/dr1
+                }
             }
         }
         st->dDqElem.upload(dqElem, ndq * sizeof(int));
@@ -2487,6 +2608,8 @@ static void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const st
         st->dDqKind.upload(dqKind, ndq * sizeof(int));
         st->dDqWeight.upload(dqWeight, ndq * sizeof(double));
         st->dDqDest.upload(dqDest.data(), dqDest.size() * sizeof(int));
+        st->dDqAlt.upload(dqAlt.data(), dqAlt.size() * sizeof(int));
+        st->dDqSel.upload(dqSel.data(), dqSel.size() * sizeof(int));
     }
 }
 
@@ -2665,10 +2788,17 @@ static void buildDistrShuntBDest(SharedStructure* st, const CsrPattern& pos, con
 // FALLBACK row (the pilot's own row, read by no outer loop) so a remote member's diagnostic q
 // row carries ONLY its own injection (fillRemoteMemberQBatch). Without this the pilot's whole
 // balance lands on the base carrier's row and corrupts the free member's reactive-limit check.
-static void patchFrozenGroupDests(DeviceBuf& dest, const std::vector<int>& relocGroup, int nout,
+static void patchFrozenGroupDests(DeviceBuf& dest, const std::vector<int>& relocGroup,
+                                  const std::vector<int>& relocOff, int nout,
                                   const int* scatterRole, const int* qrPtr, const int* qrRows) {
     for (size_t o = 0; o < relocGroup.size(); o++) {
         int g = relocGroup[o];
+        // A STOCK PAIR (negative offset) parks the DUMMY ROW in the group slot, not a group id — reading
+        // qrPtr[row] there walked off the candidate table and wrote a garbage dest, which the device then
+        // used: "CUDA error: an illegal memory access" out of createBatchContext.
+        if (g >= 0 && relocOff[o] < 0) {
+            continue;
+        }
         if (g >= 0 && scatterRole[o % nout] == 0) {
             int v = -2 - qrRows[qrPtr[g]];
             CUDA_CHECK(cudaMemcpy(dest.as<int>() + o, &v, sizeof(int), cudaMemcpyHostToDevice));
@@ -2763,6 +2893,9 @@ SharedStructure* buildStructure(int n,
         }
     }
     const int* relocOwn = anyRelocOwn ? relocOwnRow.data() : nullptr;
+    if (anyRelocOwn) {                                       // the kernels that divert per scenario need it
+        st->dRelocOwn.upload(relocOwnRow.data(), relocOwnRow.size() * sizeof(int));
+    }
     auto mapRows = [&](const int* idx, int ne, int stride, std::initializer_list<int> rowSlots) {
         std::vector<int> out(idx, idx + static_cast<size_t>(ne) * stride);
         for (int e = 0; e < ne; e++) {
@@ -2826,7 +2959,7 @@ SharedStructure* buildStructure(int n,
     }
     collectPattern(nhv, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pat);
     collectFamilyPattern(rowMap, cbIdx, obIdx, shIdx, ndq, dqElem, dqSide, dqKind, dqRow,
-                         ndr, drRow, drCol, ndb, dbRow, dbCol, nzi, ziIdx, pat);
+                         ndr, drRow, drCol, ndb, dbRow, dbCol, nzi, ziIdx, dynReloc ? relocOwn : nullptr, pat);
     if (dynReloc) {
         for (int e = 0; e < nzi; e++) {                      // zi STOCK positions: a +-dummy coupling that lands on
         const int* z = ziIdx + static_cast<size_t>(e) * 11;   // a relocated bus's home row also needs the slot
@@ -3036,7 +3169,7 @@ SharedStructure* buildStructure(int n,
             for (int k = 0; k < CB_NOUT; k++) {
                 cbRoles[k] = CB_SCATTER[k].role;
             }
-            patchFrozenGroupDests(st->cb.dest, relocGroup, CB_NOUT, cbRoles,
+            patchFrozenGroupDests(st->cb.dest, relocGroup, relocOff, CB_NOUT, cbRoles,
                     st->hQrPtr.data(), st->hQrRows.data());
         }
         st->cb.dynReloc = true;
@@ -3072,7 +3205,7 @@ SharedStructure* buildStructure(int n,
             for (int k = 0; k < OB_NOUT; k++) {
                 obRoles[k] = OB_SCATTER[k].role;
             }
-            patchFrozenGroupDests(st->ob.dest, obRelocGroup, OB_NOUT, obRoles,
+            patchFrozenGroupDests(st->ob.dest, obRelocGroup, obRelocOff, OB_NOUT, obRoles,
                     st->hQrPtr.data(), st->hQrRows.data());
         }
         st->ob.dynReloc = true;
@@ -3096,7 +3229,7 @@ SharedStructure* buildStructure(int n,
             for (int k = 0; k < SH_NOUT; k++) {
                 shRoles[k] = SH_SCATTER[k].role;
             }
-            patchFrozenGroupDests(st->sh.dest, shRelocGroup, SH_NOUT, shRoles,
+            patchFrozenGroupDests(st->sh.dest, shRelocGroup, shRelocOff, SH_NOUT, shRoles,
                     st->hQrPtr.data(), st->hQrRows.data());
         }
         st->sh.dynReloc = true;
@@ -3105,7 +3238,7 @@ SharedStructure* buildStructure(int n,
 
     // ---- DISTR_Q destinations: per contribution {F-row, dq/dv1, dq/dv2, dq/dph1, dq/dph2, dq/dr1}
     //      (-2-row encodes an F row, >=0 a J slot, -1 skip) ----
-    buildDistrQDest(st.get(), pos, rowMap, ndq, dqElem, dqSide, dqKind, dqWeight, dqRow, cbIdx, obIdx, shIdx);
+    buildDistrQDest(st.get(), pos, rowMap, ndq, dqElem, dqSide, dqKind, dqWeight, dqRow, cbIdx, obIdx, shIdx, relocOwn);
 
     // ---- zero-impedance destinations: per branch the 8 dummy couplings + (tree) the 6 ZERO_V/ZERO_PHI ----
     buildZeroImpDest(st.get(), pos, rowMap, nzi, ziIn, ziIdx, ziQAlt, relocOwn);
@@ -3327,7 +3460,7 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
         if (ctx->st->sh.ne) fillShunt<<<grid(ctx->st->sh.ne), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0, withPilotSelf(relocOf(ctx->st->sh, ctx->st.get()), ctx));
         if (ctx->st->nvdl) fillVdlBatch<<<grid(ctx->st->nvdl), BLOCK, 0, ctx->stream>>>(ctx->st->nvdl, 1, ctx->st->n, ctx->st->nnz, ctx->st->dVdlIn.as<double>(), ctx->st->dVdlIdx.as<int>(), ctx->st->dVdlDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->st->hv.ne) fillHvdc<<<grid(ctx->st->hv.ne), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
-        if (ctx->ndq) fillDistrQ<<<grid(ctx->ndq), BLOCK, 0, ctx->stream>>>(ctx->ndq, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dMode.as<int>());
+        if (ctx->ndq) fillDistrQ<<<grid(ctx->ndq), BLOCK, 0, ctx->stream>>>(ctx->ndq, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->dDqAlt.as<int>(), ctx->st->dDqSel.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dMode.as<int>());
         if (ctx->nzi) fillZeroImp<<<grid(ctx->nzi), BLOCK, 0, ctx->stream>>>(ctx->nzi, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx));
         if (ctx->ndr) fillDistrRho<<<grid(ctx->ndr), BLOCK, 0, ctx->stream>>>(ctx->ndr, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
         if (ctx->ndb) fillDistrShuntB<<<grid(ctx->ndb), BLOCK, 0, ctx->stream>>>(ctx->ndb, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
@@ -3834,10 +3967,11 @@ __device__ void scatterAddFDyn(int nres, const int* dest, const int* altDest, co
         int idx = pos[k];
         int d;
         int rg = rt.group != nullptr ? rt.group[eOff + idx] : -1;
-        if (rg >= 0 && rt.psSkip != nullptr && rt.psSkip[rg]) {
+        if (rg >= 0 && rt.off[eOff + idx] < 0) {             // STOCK PAIR: group slot holds the dummy ROW
+            d = stockPairPick(mode[rg], rt.pool, -rt.off[eOff + idx] - 1, dest[idx]);
+        } else if (rg >= 0 && rt.psSkip != nullptr && rt.psSkip[rg]) {
             continue;                                        // pilot-self group, pilot unpinned: no raw q
-        }
-        if (rg >= 0) {
+        } else if (rg >= 0) {
             d = rt.pool[rt.off[eOff + idx] + relocChoose(rg, rt.qrPtr, rt.qrRows, mode)];
         } else {
             int sr = selRow[idx];
@@ -4042,6 +4176,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
                                 int cbOffset, int obOffset,
                                 const int* dqElem, const int* dqSide, const int* dqKind,
                                 const double* dqWeight, const int* dqDest,
+                                const int* dqAlt, const int* dqSel,
                                 const double* cbIn, const int* cbIx, const double* shIn, const int* shIx,
                                 const double* obIn, const int* obIx,
                                 const double* x, double* vals, double* F,
@@ -4062,6 +4197,12 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
     int c = tid % ndq;
     int s = tid / ndq;
     if (!active[s]) return;
+    // STOCK PLACEMENT: a relocated child's sharing row moves to the bus's OWN row in any scenario that
+    // kills its parent coupler, which pins that coupler's DUMMY_Q row to an identity (see buildDistrQDest).
+    if (dqSel != nullptr && dqSel[c] >= 0 && dqAlt != nullptr
+            && mode[(size_t) s * n + dqSel[c]] == 0 && dqAlt[c * 6] <= -2) {
+        dqDest = dqAlt;
+    }
     // an RL-PINNED remote member's row (mode 4) hosts its OWN Q balance — its DISTR_Q emissions
     // stop for this scenario (the CPU deactivates only that member's DISTR_Q equation)
     {
@@ -4740,7 +4881,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                                          int nFrozen, const int* frozenSlotRow,
                                          int nTqOv, const int* tqOvKey, const double* tqOvVal,
                                          const int* mTgtPtr, const int* mTgtPeer,
-                                         const int* psEntry, int psMask) {
+                                         const int* psEntry, int psMask, const int* relocOwn) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nMembers * nScenarios) return;
     int k = tid % nMembers;
@@ -4752,10 +4893,19 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     if ((psMask & 1) && psEntry != nullptr && qg >= 0 && psEntry[qg] >= 0) qg = -1;
     if (!mHasRow[k] && qg < 0) return;                       // only members owning a packed DISTR_Q row
                                                              // (or linked to a relocation group, plan-B4)
-    if (mRow[k] >= 0 && rowIsFrozen(nFrozen, frozenSlotRow, s, mRow[k])) {
+    // STOCK PLACEMENT: this member's packed DISTR_Q row is its parent coupler's DUMMY_Q row, and a
+    // scenario that kills that coupler pins it to an identity — the sharing equation (and so its target)
+    // is then on the bus's OWN row, where fillDistrQBatch puts it. Without the same diversion here the
+    // identity test below returned and the diverted row kept target 0: measured on the middle-section-loss
+    // fixtures as 401.35 kV against OLF's 401.69 once the equation itself had moved.
+    int mrow = mRow[k];
+    if (mrow >= 0 && relocOwn != nullptr && relocOwn[mrow] >= 0 && mode[(size_t) s * n + mrow] == 0) {
+        mrow = relocOwn[mrow];
+    }
+    if (mrow >= 0 && rowIsFrozen(nFrozen, frozenSlotRow, s, mrow)) {
         return;                                              // islanded: the row is frozen, not ours to write
     }
-    if (mRow[k] >= 0 && mode[(size_t) s * n + mRow[k]] == 0) {
+    if (mrow >= 0 && mode[(size_t) s * n + mrow] == 0) {
         // The row is a VOLTAGE IDENTITY this scenario: a control OLF re-merged onto this bus after a
         // zero-impedance split (GpuBatchQualification.reHomedControls — the bus is a plain PV bus at its
         // own target, and the member has left the group), or a frozen/outaged row. A DISTR_Q target
@@ -4763,7 +4913,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
         // target 1.039 became 0.000 at the first RL pass and the solve ran to MAX_ITERATION on it.
         return;
     }
-    if (mRow[k] >= 0 && mode[(size_t) s * n + mRow[k]] == 4) {
+    if (mrow >= 0 && mode[(size_t) s * n + mrow] == 4) {
         // The row hosts its OWN reactive balance this scenario (mode 4): an RL pin (the RL kernel
         // owns the target) or a control the contingency KILLED (the injection override owns it,
         // OLF's BUS_TARGET_Q). A DISTR_Q target has no business here — fillDistrQBatch already
@@ -4780,10 +4930,10 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
         // member without a packed DISTR_Q row (the base free member, superseded mid-scenario) has
         // no row to maintain here — the RL kernel owns it while pinned.
         int carrier = qrRows[qrPtr[qg] + relocChoose(qg, qrPtr, qrRows, mode + (size_t) s * n)];
-        if (mRow[k] == carrier) {
+        if (mrow == carrier) {
             int pe = psEntry != nullptr ? psEntry[qg] : -1;  // the group's own pilot, when it is one of its controllers
             if (pe < 0) {
-                target[(size_t) s * n + mRow[k]] = pilotQ[(size_t) s * nQr + qg];
+                target[(size_t) s * n + mrow] = pilotQ[(size_t) s * nQr + qg];
                 return;
             }
             char plt = limitType[(size_t) s * nrl + pe];
@@ -4793,7 +4943,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                 // nearer limit here; rlInitTgtQ is not in this kernel's tables.
                 size_t pli = cvStride ? (size_t) s * nrl + pe : (size_t) pe;
                 double lim = (plt == 1 || plt == 3) ? rlMinQ[pli] : rlMaxQ[pli];
-                target[(size_t) s * n + mRow[k]] = lim - rlLoadQ[pli];
+                target[(size_t) s * n + mrow] = lim - rlLoadQ[pli];
                 return;
             }
             // pilot-self, pilot UNPINNED: its q feeds the DISTR_Q rows weighted and the carrier hosts its OWN
@@ -4842,7 +4992,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     // targetQ; anywhere else the device solved the row against a target short by exactly
     // qPct_k * sum_unpinned targetQ_j - targetQ_k, and drove the members to equal reactive
     // injections instead of equally-shared DEVIATIONS from their targets.
-    target[(size_t) s * n + mRow[k]] = qpk * sumTargetQ
+    target[(size_t) s * n + mrow] = qpk * sumTargetQ
             - dqTargetQOf(nTqOv, tqOvKey, tqOvVal, s, nMembers, k, mTargetQ);
 }
 
@@ -9088,7 +9238,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->nDqTqOv, ctx->nDqTqOv ? ctx->dDqTqOvKey.as<int>() : nullptr,
                         ctx->nDqTqOv ? ctx->dDqTqOvVal.as<double>() : nullptr,
                         ctx->dDqMemberTgtPtr.as<int>(), ctx->dDqMemberTgtPeer.as<int>(),
-                        psEntryPtr(ctx), psMaskEnv());
+                        psEntryPtr(ctx), psMaskEnv(),
+                        std::getenv("OLF_GPU_NO_TGT_STOCK") == nullptr && ctx->st->dRelocOwn.p != nullptr
+                                ? ctx->st->dRelocOwn.as<int>() : nullptr);
         }
     };
     std::vector<char> rlActive(nS), rlSwitched(nS), wasActive(nS);
@@ -9612,7 +9764,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             }
         }
     int dqTraceRow = gpuDqTraceRow();
-    if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqInact,
+    if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->dDqAlt.as<int>(), ctx->st->dDqSel.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqInact,
                 ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
                 ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr ? ctx->dPsSkip.as<char>() : nullptr, ctx->st->nQr, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr, ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), dqTraceRow);
         if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr, ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
@@ -12381,7 +12533,7 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
                 ctx->st->nQr, nS, ctx->nrl, ctx->dPsPilotEntry.as<int>(),
                 ctx->dRlLimitType.as<char>(), ctx->dPsSkip.as<char>());
     }
-    if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqInact,
+    if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->dDqAlt.as<int>(), ctx->st->dDqSel.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqInact,
                 ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
                 ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr ? ctx->dPsSkip.as<char>() : nullptr, ctx->st->nQr, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr, ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), dqTraceRow);
     if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr, ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());

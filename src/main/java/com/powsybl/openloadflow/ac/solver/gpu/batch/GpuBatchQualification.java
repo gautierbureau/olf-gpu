@@ -587,6 +587,37 @@ final class GpuBatchQualification {
         return slot >= 0 ? 4 : 1;
     }
 
+    /**
+     * The relocated coupler children, keyed by the child's own {@code BUS_V} variable row:
+     * {@code {coupler branch num, the coupler's DUMMY_Q variable row}}. The coupler-tree relocation moved that
+     * bus's reactive balance (and its {@code BUS_TARGET_Q}) onto the coupler's dummy row and put the coupler's
+     * {@code ZERO_V} on the bus's own row, so a per-scenario flip of "solve your own reactive balance at this
+     * target" has to land on the dummy row — the native reactive-limit pass makes exactly the same diversion
+     * (see {@code rlQrow}) — and a flip to a VOLTAGE identity has nowhere to land at all.
+     */
+    static java.util.Map<Integer, int[]> relocatedChildRows(GpuAcData gpuData) {
+        java.util.Map<Integer, int[]> out = new java.util.HashMap<>();
+        int[] zi = gpuData.ziIdx();
+        int[] nums = gpuData.ziBranchNums();
+        for (int e = 0; e < zi.length / 11 && e < nums.length; e++) {
+            int o = e * 11;
+            int childSide = (zi[o + 10] >> 1) & 3;
+            int ownV = childSide == 1 ? zi[o + 6] : (childSide == 2 ? zi[o + 7] : -1);
+            if (ownV >= 0 && zi[o + 5] >= 0) {
+                out.put(ownV, new int[] {nums[e], zi[o + 5]});
+            }
+        }
+        return out;
+    }
+
+    /** Where a per-scenario reactive flip lands: the bus's own {@code BUS_V} row, or its parent coupler's
+     *  {@code DUMMY_Q} row while that coupler stays closed. An OUTAGED coupler puts the equations back on the
+     *  bus's own rows (the stock placement the chunk solver switches to), so the own row is right there. */
+    private static int relocQRow(int vRow, java.util.Map<Integer, int[]> relocRows, java.util.Set<Integer> outagedZiNums) {
+        int[] reloc = relocRows.get(vRow);
+        return reloc == null || outagedZiNums.contains(reloc[0]) ? vRow : reloc[1];
+    }
+
     private static final int[] NO_ISLANDED_DS = new int[0];
 
     /** The reactive-limits controllers this contingency puts in another synchronous component: their
@@ -705,6 +736,7 @@ final class GpuBatchQualification {
             com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams, Set<LfBranch> distrRhoControllers,
             Set<LfBranch> relocatedCouplers, int[] curvePRows) {
         List<Integer> batchedIndices = new ArrayList<>();
+        java.util.Map<Integer, int[]> relocRows = relocatedChildRows(gpuData);
         int[][] frozenRowsByIndex = new int[contingencies.size()][];     // islanded buses' variable rows, per contingency
         int[][] islandedNumsByIndex = new int[contingencies.size()][];   // islanded LfBus nums (result-building excludes them)
         double[][] frozenTargetsByIndex = new double[contingencies.size()][];   // the clean value each frozen row holds (V=1, phi=0)
@@ -736,6 +768,8 @@ final class GpuBatchQualification {
                 continue;
             }
             BatchContingency c = contingencies.get(i);
+            java.util.Set<Integer> outagedZiNums = c.outagedZiBranches().stream()
+                    .map(LfBranch::getNum).collect(java.util.stream.Collectors.toSet());
             // SIDE-OPEN scope (conservative): a branch that carries a VARIABLE (BRANCH_RHO1 /
             // BRANCH_ALPHA1) or belongs to a DISTR_RHO group changes the live es shape when
             // half-opened — CPU for those; plain impedance branches batch.
@@ -911,7 +945,12 @@ final class GpuBatchQualification {
                                 live = null;
                                 break;
                             }
-                            live.add(new GenOutage(-1, 0, vVar.getRow(), sb.getTargetQ(), true, true,
+                            int qFlipRow = relocQRow(vVar.getRow(), relocRows, outagedZiNums);
+                            if (frozenSet.contains(qFlipRow)) {
+                                live = null;
+                                break;
+                            }
+                            live.add(new GenOutage(-1, 0, qFlipRow, sb.getTargetQ(), true, true,
                                     -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
                                     new int[0], new double[0], deadControlRowMode(gpuData, sb), -1, 0, -1, 0, -1, 0));
                         }
@@ -924,6 +963,7 @@ final class GpuBatchQualification {
                             continue;
                         }
                     }
+                    boolean relocIdentity = false;
                     if (live != null) {
                         for (var e : reHomed.pvTargets().entrySet()) {
                             var vVar = es.getVariableSet().getVariable(e.getKey().getNum(), AcVariableType.BUS_V);
@@ -931,11 +971,17 @@ final class GpuBatchQualification {
                                 live = null;
                                 break;
                             }
+                            if (relocQRow(vVar.getRow(), relocRows, outagedZiNums) != vVar.getRow()) {
+                                relocIdentity = true;        // its own row carries the coupler's ZERO_V
+                                live = null;
+                                break;
+                            }
                             live.add(reHomedPvEntry(vVar.getRow(), e.getValue(), rlEntryOf(gpuData, e.getKey())));
                         }
                     }
                     if (live == null) {
-                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:VC_REMERGE_NO_VROW");
+                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(
+                                relocIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
                         continue;
                     }
                     if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
@@ -1072,7 +1118,8 @@ final class GpuBatchQualification {
                             vcOff = null;
                             break;
                         }
-                        vcOff.add(new GenOutage(-1, 0, vVar.getRow(), sb.getTargetQ(), true, true,
+                        vcOff.add(new GenOutage(-1, 0, relocQRow(vVar.getRow(), relocRows, outagedZiNums),
+                                sb.getTargetQ(), true, true,
                                 -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
                                 new int[0], new double[0], deadControlRowMode(gpuData, sb), -1, 0, -1, 0, -1, 0));
                     }
@@ -1092,16 +1139,23 @@ final class GpuBatchQualification {
                         pvOn.addAll(java.util.Arrays.asList(genOutagesByIndex[i]));
                     }
                     boolean ok = true;
+                    boolean relocIdentity = false;
                     for (var e : reHomed.pvTargets().entrySet()) {
                         var vVar = es.getVariableSet().getVariable(e.getKey().getNum(), AcVariableType.BUS_V);
                         if (vVar == null || vVar.getRow() < 0) {
                             ok = false;
                             break;
                         }
+                        if (relocQRow(vVar.getRow(), relocRows, outagedZiNums) != vVar.getRow()) {
+                            ok = false;
+                            relocIdentity = true;            // its own row carries the coupler's ZERO_V
+                            break;
+                        }
                         pvOn.add(reHomedPvEntry(vVar.getRow(), e.getValue(), rlEntryOf(gpuData, e.getKey())));
                     }
                     if (!ok) {
-                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:VC_REMERGE_NO_VROW");
+                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(
+                                relocIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
                         continue;
                     }
                     genOutagesByIndex[i] = pvOn.toArray(new GenOutage[0]);

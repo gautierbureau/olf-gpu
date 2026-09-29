@@ -4037,3 +4037,30 @@ row carries its reactive balance; OLF replaces a controlled bus's reactive balan
 component's identity belongs on the ROOT's V row whichever of its buses is the elected main, with the root's
 reactive balance moving the way a controlled bus's does. That also removes `hostsVoltageIdentity` as a coverage
 limit: the root would be CHOSEN as the identity owner instead of every capable bus being excluded from relocation.
+
+### The relocation ON by default: the full-scope base is EXACT (2026-09-29)
+
+`hostsVoltageIdentity` asking OLF's own `VoltageControl.findMainVisibleControlledBus()` — of the controls merged
+over a zero-impedance component exactly one is main and visible, and its controlled bus carries the component's
+single identity — recovers the coverage the "has a control at all" test threw away, while staying pin-state
+independent. Measured on rte6515's FULL busbar scope (6876 sections, the objective; the [5000,6000) window is only
+the fast regression check), base load flow with `-Dolf.gpu.ziTreeRelocation=true -DziTreeRelocationMinCouplers=1`:
+
+| | no relocation | strict owner test | canonical owner test |
+|---|---|---|---|
+| zero diagonals (`tinyDiag`) | 996 | 793 | **0** |
+| hazard rows (`nHaz`) | — | 1616 | 222 |
+| first linear residual ratio | 2.1e+08 | 1.3e+10 | **1.5e-14** |
+| base distributed power vs CPU | 6.6e-02 MW | 0 after a divergence + retry | **0.000000e+00 MW, clean** |
+
+So the device's base now factors its own matrix at machine precision at full scope and lands on OLF's distributed
+power exactly, with no numeric row repair left to do (222 hazard rows are the unrelocated non-tree couplers).
+The properties are flipped to ON / min 1 by default, with the javadoc carrying the measurement.
+
+**The window's precompute then failed loudly, and the message named the defect**: `device row 12562 assigned twice
+— column 13026 then ZERO_V elem 9060`. The per-scenario carrier row (`GpuAcRowIndexing.stateQRow`, the first
+ENABLED member's own `BUS_V` row, which the in-kernel mode scan picks) did not follow the relocation, so a
+relocated member's row got both the pilot's reactive balance and its coupler's `ZERO_V`. The canonical owner test
+frees more buses, which is why the extra coverage surfaced it. Fixed by giving `stateQRow` the relocation (a
+`ziParentEdge`/`dummyQCol` overload, the same mapping `distrQRow`'s tree overload makes) and by mapping candidate 0
+— the pilot's own fallback row — through it too, so the table, the target map and the kernels name one row each.

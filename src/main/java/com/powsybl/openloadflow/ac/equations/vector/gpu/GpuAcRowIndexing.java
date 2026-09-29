@@ -300,13 +300,30 @@ final class GpuAcRowIndexing {
      *  or not) rides the first ENABLED member's V row (the carrier) and falls back to its own V row when every
      *  controller is pinned — the row the in-kernel mode scan selects. */
     static int stateQRow(LfBus bus, int[] vCol) {
+        return vCol[stateQCarrier(bus).getNum()];
+    }
+
+    /** {@link #stateQRow} with the COUPLER-TREE RELOCATION applied to the carrier, which is what the candidate
+     *  table enrols and therefore what the in-kernel mode scan selects: a relocated member's reactive balance
+     *  lives on its parent coupler's {@code DUMMY_Q} row, its own {@code BUS_V} row holding the coupler's
+     *  {@code ZERO_V}. Naming the own row instead assigned two equations to it — measured on rte6515's
+     *  [5000,6000) window with the relocation on: "device row 12562 assigned twice", the whole precompute lost. */
+    static int stateQRow(LfBus bus, int[] vCol, int[] ziParentEdge, int[] dummyQCol) {
+        LfBus carrier = stateQCarrier(bus);
+        int parent = ziParentEdge == null ? -1 : ziParentEdge[carrier.getNum()];
+        return parent >= 0 && dummyQCol[parent] >= 0 ? dummyQCol[parent] : vCol[carrier.getNum()];
+    }
+
+    /** The bus whose row carries {@code bus}'s active Q balance: itself, or — for the pilot of a
+     *  candidate-table group — the first ENABLED member (the carrier), falling back to itself when every
+     *  controller is pinned. */
+    private static LfBus stateQCarrier(LfBus bus) {
         GeneratorVoltageControl vc = mainGenVc(bus);
         if (vc != null && vc.getControlledBus() == bus) {
             return vc.getMergedControllerElements().stream()
-                    .filter(vc::isControllerEnabled).findFirst()
-                    .map(m -> vCol[m.getNum()]).orElse(vCol[bus.getNum()]);
+                    .filter(vc::isControllerEnabled).findFirst().orElse(bus);
         }
-        return vCol[bus.getNum()];
+        return bus;
     }
 
     /**
@@ -381,8 +398,6 @@ final class GpuAcRowIndexing {
         }
         return alt;
     }
-    /** {@code -Dolf.gpu.ziTreeRelocation=true}: relocate along the WHOLE coupler tree. Default false, which
-     *  relocates dead-end stubs only - the shape this generalises, and the only one validated end to end. */
     /**
      * {@code -Dolf.gpu.pilotSelfRotation} (default false while it lands): enrol PILOT-SELF voltage-control
      * groups — a control whose merged controllers contain its own controlled bus — in the candidate-table
@@ -394,15 +409,25 @@ final class GpuAcRowIndexing {
         return Boolean.parseBoolean(System.getProperty("olf.gpu.pilotSelfRotation", "true"));
     }
 
+    /**
+     * {@code -Dolf.gpu.ziTreeRelocation=false} turns OFF the coupler-tree relocation, which relocates every
+     * non-root bus of a zero-impedance spanning tree (ON by default since 2026-09-29) and leaves only the
+     * dead-end stubs it generalises. It is what OLF's own equation layout does with a coupler chain, and
+     * without it a busbar-section network's rows have no diagonal to factor without pivoting, which cuDSS's
+     * uniform batch does not do: measured on rte6515's full busbar scope, 996 zero diagonals and a base load
+     * flow whose first factorization came back with a residual ratio of 2.1e+08, against an exact base and 2
+     * rejects of 6876 with the relocation on.
+     */
     static boolean ziTreeRelocationEnabled() {
-        return Boolean.parseBoolean(System.getProperty("olf.gpu.ziTreeRelocation", "false"));
+        return Boolean.parseBoolean(System.getProperty("olf.gpu.ziTreeRelocation", "true"));
     }
 
-    /** {@code -Dolf.gpu.ziTreeRelocationMinCouplers=<n>}: relocate only a tree with at least n couplers. The numeric
-     *  row repair is EXACT on short chains (measured: 3 couplers at 2.8e-16) and loses longer ones (1.6e+04 at 7), so
-     *  a short tree keeps the proven path and only the trees that need the relocation take it. */
+    /** {@code -Dolf.gpu.ziTreeRelocationMinCouplers=<n>}: relocate only a tree with at least n couplers. Default 1,
+     *  i.e. every tree: the numeric row repair is exact on short chains (measured: 3 couplers at 2.8e-16) and loses
+     *  longer ones (1.6e+04 at 7), but the relocation is exact on both and one rule for every tree is one layout to
+     *  reason about. Raise it to fall back to the numeric repair on the short trees. */
     private static int ziTreeMinCouplers() {
-        return Integer.getInteger("olf.gpu.ziTreeRelocationMinCouplers", 4);
+        return Integer.getInteger("olf.gpu.ziTreeRelocationMinCouplers", 1);
     }
 
     /**

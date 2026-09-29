@@ -148,12 +148,12 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             // BUS_V(VL-6003_1) at 6.5e+02 and on the empty pilot row BUS_V(VL-6003_0) at 1.09e+02, every iteration.
             List<Integer> memberRows = new ArrayList<>();
             for (LfBus m : gvc.getMergedControllerElements()) {
-                int parent = ziTreeEdges[0][m.getNum()];
-                memberRows.add(parent >= 0 && dummyQCol[parent] >= 0 ? dummyQCol[parent] : vCol[m.getNum()]);
+                memberRows.add(relocatedQRow(m.getNum(), ziTreeEdges[0], dummyQCol, vCol));
             }
             int g = qrPtr.size();
             qrPtr.add(qrRows.size());
-            qrRows.add(vCol[bus.getNum()]);                  // candidate 0 = the FALLBACK (control lost)
+            // candidate 0 = the FALLBACK (control lost), the pilot's own reactive row — relocated like any other
+            qrRows.add(relocatedQRow(bus.getNum(), ziTreeEdges[0], dummyQCol, vCol));
             qrRows.addAll(memberRows);
             qRowAlt[bus.getNum()] = -2 - g;
             qrPilotBuses.add(bus.getNum());
@@ -288,6 +288,15 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         return new ExtractionColumns(phiCol, vCol, branchRhoCol, branchAlphaCol, dummyPCol, dummyQCol, shuntBCol, qRow, qRowAlt,
                 GpuAcArrays.toIntArray(qrPtr), GpuAcArrays.toIntArray(qrRows), qrGroupOfPilot, ziDeadEnd,
                 pRow, ziParentEdge, ziChildBus);
+    }
+
+
+    /** The row that hosts a bus's reactive balance: its own {@code BUS_V} row, or its parent coupler's
+     *  {@code DUMMY_Q} row when the coupler-tree relocation moved its power equations there (the same mapping
+     *  {@code GpuAcRowIndexing.distrQRow}'s tree overload makes for the bus's {@code DISTR_Q}). */
+    private static int relocatedQRow(int busNum, int[] ziParentEdge, int[] dummyQCol, int[] vCol) {
+        int parent = ziParentEdge[busNum];
+        return parent >= 0 && dummyQCol[parent] >= 0 ? dummyQCol[parent] : vCol[busNum];
     }
 
 }

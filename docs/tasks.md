@@ -3854,3 +3854,29 @@ Chain, end to end, as measured: 996 zero diagonals (relocation off) → unpivote
 wrong trajectory → 11 spurious robust pins → base 6.56e-02 MW off and 6357 scenarios rejected; with the
 relocation on the factorization is right (1.65e-14, first iterate matching OLF to ten digits) → the RL q is read
 at repurposed rows → 20 spurious pins → the pinned solve does not converge. Fix the q row, then re-measure both.
+
+### Why the relocation cannot simply be switched on: the conflict is systemic (2026-09-29, measured)
+
+Tried the narrow fix first — refuse to relocate a bus that is merely CAPABLE of voltage control (today's guard
+only refuses one whose BUS_TARGET_V is ACTIVE), since such a bus's reactive-limit entry reads its q, flips its
+mode and stamps its voltage target at its OWN V row, which the relocation gives to the coupler's ZERO_V. It
+removes the bad pins but it also removes the relocation: **24 of 366 couplers relocated instead of 329**, 926
+zero diagonals, ratio back to 2.6e+11. Reverted.
+The reason is in the network: of the 329 children the relocation picks, **305 are control-capable** (named in a
+`gvc` line; 1345 such buses in the full-scope extraction). A coupler in this model joins busbar sections of a
+substation, and those sections are exactly where the generators sit. So there is no subset to carve out.
+What a correct placement has to satisfy, both facts measured above:
+1. Every row needs a structurally nonzero diagonal. A coupler brings 2 equations (ZERO_V, ZERO_PHI) and 2
+   variables (DUMMY_P, DUMMY_Q); pairing the zeros with the dummies gives two zero diagonals (ZERO_V does not
+   contain DUMMY_P), so the zeros MUST take an endpoint's v/phi — which is what the relocation does, and why a
+   chain of k couplers consumes k of its k+1 buses' v/phi rows and leaves the root's free.
+2. A control-capable child still needs somewhere to put a voltage identity when the reactive-limit loop switches
+   it back to PV, and its own v row is gone. Its identity CAN live on the component's one free v row (the root's):
+   inside a zero-impedance component ZERO_V makes the voltages equal, so constraining any of them is equivalent,
+   and OLF has at most one active voltage target per such component (merged voltage controls). Its reactive-limit
+   entry must then read q at, and flip, the coupler's DUMMY_Q row (the row the activation extractor ALREADY uses
+   for its BUS_TARGET_Q — `stubBr >= 0 ? dummyQCol[stubBr] : qRow[bus]`), while the switch conditions keep
+   comparing the bus's own v (the `rlCmpVrow` channel already exists for that split).
+So the work is: place a relocated child's voltage identity on the component's free v row, and make the
+reactive-limit pack's row follow the relocation (read/flip the dummy row, compare the own v). That spans the
+extraction's placement, the activation extractor, the RL pack and the RL kernels — recorded, not started.

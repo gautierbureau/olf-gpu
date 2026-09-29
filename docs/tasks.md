@@ -4474,7 +4474,24 @@ solved on device:
 | distributed power | worst 1.073628e+01 MW, unchanged |
 | runtime rejects | 60 × `status=-2`, and NO `status=-3` |
 
-So the twenty extra scenarios brought no new differences: their results agree with OLF, and the suite is unchanged
-at the two known middle-section failures. What remains of the 23 device defects is 3: `BUS-1219_BBS` and
-`BUS-6229_BBS_1` (non-converging where the CPU converges) and `BUS-6194_BBS_2` (the one status mismatch), all of
-which point at the slack loop's five-passes-for-one behaviour already written up.
+The twenty extra scenarios converge and their statuses match, but they are NOT difference-free, and the earlier
+claim that the "identical state, one-sided violation" class had disappeared was drawn from a single run and is
+wrong. The differing set is 9 contingencies here, up from 5, three of them newly batched, and it moves run to run:
+
+| contingency | distributed power apart | the one-sided violation |
+|---|---|---|
+| `BUS-125_BBS_1` | 9.6e-13 MW | CPU-only `LINE-2533-1468 CURRENT TWO` value 6.654 limit 5.486, margin **1.17** |
+| `BUS-1359_BBS_1` | 1.1e-12 MW | 3 CPU-only `APPARENT_POWER`, margins 0.105, 0.105, 0.035 (0.2-0.5% over) |
+| `BUS-1869_BBS_1` | 6.2e-13 MW | 2 GPU-only `APPARENT_POWER`, margins 0.196, 0.305 (2-3% over) |
+| `BUS-1843_BBS_1` | 7.7e-03 MW | 1 CPU-only |
+| the other 5 | 0.39 … 56.9 MW | the state-differing set |
+
+Two shapes are mixed in there: borderline apparent-power violations a hair over the limit, which a last-digit
+state difference can flip either way, and at least one CURRENT violation 21% over the limit that one arm does not
+report at all while the branch's own flow matches to 1e-13. The second cannot be a state difference. The
+discriminator is one run of the GPU arm with `-Dolf.gpu.sa.tableViolations=false`, which replaces the GPU limit
+table and its device screen with OLF's own detector on the same states.
+
+What remains of the 23 device defects is 3: `BUS-1219_BBS` and `BUS-6229_BBS_1` (non-converging where the CPU
+converges) and `BUS-6194_BBS_2` (the one status mismatch), all of which point at the slack loop's
+five-passes-for-one behaviour already written up.

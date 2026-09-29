@@ -3775,3 +3775,34 @@ Order of work, from this measurement: (1) the base's outer-loop sequence at full
 RL pass-by-pass pin sets, `OLF_GPU_DBG_RL` against `SW_PASS`, as the window work did), then (2) the 6357
 linear-solve failures, which is what keeps the device out of 96% of the scope. The window remains the fast
 regression gate; it is evidently a benign subset, so a window result must not be reported as a full-scope one.
+
+### The full-scope base's outer-loop sequence: 11 pins OLF never makes, from a first step that is not a Newton step (2026-09-29)
+
+Asked pass by pass (the method the window work used). OLF's base at the full busbar scope: 3 Newton iterations,
+DistributedSlack 0, then ReactiveLimits 1/2/3 — 4 outer loops, 8 solver iterations, and **26 switches**
+(25 PV→PQ in pass 1 including 3 robust unrealistic-voltage ones, then 1 more and 1 switch-back, then 1). The
+device: 18 iterations over 15 solves and **38 switched entries**. Diffing them bus by bus (device `SW_PASS` +
+the row map from `OLF_GPU_EQ_DUMP`, against OLF's own switch log):
+- the device makes every switch OLF makes (0 missing), plus **11 extra**: VL-2669_1..4, VL-4538_1..4,
+  VL-767_1..3 — all in one pass, all `lt=3`, all with q FAR inside their limits (2.4, 2.1, 0.58 MVAr against
+  ±100 MVAr). `lt=3` is the robust unrealistic-voltage pin, so the device's state at those controllers was below
+  the realistic floor (0.8 × 1.02 pu) where OLF's was not.
+So the extra pins are a CONSEQUENCE, and the cause is upstream: the device's first Newton step at this scope is
+not a Newton step. `OLF_GPU_LIN_RESID=1` on the base: **||J·dx − F||inf / ||F||inf = 2.05e+11 with ||dx||inf =
+8.3e+12** at iteration 0 (7.8e+11 at iteration 1), worst row 14491 every time =
+`DUMMY_Q(BUS-6218_COUPLER_4)`, whose only terms are the coupler's ZERO_PHI (+1/−1 on two angle columns) and
+NOTHING on its own column. The assembled matrix has **996 rows with an exactly zero diagonal** (pre-repair scan:
+`tinyDiag=996 firstBadRow=106 nHaz=2028`), all of them couplers' dummy rows.
+**The matrix is not the problem — the factorization is.** `GpuDumpedMatrixRankTest` on the device's OWN dumped
+base matrix: KLU (which pivots) factors it and solves to `||J·dx − B||inf = 9.75e-13`, ratio **2.4e-14**, with a
+sensible `||dx||inf = 11.5`; its largest dx components are exactly those zero-diagonal coupler rows. The same
+matrix through the device's cuDSS UNIFORM BATCH (no pivoting) gives 2.05e+11. The linear-solve guard's own
+comment already says this shape ("min pivots of 1e-18 under any unpivoted ordering") — and it is the same cause
+as the window-free scope's 6357 `status=-3` rejects, which is why the device engages on 251 of 6876.
+Fix direction (not started): the batch needs a zero-free diagonal without pivoting. The pattern is FIXED and
+host-built, so a static maximum-transversal row permutation computed once per structure (what KLU does
+internally) would give every row a structurally nonzero diagonal; the alternatives are extending the
+relocation so every coupler's ZERO_V/ZERO_PHI lands where a real derivative exists (the coupler-tree relocation
+does this for chains and still leaves 996 rows here), or a pivoted solve for the base. Acceptance: the base's
+residual ratio at iteration 0 near 1e-14 as KLU gets, the same 26 switches as OLF, and the base distributed
+power equal (today 6.56e-02 MW apart).

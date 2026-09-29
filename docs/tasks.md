@@ -4214,3 +4214,25 @@ Note the accounting: the chunk solver composes a scenario's total as `participan
 pass retained nothing (`retain` NaN) it reports the pre-distribution ALONE — which loses whatever an earlier pass
 distributed. Being measured before touching it: the bus diffs of the four worst inside the full list
 (`OLF_GPU_SA_BUSDIFF_CTG`), which separate an accounting gap (states agree) from a real difference (they do not).
+
+### The distributed-power tail is REAL, not accounting (2026-09-29)
+
+Bus diffs of the worst four inside the full list settle it:
+
+| contingency | buses over 1e-12 kV | worst | distributed power cpu vs gpu |
+|---|---|---|---|
+| `BUS-5962_BBS_1` | 5442 of 6885 | **3.122e-02 kV** (rel 6.5e-04) | 984.0996 vs 994.8359 MW |
+| `BUS-5988_BBS_1` | 5440 of 6885 | 6.964e-03 kV | 630.9537 vs 633.3204 MW |
+| `BUS-2289_BBS` | not converged on both arms | — | 22.228 vs 24.853 |
+| `BUS-6194_BBS_2` | GPU produced no bus results (cpu-only=6885) | — | 1.347 vs 58.258 |
+
+So for the big-loss contingencies the two arms end on genuinely DIFFERENT operating points, and the device
+distributes about 1% more active power. The base itself is fine in the same run: 1656 of 6886 buses differ by more
+than 1e-12 kV with a worst of **3.595e-11 kV** — the known last-digit drift, nothing else.
+
+The device's rule (`GpuBatchChunkSolver`) is OLF's: the pre-distribution is a DISPLACEMENT from the anchor, and
+the post-contingency water-fill refills `preLoss + slackMismatch` ONCE from the anchor. So the suspects are the
+pre-loss it replays and the slack mismatch it measures. Next: `OLF_GPU_PRELOSS_TRACE=1` at full scope, which
+prints `PRELOSS ctg=<id> mismatch=… absorbed=… slackShare=…` per scenario, read for `BUS-5962_BBS_1` against the
+CPU's 984.0996 MW total; the per-participant split is `OLF_GPU_DS_FINAL_DUMP` on the device (slot 0 of each chunk
+only today) against OLF's own `OLF_DS_TRACE` in the dependency.

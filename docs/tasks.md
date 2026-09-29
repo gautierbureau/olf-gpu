@@ -4284,3 +4284,39 @@ a difference of exactly the dead coupler's dummy-P value at x0). The two P rows 
 pre-distribution, which this contingency triggers (it loses a generator), so the next measurement is the device's
 pre-distribution shares for this scenario (`OLF_GPU_PRELOSS_TRACE=1`) against OLF's (`OLF_DS_TRACE`), not the
 equation wiring.
+
+### What the full-scope differences actually are (2026-09-29)
+
+**The 346 "not batched" are really 138.** Of the 6876 busbar-section contingencies, **209 are not simulated by
+anyone**: `MAPPER:no-batchable-element` means the compose funnel resolved to nothing the device models, and OLF
+produces no post-contingency result for them either — its own status total is 6667 = 6876 − 209, and none of the
+209 appears in the CPU arm's post-contingency trace or in the distributed-power dump. So the population that
+matters is 6667 simulated, of which **6529 run on device and 138 do not**:
+
+| class | distinct contingencies |
+|---|---|
+| `status=-2` (plan rejects + runtime non-convergence) | 111 |
+| `status=-3` (linear-solve failure; 44 slot-level events) | 23 |
+| `DEVICE:MAX_ITERATION_REACHED` | 4 |
+
+and inside the 111 the census accounts for 52 by design or by guard (47 `PLAN:VC_REMERGE_MULTI`,
+3 `PLAN:VC_REMERGE_RELOC_VROW`, 1 `PLAN:SIDE_OPEN_UNPACKED`, 1 `VALIDATOR:ISLANDS_SLACK`), leaving about 59
+genuine device non-convergences.
+
+**The 85 violations differ over 29 contingencies, and they split in two.** Joining the `VIOL-DIFF` list with the
+per-contingency distributed power:
+
+- **24 contingencies whose states are IDENTICAL** (distributed power apart by 3.7e-05 MW, five of them by 1e-12)
+  yet one arm reports a violation the other does not, with margins of 0.2 to 1.5 pu — `LINE-5779-4495 CURRENT TWO
+  value=9.527 limit=8.247` on the CPU with nothing on the GPU, and the mirror image on four contingencies. A state
+  that close cannot flip a violation that large, so this is a reporting or limit-selection difference, not
+  numerics. All 111 one-sided violations are CURRENT; none is a voltage one.
+- **5 contingencies whose states genuinely differ** — the distributed-power tail: `BUS-3050_BBS` 1.01 MW,
+  `BUS-4337_BBS_1` 0.39, `BUS-6139_BBS_4` 0.80, `BUS-6113_BBS_1` 1.77, `BUS-5962_BBS_1` 10.74.
+
+`BUS-6194_BBS_2` is its own case and the biggest single contributor: 71 of the 98 CPU-only violations, the ONLY
+status mismatch in 6876 (GPU FAILED, CPU CONVERGED), it ran ON DEVICE, its distributed power is 1.35 vs 58.26 MW,
+and it is a busbar section whose couplers are relocated — the same shape as the two failing
+`deviceMiddleSectionLoss…` fixtures. Fixing that shape is expected to fix this contingency too.
+Being measured: both arms' flows on the four branches that differ (`OLF_GPU_SA_MON_BRANCH`) plus bus diffs of
+their contingencies, which separates "the GPU never reports that branch" from "the GPU uses a different limit".

@@ -4265,3 +4265,22 @@ and bus vl3_b went 395.43 -> **401.35 kV** against OLF's 401.69 — from 6.3 kV 
 reads the dead row. Next: dump the SCENARIO's row modes (the batch context, not the base — `nS 1` in a
 `OLF_GPU_VALS_DUMP` header means the sequential one) and check which of the member's tables still points at
 c12's `DUMMY_Q`: the reactive-limit entry rows, the DISTR_Q member row (`mRow`), or the injection-override rows.
+
+### A dead coupler carries no reactive flow either (2026-09-29)
+
+Reading the device's first fill of the failing scenario against OLF's own post-contingency equations
+(`OLF_GPU_EQ_DUMP_CTG=bus-mid`, which lists them with `f(x0) − target` per equation) showed the last shape:
+OLF's set is `BUS_TARGET_V vl0_b/vl12_0`, `DISTR_Q vl12_2`, four `DUMMY_TARGET_*` identities for the two dead
+couplers, `BUS_TARGET_P` for vl3_b/vl4_b/vl12_0/vl12_2 and `BUS_TARGET_Q` for vl3_b/vl4_b — and the device's
+diverted sharing row still carried a coefficient **1 on the dead coupler's `DUMMY_Q`**. A kind-3 DISTR_Q
+contribution IS a coupler's dummy reactive flow inside a controller's injection, and the fill dropped kind 0 and
+kind 2 contributors when their element was outaged but had no test for kind 3. It has one now, keyed on the
+per-scenario mode of that dummy column's ROW (the pack carries the COLUMN, so the row is kept beside it).
+Measured: the entry goes to 0 and the row's residual moves from 0.2489 to 0.5815 against OLF's 0.6482.
+
+What is left on that fixture, with every other row matching OLF to the digit: rows for `BUS_TARGET_P vl12_0`
+(device −0.4410, OLF 0.7206), the sharing row (0.5815 vs 0.6482) and `BUS_TARGET_P vl12_2` (0.0410 vs −0.2509,
+a difference of exactly the dead coupler's dummy-P value at x0). The two P rows differ by the SCHEDULED-LOSS
+pre-distribution, which this contingency triggers (it loses a generator), so the next measurement is the device's
+pre-distribution shares for this scenario (`OLF_GPU_PRELOSS_TRACE=1`) against OLF's (`OLF_DS_TRACE`), not the
+equation wiring.

@@ -240,6 +240,12 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         int[] ziParentEdge = ziTree[0];
         int[] ziChildBus = ziTree[1];
         int[] pRow = phiCol.clone();
+        if (System.getenv("OLF_GPU_ZI_RELOC_TRACE") != null) {
+            long relocated = java.util.Arrays.stream(ziParentEdge).filter(x -> x >= 0).count();
+            System.err.printf("ZI_RELOC treeMode=%b minCouplers=%d relocatedBuses=%d of %d%n",
+                    GpuAcRowIndexing.ziTreeRelocationEnabled(),
+                    Integer.getInteger("olf.gpu.ziTreeRelocationMinCouplers", 4), relocated, nBuses);
+        }
         for (LfBus bus : network.getBuses()) {
             int bn = bus.getNum();
             int parent = ziParentEdge[bn];

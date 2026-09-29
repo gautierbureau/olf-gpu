@@ -46,9 +46,18 @@ final class GpuContingencyMapper {
         List<LfGenerator> gens = new java.util.ArrayList<>();
         for (String id : pc.getGeneratorIdsToLose()) {
             LfGenerator gen = net.getGeneratorById(id);
-            if (gen == null || gen.getBus() == null || gen.getBus().isDisabled()) {
-                trace(pc, "generator " + id + (gen == null ? " not in the LfNetwork"
-                        : gen.getBus() == null ? " has no bus" : " sits on a disabled bus"));
+            if (gen == null) {
+                // OLF SKIPS it, for the same reason it skips an unresolvable branch id: its own
+                // toLfContingency does "if (generator != null) { ... } // could be in another
+                // component". A generatorIdsToLose entry with no LfGenerator is therefore normal and
+                // the CPU arm never loses it. Rejecting the whole contingency was stricter than OLF:
+                // network.xiidm's LVKP and LVKQ are HVDC lines whose converter station (GIR, GNS) is
+                // outside the solved network, and both were thrown away over it.
+                trace(pc, "skipped generator " + id + " not in the LfNetwork (OLF drops it too)");
+                continue;
+            }
+            if (gen.getBus() == null || gen.getBus().isDisabled()) {
+                trace(pc, "generator " + id + (gen.getBus() == null ? " has no bus" : " sits on a disabled bus"));
                 return null;
             }
             if (lostLfBusIds.contains(gen.getBus().getId())) {
@@ -98,9 +107,16 @@ final class GpuContingencyMapper {
         List<com.powsybl.openloadflow.network.LfHvdc> out = new java.util.ArrayList<>();
         for (String id : pc.getHvdcIdsToOpen()) {
             com.powsybl.openloadflow.network.LfHvdc hvdc = net.getHvdcById(id);
-            if (hvdc == null || hvdc.getBus1() == null || hvdc.getBus2() == null) {
-                trace(pc, "hvdc " + id + (hvdc == null ? " not in the LfNetwork"
-                        : " has a converter with no bus"));
+            if (hvdc == null) {
+                // OLF SKIPS it — toLfContingency resolves hvdcIdsToOpen with
+                // ".filter(Objects::nonNull) // could be in another component", the same rule it uses
+                // for branch and generator ids. network.xiidm's LVKP and LVKQ are HVDC lines outside
+                // the solved network, and rejecting on them threw the contingency away.
+                trace(pc, "skipped hvdc " + id + " not in the LfNetwork (OLF drops it too)");
+                continue;
+            }
+            if (hvdc.getBus1() == null || hvdc.getBus2() == null) {
+                trace(pc, "hvdc " + id + " has a converter with no bus");
                 return null;                                 // not a packed hv element — CPU
             }
             if (!hvdc.isAcEmulation()) {
@@ -300,11 +316,22 @@ final class GpuContingencyMapper {
                 continue;
             }
             LfBranch branch = net.getBranchById(e.getKey());
-            if (branch == null || (branch.getBus1() == null && branch.getBus2() == null)) {
-                // name the ELEMENT KIND too: an id alone does not say which family
-                trace(pc, "unresolvable " + e.getKey() + " kind=" + pc.getContingency().getElements().stream()
-                        .map(el -> el.getType().name()).distinct().toList()
-                        + (branch == null ? " lfBranch=absent" : " bus1=false bus2=false"));
+            if (branch == null) {
+                // OLF SKIPS it. branchIdsToOpen is keyed by id and carries more than branches: every
+                // switch the propagation decides to open is copied in under the SWITCH's id
+                // (PropagatedContingency#complete), and a switch only becomes an LfSwitch when both its
+                // bus-breaker buses exist as LfBuses. So an id with no LfBranch is normal, and the AC
+                // path's findBranchToOpenDirectlyImpactedByContingency drops it with a plain
+                // ".filter(e -> e.getKey() != null)" — the CPU arm never opens it. Rejecting the whole
+                // contingency instead was stricter than OLF: network.xiidm's LJHD and LREA (branch
+                // scope) and HZDV/HZDW/HZDX (load scope) were each thrown away over one switch id
+                // (ADMO, HZCD) that OLF itself ignores.
+                trace(pc, "skipped unresolvable " + e.getKey() + " kind=" + pc.getContingency().getElements().stream()
+                        .map(el -> el.getType().name()).distinct().toList() + " lfBranch=absent (OLF drops it too)");
+                continue;
+            }
+            if (branch.getBus1() == null && branch.getBus2() == null) {
+                trace(pc, "unresolvable " + e.getKey() + " bus1=false bus2=false");
                 return null;
             }
             if (branch.getBus1() == null || branch.getBus2() == null) {

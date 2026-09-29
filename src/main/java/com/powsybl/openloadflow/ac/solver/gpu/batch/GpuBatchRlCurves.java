@@ -74,6 +74,13 @@ public final class GpuBatchRlCurves {
         List<Double> cvPts = new ArrayList<>();
         List<String> cvGenId = new ArrayList<>();
         List<Double> cvBusFactor = new ArrayList<>();
+        // Each bus's P-BALANCE row, from the one source of truth. Resolving it from the variable set
+        // instead gives the bus's own BUS_PHI column, which is NOT where its P target lives once the
+        // coupler-tree relocation has moved it onto the parent coupler's DUMMY_P — and this channel
+        // uses the row twice, as a kernel row index and as a baseTargets[] index, so a stale row
+        // evaluates every curve on this bus at the wrong active power.
+        int[] busPRow = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
+                .busPowerRows(network, es)[0];
         int rlIdx = 0;
         for (LfBus bus : network.getBuses()) {
             int bn = bus.getNum();
@@ -99,7 +106,7 @@ public final class GpuBatchRlCurves {
                 // remote members keep STATIC limits in the channel (a curve gen at a remote member is
                 // possible but its own P participation is the same as a local bus's) — fall through to
                 // the same per-generator curve packing below.
-                packBusCurves(bus, rlIdx, es, dsParams, baseTargets, cvIdx, cvIn, cvPts,
+                packBusCurves(bus, rlIdx, es, dsParams, baseTargets, busPRow, cvIdx, cvIn, cvPts,
                         cvGenId, cvBusFactor, gpuData.dgGenId());
                 rlIdx++;
                 continue;
@@ -115,7 +122,7 @@ public final class GpuBatchRlCurves {
                 throw new PowsyblException("GPU AC solver: RL-pack enumeration drift while packing curve limits (bus "
                         + bus.getId() + ")");
             }
-            packBusCurves(bus, rlIdx, es, dsParams, baseTargets, cvIdx, cvIn, cvPts,
+            packBusCurves(bus, rlIdx, es, dsParams, baseTargets, busPRow, cvIdx, cvIn, cvPts,
                     cvGenId, cvBusFactor, gpuData.dgGenId());
             rlIdx++;
         }
@@ -171,7 +178,7 @@ public final class GpuBatchRlCurves {
     }
 
     private static void packBusCurves(LfBus bus, int rlIdx, EquationSystem<AcVariableType, AcEquationType> es,
-                                      GpuDsParams dsParams, double[] baseTargets,
+                                      GpuDsParams dsParams, double[] baseTargets, int[] busPRow,
                                       List<int[]> cvIdx, List<double[]> cvIn, List<Double> cvPts,
                                       List<String> cvGenId, List<Double> cvBusFactor, String[] dgGenId) {
         double busFactor = bus.getGenerators().stream().mapToDouble(dsParams::factor).sum();
@@ -205,7 +212,7 @@ public final class GpuBatchRlCurves {
                 cvPts.add(pt.getMinQ());
                 cvPts.add(pt.getMaxQ());
             }
-            int pRow = es.getVariableSet().getVariable(bus.getNum(), AcVariableType.BUS_PHI).getRow();
+            int pRow = busPRow[bus.getNum()];             // the RELOCATED P-balance row (see build)
             // ...and WHICH generator this is in the distributed-slack generator pack. The kernel reads
             // that generator's own cumulative P movement (genCum) instead of splitting its bus's
             // movement by a fixed share: the share is exact only while the intra-bus split stays

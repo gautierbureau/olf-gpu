@@ -112,6 +112,20 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
      *  batching share. */
     private static <T> List<T> keepSolved(List<T> all, java.util.function.Predicate<T> live, String kind) {
         List<T> kept = all.stream().filter(live).toList();
+        // OLF_GPU_SA_ID_PROBE=<id>[,<id>]: for each named element, whether THIS scope kept it. A mapper
+        // reject naming an element the harness never contingencied is not a harness bug: contingency
+        // PROPAGATION runs on the IIDM network and pulls in neighbours, which can be elements our own
+        // filter deliberately dropped. The probe is what tells those two apart.
+        String probe = System.getenv("OLF_GPU_SA_ID_PROBE");
+        if (probe != null) {
+            java.util.Set<String> want = java.util.Arrays.stream(probe.split(",")).map(String::trim)
+                    .collect(Collectors.toSet());
+            for (T t : all) {
+                if (t instanceof com.powsybl.iidm.network.Identifiable<?> i && want.contains(i.getId())) {
+                    System.out.printf("  ID_PROBE %s kind=%s present=true kept=%b%n", i.getId(), kind, kept.contains(t));
+                }
+            }
+        }
         if (kept.size() != all.size()) {
             System.out.printf("  CTG_FILTER %s: %d of %d dropped (out of service, or outside the "
                     + "network OLF solves - no result on either arm)%n", kind, all.size() - kept.size(), all.size());
@@ -120,6 +134,28 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
     }
 
     private static List<Contingency> allBranchContingencies(Network network) {
+        // OLF_GPU_SA_ID_KIND=<id>[,<id>]: what CLASS an id actually is in the IIDM network. A mapper
+        // reject naming an id the branch scope never built a contingency for is answered here: the
+        // class says whether the harness could have covered it at all.
+        String idKind = System.getenv("OLF_GPU_SA_ID_KIND");
+        if (idKind != null) {
+            for (String id : idKind.split(",")) {
+                com.powsybl.iidm.network.Identifiable<?> i = network.getIdentifiable(id.trim());
+                String extra = "";
+                if (i instanceof com.powsybl.iidm.network.Switch sw) {
+                    com.powsybl.iidm.network.VoltageLevel vl = sw.getVoltageLevel();
+                    extra = " retained=" + sw.isRetained() + " open=" + sw.isOpen() + " kind=" + sw.getKind()
+                            + " vl=" + vl.getId() + " vlBusesInMainCC="
+                            + vl.getBusView().getBusStream().filter(b -> b.getConnectedComponent() != null
+                                    && b.getConnectedComponent().getNum()
+                                        == com.powsybl.iidm.network.ComponentConstants.MAIN_NUM).count()
+                            + "/" + vl.getBusView().getBusStream().count();
+                }
+                System.out.printf("  ID_KIND %s -> %s%s%n", id.trim(),
+                        i == null ? "ABSENT from the IIDM network" : i.getClass().getSimpleName() + " / " + i.getType(),
+                        extra);
+            }
+        }
         String kinds = System.getenv().getOrDefault("OLF_GPU_SA_CTG_KINDS", "branch");
         List<Contingency> all = new java.util.ArrayList<>();
         if (kinds.contains("branch")) {

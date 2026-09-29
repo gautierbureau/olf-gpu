@@ -4414,3 +4414,26 @@ design; they are unimplemented shapes plus one stopgap, and under the no-CPU-fal
 - **`PLAN:SIDE_OPEN_UNPACKED`, 1 — a MISLABEL, fixed.** That site records a fixed tag for EVERY disqualified
   validator verdict, so the one full-scope entry (an islanded-slack outage) was reported as a side-open shape.
   It now records the validator's own reason.
+
+### The genuine device defects at full scope are 23, and they share a shape (2026-09-29)
+
+Checking every runtime reject against what the CPU does with it (the distributed-power dump marks a contingency
+`not-converged` when NEITHER arm converged) settles which are bugs:
+
+| class | count | CPU converges it? |
+|---|---|---|
+| `status=-2`, device non-convergence | 60 | **58 NO** — OLF reports MAX_ITERATION_REACHED for them too, so declining them is correct |
+| `status=-2`, and the CPU converges | **2** | yes — `BUS-1219_BBS` (slot 241), `BUS-6229_BBS_1` (slot 2569) |
+| `status=-3`, linear-solve failure | **20** | **yes, all 20** — the system is solvable and the device's factorization fails |
+| status mismatch (GPU FAILED, CPU CONVERGED) | **1** | yes — `BUS-6194_BBS_2` |
+
+So 23 contingencies, not 59. And the 20 linear-solve failures share a striking pattern: **every one is a `_BBS_1`
+section** — the FIRST section of a multi-section bus (`BUS-1055_BBS_1`, `BUS-11_BBS_1` slot 220, `BUS-1282_BBS_1`,
+`BUS-1320_BBS_1`, `BUS-1330_BBS_1`, `BUS-1359_BBS_1`, `BUS-137_BBS_1`, `BUS-1502_BBS_1`, `BUS-1553_BBS_1`,
+`BUS-1564_BBS_1`, `BUS-1570_BBS_1`, `BUS-1599_BBS_1`, `BUS-1619_BBS_1`, `BUS-1644_BBS_1`, `BUS-1675_BBS_1`,
+`BUS-1843_BBS_1`, `BUS-1869_BBS_1`, `BUS-2123_BBS_1`, `BUS-2151_BBS_1`, `BUS-2182_BBS_1`). A multi-section bus has
+couplers, and losing its first section kills them — the same dead-coupler shape as `BUS-6194_BBS_2` and as the two
+failing `deviceMiddleSectionLoss…` fixtures. The 58 that neither arm converges are, by contrast, OLF's own
+non-convergences and not a device question.
+Next: scan one of the 20 inside the full list (`OLF_GPU_VALS_SCAN_SLOT=220` for `BUS-11_BBS_1`) — a singular
+matrix names its row, and the guess to test first is a dead coupler's dummy row left without an equation.

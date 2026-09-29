@@ -892,10 +892,33 @@ final class GpuBatchChunkSolver {
                                 for (GenOutage go : gos) {   // at most one DS-participant bus per contingency by construction)
                                     if (go.pRow() >= 0) {    // pRow < 0: a row-mode-only entry (a voltage
                                         overrides.add(s * n + go.pRow(), go.pTarget());   // control the island killed)
+                                        // OLF_GPU_INJ_OV_CTG=<id>[,<id>]: the row this injection outage moves and
+                                        // BY HOW MUCH, against the row's base target. A bus whose target does not
+                                        // move by the lost injection leaves that power in the balance, and the
+                                        // distributed-slack loop then reads it as a mismatch and undoes the loss
+                                        // pre-distribution (network.xiidm loads: 4183 of 7494 totals wrong).
+                                        String injWant = System.getenv("OLF_GPU_INJ_OV_CTG");
+                                        if (injWant != null) {
+                                            String cid = contingencies.get(ci).contingencyId();
+                                            for (String w : injWant.split(",")) {
+                                                if (w.trim().equals(cid)) {
+                                                    System.err.printf("INJ_OV ctg=%s pRow=%d base=%.12f pTarget=%.12f "
+                                                            + "delta=%.12f dsBus=%d dsBaseDelta=%.12f pStep=%.12f"
+                                                            + " | vRow=%d qBase=%.12f qTarget=%.12f qOv=%b%n",
+                                                            cid, go.pRow(), baseTargets[go.pRow()], go.pTarget(),
+                                                            go.pTarget() - baseTargets[go.pRow()], go.dsBus(),
+                                                            go.dsBaseDelta(), go.pStep(),
+                                                            go.qTargetRowOrV(),
+                                                            go.qTargetRowOrV() >= 0 ? baseTargets[go.qTargetRowOrV()] : Double.NaN,
+                                                            go.qTarget(), go.qOverride());
+                                                }
+                                            }
+                                        }
                                     }
                                     if (go.qOverride()) {    // Q target sheds the lost gens' Q: on the PV->PQ flip AND
-                                        // on an ALREADY-PQ bus losing fixed-Q gens (#21)
-                                        overrides.add(s * n + go.vRow(), go.qTarget());
+                                        // on an ALREADY-PQ bus losing fixed-Q gens (#21). The Q BALANCE row, which
+                                        // under a coupler is not the BUS_V row the PV->PQ mode flip below rewrites.
+                                        overrides.add(s * n + go.qTargetRowOrV(), go.qTarget());
                                     }
                                     if (go.killsPilotVoltageIdentity()) {
                                         // The pilot's voltage identity goes NOW, with the member's

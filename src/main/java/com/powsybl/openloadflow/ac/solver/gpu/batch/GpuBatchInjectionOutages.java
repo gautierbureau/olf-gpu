@@ -134,7 +134,7 @@ final class GpuBatchInjectionOutages {
                 values = v.stream().mapToDouble(Double::doubleValue).toArray();
             }
             out.add(new GenOutage(-1, 0, -1, 0, false, false, -1, 0, 0, 0, 0, -1, 0, 0, false,
-                    java.util.Set.of(), 0, 0, 0, im, new int[0], rows, values, 0, -1, 0, -1, 0, -1, 0));
+                    java.util.Set.of(), 0, 0, 0, im, new int[0], rows, values, 0, -1, 0, -1, 0, -1, 0, -1));
         }
         return out;
     }
@@ -171,7 +171,7 @@ final class GpuBatchInjectionOutages {
     static GenOutage[] computeInjectionOutages(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,
                                                double dsSum, boolean slackParticipates,
                                                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams,
-                                               List<LfGenerator> gens, List<LoadLoss> loads) {
+                                               List<LfGenerator> gens, List<LoadLoss> loads, int[][] busRows) {
         java.util.Map<LfBus, List<LfGenerator>> byBus = new java.util.LinkedHashMap<>();
         java.util.Map<LfBus, List<LoadLoss>> loadsByBus = new java.util.LinkedHashMap<>();
         for (LfGenerator g : gens) {
@@ -189,7 +189,7 @@ final class GpuBatchInjectionOutages {
         int dsBuses = 0;
         for (java.util.Map.Entry<LfBus, List<LfGenerator>> e : byBus.entrySet()) {
             GenOutage go = computeBusGenOutage(es, gpuData, dsSum, slackParticipates, dsParams, e.getKey(), e.getValue(),
-                    loadsByBus.getOrDefault(e.getKey(), List.of()));
+                    loadsByBus.getOrDefault(e.getKey(), List.of()), busRows);
             if (go == null) {
                 return null;                                 // the per-bus exit already named itself
             }
@@ -222,7 +222,7 @@ final class GpuBatchInjectionOutages {
     private static GenOutage computeBusGenOutage(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,
                                                  double dsSum, boolean slackParticipates,
                                                  com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams, LfBus bus,
-                                                 List<LfGenerator> lost, List<LoadLoss> lostLoads) {
+                                                 List<LfGenerator> lost, List<LoadLoss> lostLoads, int[][] busRows) {
         int busNum = bus.getNum();
         if (es.getEquation(busNum, AcEquationType.BUS_TARGET_PHI).isPresent()) {     // slack/reference: P is free
             return reject("SLACK_BUS", bus);
@@ -407,7 +407,13 @@ final class GpuBatchInjectionOutages {
             return reject("LOAD_BASED_DS_LOAD_LOSS", bus);   // participation factors — not modeled: CPU
         }
         java.util.Set<LfGenerator> lostSet = new java.util.HashSet<>(lost);
-        int pRow = es.getVariableSet().getVariable(busNum, AcVariableType.BUS_PHI).getRow();
+        // The bus's P-BALANCE row, which under a coupler tree is its parent coupler's DUMMY_P column,
+        // NOT its own BUS_PHI column (GpuAcDataExtractor#busPowerRows). Resolving it from the variable
+        // set instead put every injection override of a relocated bus on a coupling row whose target is
+        // 0, so the absolute override was a no-op and the lost injection stayed in the balance — and it
+        // also made the dsPhiRow lookup below miss, dropping the anchor shift. network.xiidm's loads:
+        // 4183 of 7494 wrong totals, worst 148 MW, 12640 of 13338 buses off by up to 1.03 kV.
+        int pRow = busRows[0][busNum];
         int vRow = es.getVariableSet().getVariable(busNum, AcVariableType.BUS_V).getRow();
         if (pRow < 0 || vRow < 0) {
             return reject("NO_P_OR_V_ROW", bus);
@@ -724,11 +730,17 @@ final class GpuBatchInjectionOutages {
         java.util.Set<String> lostGenIds = lost.stream().map(LfGenerator::getId)
                 .collect(java.util.stream.Collectors.toUnmodifiableSet());
         double lostFactorSum = lost.stream().mapToDouble(dsParams::factor).sum();
+        // Same relocation as pRow, on the reactive side: under a coupler the bus's Q BALANCE sits on the
+        // parent's DUMMY_Q column, so an absolute Q target written at the BUS_V row is a no-op and the
+        // lost load's REACTIVE power stays in the system. Only when the extraction actually moved it —
+        // a DISTR_Q bus keeps its Q on its own group row and is never relocated (ExtractionColumns).
+        int qTargetRow = busRows[2][busNum] >= 0 && busRows[1][busNum] >= 0 && busRows[1][busNum] != vRow
+                ? busRows[1][busNum] : -1;
         return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
                 dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum,
                 lostLoadP - lostP, loadQDelta, inactiveDqMember, pilotSurvivorRlEntries,
                 dqTargetRows, dqTargetValues, deadRemoteMember ? 4 : 1,
                 deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget,
-                dqTargetQOvMember, dqTargetQOvValue);
+                dqTargetQOvMember, dqTargetQOvValue, qTargetRow);
     }
 }

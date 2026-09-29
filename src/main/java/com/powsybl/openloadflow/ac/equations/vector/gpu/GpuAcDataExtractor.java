@@ -86,6 +86,36 @@ public final class GpuAcDataExtractor {
                 GpuDsParams.DEFAULT);
     }
 
+    /**
+     * Each bus's P-balance and Q-balance ROW, indexed by {@code LfBus.getNum()}: its own BUS_PHI /
+     * BUS_V column, or its parent coupler's DUMMY_P / DUMMY_Q column under the coupler-tree
+     * relocation ({@code ziTreeRelocation}), which is where the extraction actually writes that bus's
+     * targets.
+     *
+     * <p>A consumer that resolves a bus's target row from the variable set instead lands on the
+     * UNRELOCATED row for every bus under a coupler. That row is a coupling row whose target is 0, so
+     * an absolute target override written there is a NO-OP and the injection it was meant to remove
+     * stays in the balance. Measured on network.xiidm's full load scope: 4183 of 7494 contingencies
+     * reported the wrong distributed active power (worst 148 MW) because the lost load never left the
+     * system — the distributed-slack loop then read the surplus as a mismatch and undid the whole
+     * loss pre-distribution. rte6515 has no couplers, so it never showed it.
+     *
+     * @return {@code {pRow, qRow, ziParentEdge}} — the third names the coupler hosting each bus's power
+     *         equations, or -1 when the bus was not relocated.
+     */
+    public static int[][] busPowerRows(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es) {
+        ExtractionColumns columns = ExtractionColumns.of(network, es);
+        if (System.getenv("OLF_GPU_BUS_ROWS_TRACE") != null) {   // which buses the coupler tree relocated,
+            for (com.powsybl.openloadflow.network.LfBus b : network.getBuses()) {   // and to which rows
+                System.err.printf("BUSROWS bus=%s num=%d branches=%d gens=%d loads=%d ziParent=%d pRow=%d qRow=%d%n",
+                        b.getId(), b.getNum(), b.getBranches().size(), b.getGenerators().size(),
+                        b.getLoads().size(), columns.ziParentEdge()[b.getNum()],
+                        columns.pRow()[b.getNum()], columns.qRow()[b.getNum()]);
+            }
+        }
+        return new int[][] {columns.pRow(), columns.qRow(), columns.ziParentEdge()};
+    }
+
     public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
                                     boolean distributedSlack, boolean reactiveLimits,
                                     java.util.Set<String> baseOpenBranchIds,

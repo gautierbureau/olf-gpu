@@ -33,7 +33,17 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                         int[] dqTargetRows, double[] dqTargetValues, int pqRowMode,
                         int deadPilotVRow, double deadPilotQTarget,
                         int pinnedPilotVRow, double pinnedPilotQTarget,
-                        int dqTargetQOvMember, double dqTargetQOvValue) {
+                        int dqTargetQOvMember, double dqTargetQOvValue,
+                        /** The row carrying this bus's Q BALANCE, when the coupler-tree relocation moved it off the
+                         *  bus's own BUS_V column onto the parent coupler's DUMMY_Q column; -1 = it is {@code vRow}.
+                         *  The two part company only under a coupler: {@code vRow} stays the BUS_V row because that
+                         *  is what the PV->PQ mode flip rewrites, while the Q TARGET has to follow the balance. */
+                        int qTargetRow) {
+
+    /** Where to write this bus's Q target: the relocated Q-balance row, else the BUS_V row. */
+    public int qTargetRowOrV() {
+        return qTargetRow >= 0 ? qTargetRow : vRow;
+    }
     // lostGenIds / lostFactorSum exist for the reactive-capability CURVE channel, which evaluates each
     // generator's curve at its OWN post-distribution active power, reconstructed from the bus's row
     // target by participation share. Losing a generator skews that reconstruction three ways — the lost

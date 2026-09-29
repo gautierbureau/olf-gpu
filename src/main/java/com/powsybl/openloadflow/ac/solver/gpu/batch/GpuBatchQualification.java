@@ -534,7 +534,7 @@ final class GpuBatchQualification {
     private static GenOutage reHomedPvEntry(int vRow, double vTarget) {
         return new GenOutage(-1, 0, vRow, vTarget, true, true,
                 -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
-                new int[0], new double[0], GenOutage.ROW_V_IDENTITY, -1, 0, -1, 0, -1, 0);
+                new int[0], new double[0], GenOutage.ROW_V_IDENTITY, -1, 0, -1, 0, -1, 0, -1);
     }
 
     static int deadControlRowMode(GpuAcData gpuData, LfBus survivor) {
@@ -687,6 +687,10 @@ final class GpuBatchQualification {
         double[][] drOvCByIndex = new double[contingencies.size()][];
         int[][] islandedDsByIndex = new int[contingencies.size()][];
         int[][] islandedRlByIndex = new int[contingencies.size()][];
+        // {pRow, qRow} per LfBus.getNum(), resolved lazily on the first injection outage: the P/Q
+        // balance rows the extraction writes targets at, which the coupler-tree relocation moves off
+        // the bus's own BUS_PHI/BUS_V columns. One O(buses+branches) pass for the whole plan.
+        int[][] busRows = null;
         int islandingCount = 0;
         for (int i = 0; i < qualifications.size(); i++) {
             GpuBatchContingencyValidator.Qualification q = qualifications.get(i);
@@ -764,8 +768,16 @@ final class GpuBatchQualification {
                 List<LoadLoss> liveLostLoads = c.lostLoads().stream()
                         .filter(ll -> ll.bus() == null || !islandedNumSet.contains(ll.bus().getNum()))
                         .toList();
+                if (busRows == null) {                       // once per plan: the coupler-tree relocation
+                    LfBus anyBus = !liveLostGens.isEmpty() ? liveLostGens.get(0).getBus()
+                            : liveLostLoads.isEmpty() ? null : liveLostLoads.get(0).bus();
+                    if (anyBus != null) {                    // stays null when nothing is lost here — and then
+                        busRows = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
+                                .busPowerRows(anyBus.getNetwork(), es);   // no bus is looked up either
+                    }
+                }
                 GenOutage[] gos = GpuBatchInjectionOutages.computeInjectionOutages(es, gpuData, dsSum, slackParticipates,
-                        dsParams, liveLostGens, liveLostLoads);
+                        dsParams, liveLostGens, liveLostLoads, busRows);
                 if (gos == null) {                           // slack / >1 DS bus / remote gen — route to CPU
                     // (was tagged SHUNT_SHAPE, a copy-paste from the block above: this is the INJECTION
                     // outage shape, and the census is how we pick what to fix — a tag that lies about
@@ -872,7 +884,7 @@ final class GpuBatchQualification {
                             }
                             live.add(new GenOutage(-1, 0, vVar.getRow(), sb.getTargetQ(), true, true,
                                     -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
-                                    new int[0], new double[0], deadControlRowMode(gpuData, sb), -1, 0, -1, 0, -1, 0));
+                                    new int[0], new double[0], deadControlRowMode(gpuData, sb), -1, 0, -1, 0, -1, 0, -1));
                         }
                         if (live == null) {
                             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
@@ -1002,7 +1014,7 @@ final class GpuBatchQualification {
                         }
                         vcOff.add(new GenOutage(-1, 0, vVar.getRow(), sb.getTargetQ(), true, true,
                                 -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
-                                new int[0], new double[0], deadControlRowMode(gpuData, sb), -1, 0, -1, 0, -1, 0));
+                                new int[0], new double[0], deadControlRowMode(gpuData, sb), -1, 0, -1, 0, -1, 0, -1));
                     }
                     if (vcOff == null) {
                         if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {

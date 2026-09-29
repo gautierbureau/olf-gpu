@@ -4118,3 +4118,26 @@ a row that already carries those columns.
 Open right after the fix: the full-scope base reported `MAX_ITERATION_REACHED` in a GPU-arm-only run whose
 visible scans stop at outer 6 it=8 (|F| 2.8e-3 and falling), so the later passes run in another context. Being
 measured with both arms and `OLF_GPU_DBG_NR` beside the device scans.
+
+### And the reactive-limit check has to READ the relocated row too (2026-09-29)
+
+With the alternate row fixed, the full-scope base stopped being wrong and started being INCOMPLETE: OLF's engine
+log for the GPU arm reads `AcLoadFlowResult(outerLoopIterations=0, solverIterations=2…)` and the status comes back
+`MAX_ITERATION_REACHED`, with the device's own passes matching OLF's first three solves exactly — 3 Newton
+iterations, then 1, then 2 (OLF: `|f(x0)|=119.5997` → 5.5883 → 0.2284 → 0.002453, then DistributedSlack 1
+iteration, then ReactiveLimits 2) — and then stopping where OLF does two more ReactiveLimits passes.
+
+The reason is the third consumer of "where does this bus's q live": `GpuAcOuterLoopPacks.remoteMemberQPack`
+accumulates each remote controller's OWN reactive injection into the diagnostic q buffer at `vCol[bus]`, while the
+native reactive-limit pass reads `qBuf[rlQrow]` — the coupler's `DUMMY_Q` row for a relocated child. So every
+relocated member's q read as ZERO and could never trip a limit, which is why the device's ReactiveLimits loop
+declared itself done after one pass. OLF's own base makes **28 switches over 3 passes (25 + 2 + 1)**, and its q
+values for exactly these buses are what the device must reproduce: `VL-5997_0 q=268.41 > maxQ=95.5`,
+`VL-5997_1 q=-82.69 < minQ=0`, `VL-6003_0 q=192.10 > 74.77`, `VL-6003_1 q=192.10 > 75.36`,
+`VL-6003_2 q=229.12 > 119.27` (`OLF_GPU_DBG_RL`).
+
+All three places now go through ONE mapping, `GpuAcRowIndexing.relocatedQRow(busNum, ziParentEdge, dummyQCol,
+vCol)`, with the list of its consumers in its javadoc: the reactive-limit pin and q read, the candidate table, the
+activation target map, the families' mode-4 alternate, and this diagnostic fill. The pattern of the last three
+defects is the same one — a consumer left on the bus's own row silently reads or writes ZERO there — so the
+javadoc names it rather than letting the next consumer rediscover it.

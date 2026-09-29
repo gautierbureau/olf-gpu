@@ -247,7 +247,13 @@ public final class GpuAcOuterLoopPacks {
                 if (vCol[vc.getControlledBus().getNum()] < 0) {
                     continue;
                 }
-                int row = vCol[bus.getNum()];
+                // The row the reactive-limit check READS (native rlQrow): for a relocated child that is the
+                // parent coupler's DUMMY_Q row, not its own V row, which now holds the coupler's ZERO_V. Filling
+                // the own row left the check reading ZERO for every relocated member, so it could never pin one —
+                // measured on rte6515's full busbar scope: the device's base stopped after its first
+                // ReactiveLimits pass where OLF takes three, and came back MAX_ITERATION_REACHED.
+                int row = GpuAcRowIndexing.relocatedQRow(bus.getNum(), columns.ziParentEdge(),
+                        columns.dummyQCol(), vCol);
                 if (bus.getShunt().isPresent()) {
                     out.add(new int[] {row, family.shElemOf()[bus.getNum()], 0, 1});
                     w.add(1.0);

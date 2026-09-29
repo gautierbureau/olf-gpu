@@ -148,12 +148,12 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             // BUS_V(VL-6003_1) at 6.5e+02 and on the empty pilot row BUS_V(VL-6003_0) at 1.09e+02, every iteration.
             List<Integer> memberRows = new ArrayList<>();
             for (LfBus m : gvc.getMergedControllerElements()) {
-                memberRows.add(relocatedQRow(m.getNum(), ziTreeEdges[0], dummyQCol, vCol));
+                memberRows.add(GpuAcRowIndexing.relocatedQRow(m.getNum(), ziTreeEdges[0], dummyQCol, vCol));
             }
             int g = qrPtr.size();
             qrPtr.add(qrRows.size());
             // candidate 0 = the FALLBACK (control lost), the pilot's own reactive row — relocated like any other
-            qrRows.add(relocatedQRow(bus.getNum(), ziTreeEdges[0], dummyQCol, vCol));
+            qrRows.add(GpuAcRowIndexing.relocatedQRow(bus.getNum(), ziTreeEdges[0], dummyQCol, vCol));
             qrRows.addAll(memberRows);
             qRowAlt[bus.getNum()] = -2 - g;
             qrPilotBuses.add(bus.getNum());
@@ -302,13 +302,5 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                 pRow, ziParentEdge, ziChildBus);
     }
 
-
-    /** The row that hosts a bus's reactive balance: its own {@code BUS_V} row, or its parent coupler's
-     *  {@code DUMMY_Q} row when the coupler-tree relocation moved its power equations there (the same mapping
-     *  {@code GpuAcRowIndexing.distrQRow}'s tree overload makes for the bus's {@code DISTR_Q}). */
-    private static int relocatedQRow(int busNum, int[] ziParentEdge, int[] dummyQCol, int[] vCol) {
-        int parent = ziParentEdge[busNum];
-        return parent >= 0 && dummyQCol[parent] >= 0 ? dummyQCol[parent] : vCol[busNum];
-    }
 
 }

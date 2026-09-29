@@ -295,6 +295,19 @@ final class GpuAcRowIndexing {
                 .orElse(members.isEmpty() ? null : members.get(0));
     }
 
+    /**
+     * The row that hosts a bus's reactive balance once the COUPLER-TREE RELOCATION has had its say: its own
+     * {@code BUS_V} row, or its parent coupler's {@code DUMMY_Q} row when the relocation moved its power
+     * equations there. Every consumer of "where does this bus's q live" has to ask this — the reactive-limit
+     * pass reads the pin and the q at that row (native {@code rlQrow}), the candidate table enrols it, the
+     * activation extractor targets it, the families write the bus's own q to it in mode 4, and the diagnostic
+     * remote-member fill accumulates into it. A consumer left on the own row silently reads ZERO there.
+     */
+    static int relocatedQRow(int busNum, int[] ziParentEdge, int[] dummyQCol, int[] vCol) {
+        int parent = ziParentEdge == null ? -1 : ziParentEdge[busNum];
+        return parent >= 0 && dummyQCol[parent] >= 0 ? dummyQCol[parent] : vCol[busNum];
+    }
+
     /** The row that hosts a bus's ACTIVE Q balance in the CURRENT state when its group has a candidate table
      *  (see GpuAcActivationExtractor): a pinned member's own V row; the pilot (a controller of its own group
      *  or not) rides the first ENABLED member's V row (the carrier) and falls back to its own V row when every

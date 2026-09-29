@@ -1586,6 +1586,27 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
      *    b0 --- l01 --- b1 === c12 === b2 --- l20 --- b0
      *           g0      g1            g2
      *  </pre> */
+    /** A BOUNDARY LINE outage. BoundaryLine extends Injection, not Branch, so this population sits
+     *  outside every scope the harness had: it is not reached by the branch scope, and it is neither a
+     *  generator nor a load. OLF models one as an LfBoundaryLineGenerator plus the boundary's own P0/Q0
+     *  at the same bus, so losing it takes BOTH away at once — a shape no other kind produces.
+     *
+     *  <p>Neither production case carries one (network.xiidm and rte6515 both have zero boundary
+     *  lines), so the full-scope runs cannot cover this and a fixture is the only coverage there is.
+     *  bl1 carries P0 = 91 MW against a 101.3664 MW generator, so the outage is a large injection step
+     *  and distributed slack has to move real power to absorb it. */
+    @org.junit.jupiter.api.Test
+    void deviceBoundaryLineOutageMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.BoundaryFactory.createWithLoad();
+        List<Contingency> ctgs = List.of(
+                new Contingency("bl1", new com.powsybl.contingency.BoundaryLineContingency("bl1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
+    }
+
     /** vl12 = two busbar sections joined by a retained coupler breaker. bbs1 carries g1 and a load and
      *  hangs off the coupler only; g1 (local) and g2 on bbs2 (remote, through the coupler) BOTH
      *  regulate bbs1, so losing bbs1 kills the whole control and leaves g2 alone at its fixed

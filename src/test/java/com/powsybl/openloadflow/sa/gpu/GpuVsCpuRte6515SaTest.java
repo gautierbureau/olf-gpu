@@ -190,6 +190,20 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                     new com.powsybl.contingency.BusbarSectionContingency(id))));
             System.out.printf("  + %d busbar section contingencies%n", ids.size());
         }
+        // BOUNDARY LINES (formerly dangling lines) are their own population: BoundaryLine extends
+        // Injection, not Branch, so the branch scope does not reach them, and they are neither
+        // generators nor loads. OLF models one as an LfBoundaryLineGenerator — a generator-shaped
+        // injection carrying the boundary's P/Q — so a boundary-line outage is an injection outage
+        // whose bus may be anywhere. (TIE lines need no kind of their own: TieLine extends Branch, so
+        // they are already in the branch scope.)
+        if (kinds.contains("boundaryline")) {
+            List<String> ids = keepSolved(network.getBoundaryLineStream().toList(),
+                    b -> inSolvedNetwork(b.getTerminal()), "boundaryline").stream()
+                    .map(com.powsybl.iidm.network.BoundaryLine::getId).toList();
+            ids.forEach(id -> all.add(new Contingency(id,
+                    new com.powsybl.contingency.BoundaryLineContingency(id))));
+            System.out.printf("  + %d boundary line contingencies%n", ids.size());
+        }
         if (kinds.contains("battery")) {
             List<String> ids = keepSolved(network.getBatteryStream().toList(),
                     b -> inSolvedNetwork(b.getTerminal()), "battery").stream()

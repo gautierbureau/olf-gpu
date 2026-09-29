@@ -4446,7 +4446,7 @@ __global__ void pilotSelfGateBatch(int nQr, int nScenarios, int nrl, const int* 
     psSkip[(size_t) s * nQr + g] = skip;
 }
 
-__global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* rlVrow,
+__global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* rlVrow, const int* rlQrow,
                                      const double* rlVtarget, const char* rlMonitored,
                                      const int* baseMode, const double* x, char* limitType,
                                      int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal, const double* svcRlVt,
@@ -4459,7 +4459,11 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
     int i = tid % nrl;
     int s = tid / nrl;
     int vrow = rlVrow[i];
+    // the bus's own V variable (VOLTAGE reads) and the row its pin state lives on, which the coupler-tree
+    // relocation can move to the parent coupler's DUMMY_Q (see dRlQrow)
+    int qrow = rlQrow != nullptr ? rlQrow[i] : vrow;
     size_t idx = (size_t) s * n + vrow;
+    size_t qix = (size_t) s * n + qrow;
     size_t st = (size_t) s * nrl + i;
     // OLF's own reason for the base pin, when the host carried it: it distinguishes a
     // realistic-voltage pin (3/4, target = generation targetQ) from a Q-limit pin (1/2, target =
@@ -4483,8 +4487,8 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
             limitType[st] = olfKind >= 1 && olfKind <= 4 ? olfKind : 0;
             return;
         }
-        if (baseMode[vrow] == 4) {
-            double tgt = target[idx];
+        if (baseMode[qrow] == 4) {
+            double tgt = target[qix];
             limitType[st] = olfKind != 0 ? olfKind
                     : (fabs(tgt - (rlMaxQb[i] - rlLoadQb[i])) <= fabs(tgt - (rlMinQb[i] - rlLoadQb[i])) ? 2 : 1);
         }
@@ -4502,7 +4506,7 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
     // PQ by a per-scenario gen-loss OVERRIDE (its generator is gone) has base mode 0 and must get limitType 0 so
     // the reactive-limits switch-back leaves it PQ. Only a controller that is PQ in the BASE (an actual Q-limit
     // switch during the base loadflow) gets a pinned limit type so a relieving contingency can switch it back.
-    if (baseMode[vrow] == 1 && rlMonitored[i] == 0) {       // PQ in the base case (a real Q-limit switch —
+    if (baseMode[qrow] == 1 && rlMonitored[i] == 0) {       // PQ in the base case (a real Q-limit switch —
         // NOT a monitoring SVC standing by: that one seeds UNPINNED so only the VoltageMonitoring
         // orchestrator may activate it, exactly like the CPU's null qLimitType)
         double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]);
@@ -5246,7 +5250,7 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
 
 
 __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenarios, int n, double tol, int maxSwitch,
-                                    const int* rlVrow, const double* rlMinQ, const double* rlMaxQ,
+                                    const int* rlVrow, const int* rlQrow, const double* rlMinQ, const double* rlMaxQ,
                                     const double* rlLoadQ, const double* rlVtarget, const double* qBuf,
                                     const double* x, const char* rlActive, int* mode, double* target,
                                     char* limitType, char* switchCount, char* switched,
@@ -5312,7 +5316,9 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         // hands the pilot's Q target to the new carrier's row. When the LAST live member pins,
         // updatePilotVeqBatch flips the pilot's V identity to a power row (control lost) and
         // restores it on the first unpin — the all-pinned corner runs on-device too.
-        size_t ridx = (size_t) s * n + rlVrow[i];
+        size_t ridx = (size_t) s * n + rlVrow[i];            // the bus's own V variable: every VOLTAGE read
+        // ...and the row its reactive balance and pin live on, which the coupler-tree relocation can move:
+        size_t qidx = rlQrow != nullptr ? (size_t) s * n + rlQrow[i] : ridx;
         size_t rst = (size_t) s * nrl + i;
         size_t rli = cvStride ? rst : (size_t) i;
         // The quadratic delta exists only for SVC entries: rlV2Base is the packed base v², NaN when
@@ -5328,12 +5334,12 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         int pvForm = rlRemote[i] == 2 ? 0 : 1;
         bool enrolledPilot = rlRemote[i] == 2 && isEnrolledPilot(psEntry, nQr, i);
         if (limitType[rst] == 0) {
-            if (mode[ridx] != pvForm) return;                // islanded / frozen this scenario
+            if (mode[qidx] != pvForm) return;                // islanded / frozen this scenario
             // OLF_GPU_RL_NOPIN_ROW=<deviceRow>: never pin THIS row. Isolates one pin so the solve
             // it would have interrupted can be compared against the CPU on its own - the only way
             // to tell "the pin is wrong" from "the state the pin was taken at was already wrong".
             if (ridx % n == (size_t) noPinRow) return;
-            double q = qBuf[ridx] + rlLoadQ[rli];            // own q via fillRemoteMemberQBatch
+            double q = qBuf[qidx] + rlLoadQ[rli];            // own q via fillRemoteMemberQBatch
             // voltageRemoteControlRobustMode (ReactiveLimitsOuterLoop.checkControllerBus): the criteria
             // below test this REMOTE controller's OWN voltage — the same x row the quadratic SVC delta
             // reads — against the realistic band shrunk by the 1.02 margin.
@@ -5342,21 +5348,21 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             bool unrealisticLo = robust && rlRemote[i] != 2 && x[ridx] < vLoRobust;
             bool unrealisticHi = robust && rlRemote[i] != 2 && x[ridx] > vHiRobust;
             if (q < rliMin - tol) {
-                savedTarget[rst] = target[ridx];             // the DISTR_Q row target (NOT 0 in general:
+                savedTarget[rst] = target[qidx];             // the DISTR_Q row target (NOT 0 in general:
                                                              // see updateDistrQTargetsBatch)
                 if (!enrolledPilot) {
-                    mode[ridx] = 4;
-                    target[ridx] = rliMin - rlLoadQ[rli];
+                    mode[qidx] = 4;
+                    target[qidx] = rliMin - rlLoadQ[rli];
                 }
                 limitType[rst] = 1;
                 switchCount[rst]++;
                 switched[s] = 1;
                 passSwitched[rst] = 1;
             } else if (q > rliMax + tol) {
-                savedTarget[rst] = target[ridx];
+                savedTarget[rst] = target[qidx];
                 if (!enrolledPilot) {
-                    mode[ridx] = 4;
-                    target[ridx] = rliMax - rlLoadQ[rli];
+                    mode[qidx] = 4;
+                    target[qidx] = rliMax - rlLoadQ[rli];
                 }
                 limitType[rst] = 2;
                 switchCount[rst]++;
@@ -5367,10 +5373,10 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                 // stops maintaining the REMOTE voltage and freezes the generation at its INITIAL
                 // target Q, with a realistic-V limit type (3 = MIN_REALISTIC_V, 4 = MAX_REALISTIC_V)
                 // that the switch-back reads like a min/max limit but the Q-limit drift ignores.
-                savedTarget[rst] = target[ridx];
+                savedTarget[rst] = target[qidx];
                 if (!enrolledPilot) {
-                    mode[ridx] = 4;
-                    target[ridx] = rlInitTgtQ[i] - rlLoadQ[rli];
+                    mode[qidx] = 4;
+                    target[qidx] = rlInitTgtQ[i] - rlLoadQ[rli];
                 }
                 limitType[rst] = unrealisticLo ? 3 : 4;
                 switchCount[rst]++;
@@ -5396,8 +5402,8 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             bool back = wantsBack && switchCount[rst] < maxSwitch;
             if (back) {
                 if (!enrolledPilot) {
-                    mode[ridx] = pvForm;                     // back to the DISTR_Q share row (the V identity for a pilot)
-                    target[ridx] = savedTarget[rst];
+                    mode[qidx] = pvForm;                     // back to the DISTR_Q share row (the V identity for a pilot)
+                    target[qidx] = savedTarget[rst];
                 }
                 limitType[rst] = 0;
                 switched[s] = 1;
@@ -5406,15 +5412,15 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                 // OLF re-freezes at a moved limit only for MIN_Q/MAX_Q (checkPqBusWithQLimitType tests
                 // the type explicitly); a realistic-V freeze holds its initial target Q.
                 double lim = limitType[rst] == 1 ? rliMin : rliMax;
-                if (!enrolledPilot && fabs(lim - (target[ridx] + rlLoadQ[rli])) > tol) {
-                    target[ridx] = lim - rlLoadQ[rli];
+                if (!enrolledPilot && fabs(lim - (target[qidx] + rlLoadQ[rli])) > tol) {
+                    target[qidx] = lim - rlLoadQ[rli];
                     switched[s] = 1;
                     passSwitched[rst] = 3;
                 }
             }
         }
         {
-            double qRec = qBuf[ridx] + rlLoadQ[rli];
+            double qRec = qBuf[qidx] + rlLoadQ[rli];
             double cmpRec = rlCmpVrow != nullptr && rlCmpVrow[i] >= 0 ? x[(size_t) s * n + rlCmpVrow[i]] : x[ridx];
             swLogPut(passSwitched[rst], qRec, rliMin, rliMax, x[ridx], cmpRec,
                      rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]));
@@ -6151,7 +6157,7 @@ __global__ void rlPilotSelfMixedGate(int nrl, int nScenarios, const char* rlRemo
     }
 }
 
-__global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* rlVrow,
+__global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* rlVrow, const int* rlQrow,
                                     const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
                                     const char* limitType, int* mode, double* target, int cvStride,
                                     const char* rlRemote, double* savedTarget, char* savedMode,
@@ -6168,7 +6174,7 @@ __global__ void seedRlModeFromState(int nrl, int nScenarios, int n, const int* r
     if (rlBaseLt != nullptr && rlBaseLt[i] == RL_BASE_RELOCATED) return;
     if (isEnrolledPilot(psEntry, nQr, i)) return;           // its pin never lives on its own V row (rotation)
     if (lt != 0) {
-        size_t idx = (size_t) s * n + rlVrow[i];
+        size_t idx = (size_t) s * n + (rlQrow != nullptr ? rlQrow[i] : rlVrow[i]);   // the pin's row (see dRlQrow)
         size_t li = cvStride ? (size_t) s * nrl + i : (size_t) i;
         // What the row looked like BEFORE this seed is what a later switch-back restores. Leaving it
         // unwritten let the restore read whatever the previous solve left in this slot: the buffers are
@@ -6437,6 +6443,10 @@ struct BatchSolverContext {
     // buffer); dRlActive marks which scenarios to RL-check this pass; dRlSwitched flags scenarios that switched.
     int nrl = 0;
     DeviceBuf dRlVrow, dRlMinQ, dRlMaxQ, dRlLoadQ, dRlVtarget;   // per controller (nrl)
+    DeviceBuf dRlQrow;                                       // per controller: the row its reactive BALANCE and its
+                                                             // pin live on — its own V row, or, when the coupler-tree
+                                                             // relocation moved its power equations onto the parent
+                                                             // coupler's dummy columns, that coupler's DUMMY_Q row
     // PILOT-SELF rotation: per qr group, the RL entry of a pilot that is one of its OWN controllers (-1 when
     // the group is not of that shape), and the per-(scenario, group) gate the fills read. Both are DERIVED,
     // so no new host table: a group is pilot-self exactly when its fallback row (candidate 0 = the pilot's
@@ -7039,6 +7049,40 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
             rlVrowM[i] = rowMap[rlVrow[i]];
         }
         ctx->dRlVrow.upload(rlVrowM.data(), nrl * sizeof(int));
+        // A bus whose power equations the COUPLER-TREE relocation moved onto its parent coupler's dummy columns has
+        // its reactive balance — and its BUS_TARGET_Q, which GpuAcActivationExtractor already puts there — at that
+        // coupler's DUMMY_Q row, while its OWN V row carries the coupler's ZERO_V. The reactive-limit pass must read
+        // q and flip the pin at THAT row; its VOLTAGE reads stay on the bus's own row (dRlVrow). Without the split
+        // the check compared a voltage residual against reactive limits: measured on rte6515's full busbar scope
+        // with the relocation enabled, entries read -78.0 and 4767.3 MVAr and 20 buses were pinned that OLF never
+        // pins, after which the pinned solve burned all 30 iterations.
+        std::vector<int> rlQrowM(rlVrowM);
+        if (ctx->nzi > 0 && ctx->st->dZiIdx.p != nullptr) {
+            std::vector<int> zidx(static_cast<size_t>(ctx->nzi) * 11);
+            CUDA_CHECK(cudaMemcpy(zidx.data(), ctx->st->dZiIdx.p, zidx.size() * sizeof(int), cudaMemcpyDeviceToHost));
+            std::map<int, int> qRowOfVRow;
+            for (int e = 0; e < ctx->nzi; e++) {
+                const int* z = zidx.data() + static_cast<size_t>(e) * 11;
+                int childSide = (z[10] >> 1) & 3;
+                int ownVCol = childSide == 1 ? z[6] : (childSide == 2 ? z[7] : -1);
+                if (childSide == 0 || z[5] < 0 || ownVCol < 0) {
+                    continue;
+                }
+                qRowOfVRow[rowMap[ownVCol]] = rowMap[z[5]];
+            }
+            int moved = 0;
+            for (int i = 0; i < nrl; i++) {
+                auto it = qRowOfVRow.find(rlVrowM[i]);
+                if (it != qRowOfVRow.end()) {
+                    rlQrowM[i] = it->second;
+                    moved++;
+                }
+            }
+            if (moved > 0 && std::getenv("OLF_GPU_RL_TRACE") != nullptr) {
+                std::fprintf(stderr, "RL_QROW %d of %d entries follow the coupler relocation\n", moved, nrl);
+            }
+        }
+        ctx->dRlQrow.upload(rlQrowM.data(), nrl * sizeof(int));
         ctx->dRlMinQ.upload(rlMinQ, nrl * sizeof(double));
         ctx->dRlMaxQ.upload(rlMaxQ, nrl * sizeof(double));
         ctx->dRlLoadQ.upload(rlLoadQ, nrl * sizeof(double));
@@ -9114,7 +9158,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->dRlLoadQDyn.as<double>(), cvProbeEntry);
             }
             seedRlModeFromState<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n,
-                    ctx->dRlVrow.as<int>(),
+                    ctx->dRlVrow.as<int>(), ctx->dRlQrow.p ? ctx->dRlQrow.as<int>() : nullptr,
                     useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
                     useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
                     useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(), ctx->dRlLimitType.as<char>(),
@@ -9127,6 +9171,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitchCount.p, 0, static_cast<size_t>(ctx->nrl) * nS * sizeof(char), ctx->stream));
             if (ctx->nrl > 0) {                              // seed the pinned limit for base-PQ controllers (else all PV)
                 initRlLimitTypeBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n, ctx->dRlVrow.as<int>(),
+                        ctx->dRlQrow.p ? ctx->dRlQrow.as<int>() : nullptr,
                         ctx->dRlVtarget.as<double>(), ctx->dRlMonitored.as<char>(), dBaseMode.as<int>(), ctx->dX.as<double>(),
                         ctx->dRlLimitType.as<char>(),
                         nRlVtOv, nRlVtOv > 0 ? dRlVtOvSlotIdx.as<int>() : nullptr,
@@ -10966,6 +11011,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
                     ctx->nrl, nS, n, REACTIVE_LIMIT_TOL, RL_MAX_SWITCH,
                     ctx->dRlVrow.as<int>(),
+                    ctx->dRlQrow.p ? ctx->dRlQrow.as<int>() : nullptr,
                     useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
                     useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
                     useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(),
@@ -11407,6 +11453,7 @@ psgStep(ctx, nS, n, outer, "afterAllPinned");
                 ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
                 ctx->nrl, nS, n, REACTIVE_LIMIT_TOL, RL_MAX_SWITCH,
                 ctx->dRlVrow.as<int>(),
+                ctx->dRlQrow.p ? ctx->dRlQrow.as<int>() : nullptr,
                 useDynRlLimits ? ctx->dRlMinQDyn.as<double>() : ctx->dRlMinQ.as<double>(),
                 useDynRlLimits ? ctx->dRlMaxQDyn.as<double>() : ctx->dRlMaxQ.as<double>(),
                 useDynRlLimits ? ctx->dRlLoadQDyn.as<double>() : ctx->dRlLoadQ.as<double>(),

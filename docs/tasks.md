@@ -3880,3 +3880,26 @@ What a correct placement has to satisfy, both facts measured above:
 So the work is: place a relocated child's voltage identity on the component's free v row, and make the
 reactive-limit pack's row follow the relocation (read/flip the dummy row, compare the own v). That spans the
 extraction's placement, the activation extractor, the RL pack and the RL kernels — recorded, not started.
+
+### The fix, part 1: a reactive-limit entry reads its q, pin and target at the row that CARRIES them (2026-09-29)
+
+`dRlQrow`, derived in `createBatchContext` from the structure's own zero-impedance packs (no new JNI argument):
+per reactive-limit entry, the row its reactive BALANCE and its pin live on — its own V row normally, or, when the
+coupler-tree relocation moved its power equations onto the parent coupler's dummy columns, that coupler's
+DUMMY_Q row (which is exactly where `GpuAcActivationExtractor` already puts its BUS_TARGET_Q). Voltage reads
+stay on the bus's own V row, so `rlVrow` keeps its meaning and every other consumer of it is untouched.
+Applied in `reactiveLimitsBatch` (the q read, and all mode/target reads and writes — 16 accesses),
+`initRlLimitTypeBatch` (the base pin state and the row target) and `seedRlModeFromState` (the seeded pin).
+Measured on the FULL busbar scope with the relocation on (`-Dolf.gpu.ziTreeRelocation=true
+-Dolf.gpu.ziTreeRelocationMinCouplers=1`), base only:
+
+| | before today | relocation on, rows not following | relocation on + this fix |
+|---|---|---|---|
+| zero diagonals (pre-repair) | 996 | 111 | 111 |
+| residual ratio at it=0 | 2.05e+11 | 1.65e-14 | 1.40e-14 |
+| base status | CONVERGED (wrong state) | MAX_ITERATION_REACHED | **CONVERGED** |
+| base distributed power vs OLF | 6.56e-02 MW | 6.56e-02 MW | **0.000000e+00 MW** |
+
+So the full-scope base now matches OLF exactly — the 0.066 MW this branch is named after. Still to do: the
+contingency side in that configuration (slot 0 of the batch still ends `status=-2` after 30 iterations), then the
+window and both suites with the relocation on, and only then the property defaults.

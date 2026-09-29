@@ -11724,7 +11724,12 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
         }
         checkRange("hvIdx", hvIdx, nhv, 4, {0, 1, 2, 3}, -1, n);
         checkRange("dqRow", dqRow, ndq, 1, {0}, 0, n);
-        checkRange("ziIdx", ziIdx, nzi, 11, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, -1, n);
+        checkRange("ziIdx", ziIdx, nzi, 11, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, -1, n);
+        // slot 10 is the FLAGS word, not a row: bit 0 spanning-tree, bits 1-2 the relocated child side,
+        // bit 3 "the side came from the coupler-tree walk". Checking it against n rejected a valid
+        // structure on any network with fewer than 14 rows once the relocation went on by default
+        // ("bad ziIdx at elem 0 slot 10: 13 (allowed [-1, 10))", four fixtures).
+        checkRange("ziIdx.flags", ziIdx, nzi, 11, {10}, 0, 16);
         checkRange("ziQAlt", ziQAlt, nzi, 2, {0, 1}, -1 - nQr, n);
         checkRange("drRow", drRow, ndr, 1, {0}, 0, n);
         checkRange("drCol", drCol, ndr, 1, {0}, 0, n);

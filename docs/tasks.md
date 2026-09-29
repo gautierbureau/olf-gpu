@@ -4400,7 +4400,12 @@ design; they are unimplemented shapes plus one stopgap, and under the no-CPU-fal
   merged voltage controls, the surviving cluster elects a new main control (`reHomedControls`). The device
   handles exactly ONE shape of that: a cluster of a single bus controlling itself locally
   (`cluster.size() == 1 && every controller element is the controlled bus`). A cluster of several buses, or a new
-  main controlled remotely, is refused. Unimplemented, not intended.
+  main controlled remotely, is refused. This is a DELIBERATE scope boundary, drawn when the re-merge emulation
+  landed — the entry above reads "several controls or a remote controller → PLAN:VC_REMERGE_MULTI, CPU" — and
+  calling it unintended (as this section first did) is wrong. What it needs is real machinery, not a flag: such a
+  cluster forms a NEW merged control per scenario, with its own DISTR_Q group and candidate table, and those are
+  built per EXTRACTION today, so the shared structure cannot express it. It stays open only in the sense every
+  CPU route does: [[no-cpu-fallback-goal]] treats a CPU route as scaffolding.
 - **`PLAN:VC_REMERGE_RELOC_VROW`, 3.** The guard added today: the re-homed control's new main is a relocated
   coupler child, whose own `BUS_V` row holds the coupler's `ZERO_V`, so its voltage identity has nowhere to go.
   A deliberate stopgap to avoid a silently wrong answer; the fix is to move a zero-impedance component's identity

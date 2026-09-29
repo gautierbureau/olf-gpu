@@ -1244,6 +1244,11 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             int gpuCount = gpuViolByCtg.getOrDefault(ctgId, List.of()).size();
             if (cpuCount != gpuCount) {
                 System.out.printf("  VIOL-DIFF ctg=%s cpu=%d gpu=%d delta=%d%n", ctgId, cpuCount, gpuCount, gpuCount - cpuCount);
+                // Whether the one-sided entry ALREADY violated in the pre-contingency state decides what it is.
+                // A NEW violation missing on one arm is a defect. A PRE-EXISTING one is filtered by powsybl's
+                // increased-violations thresholds (this harness sets 0.5 proportional on flows), so it is
+                // re-reported only past `base + min(abs, prop*base)` — a boundary a 1e-5-relative state
+                // difference flips either way, which is what `docs/increased-violations-thresholds.md` is about.
                 // Print the violations that differ (one-sided)
                 var cpuSet = new java.util.HashSet<String>();
                 cpuViolByCtg.getOrDefault(ctgId, List.of()).forEach(v ->
@@ -1251,13 +1256,19 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 var gpuSet = new java.util.HashSet<String>();
                 gpuViolByCtg.getOrDefault(ctgId, List.of()).forEach(v ->
                         gpuSet.add(v.getSubjectId() + "|" + v.getLimitType() + "|" + v.getSide()));
+                var preKeys = new java.util.HashMap<String, Double>();
+                for (var v : cpu.getPreContingencyResult().getLimitViolationsResult().getLimitViolations()) {
+                    preKeys.put(v.getSubjectId() + "|" + v.getLimitType() + "|" + v.getSide(), v.getValue());
+                }
                 for (var v : cpuViolByCtg.getOrDefault(ctgId, List.of())) {
                     String key = v.getSubjectId() + "|" + v.getLimitType() + "|" + v.getSide();
                     if (!gpuSet.contains(key)) {
-                        System.out.printf("    CPU-only: %s %s %s value=%.6f limit=%.6f margin=%.6e%n",
+                        Double base = preKeys.get(key);
+                        System.out.printf("    CPU-only: %s %s %s value=%.6f limit=%.6f margin=%.6e pre=%s%n",
                                 v.getSubjectId(), v.getLimitType(), v.getSide(), v.getValue(),
                                 v.getLimit() * v.getLimitReduction(),
-                                Math.abs(v.getValue() - v.getLimit() * v.getLimitReduction()));
+                                Math.abs(v.getValue() - v.getLimit() * v.getLimitReduction()),
+                                base == null ? "NEW" : String.format("pre-existing base=%.6f", base));
                     }
                 }
                 for (var v : gpuViolByCtg.getOrDefault(ctgId, List.of())) {

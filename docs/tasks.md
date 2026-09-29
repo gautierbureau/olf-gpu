@@ -4523,3 +4523,28 @@ ids the device actually solved, and the report reads
 followed by a line saying the status comparison covers only the device-solved set. A `j` of zero means every
 declined contingency is OLF's own non-convergence; today `j` is 2 (`BUS-1219_BBS`, `BUS-6229_BBS_1`), and with
 `BUS-6194_BBS_2` that is the whole list of device failures on a solvable system.
+
+### The nine differing contingencies all differ in STATE (2026-09-29)
+
+Two measurements, one correction. First, the limit path is NOT involved: a full-scope run of the GPU arm with
+`-Dolf.gpu.sa.tableViolations=false`, i.e. OLF's own detector on the device's states, gives the IDENTICAL
+comparison — same 9 contingencies, same deltas, violations diff 69. So neither the GPU limit table nor its device
+screen decides any of it.
+
+Second, and correcting the reading from the distributed-power dump: equal distributed power does NOT mean equal
+state. Bus diffs inside the full list for the two contingencies whose distributed power matched to 1e-12 MW:
+
+| contingency | distributed power apart | buses over 1e-12 kV | worst bus |
+|---|---|---|---|
+| `BUS-125_BBS_1` | 9.6e-13 MW | 5406 of 6885 | **3.078e-02 kV** (4.8e-04 rel) |
+| `BUS-1869_BBS_1` | 6.2e-13 MW | 5409 of 6885 | **4.520e-01 kV** (4.9e-03 rel) |
+
+Against the base's own floor in the same runs — 3.6e-11 kV — those are real differences, four to ten orders of
+magnitude above it. So all 9 differing contingencies land on a DIFFERENT operating point, and the flipped
+violations follow from that rather than from a reporting boundary. The branch monitor now prints both sides
+(`I2` beside `I1`), which is what showed the GPU's own side-two current at 6.654294 against a 5.486048 limit with
+no violation reported — consistent only with a different state, not a different limit.
+
+One instrument added for the next pass: a one-sided violation now prints `pre=NEW` or
+`pre=pre-existing base=<value>`, since powsybl's increased-violations thresholds (0.5 proportional on flows here)
+only filter PRE-EXISTING ones — so the two shapes can be told apart without deducing it.

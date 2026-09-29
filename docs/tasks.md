@@ -4356,3 +4356,35 @@ With `OLF_GPU_SA_CTG_EXCLUDE=docs/rte6515-impactless-busbar-sections.txt`, and e
 `MAPPER:no-batchable-element` disappearing from the census confirms the 209 were exactly that class. The base
 network came out the same despite the shorter list (identical status counts and the same distributed-power worst),
 so for this network the retained switches did not move.
+
+### The violations difference is now ONE defect: the device's slack loop (2026-09-29)
+
+With the day's native fixes in, the violation differences collapse from 29 contingencies to **5**, and they are
+exactly the five whose STATES differ (`BUS-4337_BBS_1`, `BUS-5962_BBS_1`, `BUS-6113_BBS_1`, `BUS-6139_BBS_4`,
+`BUS-6194_BBS_2`). The 24 that had identical states and a one-sided violation are gone — that class was the
+relocation's dead-coupler shapes, not a limit or reporting difference as the pre-fix log suggested. Of the
+remaining 77 CPU-only violations, **71 belong to `BUS-6194_BBS_2` alone** (the GPU produced no result for it), so
+the whole 68-70 violation gap is five contingencies, four of them by one or two violations.
+
+Cross-check that says the states are otherwise equal: the four branches whose violations differed before now have
+identical flows on both arms — `LINE-5779-4495 I1 cpu=10.748060 gpu=10.748060` (9 digits), `LINE-2533-1468` to
+8.9e-13 relative — and those contingencies no longer appear in the diff list at all.
+
+**The root cause of the five, measured on the 16-row fixture** (`deviceMiddleSectionLossRenormalizes…`, a 2-second
+reproducer of the same shape as `BUS-6194_BBS_2`), with `OLF_DS_TRACE` on the CPU arm beside
+`OLF_GPU_PRELOSS_TRACE` and `OLF_GPU_BATCH_TRACE` on the device:
+
+| | OLF | device |
+|---|---|---|
+| post-contingency distributing passes | **1** (`DS_RUN mismatch=1.043213465 participants=5`) | **5** (outer 0..4, each `kind=DistributedSlack solved=1`) |
+| mismatch after the loop | 0.002238 pu | **−0.477763 pu** (`PRELOSS_AFTER deviceFinal`) |
+| per-pass residual | — | 1.294, 0.919, 0.153, 2.55e-2, 4.26e-3 — a constant ~0.17 factor |
+
+So the device nibbles at the mismatch instead of closing it in one water-fill, and retires 0.478 pu away from
+OLF. The pre-loss itself agrees to the digit (both 1.043213), and the split the device applies is
+participants 0.447091 + slack 0.596122 with `factorSumAll=0.428571`, so the slack's retained share — which OLF
+places by moving the slack bus's OWN generators' targetP — is what the device never puts into the iterate.
+That single defect explains the distributed-power tail (worst 10.74 MW), `BUS-6194_BBS_2` failing under
+`slackDistributionFailureBehavior: FAIL`, and the fixtures' last 0.34 kV.
+Note for the fix: `OLF_GPU_DS_DEBUG=1`'s `[DS-GATE]`/`[DS-WF]` device prints did NOT appear — make them work
+first, they are the per-pass view of the water-fill.

@@ -999,6 +999,7 @@ final class GpuBatchQualification {
                         }
                     }
                     boolean relocIdentity = false;
+                    boolean pinnedMain = false;
                     if (live != null) {
                         for (var e : reHomed.pvTargets().entrySet()) {
                             var vVar = es.getVariableSet().getVariable(e.getKey().getNum(), AcVariableType.BUS_V);
@@ -1011,12 +1012,43 @@ final class GpuBatchQualification {
                                 live = null;
                                 break;
                             }
-                            live.add(reHomedPvEntry(vVar.getRow(), e.getValue(), rlEntryOf(gpuData, e.getKey())));
+                            int reHomedRl = rlEntryOf(gpuData, e.getKey());
+                            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                                // Is the bus we are about to give a VOLTAGE IDENTITY already PINNED at its
+                                // reactive limit? A pinned bus cannot hold its voltage — OLF has it as PQ —
+                                // and the RL kernel's "limit drift while pinned" branch writes only the
+                                // TARGET, leaving the host's mode 0 in place, so the identity then holds v
+                                // at a reactive value.
+                                byte baseLt = gpuData.rlBaseQLimitType() != null && reHomedRl >= 0
+                                        ? gpuData.rlBaseQLimitType()[reHomedRl] : (byte) -1;
+                                System.err.printf("QUALIFY_TRACE reHomePv bus=%s vRow=%d target=%.6f"
+                                                + " rlEntry=%d baseLimitType=%d%n",
+                                        e.getKey().getId(), vVar.getRow(), e.getValue(), reHomedRl, baseLt);
+                            }
+                            // A bus PINNED at its reactive limit cannot also hold its voltage: OLF has it
+                            // as PQ, and giving it a V identity here is a state the device cannot represent.
+                            // The RL kernel then never takes the switch path that would set mode 4 — the
+                            // entry is already pinned, so it takes the "limit drift while pinned" branch,
+                            // which writes only the TARGET. The host's mode 0 stays, and a mode-0 identity
+                            // means x = target, so the bus's VOLTAGE becomes its reactive limit. Measured on
+                            // rte6515 BUS-6194_BBS_2: VL-6194_2 re-homed to a 1.123 pu identity with
+                            // baseLimitType=2, row 12938 uploaded at 1.123 and ended at 0.6251 (= maxQ −
+                            // loadQ), outside the realistic band [0.8, 1.2] — the run reported FAILED where
+                            // OLF reports CONVERGED, losing all 71 of its violations, the WHOLE violation
+                            // gap of the full busbar scope.
+                            if (gpuData.rlBaseQLimitType() != null && reHomedRl >= 0
+                                    && gpuData.rlBaseQLimitType()[reHomedRl] != 0) {
+                                pinnedMain = true;
+                                live = null;
+                                break;
+                            }
+                            live.add(reHomedPvEntry(vVar.getRow(), e.getValue(), reHomedRl));
                         }
                     }
                     if (live == null) {
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(
-                                relocIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
+                                pinnedMain ? "PLAN:VC_REMERGE_PINNED_MAIN"
+                                        : relocIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
                         continue;
                     }
                     if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {

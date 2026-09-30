@@ -11,6 +11,58 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #63 — A re-homed voltage main that is already PINNED (2026-09-30)
+
+Violation gap **71 -> 0** on the full busbar scope. The CAUSE is found and named; the fix in
+place is a plan-time refusal, so the on-device version below is still open.
+
+`BUS-6194_BBS_2` loses the middle of three coupled sections; the VC group re-homes to
+VL-6194_2 as a local main and `reHomedPvEntry` installs a VOLTAGE IDENTITY on its own row —
+without checking that the bus's reactive-limit entry is ALREADY PINNED (`baseLimitType=2`).
+A bus pinned at its reactive ceiling cannot hold its voltage: OLF has it as PQ.
+
+The whole chain, each step measured:
+
+1. host uploads row 12938 as mode 0, target 1.123 (`OLF_GPU_TARGET_ROW`)
+2. RL entry 993 for that bus is pinned, `lt=2` (`OLF_GPU_RL_TRACE` -> `GPU_RL_FINAL`)
+3. because it is ALREADY pinned, `reactiveLimitsBatch` never takes the switch path that would
+   set `mode[qidx] = 4`; it takes the "curve/SVC limit drift while pinned" branch, which writes
+   **only** `target[qidx] = lim - rlLoadQ` — no mode write
+4. device ENDS row 12938 at 0.6251 = maxQ - loadQ, mode still 0 (`OLF_GPU_FINAL_TARGET_ROW`)
+5. a mode-0 identity means x = target, so the bus VOLTAGE becomes the reactive limit:
+   `UNREALISTIC bus=VL-6194_2 v=0.625100000 band=[0.800, 1.200]`
+6. OLF's realistic-voltage check -> `FAILED` where OLF reports `CONVERGED` -> EMPTY result ->
+   all 71 of its violations lost, which was the entire scope gap
+
+**Fix in place:** refuse the identity when the entry is pinned
+(`PLAN:VC_REMERGE_PINNED_MAIN`, 3 contingencies on the full scope: BUS-6194_BBS_2,
+BUS-6157_BBS_1 and one more). Violations diff 71 -> 0, suite 177/177, and the scope's only
+genuine RUNTIME device failure is gone ("0 of them tried and failed", was 1).
+
+**STILL OPEN — put it back on the device.** This trades 2 contingencies to the CPU (device
+coverage 6552 -> 6550), and a CPU route is scaffolding. The on-device state is already known:
+a pinned bus IS mode 4 with `target = limit - loadQ`, which is exactly what the RL kernel
+writes — the ONLY wrong thing is the mode. So the re-homed entry should carry the PQ row form
+instead of `GenOutage.ROW_V_IDENTITY` when its entry is pinned, and `rlLocalVt` already exists
+to hold the 1.123 so `rlUnpinBatch`'s `mode[qidx] = pvForm; target[qidx] = savedTarget[rst]`
+can restore the identity if it later unpins. NOT implemented: the unpin path has to be
+verified, not assumed — every extension beyond a measurement cost something today (see the
+mode-0 guard in [[#65]], 1.06e-12 kV).
+
+### #64 — BUS-6113_BBS_1: the last distributed-active-power outlier (2026-09-30)
+
+OPEN, and now the ONLY failing assertion on the full busbar scope:
+`cpu=217.889505513 gpu=219.217524713 MW`, **1.328 MW**, violation delta -1. Next worst is
+1.569e-02 and the bulk ~3.7e-05; scope total sum abs DAP 1.481873 MW, so this one contingency
+is most of it.
+
+Ruled out so far: override conflicts (zero on it, [[#65]]) and the pinned-main identity — it
+is NOT among the `VC_REMERGE_PINNED_MAIN` refusals and still runs on device. Note
+`GpuBatchQualification.rlEntryOf`'s docstring cites it ("BUS-6113_BBS_1 pinned VL-6113_1 at
+RL#1, the device never looked — 7.1 kV") as the reason the re-homed-as-LOCAL check EXISTS, so
+that part is already handled; the residual 1.328 MW is something else. Not yet investigated.
+
+
 ### #65 — Duplicate target overrides: measured, then fixed at the producer (2026-09-30)
 
 RESOLVED. Kept because the METHOD is the reusable part, and because ~200 benign duplicates
@@ -73,9 +125,9 @@ target) but they are still invariant violations: `OLF_GPU_OV_DUP_TRACE` reports 
 future `conflictRows > 0` is a regression.
 
 
-### #63 — BUS-6194_BBS_2: a device kernel overwrites a voltage identity with a reactive target (2026-09-30)
+### #63b — superseded by #63 above (kept for the measurement recipe)
 
-OPEN, precisely localized. It is the WHOLE violation gap of the full busbar scope: 71 of 71.
+The writer named in #63 step 3. Was open, It is the WHOLE violation gap of the full busbar scope: 71 of 71.
 
 `BUS-6194_BBS_2` loses the middle of three coupled sections (VL-6194_0/_1/_2, both couplers
 opened, VL-6194_1 islanded) and the VC group re-homes: `reHome main=VL-6194_0
@@ -124,9 +176,9 @@ guarding. Now one override, 1.000. It did not change this contingency's outcome 
 is a separate writer — but it is the second duplicate-override race found in a day, which
 raises the priority of deduplicating the override list to its documented last-wins.
 
-### #64 — BUS-6113_BBS_1: the last distributed-active-power outlier (2026-09-30)
+### #64b — superseded by #64 above
 
-OPEN. The full busbar scope's ONLY material DAP difference and the only failing assertion:
+The full busbar scope's only material DAP difference:
 `cpu=217.889505513 gpu=219.217524713 MW`, **1.328 MW**. Every other contingency is at or
 below 1.7e-02 MW and the bulk at ~3.7e-05. It also carries a violation delta of -1. Not yet
 investigated. Worth doing right after [[#63]]: both are busbar-section contingencies on

@@ -54,17 +54,51 @@ before looking at the water-fill arithmetic.
 Suite 177/177 + GpuLoadFlow/GpuFullNewton/GpuAcStructures/GpuLineSearch green; checkstyle
 unchanged at 220.
 
-### #66 — The distributed-power TAIL: 1.4e-03 MW over a 1e-03 assertion (2026-09-30)
+### #66 — The distributed-power TAIL is TWO things (2026-09-30)
 
-OPEN, and now the only failing assertion on the full busbar scope
-(`assertTrue(worstDistributed < 1e-3)`): worst **1.398e-03 MW** on `BUS-5250_BBS`, then
-1.060e-03 (BUS-5525_BBS), 9.564e-04 (BUS-4467_BBS), 7.286e-04, 6.915e-04, 5.280e-04 — a smooth
-TAIL, not an outlier, and at the SAME values as before [[#64]]'s fix, so it is a separate
-phenomenon that [[#64]] merely uncovered. 3689 of 6602 contingencies differ by > 1e-9 MW at all.
+OPEN. The only failing assertion on the full busbar scope
+(`assertTrue(worstDistributed < 1e-3)`): worst **1.398e-03 MW**. Characterised, and it splits.
 
-Not yet investigated. Worth checking first whether these also straddle the slack gate (the
-[[#64]] signature: compare `DS_PASS` on both arms — OLF's threshold is 0.01 pu) or whether they
-are a genuine accumulation at the water-fill's `P_RESIDUE_EPS`.
+**Ruled out first.** Not the [[#64]] gate signature: for `BUS-5250_BBS` both arms fire exactly
+ONE distribution pass, so the AMOUNT differs, not the sequence. Not chunk composition: at
+`-Dolf.gpu.sa.maxBatch=512` the tail is byte-identical (same worst value, same six
+contingencies, same order) — a cross-chunk leak moves with the chunk size.
+
+**The states really do differ** (`OLF_GPU_SA_BUSDIFF_CTG=BUS-5250_BBS`): 5430 of 6885 buses
+above 1e-12 kV, worst 1.563e-06 kV, **2.012e-08 relative** — broad and uniform, the signature of
+two arms stopping at different ITERATES, not of a localized modelling error. The arms already
+differ by 3.7e-07 pu at the FIRST slack check (device 0.007948472266 vs OLF 0.007948840), which
+the 0.01 pu gate then amplifies.
+
+**The squeeze splits the tail.** `OLF_GPU_DBG_CONV_EPS=1e-8` tightens the criterion on BOTH arms
+(the instrument's own comment: "the only honest way to tell a real state difference from
+convergence slack is to squeeze the slack and watch what survives"). Worst 1.398e-03 ->
+8.464e-04 MW, differing count 3689 -> 3565, violations diff 0 either way, and the assertion
+PASSES at 1e-8. Per contingency:
+
+| | eps=1e-4 | eps=1e-8 | verdict |
+| --- | --- | --- | --- |
+| BUS-5250_BBS | 1.398e-03 | **4.749e-05** (29x down) | convergence slack |
+| BUS-4467_BBS | 9.564e-04 | **8.464e-04** (1.13x) | **eps-INDEPENDENT — real** |
+
+So:
+
+1. **Most of the tail is convergence slack.** Both arms use `UNIFORM_CRITERIA` with the default
+   `convEpsPerEq=1e-4` and the device implements OLF's exact criterion
+   (`‖F‖₂ < sqrt(convEpsPerEq² · n)`, per-scenario `nActive`) — but a Newton stopping test does
+   not pin a unique iterate. Different linear solvers (cuDSS vs KLU) take different step
+   sequences and land on different points that both satisfy it. Candidates for closing the
+   remaining asymmetry: `nActive` vs OLF's own equation count in the threshold, and the
+   MAX_VOLTAGE_CHANGE step clamp. This is why the small-network fixtures match at 1e-12 kV
+   (their Newton resolves the fixed point) and rte6515 does not (it stops at ~1e-6).
+
+2. **`BUS-4467_BBS` is a real, discrete disagreement.** `cpu=1726.709369250` vs
+   `gpu=1726.710325644` MW, and it SURVIVES a 10^4x tighter criterion. At 1726 MW distributed
+   many participants saturate, and a saturated generator contributes its EXACT limit, so one
+   differing clamp decision gives exactly this kind of fixed offset. **Chase this one first** —
+   compare `OLF_DS_SPLIT`'s G lines against `OLF_GPU_GENCUM_DUMP` for it (the join that found
+   [[#64]]'s uniform scale-up) and look for a generator at a limit on one arm only. Note
+   `OLF_DS_TRACE` prints `DS_SAT` lines and the host replay prints `SEED_SAT`.
 
 
 ### #63 — A re-homed voltage main that is already PINNED (2026-09-30)

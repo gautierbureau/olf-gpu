@@ -1,0 +1,51 @@
+# Behaviour switches — the cleaning list
+
+`docs/env-vars.md` catalogues everything readable from the environment, most of it TRACING. This file
+lists only the switches that **change what the device computes**, so each one can be dispositioned.
+The rule this exists to enforce: *once a path matches the CPU better, DELETE the other* — a switch
+whose other mode is simply wrong is not a feature, it is an unexploded measurement.
+
+Status legend: **DELETE** = one mode is known wrong, remove it and the dead path · **OPT-OUT** = a
+correct fallback worth keeping for triage · **TUNING** = both modes legitimate (library/perf knob) ·
+**VERIFY** = disposition not yet established by measurement.
+
+## System properties (`-Dolf.gpu.*`)
+
+| switch | default | gates | disposition |
+|---|---|---|---|
+| `olf.gpu.ziTreeRelocation` | `false` | the coupler-tree relocation of bus power equations | **VERIFY** — cannot be deleted either way yet: OFF loses long coupler chains (first step wrong from 7 couplers on, 1.6e+04), ON is wrong at scale (network.xiidm branch scope: 10322 of 10538 contingencies differ, worst 89.18 MW). Both modes are wrong for some input, which is why it is still a switch. |
+| `olf.gpu.ziTreeRelocationMinCouplers` | `4` | minimum tree size to relocate | **VERIFY** — a NO-OP on network.xiidm (17 of 7745 buses at 4, 373 at 1). Tied to the switch above. |
+| `olf.gpu.pilotSelfRotation` | `true` | pilot-self group Q rotation | **VERIFY** — turned ON by default 2026-09-28; the OFF path should go once the rotation is trusted. |
+| `olf.gpu.driverOuterLoops` | on | run OLF's outer loops as in-kernel driver phases | **OPT-OUT** — the host-orchestrator path is the documented escape hatch (`gpu-base-lf-on-driver`). |
+| `olf.gpu.sa.deviceCriterion` | on | per-equation convergence criteria on device | **VERIFY** |
+| `olf.gpu.sa.fixedInnerIters` | `0` | K fixed Newton steps instead of OLF's budget | **TUNING** — the fixed-iter bench needs it; never a production mode. |
+| `olf.gpu.lib` | — | native library path | **TUNING** (plumbing, not behaviour). |
+
+## Environment variables that change behaviour
+
+| switch | gates | disposition |
+|---|---|---|
+| `OLF_GPU_IR_STEPS` | iterative-refinement step count (default 4 when zero-impedance) | **TUNING** — the default was decided by measurement (`gpu-ir2-default-after-diag-repair`); keep as an override, it is how that decision gets re-checked. |
+| `OLF_GPU_REORDER_ALG` | cuDSS fill-reducing ordering | **TUNING** — library knob, both modes legitimate. |
+| `OLF_GPU_MATCHING_ALG` | cuDSS matching (standalone solve only) | **TUNING** — and `0` is a known-wrong mode kept deliberately to reproduce the failure. Document, do not delete. |
+| `OLF_GPU_PIVOT_TYPE`, `OLF_GPU_PIVOT_THRESHOLD` | cuDSS pivoting on the robust path | **TUNING** |
+| `OLF_GPU_STRAGGLER_FRAC` | straggler-exit fraction | **VERIFY** — off by default; the user's 2026-09-22 call was that the device should report MAX_ITER itself. Decide and delete the loser. |
+| `OLF_GPU_COMPACT_CACHE` | structure-cache compaction | **VERIFY** |
+| `OLF_GPU_DRIVER_OUTER_LOOPS` | env twin of the system property above | **DELETE one of the two** — the same knob should not have two names. |
+| `OLF_GPU_RL_SKIP` | skip named reactive-limit entries | **DELETE** — a debugging amputation, not a mode. |
+| `OLF_GPU_FORCE_FIRST_STEP` | force a Newton step OLF's check said was unnecessary | **DELETE** — this is the spurious-step class (`gpu-sa-spurious-newton-step`); the correct behaviour is settled. |
+| `OLF_GPU_HOST_LOOP_NOOP` | make a host outer loop do nothing | **DELETE** — bisection scaffolding. |
+| `OLF_GPU_SA_BASE_ONLY` | solve the base and stop | **OPT-OUT** — genuinely useful for triage, keep. |
+| `OLF_GPU_PS_MASK`, `OLF_GPU_PSG_STEP` | pilot-self masks / step gating | **VERIFY** — bisection leftovers from the pilot-self work; likely DELETE now that the rotation is default-on. |
+| `OLF_GPU_CPU_ROUTED` | force named contingencies to the CPU | **OPT-OUT** — the escape hatch for a bad contingency in production. |
+
+## How to use this list
+
+1. Anything marked **DELETE** should go with its dead path in one commit each, suite + the full branch
+   scope as the gate — deleting a switch is a behaviour change like any other.
+2. **VERIFY** rows need one measurement each, not a discussion: run both modes on the full branch
+   scope and keep the one that matches the CPU.
+3. The two `ziTreeRelocation` rows are the exception and should be left alone until the relocation is
+   correct for control-capable buses — see `gpu-coupler-tree-relocation-enable` in the session memory.
+   That one is a switch because *both* modes are wrong for some input, which is the only honest reason
+   to have one.

@@ -108,6 +108,58 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 && bus.getSynchronousComponent().getNum() == com.powsybl.iidm.network.ComponentConstants.MAIN_NUM;
     }
 
+    /** Per contingency, |cpu-gpu| distributed active power of the last comparison (MW). */
+    private static final Map<String, Double> DAP_BY_CTG = new TreeMap<>();
+
+    /** Per contingency, the violation-count delta (gpu - cpu) of the last comparison. */
+    private static final Map<String, Integer> VIOL_DELTA_BY_CTG = new TreeMap<>();
+
+    /** Per contingency, the worst bus-voltage difference in kV — only for the ids that were bus-diffed. */
+    private static final Map<String, Double> BUS_WORST_BY_CTG = new TreeMap<>();
+
+    /**
+     * The THREE signals together, per contingency, because no one of them settles anything on its own:
+     * distributed active power is a single scalar and can match to 1e-12 MW while the operating point differs
+     * by 0.45 kV (measured on rte6515 BUS-1869_BBS_1), a violation delta can be zero while the state drifts,
+     * and a bus diff is only available for the ids a run monitors. Any contingency that differs in ANY of the
+     * three is listed, with "-" where a signal was not measured, so a reader can see at a glance whether a
+     * difference is one signal or all of them.
+     */
+    private static void reportTriple() {
+        java.util.Set<String> ids = new java.util.TreeSet<>();
+        DAP_BY_CTG.forEach((k, v) -> {
+            if (v > 1e-6) {
+                ids.add(k);
+            }
+        });
+        VIOL_DELTA_BY_CTG.forEach((k, v) -> {
+            if (v != 0) {
+                ids.add(k);
+            }
+        });
+        BUS_WORST_BY_CTG.forEach((k, v) -> {
+            if (v > 1e-9) {
+                ids.add(k);
+            }
+        });
+        if (ids.isEmpty()) {
+            System.out.println("  TRIPLE CHECK: no contingency differs in distributed power, violations or"
+                    + " monitored bus voltage");
+            return;
+        }
+        System.out.printf("  TRIPLE CHECK (%d contingencies differ in at least one of the three):%n", ids.size());
+        System.out.printf("      %-20s %14s %8s %14s%n", "contingency", "dap |d| MW", "viol d", "bus worst kV");
+        for (String id : ids) {
+            Double dap = DAP_BY_CTG.get(id);
+            Integer vd = VIOL_DELTA_BY_CTG.get(id);
+            Double bw = BUS_WORST_BY_CTG.get(id);
+            System.out.printf("      %-20s %14s %8s %14s%n", id,
+                    dap == null ? "-" : String.format("%.3e", dap),
+                    vd == null ? "-" : Integer.toString(vd),
+                    bw == null ? "-" : String.format("%.3e", bw));
+        }
+    }
+
     /** Count what the filter removed, so a scope report says it out loud instead of hiding it in a
      *  batching share. */
     private static <T> List<T> keepSolved(List<T> all, java.util.function.Predicate<T> live, String kind) {
@@ -542,6 +594,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             }
         });
         long differing = pairs.values().stream().filter(v -> Math.abs(v[0] - v[1]) > 1e-9).count();
+        DAP_BY_CTG.clear();                                  // kept for the joined verdict (see reportTriple)
+        pairs.forEach((k, v) -> DAP_BY_CTG.put(k, Math.abs(v[0] - v[1])));
         double worst = pairs.values().stream().mapToDouble(v -> Math.abs(v[0] - v[1])).max().orElse(0);
         System.out.printf("  distributedActivePower: %d of %d contingencies differ by > 1e-9 MW | worst %.6e MW%n",
                 differing, pairs.size(), worst);
@@ -1197,6 +1251,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 long cpuOnly = cpuBuses.stream()
                         .filter(b -> !gpuV.containsKey(b.getBusId())).count();
                 long gpuOnly = gpuV.size() - (cpuBuses.size() - cpuOnly);
+                BUS_WORST_BY_CTG.put(cp.getContingency().getId(), worstAbs);
                 System.out.printf("  BUSDIFF ctg=%s buses>1e-12kV=%d of %d | worst abs=%.3e kV rel=%.3e"
                                 + " | uncompared: cpu-only=%d gpu-only=%d%n",
                         cp.getContingency().getId(), above, cpuBuses.size(),
@@ -1242,6 +1297,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             }
             int cpuCount = cpuViolByCtg.getOrDefault(ctgId, List.of()).size();
             int gpuCount = gpuViolByCtg.getOrDefault(ctgId, List.of()).size();
+            VIOL_DELTA_BY_CTG.put(ctgId, gpuCount - cpuCount);
             if (cpuCount != gpuCount) {
                 System.out.printf("  VIOL-DIFF ctg=%s cpu=%d gpu=%d delta=%d%n", ctgId, cpuCount, gpuCount, gpuCount - cpuCount);
                 // Whether the one-sided entry ALREADY violated in the pre-contingency state decides what it is.
@@ -1317,6 +1373,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         }
         long netDiff = Math.abs(cpuViolations - gpuViolations);
         double violDiffPct = cpuViolations > 0 ? 100.0 * violDiff / cpuViolations : 0;
+        reportTriple();
         System.out.printf("  violation diff: %d over %d contingencies (%.4f%%) | signed net %d%n",
                 violDiff, differingCtg, violDiffPct, netDiff);
         assertTrue(violDiffPct < 0.01,

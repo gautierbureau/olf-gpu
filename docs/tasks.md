@@ -4548,3 +4548,25 @@ no violation reported — consistent only with a different state, not a differen
 One instrument added for the next pass: a one-sided violation now prints `pre=NEW` or
 `pre=pre-existing base=<value>`, since powsybl's increased-violations thresholds (0.5 proportional on flows here)
 only filter PRE-EXISTING ones — so the two shapes can be told apart without deducing it.
+
+### The three signals must be read together (2026-09-30)
+
+A standing rule, learned the hard way twice in one day: **distributed power, bus voltages and violations together**
+decide whether a contingency agrees — never one of them alone. Both of my wrong readings came from taking one:
+
+- reading equal distributed power as an equal state: `BUS-1869_BBS_1` matched to 6.2e-13 MW and its buses were
+  4.5e-01 kV apart, 5409 of 6885 of them;
+- reading a matching side-ONE current as "the state agrees, so the missing violation must be a limit question":
+  side two was never compared, and the states differed.
+
+So the harness now prints the three joined, once per run, for every contingency that differs in ANY of them:
+
+```
+TRIPLE CHECK (9 contingencies differ in at least one of the three):
+    contingency              dap |d| MW   viol d   bus worst kV
+    BUS-125_BBS_1             9.610e-13       -1      3.078e-02
+    ...
+```
+
+with `-` where a signal was not measured (a bus diff exists only for the ids a run monitors, since monitoring all
+of them dies on heap). `reportTriple` builds it from three maps filled where each signal is computed.

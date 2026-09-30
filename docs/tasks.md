@@ -97,19 +97,33 @@ fixed row set and freezes an islanded bus's two rows as identities where OLF rem
 equations. `islandedDsParticipants=2` is consistent too (only 2 of the 5 carry participating
 generators). So the row sets are right and the participant sets agree.
 
-**The F0 route is BLOCKED by a stale instrument, not by the bug.** `EQ_DUMP_CTG`'s F0 section is
-stale by construction: `dumpPostContingencyEquations` runs on the FIRST line of
-`runPostContingencySimulation`, before the solver touches anything, and
-`context.getEquationVector()` returns whatever the last update left — the base solve's final
-iterate against the PRE-contingency system. Hence DISTR_Q residuals of 519/518/118 pu on a
-restored base-converged network and `norm2=774.03`, against the device's plausible `norm2=35.95`
-(worst |F| 11.0). **Do not read that 21x as a model difference.** A warning line is now written
-into the dump. Fix it by evaluating the equations and target at x0 inside the dump, or by moving
-the dump to just after the solver's first residual — then the recipe works and names the equation.
+**What `EQ_DUMP_CTG`'s F0 section actually is** (I first called it "stale by construction" and
+that was WRONG — corrected in a92dcc8's follow-up): the POST-contingency system evaluated at the
+PRE-contingency state. The dump runs before the solver touches x, but `lfContingency.apply()` has
+already deactivated equations, which invalidates the vector, so `AbstractVector.getArray()`
+RECREATES it against the current index. Proof from the dump itself: `fx0.length` = 14494 =
+exactly the active-equation count of its own post-contingency system section (independently
+counted), not the base's. Not stale.
 
-This is the SECOND lying instrument found in two days (the first was the DS gate record's stride,
-[[#62]]). Both were found only because a number looked implausible. Check an instrument's
-write point and its guard before spending a 20-minute scope run on it.
+**It is still not comparable with a device fill's norm**, for a different reason: the device's
+first fill is taken after ITS seeding (frozen islanded rows at flat V=1/phi=0, the pre-loss
+target seeding) and after `applyRowMode` turns identity rows into `x - target`. OLF `norm2=774.03`
+vs device `35.95`, and OLF's is dominated almost entirely by TWO equations — `distr_q1952/1953`
+at 519.00 and 518.98 — so those norms describe two equations, not the network.
+
+**Instrumentation done:** F0 now writes `f` and `target` SEPARATELY, not just their difference.
+With the difference alone a 519 cannot be attributed — a large residual, a large target, or an
+unconstrained variable all look the same. Those two equations are DISTR_Q rows built on coupler
+`DUMMY_Q` variables (`dummy_q9161`/`9162`), exactly the quantity a pre-contingency state leaves
+unconstrained, and the split makes that readable. **Next: re-dump and read whether the 519 is f or
+target** — if it is the target, F0 is behaving and the comparison needs the device's fill taken at
+the same seeding point; if it is f, those dummy variables are the lead.
+
+**A caution earned twice over.** The DS gate record's stride was a genuine lying instrument
+([[#62]]); this one was NOT, and I asserted it was on a plausible-sounding mechanism without
+checking the lazy-recompute path. Both directions cost a run. Check an instrument's write point,
+its guard AND its invalidation before spending a 20-minute scope run on it, and before writing a
+warning into it.
 
 **The instrument that unblocked all of this** (fork commit e6e7642ff, `OlfTraceScope`): OLF's
 `DS_RUN`/`DS_SPLIT`/`DS_SAT`/`DS_PASS`/`RL_SWITCH` carried no contingency id, so in a

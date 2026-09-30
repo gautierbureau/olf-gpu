@@ -1341,28 +1341,31 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             // its first |f(x0)| line is the norm of), the contingency counterpart of OLF_GPU_F0_TRACE: lined
             // up against the device's first fill of that slot (OLF_GPU_VALS_SCAN_SLOT + OLF_GPU_VALS_DUMP), it
             // names the equation the two arms evaluate differently before any step blurs it.
-            // WARNING: this section is STALE BY CONSTRUCTION and must not be compared against a device
-            // fill until it is fixed. dumpPostContingencyEquations runs on the FIRST line of
-            // runPostContingencySimulation, before the solver touches anything, and getEquationVector()
-            // returns whatever the LAST update left there -- the base solve's final iterate, evaluated
-            // against the PRE-contingency system. Measured on rte6515 BUS-4467_BBS: DISTR_Q residuals of
-            // 519 / 518 / 118 pu on a restored, base-converged network, norm2=774.03, where the device's
-            // first fill of the same slot is norm2=35.95 with a worst |F| of 11.0. Reading that 21x as a
-            // model difference would be wrong; the two are not evaluated at the same point.
+            // What this section IS, since a previous version of this comment got it wrong: the
+            // POST-contingency equation system evaluated at the PRE-contingency state. The dump runs on
+            // the first line of runPostContingencySimulation, before the solver touches x, but
+            // lfContingency.apply() has already deactivated equations, which invalidates the vector, so
+            // AbstractVector.getArray() RECREATES it against the current index -- verified on rte6515
+            // BUS-4467_BBS: fx0.length is 14494, exactly the active-equation count of the
+            // post-contingency system section, not the base's. So it is NOT stale.
             //
-            // The equation-system section ABOVE is sound (it is read from the equation system itself, and
-            // its row census reconciles with the device exactly: 14494 active + 2 rows for each of the 5
-            // islanded buses = the device's 14504). Only F0 is affected.
+            // It is still NOT directly comparable with a device fill's norm. Both arms start from the
+            // base state, but the device's first fill is taken after its own seeding (frozen islanded
+            // rows held at a flat V=1/phi=0, the pre-loss target seeding) and after applyRowMode has
+            // turned identity rows into x - target. Measured: OLF norm2=774.03 against the device's
+            // 35.95, where OLF's is dominated almost entirely by TWO equations -- distr_q1952/1953 at
+            // 519.00 and 518.98 -- so the norms are a statement about those two, not about the network.
             //
-            // To fix: evaluate the equations and the target vector at x0 inside this dump before writing
-            // F0, or move the dump to just after the solver computes its first residual.
-            w.write("# F0 WARNING: stale -- written before the solve, from an equation vector last "
-                    + "updated by a DIFFERENT system. Not comparable with a device fill. See the comment.\n");
+            // Hence f and target are written SEPARATELY below. With only the difference printed, a value
+            // of 519 cannot be attributed: a large residual, a large target, or a variable the state
+            // does not constrain yet all look identical. Those two equations are DISTR_Q rows built on
+            // coupler DUMMY_Q variables (dummy_q9161/9162), whose base values are exactly what a
+            // pre-contingency state leaves unconstrained -- which the split makes readable.
             try {
                 double[] fx0 = context.getEquationVector().getArray();
                 double[] tg0 = context.getTargetVector().getArray();
                 double n2 = 0;
-                w.write("# F0: column type elementNum id residual (f(x0) - target)\n");
+                w.write("# F0: column type elementNum id residual(f-target) f target\n");
                 for (int c = 0; c < fx0.length; c++) {
                     double v = fx0[c] - (c < tg0.length ? tg0[c] : 0.0);
                     n2 += v * v;
@@ -1377,7 +1380,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     } catch (RuntimeException e) {
                         id = "#" + eq.getElementNum();
                     }
-                    w.write("F0 " + c + " " + eq.getType() + " " + eq.getElementNum() + " " + id + " " + v + "\n");
+                    w.write("F0 " + c + " " + eq.getType() + " " + eq.getElementNum() + " " + id + " " + v
+                            + " " + fx0[c] + " " + (c < tg0.length ? tg0[c] : 0.0) + "\n");
                 }
                 w.write("# F0 norm2=" + Math.sqrt(n2) + "\n");
             } catch (RuntimeException e) {

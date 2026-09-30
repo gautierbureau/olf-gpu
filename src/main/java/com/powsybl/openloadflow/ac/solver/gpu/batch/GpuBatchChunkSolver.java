@@ -151,6 +151,48 @@ final class GpuBatchChunkSolver {
         return out.stream().mapToInt(Integer::intValue).toArray();
     }
 
+    /** One row of the OLF_GPU_TARGET_ROW probe: the row's base target, its per-scenario row modes and
+     *  every per-scenario override landing on it. */
+    private static void emitTargetRow(int probe, int n, int realCount, double[] baseTargets, int[] baseRowMode,
+                                      int[][] rowModePerScenario, int[] targetOverrideIndex,
+                                      double[] targetOverrideValue) {
+        StringBuilder sb = new StringBuilder(String.format(
+                "TARGET_ROW row=%d base=%.9f baseMode=%d", probe, baseTargets[probe], baseRowMode[probe]));
+        if (rowModePerScenario != null) {
+            for (int s2 = 0; s2 < realCount; s2++) {
+                if (rowModePerScenario[s2] != null && rowModePerScenario[s2][probe] != baseRowMode[probe]) {
+                    sb.append(String.format(" mode[s=%d]=%d", s2, rowModePerScenario[s2][probe]));
+                }
+            }
+        }
+        for (int k2 = 0; k2 < targetOverrideIndex.length; k2++) {
+            if (targetOverrideIndex[k2] % n == probe) {
+                sb.append(String.format(" ov[s=%d]=%.9f",
+                        targetOverrideIndex[k2] / n, targetOverrideValue[k2]));
+            }
+        }
+        System.err.println(sb);
+    }
+
+    /** Does this scenario's plan already carry a renormalized DISTR_Q target for {@code row}? */
+    private static boolean seedsDqTargetRow(GenOutage[] gos, int row) {
+        for (GenOutage go : gos == null ? new GenOutage[0] : gos) {
+            if (go.seedsDqTargets() && contains(go.dqTargetRows(), row)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean contains(int[] values, int v) {
+        for (int x : values) {
+            if (x == v) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static int countTrue(boolean[] flags) {
         if (flags == null) {
             return 0;
@@ -427,6 +469,21 @@ final class GpuBatchChunkSolver {
                     // {slot, participant} pairs: the distributed-slack participants this scenario
                     // strands in another synchronous component (see distributeSlackBatch).
                     List<Integer> dsIslandedList = new ArrayList<>();
+                    // {slot, participant, row} triples: a DS participant whose P-balance row this
+                    // scenario MOVES. Under the coupler-tree relocation a child bus's P balance lives on
+                    // its parent coupler's DUMMY_P row, and dsPhiRow — a STRUCTURAL array — points there.
+                    // A contingency that opens that coupler pins the dummy row to a DUMMY_TARGET identity
+                    // and the stock-placement fallback puts the balance back on the child's OWN phi row,
+                    // so for THAT scenario the participant's row is the child's. Without this the whole DS
+                    // machinery kept writing to the pinned row: measured on the middle-section fixture,
+                    // g2's 0.173869 pu share landed on a dead row while both DS kernels read its
+                    // (0 - anchor) as -1.043213 of "absorbed", so the slack loop fired four times where
+                    // OLF fires once and over-placed 0.0687 pu on the rows that still worked (0.34 kV on
+                    // vl3_b). Per chunk, like every other list here — the index is a chunk SLOT.
+                    List<Integer> dsRowOvList = new ArrayList<>();
+                    // ...and the same diversion host-side, for the loss pre-distribution below (it runs
+                    // after this loop and composes its shares onto the participants' rows).
+                    int[][] dsRowOvBySlot = new int[chunkSize][];
                     List<Integer> rlIslandedList = new ArrayList<>();
                     List<Integer> rlLocalList = new ArrayList<>();     // (slot, entry): re-homed PV buses checked as LOCAL
                     List<Double> rlLocalVt = new ArrayList<>();        // their own voltage target (pu)
@@ -486,6 +543,11 @@ final class GpuBatchChunkSolver {
                         java.util.Arrays.fill(dsOvMinDelta, 0);
                     }
                     double[] preLossBySlot = new double[chunkSize];   // scheduled active power loss per slot (plain phase)
+                    // ...and what the pre-distribution put on the PARTICIPANTS alone (the slack keeps the
+                    // rest). PRELOSS_AFTER has to compare the device's final participant total against
+                    // THIS, not against the whole mismatch: with a participating slack the two differ by
+                    // the slack's retained share, which is not a device defect.
+                    double[] preAbsorbedBySlot = new double[chunkSize];
                     for (int s = 0; s < chunkSize; s++) {
                         // Clear the WHOLE slot, not just the outage this slot carried. The chunk
                         // loop reuses one disabledMask per slot, and it used to be reset by replaying
@@ -798,10 +860,38 @@ final class GpuBatchChunkSolver {
                                     }
                                     if (childPhiRow >= 0 && dpRow >= 0) {
                                         overrides.add(s * n + childPhiRow, baseTargets[dpRow]);
+                                        // The DS participant on that bus has to follow its equation. Its
+                                        // structural row is this coupler's DUMMY_P, now an identity.
+                                        for (int i = 0; i < nds; i++) {
+                                            if (gpuData.dsPhiRow()[i] != dpRow) {
+                                                continue;
+                                            }
+                                            dsRowOvList.add(s);
+                                            dsRowOvList.add(i);
+                                            dsRowOvList.add(childPhiRow);
+                                            if (dsRowOvBySlot[s] == null) {
+                                                dsRowOvBySlot[s] = new int[nds];
+                                                java.util.Arrays.fill(dsRowOvBySlot[s], -1);
+                                            }
+                                            dsRowOvBySlot[s][i] = childPhiRow;
+                                        }
                                     }
                                     // A child that is NOT voltage-controlled has its reactive balance on the
                                     // coupler's DUMMY_Q instead, so its Q target follows the same way.
-                                    if (!applied && childVRow >= 0 && dqRow >= 0) {
+                                    //
+                                    // ...unless that row is a DISTR_Q row whose target the plan RENORMALIZES for
+                                    // this scenario (an island took a controller out of the group). Then
+                                    // baseTargets[dqRow] is the BASE-key target and the plan's entry is OLF's,
+                                    // and writing both left TWO override entries on one row — which the device
+                                    // resolves by a race (applyTargetOverrideBatch is one thread per entry
+                                    // writing target[ovIndex[k]]). Measured on the middle-section fixture: the
+                                    // base -0.133333333 won over the renormalized -0.2, so the row kept a target
+                                    // built from three keys while its weights had been renormalized over two —
+                                    // 13.33 MVAr on l2 and 0.32 kV on every bus behind it. Yielding here (rather
+                                    // than letting the plan's entry overwrite) keeps every scenario whose plan
+                                    // seeds no target for the row bit-identical.
+                                    if (!applied && childVRow >= 0 && dqRow >= 0
+                                            && !seedsDqTargetRow(genOutagesByIndex[ci], childVRow)) {
                                         overrides.add(s * n + childVRow, baseTargets[dqRow]);
                                     }
                                     if (System.getenv("OLF_GPU_ZITREE_TRACE") != null) {
@@ -1161,6 +1251,9 @@ final class GpuBatchChunkSolver {
                                 preDistributed += share;
                             }
                             preDistributedByIndex[preIdx] = preDistributed;
+                            for (int i = 0; i < nds; i++) {
+                                preAbsorbedBySlot[s] += shares[i];        // participants only
+                            }
                             // The pre-distribution is a DISPLACEMENT from the anchor, not a new anchor.
                             // OLF's post-contingency DS calls resetToInitialState, which UNDOES it and
                             // returns it as previousMismatch, then water-fills
@@ -1175,7 +1268,14 @@ final class GpuBatchChunkSolver {
                                 if (shares[i] == 0) {
                                     continue;
                                 }
-                                int flat = s * n + gpuData.dsPhiRow()[i];
+                                // The row this scenario actually solves the bus's P balance on: the
+                                // coupler-tree relocation's dummy row unless this scenario opened that
+                                // coupler, in which case the balance — and so the share — is on the bus's
+                                // own phi row. The ANCHOR stays the participant's own dsBaseTargetP, which
+                                // the device carried to the new row with the equation.
+                                int dsRow = dsRowOvBySlot[s] != null && dsRowOvBySlot[s][i] >= 0
+                                        ? dsRowOvBySlot[s][i] : gpuData.dsPhiRow()[i];
+                                int flat = s * n + dsRow;
                                 // compose with a gen-outage override on the same row
                                 overrides.compose(flat, baseTargets[gpuData.dsPhiRow()[i]], shares[i]);
                             }
@@ -1194,24 +1294,16 @@ final class GpuBatchChunkSolver {
                     // the base value and every per-scenario override landing on it. A row whose
                     // converged residual equals minus its OLF target is a row solved against 0.
                     String tgtRow = System.getenv("OLF_GPU_TARGET_ROW");
-                    if (tgtRow != null) {
-                        int probe = Integer.parseInt(tgtRow);
-                        StringBuilder sb = new StringBuilder(String.format(
-                                "TARGET_ROW row=%d base=%.9f baseMode=%d", probe, baseTargets[probe], baseRowMode[probe]));
-                        if (rowModePerScenario != null) {
-                            for (int s2 = 0; s2 < realCount; s2++) {
-                                if (rowModePerScenario[s2] != null && rowModePerScenario[s2][probe] != baseRowMode[probe]) {
-                                    sb.append(String.format(" mode[s=%d]=%d", s2, rowModePerScenario[s2][probe]));
-                                }
-                            }
+                    for (String probeSpec : tgtRow == null ? new String[0] : tgtRow.split(",")) {
+                        // A LIST (or a lo-hi range): finding which device row carries a given equation
+                        // means scanning them, and one row per JVM run made that a five-minute question.
+                        int first = Integer.parseInt(probeSpec.trim().split("-")[0]);
+                        int last = probeSpec.contains("-")
+                                ? Integer.parseInt(probeSpec.trim().split("-")[1]) : first;
+                        for (int probe = first; probe <= last && probe < n; probe++) {
+                            emitTargetRow(probe, n, realCount, baseTargets, baseRowMode, rowModePerScenario,
+                                    targetOverrideIndex, targetOverrideValue);
                         }
-                        for (int k2 = 0; k2 < targetOverrideIndex.length; k2++) {
-                            if (targetOverrideIndex[k2] % n == probe) {
-                                sb.append(String.format(" ov[s=%d]=%.9f",
-                                        targetOverrideIndex[k2] / n, targetOverrideValue[k2]));
-                            }
-                        }
-                        System.err.println(sb);
                     }
                     if (pairPhase && "1".equals(System.getenv("OLF_GPU_DBG_PAIR_OV"))) {
                         for (int s2 = 0; s2 < realCount; s2++) {
@@ -1419,6 +1511,8 @@ final class GpuBatchChunkSolver {
                     // chunk's participant mask through the reused context.
                     GpuAcNewtonSolver.setBatchDsIslanded(handle,
                             dsIslandedList.isEmpty() ? null : dsIslandedList.stream().mapToInt(Integer::intValue).toArray());
+                    GpuAcNewtonSolver.setBatchDsRowOverrides(handle,
+                            dsRowOvList.isEmpty() ? null : dsRowOvList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchRlIslanded(handle,
                             rlIslandedList.isEmpty() ? null : rlIslandedList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchRlLocal(handle,
@@ -1675,7 +1769,11 @@ final class GpuBatchChunkSolver {
                         // CPU counterpart is OLF's DS_GEN trace under OLF_DS_TRACE).
                         double[] ftd = GpuAcNewtonSolver.readBatchTargets(handle);
                         for (int i = 0; i < nds; i++) {
-                            int row = gpuData.dsPhiRow()[i];
+                            // slot 0's row, diverted like the kernels' — reading the structural row for a
+                            // participant this scenario moved reports the PINNED dummy row's target, which
+                            // is how a spurious -1.043213 "delta" got read as a real distribution.
+                            int row = dsRowOvBySlot[0] != null && dsRowOvBySlot[0][i] >= 0
+                                    ? dsRowOvBySlot[0][i] : gpuData.dsPhiRow()[i];
                             double d = ftd[row] - gpuData.dsBaseTargetP()[i];
                             if (d != 0) {
                                 System.err.printf("DS_FINAL_ROW ctg=%s i=%d row=%d base=%.12e final=%.12e delta=%.12e factor=%.12e%n",
@@ -1694,18 +1792,28 @@ final class GpuBatchChunkSolver {
                             if (preLossBySlot[s] == 0) {
                                 continue;
                             }
+                            int ci = group.get(chunkStart + s);
                             double moved = 0;
                             for (int i = 0; i < nds; i++) {
-                                int row = gpuData.dsPhiRow()[i];
-                                moved += ft[s * n + row] - baseTargets[row];
+                                int row = dsRowOvBySlot[s] != null && dsRowOvBySlot[s][i] >= 0
+                                        ? dsRowOvBySlot[s][i] : gpuData.dsPhiRow()[i];
+                                // A participant this contingency ISLANDED has its row frozen to a flat
+                                // identity, so (final - base) there is minus its whole anchor and not a
+                                // distribution at all: counting it read the middle-section fixture's
+                                // participants as -1.669969 pu off OLF when the real gap was -0.0687.
+                                if (islandedDsByIndex != null && islandedDsByIndex[ci] != null
+                                        && contains(islandedDsByIndex[ci], i)) {
+                                    continue;
+                                }
+                                moved += ft[s * n + row] - baseTargets[gpuData.dsPhiRow()[i]];
                             }
                             // preLossBySlot is the mismatch the pre-distribution was asked to absorb;
                             // `moved` is where the participants ended up relative to the SAME anchor the
                             // device DS loop resets to, so the delta is what that loop added on top.
-                            System.err.printf("PRELOSS_AFTER ctg=%s preLossMismatch=%.6f deviceFinal=%.6f "
-                                    + "deltaFromDeviceDsLoop=%.6f pu%n",
+                            System.err.printf("PRELOSS_AFTER ctg=%s preLossMismatch=%.6f seededOnParticipants=%.6f "
+                                    + "deviceFinal=%.6f deltaFromDeviceDsLoop=%.6f pu%n",
                                     contingencies.get(group.get(chunkStart + s)).contingencyId(),
-                                    preLossBySlot[s], moved, moved - preLossBySlot[s]);
+                                    preLossBySlot[s], preAbsorbedBySlot[s], moved, moved - preAbsorbedBySlot[s]);
                         }
                     }
                     if (GpuBatchPhaseStats.ENABLED) {

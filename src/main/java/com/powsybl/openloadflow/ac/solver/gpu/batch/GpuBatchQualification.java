@@ -622,6 +622,32 @@ final class GpuBatchQualification {
         return reloc == null || outagedZiNums.contains(reloc[0]) ? vRow : reloc[1];
     }
 
+    /** The INVERSE of {@link #relocatedChildRows}, keyed by the coupler's {@code DUMMY_Q} row:
+     *  {@code {branchNum, the child bus's own BUS_V row}}. A consumer holding a STRUCTURAL member row
+     *  (which the coupler-tree relocation already moved onto the dummy) needs this to map back, because
+     *  a scenario that OUTAGES the coupler puts the child's reactive equation on the bus's own row. */
+    static java.util.Map<Integer, int[]> relocatedDummyQRows(GpuAcData gpuData) {
+        java.util.Map<Integer, int[]> out = new java.util.HashMap<>();
+        int[] zi = gpuData.ziIdx();
+        int[] nums = gpuData.ziBranchNums();
+        for (int e = 0; e < zi.length / 11 && e < nums.length; e++) {
+            int o = e * 11;
+            int childSide = (zi[o + 10] >> 1) & 3;
+            int ownV = childSide == 1 ? zi[o + 6] : (childSide == 2 ? zi[o + 7] : -1);
+            if (ownV >= 0 && zi[o + 5] >= 0) {
+                out.put(zi[o + 5], new int[] {nums[e], ownV});
+            }
+        }
+        return out;
+    }
+
+    /** The row a consumer holding the structural (already relocated) row must write in THIS scenario:
+     *  the child bus's own row once the coupler carrying its equations is outaged, else unchanged. */
+    static int unrelocQRow(int row, java.util.Map<Integer, int[]> dummyQRows, java.util.Set<Integer> outagedZiNums) {
+        int[] reloc = dummyQRows.get(row);
+        return reloc != null && outagedZiNums.contains(reloc[0]) ? reloc[1] : row;
+    }
+
     private static final int[] NO_ISLANDED_DS = new int[0];
 
     /** The reactive-limits controllers this contingency puts in another synchronous component: their
@@ -741,6 +767,7 @@ final class GpuBatchQualification {
             Set<LfBranch> relocatedCouplers, int[] curvePRows) {
         List<Integer> batchedIndices = new ArrayList<>();
         java.util.Map<Integer, int[]> relocRows = relocatedChildRows(gpuData);
+        java.util.Map<Integer, int[]> relocDummyQRows = relocatedDummyQRows(gpuData);
         int[][] frozenRowsByIndex = new int[contingencies.size()][];     // islanded buses' variable rows, per contingency
         int[][] islandedNumsByIndex = new int[contingencies.size()][];   // islanded LfBus nums (result-building excludes them)
         double[][] frozenTargetsByIndex = new double[contingencies.size()][];   // the clean value each frozen row holds (V=1, phi=0)
@@ -1014,7 +1041,7 @@ final class GpuBatchQualification {
                             inactiveForTargets.add(ib);
                         }
                     }
-                    for (GenOutage go : GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, inactiveForTargets)) {
+                    for (GenOutage go : GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, inactiveForTargets, relocDummyQRows, outagedZiNums)) {
                         live.add(go.withoutFrozenTargetRows(frozenSet));
                     }
                     gos = live.toArray(new GenOutage[0]);
@@ -1184,7 +1211,7 @@ final class GpuBatchQualification {
                     dqOvContribByIndex[i] = java.util.Arrays.stream(vcOv[0]).mapToInt(d -> (int) d).toArray();
                     dqOvWByIndex[i] = vcOv[1];
                     // and the survivors' DISTR_Q row TARGETS + the islanded members' inactive entries
-                    List<GenOutage> dq = GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, lostVcControllers);
+                    List<GenOutage> dq = GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, lostVcControllers, relocDummyQRows, outagedZiNums);
                     if (!dq.isEmpty()) {
                         List<GenOutage> merged = new ArrayList<>();
                         if (genOutagesByIndex[i] != null) {

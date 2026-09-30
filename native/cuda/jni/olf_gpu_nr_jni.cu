@@ -5974,8 +5974,22 @@ __global__ void slackOnlyDsCheck(int nScenarios, int n, int slackPhiRow, double 
     }
 }
 
+// The row this SCENARIO solves participant i's P balance on. Normally its structural dsPhiRow; under
+// the coupler-tree relocation that is the parent coupler's DUMMY_P row, and a scenario opening that
+// coupler moves the balance back to the bus's own BUS_PHI row (setBatchDsRowOverrides).
+__host__ __device__ inline int dsRowOf(const int* dsPhiRow, const int* dsRowOv, int s, int nds, int i) {
+    if (dsRowOv != nullptr) {
+        int r = dsRowOv[(size_t) s * nds + i];
+        if (r >= 0) {
+            return r;
+        }
+    }
+    return dsPhiRow[i];
+}
+
 __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiRow, double slackTargetP,
-                                   double oneMinusFactorSum, const int* dsPhiRow, const double* dsBaseTargetP,
+                                   double oneMinusFactorSum, const int* dsPhiRow, const int* dsRowOv,
+                                   const double* dsBaseTargetP,
                                    const double* target, const double* qBuf, const char* rlActive,
                                    double* retain,
                                    const int* dsOvBus, const double* dsOvBaseDelta,
@@ -6005,7 +6019,7 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
         if (ov == i) {                                       // setGeneratorsInitialTargetPToTargetP before the
             base -= dsOvBaseDelta[s];                        // strategy re-solve)
         }
-        absorbed += target[(size_t) s * n + dsPhiRow[i]] - base;
+        absorbed += target[(size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, i)] - base;
     }
     double slackTgt = slackTargetP + (dsSlackShift != nullptr ? dsSlackShift[s] : 0.0);
     double tot = (qBuf[(size_t) s * n + slackPhiRow] - slackTgt) + absorbed;   // total-from-anchor, OLF's
@@ -6052,7 +6066,7 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
 // redistributed only AFTER the next re-solve) would drift — the loss change between re-solves converges to a
 // different in-tolerance point than OLF.
 __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slackDistTol, double residueEps,
-                                              int slackPhiRow, double slackTargetP, const int* dsPhiRow,
+                                              int slackPhiRow, double slackTargetP, const int* dsPhiRow, const int* dsRowOv,
                                               const double* dsFactor, const double* dsBaseTargetP, const double* dsAnchorShift, const double* dsSlackShift,
                                               const double* dsMaxDelta, const double* dsMinDelta, const double* dsRetain,
                                               const double* qBuf, const char* rlActive,
@@ -6169,13 +6183,18 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         double base = dsBaseTargetP[i];
         if (dsAnchorShift != nullptr) { base += dsAnchorShift[(size_t) s * nds + i]; }
         if (ov == i) { base -= dsOvBaseDelta[s]; }
-        size_t idx = (size_t) s * n + dsPhiRow[i];
+        size_t idx = (size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, i);
         absorbedNow += target[idx] - base;
         target[idx] = base;                                 // reset to the anchor
     }
     rem = fsGlobal * ((qBuf[(size_t) s * n + slackPhiRow] - slackTgt) + absorbedNow);
     if (gateLast != nullptr) {
-        gateLast[6 * s + 5] = rem;                           // what this pass places over the participants
+        // Slot 7, the documented `placed`. This read 6*s+5 — the stride of the 6-slot record this
+        // one replaced: for s=0 it overwrote `dsRetain` with the placed amount (so a FIRING pass
+        // printed the wrong column and dsPlaced stayed 0), and for every s>=1 it scribbled into
+        // ANOTHER scenario's slots (s=1 -> index 11 = scenario 1's slackTgt). Every LOOP_PASS number
+        // read off a firing pass was therefore the wrong quantity.
+        gateLast[8 * s + 7] = rem;                           // what this pass places over the participants
     }
     if (dbgTrace && s == dbgTrace - 1) {
         printf("[DS-WF] entry slackMismatch=%.9f absorbedNow=%.9f fsGlobal=%.9f rem=%.9f nds=%d ngen=%d anchorShift=%d\n",
@@ -6254,7 +6273,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                 ovMinD = dsMinDelta[ov] - dsOvMinDelta[s];
                 ovF = dsMode == 1 ? fmax(0.0, dirUp ? dsMarginUp[ov] : dsMarginDown[ov])
                                   : dsFactor[ov] - dsOvFactorDelta[s];
-                double ovCum = target[(size_t) s * n + dsPhiRow[ov]] - ovBase;
+                double ovCum = target[(size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, ov)] - ovBase;
                 ovActive = ovF > 0 && !((rem > 0) ? (ovCum >= ovMaxD) : (ovCum <= ovMinD));
                 if (ovActive) {
                     fsumActive += ovF;
@@ -6296,7 +6315,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                 }
             }
             if (ovActive) {
-                size_t idx = (size_t) s * n + dsPhiRow[ov];
+                size_t idx = (size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, ov);
                 double cum = target[idx] - ovBase;
                 double newCum = fmin(fmax(cum + rem * (ovF / fsumActive), ovMinD), ovMaxD);
                 if (newCum != cum) {
@@ -6315,7 +6334,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                     sum += genCum[(size_t) s * ngen + g];
                 }
                 // The outage's own move of the row target is not slack power: it shifts the anchor.
-                target[(size_t) s * n + dsPhiRow[i]] =
+                target[(size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, i)] =
                         dsBaseTargetP[i] - (ov == i ? dsOvBaseDelta[s] : 0.0) + sum;
             }
             if (dbgTrace && s == dbgTrace - 1) {
@@ -6336,7 +6355,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
             if (dsAnchorShift != nullptr) { base += sh; maxD -= sh; minD -= sh; }
             if (dsMode == 1) { f = fmax(0.0, (dirUp ? dsMarginUp[i] : dsMarginDown[i]) - (dirUp ? sh : -sh)); }
             if (ov == i) { f -= dsOvFactorDelta[s]; base -= dsOvBaseDelta[s]; maxD -= dsOvMaxDelta[s]; minD -= dsOvMinDelta[s]; }
-            double cum = target[(size_t) s * n + dsPhiRow[i]] - base;
+            double cum = target[(size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, i)] - base;
             bool sat = (rem > 0) ? (cum >= maxD) : (cum <= minD);
             if (!sat) {
                 fsumActive += f;
@@ -6355,7 +6374,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
             if (dsAnchorShift != nullptr) { base += sh; maxD -= sh; minD -= sh; }
             if (dsMode == 1) { f = fmax(0.0, (dirUp ? dsMarginUp[i] : dsMarginDown[i]) - (dirUp ? sh : -sh)); }
             if (ov == i) { f -= dsOvFactorDelta[s]; base -= dsOvBaseDelta[s]; maxD -= dsOvMaxDelta[s]; minD -= dsOvMinDelta[s]; }
-            size_t idx = (size_t) s * n + dsPhiRow[i];
+            size_t idx = (size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, i);
             double cum = target[idx] - base;
             bool sat = (rem > 0) ? (cum >= maxD) : (cum <= minD);
             if (sat) {
@@ -7018,6 +7037,8 @@ struct BatchSolverContext {
     // set it is renormalized against must shrink with it. Empty = every participant participates.
     int nDsIslanded = 0;
     DeviceBuf dDsIslanded;
+    int nDsRowOv = 0;                                        // per-scenario DS participant row diversions
+    DeviceBuf dDsRowOv;                                      // nScenarios * nds ints, -1 = use dsPhiRow
     // Same idea for the reactive-limits pass: per (scenario, controller), 1 = its bus is in another
     // synchronous component in this scenario, so the loop must not look at it.
     int nRlIslanded = 0;
@@ -11235,7 +11256,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             // Recompute the slack's retained share from the CURRENT total imbalance every pass (NOT frozen at
             // pass 0) so a participating slack tracks the loss change during redistribution.
             computeSlackRetain<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->nds, ctx->dsSlackPhiRow, ctx->dsSlackTargetP,
-                    1.0 - ctx->dsFactorSum, ctx->dDsPhiRow.as<int>(), ctx->dDsBaseTargetP.as<double>(),
+                    1.0 - ctx->dsFactorSum, ctx->dDsPhiRow.as<int>(),
+                    ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->dDsBaseTargetP.as<double>(),
                     ctx->dTarget.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
                     ctx->dDsRetain.as<double>(),
                     hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvBaseDelta.as<double>(),
@@ -11250,6 +11272,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsResidual.p, 0, nS * sizeof(char), ctx->stream));
             distributeSlackBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nds, nS, n, SLACK_DIST_TOL, P_RESIDUE_EPS,
                     ctx->dsSlackPhiRow, ctx->dsSlackTargetP, ctx->dDsPhiRow.as<int>(),
+                    ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr,
                     ctx->dDsFactor.as<double>(), ctx->dDsBaseTargetP.as<double>(),
                     hasDsAnchor ? dDsAnchorShift.as<double>() : nullptr,
                     hasDsAnchor ? dDsSlackShift.as<double>() : nullptr,
@@ -14211,6 +14234,43 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
     ctx->dDsIslanded.upload(mask.data(), maskLen);
     ctx->nDsIslanded = nPairs;
+}
+
+// Per-scenario P-balance row of a DS participant this scenario MOVES: {slot, participant, row}
+// triples, expanded to a dense (scenario, participant) row array (-1 = the structural dsPhiRow).
+// The rows arrive in the same space dsPhiRow is given in and are taken through the structure's
+// rowMap here, exactly as createBatchContext maps dsPhiRow itself — so the two are always in one
+// space whatever rowMap is.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDsRowOverrides(
+        JNIEnv* env, jclass, jlong handle, jintArray jTriples) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jTriples == nullptr || env->GetArrayLength(jTriples) == 0 || ctx->nds == 0) {
+        ctx->nDsRowOv = 0;
+        return;
+    }
+    size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nds;
+    std::vector<int> rows(len, -1);
+    int nTriples = env->GetArrayLength(jTriples) / 3;
+    jint* t = env->GetIntArrayElements(jTriples, nullptr);
+    const std::vector<int>& rowMap = ctx->st->rowMap;
+    int nOk = 0;
+    for (int k = 0; k < nTriples; k++) {
+        int s = t[3 * k];
+        int i = t[3 * k + 1];
+        int row = t[3 * k + 2];
+        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nds
+                && row >= 0 && row < static_cast<int>(rowMap.size()) && rowMap[row] >= 0) {
+            rows[(size_t) s * ctx->nds + i] = rowMap[row];
+            nOk++;
+        }
+    }
+    env->ReleaseIntArrayElements(jTriples, t, JNI_ABORT);
+    ctx->dDsRowOv.upload(rows.data(), len * sizeof(int));
+    ctx->nDsRowOv = nOk;
 }
 
 // DISTR_RHO coefficient overrides: install (or clear, with nulls) the per-scenario 1/count'

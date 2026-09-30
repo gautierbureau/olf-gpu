@@ -624,6 +624,30 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
     void gpuSaMatchesCpuOnRte6515Full() throws Exception {
         Network network = Network.read(CASE_FILE);
         List<Contingency> contingencies = allBranchContingencies(network);
+        // OLF_GPU_SA_CTG_FIRST=<id>[,<id>]: move these to the FRONT of the list, keeping the list
+        // itself intact (so the retained switches, and therefore the network both arms solve, are
+        // unchanged - which is what CTG_ONLY cannot do). OLF's zero-impedance spanning tree is
+        // history-dependent within one security analysis: removing a ZI tree edge re-elects the tree
+        // (LfZeroImpedanceNetwork.removeBranchAndTryToSplit) and re-adding the branch does NOT
+        // restore it, so from the first ZI contingency onwards OLF solves on a tree the saved base
+        // state's dummy flows no longer match. Running a contingency FIRST is how that history is
+        // taken out of the measurement.
+        String ctgFirst = System.getenv("OLF_GPU_SA_CTG_FIRST");
+        if (ctgFirst != null && !ctgFirst.isEmpty()) {
+            List<String> wanted = java.util.Arrays.stream(ctgFirst.split(",")).map(String::trim).toList();
+            List<Contingency> head = new ArrayList<>();
+            for (String w : wanted) {
+                contingencies.stream().filter(c -> c.getId().equals(w)).findFirst().ifPresent(head::add);
+            }
+            List<Contingency> reordered = new ArrayList<>(head);
+            for (Contingency c : contingencies) {
+                if (head.stream().noneMatch(h -> h.getId().equals(c.getId()))) {
+                    reordered.add(c);
+                }
+            }
+            contingencies = reordered;
+            System.out.printf("  CTG_FIRST: %s moved to the front (list otherwise unchanged)%n", head.stream().map(Contingency::getId).toList());
+        }
         System.out.printf("%s: %d branches → %d N-1 contingencies%n", CASE_FILE,
                 network.getBranchCount(), contingencies.size());
 
@@ -1158,12 +1182,22 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                     .toList();
             long declined = cpu.getPostContingencyResults().stream()
                     .filter(p -> !onDevice.contains(p.getContingency().getId())).count();
-            System.out.printf("  DEVICE VERDICT: %d of %d simulated solved on device; of the %d it declined,"
-                    + " OLF converged %d%s%n",
-                    onDevice.size(), cpu.getPostContingencyResults().size(), declined,
-                    declinedButOlfConverged.size(),
-                    declinedButOlfConverged.isEmpty() ? " (so every declined one is OLF's own non-convergence)"
-                            : ": " + declinedButOlfConverged);
+            // Split the declined ones, or the number misleads: a scenario REFUSED AT PLAN TIME was never
+            // attempted on the device (an unmodeled shape — OLF converges those perfectly well, they are a
+            // scope gap), while one the device TRIED and threw away is a device failure whenever OLF converges
+            // it. The census gives the plan/validator classes by count, which is enough to separate them.
+            long planRefused = GpuBatchScopeCensus.snapshot().entrySet().stream()
+                    .filter(e -> e.getKey().startsWith("PLAN:") || e.getKey().startsWith("VALIDATOR:"))
+                    .mapToLong(Map.Entry::getValue).sum();
+            System.out.printf("  DEVICE VERDICT: %d of %d simulated solved on device; %d declined = %d refused at"
+                    + " plan time (unmodeled shape, OLF converges them) + %d tried and failed%n",
+                    onDevice.size(), cpu.getPostContingencyResults().size(), declined, planRefused,
+                    declined - planRefused);
+            System.out.printf("  DEVICE FAILURES on a system OLF converges: %d of the %d declined%s%n",
+                    declinedButOlfConverged.size(), declined,
+                    declinedButOlfConverged.isEmpty() ? " (none — every declined one is OLF's own non-convergence)"
+                            : " (" + (declinedButOlfConverged.size() - planRefused) + " of them tried and failed): "
+                              + declinedButOlfConverged);
             System.out.printf("  STATUS COMPARISON covers the %d device-solved contingencies; for the rest both"
                     + " arms report the SAME CPU computation%n", onDevice.size());
         }
@@ -1348,6 +1382,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
 
         // ASSERTIONS
         // after every per-contingency diff line, so a failing run still says whether the STATES agree
+        reportTriple();                                      // before any assertion: a failing run is exactly when the joined table is wanted
         assertTrue(worstDistributed < 1e-3, "distributed active power must match the CPU: worst " + worstDistributed + " MW");
         assertEquals(statusCounts(cpu), statusCounts(gpuCold),
                 "post-contingency status counts must match CPU");
@@ -1373,7 +1408,6 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         }
         long netDiff = Math.abs(cpuViolations - gpuViolations);
         double violDiffPct = cpuViolations > 0 ? 100.0 * violDiff / cpuViolations : 0;
-        reportTriple();
         System.out.printf("  violation diff: %d over %d contingencies (%.4f%%) | signed net %d%n",
                 violDiff, differingCtg, violDiffPct, netDiff);
         assertTrue(violDiffPct < 0.01,

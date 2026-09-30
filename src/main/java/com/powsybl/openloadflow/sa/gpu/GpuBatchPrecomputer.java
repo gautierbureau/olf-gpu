@@ -106,6 +106,88 @@ final class GpuBatchPrecomputer {
             var target = context.getTargetVector();
 
             List<BatchContingency> batch = new ArrayList<>();
+            // OLF's zero-impedance spanning tree, replayed. The non-tree edge of each ZI network is the
+            // LAST one a contingency disabled (removeBranchAndTryToSplit marks it non-tree and re-elects;
+            // addBranch never restores it), so walking the list in OLF's own order reproduces the tree it
+            // will have at every contingency. Union-find partitions the couplers into networks; the seed is
+            // the base tree, which is what the device's structure was extracted on.
+            java.util.List<LfBranch> ziAll = net.getBranches().stream()
+                    .filter(b -> b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC))
+                    .toList();
+            java.util.Map<Integer, Integer> uf = new java.util.HashMap<>();   // bus num -> root
+            java.util.function.IntUnaryOperator find = new java.util.function.IntUnaryOperator() {
+                @Override
+                public int applyAsInt(int x) {
+                    int r = x;
+                    while (uf.getOrDefault(r, r) != r) {
+                        r = uf.get(r);
+                    }
+                    return r;
+                }
+            };
+            for (LfBranch b : ziAll) {
+                if (b.getBus1() != null && b.getBus2() != null) {
+                    uf.put(find.applyAsInt(b.getBus1().getNum()), find.applyAsInt(b.getBus2().getNum()));
+                }
+            }
+            java.util.Map<String, Integer> ziNetOf = new java.util.HashMap<>();
+            for (LfBranch b : ziAll) {
+                if (b.getBus1() != null) {
+                    ziNetOf.put(b.getId(), find.applyAsInt(b.getBus1().getNum()));
+                }
+            }
+            java.util.Map<Integer, LfBranch> sticky = new java.util.TreeMap<>();
+            for (LfBranch b : ziAll) {
+                if (!b.isSpanningTreeEdge(com.powsybl.openloadflow.network.LoadFlowModel.AC)
+                        && ziNetOf.containsKey(b.getId())) {
+                    sticky.put(ziNetOf.get(b.getId()), b);
+                }
+            }
+            java.util.List<LfBranch> baseNonTreeZi = List.copyOf(sticky.values());
+            // A coupler only STAYS out of the tree if removing it leaves its network connected. A BRIDGE
+            // splits the network instead: removeBranchAndTryToSplit builds two new LfZeroImpedanceNetworks,
+            // and on revert addBranchAndMerge builds a merged one whose constructor re-elects over the full
+            // edge set and puts the branch back in the tree. So only non-bridges are sticky - which is why
+            // OLF shows AAWA out at LITJ and back in at LITK, while LMO, once disabled, never returns.
+            java.util.Map<Integer, java.util.List<LfBranch>> ziByNet = new java.util.HashMap<>();
+            for (LfBranch b : ziAll) {
+                Integer k = ziNetOf.get(b.getId());
+                if (k != null) {
+                    ziByNet.computeIfAbsent(k, x -> new ArrayList<>()).add(b);
+                }
+            }
+            java.util.Set<String> ziNonBridge = new java.util.HashSet<>();
+            for (var e : ziByNet.entrySet()) {
+                java.util.List<LfBranch> edges = e.getValue();
+                for (LfBranch skip : edges) {
+                    java.util.Map<Integer, Integer> uf2 = new java.util.HashMap<>();
+                    java.util.function.IntUnaryOperator f2 = new java.util.function.IntUnaryOperator() {
+                        @Override
+                        public int applyAsInt(int x) {
+                            int r = x;
+                            while (uf2.getOrDefault(r, r) != r) {
+                                r = uf2.get(r);
+                            }
+                            return r;
+                        }
+                    };
+                    java.util.Set<Integer> buses = new java.util.HashSet<>();
+                    for (LfBranch b : edges) {
+                        if (b.getBus1() == null || b.getBus2() == null) {
+                            continue;
+                        }
+                        buses.add(b.getBus1().getNum());
+                        buses.add(b.getBus2().getNum());
+                        if (b != skip) {
+                            uf2.put(f2.applyAsInt(b.getBus1().getNum()), f2.applyAsInt(b.getBus2().getNum()));
+                        }
+                    }
+                    long roots = buses.stream().map(f2::applyAsInt).distinct().count();
+                    if (roots == 1) {
+                        ziNonBridge.add(skip.getId());       // still connected without it: a cycle edge
+                    }
+                }
+            }
             for (PropagatedContingency pc : contingencies) {
                 java.util.Set<String> lostLfBusIds = GpuContingencyMapper.lostLfBusIds(net, network, pc);
                 List<LfGenerator> gens = pc.getGeneratorIdsToLose().isEmpty() ? List.of() : GpuContingencyMapper.generatorOutages(net, pc, lostLfBusIds);
@@ -121,6 +203,52 @@ final class GpuBatchPrecomputer {
                         .map(net::getBranchById).filter(Objects::nonNull)
                         .filter(b -> b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC))
                         .toList();
+                // The tree OLF has when it REACHES this contingency (its own couplers come off on top of
+                // it, which the per-scenario zi-outage rows already carry), then the evolution for the
+                // contingencies after it: a coupler this one disables becomes its network's non-tree edge
+                // and stays there. Couplers go off both by being opened and by sitting on a lost bus.
+                List<LfBranch> stickyBefore = List.copyOf(sticky.values());
+                if (System.getenv("OLF_GPU_ZI_TREE_REPLAY") != null) {
+                    System.err.println("ZI_TREE_REPLAY ctg=" + pc.getContingency().getId() + " nonTree="
+                            + java.util.stream.Stream.concat(stickyBefore.stream(), ziDisabledPreview(net, pc).stream())
+                                    .map(LfBranch::getId).distinct().sorted().toList());
+                }
+                java.util.List<LfBranch> ziDisabled = new ArrayList<>(ziOutages);
+                for (String busId : pc.getBusIdsToLose()) {
+                    com.powsybl.openloadflow.network.LfBus lost = net.getBusById(busId);
+                    if (lost != null) {
+                        for (LfBranch inc : lost.getBranches()) {
+                            if (inc.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
+                                ziDisabled.add(inc);
+                            }
+                        }
+                    }
+                }
+                // Per network: ONE cycle edge off leaves that edge out for good (the reduced graph is
+                // re-elected and the revert only re-adds the edge). TWO or more off splits the network,
+                // and the revert MERGES it - and a merged LfZeroImpedanceNetwork re-elects in its
+                // constructor over the whole edge set, which lands back on the base choice. Anything
+                // else (bridges) is restored by that same merge.
+                java.util.Map<Integer, java.util.List<LfBranch>> disabledByNet = new java.util.HashMap<>();
+                for (LfBranch d : ziDisabled) {
+                    Integer k = ziNetOf.get(d.getId());
+                    if (k != null) {
+                        disabledByNet.computeIfAbsent(k, x -> new ArrayList<>()).add(d);
+                    }
+                }
+                for (var en : disabledByNet.entrySet()) {
+                    java.util.List<LfBranch> off = en.getValue().stream().distinct().toList();
+                    int netSize = ziByNet.getOrDefault(en.getKey(), List.of()).size();
+                    java.util.List<LfBranch> offCycle = off.stream()
+                            .filter(b -> ziNonBridge.contains(b.getId())).toList();
+                    if (off.size() < netSize && !offCycle.isEmpty()) {
+                        sticky.put(en.getKey(), offCycle.get(offCycle.size() - 1));
+                    } else if (off.size() >= netSize && netSize > 0) {
+                        baseNonTreeZi.stream()
+                                .filter(b -> en.getKey().equals(ziNetOf.get(b.getId())))
+                                .findFirst().ifPresent(b -> sticky.put(en.getKey(), b));
+                    }
+                }
                 List<LfBranch> branches = pc.getBranchIdsToOpen().isEmpty() ? List.of()
                         : GpuContingencyMapper.closedBranchOutages(net, pc, ziOutages);
                 List<BatchContingency.SideOpen> sideOpens =
@@ -208,7 +336,8 @@ final class GpuBatchPrecomputer {
                         && (!branches.isEmpty() || !gens.isEmpty() || !loads.isEmpty() || !shifts.isEmpty()
                             || !ziOutages.isEmpty() || !hvdcs.isEmpty() || !sideOpens.isEmpty())) {
                     batch.add(new BatchContingency(pc.getContingency().getId(), branches, gens, loads,
-                            shifts, List.of(), List.of(), List.of(), ziOutages, hvdcs, sideOpens));
+                            shifts, List.of(), List.of(), List.of(), ziOutages, hvdcs, sideOpens,
+                            stickyBefore));
                     // Batched OPERATOR STRATEGIES stage 1: TrueCondition (always-applied) strategies
                     // matching this contingency become EXTRA batch scenarios — the (ctg, strategy)
                     // pair is just another BatchContingency with the actions COMPOSED onto the
@@ -434,6 +563,24 @@ final class GpuBatchPrecomputer {
     }
 
     /** The device's own loss pre-distribution and distributed total for a scenario, where it reported them. */
+    /** The zero-impedance branches a contingency takes off: opened couplers, and couplers on a lost bus. */
+    private static java.util.List<LfBranch> ziDisabledPreview(LfNetwork net, PropagatedContingency pc) {
+        java.util.List<LfBranch> out = new ArrayList<>(pc.getBranchIdsToOpen().keySet().stream()
+                .map(net::getBranchById).filter(Objects::nonNull)
+                .filter(b -> b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)).toList());
+        for (String busId : pc.getBusIdsToLose()) {
+            com.powsybl.openloadflow.network.LfBus lost = net.getBusById(busId);
+            if (lost != null) {
+                for (LfBranch inc : lost.getBranches()) {
+                    if (inc.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC)) {
+                        out.add(inc);
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
     private static void recordDistributed(BatchScenarioResult r, Map<String, Double> preDistributed,
                                           Map<String, Double> distributed) {
         if (!Double.isNaN(r.preDistributedActivePower())) {

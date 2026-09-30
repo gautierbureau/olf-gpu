@@ -275,6 +275,11 @@ public final class GpuAcNewtonSolver {
      *  the convergence criterion tested after the last one only (outer loops unchanged); 0 = test every iteration. */
     public static native void setBatchFixedIter(long handle, int k);
 
+    /** Per (scenario, coupler) spanning-tree flag, as flat {slot, ziElement, isTree} triples, for the
+     *  scenarios where OLF's tree has moved away from the one the structure was extracted on. Empty
+     *  clears. */
+    public static native void setBatchZiTreeOverrides(long handle, int[] slotElemVal);
+
     /** OLF_GPU_LOOP_TRACE by contingency: the slot to trace in the next solve of this context, -1 = none. */
     public static native void setBatchLoopTraceSlot(long handle, int slot);
 

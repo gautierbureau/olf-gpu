@@ -1379,6 +1379,18 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                                  PreContingencyNetworkResult preContingencyNetworkResult, boolean createResultExtension,
                                                                  List<LimitReduction> limitReductions, double preDistributedActivePower) {
         dumpPostContingencyEquations(context, contingency, lfContingency, network);
+        // OLF_GPU_ZI_TREE_CTG=1: the zero-impedance branches OLF has OUT of its spanning tree for THIS
+        // contingency, right after lfContingency.apply(). OLF's tree is history-dependent within a
+        // security analysis - removeBranchAndTryToSplit marks a disabled tree edge non-tree and
+        // re-elects, addBranch never restores it - so this is the ground truth a device-side replay of
+        // that history has to reproduce, contingency by contingency.
+        if (System.getenv("OLF_GPU_ZI_TREE_CTG") != null) {
+            System.err.println("ZI_TREE_CTG ctg=" + contingency.getId() + " nonTree="
+                    + network.getBranches().stream()
+                            .filter(b -> b.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC))
+                            .filter(b -> !b.isSpanningTreeEdge(com.powsybl.openloadflow.network.LoadFlowModel.AC))
+                            .map(com.powsybl.openloadflow.network.LfBranch::getId).sorted().toList());
+        }
         PrecomputedBatch precomputed = runState.get().precomputed;
         if (precomputed.isReady() && precomputed.exhausted().contains(contingency.getId())) {
             // The device carried this scenario through OLF's whole Newton budget without

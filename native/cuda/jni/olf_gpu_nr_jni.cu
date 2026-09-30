@@ -230,7 +230,16 @@ inline int irSteps(bool hasZeroImpedance) {
     if (e != nullptr && *e != '\0') {
         return std::atoi(e);
     }
-    return hasZeroImpedance ? 2 : IR_N_STEPS;
+    // 4, not 2, since 2026-09-28. The accuracy of the batched factorization on the repaired
+    // zero-diagonal rows depends on which OTHER matrices share the batch: network.xiidm/LLAX (a
+    // line whose loss islands three buses; its weak pivots are the DUMMY rows of couplers BDTG and
+    // BDXR) solved to a linear residual of 2.5e-06 (ratio 3.1e-06) in one chunk composition and
+    // 2.2e-08 in another, for the same matrix and the same right-hand side. The inaccurate step
+    // stopped the first solve at a slightly different iterate, the slack pass read it, and 22
+    // large-loss islanding contingencies ended 2-4e-06 MW off where the same scope at another
+    // chunk size had them at 1e-08. Two more refinement steps take that residual to 1.1e-11 in the
+    // bad composition and leave no contingency worse by 1e-07 than before (99 better).
+    return hasZeroImpedance ? 4 : IR_N_STEPS;
 }
 
 // ---------------------------------------------------------------------------------
@@ -2504,7 +2513,13 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
         pat.emplace_back(b2P, z[4]);
         if (b1Q >= 0) pat.emplace_back(b1Q, z[5]);
         if (b2Q >= 0) pat.emplace_back(b2Q, z[5]);
-        if (ziSpan(z)) {
+        // The ZERO_V / ZERO_PHI coupling is reserved for EVERY coupler, not only the ones that are
+        // spanning-tree edges at extraction. OLF re-elects its tree during a security analysis and never
+        // restores it, so a coupler out of the tree here can be IN it when OLF reaches a later
+        // contingency; without the entries that scenario's row would carry no equation at all (measured:
+        // the solve sat at 0% GPU and never finished a chunk). Four entries per coupler, zero while the
+        // base tree holds.
+        {
             int zvRow = rowMap[ziZeroVRow(z)], zpRow = rowMap[ziZeroPhiRow(z)];
             pat.emplace_back(zvRow, z[6]);
             pat.emplace_back(zvRow, z[7]);
@@ -2749,7 +2764,7 @@ static void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const s
                     }
                 }
             }
-            if (ziSpan(z)) {                                 // spanning-tree edge
+            {                                                // every coupler: the tree flag is per scenario
                 int zvRow = rowMap[ziZeroVRow(z)], zpRow = rowMap[ziZeroPhiRow(z)];
                 dd[8] = -2 - zvRow;                          // F ZERO_V row
                 dd[9] = pos.at(zvRow, z[6]);                 // J(ZERO_V, v1)
@@ -4460,7 +4475,7 @@ __global__ void fillZeroImpBatch(int nzi, int nScenarios, int n, int nnz,
                                  int nziBase, int nZiOn, const int* ziOnSlotElem,
                                  int nZiOff, const int* ziOffSlotElem,
                                  const int* ziAlt, const int* ziSel, const int* mode, int ziDyn,
-                                 RelocTables rt) {
+                                 RelocTables rt, int nZiTree, const int* ziTreeSlotElemVal) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nzi * nScenarios) return;
     int e = tid % nzi;
@@ -4512,7 +4527,14 @@ __global__ void fillZeroImpBatch(int nzi, int nScenarios, int n, int nnz,
     addAt(d5, -1.0, valsS, FS);                            // J(bus2 P, dummyP)
     addAt(d6, 1.0, valsS, FS);                               // J(bus1 Q, dummyQ)
     addAt(d7, -1.0, valsS, FS);                              // J(bus2 Q, dummyQ)
-    if (q[10] & 1) {                                         // spanning-tree edge: voltage/angle coupling
+    int isTree = q[10] & 1;                                  // the tree at EXTRACTION...
+    for (int k = 0; k < nZiTree; k++) {                      // ...overridden where OLF's has moved by then
+        if (ziTreeSlotElemVal[3 * k] == s && ziTreeSlotElemVal[3 * k + 1] == e) {
+            isTree = ziTreeSlotElemVal[3 * k + 2];
+            break;
+        }
+    }
+    if (isTree) {                                            // spanning-tree edge: voltage/angle coupling
         double v1 = xs[q[6]], v2 = xs[q[7]], ph1 = xs[q[8]], ph2 = xs[q[9]];
         addAt(d[8], v1 - rho * v2, valsS, FS);               // F[ZERO_V row]
         addAt(d[9], 1.0, valsS, FS);                         // J(ZERO_V, v1)
@@ -5203,13 +5225,15 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
         // pilot stayed a power row beside a member that had resumed control.
         veqOff[fi] = 1;
         savedVTarget[fi] = rlVtarget[pe];
-    } else if (act && !lost && mode[pi] == 1 && pe < 0 && qrPilotRlEntry != nullptr && qrPilotRlEntry[g] >= 0) {
-        // control lost in the BASE, a member just unpinned: the V identity comes back with the
-        // group's target (the base carried no saved one — the pilot's local entry has it). A
-        // pilot-self group (pe >= 0) books the same state as flipped above and restores through veqOff.
-        int lpe = qrPilotRlEntry[g];
+    } else if (!lost && pe < 0 && mode[pi] == 1 && qrPilotRlEntry != nullptr && qrPilotRlEntry[g] >= 0) {
+        // The same base-lost case for a PURE-TRANSIT pilot (not one of its own controllers, so no
+        // psEntry): the base carried no saved V target - the pilot's own local reactive-limit entry
+        // holds the group's target (per-scenario overrides included). A member just unpinned, and
+        // OLF gives the pilot its V equation back IN THAT PASS (network.xiidm/LNER: IZUM_0's three
+        // members unpinned on a 7.85e-07 pu margin; restoring a pass late cost 0.151 MW of slack).
+        int le = qrPilotRlEntry[g];
         mode[pi] = 0;
-        target[pi] = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, lpe, rlVtarget[lpe]);
+        target[pi] = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, le, rlVtarget[le]);
         switched[s] = 1;
     }
 }
@@ -6109,17 +6133,20 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                (fsGlobal > 0.0 && fabs(rem) > fsGlobal * slackDistTol) ? 1 : 0);
     }
     if (gateLast != nullptr) {
-        // The WHOLE accounting of this pass, host-readable (device printf does not reach the test log):
-        // [0] rem the gate compares, [1] fired, [2] the slack's own mismatch, [3] the share the slack is
-        // assumed to hold, [4] the participants' global factor sum, [5] the amount the water-fill places
-        // (written below). OLF's counterpart is one line, `DS_RUN mismatch=... participants=n`, and the two
-        // totals MUST agree: a difference in the amount distributed is a defect, not a different route.
-        gateLast[6 * s] = rem;
-        gateLast[6 * s + 1] = (fsGlobal > 0.0 && fabs(rem) > fsGlobal * slackDistTol) ? 1.0 : 0.0;
-        gateLast[6 * s + 2] = qBuf[(size_t) s * n + slackPhiRow] - slackTgt;
-        gateLast[6 * s + 3] = dsRetain[s];
-        gateLast[6 * s + 4] = fsGlobal;
-        gateLast[6 * s + 5] = 0.0;
+        // The WHOLE accounting of one slack pass, host-readable (device printf does not reach the test log).
+        // [0] rem the gate compares, [1] fired, [2] the slack's own injection, [3] its target, [4] the
+        // mismatch between them, [5] the share the slack is assumed to hold, [6] the participants' global
+        // factor sum, [7] the amount the water-fill places (written below). OLF's counterpart is one line,
+        // `DS_RUN mismatch=... participants=n`, and the two TOTALS must agree: a difference in the amount
+        // distributed is a defect, not a different route.
+        gateLast[8 * s] = rem;
+        gateLast[8 * s + 1] = (fsGlobal > 0.0 && fabs(rem) > fsGlobal * slackDistTol) ? 1.0 : 0.0;
+        gateLast[8 * s + 2] = qBuf[(size_t) s * n + slackPhiRow];
+        gateLast[8 * s + 3] = slackTgt;
+        gateLast[8 * s + 4] = qBuf[(size_t) s * n + slackPhiRow] - slackTgt;
+        gateLast[8 * s + 5] = dsRetain[s];
+        gateLast[8 * s + 6] = fsGlobal;
+        gateLast[8 * s + 7] = 0.0;
     }
     if (fsGlobal <= 0.0 || fabs(rem) <= fsGlobal * slackDistTol) {
         return;
@@ -6666,6 +6693,8 @@ struct BatchSolverContext {
                                                              // base-open closable switches gated by the ziOn list
     int nZiOn = 0;
     int nZiOff = 0;
+    DeviceBuf dZiTreeSlotElemVal;                          // per (scenario, coupler) OLF tree flag where it differs from extraction
+    int nZiTree = 0;
     DeviceBuf dZiOffSlotElem;                                // nZiOff*2 ints (slot, zi elem) — scenarios that OPEN a switch
     DeviceBuf dZiOnSlotElem;                                 // nZiOn*2 ints (slot, zi elem) — scenarios that CLOSE a switch
     int nR1Ov = 0;                                           // per-scenario closed-branch tap overrides (tap/PST actions)
@@ -7396,7 +7425,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
         }
         ctx->dsFactorSum = factorSum > 0 ? factorSum : 1.0;
         ctx->dDsRetain.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
-        ctx->dDsGateLast.alloc(static_cast<size_t>(nScenarios) * 6 * sizeof(double));
+        ctx->dDsGateLast.alloc(static_cast<size_t>(nScenarios) * 8 * sizeof(double));   // see the gateLast write
         ctx->dDsRetainApplied.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
     }
 
@@ -9830,7 +9859,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr ? ctx->dPsSkip.as<char>() : nullptr, ctx->st->nQr, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr, ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), dqTraceRow);
         if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr, ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
         if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
-        if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx));
+        if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx), ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr);
         applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>());
         // OLF_GPU_VALS_SCAN_PREREPAIR: scan/dump the fill BEFORE the zero-diagonal repair rewrites hazard rows
         // (a row that reads as a borrowed donor after the repair was EMPTY before it — the defect is upstream).
@@ -10757,7 +10786,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         {
             static const char* dxPath = std::getenv("OLF_GPU_DX_DUMP");   // read once, not per iteration
             static bool dumped = false;
-            if (dxPath != nullptr && !dumped && it == 0) {
+            // With OLF_GPU_LOOP_TRACE_CTG set, the dump is that contingency's slot in its own chunk
+            // (the host sets loopTraceSlot to -1 for the chunks that do not hold it); slot 0 of the
+            // first solve otherwise, as before.
+            const int dumpSlot = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : (std::getenv("OLF_GPU_LOOP_TRACE_CTG") != nullptr ? -1 : 0);
+            if (dxPath != nullptr && !dumped && it == 0 && dumpSlot >= 0) {
                 dumped = true;
                 CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
                 std::vector<double> hv(nnz);
@@ -10767,13 +10800,13 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 std::vector<int> hci(nnz);
                 std::vector<int> hmode(n);
                 std::vector<double> hb(n);                   // the RHS as SOLVED (row-repaired, see hazRepairRhs)
-                CUDA_CHECK(cudaMemcpy(hb.data(), ctx->dB.p, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(hv.data(), ctx->dVals.p, (size_t) nnz * sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(hd.data(), ctx->dDx.p, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(hff.data(), ctx->dF.p, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(hb.data(), ctx->dB.as<double>() + (size_t) dumpSlot * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(hv.data(), ctx->dVals.as<double>() + (size_t) dumpSlot * nnz, (size_t) nnz * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(hd.data(), ctx->dDx.as<double>() + (size_t) dumpSlot * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(hff.data(), ctx->dF.as<double>() + (size_t) dumpSlot * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
                 CUDA_CHECK(cudaMemcpy(hrp.data(), ctx->st->dRowPtr.p, (size_t) (n + 1) * sizeof(int), cudaMemcpyDeviceToHost));
                 CUDA_CHECK(cudaMemcpy(hci.data(), ctx->st->dColIdx.p, (size_t) nnz * sizeof(int), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(hmode.data(), ctx->dMode.p, (size_t) n * sizeof(int), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(hmode.data(), ctx->dMode.as<int>() + (size_t) dumpSlot * n, (size_t) n * sizeof(int), cudaMemcpyDeviceToHost));
                 FILE* f = std::fopen(dxPath, "w");
                 if (f != nullptr) {
                     std::fprintf(f, "N %d %d\n", n, nnz);
@@ -10787,7 +10820,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         }
                     }
                     std::fclose(f);
-                    std::fprintf(stderr, "OLF_GPU_DX_DUMP wrote %s (n=%d nnz=%d)\n", dxPath, n, nnz);
+                    std::fprintf(stderr, "OLF_GPU_DX_DUMP wrote %s (n=%d nnz=%d slot=%d)\n", dxPath, n, nnz, dumpSlot);
                 }
             }
         }
@@ -11042,7 +11075,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // reads the slack row's balance from dQbuf — without the coupler's dummy-P the DS sees a
     // phantom mismatch equal to the through-flow and distributes it FOREVER (measured: +392 MW
     // runaway on the first switch-close scenario until the per-scenario budget rejected it).
-    if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), nullptr, nullptr, nullptr, 0, RelocTables{});
+    if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), nullptr, nullptr, nullptr, 0, RelocTables{}, ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr);
     // Remote-member OWN q (plan-B3): fill each member's own reactive injection into its (suppressed,
     // hence free) qBuf row so the RL kernel evaluates remote entries like local ones.
     if (ctx->nRmq > 0) {
@@ -11581,16 +11614,17 @@ psgStep(ctx, nS, n, outer, "afterAllPinned");
     // scenario from one run to the next (IZUZ: slot 170, then 18)
     const int loopTraceSlot = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : (loopTraceEnv != nullptr ? std::atoi(loopTraceEnv) : -1);
     if (loopTraceSlot >= 0 && loopTraceSlot < nS) {
-        double gate[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};    // see the gateLast write: the pass's accounting
+        double gate[8] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};   // see the gateLast write
         if (ctx->dDsGateLast.p) {
-            CUDA_CHECK(cudaMemcpy(gate, ctx->dDsGateLast.as<double>() + 6 * loopTraceSlot, 6 * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(gate, ctx->dDsGateLast.as<double>() + 8 * loopTraceSlot, 8 * sizeof(double), cudaMemcpyDeviceToHost));
         }
-        std::fprintf(stderr, "LOOP_PASS s=%d outer=%d loopIdx=%d kind=%d solved=%d switched=%d nChanged=%d live=%d status=%d dsRem=%.12f dsFire=%d nrIters=%d"
-                     " dsSlackMismatch=%.12f dsRetain=%.12f fsGlobal=%.12f dsPlaced=%.12f\n",
+        std::fprintf(stderr, "LOOP_PASS s=%d outer=%d loopIdx=%d kind=%d solved=%d switched=%d nChanged=%d live=%d status=%d"
+                     " dsRem=%.12f dsFire=%d nrIters=%d dsSlackP=%.12f dsSlackTgt=%.12f dsSlackMismatch=%.12f"
+                     " dsRetain=%.12f fsGlobal=%.12f dsPlaced=%.12f\n",
                      loopTraceSlot, outer, loopIdx, loopOrder[loopIdx], solvePass ? 1 : 0,
                      (int) rlSwitched[loopTraceSlot], nChanged, (int) live[loopTraceSlot], res.status[loopTraceSlot],
                      gate[0], (int) gate[1], res.iters[loopTraceSlot],
-                     gate[2], gate[3], gate[4], gate[5]);
+                     gate[2], gate[3], gate[4], gate[5], gate[6], gate[7]);
     }
     if (nChanged > 0) {                                     // this outer loop is still unstable
         for (int s = 0; s < nS; s++) {
@@ -11658,7 +11692,7 @@ psgStep(ctx, nS, n, outer, "afterAllPinned");
         if (ctx->st->ob.ne) fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), nullptr, nullptr, nullptr, 0, RelocTables{});
         if (ctx->st->sh.ne) fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), nullptr, nullptr, nullptr, 0, RelocTables{});
         if (ctx->st->nvdl) fillVdlBatch<<<grid(ctx->st->nvdl * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nvdl, nS, n, nnz, ctx->st->dVdlIn.as<double>(), ctx->st->dVdlIdx.as<int>(), ctx->st->dVdlDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>());
-        if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), nullptr, nullptr, nullptr, 0, RelocTables{});
+        if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), nullptr, nullptr, nullptr, 0, RelocTables{}, ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr);
         if (ctx->nRmq > 0) {
             fillRemoteMemberQBatch<<<grid(ctx->nRmq * nS), BLOCK, 0, ctx->stream>>>(ctx->nRmq, nS, n,
                     ctx->nElements, ctx->cbOffset, ctx->obOffset,
@@ -12601,7 +12635,7 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
                 ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr ? ctx->dPsSkip.as<char>() : nullptr, ctx->st->nQr, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr, ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), dqTraceRow);
     if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr, ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
     if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
-    if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx));
+    if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx), ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr);
     applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>());
     hazRepairValues(ctx, nS, ctx->dVals.as<double>());
 
@@ -13112,6 +13146,22 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 // pushed mode-4 free-member row gates the re-picked carrier's DISTR_Q row off in fillDistrQBatch.
 // Does NOT touch nDqDyn: the hybrid's weights stay static-pack + dqOv (OLF renormalizes and the
 // engine pushes live values). Nulls clear.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchZiTreeOverrides(
+        JNIEnv* env, jclass, jlong handle, jintArray jSlotElemVal) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    int len = jSlotElemVal == nullptr ? 0 : env->GetArrayLength(jSlotElemVal);
+    ctx->nZiTree = len / 3;
+    if (ctx->nZiTree > 0) {
+        jint* p = env->GetIntArrayElements(jSlotElemVal, nullptr);
+        ctx->dZiTreeSlotElemVal.upload(p, static_cast<size_t>(len) * sizeof(int));
+        env->ReleaseIntArrayElements(jSlotElemVal, p, JNI_ABORT);
+    }
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchLoopTraceSlot(
         JNIEnv*, jclass, jlong handle, jint slot) {

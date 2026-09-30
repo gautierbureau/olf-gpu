@@ -9079,9 +9079,17 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         dRlVtOvVal.upload(rlVtOvVal, (size_t) nRlVtOv * sizeof(double));
     }
     DeviceBuf dDsAnchorShift, dDsSlackShift;
-    bool hasDsAnchor = (dsAnchorShift != nullptr && dsSlackShift != nullptr && ctx->nds > 0);
+    bool hasDsAnchor = (dsAnchorShift != nullptr && ctx->nds > 0);
     if (hasDsAnchor) {
         dDsAnchorShift.upload(dsAnchorShift, static_cast<size_t>(nS) * ctx->nds * sizeof(double));
+    }
+    // The slack's own target displacement travels ALONE as well. It used to be uploaded only beside a
+    // per-participant anchor shift (the operator-strategy pair path), so an ordinary contingency's
+    // pre-loss share for the SLACK bus — which OLF places in that bus's generator target like any other
+    // participant — never reached the device: the gate then measured that share as an unbalanced mismatch
+    // (0.871 pu where OLF sees 0.002238 on the middle-section fixture) and the loop re-distributed.
+    bool hasDsSlackShift = dsSlackShift != nullptr;
+    if (hasDsSlackShift) {
         dDsSlackShift.upload(dsSlackShift, static_cast<size_t>(nS) * sizeof(double));
     }
 
@@ -11240,7 +11248,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dDsRetain.as<double>(),
                     hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvBaseDelta.as<double>(),
                     hasDsAnchor ? dDsAnchorShift.as<double>() : nullptr,
-                    hasDsAnchor ? dDsSlackShift.as<double>() : nullptr,
+                    hasDsSlackShift ? dDsSlackShift.as<double>() : nullptr,
                     ctx->dsMode, ctx->dsMode == 1 ? ctx->dDsMarginUp.as<double>() : nullptr,
                     ctx->dsMode == 1 ? ctx->dDsMarginDown.as<double>() : nullptr,
                     ctx->dsSlackMarginUp, ctx->dsSlackMarginDown,
@@ -11252,7 +11260,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dsSlackPhiRow, ctx->dsSlackTargetP, ctx->dDsPhiRow.as<int>(),
                     ctx->dDsFactor.as<double>(), ctx->dDsBaseTargetP.as<double>(),
                     hasDsAnchor ? dDsAnchorShift.as<double>() : nullptr,
-                    hasDsAnchor ? dDsSlackShift.as<double>() : nullptr,
+                    hasDsSlackShift ? dDsSlackShift.as<double>() : nullptr,
                     ctx->dDsMaxDelta.as<double>(), ctx->dDsMinDelta.as<double>(), ctx->dDsRetain.as<double>(),
                     ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
                     hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvFactorDelta.as<double>(),

@@ -4606,3 +4606,41 @@ OLF's 5 (`OLF_DS_TRACE` names them per pass with their factors), and see which o
 whether `rho` should renormalize over the survivors instead of crediting the slack. The renormalization already
 exists for ISLANDED participants (`dsIslanded`, "Dropping the stranded ones renormalizes over W' = W − Σ_stranded
 w"), so the question is which other exclusion this scenario hits.
+
+### The slack loop, measured on both arms: two fixes and what is left (2026-09-30)
+
+The measurement the diagnosis needed. OLF's participant set for the fixture's post-contingency pass, from a
+temporary `DS_PART` trace in the fork (added, measured, reverted, dependency reinstalled):
+
+```
+DS_PART n=3 factorSum=7.500000000
+DS_PART   element=gs factor=5.000000000     <- the SLACK bus's own generator
+DS_PART   element=g0 factor=1.250000000
+DS_PART   element=g2 factor=1.250000000
+```
+
+So OLF gives the slack bus's generator two thirds of the 1.043213 and the other two a sixth each. The device's
+own pack, from `OLF_GPU_DS_BUSMAP` and `OLF_GPU_DS_FINAL_DUMP`, held three rows — `vl12_0` at its own PHI row and
+the two RELOCATED children at their couplers' `DUMMY_P` rows — and the one on the dead coupler's row had moved by
+**−0.894 pu**: the islanded generator was still receiving slack power.
+
+**Fix 1: mask an islanded participant by its BUS in the pre-loss too.** `islandedDsParticipants` already matches
+on the bus as well as the row, precisely because a relocated participant's row is the coupler's `DUMMY_P` while
+the frozen rows are the bus's own — and its comment records the 7.386 MW that cost on `BUS-6014_BBS_2`. But the
+pre-loss distribution REBUILT the mask from the row test alone and ignored the plan's. With the plan's mask, the
+device's split becomes OLF's exactly: `absorbed=0.347738 slackShare=0.695476`, summing to 1.043213.
+
+**Fix 2: let the slack's own share reach the device.** `dsSlackShift` carries the displacement OLF puts in the
+slack bus's generator target (the device has no `BUS_TARGET_P` row there — its P is free). It was seeded only in
+the slack-only path, and the JNI uploaded it only BESIDE a per-participant anchor shift, which exists only for
+operator-strategy pairs. So an ordinary contingency's slack share never reached the device. Both are fixed; the
+trace now shows `dsSlackTgt=0.868330` = base 0.172854 + share 0.695476.
+
+Measured effect on the fixture: the final slack mismatch falls from **0.837082 to 0.280556** pu and the bus moves
+from 401.35009 to 401.36183 kV against OLF's 401.69026. The loop still fires four times where OLF fires once.
+
+What is left, and the next thing to measure: at pass 0, after a CORRECT pre-loss, the mismatch is only 0.175954
+yet `dsRetain` is **−0.173174** — negative, which is what makes the gate's remainder large enough to fire. With
+`absorbed = +0.347738` (the pre-loss seeds) and `rho` two thirds, the retain should be about +0.35, not −0.17. So
+the retain formula's treatment of the pre-loss seeds is the next suspect: `tot = (slackP − slackTgt) + absorbed`
+now double-counts a share that the slack target already carries.

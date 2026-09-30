@@ -4570,3 +4570,39 @@ TRIPLE CHECK (9 contingencies differ in at least one of the three):
 
 with `-` where a signal was not measured (a bus diff exists only for the ids a run monitors, since monitoring all
 of them dies on heap). `reportTriple` builds it from three maps filled where each signal is computed.
+
+### The slack loop: the device retains a share it never places (2026-09-30)
+
+The widened gate record (8 doubles, host-readable, printed by `OLF_GPU_LOOP_TRACE=<slot>`) gives the whole
+accounting of each pass. On the middle-section fixture, beside OLF's own `OLF_DS_TRACE`:
+
+OLF, post-contingency: **one** pass — `DS_RUN mismatch=1.043213465 previousMismatch=0.000000000
+effective=1.043213465 participants=5`, then `DS_PASS mismatch=0.002238490 distribute=false`. Done, mismatch ≈ 0.
+
+The device, same scenario:
+
+| pass | slack mismatch | retain | rem = mismatch − retain | fired |
+|---|---|---|---|---|
+| 0 | 0.896259 | 0.050369 | 0.795521 | yes |
+| 1 | 1.020064 | 0.356811 | 0.306442 | yes |
+| 2 | 0.866892 | 0.407901 | 0.051090 | yes |
+| 3 | 0.841359 | 0.416420 | 0.008519 | yes |
+| 4 | **0.837101** | **0.835680** | 0.001420 | no — retires |
+
+So the device retires with **0.837101 pu (83.7 MW) of slack mismatch**, having decided the slack "retains"
+0.835680 of it, while OLF ends at 0.002238. The slack's target was moved by only 0.172854 (the host's pre-loss
+seed), so that retained share is never placed anywhere: not on a participant row, not on the slack's target. Its
+`dsRetain` also DOUBLES between the last two passes (0.416420 → 0.835680) as the participants' displacement flips
+sign, which is what lets the gate retire.
+
+Where it comes from: `rho = 1 − Σf` over the DEVICE's distributed-slack pack, i.e. the device assumes every unit
+of participation it does not carry belongs to the slack bus, whose injection is free. In this scenario
+`fsGlobal = 1/3`, so it credits two thirds of the mismatch to the slack, while OLF's pass has **5 participants**
+and distributes the whole 1.043213 among them. The kernel cannot fix this itself: `dsSlackShift` is a
+host-uploaded seed (`const double*`), so a pass has no way to place the slack's share.
+
+Next, and it is a measurement not a guess: list the device's DS-pack participants for this scenario against
+OLF's 5 (`OLF_DS_TRACE` names them per pass with their factors), and see which ones the pack is missing and
+whether `rho` should renormalize over the survivors instead of crediting the slack. The renormalization already
+exists for ISLANDED participants (`dsIslanded`, "Dropping the stranded ones renormalizes over W' = W − Σ_stranded
+w"), so the question is which other exclusion this scenario hits.

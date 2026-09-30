@@ -5686,6 +5686,20 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
     }
     int vrow = rlVrow[i];
     size_t idx = (size_t) s * n + vrow;
+    // The q this check READS is accumulated by fillRemoteMemberQBatch at rlQrow, which for a relocated
+    // child is the parent coupler's DUMMY_Q row and NOT its own V row (see the rlQrow comment in
+    // GpuAcOuterLoopPacks: filling the own row "left the check reading ZERO for every relocated member,
+    // so it could never pin one"). That pack is STRUCTURAL -- it keeps writing there even in a scenario
+    // that pins the dummy to a DUMMY_TARGET identity -- and qBuf is a separate accumulator, so reading it
+    // there is valid whatever the row's equation MODE. Only the pin WRITE belongs on the live row, which
+    // is idx. Conflating the two reproduced that base failure per scenario: measured on rte6515
+    // BUS-6113_BBS_1, VL-6113_1 is re-homed LOCAL (reHomePv rlEntry=969) and OLF pins it MIN_Q at
+    // q=-3.231 against a -0.774 limit, while the device read q~0 and never pinned. Its THIRD slack check
+    // then measured 0.013280180 where OLF measures 0.006846832 -- straddling the 1 MW gate -- so the
+    // device took a distribution OLF does not and reported 1.328 MW more distributed active power: the
+    // worst such difference on the whole busbar scope.
+    size_t qIdx = (rlQrow != nullptr && rlQrow[i] >= 0 && rlQrow[i] != vrow)
+            ? (size_t) s * n + rlQrow[i] : idx;
     size_t st = (size_t) s * nrl + i;
     size_t li = cvStride ? st : (size_t) i;                 // curve limits are per (scenario, entry)
     bool slopeRow = rowSlope[vrow] != 0;                    // SLOPE-SVC bus: its PV form is row mode 2
@@ -5710,12 +5724,12 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
     // nothing restored the row then; now something does, in the same pass OLF does it, and this
     // entry's own voltage test (a pin type guessed for an empty range) fired a pass late on LNER.
     if (liMin >= liMax) {
-        swLogPut(passSwitched[st], qBuf[idx] + rlLoadQ[li], liMin, liMax, x[idx], x[idx],
+        swLogPut(passSwitched[st], qBuf[qIdx] + rlLoadQ[li], liMin, liMax, x[idx], x[idx],
                  rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]));
         return;
     }
     if ((mode[idx] == 0 || mode[idx] == 2) && limitType[st] == 0) {   // currently PV — check the reactive limits
-        double q = qBuf[idx] + rlLoadQ[li];
+        double q = qBuf[qIdx] + rlLoadQ[li];
         if (q < liMin - tol) {
             savedTarget[st] = target[idx];                   // remember the row target for the switch-back
             savedMode[st] = static_cast<char>(mode[idx]);   // and the PV form (0, or 2 for a slope SVC)
@@ -5768,7 +5782,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             }
         }
     }
-    swLogPut(passSwitched[st], qBuf[idx] + rlLoadQ[li], liMin, liMax, x[idx], x[idx],
+    swLogPut(passSwitched[st], qBuf[qIdx] + rlLoadQ[li], liMin, liMax, x[idx], x[idx],
              rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]));
 }
 

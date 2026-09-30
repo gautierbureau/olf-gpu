@@ -11,6 +11,62 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #64 — FIXED: a re-homed member's reactive limit read from the wrong row (2026-09-30)
+
+Worst distributed-active-power difference **1.328 MW -> 7.5e-09 MW** on the contingency, and
+the scope's worst **1.328 MW -> 1.398e-03 MW**. One missed reactive pin was worth 1.328 MW.
+
+`BUS-6113_BBS_1` islands VL-6113_0 and re-homes its voltage control to VL-6113_1, which becomes
+a plain local PV bus (`reHomePv bus=VL-6113_1 rlEntry=969 baseLimitType=0`). OLF pins it MIN_Q
+at `q=-3.231385934` against a `-0.774` limit. The device never pinned it.
+
+Because VL-6113_1's reactive injection is accumulated by `fillRemoteMemberQBatch` at `rlQrow` —
+for a relocated child its parent coupler's `DUMMY_Q` row, NOT its own V row — and that pack is
+STRUCTURAL: it keeps writing there even in a scenario that pins the dummy to a `DUMMY_TARGET`
+identity. `reactiveLimitsBatch` used ONE index for both the q READ and the pin WRITE, and its
+`mode[relocIdx] == 0 ? ridx : relocIdx` fallback sent the READ to the bus's own row exactly when
+the coupler is outaged — where nothing accumulates q. So it read q ~ 0, inside any limit.
+
+`qBuf` is an accumulator SEPARATE from the equation system, so reading it at a row whose
+equation is an identity is perfectly valid; only the pin WRITE belongs on the live row. The fix
+splits the two (`qIdx` for the read, `idx` for the writes).
+
+**`GpuAcOuterLoopPacks`'s own `rlQrow` comment had already recorded this failure for the base** —
+"filling the own row left the check reading ZERO for every relocated member, so it could never
+pin one ... the device's base stopped after its first ReactiveLimits pass where OLF takes three"
+— and the kernel reintroduced it PER SCENARIO. When a comment names a failure mode, check the
+other places that make the same choice.
+
+**How a missed pin became 1.328 MW.** Both arms agree to 9 digits through two slack checks
+(`-0.001506610` vs `-0.001506609759`). The missing pin then leaves the THIRD check at
+`0.013280180` where OLF measures `0.006846832` — straddling the 1 MW gate — so the device runs a
+whole extra distribution OLF never runs: `dsPlaced` 2.178895055 then 2.192175235 against OLF's
+single 2.178895055. The DAP difference was the SYMPTOM; the pin was the cause. A DAP gap that is
+an exact multiple of a gate crossing is worth reading as "one arm took a pass the other did not"
+before looking at the water-fill arithmetic.
+
+| | before | after | OLF |
+| --- | --- | --- | --- |
+| RL switches / pins | 4 / 19 | **5 / 20** | 5 / 20 |
+| DS passes fired | 2 | **1** | 1 |
+| contingency DAP diff | 1.328019 MW | **7.5e-09 MW** | — |
+
+Suite 177/177 + GpuLoadFlow/GpuFullNewton/GpuAcStructures/GpuLineSearch green; checkstyle
+unchanged at 220.
+
+### #66 — The distributed-power TAIL: 1.4e-03 MW over a 1e-03 assertion (2026-09-30)
+
+OPEN, and now the only failing assertion on the full busbar scope
+(`assertTrue(worstDistributed < 1e-3)`): worst **1.398e-03 MW** on `BUS-5250_BBS`, then
+1.060e-03 (BUS-5525_BBS), 9.564e-04 (BUS-4467_BBS), 7.286e-04, 6.915e-04, 5.280e-04 — a smooth
+TAIL, not an outlier, and at the SAME values as before [[#64]]'s fix, so it is a separate
+phenomenon that [[#64]] merely uncovered. 3689 of 6602 contingencies differ by > 1e-9 MW at all.
+
+Not yet investigated. Worth checking first whether these also straddle the slack gate (the
+[[#64]] signature: compare `DS_PASS` on both arms — OLF's threshold is 0.01 pu) or whether they
+are a genuine accumulation at the water-fill's `P_RESIDUE_EPS`.
+
+
 ### #63 — A re-homed voltage main that is already PINNED (2026-09-30)
 
 Violation gap **71 -> 0** on the full busbar scope. The CAUSE is found and named; the fix in
@@ -176,7 +232,7 @@ guarding. Now one override, 1.000. It did not change this contingency's outcome 
 is a separate writer — but it is the second duplicate-override race found in a day, which
 raises the priority of deduplicating the override list to its documented last-wins.
 
-### #64b — superseded by #64 above
+### #64c — superseded by #64 above (fixed)
 
 The full busbar scope's only material DAP difference:
 `cpu=217.889505513 gpu=219.217524713 MW`, **1.328 MW**. Every other contingency is at or

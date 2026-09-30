@@ -1039,7 +1039,32 @@ final class GpuBatchChunkSolver {
                                     }
                                     if (go.seedsDqTargets()) {
                                         for (int t = 0; t < go.dqTargetRows().length; t++) {
-                                            overrides.add(s * n + go.dqTargetRows()[t], go.dqTargetValues()[t]);
+                                            int dqRow2 = go.dqTargetRows()[t];
+                                            int dqMode = rowModePerScenario[s] != null
+                                                    ? rowModePerScenario[s][dqRow2] : baseRowMode[dqRow2];
+                                            // Seed only where the row still HOSTS a DISTR_Q equation this
+                                            // scenario. Mode 4 means it hosts its own reactive balance (an RL
+                                            // pin, or a control the contingency killed and whose BUS_TARGET_Q
+                                            // the injection override owns), and updateDistrQTargetsBatch
+                                            // refuses to maintain a DISTR_Q target there -- "A DISTR_Q target
+                                            // has no business here" -- so uploading one is a write this code
+                                            // does not own. (Mode 0, the voltage identity the same kernel also
+                                            // refuses, is NOT skipped here: no measured conflict was on a
+                                            // mode-0 row, and skipping it moved deviceMultiChunkMatchesCpu's
+                                            // B3 by 1.06e-12 kV -- past its 1e-12 assertion. Guard what was
+                                            // measured.) It landed as a SECOND
+                                            // override on a row that already had one, and
+                                            // applyTargetOverrideBatch resolves two entries on one row by a
+                                            // race (one thread per entry writing target[ovIndex[k]]).
+                                            // Measured over the full busbar scope (OLF_GPU_OV_DUP_TRACE):
+                                            // 26 rows across 24 contingencies disagreed, EVERY one of them
+                                            // mode 4, all from this one site -- among them BUS-1359_BBS_1 and
+                                            // BUS-1869_BBS_1 (the +-2 violation pair) and BUS-1599_BBS_1 (the
+                                            // second-worst distributed-power difference).
+                                            if (dqMode == 4) {
+                                                continue;
+                                            }
+                                            overrides.add(s * n + dqRow2, go.dqTargetValues()[t]);
                                         }
                                     }
                                     if (go.flipsPilotRowWhenAllPinned()) {
@@ -1299,6 +1324,34 @@ final class GpuBatchChunkSolver {
                     }
                     int[] targetOverrideIndex = overrides.indexArray();
                     double[] targetOverrideValue = overrides.valueArray();
+                    if (GpuBatchOverrides.dupTrace()) {
+                        // The invariant GpuBatchOverrides states in its javadoc, measured on the entries
+                        // actually handed to the device: a row with two entries is written by two threads
+                        // of applyTargetOverrideBatch in an unspecified order. Same value = benign;
+                        // different values = a target chosen by a race.
+                        System.err.printf("OV_DUP chunk entries=%d dupRows=%d conflictRows=%d%n",
+                                targetOverrideIndex.length, overrides.duplicateRowCount(),
+                                overrides.conflictingRowCount());
+                        java.util.List<String> sites = overrides.conflictSites();
+                        for (int ci2 = 0; ci2 < overrides.conflictSamples().size(); ci2++) {
+                            double[] c = overrides.conflictSamples().get(ci2);
+                            int flat = (int) c[0];
+                            int slot = flat / n;
+                            String id = slot < realCount
+                                    ? contingencies.get(group.get(chunkStart + slot)).contingencyId() : "<padding>";
+                            int row2 = flat % n;
+                            // The row MODE decides who is right: updateDistrQTargetsBatch refuses to
+                            // maintain a DISTR_Q target on a mode-0 identity or a mode-4 own-Q row, so a
+                            // seeded DISTR_Q target on such a row is the write that should not exist.
+                            int mode2 = rowModePerScenario != null && slot < realCount
+                                    && rowModePerScenario[slot] != null
+                                    ? rowModePerScenario[slot][row2] : baseRowMode[row2];
+                            System.err.printf("OV_CONFLICT ctg=%s row=%d mode=%d baseMode=%d"
+                                            + " shadowed=%.9f new=%.9f by=%s%n",
+                                    id, row2, mode2, baseRowMode[row2], c[1], c[2],
+                                    ci2 < sites.size() ? sites.get(ci2) : "?");
+                        }
+                    }
                     // OLF_GPU_TARGET_ROW=<row>: the target the DEVICE actually solves that row against —
                     // the base value and every per-scenario override landing on it. A row whose
                     // converged residual equals minus its OLF target is a row solved against 0.

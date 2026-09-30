@@ -11,6 +11,68 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #65 — Duplicate target overrides: measured, then fixed at the producer (2026-09-30)
+
+RESOLVED. Kept because the METHOD is the reusable part, and because ~200 benign duplicates
+per run remain.
+
+`GpuBatchOverrides`'s own javadoc states the invariant: "A row must carry at most ONE
+override. The device scatter has no ordering, so two entries for the same row race."
+`applyTargetOverrideBatch` is one thread per entry doing `target[ovIndex[k]] = ovValue[k]`,
+so a second entry makes the surviving target UNSPECIFIED. `add()` permits duplicates and
+documents "last one wins", which the device does not honour — two fixtures were passing
+*because* the race favoured the earlier entry ([[#62]]).
+
+**Measured before changing anything** (`OLF_GPU_OV_DUP_TRACE`, full busbar scope, per run):
+
+| | |
+| --- | --- |
+| override entries handed to the device | ~3.4 M |
+| distinct rows with >1 entry | 211 |
+| rows whose entries DISAGREE | **26**, over 24 contingencies |
+| producers | **one** — `GpuBatchChunkSolver` DISTR_Q target seeding |
+| row mode of every conflicting row | **4** (own-Q), baseMode 1 |
+| shape | 25 of 26 are `0.0` shadowed by a small reactive target; 1 is 0.06 -> 0.092 |
+
+Mode 4 means the row hosts its OWN reactive balance — an RL pin, or a control the contingency
+killed whose `BUS_TARGET_Q` the injection override owns. `updateDistrQTargetsBatch` already
+REFUSES to maintain a DISTR_Q target there ("A DISTR_Q target has no business here", measured
+on BUS-1055_BBS_1 — which is one of the 24). So the host was uploading exactly what its own
+kernel declines to maintain. Fix: don't seed a DISTR_Q target on a mode-4 row. That is a rule,
+not a choice of winner — which is why forcing `put` (last-wins) earlier the same day was wrong
+and turned two fixtures red.
+
+**Guard only what was measured.** The first attempt also skipped mode 0, the voltage identity
+the same kernel refuses, on symmetry grounds. No measured conflict was on a mode-0 row, and
+skipping it moved `deviceMultiChunkMatchesCpu`'s B3 by 1.06e-12 kV — past its 1e-12 assertion.
+Restricted to mode 4: suite 177/177. The comment at the site says why mode 0 is deliberately
+NOT guarded, so nobody "completes" it.
+
+**What it bought, full scope** (conflictRows 26 -> **0**; 800/4-chunk benign duplicates remain):
+
+| | before | after |
+| --- | --- | --- |
+| BUS-1599_BBS_1 DAP | 1.737e-02 MW | **3.711e-05** |
+| scope total sum abs DAP | 1.499204 MW | 1.481873 MW |
+| worst DAP (BUS-6113_BBS_1) | 1.328019 MW | unchanged |
+| violations diff | 71 | unchanged |
+
+**A prediction that was wrong, recorded so it is not repeated:** the +-2 violation pair
+BUS-1359_BBS_1 / BUS-1869_BBS_1 has 2 conflicts each and did NOT move. Their DAP differences
+are ~1e-12 MW — those states agree to machine precision, and the +-2 is the threshold flicker
+of `docs/increased-violations-thresholds.md`, not a state difference. A conflicting override
+does not imply a visible difference, and the converse held too: neither headline failure
+([[#63]], [[#64]]) has any conflict.
+
+**Method notes.** Device row indices are NOT portable across contingency sets —
+BUS-1055_BBS_1's conflicting row is 2460 in the full set and 2290 run alone; a row number in a
+note needs its scope stated. And BUS-1055_BBS_1 PASSES run alone while still racing, so this
+defect class hides completely from single-contingency reproduction. The remaining ~200
+same-value duplicates per run are harmless by construction (either write gives the same
+target) but they are still invariant violations: `OLF_GPU_OV_DUP_TRACE` reports them, and a
+future `conflictRows > 0` is a regression.
+
+
 ### #63 — BUS-6194_BBS_2: a device kernel overwrites a voltage identity with a reactive target (2026-09-30)
 
 OPEN, precisely localized. It is the WHOLE violation gap of the full busbar scope: 71 of 71.

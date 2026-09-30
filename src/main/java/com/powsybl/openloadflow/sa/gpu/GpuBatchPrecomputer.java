@@ -500,6 +500,10 @@ final class GpuBatchPrecomputer {
             // the device. The test harness's logback appenders are broken (core/classic version
             // mismatch), so the WARN above does not reach anyone here.
             System.err.println("GPU_PRECOMPUTE_FAILED " + e);
+            StackTraceElement[] frames = e.getStackTrace();      // the first frames always: the line that says where
+            for (int i = 0; i < Math.min(6, frames.length); i++) {
+                System.err.println("    at " + frames[i]);
+            }
             if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                 e.printStackTrace();                         // the test harness's logback appenders are broken
             }                                                // (core/classic version mismatch) — surface it here

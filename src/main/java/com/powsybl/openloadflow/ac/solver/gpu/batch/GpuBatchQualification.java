@@ -355,23 +355,42 @@ final class GpuBatchQualification {
             if (toggled.isEmpty()) {
                 return new double[][] {new double[0], new double[0]};
             }
+            // On the MAIN control (the merged group), as OLF does: a member's OWN control is the DEPENDENT one
+            // whose element list is just itself, and updateReactiveKeys on it set that member's reactive
+            // percent to 1.0 — permanently, since the restore below repeated the same call. Measured on
+            // rte6515's [5000,6000) busbar window: the number of re-weighted entries grew with every
+            // contingency (0, 10, 15, 27, 35, 45, 51, 56 ...), each late contingency carrying bogus overrides
+            // for every group an earlier one had touched; BUS-612_BBS_2's VL-5967 DISTR_Q row became the
+            // pilot's raw q alone (weights 1.0 / 0), the split (1.694, -1.574) against OLF's (0.912, -0.782)
+            // pinned both members spuriously, and the distributed power ended 0.141 MW off.
             for (LfBus bus : touched) {
-                bus.getGeneratorVoltageControl().ifPresent(
-                        com.powsybl.openloadflow.network.GeneratorVoltageControl::updateReactiveKeys);
+                updateMainReactiveKeys(bus);
             }
-            double[] newW = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
-                    .extract(network, es, false, false).dqWeight();
+            GpuAcData nd = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
+                    .extract(network, es, false, false);
+            double[] newW = nd.dqWeight();
             double[] baseW = gpuData.dqWeight();
             if (newW.length != baseW.length) {
                 return null;                                 // structural drift — not a pure reweight
             }
             List<Double> idx = new ArrayList<>();
             List<Double> w = new ArrayList<>();
+            boolean dqOvTrace = System.getenv("OLF_GPU_DQOV_TRACE") != null;
+            int traced = 0;
             for (int k = 0; k < newW.length; k++) {
                 if (newW[k] != baseW[k]) {
                     idx.add((double) k);
                     w.add(newW[k]);
+                    if (dqOvTrace && traced++ < 12) {        // the two packs' metadata at a differing index
+                        System.err.printf("DQOV_PACK k=%d old(row=%d kind=%d elem=%d side=%d w=%.6f) new(row=%d kind=%d elem=%d side=%d w=%.6f)%n",
+                                k, gpuData.dqRow()[k], gpuData.dqKind()[k], gpuData.dqElem()[k], gpuData.dqSide()[k], baseW[k],
+                                nd.dqRow()[k], nd.dqKind()[k], nd.dqElem()[k], nd.dqSide()[k], newW[k]);
+                    }
                 }
+            }
+            if (dqOvTrace) {
+                System.err.println("DQOV_PACK lost=" + lost.stream().map(g -> g.getId()).toList() + " differing=" + idx.size()
+                        + " of " + newW.length + " oldFlags(ds,rl)=? newFlags=(false,false)");
             }
             return new double[][] {idx.stream().mapToDouble(Double::doubleValue).toArray(),
                 w.stream().mapToDouble(Double::doubleValue).toArray()};
@@ -380,10 +399,17 @@ final class GpuBatchQualification {
                 g.setGeneratorControlType(com.powsybl.openloadflow.network.LfGenerator.GeneratorControlType.VOLTAGE);
             }
             for (LfBus bus : touched) {
-                bus.getGeneratorVoltageControl().ifPresent(
-                        com.powsybl.openloadflow.network.GeneratorVoltageControl::updateReactiveKeys);
+                updateMainReactiveKeys(bus);
             }
         }
+    }
+
+    /** OLF's own key update: on the group's MAIN control, never on a member's dependent one. */
+    private static void updateMainReactiveKeys(LfBus bus) {
+        bus.getGeneratorVoltageControl()
+                .<com.powsybl.openloadflow.network.GeneratorVoltageControl>map(
+                        com.powsybl.openloadflow.network.VoltageControl::getMainVoltageControl)
+                .ifPresent(com.powsybl.openloadflow.network.GeneratorVoltageControl::updateReactiveKeys);
     }
 
     /** The contingency's SCHEDULED active power loss (pu): mirror of LfContingency's
@@ -531,10 +557,25 @@ final class GpuBatchQualification {
     }
 
     /** Row-mode-only GenOutage: the bus's V row becomes a VOLTAGE IDENTITY at {@code vTarget} (a re-homed control). */
-    private static GenOutage reHomedPvEntry(int vRow, double vTarget) {
+    private static GenOutage reHomedPvEntry(int vRow, double vTarget, int rlEntry) {
         return new GenOutage(-1, 0, vRow, vTarget, true, true,
-                -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
+                -1, 0, 0, 0, 0, rlEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
                 new int[0], new double[0], GenOutage.ROW_V_IDENTITY, -1, 0, -1, 0, -1, 0, -1);
+    }
+
+    /** The bus's reactive-limit entry, or -1: a re-homed bus is checked as a LOCAL controller by the device
+     *  (OLF checks it as the PV bus it now is; BUS-6113_BBS_1 pinned VL-6113_1 at RL#1, the device never
+     *  looked — 7.1 kV). */
+    private static int rlEntryOf(GpuAcData gpuData, LfBus bus) {
+        int[] rlBusNum = gpuData.rlBusNum();
+        if (rlBusNum != null) {
+            for (int e = 0; e < rlBusNum.length; e++) {
+                if (rlBusNum[e] == bus.getNum()) {
+                    return e;
+                }
+            }
+        }
+        return -1;
     }
 
     static int deadControlRowMode(GpuAcData gpuData, LfBus survivor) {
@@ -902,7 +943,7 @@ final class GpuBatchQualification {
                                 live = null;
                                 break;
                             }
-                            live.add(reHomedPvEntry(vVar.getRow(), e.getValue()));
+                            live.add(reHomedPvEntry(vVar.getRow(), e.getValue(), rlEntryOf(gpuData, e.getKey())));
                         }
                     }
                     if (live == null) {
@@ -918,7 +959,22 @@ final class GpuBatchQualification {
                     // RENORMALIZE: the islanded controllers' keys leave the group (weights below,
                     // through the rediff); their DISTR_Q row targets and inactive-member entries go
                     // the way a generator outage's do.
-                    live.addAll(GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, islandLostVcControllers));
+                    // The ISLANDED packed members count as inactive too, not only the controllers the split or
+                    // the re-homing listed: a survivor's renormalized target was otherwise written onto an islanded
+                    // member's own DISTR_Q row — a FROZEN identity row — as a second override, and the identity
+                    // then drove that bus's V from 1.0 to 0 in MAX_VOLTAGE_CHANGE-clamped steps (BUS-612_BBS_2:
+                    // three scaled iterations on the device against OLF's one, the distributed-slack decision
+                    // taken at another residual level, 0.141 MW of distributed active power). No entry may target
+                    // a frozen row at all: those rows belong to buses OLF removes from the system.
+                    List<LfBus> inactiveForTargets = new ArrayList<>(islandLostVcControllers);
+                    for (LfBus ib : q.islandedBuses()) {
+                        if (!inactiveForTargets.contains(ib) && GpuBatchInjectionOutages.dqMemberSlot(gpuData, ib) >= 0) {
+                            inactiveForTargets.add(ib);
+                        }
+                    }
+                    for (GenOutage go : GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, inactiveForTargets)) {
+                        live.add(go.withoutFrozenTargetRows(frozenSet));
+                    }
                     gos = live.toArray(new GenOutage[0]);
                     frozenRowsByIndex[i] = fi.rows();
                     frozenTargetsByIndex[i] = fi.targets();
@@ -956,6 +1012,22 @@ final class GpuBatchQualification {
                     }
                     dqOvContribByIndex[i] = java.util.Arrays.stream(ov[0]).mapToInt(d -> (int) d).toArray();
                     dqOvWByIndex[i] = ov[1];
+                    String dqOvTrace = System.getenv("OLF_GPU_DQOV_TRACE");   // <contingency id>: every reweighted entry
+                    if (dqOvTrace != null && dqOvTrace.equals(c.contingencyId())) {
+                        int[] mBus = gpuData.dqMemberBusNum();
+                        for (int k = 0; k < ov[0].length; k++) {
+                            int cc = (int) ov[0][k];
+                            int kM = gpuData.dqKMember() != null ? gpuData.dqKMember()[cc] : -1;
+                            int jM = gpuData.dqJMember() != null ? gpuData.dqJMember()[cc] : -1;
+                            System.err.printf("DQOV_TRACE ctg=%s c=%d row=%d kind=%d elem=%d oldW=%.6f newW=%.6f kMember=%s jMember=%s%n",
+                                    c.contingencyId(), cc, gpuData.dqRow()[cc], gpuData.dqKind()[cc], gpuData.dqElem()[cc],
+                                    gpuData.dqWeight()[cc], ov[1][k],
+                                    kM >= 0 && mBus != null ? goneForKeys.get(0).getBus().getNetwork().getBus(mBus[kM]).getId() : "?",
+                                    jM >= 0 && mBus != null ? goneForKeys.get(0).getBus().getNetwork().getBus(mBus[jM]).getId() : "?");
+                        }
+                        System.err.println("DQOV_TRACE ctg=" + c.contingencyId() + " total=" + ov[0].length
+                                + " lostGens=" + goneForKeys.stream().map(g -> g.getId()).toList());
+                    }
                 }
                 genOutagesByIndex[i] = gos;
                 activePowerLossByIndex[i] = scheduledActivePowerLoss(c, q.islandedBuses());
@@ -1038,7 +1110,7 @@ final class GpuBatchQualification {
                             ok = false;
                             break;
                         }
-                        pvOn.add(reHomedPvEntry(vVar.getRow(), e.getValue()));
+                        pvOn.add(reHomedPvEntry(vVar.getRow(), e.getValue(), rlEntryOf(gpuData, e.getKey())));
                     }
                     if (!ok) {
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:VC_REMERGE_NO_VROW");

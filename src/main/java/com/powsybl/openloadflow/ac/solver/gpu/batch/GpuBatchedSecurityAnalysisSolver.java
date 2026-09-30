@@ -290,6 +290,15 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 ? GpuAcDataCache.extract(network, equationSystem, distributedSlack, reactiveLimits, dsParams)
                 : GpuAcDataExtractor.extract(network, equationSystem, distributedSlack, reactiveLimits, baseOpenIds, baseOpenZiIds, dsParams);
         GpuAcActivation baseActivation = GpuAcActivation.fromEquationSystem(network, equationSystem);
+        String saEqDump = System.getenv("OLF_GPU_SA_EQ_DUMP");   // the SA extraction's row map (GpuEquationDump)
+        if (saEqDump != null && !saEqDump.isEmpty()) {
+            try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(saEqDump))) {
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuEquationDump.write(w, network, equationSystem, gpuData,
+                        new int[baseState.length]);
+            } catch (java.io.IOException | RuntimeException e) {
+                LOGGER.warn("OLF_GPU_SA_EQ_DUMP failed: {}", e.toString());
+            }
+        }
         GpuBatchElementMapper elementMapper = new GpuBatchElementMapper(network, baseOpenIds);
 
         int n = baseState.length;

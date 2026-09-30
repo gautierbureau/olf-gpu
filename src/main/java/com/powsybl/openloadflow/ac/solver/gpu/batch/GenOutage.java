@@ -44,6 +44,33 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
     public int qTargetRowOrV() {
         return qTargetRow >= 0 ? qTargetRow : vRow;
     }
+
+
+    /** This entry without the DISTR_Q row targets that fall on a FROZEN (islanded) row: such a row is an identity
+     *  held at a flat value, and a second override on it (a survivor's renormalized target written onto an islanded
+     *  member's own row) won over the flat one and drove the dead bus's V to 0 in clamped steps. */
+    public GenOutage withoutFrozenTargetRows(java.util.Set<Integer> frozenRows) {
+        if (dqTargetRows == null || dqTargetRows.length == 0 || frozenRows.isEmpty()) {
+            return this;
+        }
+        java.util.List<Integer> rows = new java.util.ArrayList<>();
+        java.util.List<Double> values = new java.util.ArrayList<>();
+        for (int t = 0; t < dqTargetRows.length; t++) {
+            if (!frozenRows.contains(dqTargetRows[t])) {
+                rows.add(dqTargetRows[t]);
+                values.add(dqTargetValues[t]);
+            }
+        }
+        if (rows.size() == dqTargetRows.length) {
+            return this;
+        }
+        return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
+                dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum, pStep,
+                loadQDelta, inactiveDqMember, pilotGroupSurvivorRlEntries,
+                rows.stream().mapToInt(Integer::intValue).toArray(), values.stream().mapToDouble(Double::doubleValue).toArray(),
+                pqRowMode, deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget, dqTargetQOvMember,
+                dqTargetQOvValue, qTargetRow);
+    }
     // lostGenIds / lostFactorSum exist for the reactive-capability CURVE channel, which evaluates each
     // generator's curve at its OWN post-distribution active power, reconstructed from the bus's row
     // target by participation share. Losing a generator skews that reconstruction three ways — the lost
@@ -153,6 +180,13 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
     }
 
     /** The bus keeps NO generator: its reactive-limit entry is not a controller in this scenario. */
+    /** A re-homed voltage control (see {@link #ROW_V_IDENTITY}): its bus is a plain PV bus this scenario, so its
+     *  reactive-limit entry — packed as a remote member of the base group — is checked as a LOCAL controller
+     *  (pin on its own row, switch back on its own voltage) at the target {@code qTarget} carries. */
+    public boolean reHomesRlEntry() {
+        return pqRowMode == ROW_V_IDENTITY && rlEntry >= 0;
+    }
+
     public boolean silencesReactiveLimitEntry() {
         return rlEntry >= 0 && allGensLost;
     }

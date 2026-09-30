@@ -3497,3 +3497,483 @@ Open: the 16 multi-control re-merges (a new remote group after the split — nee
 21 runtime rejects (8 × max-iter-bad-solve, 1 × budget), the DAP tail (1.34 MW worst), the ulp class (~480
 contingencies between 1e-9 and 1e-6 MW), and a re-homed PV bus's reactive limits (its RL entry stays a remote
 member: OLF checks it as a local PV bus and may pin it; the device does not).
+
+### A re-homed PV bus keeps its reactive limits (2026-09-28)
+
+BUS-6113_BBS_1 (DAP 1.33 MW, 7.1 kV at BUS-6113_BBS_2): the re-homed survivor VL-6113_1 is pinned by OLF at RL#1
+(q = −323 < minQ −77.4) while the device never looked — its reactive-limit entry is packed as a REMOTE member of
+the base group and the RL kernel drops a remote member whose row is an identity. Now a re-homed control's entry
+travels as a (slot, entry, own V target) triple (`GenOutage.reHomesRlEntry`, `setBatchRlLocal`, `dRlLocalOv`/
+`dRlLocalVt`): `reactiveLimitsBatch` takes the LOCAL path for it (pin on its own row, switch-back on its own
+voltage at its own target) — and pins with mode 4, not 1: a base-packed member's own q reaches its row only
+through the ALTERNATE dest, a mode-1 row is empty (the first try failed its linear solve and the CPU replay
+produced the "parity"; the census line is what showed it — `RUNTIME:status=-3=1`, 0/1 on device). Measured:
+1/1 on device, worst bus 4.0e-11 kV, DAP 6.5e-9 MW, violations equal. Window [5000,6000): 956/1000 on device,
+violations diff 0, DAP worst **0.141 MW** (was 1.34; BUS-6003_BBS_3's 0.60 went with it), 20 runtime rejects.
+The seven `injection-scope` commits (base-lost pilot restore through the pilot's local entry, no DISTR_Q share
+seeded onto a base-pinned member, loop/iteration traces addressed by contingency) are cherry-picked; the
+base-lost restore and the pilot-self `veqOff` booking coexist (`pe < 0` selects the former).
+
+### The window's runtime rejects, named (2026-09-28)
+
+`CHUNK_REJECT` (new, under `OLF_GPU_REJECT_TRACE`) maps every rejected slot to its contingency; the [5000,6000)
+busbar window batches 960 contingencies in ONE chunk (976 batchable − 16 `VC_REMERGE_MULTI`), and its 4 chunk
+rejects are: BUS-536_BBS (outer-loop budget; the CPU does not converge it either), BUS-6079_BBS (`max-iter-bad-solve`
+at outer 0 — OLF's OWN Newton oscillates there, 16.978 → 4.720 → 1.191 → 1.060 → 2.528 → 0.980 → 2.909 …, and
+the device reproduces that trajectory to 10+ digits: both arms MAX_ITERATION_REACHED, nothing to fix),
+BUS-6003_BBS_2 (slot 797, churn to outer 36: the base's pilot-self VL-6003 group) and BUS-6088_BBS (slot 893,
+churn to outer 36). The last two, like BUS-612_BBS_2 (the DAP tail's 0.141 MW), are at machine precision when
+run ALONE — the single-contingency base retains different switches — so they are batch-only and must be traced
+in the window by SLOT (`OLF_GPU_LOOP_TRACE=<slot>`, `OLF_GPU_SW_TRACE=<slot>`, one per run; slots are stable for a
+fixed list and chunk size) with `OLF_GPU_SA_BUSDIFF_CTG=<ids>` for the in-scope bus diffs. `OLF_GPU_LOOP_TRACE_CTG`
+now says when the named id is not batched at all (a plan reject — BUS-6002_BBS_2 is one of the 16).
+
+### A group lost in the base is booked at seed time, not in the RL phase (2026-09-28)
+
+BUS-6003_BBS_2 in the [5000,6000) batch (slot 797, `max-iter-bad-solve` at RL#2): at RL#1 the pilot-self pilot
+VL-6003_0 UNPINS (v 1.134 > vt 0.993, its group lost in the base) and the re-solve fails in 30 iterations. The
+`veqOff` booking that lets `updatePilotVeqBatch` restore the V identity on that unpin is done at the post-seed
+launch — where the kernel returned early on `!rlActive[s]` (the RL phase is not active at seed time), so the
+pilot's row stayed a power row while its raw q was gated off (unpinned ⇒ `psSkip`): an empty row, a bad solve.
+The booking now runs regardless of `rlActive`; only the flip/restore/re-stamp branches stay RL-phase gated.
+Measured: slot 797 converges (RL passes 36–39, status 0); window 957/1000 on device, violations diff 0, DAP
+worst 0.141 MW; fixtures 177/0 both ways; suite 303/0. Chunk rejects left: BUS-536_BBS and BUS-6079_BBS (OLF
+does not converge them either — the device reproduces OLF's divergence to 10+ digits) and BUS-6088_BBS (slot 893).
+Batch observation: BUS-536's non-convergence drives the DistributedSlack loop for 30 batch passes (`nChanged=1`
+for 28 of them), each a full-width re-solve — the budget is per scenario and correct, but the pass count is a
+cost the CPU never pays; a scenario whose solve has failed should stop driving the loop.
+
+### The SA extraction must be CANONICAL — the base pin state leaked into the batch structure (2026-09-28)
+
+BUS-6088_BBS (slot 893 of the [5000,6000) busbar window, `max-iter-bad-solve` at RL#2): the CPU and the device
+take the same RL#1 decision (pin VL-5997_1, the sibling of the pilot-self pilot VL-5997_0), and the device's re-solve
+then fails because the just-pinned member's row 12562 (mode 4) assembles EMPTY (pre-repair nnz=0, F=−target) while
+the same pinned row is FULL in the base at outer 6. The per-row scatter replay (`OLF_GPU_VALS_DUMP_ROW=<row>`, the
+`CBROW` lines: every closed-branch output whose frozen or alternate dest is the row, with the select row's mode, the
+element's disabled flag and its relocation group) showed the two contexts hold DIFFERENT structures: in the base,
+row 12562 is the ALTERNATE of the member's two lines (8568/8700, `mode 4` selects it); in the batch, it is the
+FROZEN dest of the pilot's line 8699 under relocation group 17 and the member's lines have no route to it at all.
+`OLF_GPU_SA_EQ_DUMP=<path>` (the SA extraction's row map, same format as `OLF_GPU_EQ_DUMP`) named the cause: the
+batched SA extracts AFTER the base load flow has pinned buses, and `computeQRow` / the DISTR_Q pack / the member
+alternate loop all read that state — a pinned pilot-self pilot has BUS_TARGET_Q active, so it fell into the
+"regular pilot" branch (its q frozen onto the first ENABLED member's row, 12562), the member became the "free"
+member whose own control's controlled bus is itself (never in the pilot set) and lost its alternate, and the DISTR_Q
+row on 12562 became the PILOT's equation (weights −1/0) instead of the member's (+0.5/−0.5). The kernels' rotation
+dynamics assume the base layout, which is only canonical by luck (nothing is pinned when the base extracts).
+
+Fix: a group with a candidate table (`GpuAcRowIndexing.hasCandidateTable`, now the ONE enrolment predicate
+ExtractionColumns uses) is encoded as if every controller were enabled — every controller element's frozen q row
+suppressed (own row through the alternate, mode 4), a non-controller pilot's q on the FIRST member (re-picked per
+scenario by the mode scan), the DISTR_Q pack's free controller = the first member, `distrQHostMember` = the first
+member; `GpuAcData.sameStructureInputsAs` now includes the candidate tables. The per-scenario side stays
+state-based: `GpuAcActivationExtractor` puts an ACTIVE Q balance on `GpuAcRowIndexing.stateQRow` (a pinned member's
+own V row; the pilot's on the first ENABLED member's row, or its own row once every controller is pinned) — the
+canonical row collided with a pinned first member's own Q (12 remote-group fixtures failed, `assigned twice`) and a
+pinned pilot-self pilot indexed −1 (the whole precompute fell to the CPU: `GPU_PRECOMPUTE_FAILED` now prints its top
+frames unconditionally). Measured: window 958/1000 on device (BUS-6088_BBS now at 1.2e-8 MW; only OLF's own
+non-convergences BUS-536_BBS and BUS-6079_BBS remain), violations diff 0, DAP worst 0.141 MW (BUS-612_BBS_2,
+unchanged); suites 304/0 with the rotation on and off; base 3/1/2/1 iteration-for-iteration.
+Observed on the way: the BASE's distributed active power differs from the CPU's by a run-dependent amount with
+identical code (1.1e-8, 4.2e-6, 2.3e-7 MW in three runs; cold=warm within one JVM) — the last-digit drift
+(8–10 agreeing digits per iterate) amplified through the DistributedSlack loop. When it lands at 4.2e-6 the whole
+window shifts with it (468 contingencies move from ≤1e-6 into the 4.25e-6 class). That drift is the open ulp item.
+
+### The DISTR_Q weight override builder corrupted the network's reactive percents (2026-09-28)
+
+The [5000,6000) window's distributed-active-power tail (0.141 / 0.042 / 0.026 / 0.0076 / 0.0037 MW …) had ONE
+mechanism behind most of it. `GpuBatchQualification.distrQWeightOverrides` toggles a contingency's lost generators
+OFF, calls `updateReactiveKeys`, re-extracts the whole network and diffs `dqWeight` index by index against the SA
+extraction (`OLF_GPU_DQOV_TRACE=<ctg>` lists each override with its members, `DQOV_PACK` the two packs' metadata at
+each differing index). It called `updateReactiveKeys` on each touched bus's OWN control — for a member that is the
+DEPENDENT (merged) control whose element list is just the member, so its reactive percent became 1.0, and the
+restore in `finally` repeated the same call: the corruption stayed in the LfNetwork and ACCUMULATED across the
+qualification (differing entries 0, 10, 15, 27, 35, 45, 51, 56 … as the contingency list went on). Every later
+contingency then carried bogus overrides for every pilot-self group an earlier one had touched: on BUS-612_BBS_2
+(slot 945) the VL-5967 DISTR_Q row became the pilot's raw q alone (weights 1.0 / 0 instead of 0.5 / −0.5; the
+row's first-fill residual −0.782 at the base solution, `DQROW2` and `CBROW ... lt/psSkip` cleared the gate and the
+keys as suspects), the group's Q split was (1.694, −1.574) against OLF's (0.912, −0.782), and the RL check pinned
+both members plus four other groups' pilots (`SW_PASS`, act=1) where OLF pinned none. Fix: `updateMainReactiveKeys`
+— the key update on the MAIN control, as OLF does. Measured: no override for an unrelated contingency any more
+(`differing=0`); window 958/1000 on device, violations diff 0; DAP tail above 1e-4 MW from 11 contingencies to 4
+(BUS-536 = OLF's own non-convergence, BUS-612_BBS_2 0.141 unchanged, BUS-6112_BBS_2 0.0037, BUS-5997_BBS_2
+0.0024), above 1e-6 from 19 to 8. BUS-612_BBS_2 has a second cause (its first post-contingency solve takes 3 scaled
+steps on the device against OLF's single step) — the next trace.
+Lesson: a diagnostic that re-extracts the live LfNetwork must leave it EXACTLY as found; a diff against the SA
+extraction turns any leftover into overrides on unrelated scenarios. Diffing counts (`DQOV_PACK differing=`)
+that grow with the contingency index are the signature.
+
+### An islanded member's frozen row took a survivor's DISTR_Q target (2026-09-28)
+
+BUS-612_BBS_2 (slot 945), the DAP tail's 0.141 MW after the reactive-key fix: the device's first post-contingency
+solve took three MAX_VOLTAGE_CHANGE-clamped iterations (norms 1.168 → 0.700 → 0.233 → 1.7e-4) where OLF took one
+(30.48 → 0.0045), so the distributed-slack decision was taken at another residual level and the two arms distributed
+0.141 MW apart while every bus agreed to 1.6e-4 kV. `OLF_GPU_TARGET_ROW=1324` (VL-612_1's V row, an islanded
+bus) showed TWO overrides for the slot: the frozen flat 1.0 and a later 0.0 that won — a survivor's renormalized
+DISTR_Q target from `islandedDistrQEntries`, whose inactive set held only the split's and the re-homing's controllers
+(VL-612_2, the re-homed one) and not the ISLANDED packed members themselves, so VL-612_1 counted as a survivor and
+its own (frozen) row got the target. The identity row then drove that dead bus's V from 1.0 to 0 in clamped steps,
+scaling the whole step with it. Fix: the islanded packed members join the inactive set, and no entry may target a
+frozen row (`GenOutage.withoutFrozenTargetRows`). Measured: slot 945 first solve 1 iteration to 4.5005e-3 (OLF
+4.500510e-3), DS solve to 1.8959e-6 (OLF 1.8958917e-6), bus diff 1.2e-10 kV; window 958/1000 on device, violations
+diff 0, DAP worst 3.7e-3 MW (BUS-6112_BBS_2, then BUS-5997_BBS_2 2.4e-3; the tail above 1e-4 MW is those two plus
+OLF's own non-convergence BUS-536), above 1e-6 8 contingencies.
+Lesson: two overrides on one (slot,row) is always a bug; `OLF_GPU_TARGET_ROW` names both writers. A frozen row
+belongs to a bus OLF removes from the system — nothing else may write it.
+Suites after this fix: rotation ON 304/0; rotation OFF 303/1 once — `javaLoadBasedDistributedSlackMatchesCpu`
+missed its 1e-12 kV bus-voltage assertion by 1.02e-12 kV (133.19640118822167 vs …065) and passed on two
+immediate reruns: the run-to-run last-digit drift, not this change (no island, no frozen row in that fixture).
+It is the same open ulp item as the base's run-dependent distributed power; the tolerance stays.
+
+### The two tail contingencies left after the 2026-09-28 fixes (measured, open)
+
+- **BUS-5997_BBS_2** (slot 787, DAP 2.4e-3 MW, worst bus 7.8e-6 kV): it islands VL-5997_1 — the only sibling of the
+  base-pinned pilot-self pilot VL-5997_0 — and removes GEN-5997#0. The row layout is right (`OLF_GPU_ROWMODE_DUMP_CTG`:
+  the pilot's own row flips to its Q balance at 0.955 − 3.511, the sibling's rows and the coupler dummies are
+  identities; OLF's post-contingency dump has `bus_target_q[6280]` active and `bus_target_v6280` inactive, the same
+  shape). The SEQUENCE differs: OLF's first solve takes two iterations (0.0898, then 1.25e-4) and its DistributedSlack
+  fires at iteration 0 (the lost generation), the device's first solve converges in one (2.7e-3), its slack loop does
+  not fire until pass 40 (remainder 1.36 MW) and its first reactive-limit check switches something OLF never does
+  (`LOOP_PASS switched=1` at pass 35, no `SW_PASS` line — the switch trace did not name it). The 2.4e-3 MW is the
+  slack-loop remainder landing differently. Next: name the pass-35 switch (RL_TRACE by row), then the first solve's
+  per-equation residual against OLF's (the F0 port in the post-contingency dump evaluates a stale state — 82.2 vs
+  OLF's 30.48 — it needs OLF's own NR-start evaluation).
+- **BUS-6112_BBS_2** (slot 924, DAP 3.7e-3 MW, worst bus 4.2e-6 kV): first solve, slack distribution and HVDC pass
+  match OLF (3.365e-4 vs 3.373e-4 after the HVDC re-solve); the reactive-limit passes do not. OLF's RL 2 pins seven
+  buses (VL-6490_0, 6489_0, 6055_0, 6090_0, 6139_1, 6139_3, 6231_0) and adjusts VL-6226_0's limit, RL 3 pins
+  VL-6139_2 and VL-6139_4; the device pins the same buses EXCEPT VL-6055_0 at RL#1 (row 12710, a local PV entry) and
+  catches it at RL#2 — OLF sees q = 190.24 MVAr against a 152.4 limit there, a 38 MVAr excess the device's q at
+  RL#1 cannot have shown. Next: VL-6055_0's device q at RL#1 (`OLF_GPU_RL_TRACE_VROW=12710`).
+  Measured (`OLF_GPU_RL_TRACE_VROW=12710`, prints `RL_VROW`): at the device's first reactive-limit check VL-6055_0
+  reads q = 1.4744 pu (base 1.4757; limits ±1.524) where OLF reads 1.9024 at its first check — after the device's
+  own RL#1 pins and re-solve it reads 1.8995 and pins. So the two arms' states BEFORE the first reactive-limit
+  check differ by ~43 MVAr at that bus while the final buses agree to 4.2e-6 kV: the first-solve residuals are
+  close (0.196 / 7.9e-5 against OLF's 0.2124 / 1.456e-4) but not equal, and the slack pass distributes 21.4 MW
+  on the device. Next: an intermediate-state comparison (the device's x at the RL#1 check against OLF's state
+  before its RL 2 — OLF logs no intermediate state, so a CPU-side hook on the outer-loop check is needed).
+
+### The pilot-self gate did not exist when reactive limits are disabled (2026-09-28)
+
+Isolating the remaining tail with `OLF_GPU_SA_NO_RL=1` (reactive limits off on BOTH arms) exposed a defect of its
+own: the GPU arm's BASE load flow reported MAX_ITERATION_REACHED where the CPU converged, so the whole run
+produced no post-contingency results (`pre-ctg: CPU=CONVERGED GPU=MAX_ITERATION_REACHED`, 976 status mismatches,
+violations 0 vs 75,735 — the vacuous-agreement shape the census exists to catch). The device's first residual was
+|f(x0)| = 117.908 against OLF's 117.845, the double-counted pilot-q signature.
+Cause: the PILOT-SELF gate table (`psPilotEntry` → `psSkip`) is derived inside `createBatchContext`'s
+`if (nrl > 0)` block, and it marked a pilot-self group whose pilot has NO reactive-limit entry with `-1`, the same
+value as "not a pilot-self group". Both readings are backwards: a pilot that can never be PINNED controls for the
+whole solve, so its raw q must ALWAYS be skipped (it feeds the group's DISTR_Q rows weighted). With limits off
+there are no entries at all, so all 28 pilot-self groups emitted their raw q at their carrier rows on top of their
+own DISTR_Q terms. The one-step `createContext` path already did the right thing (a constant `psSkip = 1` per such
+group) and says why in its comment; the batch path was the outlier.
+Fix: the derivation moves OUT of the `nrl > 0` block, and a pilot-self group without an entry is marked
+`PS_NO_ENTRY` (-2), which `pilotSelfGateBatch` reads as "always skip"; `-1` keeps meaning "not pilot-self".
+Measured (limits off): base CONVERGED on both arms, device |f(x0)| = 117.844754887565969 against OLF's
+117.84475488756634 (15 digits), first solve 5.4631120881 / 0.2283399726 / 2.4533278552e-3 against OLF's
+5.4631121272 / 0.2283399701 / 2.4533278580e-3, base distributed power within 7.9e-8 MW; window violations diff 0
+(75,735 both arms), DAP worst 5.2e-7 MW. Limits ON is INERT — `PILOTSELF_GATE groups=27(+0 never-pinnable) of 30`,
+every group has an entry — and the window is unchanged (958/1000, violations diff 0, DAP worst 3.7e-3 MW);
+suites 304/0 both ways.
+Newly REACHABLE, not a regression: with limits off every batched scenario is now runtime-rejected
+(`RUNTIME:status=-2=976`, 0/1000 on device) — the CPU-replayed results are what agree above. That batch path had
+never run before, because the base failed first. Next.
+
+### Reactive limits OFF: monitored buses need a limit entry, or the whole run falls back (2026-09-28)
+
+With the gate fixed the limits-off base converged, and the next gate showed itself: 976 of 976 batchable
+contingencies were CPU-replayed (`RUNTIME:status=-2=976`, 0/1000 on device) with no native reject line at all.
+The refusal is host-side and total — `GpuBatchPhaseOwnership.batchable()` returns false and
+`GpuBatchedSecurityAnalysisSolver` leaves every `resultsByIndex` null — because `GpuBatchVoltageMonitoring`
+records a SKIP for every standby-automaton SVC bus: it maps a bus to its reactive-limit entry, and with limits
+disabled the pack has no entries. The run's own loop list HAS VoltageMonitoring (`GPU_DRIVER_ENGINE
+loops=[DistributedSlack, AcHvdcAcEmulationLimits, VoltageMonitoring]`), so the loop is real and unrepresentable.
+Fix: `reactiveLimitsPack` emits entries for MONITORING_VOLTAGE buses whatever the reactive-limits flag (5 of them
+here). Their limits are dormant — no RL loop runs — but the entry is what the monitoring phase activates through.
+Measured (limits off): 958/1000 on device (was 0), violations diff 0 (75,735 both), DAP worst 4.0e-5 MW, 18 runtime
+rejects. Limits ON unchanged: 958/1000, violations diff 0, DAP worst 3.7e-3 MW; suites 304/0 both ways.
+
+**What the limits-off arm then says about the production tail**: with reactive limits disabled the two tail
+contingencies AGREE — BUS-6112_BBS_2 within 1.6e-7 MW (against 3.7e-3 with limits on), BUS-5997_BBS_2 exactly,
+BUS-612_BBS_2 within 3.6e-7 — and the whole window's DAP worst drops to 4.0e-5 MW (BUS-6011_BBS). So the equations,
+the slack distribution and the HVDC passes are not the tail: the tail is entirely a REACTIVE-LIMIT decision
+difference. BUS-536_BBS (6.4 MW apart, limits off too) is OLF's own non-convergence.
+
+### The production DAP tail, diagnosed to the digit — and why the obvious fix is not the fix (2026-09-28)
+
+The limits-off arm had shown the tail was a reactive-limit DECISION difference. The instrument that closed it was
+OLF's own q per check: a TEMPORARY `OLF_RL_Q_TRACE=<busId>` print in the OLF worktree's `ReactiveLimitsOuterLoop`
+(added, measured with, then REMOVED and the dependency reinstalled clean; it also printed each incident branch's q
+and every neighbour's v/phi). Measured on BUS-6112_BBS_2 (slot 924):
+- OLF's FIRST limit check reads q = 1.902356914 pu at VL-6055_0 and pins it; the device reads 1.474409053 and
+  pins it one pass later, after its own six other pins.
+- The device's six pins in that same pass match OLF's q to 0.0005 MVAr (VL-6490_0 145.0179 vs 145.0184, and so on),
+  so the states agree almost everywhere.
+- The device's state dump at that check: VL-6055_0's neighbour VL-6036_0 is 1.683e-3 pu off OLF while every other
+  neighbour is within 1e-7, and the bus behind it — the pilot-self pilot VL-6112_0 — still holds a BUS_TARGET_V
+  identity at v = 1.055 with a 0.86 pu residual on that row. VL-6055_0 has THREE parallel lines to VL-6036_0, so
+  1.7e-3 pu there is 0.43 pu of q here.
+- OLF has NO voltage control at VL-6112_0 in this scenario: the base load flow PINNED it at a reactive limit and
+  this contingency islands its only sibling VL-6112_1, so `updateRemoteVoltageControlEquations` finds no ENABLED
+  controller and deactivates the pilot's BUS_TARGET_V. The device keeps it until its reactive-limit phase flips it
+  (`updatePilotVeqBatch`, gated on `rlActive`), i.e. after the whole distributed-slack phase.
+
+Two implementations were measured and BOTH REVERTED:
+1. Plan-time: require a survivor in `classifyVcSplit` to be `isGeneratorVoltageControlEnabled()`, so the group takes
+   the CONTROL_DIES path. The device's q then reads 1.902356914 — OLF's value to every printed digit — it pins in
+   the SAME pass, and the window's DAP worst drops to **1.55e-05 MW** (from 3.70e-03; the assertion is 1e-3, so the
+   window test PASSED for the first time). But it is PERMANENT, and a base-pinned controller may be switched BACK
+   to PV during the scenario: 3 fixtures fail (`deviceRemoteGroupLostInBaseRegainsControlInSamePass`,
+   `deviceRemoteGroupUnpinnedByContingencyRecomputesTargetQ`, `deviceRemoteGeneratorFreezeUnderControlledLevel`).
+   It also moved BUS-6003_BBS_2's violation count 7 above the CPU's.
+2. Per-pass: run the `updatePilotVeqBatch` flip without the `rlActive` gate. BUS-6112_BBS_2 improves 7-fold
+   (3.7e-3 → 5.2e-4 MW) and violations stay equal, but 4 fixtures fail: at seed time `lost` is read before the
+   per-scenario row modes and overrides are all in place, so it fires on groups that DO control.
+Also measured and reverted with them: `relocChoose` returning the pilot's own row as soon as that row is not an
+identity, and the pilot-self gate keying on the same fact instead of the limit type alone. Both are no-ops on this
+case (a pilot-self group's candidate 1 IS the pilot's row) and together they still failed 3 fixtures, so they are
+not free either.
+The fix, in two parts, both landed:
+1. **Read the fact OLF reads, every pass.** A group's controllers are ENABLED or not, and on the device that is the
+   members' per-(scenario, entry) REACTIVE-LIMIT state — current from the seeding onwards — not the row modes the
+   kernel used to infer it from (at seed time a member row reads mode 0 both for a frozen island and for an
+   identity that means the member controls, which is why the ungated flip fired on groups that DO control).
+   `updatePilotVeqBatch` now judges it from `dqMemberQrGroup` + `dqMemberRlEntry` + the islanded mask and applies
+   the layout EVERY pass, the first fill included; the restore is the same test, so a member switching back to PV
+   brings the identity back. A group whose members have no entries at all (limits off, empty q range) is left
+   exactly as the extraction laid it out.
+2. **Stamp the flipped row's target from the STATIC limits at seed time.** The curve-evaluated arrays are still
+   zero then (`rlCurveLimitsBatch` runs in the reactive-limits phase), so the seed-time flip stamped the pilot's
+   own-Q target as 0 instead of (limit − loadQ): row 12834 sat CONVERGED at target 0 through outer 32, the RL
+   phase re-stamped −0.444, and the solve had to catch up — still one pass behind OLF. The kernel's re-stamp
+   branch keeps the value current once the curve limits exist, so the static value is a correct starting point.
+Measured together: window **DAP worst 1.38e-05 MW** (was 3.70e-03; the assertion is 1e-3, and the window test now
+PASSES), violations diff **0**, 958/1000 on device; the four contingencies that carried the tail —
+BUS-6112_BBS_2, BUS-5997_BBS_2, BUS-612_BBS_2, BUS-6003_BBS_2 — all agree to ~2.5e-07 MW, and only two
+contingencies in the window exceed 1e-5 MW (BUS-536_BBS, 8.5 MW, is OLF's own non-convergence and is not
+asserted). Suites 304/0 with the rotation on and off. The limits-off window also passes (worst 1.74e-05 MW,
+violations diff 0).
+
+### Status of the FULL busbar scope with today's code (2026-09-28, measured)
+
+Everything above was measured on the [5000,6000) window (1000 of the 6876 busbar-section contingencies). The full
+scope, run with the same code (`OLF_GPU_SA_CTG_KINDS=busbar OLF_GPU_SA_BUSBAR_TOP=99999`, no range), is a different
+regime and is NOT at parity:
+- **251 of 6876 on device.** The census is `RUNTIME:status=-3=6357` (LINEAR_SOLVE_FAILED) plus
+  `status=-2=59`, `MAPPER:no-batchable-element=209`, `PLAN:VC_REMERGE_MULTI=47`, `PLAN:SIDE_OPEN_UNPACKED=1`,
+  `VALIDATOR:ISLANDS_SLACK=1`. The −3 rejects are essentially all the plain sections (6352 `BUS-*`, 5 `GEN-*`), so
+  the device barely engages and the CPU replays the rest — which is why the statuses match exactly
+  (CONVERGED 6602, FAILED 5, MAX_ITERATION_REACHED 60 on both arms) and the timing is 0.86x (GPU cold 862 s
+  against CPU 1-thread 744 s).
+- **The BASE itself is 6.56e-02 MW apart** (cpu 14.359916545, gpu 14.294298358) — the 0.066 MW item recorded on
+  2026-09-25 and this branch's namesake. Nearly every contingency inherits it: the DAP worst is 1.07 MW with a
+  dense cluster around 1.063 MW and ~4180 contingencies above 1e-5 MW. Violations: CPU 503,923 vs GPU 503,905
+  (diff 18, within the harness's 0.01% tolerance).
+- The base's START is exact: the device's first fill is norm2 = 1.19599687948394333e+02 against OLF's
+  |f(x0)| = 119.59968794839484, identical to 15 digits. The arms then DIVERGE: OLF converges in 4 outer loops /
+  8 Newton iterations, the device takes 18 iterations across 15 solves and pins 36–37 buses where the window's
+  base pins 19. So the extraction and assembly are right at this scope and the OUTER-LOOP sequence is not.
+Order of work, from this measurement: (1) the base's outer-loop sequence at full scope (the 0.066 MW; compare the
+RL pass-by-pass pin sets, `OLF_GPU_DBG_RL` against `SW_PASS`, as the window work did), then (2) the 6357
+linear-solve failures, which is what keeps the device out of 96% of the scope. The window remains the fast
+regression gate; it is evidently a benign subset, so a window result must not be reported as a full-scope one.
+
+### The full-scope base's outer-loop sequence: 11 pins OLF never makes, from a first step that is not a Newton step (2026-09-29)
+
+Asked pass by pass (the method the window work used). OLF's base at the full busbar scope: 3 Newton iterations,
+DistributedSlack 0, then ReactiveLimits 1/2/3 — 4 outer loops, 8 solver iterations, and **26 switches**
+(25 PV→PQ in pass 1 including 3 robust unrealistic-voltage ones, then 1 more and 1 switch-back, then 1). The
+device: 18 iterations over 15 solves and **38 switched entries**. Diffing them bus by bus (device `SW_PASS` +
+the row map from `OLF_GPU_EQ_DUMP`, against OLF's own switch log):
+- the device makes every switch OLF makes (0 missing), plus **11 extra**: VL-2669_1..4, VL-4538_1..4,
+  VL-767_1..3 — all in one pass, all `lt=3`, all with q FAR inside their limits (2.4, 2.1, 0.58 MVAr against
+  ±100 MVAr). `lt=3` is the robust unrealistic-voltage pin, so the device's state at those controllers was below
+  the realistic floor (0.8 × 1.02 pu) where OLF's was not.
+So the extra pins are a CONSEQUENCE, and the cause is upstream: the device's first Newton step at this scope is
+not a Newton step. `OLF_GPU_LIN_RESID=1` on the base: **||J·dx − F||inf / ||F||inf = 2.05e+11 with ||dx||inf =
+8.3e+12** at iteration 0 (7.8e+11 at iteration 1), worst row 14491 every time =
+`DUMMY_Q(BUS-6218_COUPLER_4)`, whose only terms are the coupler's ZERO_PHI (+1/−1 on two angle columns) and
+NOTHING on its own column. The assembled matrix has **996 rows with an exactly zero diagonal** (pre-repair scan:
+`tinyDiag=996 firstBadRow=106 nHaz=2028`), all of them couplers' dummy rows.
+**The matrix is not the problem — the factorization is.** `GpuDumpedMatrixRankTest` on the device's OWN dumped
+base matrix: KLU (which pivots) factors it and solves to `||J·dx − B||inf = 9.75e-13`, ratio **2.4e-14**, with a
+sensible `||dx||inf = 11.5`; its largest dx components are exactly those zero-diagonal coupler rows. The same
+matrix through the device's cuDSS UNIFORM BATCH (no pivoting) gives 2.05e+11. The linear-solve guard's own
+comment already says this shape ("min pivots of 1e-18 under any unpivoted ordering") — and it is the same cause
+as the window-free scope's 6357 `status=-3` rejects, which is why the device engages on 251 of 6876.
+Fix direction (not started): the batch needs a zero-free diagonal without pivoting. The pattern is FIXED and
+host-built, so a static maximum-transversal row permutation computed once per structure (what KLU does
+internally) would give every row a structurally nonzero diagonal; the alternatives are extending the
+relocation so every coupler's ZERO_V/ZERO_PHI lands where a real derivative exists (the coupler-tree relocation
+does this for chains and still leaves 996 rows here), or a pivoted solve for the base. Acceptance: the base's
+residual ratio at iteration 0 near 1e-14 as KLU gets, the same 26 switches as OLF, and the base distributed
+power equal (today 6.56e-02 MW apart).
+
+### The unpivoted factorization at full scope is fixable with the mechanism already in the tree (2026-09-29)
+
+`ziTreeRelocation` (the coupler-tree relocation: a coupler's ZERO_V/ZERO_PHI move onto the child bus's own
+PHI/V, and the child's power equations onto the coupler's dummy columns) is behind
+`-Dolf.gpu.ziTreeRelocation`, **default false**, with a second gate `-Dolf.gpu.ziTreeRelocationMinCouplers`,
+**default 4**. At the full busbar scope that leaves every one of the 366 couplers unrelocated (`childSide=0`
+for all of them in the `.eq` dump), which is where the 996 zero diagonals come from.
+Measured on the full-scope base, three configurations:
+
+| configuration | couplers relocated | zero diagonals (pre-repair) | ratio at it=0 | first iterate |
+|---|---|---|---|---|
+| default (relocation off) | 0 of 366 | 996 (nHaz 2028) | 2.05e+11 | wrong (step 8.3e+12) |
+| relocation on, gate 4 (its default) | 23 of 366 | 928 (nHaz 1926) | 2.49e+05 | wrong |
+| relocation on, gate 1 | 329 of 366 | 111 (nHaz 222) | **1.65e-14** | 5.588341866896 vs OLF's 5.588341867362982 |
+
+So the linear-algebra half of the full-scope problem needs no new mechanism: applying the existing relocation to
+EVERY coupler tree gives the unpivoted batch a factorable structure (1.65e-14 is the quality KLU gets on the same
+matrix, 2.4e-14) and the first iterate then matches OLF to ten digits. The 111 zero diagonals left are the count
+the WINDOW also carries, i.e. the shapes the numeric repair already handles.
+What remains in that configuration: the base still ends `MAX_ITERATION_REACHED` with the distributed power
+6.56e-02 MW apart, so there is a second, outer-loop defect behind the first one — measure its pass sequence and
+switch set next (`OLF_GPU_SW_TRACE=0` + `OLF_GPU_BATCH_TRACE=1` with both properties set). Also still to check
+before considering the defaults: the window and both suites with the relocation on, since the property is off by
+default and its gate of 4 was chosen deliberately ("the numeric row repair is EXACT on short chains ... so a
+short tree keeps the proven path").
+
+### What blocks enabling the relocation: the reactive-limit check reads q at a row the relocation repurposed (2026-09-29)
+
+With the relocation on (gate 1) the factorization is right, and the base's SECOND defect steps forward: the first
+reactive-limit pass pins 36 buses (OLF pins 25) and the re-solve then burns all 30 iterations without converging,
+so the base ends `MAX_ITERATION_REACHED`. Diffing the switch sets in that configuration: 116 switch events over 46
+buses against OLF's 27, with **20 device-only buses** — the 8 robust ones from before (VL-2669_*, VL-4538_*,
+`lt=3`) plus q-limit pins with impossible reactive powers: VL-6049_0 at **4767 MVAr**, VL-6002_0 at 667.7,
+VL-6002_2/3 at 99.5, VL-6113_1 at −78.0, VL-6162_1 at 61.9, VL-6189_0 at 83.3, VL-6315_0 at −51.7.
+The `.eq` dump for that configuration names the cause. VL-6113_1's V row (13434) now reads
+`terms=[cb#8765.q1@alt, cb#8928.q2@alt, zi#334.ZERO_V]` and the bus is `childSide=2` of coupler 334: the
+relocation moved the COUPLER's ZERO_V onto that row, and the bus's own reactive balance onto the coupler's
+DUMMY_Q column. VL-6002_0 is `childSide=2` of coupler 316 with an EMPTY V row. But the reactive-limit machinery
+still reads each entry's q as `qBuf[rlVrow] + loadQ` at the bus's own V row — which is no longer its reactive
+balance — so the check compares a voltage-equality residual against reactive limits and pins on it.
+Fix: `rlVrow` (and the q the check reads) must FOLLOW the coupler-tree relocation, the same way
+`GpuAcRowIndexing.distrQRow`'s `(ziParentEdge, dummyQCol)` overload already makes a relocated child's DISTR_Q
+follow it. That is the blocker for enabling the relocation, which is the blocker for the full scope.
+Chain, end to end, as measured: 996 zero diagonals (relocation off) → unpivoted factorization wrong (2.05e+11) →
+wrong trajectory → 11 spurious robust pins → base 6.56e-02 MW off and 6357 scenarios rejected; with the
+relocation on the factorization is right (1.65e-14, first iterate matching OLF to ten digits) → the RL q is read
+at repurposed rows → 20 spurious pins → the pinned solve does not converge. Fix the q row, then re-measure both.
+
+### Why the relocation cannot simply be switched on: the conflict is systemic (2026-09-29, measured)
+
+Tried the narrow fix first — refuse to relocate a bus that is merely CAPABLE of voltage control (today's guard
+only refuses one whose BUS_TARGET_V is ACTIVE), since such a bus's reactive-limit entry reads its q, flips its
+mode and stamps its voltage target at its OWN V row, which the relocation gives to the coupler's ZERO_V. It
+removes the bad pins but it also removes the relocation: **24 of 366 couplers relocated instead of 329**, 926
+zero diagonals, ratio back to 2.6e+11. Reverted.
+The reason is in the network: of the 329 children the relocation picks, **305 are control-capable** (named in a
+`gvc` line; 1345 such buses in the full-scope extraction). A coupler in this model joins busbar sections of a
+substation, and those sections are exactly where the generators sit. So there is no subset to carve out.
+What a correct placement has to satisfy, both facts measured above:
+1. Every row needs a structurally nonzero diagonal. A coupler brings 2 equations (ZERO_V, ZERO_PHI) and 2
+   variables (DUMMY_P, DUMMY_Q); pairing the zeros with the dummies gives two zero diagonals (ZERO_V does not
+   contain DUMMY_P), so the zeros MUST take an endpoint's v/phi — which is what the relocation does, and why a
+   chain of k couplers consumes k of its k+1 buses' v/phi rows and leaves the root's free.
+2. A control-capable child still needs somewhere to put a voltage identity when the reactive-limit loop switches
+   it back to PV, and its own v row is gone. Its identity CAN live on the component's one free v row (the root's):
+   inside a zero-impedance component ZERO_V makes the voltages equal, so constraining any of them is equivalent,
+   and OLF has at most one active voltage target per such component (merged voltage controls). Its reactive-limit
+   entry must then read q at, and flip, the coupler's DUMMY_Q row (the row the activation extractor ALREADY uses
+   for its BUS_TARGET_Q — `stubBr >= 0 ? dummyQCol[stubBr] : qRow[bus]`), while the switch conditions keep
+   comparing the bus's own v (the `rlCmpVrow` channel already exists for that split).
+So the work is: place a relocated child's voltage identity on the component's free v row, and make the
+reactive-limit pack's row follow the relocation (read/flip the dummy row, compare the own v). That spans the
+extraction's placement, the activation extractor, the RL pack and the RL kernels — recorded, not started.
+
+### The fix, part 1: a reactive-limit entry reads its q, pin and target at the row that CARRIES them (2026-09-29)
+
+`dRlQrow`, derived in `createBatchContext` from the structure's own zero-impedance packs (no new JNI argument):
+per reactive-limit entry, the row its reactive BALANCE and its pin live on — its own V row normally, or, when the
+coupler-tree relocation moved its power equations onto the parent coupler's dummy columns, that coupler's
+DUMMY_Q row (which is exactly where `GpuAcActivationExtractor` already puts its BUS_TARGET_Q). Voltage reads
+stay on the bus's own V row, so `rlVrow` keeps its meaning and every other consumer of it is untouched.
+Applied in `reactiveLimitsBatch` (the q read, and all mode/target reads and writes — 16 accesses),
+`initRlLimitTypeBatch` (the base pin state and the row target) and `seedRlModeFromState` (the seeded pin).
+Measured on the FULL busbar scope with the relocation on (`-Dolf.gpu.ziTreeRelocation=true
+-Dolf.gpu.ziTreeRelocationMinCouplers=1`), base only:
+
+| | before today | relocation on, rows not following | relocation on + this fix |
+|---|---|---|---|
+| zero diagonals (pre-repair) | 996 | 111 | 111 |
+| residual ratio at it=0 | 2.05e+11 | 1.65e-14 | 1.40e-14 |
+| base status | CONVERGED (wrong state) | MAX_ITERATION_REACHED | **CONVERGED** |
+| base distributed power vs OLF | 6.56e-02 MW | 6.56e-02 MW | **0.000000e+00 MW** |
+
+So the full-scope base now matches OLF exactly — the 0.066 MW this branch is named after. Still to do: the
+contingency side in that configuration (slot 0 of the batch still ends `status=-2` after 30 iterations), then the
+window and both suites with the relocation on, and only then the property defaults.
+
+### The fix, part 2 (per-scenario) and where it stands (2026-09-29)
+
+`dRlQrow` is a STRUCTURE fact, but the relocation is per scenario: a contingency that OPENS the coupler sends the
+child's equations back to its own rows and the host pins the dummy row with a DUMMY_TARGET identity. All three
+kernels now test for that — mode 0 at the relocated row means "coupler open this scenario, read the bus's own
+row", the same test the zi scatter's stock-placement fallback uses (`initRlLimitTypeBatch` tests the BASE mode).
+State, all measured with the relocation enabled (`-Dolf.gpu.ziTreeRelocation=true
+-Dolf.gpu.ziTreeRelocationMinCouplers=1`):
+- **Full-scope BASE: exact.** Distributed power 14.359916545 MW on both arms, diff 0.000000e+00 (was 6.56e-02),
+  both CONVERGED, first residual ratio 1.40e-14.
+- **Full-scope linear-solve rejects: 6357 → 2.** The whole `status=-3` class is gone.
+- **Full-scope worst per-contingency distributed power: 1.07 MW → 2.05e-04 MW**, 4 contingencies above 1e-4.
+- **But nothing batches: 0 of 6876 on device**, 6660 rejects now `status=-2` — `max-iter-bad-solve`, ratio ~8e-2,
+  i.e. the per-scenario solves no longer converge. The WINDOW shows the same thing faster: with the relocation on
+  it drops from 958/1000 to **2/1000** (974 × `max-iter-bad-solve`), while its matrices are clean (tinyDiag 9 in
+  the base, 18 in the batch). So this is NOT a zero-diagonal problem: with the relocation on, the scenarios that
+  OPEN a relocated coupler fail. That per-scenario return path (the `relocOwn` / `stockAltRow` channel, and
+  whatever else must follow it: DISTR_Q dests, hazard donors, the P rows) is the next thing to fix.
+- **The DEFAULT path is unaffected** by the two parts landed: window 958/1000, violations diff 0, DAP worst
+  1.68e-05 MW, suite 304/0 (the one rotation-off failure is the known flaky 1e-12 kV assertion,
+  `javaLoadBasedDistributedSlackMatchesCpu`, same digits as its earlier occurrence, which passed on reruns).
+So the property defaults stay off for now: enabling them would trade a correct base for 974 CPU-replayed
+scenarios. The order from here is the per-scenario coupler-opening path, then the defaults, then part 3 (a
+relocated child that switches BACK to PV, which today has nowhere to put its voltage identity).
+
+### Branch check (2026-09-29): nothing left to import
+
+`test_inteliji-h100` (+71 commits by hash, including the whole coupler-relocation line: "Put a relocated bus's
+equations back on its own rows when a scenario opens its coupler", "Move a relocated bus's TARGET with its
+equation when its coupler opens", "Make the DISTR_Q member row follow the coupler-tree relocation", "restore the V
+identity the relocation displaced", "Relocate only the coupler trees the numeric repair cannot hold") and
+`origin/injection-scope` (+10, including "Move a bus limit only for the generators that actually set it") are
+BOTH fully contained in `base-outer7-divergence`: every one of their 81 subjects is present here, the hashes
+differ only because the work was rebased/cherry-picked, and where a file still differs the version here is the
+later one (e.g. `GpuBatchRlCurves` uses `mainGenVc` where injection-scope still has `getGeneratorVoltageControl()
+.orElseThrow()`). So the per-scenario relocation work has to be finished here, not fetched.
+
+### Where the contingency side stands with the relocation on (2026-09-29)
+
+The rejects fire at the scenario's FIRST solve (`max-iter-bad-solve outer=0 it=30`, final ratio 8.18e-02, norm
+3.34), and that solve's FIRST iteration factors cleanly (ratio 1.24e-14, and 2.59e-12 / 1.21e-15 on the next
+slots), so it is not the factorization: the Newton wanders over the 30 iterations, which is what a wrong equation
+layout looks like. The failing scenario's dumped matrix has no empty row and 18 zero-diagonal rows, and all 18 are
+shapes the BASE also carries (a pilot-self carrier row such as `BUS_V(VL-5997_1)`, which holds the PILOT's balance
+and so has no entry of its own, plus unrelocated couplers' `DUMMY_P/DUMMY_Q` rows) — i.e. the repaired shapes that
+the window already lives with when the relocation is OFF. So the defect is an equation that is wrong, not missing.
+Next measurement, the one that named every earlier defect of this kind: OLF's own post-contingency equations and
+residual for that scenario (`OLF_GPU_EQ_DUMP_CTG=<id>`, which now also writes OLF's f(x0) per equation) against
+the device's first fill of the same slot (`OLF_GPU_VALS_SCAN_SLOT=<slot>` + `OLF_GPU_VALS_DUMP`), matched row by
+row through the `.eq` map — with the relocation ON, so the comparison sees the relocated layout.
+
+### Why the contingencies fail with the relocation on: named rows (2026-09-29)
+
+`VALS_SCAN` now also prints the three largest |F| of the scanned slot (`worstF=[row:value ...]`) — a scenario that
+spends its whole Newton budget is a handful of rows whose residual never falls, and naming them names the defect.
+On the window's failing slot 0 with the relocation on, the residual is dominated by the SAME three rows at every
+iteration: **12590 at 6.5e+02, 12588 at 1.09e+02, 13174 at 3.1e+01**. Read through the SA extraction's own row map
+(`OLF_GPU_SA_EQ_DUMP`, since the row indices differ from the base extraction's):
+- **12590 = `BUS_V(VL-6003_1)`**, the pilot-self group's carrier row (its own q via the alternate dest plus the
+  group's DISTR_Q sharing) — a 650 residual means the reactive sharing is wildly unsatisfied.
+- **12588 = `BUS_V(VL-6003_0)`**, the PILOT, `terms=[]` — an EMPTY row. A residual of 109 on an empty row is
+  exactly `F = −target`: the row carries a target and nothing assembles into it. That is the empty-row class
+  fixed twice already today, now in the relocated layout.
+- **13174 = `DUMMY_P(BUS-6002_COUPLER_2)`**, a RELOCATED coupler's dummy row hosting a bus's P equation.
+And the relocation is itself pin-state dependent, so the base and the SA get DIFFERENT structures: comparing the
+two maps in one run, 44 of 47 couplers are relocated in the base extraction against 41 in the SA's, and the three
+that differ are `BUS-5997_COUPLER_1`, `BUS-6003_COUPLER_1`, `BUS-6112_COUPLER_1` — exactly the pilot-self groups
+the base load flow PINS (`ownReactiveOnItsVRow` reads `qRow`/the DISTR_Q activation, which the pin changes). So
+the relocation must be made canonical the way the extraction was this morning, and the pilot-self candidate table
+must follow it where a member's balance has moved — the qr table still names the buses' own V rows.
+Next: make `ziTreeRelocation` pin-state independent (the same canonical rule as `hasCandidateTable`), then check
+whether the pilot's row still assembles empty in a scenario; the instrument is in place (`worstF` + the two row
+maps + `OLF_GPU_SA_EQ_DUMP`).

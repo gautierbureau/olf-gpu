@@ -83,8 +83,23 @@ final class GpuAcRowIndexing {
             // injection feeds the DISTR_Q rows, never its own BUS_V row — so suppress its per-bus Q scatter.
             // If the controller is switched to PQ by reactive limits, BUS_TARGET_Q becomes active again and the
             // bus must recover its own BUS_V-backed Q row.
-            if (!qActive && isRemoteGenVcControllerElement(bus)) {
+            // CANONICAL encoding for a group with a candidate table (hasCandidateTable): the layout of the
+            // all-controllers-enabled state, whatever the network's pin state at extraction time. The row
+            // modes carry the state per scenario, and the batched security analysis extracts AFTER the base
+            // load flow has pinned buses: measured on rte6515's busbar window, the pilot-self pilot VL-5997_0
+            // was pinned at SA extraction, so its q was frozen onto the member VL-5997_1's row and the member
+            // lost its own alternate — the member's pin then assembled an EMPTY row (slot 893, BUS-6088_BBS)
+            // while the base extraction (taken before any pin) had the layout the kernels are built for.
+            GeneratorVoltageControl mainVc = mainGenVc(bus);
+            boolean canonical = mainVc != null && hasCandidateTable(mainVc, es);
+            if (isRemoteGenVcControllerElement(bus) && (!qActive || canonical)) {
                 qRow[bn] = -1;                               // includes a controller that is ALSO the pilot
+                continue;
+            }
+            if (canonical && mainVc.getControlledBus() == bus) {
+                // a pilot that is not a controller: its balance rides the canonical free member (the first),
+                // re-picked per scenario by the candidate table's mode scan
+                qRow[bn] = vCol[mainVc.getMergedControllerElements().get(0).getNum()];
                 continue;
             }
             if (!(vActive && qActive)) {
@@ -252,7 +267,7 @@ final class GpuAcRowIndexing {
                 .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
                 .orElse(null);
         if (vc != null && vc.getControlledBus() == controller) {
-            LfBus free = distrQHostMember(vc);
+            LfBus free = distrQHostMember(vc, es);
             if (free == null) {
                 throw new PowsyblException("GPU AC solver: remote generator voltage control of bus "
                         + controller.getId() + " has no controller");
@@ -271,10 +286,51 @@ final class GpuAcRowIndexing {
      *  NOT the free-member predicate below: a pinned member is never free (its row hosts its own
      *  Q balance, canonical encoding) - calling it free left a pinned singleton at mode 1 with the
      *  structure-frozen encoding (deviceRemoteSingletonMemberPin, deviceRemoteRobustRealisticVoltage). */
-    static LfBus distrQHostMember(GeneratorVoltageControl vc) {
+    static LfBus distrQHostMember(GeneratorVoltageControl vc, EquationSystem<AcVariableType, AcEquationType> es) {
         List<LfBus> members = vc.getMergedControllerElements();
+        if (hasCandidateTable(vc, es)) {
+            return members.get(0);                           // canonical: the first member, whatever is pinned
+        }
         return members.stream().filter(vc::isControllerEnabled).findFirst()
                 .orElse(members.isEmpty() ? null : members.get(0));
+    }
+
+    /** The row that hosts a bus's ACTIVE Q balance in the CURRENT state when its group has a candidate table
+     *  (see GpuAcActivationExtractor): a pinned member's own V row; the pilot (a controller of its own group
+     *  or not) rides the first ENABLED member's V row (the carrier) and falls back to its own V row when every
+     *  controller is pinned — the row the in-kernel mode scan selects. */
+    static int stateQRow(LfBus bus, int[] vCol) {
+        GeneratorVoltageControl vc = mainGenVc(bus);
+        if (vc != null && vc.getControlledBus() == bus) {
+            return vc.getMergedControllerElements().stream()
+                    .filter(vc::isControllerEnabled).findFirst()
+                    .map(m -> vCol[m.getNum()]).orElse(vCol[bus.getNum()]);
+        }
+        return vCol[bus.getNum()];
+    }
+
+    /**
+     * True when {@code vc} is a MAIN remote generator voltage control that ExtractionColumns gives a
+     * candidate table (plan-B4 / pilot-self rotation): every member and the pilot have a BUS_V column, and a
+     * pilot that is one of its own controllers rotates (property on, at least two controllers). Such a
+     * group is encoded CANONICALLY — as if every controller were enabled — because the table's in-kernel
+     * mode scan re-picks the carrier per scenario; the pin state at extraction time must not leak into the
+     * structure (see computeQRow). Keep in step with the enrolment in ExtractionColumns.
+     */
+    static boolean hasCandidateTable(GeneratorVoltageControl vc, EquationSystem<AcVariableType, AcEquationType> es) {
+        if (vc == null || vc.getMergeStatus() != VoltageControl.MergeStatus.MAIN || vc.isLocalControl()) {
+            return false;
+        }
+        LfBus pilot = vc.getControlledBus();
+        List<LfBus> members = vc.getMergedControllerElements();
+        if (members.isEmpty() || col(es, pilot.getNum(), AcVariableType.BUS_V) < 0) {
+            return false;
+        }
+        boolean pilotSelf = members.contains(pilot);
+        if (pilotSelf && (!pilotSelfRotationEnabled() || members.size() < 2)) {
+            return false;
+        }
+        return members.stream().allMatch(m -> col(es, m.getNum(), AcVariableType.BUS_V) >= 0);
     }
 
     /** The FREE member: the first ENABLED merged controller. None when every controller is pinned. */

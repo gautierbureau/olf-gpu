@@ -88,12 +88,28 @@ when the criterion tightens 10^4x are not converging differently: **the two arms
 slightly different systems.** Small, genuine, and localized somewhere in this contingency's
 equation set.
 
-**Next, and it is a defined recipe rather than a guess.** `OLF_GPU_EQ_DUMP_CTG=BUS-4467_BBS`
-gives OLF's post-contingency system plus its `F0` per equation; line that up against the device's
-first fill of the same slot (`OLF_GPU_VALS_SCAN_SLOT` + `OLF_GPU_VALS_DUMP`) and the equation the
-two arms evaluate differently is named before any Newton step blurs it — the dump's own docstring
-says so. Note `islandedDsParticipants=2` on this contingency against OLF's `participants=6881`:
-worth checking whether the two arms agree on the participant SET before anything else.
+**The STRUCTURES agree exactly — checked, and it removes the last structural suspicion.** Device
+first fill of slot 585: `n=14504` rows, 985 identity (mode 0) + 13499 power (mode 1) + 20 own-Q
+(mode 4). OLF: 14494 ACTIVE equations = BUS_TARGET_P 6880 + BUS_TARGET_Q 5578 + BUS_TARGET_V 980
++ DISTR_Q 323 + ZERO_V 366 + ZERO_PHI 366 + BUS_TARGET_PHI 1. The difference is
+`14504 - 14494 = 10 = 2 x 5`, and the contingency disables exactly 5 buses — the device keeps a
+fixed row set and freezes an islanded bus's two rows as identities where OLF removes the
+equations. `islandedDsParticipants=2` is consistent too (only 2 of the 5 carry participating
+generators). So the row sets are right and the participant sets agree.
+
+**The F0 route is BLOCKED by a stale instrument, not by the bug.** `EQ_DUMP_CTG`'s F0 section is
+stale by construction: `dumpPostContingencyEquations` runs on the FIRST line of
+`runPostContingencySimulation`, before the solver touches anything, and
+`context.getEquationVector()` returns whatever the last update left — the base solve's final
+iterate against the PRE-contingency system. Hence DISTR_Q residuals of 519/518/118 pu on a
+restored base-converged network and `norm2=774.03`, against the device's plausible `norm2=35.95`
+(worst |F| 11.0). **Do not read that 21x as a model difference.** A warning line is now written
+into the dump. Fix it by evaluating the equations and target at x0 inside the dump, or by moving
+the dump to just after the solver's first residual — then the recipe works and names the equation.
+
+This is the SECOND lying instrument found in two days (the first was the DS gate record's stride,
+[[#62]]). Both were found only because a number looked implausible. Check an instrument's
+write point and its guard before spending a 20-minute scope run on it.
 
 **The instrument that unblocked all of this** (fork commit e6e7642ff, `OlfTraceScope`): OLF's
 `DS_RUN`/`DS_SPLIT`/`DS_SAT`/`DS_PASS`/`RL_SWITCH` carried no contingency id, so in a

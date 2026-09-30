@@ -1341,6 +1341,23 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             // its first |f(x0)| line is the norm of), the contingency counterpart of OLF_GPU_F0_TRACE: lined
             // up against the device's first fill of that slot (OLF_GPU_VALS_SCAN_SLOT + OLF_GPU_VALS_DUMP), it
             // names the equation the two arms evaluate differently before any step blurs it.
+            // WARNING: this section is STALE BY CONSTRUCTION and must not be compared against a device
+            // fill until it is fixed. dumpPostContingencyEquations runs on the FIRST line of
+            // runPostContingencySimulation, before the solver touches anything, and getEquationVector()
+            // returns whatever the LAST update left there -- the base solve's final iterate, evaluated
+            // against the PRE-contingency system. Measured on rte6515 BUS-4467_BBS: DISTR_Q residuals of
+            // 519 / 518 / 118 pu on a restored, base-converged network, norm2=774.03, where the device's
+            // first fill of the same slot is norm2=35.95 with a worst |F| of 11.0. Reading that 21x as a
+            // model difference would be wrong; the two are not evaluated at the same point.
+            //
+            // The equation-system section ABOVE is sound (it is read from the equation system itself, and
+            // its row census reconciles with the device exactly: 14494 active + 2 rows for each of the 5
+            // islanded buses = the device's 14504). Only F0 is affected.
+            //
+            // To fix: evaluate the equations and the target vector at x0 inside this dump before writing
+            // F0, or move the dump to just after the solver computes its first residual.
+            w.write("# F0 WARNING: stale -- written before the solve, from an equation vector last "
+                    + "updated by a DIFFERENT system. Not comparable with a device fill. See the comment.\n");
             try {
                 double[] fx0 = context.getEquationVector().getArray();
                 double[] tg0 = context.getTargetVector().getArray();

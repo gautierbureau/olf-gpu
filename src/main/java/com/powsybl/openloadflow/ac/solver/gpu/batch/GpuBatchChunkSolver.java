@@ -939,6 +939,59 @@ final class GpuBatchChunkSolver {
                                 overrides.add(s * n + dpRow, 0.0);
                                 overrides.add(s * n + dqRow, 0.0);
                                 rowModePerScenario[s] = row;
+                                // ...and if the RELOCATION put a child bus's power balance on those dummy rows,
+                                // its TARGETS have to travel with it, exactly as on the coupler-OPENING path
+                                // above. Pinning the row to an identity is what makes the kernel's
+                                // stock-placement fallback move the EQUATIONS back to the child's own PHI / V
+                                // rows; leaving the targets behind erases the bus's injection. This path is the
+                                // one the 2026-09-28 tree overrides never covered, because they were written
+                                // while the relocation was off and a non-tree coupler's dummies carried nothing.
+                                // Measured on network.xiidm: LJIN re-picks OLF's tree from LMQ to LMK, and
+                                // LMQ's DUMMY_P (row 14822) went from -1.029778 to a pinned 0 while LLJ_2's own
+                                // row got nothing — the bus's 102.98 MW vanished and the slack placed 87.8 MW of
+                                // it, on 100 LJ* contingencies (cpu=0.0 against gpu=-87.8 MW each).
+                                //
+                                // NB no BUS_TARGET_V identity here, unlike the opening path: the coupler is only
+                                // leaving the TREE, not opening, so the replacement edge still couples the child
+                                // and its voltage is not its own to set.
+                                int treeBits = gpuData.ziIdx()[ze * 11 + 10];
+                                int treeChildSide = (treeBits >> 1) & 3;
+                                if ((treeBits & 8) == 0 || treeChildSide == 0) {
+                                    continue;                // not a relocated coupler: nothing moved onto it
+                                }
+                                int childPhiRow = treeChildSide == 1 ? gpuData.ziIdx()[ze * 11 + 8]
+                                        : gpuData.ziIdx()[ze * 11 + 9];
+                                int childVRow = gpuData.ziIdx()[ze * 11 + (treeChildSide == 1 ? 6 : 7)];
+                                boolean childFrozen = false;
+                                for (int fr : frozenRowsByIndex[ci]) {
+                                    if (fr == childPhiRow || fr == childVRow) {
+                                        childFrozen = true;  // islanded: the freeze holds these rows flat
+                                        break;
+                                    }
+                                }
+                                if (childFrozen) {
+                                    continue;
+                                }
+                                if (childPhiRow >= 0 && dpRow >= 0) {
+                                    overrides.put(s * n + childPhiRow, baseTargets[dpRow]);
+                                    for (int i = 0; i < nds; i++) {   // the DS participant follows its equation
+                                        if (gpuData.dsPhiRow()[i] != dpRow) {
+                                            continue;
+                                        }
+                                        dsRowOvList.add(s);
+                                        dsRowOvList.add(i);
+                                        dsRowOvList.add(childPhiRow);
+                                        if (dsRowOvBySlot[s] == null) {
+                                            dsRowOvBySlot[s] = new int[nds];
+                                            java.util.Arrays.fill(dsRowOvBySlot[s], -1);
+                                        }
+                                        dsRowOvBySlot[s][i] = childPhiRow;
+                                    }
+                                }
+                                if (childVRow >= 0 && dqRow >= 0
+                                        && !seedsDqTargetRow(genOutagesByIndex[ci], childVRow)) {
+                                    overrides.put(s * n + childVRow, baseTargets[dqRow]);
+                                }
                             }
                             if (!contingencies.get(ci).stickyNonTreeZi().isEmpty()) {
                                 java.util.Set<Integer> stillOut = contingencies.get(ci).stickyNonTreeZi().stream()

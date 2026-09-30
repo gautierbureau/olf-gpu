@@ -6108,9 +6108,18 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                qBuf[(size_t) s * n + slackPhiRow] - slackTgt, dsRetain[s], rem, fsGlobal, slackDistTol, slackTgt,
                (fsGlobal > 0.0 && fabs(rem) > fsGlobal * slackDistTol) ? 1 : 0);
     }
-    if (gateLast != nullptr) {                              // what this gate saw, host-readable (no printf)
-        gateLast[2 * s] = rem;
-        gateLast[2 * s + 1] = (fsGlobal > 0.0 && fabs(rem) > fsGlobal * slackDistTol) ? 1.0 : 0.0;
+    if (gateLast != nullptr) {
+        // The WHOLE accounting of this pass, host-readable (device printf does not reach the test log):
+        // [0] rem the gate compares, [1] fired, [2] the slack's own mismatch, [3] the share the slack is
+        // assumed to hold, [4] the participants' global factor sum, [5] the amount the water-fill places
+        // (written below). OLF's counterpart is one line, `DS_RUN mismatch=... participants=n`, and the two
+        // totals MUST agree: a difference in the amount distributed is a defect, not a different route.
+        gateLast[6 * s] = rem;
+        gateLast[6 * s + 1] = (fsGlobal > 0.0 && fabs(rem) > fsGlobal * slackDistTol) ? 1.0 : 0.0;
+        gateLast[6 * s + 2] = qBuf[(size_t) s * n + slackPhiRow] - slackTgt;
+        gateLast[6 * s + 3] = dsRetain[s];
+        gateLast[6 * s + 4] = fsGlobal;
+        gateLast[6 * s + 5] = 0.0;
     }
     if (fsGlobal <= 0.0 || fabs(rem) <= fsGlobal * slackDistTol) {
         return;
@@ -6138,6 +6147,9 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         target[idx] = base;                                 // reset to the anchor
     }
     rem = fsGlobal * ((qBuf[(size_t) s * n + slackPhiRow] - slackTgt) + absorbedNow);
+    if (gateLast != nullptr) {
+        gateLast[6 * s + 5] = rem;                           // what this pass places over the participants
+    }
     if (dbgTrace && s == dbgTrace - 1) {
         printf("[DS-WF] entry slackMismatch=%.9f absorbedNow=%.9f fsGlobal=%.9f rem=%.9f nds=%d ngen=%d anchorShift=%d\n",
                qBuf[(size_t) s * n + slackPhiRow] - slackTgt, absorbedNow, fsGlobal, rem, nds, ngen,
@@ -7384,7 +7396,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
         }
         ctx->dsFactorSum = factorSum > 0 ? factorSum : 1.0;
         ctx->dDsRetain.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
-        ctx->dDsGateLast.alloc(static_cast<size_t>(nScenarios) * 2 * sizeof(double));
+        ctx->dDsGateLast.alloc(static_cast<size_t>(nScenarios) * 6 * sizeof(double));
         ctx->dDsRetainApplied.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
     }
 
@@ -11569,14 +11581,16 @@ psgStep(ctx, nS, n, outer, "afterAllPinned");
     // scenario from one run to the next (IZUZ: slot 170, then 18)
     const int loopTraceSlot = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : (loopTraceEnv != nullptr ? std::atoi(loopTraceEnv) : -1);
     if (loopTraceSlot >= 0 && loopTraceSlot < nS) {
-        double gate[2] = {0.0, 0.0};                        // the DS gate this slot last evaluated: rem, fired
+        double gate[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};    // see the gateLast write: the pass's accounting
         if (ctx->dDsGateLast.p) {
-            CUDA_CHECK(cudaMemcpy(gate, ctx->dDsGateLast.as<double>() + 2 * loopTraceSlot, 2 * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(gate, ctx->dDsGateLast.as<double>() + 6 * loopTraceSlot, 6 * sizeof(double), cudaMemcpyDeviceToHost));
         }
-        std::fprintf(stderr, "LOOP_PASS s=%d outer=%d loopIdx=%d kind=%d solved=%d switched=%d nChanged=%d live=%d status=%d dsRem=%.12f dsFire=%d nrIters=%d\n",
+        std::fprintf(stderr, "LOOP_PASS s=%d outer=%d loopIdx=%d kind=%d solved=%d switched=%d nChanged=%d live=%d status=%d dsRem=%.12f dsFire=%d nrIters=%d"
+                     " dsSlackMismatch=%.12f dsRetain=%.12f fsGlobal=%.12f dsPlaced=%.12f\n",
                      loopTraceSlot, outer, loopIdx, loopOrder[loopIdx], solvePass ? 1 : 0,
                      (int) rlSwitched[loopTraceSlot], nChanged, (int) live[loopTraceSlot], res.status[loopTraceSlot],
-                     gate[0], (int) gate[1], res.iters[loopTraceSlot]);
+                     gate[0], (int) gate[1], res.iters[loopTraceSlot],
+                     gate[2], gate[3], gate[4], gate[5]);
     }
     if (nChanged > 0) {                                     // this outer loop is still unstable
         for (int s = 0; s < nS; s++) {

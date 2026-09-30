@@ -1179,21 +1179,6 @@ final class GpuBatchChunkSolver {
                                 // compose with a gen-outage override on the same row
                                 overrides.compose(flat, baseTargets[gpuData.dsPhiRow()[i]], shares[i]);
                             }
-                            // ...and the SLACK BUS's own share of the same pre-distribution. OLF puts it in that
-                            // bus's generator target like any other participant (measured on the middle-section
-                            // fixture: `DS_PART element=gs factor=5.0` beside g0 and g2 at 1.25, so gs takes two
-                            // thirds), but the device has no BUS_TARGET_P row at the slack — its P is free — so
-                            // the displacement has nowhere to live except dsSlackShift, exactly as the
-                            // slack-only path above seeds it. Left unseeded, the slack's target stayed at its
-                            // base value, the gate measured the slack's own share as an unbalanced mismatch
-                            // (0.871 pu where OLF sees 0.002238) and the loop re-distributed for four more
-                            // passes, retiring 0.837 pu away.
-                            if (shares.length > nds && shares[nds] != 0) {
-                                if (dsSlackShift == null) {
-                                    dsSlackShift = new double[chunkSize];
-                                }
-                                dsSlackShift[s] = shares[nds];
-                            }
                         }
                     }
                     // CONTINUOUS phase control: OLF's initialize() enables the CONTROLLER-mode controls

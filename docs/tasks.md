@@ -4644,3 +4644,22 @@ yet `dsRetain` is **−0.173174** — negative, which is what makes the gate's r
 `absorbed = +0.347738` (the pre-loss seeds) and `rho` two thirds, the retain should be about +0.35, not −0.17. So
 the retain formula's treatment of the pre-loss seeds is the next suspect: `tot = (slackP − slackTgt) + absorbed`
 now double-counts a share that the slack target already carries.
+
+### Fix 2 REVERTED: the slack share and the retain formula are one change (2026-09-30)
+
+Letting the slack's pre-loss share reach the device (seeding `dsSlackShift` for an ordinary contingency and
+uploading it independently of the anchor shift) took the suite from 2 failures to **10**: `loadLossBatchMatchesCpu`,
+`shuntBranchLoadComboBatchMatchesCpu`, `deviceBusLossIslandingMergedPilotSurvivorMatchesCpu`,
+`deviceIslandedRemoteControlGroupMatchesCpu`, `deviceBranchOutageIslandingAGroupMemberBatchesAndMatchesCpu`,
+`deviceBasePinnedMemberKeepsItsQWhenASiblingIsIslandedMatchesCpu` and the two middle-section ones. Reverted; the
+suite is back to 2.
+
+Why it cannot go in alone: shifting the slack's target changes the mismatch EVERY scenario measures, and the
+retain formula then compounds it — the same formula whose first pass reports `dsRetain = −0.173174` where the
+pre-loss seeds imply about +0.35, because `tot = (slackP − slackTgt) + absorbed` counts the seeds once in
+`absorbed` and again in the shifted `slackTgt`. So the correct change is a single one: seed the slack's share AND
+take it out of the retain's `tot`. That is the next step, and the fixture plus these eight fixtures are its test.
+
+What DID land and is verified: masking an islanded participant by its BUS in the pre-loss distribution (fix 1),
+which makes the device's split OLF's exactly (`absorbed=0.347738 slackShare=0.695476` against OLF's
+`gs 5.0 / g0 1.25 / g2 1.25` over 1.043213) and leaves the suite at its two known failures.

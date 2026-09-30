@@ -11,6 +11,66 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #63 — BUS-6194_BBS_2: a device kernel overwrites a voltage identity with a reactive target (2026-09-30)
+
+OPEN, precisely localized. It is the WHOLE violation gap of the full busbar scope: 71 of 71.
+
+`BUS-6194_BBS_2` loses the middle of three coupled sections (VL-6194_0/_1/_2, both couplers
+opened, VL-6194_1 islanded) and the VC group re-homes: `reHome main=VL-6194_0
+cluster=[VL-6194_2] newMain=VL-6194_2 target=1.123 local=true`. The device SOLVES it —
+`status=0 iters=1 norm=2.17e-9` — but the run is reported `FAILED` where OLF reports
+`CONVERGED`, so the GPU arm yields an EMPTY result and loses every violation on it. The
+status comes from OLF's realistic-voltage band, CPU-side:
+
+    UNREALISTIC bus=VL-6194_2 v=0.625100000 nominalV=380.000 band=[0.800, 1.200]
+
+**What is proven.** VL-6194_2's own V row is 12938. The HOST uploads it correctly — mode 0
+with target **1.123** (`OLF_GPU_TARGET_ROW=12938`). The DEVICE ends it at **0.6251**
+(`OLF_GPU_FINAL_TARGET_ROW=12938` -> `final=0.625100000 setupMode=0 devMode=0`). So a device
+outer-loop kernel overwrote the row's target between upload and convergence, the mode stayed
+0, and a mode-0 identity makes x = target: the bus voltage BECOMES the reactive number.
+0.6251 is this group's `mKey` == `mTargetQ` for all three members (they coincide because all
+derive from the same 62.51 MVAr reactive limit), so what landed there is a DISTR_Q/pilot-Q
+target.
+
+**Where it is not.** `updateDistrQTargetsBatch` is the obvious suspect and it already has the
+right guard — "The row is a VOLTAGE IDENTITY this scenario ... A DISTR_Q target written here
+replaces the voltage target" (measured on BUS-6029_BBS_1) — and it runs AFTER the
+stock-placement diversion, so a member diverted onto 12938 should return. Its `qg >= 0`
+carrier branch writes only when `mrow == carrier`, i.e. only to a row that already passed
+that guard. The group has NO live keys here (`DQISL keySum=0.0`, `keeps=false` for all three
+members), so no DISTR_Q target is even owed. Which kernel writes it is NOT yet established —
+do not guess it; instrument the writes. Device `printf` does NOT reach the surefire log
+(measured: `OLF_GPU_DS_DEBUG` printfs never appeared), so this needs a host-readable record,
+the way the DS gate record works.
+
+Reproduce in ~40 s:
+
+    OLF_GPU_SA_CTG_KINDS=busbar OLF_GPU_SA_BUSBAR_TOP=100000 \
+    OLF_GPU_SA_CTG_EXCLUDE=docs/rte6515-impactless-busbar-sections.txt \
+    OLF_GPU_SA_CTG_ONLY=BUS-6194_BBS_2 OLF_GPU_FINAL_TARGET_ROW=12934,12936,12938,13045,13047 \
+    mvn -Dcheckstyle.skip -Dsurefire.failIfNoSpecifiedTests=false \
+      -Dtest='GpuVsCpuRte6515SaTest#gpuSaMatchesCpuOnRte6515Full' test
+
+**Fixed on the way** (same contingency, a different bug, suite still 177/177): the coupler
+block's re-homed V identity — `rowZi[childVRow] = 0` plus the VC target — ran ABOVE the
+`childFrozen` guard, so an ISLANDED child got a voltage identity as well. On this contingency
+VL-6194_1's V row 12936 carried TWO overrides, 1.000 from the island freeze and 1.123 from
+that identity, resolved by the `applyTargetOverrideBatch` race (see [[#62]]). The guard's own
+comment already said the freeze must not be overwritten; it simply sat below the write it was
+guarding. Now one override, 1.000. It did not change this contingency's outcome — the 0.6251
+is a separate writer — but it is the second duplicate-override race found in a day, which
+raises the priority of deduplicating the override list to its documented last-wins.
+
+### #64 — BUS-6113_BBS_1: the last distributed-active-power outlier (2026-09-30)
+
+OPEN. The full busbar scope's ONLY material DAP difference and the only failing assertion:
+`cpu=217.889505513 gpu=219.217524713 MW`, **1.328 MW**. Every other contingency is at or
+below 1.7e-02 MW and the bulk at ~3.7e-05. It also carries a violation delta of -1. Not yet
+investigated. Worth doing right after [[#63]]: both are busbar-section contingencies on
+coupled sections, the population [[#62]]'s fixes moved most.
+
+
 ### #62 — Coupler relocation: a structural row a contingency un-relocates (2026-09-30)
 
 FIXED (54a866a) for the two middle-section fixtures; the pattern is the thing to remember.

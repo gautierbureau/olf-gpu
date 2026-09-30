@@ -826,12 +826,6 @@ final class GpuBatchChunkSolver {
                                     int childVRow = gpuData.ziIdx()[ze * 11 + (childSide == 1 ? 6 : 7)];
                                     var childVc = child == null ? java.util.Optional.<GeneratorVoltageControl>empty()
                                             : child.getGeneratorVoltageControl();
-                                    boolean applied = childVRow >= 0 && child != null && !child.isDisabled()
-                                            && child.isGeneratorVoltageControlled() && childVc.isPresent();
-                                    if (applied) {
-                                        rowZi[childVRow] = 0;
-                                        overrides.add(s * n + childVRow, childVc.orElseThrow().getTargetValue());
-                                    }
                                     // The TARGET must travel with the equation. The child's P balance lives on
                                     // this coupler's DUMMY_P while it is closed, so its target (the bus's net
                                     // scheduled injection, and whatever the distributed slack has shifted it
@@ -857,6 +851,21 @@ final class GpuBatchChunkSolver {
                                     }
                                     if (childFrozen) {
                                         continue;
+                                    }
+                                    // The child keeps controlling its own voltage once the coupler that carried
+                                    // its ZERO_V is gone, so its own V row takes the BUS_TARGET_V identity.
+                                    // This USED TO RUN ABOVE the frozen guard, so an ISLANDED child got the
+                                    // identity too -- a second override on a row the island freeze holds flat,
+                                    // and applyTargetOverrideBatch resolves two entries on one row by a RACE.
+                                    // Measured on rte6515 BUS-6194_BBS_2: VL-6194_1 is islanded and its V row
+                                    // carried both 1.000 (the freeze) and 1.123 (this identity). The guard's own
+                                    // comment already said the freeze must not be overwritten -- it just sat
+                                    // below the write it was guarding.
+                                    boolean applied = childVRow >= 0 && child != null && !child.isDisabled()
+                                            && child.isGeneratorVoltageControlled() && childVc.isPresent();
+                                    if (applied) {
+                                        rowZi[childVRow] = 0;
+                                        overrides.add(s * n + childVRow, childVc.orElseThrow().getTargetValue());
                                     }
                                     if (childPhiRow >= 0 && dpRow >= 0) {
                                         overrides.add(s * n + childPhiRow, baseTargets[dpRow]);

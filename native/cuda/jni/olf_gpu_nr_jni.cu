@@ -11754,7 +11754,14 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
         }
         checkRange("hvIdx", hvIdx, nhv, 4, {0, 1, 2, 3}, -1, n);
         checkRange("dqRow", dqRow, ndq, 1, {0}, 0, n);
-        checkRange("ziIdx", ziIdx, nzi, 11, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, -1, n);
+        checkRange("ziIdx", ziIdx, nzi, 11, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, -1, n);
+        // Slot 10 is the FLAGS word, not a row: bit 0 the spanning-tree edge, bits 1-2 the relocated
+        // CHILD SIDE, bit 3 "the child side came from the coupler-tree walk". Its largest value is
+        // 1|4|8 = 13, so checking it against [-1, n) rejects a perfectly good pack on any network with
+        // n <= 13. Latent until the relocation is on, which is what sets bit 3 and takes the maximum
+        // from 5 to 13: measured on the 12-row generatorRemoteControlWithZeroImpedanceBranchAtController
+        // fixture as "bad ziIdx at elem 0 slot 10: 13 (allowed [-1, 12))".
+        checkRange("ziIdx.flags", ziIdx, nzi, 11, {10}, 0, 16);
         checkRange("ziQAlt", ziQAlt, nzi, 2, {0, 1}, -1 - nQr, n);
         checkRange("drRow", drRow, ndr, 1, {0}, 0, n);
         checkRange("drCol", drCol, ndr, 1, {0}, 0, n);

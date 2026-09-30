@@ -1071,6 +1071,24 @@ final class GpuBatchChunkSolver {
                             int ci = group.get(chunkStart + s);
                             int[] frozen = frozenRowsByIndex[ci];
                             boolean[] islandedDs = null;
+                            // The PLAN's mask first (islandedDsParticipants): it matches a participant on its BUS
+                            // as well as on its row, which the row test below cannot do for a participant whose P
+                            // row the coupler-tree relocation moved onto its parent coupler's DUMMY_P — the frozen
+                            // rows are the bus's own BUS_PHI/BUS_V. Rebuilding the mask here from the row test
+                            // alone repeated exactly the defect that comment describes: measured on the
+                            // middle-section fixture, the pre-loss gave the ISLANDED generator's relocated row a
+                            // share of -0.894 pu, and the device's slack loop then chased its own tail for five
+                            // passes and retired 0.837 pu away from OLF.
+                            if (islandedDsByIndex != null && islandedDsByIndex[ci] != null) {
+                                for (int participant : islandedDsByIndex[ci]) {
+                                    if (participant >= 0 && participant < nds) {
+                                        if (islandedDs == null) {
+                                            islandedDs = new boolean[nds];
+                                        }
+                                        islandedDs[participant] = true;
+                                    }
+                                }
+                            }
                             for (int i = 0; i < nds; i++) {
                                 for (int fr : frozen) {
                                     if (fr == gpuData.dsPhiRow()[i]) {

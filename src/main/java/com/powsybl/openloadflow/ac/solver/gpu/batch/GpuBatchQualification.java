@@ -449,6 +449,10 @@ final class GpuBatchQualification {
             if (islanded) {
                 found[count++] = i;
             }
+            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                System.err.printf("QUALIFY_TRACE dsPart i=%d row=%d busNum=%s islanded=%b%n", i, dsPhiRow[i],
+                        dsBusNum != null && i < dsBusNum.length ? Integer.toString(dsBusNum[i]) : "-", islanded);
+            }
         }
         return count == 0 ? NO_ISLANDED_DS : java.util.Arrays.copyOf(found, count);
     }

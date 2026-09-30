@@ -281,6 +281,15 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                     break;
                 }
             }
+            if (slackBus == null) {
+                // The COUPLER-TREE RELOCATION moved that bus's P balance onto its parent coupler's DUMMY_P row,
+                // which no BUS_PHI variable owns — the pack ships the relocated row (dsSlackPhiRow = pRow). Left
+                // unresolved, the slack's retained share was never written back and OLF measured the device's
+                // converged state against stale targets: on rte6515's full busbar scope the device's own norm was
+                // 9.45e-06 (OLF's own final 9.50e-06) while OLF re-evaluated 1.67 and called the base
+                // MAX_ITERATION_REACHED, which took the whole security analysis with it.
+                slackBus = relocatedChildOfPRow(data, data.dsSlackPhiRow());
+            }
         }
         if (data.dsPhiRow().length == 0) {
             // slack-only participation: the whole distribution is the slack's absorbed total
@@ -414,6 +423,15 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
      *  pinned (the carrier) — and its own row when none is live (the group lost control and the device
      *  flipped that row to a power row, mode 1). */
     private static int pinnedBalanceRow(GpuAcData data, int i, int vRow, int[] devModes) {
+        // First, the COUPLER-TREE RELOCATION: a relocated child's reactive balance — and so the target the pin
+        // wrote — lives on its parent coupler's DUMMY_Q row, which is exactly where the native pass put it
+        // (rlQrow). Reading the bus's own row instead read the coupler's ZERO_V target as a reactive limit and
+        // froze that on the bus. Mode 0 at the relocated row means the coupler is open here, so the equations
+        // are back home and the own row is right (the same per-scenario test the device makes).
+        int relocated = relocatedPinRow(data, vRow);
+        if (relocated != vRow && devModes != null && relocated < devModes.length && devModes[relocated] != 0) {
+            vRow = relocated;
+        }
         if (devModes == null || data.rlRemote() == null || data.rlRemote()[i] != 2 || data.qrPtr() == null
                 || vRow < 0 || vRow >= devModes.length || devModes[vRow] != 0) {
             return vRow;
@@ -437,6 +455,44 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
             return vRow;
         }
         return vRow;
+    }
+
+    /** The relocated {@code DUMMY_Q} row that hosts the reactive balance of the bus whose own {@code BUS_V} row
+     *  is {@code vRow}, or {@code vRow} itself when that bus is not a relocated coupler child. The Java twin of
+     *  the native {@code rlQrow} map, derived from the same zero-impedance pack. */
+    private static int relocatedPinRow(GpuAcData data, int vRow) {
+        int[] zi = data.ziIdx();
+        if (zi == null || vRow < 0) {
+            return vRow;
+        }
+        for (int e = 0; e < zi.length / 11; e++) {
+            int o = e * 11;
+            int childSide = (zi[o + 10] >> 1) & 3;
+            int ownV = childSide == 1 ? zi[o + 6] : (childSide == 2 ? zi[o + 7] : -1);
+            if (ownV == vRow && zi[o + 5] >= 0) {
+                return zi[o + 5];
+            }
+        }
+        return vRow;
+    }
+
+    /** The bus whose P balance the relocation moved onto the coupler {@code DUMMY_P} row {@code pRow}. */
+    private LfBus relocatedChildOfPRow(GpuAcData data, int pRow) {
+        int[] zi = data.ziIdx();
+        int[] nums = data.ziBranchNums();
+        if (zi == null || nums == null) {
+            return null;
+        }
+        for (int e = 0; e < zi.length / 11 && e < nums.length; e++) {
+            int o = e * 11;
+            int childSide = (zi[o + 10] >> 1) & 3;
+            if (childSide == 0 || zi[o + 4] != pRow || nums[e] < 0) {
+                continue;
+            }
+            com.powsybl.openloadflow.network.LfBranch br = network.getBranch(nums[e]);
+            return childSide == 1 ? br.getBus1() : br.getBus2();
+        }
+        return null;
     }
 
     /** Read the bands out of the run's OWN configured loops, so the device decides at OLF's threshold. */

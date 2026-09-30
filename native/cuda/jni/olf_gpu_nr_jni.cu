@@ -620,6 +620,46 @@ inline int stockSelRow(int frozenRow, int alt, const int* relocOwn) {
             ? -2 - frozenRow : frozenRow;
 }
 
+// A relocated child whose own q row is SUPPRESSED (a remote gen-VC member has no frozen dest: its q
+// feeds the DISTR_Q rows) needs THREE destinations, not two:
+//   the coupler's DUMMY_Q row  while a reactive limit PINS it there (that row is mode 4),
+//   its OWN row                while the parent coupler is dead this scenario (the dummy row is an
+//                              identity, mode 0 — the stock placement),
+//   nowhere at all             while it shares (mode 1: the DISTR_Q terms carry its q).
+// Two of the three cannot be expressed with one alternate and one selector, so the pair travels in the
+// reloc POOL, marked by a NEGATIVE relocOff, with the DUMMY row itself in the group slot as the selector.
+// Measured without it (relocation on by default): the middle-section-loss fixtures left the child's own
+// row empty once the contingency killed its coupler — one zero diagonal, dx 4e+12, no convergence.
+inline bool stockPairOut(int frozenRow, int alt, const int* relocOwn) {
+    return frozenRow < 0 && alt >= 0 && relocOwn != nullptr && relocOwn[alt] >= 0;
+}
+
+/**
+ * Pool order of a stock pair: [0] = the bus's OWN row, [1] = the parent coupler's DUMMY_Q row. Which one takes
+ * the bus's raw q depends on TWO modes, not one:
+ *   dummy row mode 4                      -> the dummy row: a reactive limit pins it there, coupler alive;
+ *   dummy row mode 0 and own row mode 4   -> the OWN row: the coupler is dead, so the equations are back home
+ *                                            and the pin is there (measured: rte6515 BUS-11_BBS_1 put mode 4 on
+ *                                            BUS_V(VL-11_1), which holds zi#1's ZERO_V, and writing nothing left
+ *                                            that row with a zero diagonal — 20 of the 6667 scenarios failed
+ *                                            their linear solve exactly this way, all of them _BBS_1 outages);
+ *   anything else                         -> nothing: while it SHARES, its DISTR_Q row (diverted home when the
+ *                                            coupler dies) carries its q, and writing the raw q too double-counts.
+ */
+__host__ __device__ inline int stockPairPick(int m, const int* pool, int p, int frozen,
+                                             const int* mode, const int* relocOwn, int dummyRow) {
+    if (m == 4) {
+        return pool[p + 1];
+    }
+    if (m == 0 && relocOwn != nullptr) {
+        int own = relocOwn[dummyRow];
+        if (own >= 0 && mode[own] == 4) {
+            return pool[p];
+        }
+    }
+    return frozen;
+}
+
 inline int cbAltRow(const CbScatter& s, const int* ix) {
     return s.rowEq == 1 ? ix[10 + s.rowEnd] : -1;
 }
@@ -694,6 +734,11 @@ void collectCbAltPattern(int ncb, const int* cbIdx, const int* relocOwn, std::ve
             if (rc.col < 0) {
                 continue;
             }
+            if (stockPairOut(rc.row, origAlt, relocOwn)) {   // STOCK PAIR (see stockPairPick): both rows
+                pat.emplace_back(relocOwn[origAlt], rc.col);
+                pat.emplace_back(origAlt, rc.col);
+                continue;
+            }
             if (altRow <= -2) {                              // GROUP relocation (plan-A6): union EVERY
                 int g = -2 - altRow;                         // candidate row's slot for this column
                 for (int c = qrPtr[g]; c < qrPtr[g + 1]; c++) {
@@ -727,6 +772,21 @@ void buildCbDynDest(int ncb, const int* cbIdx, const int* relocOwn, const CsrPat
             int altRow = stockAltRow(rc.row, origAlt, relocOwn);
             int stockSel = stockSelRow(rc.row, origAlt, relocOwn);
             size_t o = static_cast<size_t>(e) * CB_NOUT + k;
+            if (stockPairOut(rc.row, origAlt, relocOwn)) {
+                // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL pin holds it
+                // there (mode 4), NOTHING while the coupler is dead (that row is an identity — the bus is an
+                // ordinary group controller again and its DISTR_Q row, diverted to its own row, carries its q),
+                // and nothing while it shares. Writing the raw q into the dead coupler's identity row, which
+                // the plain two-way rule does on mode 0, corrupts that identity.
+                if ((s.role == 1 && rc.col >= 0) || s.role == 0) {
+                    relocGroup[o] = origAlt;                 // the selector is the dummy row itself
+                    relocOff[o] = -static_cast<int>(relocPool.size()) - 1;
+                    int own = relocOwn[origAlt];
+                    relocPool.push_back(s.role == 1 ? pos.at(own, rc.col) : -2 - own);
+                    relocPool.push_back(s.role == 1 ? pos.at(origAlt, rc.col) : -2 - origAlt);
+                }
+                continue;
+            }
             if (altRow <= -2) {                              // GROUP relocation (plan-A6): one slot per
                 int g = -2 - altRow;                         // candidate, selected per scenario by the
                 if (s.role == 1 && rc.col >= 0) {            // first-valid-member mode scan
@@ -783,6 +843,11 @@ void collectShAltPattern(int nsh, const int* shIdx, const int* relocOwn, std::ve
             if (rc.col < 0) {
                 continue;
             }
+            if (stockPairOut(rc.row, origAlt, relocOwn)) {   // STOCK PAIR (see stockPairPick): both rows
+                pat.emplace_back(relocOwn[origAlt], rc.col);
+                pat.emplace_back(origAlt, rc.col);
+                continue;
+            }
             if (altRow <= -2) {
                 int g = -2 - altRow;
                 for (int c = qrPtr[g]; c < qrPtr[g + 1]; c++) {
@@ -812,6 +877,21 @@ void buildShDynDest(int nsh, const int* shIdx, const int* relocOwn, const CsrPat
             int altRow = stockAltRow(rc.row, origAlt, relocOwn);
             int stockSel = stockSelRow(rc.row, origAlt, relocOwn);
             size_t o = static_cast<size_t>(e) * SH_NOUT + k;
+            if (stockPairOut(rc.row, origAlt, relocOwn)) {
+                // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL pin holds it
+                // there (mode 4), NOTHING while the coupler is dead (that row is an identity — the bus is an
+                // ordinary group controller again and its DISTR_Q row, diverted to its own row, carries its q),
+                // and nothing while it shares. Writing the raw q into the dead coupler's identity row, which
+                // the plain two-way rule does on mode 0, corrupts that identity.
+                if ((s.role == 1 && rc.col >= 0) || s.role == 0) {
+                    relocGroup[o] = origAlt;                 // the selector is the dummy row itself
+                    relocOff[o] = -static_cast<int>(relocPool.size()) - 1;
+                    int own = relocOwn[origAlt];
+                    relocPool.push_back(s.role == 1 ? pos.at(own, rc.col) : -2 - own);
+                    relocPool.push_back(s.role == 1 ? pos.at(origAlt, rc.col) : -2 - origAlt);
+                }
+                continue;
+            }
             if (altRow <= -2) {
                 int g = -2 - altRow;
                 if (s.role == 1 && rc.col >= 0) {
@@ -867,6 +947,11 @@ void collectObAltPattern(int nob, const int* obIdx, const int* obQAlt, const int
             if (rc.col < 0) {
                 continue;
             }
+            if (stockPairOut(rc.row, origAlt, relocOwn)) {   // STOCK PAIR (see stockPairPick): both rows
+                pat.emplace_back(relocOwn[origAlt], rc.col);
+                pat.emplace_back(origAlt, rc.col);
+                continue;
+            }
             if (altRow <= -2) {
                 int g = -2 - altRow;
                 for (int c = qrPtr[g]; c < qrPtr[g + 1]; c++) {
@@ -896,6 +981,21 @@ void buildObDynDest(int nob, const int* obIdx, const int* obQAlt, const int* rel
             int altRow = stockAltRow(rc.row, origAlt, relocOwn);
             int stockSel = stockSelRow(rc.row, origAlt, relocOwn);
             size_t o = static_cast<size_t>(e) * OB_NOUT + k;
+            if (stockPairOut(rc.row, origAlt, relocOwn)) {
+                // THREE destinations (see stockPairOut): the coupler's DUMMY_Q row while an RL pin holds it
+                // there (mode 4), NOTHING while the coupler is dead (that row is an identity — the bus is an
+                // ordinary group controller again and its DISTR_Q row, diverted to its own row, carries its q),
+                // and nothing while it shares. Writing the raw q into the dead coupler's identity row, which
+                // the plain two-way rule does on mode 0, corrupts that identity.
+                if ((s.role == 1 && rc.col >= 0) || s.role == 0) {
+                    relocGroup[o] = origAlt;                 // the selector is the dummy row itself
+                    relocOff[o] = -static_cast<int>(relocPool.size()) - 1;
+                    int own = relocOwn[origAlt];
+                    relocPool.push_back(s.role == 1 ? pos.at(own, rc.col) : -2 - own);
+                    relocPool.push_back(s.role == 1 ? pos.at(origAlt, rc.col) : -2 - origAlt);
+                }
+                continue;
+            }
             if (altRow <= -2) {
                 int g = -2 - altRow;
                 if (s.role == 1 && rc.col >= 0) {
@@ -961,6 +1061,10 @@ struct RelocTables {
     // and its raw q must NOT be emitted at the carrier row. Null = no such group, every pick as before.
     const char* psSkip = nullptr;
     int psGroups = 0;                                        // stride of psSkip (= nQr)
+    // Per row: the relocated child's OWN row for a coupler dummy row, -1 elsewhere. A stock pair needs it to
+    // tell "the coupler is dead AND this bus is PINNED at home" (its own q belongs on its own row) from
+    // "the coupler is dead and it still SHARES" (its DISTR_Q, diverted home, carries its q).
+    const int* relocOwn = nullptr;
 };
 
 // GROUP pilot-Q relocation (plan-A6): candidates = [fallback row, member rows in merged order];
@@ -1009,6 +1113,9 @@ __device__ inline int ziDynDest(int frozen, int slot, const int* alt, const int*
                                 const int* mode, RelocTables rt) {
     int rg = rt.group != nullptr ? rt.group[slot] : -1;
     if (rg >= 0) {
+        if (rt.off[slot] < 0) {                              // STOCK PAIR: group slot holds the dummy ROW
+            return stockPairPick(mode[rg], rt.pool, -rt.off[slot] - 1, frozen, mode, rt.relocOwn, rg);
+        }
         if (rt.psSkip != nullptr && rt.psSkip[rg]) {
             return -1;                                       // pilot-self group, pilot unpinned: no raw q
         }
@@ -1027,10 +1134,11 @@ __device__ void scatterAddDyn(int nout, const int* dest, const int* altDest, con
     for (int k = 0; k < nout; k++) {
         int d;
         int rg = rt.group != nullptr ? rt.group[eOff + k] : -1;
-        if (rg >= 0 && rt.psSkip != nullptr && rt.psSkip[rg]) {
+        if (rg >= 0 && rt.off[eOff + k] < 0) {               // STOCK PAIR: group slot holds the dummy ROW
+            d = stockPairPick(mode[rg], rt.pool, -rt.off[eOff + k] - 1, dest[k], mode, rt.relocOwn, rg);
+        } else if (rg >= 0 && rt.psSkip != nullptr && rt.psSkip[rg]) {
             continue;                                        // pilot-self group, pilot unpinned: no raw q
-        }
-        if (rg >= 0) {
+        } else if (rg >= 0) {
             d = rt.pool[rt.off[eOff + k] + relocChoose(rg, rt.qrPtr, rt.qrRows, mode)];
         } else {
             int sr = selRow[k];
@@ -1138,11 +1246,18 @@ __global__ void fillHvdc(int ne, const double* in, const int* ix, const int* des
 // applyRowMode leaves it; the controllers' own per-bus Q scatter was suppressed (qRow=-1) on the host.
 __global__ void fillDistrQ(int ndq, const int* dqElem, const int* dqSide, const int* dqKind,
                            const double* dqWeight, const int* dqDest,
+                           const int* dqAlt, const int* dqSel, const int* dqZiRow,
                            const double* cbIn, const int* cbIx, const double* shIn, const int* shIx,
                            const double* obIn, const int* obIx,
                            const double* x, double* vals, double* F, const int* mode) {
     int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= ndq) return;
+    // the same STOCK placement the batched fill makes: an identity on the relocated row means that
+    // coupler is gone and the sharing equation belongs on the bus's own row (see buildDistrQDest)
+    if (dqSel != nullptr && dqSel[c] >= 0 && dqAlt != nullptr && mode[dqSel[c]] == 0
+            && dqAlt[c * 6] <= -2) {
+        dqDest = dqAlt;
+    }
     int e = dqElem[c];
     double w = dqWeight[c];
     const int* dst = dqDest + c * 6;
@@ -2352,24 +2467,36 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
                           int ndq, const int* dqElem, const int* dqSide, const int* dqKind, const int* dqRow,
                           int ndr, const int* drRow, const int* drCol,
                           int ndb, const int* dbRow, const int* dbCol,
-                          int nzi, const int* ziIdx,
+                          int nzi, const int* ziIdx, const int* relocOwn,
                           std::vector<std::pair<int, int>>& pat) {
     for (int c = 0; c < ndq; c++) {
-        int mappedRow = rowMap[dqRow[c]];
-        if (dqKind[c] == 1) {                                // shunt q: bus V column
-            pat.emplace_back(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 5 + 2]);
-        } else if (dqKind[c] == 2) {                         // half-open: connected-side V column
-            const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
-            pat.emplace_back(mappedRow, dqSide[c] == 0 ? oq[4] : oq[5]);
-        } else if (dqKind[c] == 3) {                         // zero-imp DUMMY_Q column
-            pat.emplace_back(mappedRow, dqElem[c]);
-        } else {                                             // closed branch: v1 v2 ph1 ph2 r1
-            const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 12;
-            pat.emplace_back(mappedRow, q[5]);
-            pat.emplace_back(mappedRow, q[7]);
-            pat.emplace_back(mappedRow, q[4]);
-            pat.emplace_back(mappedRow, q[6]);
-            if (q[9] >= 0) pat.emplace_back(mappedRow, q[9]);
+        // Twice for a relocated child's sharing row: where it lives while the coupler stands, and on the
+        // bus's OWN row, which is where it goes in any scenario that kills that coupler (see buildDistrQDest).
+        int mapped = rowMap[dqRow[c]];
+        int own = relocOwn != nullptr && mapped >= 0 ? relocOwn[mapped] : -1;
+        for (int pass = 0; pass < 2; pass++) {
+            int mappedRow = pass == 0 ? mapped : own;
+            if (mappedRow < 0) {
+                continue;
+            }
+            if (pass == 1) {
+                pat.emplace_back(mappedRow, mappedRow);      // the stock row's own diagonal
+            }
+            if (dqKind[c] == 1) {                            // shunt q: bus V column
+                pat.emplace_back(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 5 + 2]);
+            } else if (dqKind[c] == 2) {                     // half-open: connected-side V column
+                const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
+                pat.emplace_back(mappedRow, dqSide[c] == 0 ? oq[4] : oq[5]);
+            } else if (dqKind[c] == 3) {                     // zero-imp DUMMY_Q column
+                pat.emplace_back(mappedRow, dqElem[c]);
+            } else {                                         // closed branch: v1 v2 ph1 ph2 r1
+                const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 12;
+                pat.emplace_back(mappedRow, q[5]);
+                pat.emplace_back(mappedRow, q[7]);
+                pat.emplace_back(mappedRow, q[4]);
+                pat.emplace_back(mappedRow, q[6]);
+                if (q[9] >= 0) pat.emplace_back(mappedRow, q[9]);
+            }
         }
     }
     for (int c = 0; c < ndr; c++) {                          // DISTR_RHO: controller r1 column in a DISTR_RHO row
@@ -2440,6 +2567,12 @@ struct SharedStructure {
     DeviceBuf cbTrig;                                        // per closed-branch STATIC trig (6 doubles: sinKsi cosKsi sinC1 cosC1 sinC2 cosC2)
     int ndq = 0;                                             // DISTR_Q weighted reactive contributions
     DeviceBuf dDqElem, dDqSide, dDqKind, dDqWeight, dDqDest; // ndq each (dDqDest is ndq*6)
+    DeviceBuf dRelocOwn;                                     // per row: the relocated child's OWN row for a
+                                                             // coupler DUMMY row, -1 elsewhere (stock placement)
+    DeviceBuf dDqZiRow;                                      // per contribution: a kind-3 coupler dummy
+                                                             // column's device ROW, -1 otherwise
+    DeviceBuf dDqAlt, dDqSel;                                // the STOCK-placement twin of dDqDest
+                                                             // (ndq*6) and the dummy row it keys on (ndq)
     int nzi = 0;                                             // zero-impedance branches
     DeviceBuf dZiIn, dZiIdx, dZiDest;                        // nzi (dZiIn) / nzi*11 (dZiIdx) / nzi*14 (dZiDest)
     DeviceBuf dDrQrGroup;                                    // per DISTR_RHO contribution: the qr relocation group
@@ -2474,27 +2607,55 @@ using SharedStructurePtr = std::shared_ptr<SharedStructure>;
 static void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
                             int ndq, const int* dqElem, const int* dqSide, const int* dqKind,
                             const double* dqWeight, const int* dqRow,
-                            const int* cbIdx, const int* obIdx, const int* shIdx) {
+                            const int* cbIdx, const int* obIdx, const int* shIdx, const int* relocOwn) {
     st->ndq = ndq;
     if (ndq > 0) {
         std::vector<int> dqDest(static_cast<size_t>(ndq) * 6, -1);
+        // The COUPLER-TREE stock placement for a DISTR_Q row: a relocated child's sharing equation sits on
+        // its parent coupler's DUMMY_Q row, and a scenario that kills that coupler pins the row to an
+        // identity — the equation then has to be back on the bus's OWN row, exactly where OLF keeps a
+        // controller's DISTR_Q. dqAlt holds the same six destinations recomputed there and dqSel the dummy
+        // row whose per-scenario mode decides (0 = dead). Without it the middle-section-loss fixtures
+        // converged on a system one equation short: bus vl3_b 395.43 kV against OLF's 401.69.
+        std::vector<int> dqAlt(static_cast<size_t>(ndq) * 6, -1);
+        std::vector<int> dqSel(static_cast<size_t>(ndq), -1);
+        // A kind-3 contribution is a COUPLER's DUMMY_Q inside this controller's reactive injection; the pack
+        // carries the dummy COLUMN, and the per-scenario mode that says whether that coupler is still alive
+        // lives at its ROW. Keep the mapped row per contribution so the fill can ask.
+        std::vector<int> dqZiRow(static_cast<size_t>(ndq), -1);
         for (int c = 0; c < ndq; c++) {
             int mappedRow = rowMap[dqRow[c]];
-            dqDest[c * 6 + 0] = -2 - mappedRow;              // q value -> F row
-            if (dqKind[c] == 1) {                            // shunt: dq/dv on the bus V column
-                dqDest[c * 6 + 1] = pos.at(mappedRow, shIdx[static_cast<size_t>(dqElem[c]) * 5 + 2]);
-            } else if (dqKind[c] == 2) {                     // half-open: dq/dv on the connected-side V col
-                const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
-                dqDest[c * 6 + 1] = pos.at(mappedRow, dqSide[c] == 0 ? oq[4] : oq[5]);
-            } else if (dqKind[c] == 3) {                     // zero-impedance: J slot on the dummyQ column
-                dqDest[c * 6 + 1] = pos.at(mappedRow, dqElem[c]);
-            } else {                                         // closed branch
-                const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 12;
-                dqDest[c * 6 + 1] = pos.at(mappedRow, q[5]);     // dq/dv1
-                dqDest[c * 6 + 2] = pos.at(mappedRow, q[7]);     // dq/dv2
-                dqDest[c * 6 + 3] = pos.at(mappedRow, q[4]);     // dq/dph1
-                dqDest[c * 6 + 4] = pos.at(mappedRow, q[6]);     // dq/dph2
-                dqDest[c * 6 + 5] = q[9] >= 0 ? pos.at(mappedRow, q[9]) : -1;  // dq/dr1
+            int ownRow = relocOwn != nullptr && mappedRow >= 0 ? relocOwn[mappedRow] : -1;
+            // OLF_GPU_NO_DQ_STOCK=1: build the twin but never divert to it (bisection lever)
+            static const bool noDqStock = std::getenv("OLF_GPU_NO_DQ_STOCK") != nullptr;
+            if (ownRow >= 0 && !noDqStock) {
+                dqSel[c] = mappedRow;
+            }
+            if (dqKind[c] == 3 && dqElem[c] >= 0) {
+                dqZiRow[c] = rowMap[dqElem[c]];
+            }
+            for (int pass = 0; pass < 2; pass++) {           // pass 0 = the real row, pass 1 = the stock row
+                int row = pass == 0 ? mappedRow : ownRow;
+                int* d = (pass == 0 ? dqDest : dqAlt).data() + static_cast<size_t>(c) * 6;
+                if (row < 0) {
+                    continue;
+                }
+                d[0] = -2 - row;                             // q value -> F row
+                if (dqKind[c] == 1) {                        // shunt: dq/dv on the bus V column
+                    d[1] = pos.at(row, shIdx[static_cast<size_t>(dqElem[c]) * 5 + 2]);
+                } else if (dqKind[c] == 2) {                 // half-open: dq/dv on the connected-side V col
+                    const int* oq = obIdx + static_cast<size_t>(dqElem[c]) * 6;
+                    d[1] = pos.at(row, dqSide[c] == 0 ? oq[4] : oq[5]);
+                } else if (dqKind[c] == 3) {                 // zero-impedance: J slot on the dummyQ column
+                    d[1] = pos.at(row, dqElem[c]);
+                } else {                                     // closed branch
+                    const int* q = cbIdx + static_cast<size_t>(dqElem[c]) * 12;
+                    d[1] = pos.at(row, q[5]);                // dq/dv1
+                    d[2] = pos.at(row, q[7]);                // dq/dv2
+                    d[3] = pos.at(row, q[4]);                // dq/dph1
+                    d[4] = pos.at(row, q[6]);                // dq/dph2
+                    d[5] = q[9] >= 0 ? pos.at(row, q[9]) : -1;   // dq/dr1
+                }
             }
         }
         st->dDqElem.upload(dqElem, ndq * sizeof(int));
@@ -2502,6 +2663,9 @@ static void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const st
         st->dDqKind.upload(dqKind, ndq * sizeof(int));
         st->dDqWeight.upload(dqWeight, ndq * sizeof(double));
         st->dDqDest.upload(dqDest.data(), dqDest.size() * sizeof(int));
+        st->dDqAlt.upload(dqAlt.data(), dqAlt.size() * sizeof(int));
+        st->dDqSel.upload(dqSel.data(), dqSel.size() * sizeof(int));
+        st->dDqZiRow.upload(dqZiRow.data(), dqZiRow.size() * sizeof(int));
     }
 }
 
@@ -2680,10 +2844,17 @@ static void buildDistrShuntBDest(SharedStructure* st, const CsrPattern& pos, con
 // FALLBACK row (the pilot's own row, read by no outer loop) so a remote member's diagnostic q
 // row carries ONLY its own injection (fillRemoteMemberQBatch). Without this the pilot's whole
 // balance lands on the base carrier's row and corrupts the free member's reactive-limit check.
-static void patchFrozenGroupDests(DeviceBuf& dest, const std::vector<int>& relocGroup, int nout,
+static void patchFrozenGroupDests(DeviceBuf& dest, const std::vector<int>& relocGroup,
+                                  const std::vector<int>& relocOff, int nout,
                                   const int* scatterRole, const int* qrPtr, const int* qrRows) {
     for (size_t o = 0; o < relocGroup.size(); o++) {
         int g = relocGroup[o];
+        // A STOCK PAIR (negative offset) parks the DUMMY ROW in the group slot, not a group id — reading
+        // qrPtr[row] there walked off the candidate table and wrote a garbage dest, which the device then
+        // used: "CUDA error: an illegal memory access" out of createBatchContext.
+        if (g >= 0 && relocOff[o] < 0) {
+            continue;
+        }
         if (g >= 0 && scatterRole[o % nout] == 0) {
             int v = -2 - qrRows[qrPtr[g]];
             CUDA_CHECK(cudaMemcpy(dest.as<int>() + o, &v, sizeof(int), cudaMemcpyHostToDevice));
@@ -2700,6 +2871,7 @@ static RelocTables relocOf(Family& f, SharedStructure* st) {
         rt.pool = f.relocPool.as<int>();
         rt.qrPtr = st->dQrPtr.as<int>();
         rt.qrRows = st->dQrRows.as<int>();
+        rt.relocOwn = st->dRelocOwn.p != nullptr ? st->dRelocOwn.as<int>() : nullptr;
     }
     return rt;
 }
@@ -2724,6 +2896,7 @@ static RelocTables ziRelocOf(SharedStructure* st) {
         rt.pool = st->dZiRelocPool.as<int>();
         rt.qrPtr = st->dQrPtr.as<int>();
         rt.qrRows = st->dQrRows.as<int>();
+        rt.relocOwn = st->dRelocOwn.p != nullptr ? st->dRelocOwn.as<int>() : nullptr;
     }
     return rt;
 }
@@ -2778,6 +2951,9 @@ SharedStructure* buildStructure(int n,
         }
     }
     const int* relocOwn = anyRelocOwn ? relocOwnRow.data() : nullptr;
+    if (anyRelocOwn) {                                       // the kernels that divert per scenario need it
+        st->dRelocOwn.upload(relocOwnRow.data(), relocOwnRow.size() * sizeof(int));
+    }
     auto mapRows = [&](const int* idx, int ne, int stride, std::initializer_list<int> rowSlots) {
         std::vector<int> out(idx, idx + static_cast<size_t>(ne) * stride);
         for (int e = 0; e < ne; e++) {
@@ -2841,7 +3017,7 @@ SharedStructure* buildStructure(int n,
     }
     collectPattern(nhv, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pat);
     collectFamilyPattern(rowMap, cbIdx, obIdx, shIdx, ndq, dqElem, dqSide, dqKind, dqRow,
-                         ndr, drRow, drCol, ndb, dbRow, dbCol, nzi, ziIdx, pat);
+                         ndr, drRow, drCol, ndb, dbRow, dbCol, nzi, ziIdx, dynReloc ? relocOwn : nullptr, pat);
     if (dynReloc) {
         for (int e = 0; e < nzi; e++) {                      // zi STOCK positions: a +-dummy coupling that lands on
         const int* z = ziIdx + static_cast<size_t>(e) * 11;   // a relocated bus's home row also needs the slot
@@ -3051,7 +3227,7 @@ SharedStructure* buildStructure(int n,
             for (int k = 0; k < CB_NOUT; k++) {
                 cbRoles[k] = CB_SCATTER[k].role;
             }
-            patchFrozenGroupDests(st->cb.dest, relocGroup, CB_NOUT, cbRoles,
+            patchFrozenGroupDests(st->cb.dest, relocGroup, relocOff, CB_NOUT, cbRoles,
                     st->hQrPtr.data(), st->hQrRows.data());
         }
         st->cb.dynReloc = true;
@@ -3087,7 +3263,7 @@ SharedStructure* buildStructure(int n,
             for (int k = 0; k < OB_NOUT; k++) {
                 obRoles[k] = OB_SCATTER[k].role;
             }
-            patchFrozenGroupDests(st->ob.dest, obRelocGroup, OB_NOUT, obRoles,
+            patchFrozenGroupDests(st->ob.dest, obRelocGroup, obRelocOff, OB_NOUT, obRoles,
                     st->hQrPtr.data(), st->hQrRows.data());
         }
         st->ob.dynReloc = true;
@@ -3111,7 +3287,7 @@ SharedStructure* buildStructure(int n,
             for (int k = 0; k < SH_NOUT; k++) {
                 shRoles[k] = SH_SCATTER[k].role;
             }
-            patchFrozenGroupDests(st->sh.dest, shRelocGroup, SH_NOUT, shRoles,
+            patchFrozenGroupDests(st->sh.dest, shRelocGroup, shRelocOff, SH_NOUT, shRoles,
                     st->hQrPtr.data(), st->hQrRows.data());
         }
         st->sh.dynReloc = true;
@@ -3120,7 +3296,7 @@ SharedStructure* buildStructure(int n,
 
     // ---- DISTR_Q destinations: per contribution {F-row, dq/dv1, dq/dv2, dq/dph1, dq/dph2, dq/dr1}
     //      (-2-row encodes an F row, >=0 a J slot, -1 skip) ----
-    buildDistrQDest(st.get(), pos, rowMap, ndq, dqElem, dqSide, dqKind, dqWeight, dqRow, cbIdx, obIdx, shIdx);
+    buildDistrQDest(st.get(), pos, rowMap, ndq, dqElem, dqSide, dqKind, dqWeight, dqRow, cbIdx, obIdx, shIdx, relocOwn);
 
     // ---- zero-impedance destinations: per branch the 8 dummy couplings + (tree) the 6 ZERO_V/ZERO_PHI ----
     buildZeroImpDest(st.get(), pos, rowMap, nzi, ziIn, ziIdx, ziQAlt, relocOwn);
@@ -3342,7 +3518,7 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
         if (ctx->st->sh.ne) fillShunt<<<grid(ctx->st->sh.ne), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0, withPilotSelf(relocOf(ctx->st->sh, ctx->st.get()), ctx));
         if (ctx->st->nvdl) fillVdlBatch<<<grid(ctx->st->nvdl), BLOCK, 0, ctx->stream>>>(ctx->st->nvdl, 1, ctx->st->n, ctx->st->nnz, ctx->st->dVdlIn.as<double>(), ctx->st->dVdlIdx.as<int>(), ctx->st->dVdlDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
         if (ctx->st->hv.ne) fillHvdc<<<grid(ctx->st->hv.ne), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
-        if (ctx->ndq) fillDistrQ<<<grid(ctx->ndq), BLOCK, 0, ctx->stream>>>(ctx->ndq, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dMode.as<int>());
+        if (ctx->ndq) fillDistrQ<<<grid(ctx->ndq), BLOCK, 0, ctx->stream>>>(ctx->ndq, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->dDqAlt.as<int>(), ctx->st->dDqSel.as<int>(), ctx->st->dDqZiRow.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dMode.as<int>());
         if (ctx->nzi) fillZeroImp<<<grid(ctx->nzi), BLOCK, 0, ctx->stream>>>(ctx->nzi, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx));
         if (ctx->ndr) fillDistrRho<<<grid(ctx->ndr), BLOCK, 0, ctx->stream>>>(ctx->ndr, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
         if (ctx->ndb) fillDistrShuntB<<<grid(ctx->ndb), BLOCK, 0, ctx->stream>>>(ctx->ndb, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
@@ -3849,10 +4025,11 @@ __device__ void scatterAddFDyn(int nres, const int* dest, const int* altDest, co
         int idx = pos[k];
         int d;
         int rg = rt.group != nullptr ? rt.group[eOff + idx] : -1;
-        if (rg >= 0 && rt.psSkip != nullptr && rt.psSkip[rg]) {
+        if (rg >= 0 && rt.off[eOff + idx] < 0) {             // STOCK PAIR: group slot holds the dummy ROW
+            d = stockPairPick(mode[rg], rt.pool, -rt.off[eOff + idx] - 1, dest[idx], mode, rt.relocOwn, rg);
+        } else if (rg >= 0 && rt.psSkip != nullptr && rt.psSkip[rg]) {
             continue;                                        // pilot-self group, pilot unpinned: no raw q
-        }
-        if (rg >= 0) {
+        } else if (rg >= 0) {
             d = rt.pool[rt.off[eOff + idx] + relocChoose(rg, rt.qrPtr, rt.qrRows, mode)];
         } else {
             int sr = selRow[idx];
@@ -4057,6 +4234,7 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
                                 int cbOffset, int obOffset,
                                 const int* dqElem, const int* dqSide, const int* dqKind,
                                 const double* dqWeight, const int* dqDest,
+                                const int* dqAlt, const int* dqSel, const int* dqZiRow,
                                 const double* cbIn, const int* cbIx, const double* shIn, const int* shIx,
                                 const double* obIn, const int* obIx,
                                 const double* x, double* vals, double* F,
@@ -4077,6 +4255,12 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
     int c = tid % ndq;
     int s = tid / ndq;
     if (!active[s]) return;
+    // STOCK PLACEMENT: a relocated child's sharing row moves to the bus's OWN row in any scenario that
+    // kills its parent coupler, which pins that coupler's DUMMY_Q row to an identity (see buildDistrQDest).
+    if (dqSel != nullptr && dqSel[c] >= 0 && dqAlt != nullptr
+            && mode[(size_t) s * n + dqSel[c]] == 0 && dqAlt[c * 6] <= -2) {
+        dqDest = dqAlt;
+    }
     // an RL-PINNED remote member's row (mode 4) hosts its OWN Q balance — its DISTR_Q emissions
     // stop for this scenario (the CPU deactivates only that member's DISTR_Q equation)
     {
@@ -4101,6 +4285,12 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
     int kind = dqKind[c];
     if (kind == 0 && disabled[s * nElements + cbOffset + e]) return;   // outaged closed contributor
     if (kind == 2 && disabled[s * nElements + obOffset + e]) return;   // outaged open contributor
+    // kind 3 is a COUPLER's DUMMY_Q as part of this controller's reactive injection, and its element index
+    // IS that dummy column (= its row). A scenario that kills the coupler pins that row to an identity, and
+    // the coupler then carries no reactive flow at all — the contribution has to go with it. Measured on the
+    // middle-section-loss fixtures: the surviving section's DISTR_Q row kept a coefficient 1 on the dead
+    // coupler's DUMMY_Q and the solve landed 0.34 kV off (bus vl3_b 401.35 against OLF's 401.69).
+    if (kind == 3 && dqZiRow != nullptr && dqZiRow[c] >= 0 && mode[(size_t) s * n + dqZiRow[c]] == 0) return;
     double w = dqWeight[c];
     int kM = dqKMember != nullptr ? dqKMember[c] : -1;
     if (kM >= 0) {
@@ -4762,7 +4952,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                                          int nFrozen, const int* frozenSlotRow,
                                          int nTqOv, const int* tqOvKey, const double* tqOvVal,
                                          const int* mTgtPtr, const int* mTgtPeer,
-                                         const int* psEntry, int psMask) {
+                                         const int* psEntry, int psMask, const int* relocOwn) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nMembers * nScenarios) return;
     int k = tid % nMembers;
@@ -4774,10 +4964,19 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     if ((psMask & 1) && psEntry != nullptr && qg >= 0 && psEntry[qg] >= 0) qg = -1;
     if (!mHasRow[k] && qg < 0) return;                       // only members owning a packed DISTR_Q row
                                                              // (or linked to a relocation group, plan-B4)
-    if (mRow[k] >= 0 && rowIsFrozen(nFrozen, frozenSlotRow, s, mRow[k])) {
+    // STOCK PLACEMENT: this member's packed DISTR_Q row is its parent coupler's DUMMY_Q row, and a
+    // scenario that kills that coupler pins it to an identity — the sharing equation (and so its target)
+    // is then on the bus's OWN row, where fillDistrQBatch puts it. Without the same diversion here the
+    // identity test below returned and the diverted row kept target 0: measured on the middle-section-loss
+    // fixtures as 401.35 kV against OLF's 401.69 once the equation itself had moved.
+    int mrow = mRow[k];
+    if (mrow >= 0 && relocOwn != nullptr && relocOwn[mrow] >= 0 && mode[(size_t) s * n + mrow] == 0) {
+        mrow = relocOwn[mrow];
+    }
+    if (mrow >= 0 && rowIsFrozen(nFrozen, frozenSlotRow, s, mrow)) {
         return;                                              // islanded: the row is frozen, not ours to write
     }
-    if (mRow[k] >= 0 && mode[(size_t) s * n + mRow[k]] == 0) {
+    if (mrow >= 0 && mode[(size_t) s * n + mrow] == 0) {
         // The row is a VOLTAGE IDENTITY this scenario: a control OLF re-merged onto this bus after a
         // zero-impedance split (GpuBatchQualification.reHomedControls — the bus is a plain PV bus at its
         // own target, and the member has left the group), or a frozen/outaged row. A DISTR_Q target
@@ -4785,7 +4984,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
         // target 1.039 became 0.000 at the first RL pass and the solve ran to MAX_ITERATION on it.
         return;
     }
-    if (mRow[k] >= 0 && mode[(size_t) s * n + mRow[k]] == 4) {
+    if (mrow >= 0 && mode[(size_t) s * n + mrow] == 4) {
         // The row hosts its OWN reactive balance this scenario (mode 4): an RL pin (the RL kernel
         // owns the target) or a control the contingency KILLED (the injection override owns it,
         // OLF's BUS_TARGET_Q). A DISTR_Q target has no business here — fillDistrQBatch already
@@ -4802,10 +5001,10 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
         // member without a packed DISTR_Q row (the base free member, superseded mid-scenario) has
         // no row to maintain here — the RL kernel owns it while pinned.
         int carrier = qrRows[qrPtr[qg] + relocChoose(qg, qrPtr, qrRows, mode + (size_t) s * n)];
-        if (mRow[k] == carrier) {
+        if (mrow == carrier) {
             int pe = psEntry != nullptr ? psEntry[qg] : -1;  // the group's own pilot, when it is one of its controllers
             if (pe < 0) {
-                target[(size_t) s * n + mRow[k]] = pilotQ[(size_t) s * nQr + qg];
+                target[(size_t) s * n + mrow] = pilotQ[(size_t) s * nQr + qg];
                 return;
             }
             char plt = limitType[(size_t) s * nrl + pe];
@@ -4815,7 +5014,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                 // nearer limit here; rlInitTgtQ is not in this kernel's tables.
                 size_t pli = cvStride ? (size_t) s * nrl + pe : (size_t) pe;
                 double lim = (plt == 1 || plt == 3) ? rlMinQ[pli] : rlMaxQ[pli];
-                target[(size_t) s * n + mRow[k]] = lim - rlLoadQ[pli];
+                target[(size_t) s * n + mrow] = lim - rlLoadQ[pli];
                 return;
             }
             // pilot-self, pilot UNPINNED: its q feeds the DISTR_Q rows weighted and the carrier hosts its OWN
@@ -4864,7 +5063,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     // targetQ; anywhere else the device solved the row against a target short by exactly
     // qPct_k * sum_unpinned targetQ_j - targetQ_k, and drove the members to equal reactive
     // injections instead of equally-shared DEVIATIONS from their targets.
-    target[(size_t) s * n + mRow[k]] = qpk * sumTargetQ
+    target[(size_t) s * n + mrow] = qpk * sumTargetQ
             - dqTargetQOf(nTqOv, tqOvKey, tqOvVal, s, nMembers, k, mTargetQ);
 }
 
@@ -5026,13 +5225,15 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
         // pilot stayed a power row beside a member that had resumed control.
         veqOff[fi] = 1;
         savedVTarget[fi] = rlVtarget[pe];
-    } else if (act && !lost && mode[pi] == 1 && pe < 0 && qrPilotRlEntry != nullptr && qrPilotRlEntry[g] >= 0) {
-        // control lost in the BASE, a member just unpinned: the V identity comes back with the
-        // group's target (the base carried no saved one — the pilot's local entry has it). A
-        // pilot-self group (pe >= 0) books the same state as flipped above and restores through veqOff.
-        int lpe = qrPilotRlEntry[g];
+    } else if (!lost && pe < 0 && mode[pi] == 1 && qrPilotRlEntry != nullptr && qrPilotRlEntry[g] >= 0) {
+        // The same base-lost case for a PURE-TRANSIT pilot (not one of its own controllers, so no
+        // psEntry): the base carried no saved V target - the pilot's own local reactive-limit entry
+        // holds the group's target (per-scenario overrides included). A member just unpinned, and
+        // OLF gives the pilot its V equation back IN THAT PASS (network.xiidm/LNER: IZUM_0's three
+        // members unpinned on a 7.85e-07 pu margin; restoring a pass late cost 0.151 MW of slack).
+        int le = qrPilotRlEntry[g];
         mode[pi] = 0;
-        target[pi] = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, lpe, rlVtarget[lpe]);
+        target[pi] = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, le, rlVtarget[le]);
         switched[s] = 1;
     }
 }
@@ -5485,6 +5686,20 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
     }
     int vrow = rlVrow[i];
     size_t idx = (size_t) s * n + vrow;
+    // The q this check READS is accumulated by fillRemoteMemberQBatch at rlQrow, which for a relocated
+    // child is the parent coupler's DUMMY_Q row and NOT its own V row (see the rlQrow comment in
+    // GpuAcOuterLoopPacks: filling the own row "left the check reading ZERO for every relocated member,
+    // so it could never pin one"). That pack is STRUCTURAL -- it keeps writing there even in a scenario
+    // that pins the dummy to a DUMMY_TARGET identity -- and qBuf is a separate accumulator, so reading it
+    // there is valid whatever the row's equation MODE. Only the pin WRITE belongs on the live row, which
+    // is idx. Conflating the two reproduced that base failure per scenario: measured on rte6515
+    // BUS-6113_BBS_1, VL-6113_1 is re-homed LOCAL (reHomePv rlEntry=969) and OLF pins it MIN_Q at
+    // q=-3.231 against a -0.774 limit, while the device read q~0 and never pinned. Its THIRD slack check
+    // then measured 0.013280180 where OLF measures 0.006846832 -- straddling the 1 MW gate -- so the
+    // device took a distribution OLF does not and reported 1.328 MW more distributed active power: the
+    // worst such difference on the whole busbar scope.
+    size_t qIdx = (rlQrow != nullptr && rlQrow[i] >= 0 && rlQrow[i] != vrow)
+            ? (size_t) s * n + rlQrow[i] : idx;
     size_t st = (size_t) s * nrl + i;
     size_t li = cvStride ? st : (size_t) i;                 // curve limits are per (scenario, entry)
     bool slopeRow = rowSlope[vrow] != 0;                    // SLOPE-SVC bus: its PV form is row mode 2
@@ -5509,12 +5724,12 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
     // nothing restored the row then; now something does, in the same pass OLF does it, and this
     // entry's own voltage test (a pin type guessed for an empty range) fired a pass late on LNER.
     if (liMin >= liMax) {
-        swLogPut(passSwitched[st], qBuf[idx] + rlLoadQ[li], liMin, liMax, x[idx], x[idx],
+        swLogPut(passSwitched[st], qBuf[qIdx] + rlLoadQ[li], liMin, liMax, x[idx], x[idx],
                  rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]));
         return;
     }
     if ((mode[idx] == 0 || mode[idx] == 2) && limitType[st] == 0) {   // currently PV — check the reactive limits
-        double q = qBuf[idx] + rlLoadQ[li];
+        double q = qBuf[qIdx] + rlLoadQ[li];
         if (q < liMin - tol) {
             savedTarget[st] = target[idx];                   // remember the row target for the switch-back
             savedMode[st] = static_cast<char>(mode[idx]);   // and the PV form (0, or 2 for a slope SVC)
@@ -5567,7 +5782,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             }
         }
     }
-    swLogPut(passSwitched[st], qBuf[idx] + rlLoadQ[li], liMin, liMax, x[idx], x[idx],
+    swLogPut(passSwitched[st], qBuf[qIdx] + rlLoadQ[li], liMin, liMax, x[idx], x[idx],
              rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]));
 }
 
@@ -5773,8 +5988,22 @@ __global__ void slackOnlyDsCheck(int nScenarios, int n, int slackPhiRow, double 
     }
 }
 
+// The row this SCENARIO solves participant i's P balance on. Normally its structural dsPhiRow; under
+// the coupler-tree relocation that is the parent coupler's DUMMY_P row, and a scenario opening that
+// coupler moves the balance back to the bus's own BUS_PHI row (setBatchDsRowOverrides).
+__host__ __device__ inline int dsRowOf(const int* dsPhiRow, const int* dsRowOv, int s, int nds, int i) {
+    if (dsRowOv != nullptr) {
+        int r = dsRowOv[(size_t) s * nds + i];
+        if (r >= 0) {
+            return r;
+        }
+    }
+    return dsPhiRow[i];
+}
+
 __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiRow, double slackTargetP,
-                                   double oneMinusFactorSum, const int* dsPhiRow, const double* dsBaseTargetP,
+                                   double oneMinusFactorSum, const int* dsPhiRow, const int* dsRowOv,
+                                   const double* dsBaseTargetP,
                                    const double* target, const double* qBuf, const char* rlActive,
                                    double* retain,
                                    const int* dsOvBus, const double* dsOvBaseDelta,
@@ -5804,7 +6033,7 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
         if (ov == i) {                                       // setGeneratorsInitialTargetPToTargetP before the
             base -= dsOvBaseDelta[s];                        // strategy re-solve)
         }
-        absorbed += target[(size_t) s * n + dsPhiRow[i]] - base;
+        absorbed += target[(size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, i)] - base;
     }
     double slackTgt = slackTargetP + (dsSlackShift != nullptr ? dsSlackShift[s] : 0.0);
     double tot = (qBuf[(size_t) s * n + slackPhiRow] - slackTgt) + absorbed;   // total-from-anchor, OLF's
@@ -5851,7 +6080,7 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
 // redistributed only AFTER the next re-solve) would drift — the loss change between re-solves converges to a
 // different in-tolerance point than OLF.
 __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slackDistTol, double residueEps,
-                                              int slackPhiRow, double slackTargetP, const int* dsPhiRow,
+                                              int slackPhiRow, double slackTargetP, const int* dsPhiRow, const int* dsRowOv,
                                               const double* dsFactor, const double* dsBaseTargetP, const double* dsAnchorShift, const double* dsSlackShift,
                                               const double* dsMaxDelta, const double* dsMinDelta, const double* dsRetain,
                                               const double* qBuf, const char* rlActive,
@@ -5931,11 +6160,21 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                qBuf[(size_t) s * n + slackPhiRow] - slackTgt, dsRetain[s], rem, fsGlobal, slackDistTol, slackTgt,
                (fsGlobal > 0.0 && fabs(rem) > fsGlobal * slackDistTol) ? 1 : 0);
     }
-    if (gateLast != nullptr) {                              // what this gate saw, host-readable (no printf)
-        gateLast[4 * s] = rem;
-        gateLast[4 * s + 1] = (fsGlobal > 0.0 && fabs(rem) > fsGlobal * slackDistTol) ? 1.0 : 0.0;
-        gateLast[4 * s + 2] = qBuf[(size_t) s * n + slackPhiRow];   // the two halves of the mismatch, so a
-        gateLast[4 * s + 3] = slackTgt;                              // gate that differs from OLF's can be split
+    if (gateLast != nullptr) {
+        // The WHOLE accounting of one slack pass, host-readable (device printf does not reach the test log).
+        // [0] rem the gate compares, [1] fired, [2] the slack's own injection, [3] its target, [4] the
+        // mismatch between them, [5] the share the slack is assumed to hold, [6] the participants' global
+        // factor sum, [7] the amount the water-fill places (written below). OLF's counterpart is one line,
+        // `DS_RUN mismatch=... participants=n`, and the two TOTALS must agree: a difference in the amount
+        // distributed is a defect, not a different route.
+        gateLast[8 * s] = rem;
+        gateLast[8 * s + 1] = (fsGlobal > 0.0 && fabs(rem) > fsGlobal * slackDistTol) ? 1.0 : 0.0;
+        gateLast[8 * s + 2] = qBuf[(size_t) s * n + slackPhiRow];
+        gateLast[8 * s + 3] = slackTgt;
+        gateLast[8 * s + 4] = qBuf[(size_t) s * n + slackPhiRow] - slackTgt;
+        gateLast[8 * s + 5] = dsRetain[s];
+        gateLast[8 * s + 6] = fsGlobal;
+        gateLast[8 * s + 7] = 0.0;
     }
     if (fsGlobal <= 0.0 || fabs(rem) <= fsGlobal * slackDistTol) {
         return;
@@ -5958,11 +6197,19 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
         double base = dsBaseTargetP[i];
         if (dsAnchorShift != nullptr) { base += dsAnchorShift[(size_t) s * nds + i]; }
         if (ov == i) { base -= dsOvBaseDelta[s]; }
-        size_t idx = (size_t) s * n + dsPhiRow[i];
+        size_t idx = (size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, i);
         absorbedNow += target[idx] - base;
         target[idx] = base;                                 // reset to the anchor
     }
     rem = fsGlobal * ((qBuf[(size_t) s * n + slackPhiRow] - slackTgt) + absorbedNow);
+    if (gateLast != nullptr) {
+        // Slot 7, the documented `placed`. This read 6*s+5 — the stride of the 6-slot record this
+        // one replaced: for s=0 it overwrote `dsRetain` with the placed amount (so a FIRING pass
+        // printed the wrong column and dsPlaced stayed 0), and for every s>=1 it scribbled into
+        // ANOTHER scenario's slots (s=1 -> index 11 = scenario 1's slackTgt). Every LOOP_PASS number
+        // read off a firing pass was therefore the wrong quantity.
+        gateLast[8 * s + 7] = rem;                           // what this pass places over the participants
+    }
     if (dbgTrace && s == dbgTrace - 1) {
         printf("[DS-WF] entry slackMismatch=%.9f absorbedNow=%.9f fsGlobal=%.9f rem=%.9f nds=%d ngen=%d anchorShift=%d\n",
                qBuf[(size_t) s * n + slackPhiRow] - slackTgt, absorbedNow, fsGlobal, rem, nds, ngen,
@@ -6040,7 +6287,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                 ovMinD = dsMinDelta[ov] - dsOvMinDelta[s];
                 ovF = dsMode == 1 ? fmax(0.0, dirUp ? dsMarginUp[ov] : dsMarginDown[ov])
                                   : dsFactor[ov] - dsOvFactorDelta[s];
-                double ovCum = target[(size_t) s * n + dsPhiRow[ov]] - ovBase;
+                double ovCum = target[(size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, ov)] - ovBase;
                 ovActive = ovF > 0 && !((rem > 0) ? (ovCum >= ovMaxD) : (ovCum <= ovMinD));
                 if (ovActive) {
                     fsumActive += ovF;
@@ -6082,7 +6329,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                 }
             }
             if (ovActive) {
-                size_t idx = (size_t) s * n + dsPhiRow[ov];
+                size_t idx = (size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, ov);
                 double cum = target[idx] - ovBase;
                 double newCum = fmin(fmax(cum + rem * (ovF / fsumActive), ovMinD), ovMaxD);
                 if (newCum != cum) {
@@ -6101,7 +6348,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
                     sum += genCum[(size_t) s * ngen + g];
                 }
                 // The outage's own move of the row target is not slack power: it shifts the anchor.
-                target[(size_t) s * n + dsPhiRow[i]] =
+                target[(size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, i)] =
                         dsBaseTargetP[i] - (ov == i ? dsOvBaseDelta[s] : 0.0) + sum;
             }
             if (dbgTrace && s == dbgTrace - 1) {
@@ -6122,7 +6369,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
             if (dsAnchorShift != nullptr) { base += sh; maxD -= sh; minD -= sh; }
             if (dsMode == 1) { f = fmax(0.0, (dirUp ? dsMarginUp[i] : dsMarginDown[i]) - (dirUp ? sh : -sh)); }
             if (ov == i) { f -= dsOvFactorDelta[s]; base -= dsOvBaseDelta[s]; maxD -= dsOvMaxDelta[s]; minD -= dsOvMinDelta[s]; }
-            double cum = target[(size_t) s * n + dsPhiRow[i]] - base;
+            double cum = target[(size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, i)] - base;
             bool sat = (rem > 0) ? (cum >= maxD) : (cum <= minD);
             if (!sat) {
                 fsumActive += f;
@@ -6141,7 +6388,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
             if (dsAnchorShift != nullptr) { base += sh; maxD -= sh; minD -= sh; }
             if (dsMode == 1) { f = fmax(0.0, (dirUp ? dsMarginUp[i] : dsMarginDown[i]) - (dirUp ? sh : -sh)); }
             if (ov == i) { f -= dsOvFactorDelta[s]; base -= dsOvBaseDelta[s]; maxD -= dsOvMaxDelta[s]; minD -= dsOvMinDelta[s]; }
-            size_t idx = (size_t) s * n + dsPhiRow[i];
+            size_t idx = (size_t) s * n + dsRowOf(dsPhiRow, dsRowOv, s, nds, i);
             double cum = target[idx] - base;
             bool sat = (rem > 0) ? (cum >= maxD) : (cum <= minD);
             if (sat) {
@@ -6804,6 +7051,8 @@ struct BatchSolverContext {
     // set it is renormalized against must shrink with it. Empty = every participant participates.
     int nDsIslanded = 0;
     DeviceBuf dDsIslanded;
+    int nDsRowOv = 0;                                        // per-scenario DS participant row diversions
+    DeviceBuf dDsRowOv;                                      // nScenarios * nds ints, -1 = use dsPhiRow
     // Same idea for the reactive-limits pass: per (scenario, controller), 1 = its bus is in another
     // synchronous component in this scenario, so the loop must not look at it.
     int nRlIslanded = 0;
@@ -7211,7 +7460,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
         }
         ctx->dsFactorSum = factorSum > 0 ? factorSum : 1.0;
         ctx->dDsRetain.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
-        ctx->dDsGateLast.alloc(static_cast<size_t>(nScenarios) * 4 * sizeof(double));   // {rem, fired, slackP, slackTgt}
+        ctx->dDsGateLast.alloc(static_cast<size_t>(nScenarios) * 8 * sizeof(double));   // see the gateLast write
         ctx->dDsRetainApplied.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
     }
 
@@ -9114,7 +9363,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->nDqTqOv, ctx->nDqTqOv ? ctx->dDqTqOvKey.as<int>() : nullptr,
                         ctx->nDqTqOv ? ctx->dDqTqOvVal.as<double>() : nullptr,
                         ctx->dDqMemberTgtPtr.as<int>(), ctx->dDqMemberTgtPeer.as<int>(),
-                        psEntryPtr(ctx), psMaskEnv());
+                        psEntryPtr(ctx), psMaskEnv(),
+                        std::getenv("OLF_GPU_NO_TGT_STOCK") == nullptr && ctx->st->dRelocOwn.p != nullptr
+                                ? ctx->st->dRelocOwn.as<int>() : nullptr);
         }
     };
     std::vector<char> rlActive(nS), rlSwitched(nS), wasActive(nS);
@@ -9638,7 +9889,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             }
         }
     int dqTraceRow = gpuDqTraceRow();
-    if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqInact,
+    if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->dDqAlt.as<int>(), ctx->st->dDqSel.as<int>(), ctx->st->dDqZiRow.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqInact,
                 ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
                 ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr ? ctx->dPsSkip.as<char>() : nullptr, ctx->st->nQr, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr, ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), dqTraceRow);
         if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr, ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
@@ -11019,7 +11270,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             // Recompute the slack's retained share from the CURRENT total imbalance every pass (NOT frozen at
             // pass 0) so a participating slack tracks the loss change during redistribution.
             computeSlackRetain<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->nds, ctx->dsSlackPhiRow, ctx->dsSlackTargetP,
-                    1.0 - ctx->dsFactorSum, ctx->dDsPhiRow.as<int>(), ctx->dDsBaseTargetP.as<double>(),
+                    1.0 - ctx->dsFactorSum, ctx->dDsPhiRow.as<int>(),
+                    ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->dDsBaseTargetP.as<double>(),
                     ctx->dTarget.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
                     ctx->dDsRetain.as<double>(),
                     hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvBaseDelta.as<double>(),
@@ -11034,6 +11286,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsResidual.p, 0, nS * sizeof(char), ctx->stream));
             distributeSlackBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nds, nS, n, SLACK_DIST_TOL, P_RESIDUE_EPS,
                     ctx->dsSlackPhiRow, ctx->dsSlackTargetP, ctx->dDsPhiRow.as<int>(),
+                    ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr,
                     ctx->dDsFactor.as<double>(), ctx->dDsBaseTargetP.as<double>(),
                     hasDsAnchor ? dDsAnchorShift.as<double>() : nullptr,
                     hasDsAnchor ? dDsSlackShift.as<double>() : nullptr,
@@ -11398,14 +11651,17 @@ psgStep(ctx, nS, n, outer, "afterAllPinned");
     // scenario from one run to the next (IZUZ: slot 170, then 18)
     const int loopTraceSlot = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : (loopTraceEnv != nullptr ? std::atoi(loopTraceEnv) : -1);
     if (loopTraceSlot >= 0 && loopTraceSlot < nS) {
-        double gate[4] = {0.0, 0.0, 0.0, 0.0};              // the DS gate this slot last evaluated: rem, fired, slackP, slackTgt
+        double gate[8] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};   // see the gateLast write
         if (ctx->dDsGateLast.p) {
-            CUDA_CHECK(cudaMemcpy(gate, ctx->dDsGateLast.as<double>() + 4 * loopTraceSlot, 4 * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(gate, ctx->dDsGateLast.as<double>() + 8 * loopTraceSlot, 8 * sizeof(double), cudaMemcpyDeviceToHost));
         }
-        std::fprintf(stderr, "LOOP_PASS s=%d outer=%d loopIdx=%d kind=%d solved=%d switched=%d nChanged=%d live=%d status=%d dsRem=%.12f dsFire=%d nrIters=%d slackP=%.12f slackTgt=%.12f\n",
+        std::fprintf(stderr, "LOOP_PASS s=%d outer=%d loopIdx=%d kind=%d solved=%d switched=%d nChanged=%d live=%d status=%d"
+                     " dsRem=%.12f dsFire=%d nrIters=%d dsSlackP=%.12f dsSlackTgt=%.12f dsSlackMismatch=%.12f"
+                     " dsRetain=%.12f fsGlobal=%.12f dsPlaced=%.12f\n",
                      loopTraceSlot, outer, loopIdx, loopOrder[loopIdx], solvePass ? 1 : 0,
                      (int) rlSwitched[loopTraceSlot], nChanged, (int) live[loopTraceSlot], res.status[loopTraceSlot],
-                     gate[0], (int) gate[1], res.iters[loopTraceSlot], gate[2], gate[3]);
+                     gate[0], (int) gate[1], res.iters[loopTraceSlot],
+                     gate[2], gate[3], gate[4], gate[5], gate[6], gate[7]);
     }
     if (nChanged > 0) {                                     // this outer loop is still unstable
         for (int s = 0; s < nS; s++) {
@@ -11755,12 +12011,10 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
         checkRange("hvIdx", hvIdx, nhv, 4, {0, 1, 2, 3}, -1, n);
         checkRange("dqRow", dqRow, ndq, 1, {0}, 0, n);
         checkRange("ziIdx", ziIdx, nzi, 11, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, -1, n);
-        // Slot 10 is the FLAGS word, not a row: bit 0 the spanning-tree edge, bits 1-2 the relocated
-        // CHILD SIDE, bit 3 "the child side came from the coupler-tree walk". Its largest value is
-        // 1|4|8 = 13, so checking it against [-1, n) rejects a perfectly good pack on any network with
-        // n <= 13. Latent until the relocation is on, which is what sets bit 3 and takes the maximum
-        // from 5 to 13: measured on the 12-row generatorRemoteControlWithZeroImpedanceBranchAtController
-        // fixture as "bad ziIdx at elem 0 slot 10: 13 (allowed [-1, 12))".
+        // slot 10 is the FLAGS word, not a row: bit 0 spanning-tree, bits 1-2 the relocated child side,
+        // bit 3 "the side came from the coupler-tree walk". Checking it against n rejected a valid
+        // structure on any network with fewer than 14 rows once the relocation went on by default
+        // ("bad ziIdx at elem 0 slot 10: 13 (allowed [-1, 10))", four fixtures).
         checkRange("ziIdx.flags", ziIdx, nzi, 11, {10}, 0, 16);
         checkRange("ziQAlt", ziQAlt, nzi, 2, {0, 1}, -1 - nQr, n);
         checkRange("drRow", drRow, ndr, 1, {0}, 0, n);
@@ -12413,7 +12667,7 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
                 ctx->st->nQr, nS, ctx->nrl, ctx->dPsPilotEntry.as<int>(),
                 ctx->dRlLimitType.as<char>(), ctx->dPsSkip.as<char>());
     }
-    if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqInact,
+    if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->dDqAlt.as<int>(), ctx->st->dDqSel.as<int>(), ctx->st->dDqZiRow.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqInact,
                 ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
                 ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr ? ctx->dPsSkip.as<char>() : nullptr, ctx->st->nQr, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr, ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), dqTraceRow);
     if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr, ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
@@ -13994,6 +14248,43 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
     ctx->dDsIslanded.upload(mask.data(), maskLen);
     ctx->nDsIslanded = nPairs;
+}
+
+// Per-scenario P-balance row of a DS participant this scenario MOVES: {slot, participant, row}
+// triples, expanded to a dense (scenario, participant) row array (-1 = the structural dsPhiRow).
+// The rows arrive in the same space dsPhiRow is given in and are taken through the structure's
+// rowMap here, exactly as createBatchContext maps dsPhiRow itself — so the two are always in one
+// space whatever rowMap is.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDsRowOverrides(
+        JNIEnv* env, jclass, jlong handle, jintArray jTriples) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jTriples == nullptr || env->GetArrayLength(jTriples) == 0 || ctx->nds == 0) {
+        ctx->nDsRowOv = 0;
+        return;
+    }
+    size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nds;
+    std::vector<int> rows(len, -1);
+    int nTriples = env->GetArrayLength(jTriples) / 3;
+    jint* t = env->GetIntArrayElements(jTriples, nullptr);
+    const std::vector<int>& rowMap = ctx->st->rowMap;
+    int nOk = 0;
+    for (int k = 0; k < nTriples; k++) {
+        int s = t[3 * k];
+        int i = t[3 * k + 1];
+        int row = t[3 * k + 2];
+        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nds
+                && row >= 0 && row < static_cast<int>(rowMap.size()) && rowMap[row] >= 0) {
+            rows[(size_t) s * ctx->nds + i] = rowMap[row];
+            nOk++;
+        }
+    }
+    env->ReleaseIntArrayElements(jTriples, t, JNI_ABORT);
+    ctx->dDsRowOv.upload(rows.data(), len * sizeof(int));
+    ctx->nDsRowOv = nOk;
 }
 
 // DISTR_RHO coefficient overrides: install (or clear, with nulls) the per-scenario 1/count'

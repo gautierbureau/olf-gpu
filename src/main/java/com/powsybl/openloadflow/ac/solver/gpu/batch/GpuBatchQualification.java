@@ -449,6 +449,10 @@ final class GpuBatchQualification {
             if (islanded) {
                 found[count++] = i;
             }
+            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                System.err.printf("QUALIFY_TRACE dsPart i=%d row=%d busNum=%s islanded=%b%n", i, dsPhiRow[i],
+                        dsBusNum != null && i < dsBusNum.length ? Integer.toString(dsBusNum[i]) : "-", islanded);
+            }
         }
         return count == 0 ? NO_ISLANDED_DS : java.util.Arrays.copyOf(found, count);
     }
@@ -587,6 +591,63 @@ final class GpuBatchQualification {
         return slot >= 0 ? 4 : 1;
     }
 
+    /**
+     * The relocated coupler children, keyed by the child's own {@code BUS_V} variable row:
+     * {@code {coupler branch num, the coupler's DUMMY_Q variable row}}. The coupler-tree relocation moved that
+     * bus's reactive balance (and its {@code BUS_TARGET_Q}) onto the coupler's dummy row and put the coupler's
+     * {@code ZERO_V} on the bus's own row, so a per-scenario flip of "solve your own reactive balance at this
+     * target" has to land on the dummy row — the native reactive-limit pass makes exactly the same diversion
+     * (see {@code rlQrow}) — and a flip to a VOLTAGE identity has nowhere to land at all.
+     */
+    static java.util.Map<Integer, int[]> relocatedChildRows(GpuAcData gpuData) {
+        java.util.Map<Integer, int[]> out = new java.util.HashMap<>();
+        int[] zi = gpuData.ziIdx();
+        int[] nums = gpuData.ziBranchNums();
+        for (int e = 0; e < zi.length / 11 && e < nums.length; e++) {
+            int o = e * 11;
+            int childSide = (zi[o + 10] >> 1) & 3;
+            int ownV = childSide == 1 ? zi[o + 6] : (childSide == 2 ? zi[o + 7] : -1);
+            if (ownV >= 0 && zi[o + 5] >= 0) {
+                out.put(ownV, new int[] {nums[e], zi[o + 5]});
+            }
+        }
+        return out;
+    }
+
+    /** Where a per-scenario reactive flip lands: the bus's own {@code BUS_V} row, or its parent coupler's
+     *  {@code DUMMY_Q} row while that coupler stays closed. An OUTAGED coupler puts the equations back on the
+     *  bus's own rows (the stock placement the chunk solver switches to), so the own row is right there. */
+    private static int relocQRow(int vRow, java.util.Map<Integer, int[]> relocRows, java.util.Set<Integer> outagedZiNums) {
+        int[] reloc = relocRows.get(vRow);
+        return reloc == null || outagedZiNums.contains(reloc[0]) ? vRow : reloc[1];
+    }
+
+    /** The INVERSE of {@link #relocatedChildRows}, keyed by the coupler's {@code DUMMY_Q} row:
+     *  {@code {branchNum, the child bus's own BUS_V row}}. A consumer holding a STRUCTURAL member row
+     *  (which the coupler-tree relocation already moved onto the dummy) needs this to map back, because
+     *  a scenario that OUTAGES the coupler puts the child's reactive equation on the bus's own row. */
+    static java.util.Map<Integer, int[]> relocatedDummyQRows(GpuAcData gpuData) {
+        java.util.Map<Integer, int[]> out = new java.util.HashMap<>();
+        int[] zi = gpuData.ziIdx();
+        int[] nums = gpuData.ziBranchNums();
+        for (int e = 0; e < zi.length / 11 && e < nums.length; e++) {
+            int o = e * 11;
+            int childSide = (zi[o + 10] >> 1) & 3;
+            int ownV = childSide == 1 ? zi[o + 6] : (childSide == 2 ? zi[o + 7] : -1);
+            if (ownV >= 0 && zi[o + 5] >= 0) {
+                out.put(zi[o + 5], new int[] {nums[e], ownV});
+            }
+        }
+        return out;
+    }
+
+    /** The row a consumer holding the structural (already relocated) row must write in THIS scenario:
+     *  the child bus's own row once the coupler carrying its equations is outaged, else unchanged. */
+    static int unrelocQRow(int row, java.util.Map<Integer, int[]> dummyQRows, java.util.Set<Integer> outagedZiNums) {
+        int[] reloc = dummyQRows.get(row);
+        return reloc != null && outagedZiNums.contains(reloc[0]) ? reloc[1] : row;
+    }
+
     private static final int[] NO_ISLANDED_DS = new int[0];
 
     /** The reactive-limits controllers this contingency puts in another synchronous component: their
@@ -705,6 +766,8 @@ final class GpuBatchQualification {
             com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams, Set<LfBranch> distrRhoControllers,
             Set<LfBranch> relocatedCouplers, int[] curvePRows) {
         List<Integer> batchedIndices = new ArrayList<>();
+        java.util.Map<Integer, int[]> relocRows = relocatedChildRows(gpuData);
+        java.util.Map<Integer, int[]> relocDummyQRows = relocatedDummyQRows(gpuData);
         int[][] frozenRowsByIndex = new int[contingencies.size()][];     // islanded buses' variable rows, per contingency
         int[][] islandedNumsByIndex = new int[contingencies.size()][];   // islanded LfBus nums (result-building excludes them)
         double[][] frozenTargetsByIndex = new double[contingencies.size()][];   // the clean value each frozen row holds (V=1, phi=0)
@@ -736,10 +799,16 @@ final class GpuBatchQualification {
         for (int i = 0; i < qualifications.size(); i++) {
             GpuBatchContingencyValidator.Qualification q = qualifications.get(i);
             if (!q.qualified()) {
-                com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:SIDE_OPEN_UNPACKED");
+                // The validator's OWN reason, not a fixed tag: this site is reached by every disqualified
+                // verdict, so recording "SIDE_OPEN_UNPACKED" for all of them misreports the census — the one
+                // entry at rte6515's full scope is an ISLANDS_SLACK outage, which reads as a side-open shape.
+                com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:"
+                        + (q.reason() != null ? q.reason() : "UNQUALIFIED"));
                 continue;
             }
             BatchContingency c = contingencies.get(i);
+            java.util.Set<Integer> outagedZiNums = c.outagedZiBranches().stream()
+                    .map(LfBranch::getNum).collect(java.util.stream.Collectors.toSet());
             // SIDE-OPEN scope (conservative): a branch that carries a VARIABLE (BRANCH_RHO1 /
             // BRANCH_ALPHA1) or belongs to a DISTR_RHO group changes the live es shape when
             // half-opened — CPU for those; plain impedance branches batch.
@@ -923,7 +992,12 @@ final class GpuBatchQualification {
                                 live = null;
                                 break;
                             }
-                            live.add(new GenOutage(-1, 0, vVar.getRow(), sb.getTargetQ(), true, true,
+                            int qFlipRow = relocQRow(vVar.getRow(), relocRows, outagedZiNums);
+                            if (frozenSet.contains(qFlipRow)) {
+                                live = null;
+                                break;
+                            }
+                            live.add(new GenOutage(-1, 0, qFlipRow, sb.getTargetQ(), true, true,
                                     -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
                                     new int[0], new double[0], deadControlRowMode(gpuData, sb), -1, 0, -1, 0, -1, 0, -1));
                         }
@@ -936,6 +1010,8 @@ final class GpuBatchQualification {
                             continue;
                         }
                     }
+                    boolean relocIdentity = false;
+                    boolean pinnedMain = false;
                     if (live != null) {
                         for (var e : reHomed.pvTargets().entrySet()) {
                             var vVar = es.getVariableSet().getVariable(e.getKey().getNum(), AcVariableType.BUS_V);
@@ -943,11 +1019,48 @@ final class GpuBatchQualification {
                                 live = null;
                                 break;
                             }
-                            live.add(reHomedPvEntry(vVar.getRow(), e.getValue(), rlEntryOf(gpuData, e.getKey())));
+                            if (relocQRow(vVar.getRow(), relocRows, outagedZiNums) != vVar.getRow()) {
+                                relocIdentity = true;        // its own row carries the coupler's ZERO_V
+                                live = null;
+                                break;
+                            }
+                            int reHomedRl = rlEntryOf(gpuData, e.getKey());
+                            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                                // Is the bus we are about to give a VOLTAGE IDENTITY already PINNED at its
+                                // reactive limit? A pinned bus cannot hold its voltage — OLF has it as PQ —
+                                // and the RL kernel's "limit drift while pinned" branch writes only the
+                                // TARGET, leaving the host's mode 0 in place, so the identity then holds v
+                                // at a reactive value.
+                                byte baseLt = gpuData.rlBaseQLimitType() != null && reHomedRl >= 0
+                                        ? gpuData.rlBaseQLimitType()[reHomedRl] : (byte) -1;
+                                System.err.printf("QUALIFY_TRACE reHomePv bus=%s vRow=%d target=%.6f"
+                                                + " rlEntry=%d baseLimitType=%d%n",
+                                        e.getKey().getId(), vVar.getRow(), e.getValue(), reHomedRl, baseLt);
+                            }
+                            // A bus PINNED at its reactive limit cannot also hold its voltage: OLF has it
+                            // as PQ, and giving it a V identity here is a state the device cannot represent.
+                            // The RL kernel then never takes the switch path that would set mode 4 — the
+                            // entry is already pinned, so it takes the "limit drift while pinned" branch,
+                            // which writes only the TARGET. The host's mode 0 stays, and a mode-0 identity
+                            // means x = target, so the bus's VOLTAGE becomes its reactive limit. Measured on
+                            // rte6515 BUS-6194_BBS_2: VL-6194_2 re-homed to a 1.123 pu identity with
+                            // baseLimitType=2, row 12938 uploaded at 1.123 and ended at 0.6251 (= maxQ −
+                            // loadQ), outside the realistic band [0.8, 1.2] — the run reported FAILED where
+                            // OLF reports CONVERGED, losing all 71 of its violations, the WHOLE violation
+                            // gap of the full busbar scope.
+                            if (gpuData.rlBaseQLimitType() != null && reHomedRl >= 0
+                                    && gpuData.rlBaseQLimitType()[reHomedRl] != 0) {
+                                pinnedMain = true;
+                                live = null;
+                                break;
+                            }
+                            live.add(reHomedPvEntry(vVar.getRow(), e.getValue(), reHomedRl));
                         }
                     }
                     if (live == null) {
-                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:VC_REMERGE_NO_VROW");
+                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(
+                                pinnedMain ? "PLAN:VC_REMERGE_PINNED_MAIN"
+                                        : relocIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
                         continue;
                     }
                     if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
@@ -972,7 +1085,7 @@ final class GpuBatchQualification {
                             inactiveForTargets.add(ib);
                         }
                     }
-                    for (GenOutage go : GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, inactiveForTargets)) {
+                    for (GenOutage go : GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, inactiveForTargets, relocDummyQRows, outagedZiNums)) {
                         live.add(go.withoutFrozenTargetRows(frozenSet));
                     }
                     gos = live.toArray(new GenOutage[0]);
@@ -1084,7 +1197,8 @@ final class GpuBatchQualification {
                             vcOff = null;
                             break;
                         }
-                        vcOff.add(new GenOutage(-1, 0, vVar.getRow(), sb.getTargetQ(), true, true,
+                        vcOff.add(new GenOutage(-1, 0, relocQRow(vVar.getRow(), relocRows, outagedZiNums),
+                                sb.getTargetQ(), true, true,
                                 -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
                                 new int[0], new double[0], deadControlRowMode(gpuData, sb), -1, 0, -1, 0, -1, 0, -1));
                     }
@@ -1104,16 +1218,23 @@ final class GpuBatchQualification {
                         pvOn.addAll(java.util.Arrays.asList(genOutagesByIndex[i]));
                     }
                     boolean ok = true;
+                    boolean relocIdentity = false;
                     for (var e : reHomed.pvTargets().entrySet()) {
                         var vVar = es.getVariableSet().getVariable(e.getKey().getNum(), AcVariableType.BUS_V);
                         if (vVar == null || vVar.getRow() < 0) {
                             ok = false;
                             break;
                         }
+                        if (relocQRow(vVar.getRow(), relocRows, outagedZiNums) != vVar.getRow()) {
+                            ok = false;
+                            relocIdentity = true;            // its own row carries the coupler's ZERO_V
+                            break;
+                        }
                         pvOn.add(reHomedPvEntry(vVar.getRow(), e.getValue(), rlEntryOf(gpuData, e.getKey())));
                     }
                     if (!ok) {
-                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:VC_REMERGE_NO_VROW");
+                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(
+                                relocIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
                         continue;
                     }
                     genOutagesByIndex[i] = pvOn.toArray(new GenOutage[0]);
@@ -1134,7 +1255,7 @@ final class GpuBatchQualification {
                     dqOvContribByIndex[i] = java.util.Arrays.stream(vcOv[0]).mapToInt(d -> (int) d).toArray();
                     dqOvWByIndex[i] = vcOv[1];
                     // and the survivors' DISTR_Q row TARGETS + the islanded members' inactive entries
-                    List<GenOutage> dq = GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, lostVcControllers);
+                    List<GenOutage> dq = GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, lostVcControllers, relocDummyQRows, outagedZiNums);
                     if (!dq.isEmpty()) {
                         List<GenOutage> merged = new ArrayList<>();
                         if (genOutagesByIndex[i] != null) {

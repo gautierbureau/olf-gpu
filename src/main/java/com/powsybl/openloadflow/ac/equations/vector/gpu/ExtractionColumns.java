@@ -70,6 +70,11 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         // Dynamic Q-relocation: the OTHER candidate Q row of each transformer/shunt voltage-controlled
         // bus, so the fill can follow a per-scenario control toggle on the shared structure (§11).
         int[] qRowAlt = GpuAcRowIndexing.computeQRowAlt(network, es, vCol, branchRhoCol, shuntBCol, qRow);
+        // The coupler-tree relocation, computed HERE rather than after the candidate tables: a child bus's power
+        // equations move onto its parent coupler's dummy columns, so every row of a coupler chain keeps a
+        // structurally non-zero diagonal — and the tables below must name the row that ends up hosting each
+        // member's reactive balance, which for a relocated member is that dummy column and no longer its own V row.
+        int[][] ziTreeEdges = GpuAcRowIndexing.ziTreeRelocation(network, es, phiCol, vCol, qRow, dummyPCol, dummyQCol);
         // GROUP pilot-Q relocation candidates (plan-A6): a shared transformer-VC pilot's reactive
         // balance rides on the FREE member's rho column — "first enabled", which an outage or clamp
         // of the free member RE-PICKS per scenario. Encode such pilots' alternate as -2-groupId and
@@ -135,13 +140,20 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             if (!GpuAcRowIndexing.hasCandidateTable(gvc, es)) {
                 continue;
             }
+            // Each member's row is the one that HOSTS its reactive balance, which the coupler-tree relocation can
+            // move to the parent coupler's DUMMY_Q column (exactly as GpuAcRowIndexing.distrQRow's tree overload
+            // already moves its DISTR_Q). Naming its own V row instead sent a pinned pilot's raw q onto a row the
+            // relocation had given to the coupler's ZERO_V, and left the pilot's own row empty: measured on
+            // rte6515's [5000,6000) window with the relocation on, the failing slot's residual sat on
+            // BUS_V(VL-6003_1) at 6.5e+02 and on the empty pilot row BUS_V(VL-6003_0) at 1.09e+02, every iteration.
             List<Integer> memberRows = new ArrayList<>();
             for (LfBus m : gvc.getMergedControllerElements()) {
-                memberRows.add(vCol[m.getNum()]);
+                memberRows.add(GpuAcRowIndexing.relocatedQRow(m.getNum(), ziTreeEdges[0], dummyQCol, vCol));
             }
             int g = qrPtr.size();
             qrPtr.add(qrRows.size());
-            qrRows.add(vCol[bus.getNum()]);                  // candidate 0 = the FALLBACK (control lost)
+            // candidate 0 = the FALLBACK (control lost), the pilot's own reactive row — relocated like any other
+            qrRows.add(GpuAcRowIndexing.relocatedQRow(bus.getNum(), ziTreeEdges[0], dummyQCol, vCol));
             qrRows.addAll(memberRows);
             qRowAlt[bus.getNum()] = -2 - g;
             qrPilotBuses.add(bus.getNum());
@@ -253,11 +265,8 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                 ziDeadEnd[br.getNum()] = GpuAcRowIndexing.ziDeadEndSide(es, br, phiCol, vCol, qRow);
             }
         }
-        // The coupler-tree relocation: a child bus's power equations move onto its parent coupler's dummy columns,
-        // so every row of a coupler chain keeps a structurally non-zero diagonal.
-        int[][] ziTree = GpuAcRowIndexing.ziTreeRelocation(network, es, phiCol, vCol, qRow, dummyPCol, dummyQCol);
-        int[] ziParentEdge = ziTree[0];
-        int[] ziChildBus = ziTree[1];
+        int[] ziParentEdge = ziTreeEdges[0];
+        int[] ziChildBus = ziTreeEdges[1];
         int[] pRow = phiCol.clone();
         if (System.getenv("OLF_GPU_ZI_RELOC_TRACE") != null) {
             long relocated = java.util.Arrays.stream(ziParentEdge).filter(x -> x >= 0).count();
@@ -275,6 +284,18 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             if (qRow[bn] == vCol[bn]) {                       // a DISTR_Q child moves through distrQRow instead
                 qRow[bn] = dummyQCol[parent];
             }
+            // ...and so does the ALTERNATE row, the one every family writes the bus's OWN q to when a reactive
+            // limit puts it in mode 4. For a relocated child that pin lands on this coupler's DUMMY_Q row (the
+            // native pass diverts it there through rlQrow, since that is where its balance lives), so leaving the
+            // alternate on the bus's own BUS_V row sent its own q onto the row now holding the coupler's ZERO_V
+            // and left the DUMMY_Q column held by nothing but the DISTR_Q terms the mode-4 flip gates off —
+            // a DEAD COLUMN. Measured on rte6515's full busbar scope: 9 mode-4 rows on relocated couplers of
+            // VL-5997/VL-6003/VL-6194/VL-6229, deadCols=2 (first 14417 = DUMMY_Q(BUS-6003_COUPLER_2)),
+            // tinyDiag=7, and 6616 of 6876 scenarios rejecting their second iteration at a ratio of 1e+10.
+            // Only the plain own-row alternate moves: a candidate-table pilot's is encoded as -2-group.
+            if (qRowAlt[bn] == vCol[bn] && dummyQCol[parent] >= 0) {
+                qRowAlt[bn] = dummyQCol[parent];
+            }
         }
         for (int br = 0; br < nBranches; br++) {
             int child = ziChildBus[br];
@@ -286,5 +307,6 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
                 GpuAcArrays.toIntArray(qrPtr), GpuAcArrays.toIntArray(qrRows), qrGroupOfPilot, ziDeadEnd,
                 pRow, ziParentEdge, ziChildBus);
     }
+
 
 }

@@ -295,18 +295,48 @@ final class GpuAcRowIndexing {
                 .orElse(members.isEmpty() ? null : members.get(0));
     }
 
+    /**
+     * The row that hosts a bus's reactive balance once the COUPLER-TREE RELOCATION has had its say: its own
+     * {@code BUS_V} row, or its parent coupler's {@code DUMMY_Q} row when the relocation moved its power
+     * equations there. Every consumer of "where does this bus's q live" has to ask this — the reactive-limit
+     * pass reads the pin and the q at that row (native {@code rlQrow}), the candidate table enrols it, the
+     * activation extractor targets it, the families write the bus's own q to it in mode 4, and the diagnostic
+     * remote-member fill accumulates into it. A consumer left on the own row silently reads ZERO there.
+     */
+    static int relocatedQRow(int busNum, int[] ziParentEdge, int[] dummyQCol, int[] vCol) {
+        int parent = ziParentEdge == null ? -1 : ziParentEdge[busNum];
+        return parent >= 0 && dummyQCol[parent] >= 0 ? dummyQCol[parent] : vCol[busNum];
+    }
+
     /** The row that hosts a bus's ACTIVE Q balance in the CURRENT state when its group has a candidate table
      *  (see GpuAcActivationExtractor): a pinned member's own V row; the pilot (a controller of its own group
      *  or not) rides the first ENABLED member's V row (the carrier) and falls back to its own V row when every
      *  controller is pinned — the row the in-kernel mode scan selects. */
     static int stateQRow(LfBus bus, int[] vCol) {
+        return vCol[stateQCarrier(bus).getNum()];
+    }
+
+    /** {@link #stateQRow} with the COUPLER-TREE RELOCATION applied to the carrier, which is what the candidate
+     *  table enrols and therefore what the in-kernel mode scan selects: a relocated member's reactive balance
+     *  lives on its parent coupler's {@code DUMMY_Q} row, its own {@code BUS_V} row holding the coupler's
+     *  {@code ZERO_V}. Naming the own row instead assigned two equations to it — measured on rte6515's
+     *  [5000,6000) window with the relocation on: "device row 12562 assigned twice", the whole precompute lost. */
+    static int stateQRow(LfBus bus, int[] vCol, int[] ziParentEdge, int[] dummyQCol) {
+        LfBus carrier = stateQCarrier(bus);
+        int parent = ziParentEdge == null ? -1 : ziParentEdge[carrier.getNum()];
+        return parent >= 0 && dummyQCol[parent] >= 0 ? dummyQCol[parent] : vCol[carrier.getNum()];
+    }
+
+    /** The bus whose row carries {@code bus}'s active Q balance: itself, or — for the pilot of a
+     *  candidate-table group — the first ENABLED member (the carrier), falling back to itself when every
+     *  controller is pinned. */
+    private static LfBus stateQCarrier(LfBus bus) {
         GeneratorVoltageControl vc = mainGenVc(bus);
         if (vc != null && vc.getControlledBus() == bus) {
             return vc.getMergedControllerElements().stream()
-                    .filter(vc::isControllerEnabled).findFirst()
-                    .map(m -> vCol[m.getNum()]).orElse(vCol[bus.getNum()]);
+                    .filter(vc::isControllerEnabled).findFirst().orElse(bus);
         }
-        return vCol[bus.getNum()];
+        return bus;
     }
 
     /**
@@ -381,8 +411,6 @@ final class GpuAcRowIndexing {
         }
         return alt;
     }
-    /** {@code -Dolf.gpu.ziTreeRelocation=true}: relocate along the WHOLE coupler tree. Default false, which
-     *  relocates dead-end stubs only - the shape this generalises, and the only one validated end to end. */
     /**
      * {@code -Dolf.gpu.pilotSelfRotation} (default false while it lands): enrol PILOT-SELF voltage-control
      * groups — a control whose merged controllers contain its own controlled bus — in the candidate-table
@@ -394,15 +422,25 @@ final class GpuAcRowIndexing {
         return Boolean.parseBoolean(System.getProperty("olf.gpu.pilotSelfRotation", "true"));
     }
 
+    /**
+     * {@code -Dolf.gpu.ziTreeRelocation=false} turns OFF the coupler-tree relocation, which relocates every
+     * non-root bus of a zero-impedance spanning tree (ON by default since 2026-09-29) and leaves only the
+     * dead-end stubs it generalises. It is what OLF's own equation layout does with a coupler chain, and
+     * without it a busbar-section network's rows have no diagonal to factor without pivoting, which cuDSS's
+     * uniform batch does not do: measured on rte6515's full busbar scope, 996 zero diagonals and a base load
+     * flow whose first factorization came back with a residual ratio of 2.1e+08, against an exact base and 2
+     * rejects of 6876 with the relocation on.
+     */
     static boolean ziTreeRelocationEnabled() {
-        return Boolean.parseBoolean(System.getProperty("olf.gpu.ziTreeRelocation", "false"));
+        return Boolean.parseBoolean(System.getProperty("olf.gpu.ziTreeRelocation", "true"));
     }
 
-    /** {@code -Dolf.gpu.ziTreeRelocationMinCouplers=<n>}: relocate only a tree with at least n couplers. The numeric
-     *  row repair is EXACT on short chains (measured: 3 couplers at 2.8e-16) and loses longer ones (1.6e+04 at 7), so
-     *  a short tree keeps the proven path and only the trees that need the relocation take it. */
+    /** {@code -Dolf.gpu.ziTreeRelocationMinCouplers=<n>}: relocate only a tree with at least n couplers. Default 1,
+     *  i.e. every tree: the numeric row repair is exact on short chains (measured: 3 couplers at 2.8e-16) and loses
+     *  longer ones (1.6e+04 at 7), but the relocation is exact on both and one rule for every tree is one layout to
+     *  reason about. Raise it to fall back to the numeric repair on the short trees. */
     private static int ziTreeMinCouplers() {
-        return Integer.getInteger("olf.gpu.ziTreeRelocationMinCouplers", 4);
+        return Integer.getInteger("olf.gpu.ziTreeRelocationMinCouplers", 1);
     }
 
     /**
@@ -475,7 +513,7 @@ final class GpuAcRowIndexing {
                     LfBus other = br.getBus1() == b ? br.getBus2() : br.getBus1();
                     int otherNum = other.getNum();
                     if (seen[otherNum] || phiCol[otherNum] < 0 || vCol[otherNum] < 0
-                            || row(es, otherNum, AcEquationType.BUS_TARGET_V) >= 0) {
+                            || hostsVoltageIdentity(other, es)) {
                         continue;                            // a pilot's V row is an identity: ZERO_V cannot take it
                     }
                     seen[otherNum] = true;
@@ -516,8 +554,14 @@ final class GpuAcRowIndexing {
             if (parent < 0) {
                 continue;
             }
-            boolean ownReactiveOnItsVRow = qRow[bn] == vCol[bn]
-                    || row(es, bn, AcEquationType.DISTR_Q) >= 0 && distrQRow(es, bus) == vCol[bn];
+            // CANONICAL, i.e. pin-state independent (the lesson of the canonical extraction): a remote gen-VC
+            // controller element's q is SUPPRESSED at extraction (qRow = -1) and its own V row is where its balance
+            // comes back — its DISTR_Q while it shares, its own Q once a limit pins it — so its row is the home of
+            // its reactive balance whatever the pin state. Reading the pin state here made the base and the
+            // security analysis relocate DIFFERENTLY (measured: 44 of 47 couplers in the base extraction against
+            // 41 in the SA's, the three differing ones exactly the pilot-self groups the base load flow pins), so
+            // the two ran on different structures and every scenario failed.
+            boolean ownReactiveOnItsVRow = qRow[bn] == vCol[bn] || isRemoteGenVcControllerElement(bus);
             if (dummyPCol[parent] < 0 || dummyQCol[parent] < 0 || hostsAnotherReactiveRow[bn]
                     || !ownReactiveOnItsVRow) {
                 parentEdgeOfBus[bn] = -1;
@@ -525,6 +569,30 @@ final class GpuAcRowIndexing {
             }
         }
         return new int[][] {parentEdgeOfBus, childBusOfEdge};
+    }
+
+    /**
+     * True when this bus owns a {@code BUS_TARGET_V} identity row: it is where OLF puts the voltage equation of
+     * a control it takes part in, so that row is not free for a coupler's {@code ZERO_V}.
+     *
+     * <p>Pin-state INDEPENDENT, which asking whether the equation is active right now is not — a pilot whose
+     * controllers a reactive limit has pinned has no active identity, yet the row is still its own and comes
+     * back the moment the limit releases. The owner is OLF's own answer, {@link
+     * VoltageControl#findMainVisibleControlledBus()}: of the controls merged over a zero-impedance component
+     * exactly ONE is main and visible, and its controlled bus carries the single identity the component gets.
+     * Asking instead whether the bus has a control AT ALL excluded every merged dependent controlled bus and
+     * cost most of the coverage (measured on rte6515's full busbar scope: 74 of 366 couplers relocated against
+     * 329, 793 zero diagonals left and the base's first factorization off by a ratio of 1.3e+10).
+     */
+    private static boolean hostsVoltageIdentity(LfBus bus, EquationSystem<AcVariableType, AcEquationType> es) {
+        return row(es, bus.getNum(), AcEquationType.BUS_TARGET_V) >= 0
+                || identityOwner(bus.getGeneratorVoltageControl().orElse(null), bus)
+                || identityOwner(bus.getTransformerVoltageControl().orElse(null), bus)
+                || identityOwner(bus.getShuntVoltageControl().orElse(null), bus);
+    }
+
+    private static boolean identityOwner(VoltageControl<?> vc, LfBus bus) {
+        return vc != null && vc.findMainVisibleControlledBus().map(b -> b == bus).orElse(false);
     }
 
     private static boolean hasImpedantBranch(LfBus bus) {

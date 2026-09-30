@@ -78,7 +78,9 @@ final class GpuBatchInjectionOutages {
      *  solved the renormalized weights against the BASE target: invisible while the pilot carries no
      *  reactive load (target 0 either way), 8.5e-2 kV on rte6515 BUS-1359_BBS_2 whose pilot has one.
      *  Empty when no islanded controller is a packed member. */
-    static List<GenOutage> islandedDistrQEntries(GpuAcData gpuData, List<LfBus> islandedControllers) {
+    static List<GenOutage> islandedDistrQEntries(GpuAcData gpuData, List<LfBus> islandedControllers,
+                                                java.util.Map<Integer, int[]> relocDummyQRows,
+                                                java.util.Set<Integer> outagedZiNums) {
         List<GenOutage> out = new ArrayList<>();
         int[] mBusNum = gpuData.dqMemberBusNum();
         if (mBusNum == null || islandedControllers.isEmpty()) {
@@ -122,7 +124,16 @@ final class GpuBatchInjectionOutages {
                         continue;
                     }
                     double qpk = keySum == 0 || !memberKeepsKey(any, mBusNum[m], m, -1) ? 0 : mKey[m] / keySum;
-                    r.add(mRow[m]);
+                    // dqMemberRow is STRUCTURAL: under the coupler-tree relocation a child controller's
+                    // reactive row is its parent coupler's DUMMY_Q. A scenario that OPENS that coupler pins
+                    // the dummy to a DUMMY_TARGET identity and OLF's DISTR_Q sits on the bus's own row
+                    // instead (read off OLF's post-contingency dump for the middle-section fixture:
+                    // distr_q5 ACTIVE with keys 0.5/0.5, bus_target_q[5] inactive). Seeding the
+                    // renormalized target on the dummy left the live row at its BASE target, so the device
+                    // solved the renormalized WEIGHTS against a target built from the base keys: measured
+                    // -13.3334 MVAr where OLF has -20.0001, one third of the pilot's 40 MVAr load instead
+                    // of one half, and 0.32 kV on every bus behind it.
+                    r.add(GpuBatchQualification.unrelocQRow(mRow[m], relocDummyQRows, outagedZiNums));
                     // targetQ over THIS member's peers — its own control's elements, as AcTargetVector sums them
                     double sumTargetQ = 0;
                     for (int t = gpuData.dqMemberTgtPtr()[m]; t < gpuData.dqMemberTgtPtr()[m + 1]; t++) {
@@ -132,6 +143,24 @@ final class GpuBatchInjectionOutages {
                 }
                 rows = r.stream().mapToInt(Integer::intValue).toArray();
                 values = v.stream().mapToDouble(Double::doubleValue).toArray();
+                if (System.getenv("OLF_GPU_DQISL_TRACE") != null) {
+                    // The counterpart of the generator path's DQSEED. Its absence cost a measurement:
+                    // DQSEED staying silent says nothing about THIS path, and reading that as "the
+                    // target is never seeded" sent one fix at an inert code path.
+                    StringBuilder sb = new StringBuilder();
+                    for (int m = gs; m < gs + gc; m++) {
+                        sb.append(" m").append(m).append("[bus=").append(mBusNum[m])
+                                .append(" hasRow=").append(mHasRow[m]).append(" row=").append(mRow[m])
+                                .append(" reloc=").append(GpuBatchQualification.unrelocQRow(mRow[m],
+                                        relocDummyQRows, outagedZiNums))
+                                .append(" key=").append(mKey[m])
+                                .append(" targetQ=").append(baseTargetQ(any, mBusNum[m]))
+                                .append(" inactive=").append(inactive.contains(m))
+                                .append(" keeps=").append(memberKeepsKey(any, mBusNum[m], m, -1)).append(']');
+                    }
+                    System.err.println("DQISL group=" + gs + " count=" + gc + " keySum=" + keySum
+                            + " rows=" + r + " values=" + v + sb);
+                }
             }
             out.add(new GenOutage(-1, 0, -1, 0, false, false, -1, 0, 0, 0, 0, -1, 0, 0, false,
                     java.util.Set.of(), 0, 0, 0, im, new int[0], rows, values, 0, -1, 0, -1, 0, -1, 0, -1));

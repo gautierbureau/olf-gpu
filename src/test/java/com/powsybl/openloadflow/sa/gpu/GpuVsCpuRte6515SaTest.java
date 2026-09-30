@@ -108,6 +108,58 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 && bus.getSynchronousComponent().getNum() == com.powsybl.iidm.network.ComponentConstants.MAIN_NUM;
     }
 
+    /** Per contingency, |cpu-gpu| distributed active power of the last comparison (MW). */
+    private static final Map<String, Double> DAP_BY_CTG = new TreeMap<>();
+
+    /** Per contingency, the violation-count delta (gpu - cpu) of the last comparison. */
+    private static final Map<String, Integer> VIOL_DELTA_BY_CTG = new TreeMap<>();
+
+    /** Per contingency, the worst bus-voltage difference in kV — only for the ids that were bus-diffed. */
+    private static final Map<String, Double> BUS_WORST_BY_CTG = new TreeMap<>();
+
+    /**
+     * The THREE signals together, per contingency, because no one of them settles anything on its own:
+     * distributed active power is a single scalar and can match to 1e-12 MW while the operating point differs
+     * by 0.45 kV (measured on rte6515 BUS-1869_BBS_1), a violation delta can be zero while the state drifts,
+     * and a bus diff is only available for the ids a run monitors. Any contingency that differs in ANY of the
+     * three is listed, with "-" where a signal was not measured, so a reader can see at a glance whether a
+     * difference is one signal or all of them.
+     */
+    private static void reportTriple() {
+        java.util.Set<String> ids = new java.util.TreeSet<>();
+        DAP_BY_CTG.forEach((k, v) -> {
+            if (v > 1e-6) {
+                ids.add(k);
+            }
+        });
+        VIOL_DELTA_BY_CTG.forEach((k, v) -> {
+            if (v != 0) {
+                ids.add(k);
+            }
+        });
+        BUS_WORST_BY_CTG.forEach((k, v) -> {
+            if (v > 1e-9) {
+                ids.add(k);
+            }
+        });
+        if (ids.isEmpty()) {
+            System.out.println("  TRIPLE CHECK: no contingency differs in distributed power, violations or"
+                    + " monitored bus voltage");
+            return;
+        }
+        System.out.printf("  TRIPLE CHECK (%d contingencies differ in at least one of the three):%n", ids.size());
+        System.out.printf("      %-20s %14s %8s %14s%n", "contingency", "dap |d| MW", "viol d", "bus worst kV");
+        for (String id : ids) {
+            Double dap = DAP_BY_CTG.get(id);
+            Integer vd = VIOL_DELTA_BY_CTG.get(id);
+            Double bw = BUS_WORST_BY_CTG.get(id);
+            System.out.printf("      %-20s %14s %8s %14s%n", id,
+                    dap == null ? "-" : String.format("%.3e", dap),
+                    vd == null ? "-" : Integer.toString(vd),
+                    bw == null ? "-" : String.format("%.3e", bw));
+        }
+    }
+
     /** Count what the filter removed, so a scope report says it out loud instead of hiding it in a
      *  batching share. */
     private static <T> List<T> keepSolved(List<T> all, java.util.function.Predicate<T> live, String kind) {
@@ -222,9 +274,26 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             int top = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_BUSBAR_TOP", "500"));
             List<String> ids = network.getBusbarSectionStream()
                     .map(com.powsybl.iidm.network.BusbarSection::getId).sorted().limit(top).toList();
+            // This list is the ONE that does not filter on inSolvedNetwork by default (branch, generator, SVC
+            // and shunt all do), so it carries sections that are disconnected or outside the main
+            // connected/synchronous component. OLF drops those itself — PropagatedContingency.toLfContingency
+            // returns empty and logs "has no impact" — so NEITHER arm produces a post-contingency result for
+            // them, while the GPU census still counts each as MAPPER:no-batchable-element. Measured 209 of 6876
+            // at full scope, exactly the gap between 6876 and OLF's own 6667 results.
+            //
+            // MEASURED on rte6515: all 6876 sections are connected and in the main connected/synchronous
+            // component (the count below is 0), so being "outside the solved network" is NOT why 209 of them
+            // have no result. OLF drops those 209 for a topological reason instead —
+            // PropagatedContingency.toLfContingency finds no branch to open, no bus to lose, no injection to
+            // drop, logs "has no impact" and returns empty — so NEITHER arm simulates them and the GPU census
+            // still counts each as MAPPER:no-batchable-element. Drop them with OLF_GPU_SA_CTG_EXCLUDE (below).
+            long outside = ids.stream()
+                    .filter(id -> !inSolvedNetwork(network.getBusbarSection(id).getTerminal()))
+                    .count();
             ids.forEach(id -> all.add(new Contingency(id,
                     new com.powsybl.contingency.BusbarSectionContingency(id))));
-            System.out.printf("  + %d busbar section contingencies%n", ids.size());
+            System.out.printf("  + %d busbar section contingencies (%d outside the solved network)%n",
+                    ids.size(), outside);
         }
         // BOUNDARY LINES (formerly dangling lines) are their own population: BoundaryLine extends
         // Injection, not Branch, so the branch scope does not reach them, and they are neither
@@ -351,6 +420,29 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // holds ~29832 bus results per contingency — 1389 generator contingencies at once is tens of
         // GB and dies with an OutOfMemoryError before it reports anything. Windows of a few hundred
         // fit, and together they are the full set.
+        // OLF_GPU_SA_CTG_EXCLUDE=<file>: drop the contingency ids listed there (one per line, '#' comments).
+        // The mode that keeps ONLY THE ONES THAT MATTER: rte6515's busbar list carries 209 sections that OLF
+        // itself does not simulate ("has no impact" — no branch opened, no bus lost, no injection dropped), and
+        // they show up as MAPPER:no-batchable-element, diluting the census and the batching share while neither
+        // arm produces a result for them. docs/rte6515-impactless-busbar-sections.txt is that list, produced
+        // from a full-scope census run (grep 'reason=MAPPER:no-batchable-element' with OLF_GPU_REJECT_TRACE=1).
+        // NOTE: the contingency list decides which switches the LfNetwork retains, so an excluded run has a
+        // DIFFERENT base network — its numbers are comparable with other excluded runs, not with full ones.
+        String exclude = System.getenv("OLF_GPU_SA_CTG_EXCLUDE");
+        if (exclude != null) {
+            try {
+                java.util.Set<String> drop = java.nio.file.Files.readAllLines(java.nio.file.Path.of(exclude))
+                        .stream().map(String::trim).filter(l -> !l.isEmpty() && !l.startsWith("#"))
+                        .collect(Collectors.toSet());
+                int before = all.size();
+                all.removeIf(c -> drop.contains(c.getId()));
+                System.out.printf("  CTG_EXCLUDE %s: %d of %d dropped, %d kept (a different base network than"
+                        + " an unfiltered run — the retained switches follow the list)%n",
+                        exclude, before - all.size(), before, all.size());
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        }
         String max = System.getenv("OLF_GPU_SA_MAX_CTG");
         int from = Integer.parseInt(System.getenv().getOrDefault("OLF_GPU_SA_CTG_FROM", "0"));
         if (max != null || from > 0) {
@@ -552,6 +644,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             }
         });
         long differing = pairs.values().stream().filter(v -> Math.abs(v[0] - v[1]) > 1e-9).count();
+        DAP_BY_CTG.clear();                                  // kept for the joined verdict (see reportTriple)
+        pairs.forEach((k, v) -> DAP_BY_CTG.put(k, Math.abs(v[0] - v[1])));
         double worst = pairs.values().stream().mapToDouble(v -> Math.abs(v[0] - v[1])).max().orElse(0);
         System.out.printf("  distributedActivePower: %d of %d contingencies differ by > 1e-9 MW | worst %.6e MW%n",
                 differing, pairs.size(), worst);
@@ -979,8 +1073,20 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             Map<String, Long> census = GpuBatchScopeCensus.snapshot();
             System.out.printf("  GPU CENSUS (cold): %s%n", census);
             int gpuPrecomputed = GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get();
-            System.out.printf("  GPU precomputed on device: %d / %d contingencies%n",
-                    gpuPrecomputed, contingencies.size());
+            // Two denominators, because they differ: the LIST, and the contingencies OLF actually simulates.
+            // A contingency OLF drops as having no impact has no result on either arm, so counting it against
+            // the batching share reports a GPU limitation that does not exist (209 of rte6515's 6876 busbar
+            // sections). The CPU arm's result count IS the simulated population.
+            int simulated = cpu.getPostContingencyResults().size();
+            if (simulated > 0) {                             // 0 under OLF_GPU_SA_GPU_ONLY: no CPU arm to count
+                System.out.printf("  GPU precomputed on device: %d / %d contingencies (%d of %d simulated;"
+                        + " %d simulated by neither arm)%n",
+                        gpuPrecomputed, contingencies.size(), gpuPrecomputed, simulated,
+                        contingencies.size() - simulated);
+            } else {
+                System.out.printf("  GPU precomputed on device: %d / %d contingencies%n",
+                        gpuPrecomputed, contingencies.size());
+            }
 
             // OLF_GPU_SA_COLD_ONLY=1: no warm run (a profile of the cold run alone; "warm" then repeats cold).
             if ("1".equals(System.getenv("OLF_GPU_SA_COLD_ONLY"))) {
@@ -1138,6 +1244,38 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 })
                 .map(p -> p.getContingency().getId())
                 .toList();
+        // A status comparison is only evidence for a contingency the DEVICE solved: for one it declined, the
+        // GPU arm's status comes from the CPU fallback, so comparing it with the CPU arm compares OLF with OLF
+        // and validates nothing. Split the two populations and name the one that IS a device failure: a
+        // contingency the device declined and OLF converged.
+        java.util.Set<String> onDevice = GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_IDS;
+        if (!onDevice.isEmpty()) {
+            List<String> declinedButOlfConverged = cpu.getPostContingencyResults().stream()
+                    .filter(p -> !onDevice.contains(p.getContingency().getId()))
+                    .filter(p -> p.getStatus() == PostContingencyComputationStatus.CONVERGED)
+                    .map(p -> p.getContingency().getId())
+                    .toList();
+            long declined = cpu.getPostContingencyResults().stream()
+                    .filter(p -> !onDevice.contains(p.getContingency().getId())).count();
+            // Split the declined ones, or the number misleads: a scenario REFUSED AT PLAN TIME was never
+            // attempted on the device (an unmodeled shape — OLF converges those perfectly well, they are a
+            // scope gap), while one the device TRIED and threw away is a device failure whenever OLF converges
+            // it. The census gives the plan/validator classes by count, which is enough to separate them.
+            long planRefused = GpuBatchScopeCensus.snapshot().entrySet().stream()
+                    .filter(e -> e.getKey().startsWith("PLAN:") || e.getKey().startsWith("VALIDATOR:"))
+                    .mapToLong(Map.Entry::getValue).sum();
+            System.out.printf("  DEVICE VERDICT: %d of %d simulated solved on device; %d declined = %d refused at"
+                    + " plan time (unmodeled shape, OLF converges them) + %d tried and failed%n",
+                    onDevice.size(), cpu.getPostContingencyResults().size(), declined, planRefused,
+                    declined - planRefused);
+            System.out.printf("  DEVICE FAILURES on a system OLF converges: %d of the %d declined%s%n",
+                    declinedButOlfConverged.size(), declined,
+                    declinedButOlfConverged.isEmpty() ? " (none — every declined one is OLF's own non-convergence)"
+                            : " (" + (declinedButOlfConverged.size() - planRefused) + " of them tried and failed): "
+                              + declinedButOlfConverged);
+            System.out.printf("  STATUS COMPARISON covers the %d device-solved contingencies; for the rest both"
+                    + " arms report the SAME CPU computation%n", onDevice.size());
+        }
         if (!mismatched.isEmpty()) {
             System.out.printf("  STATUS MISMATCHES (%d): %s%n", mismatched.size(),
                     mismatched.subList(0, Math.min(20, mismatched.size())));
@@ -1163,10 +1301,16 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                         continue;
                     }
                     double i1d = Math.abs(cb.getI1() - gb.getI1());
+                    // BOTH sides: a one-sided violation is usually on side TWO, and side ONE matching says
+                    // nothing about it (rte6515 BUS-125_BBS_1: LINE-2533-1468's I1 agreed to 1e-13 while only
+                    // the CPU reported a CURRENT TWO violation 21% over its limit).
+                    double i2d = Math.abs(cb.getI2() - gb.getI2());
                     System.out.printf("  BRDIFF ctg=%-14s %s I1 cpu=%.6f gpu=%.6f d=%.3e (%.3e rel) "
+                            + "| I2 cpu=%.6f gpu=%.6f d=%.3e (%.3e rel)"
                             + "| P1 cpu=%.6f gpu=%.6f | Q1 cpu=%.6f gpu=%.6f%n",
                             cp.getContingency().getId(), cb.getBranchId(), cb.getI1(), gb.getI1(),
                             i1d, i1d / Math.max(1e-9, Math.abs(cb.getI1())),
+                            cb.getI2(), gb.getI2(), i2d, i2d / Math.max(1e-9, Math.abs(cb.getI2())),
                             cb.getP1(), gb.getP1(), cb.getQ1(), gb.getQ1());
                 }
             }
@@ -1216,6 +1360,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 long cpuOnly = cpuBuses.stream()
                         .filter(b -> !gpuV.containsKey(b.getBusId())).count();
                 long gpuOnly = gpuV.size() - (cpuBuses.size() - cpuOnly);
+                BUS_WORST_BY_CTG.put(cp.getContingency().getId(), worstAbs);
                 System.out.printf("  BUSDIFF ctg=%s buses>1e-12kV=%d of %d | worst abs=%.3e kV rel=%.3e"
                                 + " | uncompared: cpu-only=%d gpu-only=%d%n",
                         cp.getContingency().getId(), above, cpuBuses.size(),
@@ -1261,8 +1406,14 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             }
             int cpuCount = cpuViolByCtg.getOrDefault(ctgId, List.of()).size();
             int gpuCount = gpuViolByCtg.getOrDefault(ctgId, List.of()).size();
+            VIOL_DELTA_BY_CTG.put(ctgId, gpuCount - cpuCount);
             if (cpuCount != gpuCount) {
                 System.out.printf("  VIOL-DIFF ctg=%s cpu=%d gpu=%d delta=%d%n", ctgId, cpuCount, gpuCount, gpuCount - cpuCount);
+                // Whether the one-sided entry ALREADY violated in the pre-contingency state decides what it is.
+                // A NEW violation missing on one arm is a defect. A PRE-EXISTING one is filtered by powsybl's
+                // increased-violations thresholds (this harness sets 0.5 proportional on flows), so it is
+                // re-reported only past `base + min(abs, prop*base)` — a boundary a 1e-5-relative state
+                // difference flips either way, which is what `docs/increased-violations-thresholds.md` is about.
                 // Print the violations that differ (one-sided)
                 var cpuSet = new java.util.HashSet<String>();
                 cpuViolByCtg.getOrDefault(ctgId, List.of()).forEach(v ->
@@ -1270,13 +1421,19 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 var gpuSet = new java.util.HashSet<String>();
                 gpuViolByCtg.getOrDefault(ctgId, List.of()).forEach(v ->
                         gpuSet.add(v.getSubjectId() + "|" + v.getLimitType() + "|" + v.getSide()));
+                var preKeys = new java.util.HashMap<String, Double>();
+                for (var v : cpu.getPreContingencyResult().getLimitViolationsResult().getLimitViolations()) {
+                    preKeys.put(v.getSubjectId() + "|" + v.getLimitType() + "|" + v.getSide(), v.getValue());
+                }
                 for (var v : cpuViolByCtg.getOrDefault(ctgId, List.of())) {
                     String key = v.getSubjectId() + "|" + v.getLimitType() + "|" + v.getSide();
                     if (!gpuSet.contains(key)) {
-                        System.out.printf("    CPU-only: %s %s %s value=%.6f limit=%.6f margin=%.6e%n",
+                        Double base = preKeys.get(key);
+                        System.out.printf("    CPU-only: %s %s %s value=%.6f limit=%.6f margin=%.6e pre=%s%n",
                                 v.getSubjectId(), v.getLimitType(), v.getSide(), v.getValue(),
                                 v.getLimit() * v.getLimitReduction(),
-                                Math.abs(v.getValue() - v.getLimit() * v.getLimitReduction()));
+                                Math.abs(v.getValue() - v.getLimit() * v.getLimitReduction()),
+                                base == null ? "NEW" : String.format("pre-existing base=%.6f", base));
                     }
                 }
                 for (var v : gpuViolByCtg.getOrDefault(ctgId, List.of())) {
@@ -1300,6 +1457,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
 
         // ASSERTIONS
         // after every per-contingency diff line, so a failing run still says whether the STATES agree
+        reportTriple();                                      // before any assertion: a failing run is exactly when the joined table is wanted
         assertTrue(worstDistributed < 1e-3, "distributed active power must match the CPU: worst " + worstDistributed + " MW");
         assertEquals(statusCounts(cpu), statusCounts(gpuCold),
                 "post-contingency status counts must match CPU");

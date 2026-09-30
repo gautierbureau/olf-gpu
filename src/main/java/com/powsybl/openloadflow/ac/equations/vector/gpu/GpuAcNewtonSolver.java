@@ -389,6 +389,22 @@ public final class GpuAcNewtonSolver {
     public static native void setBatchDsIslanded(long handle, int[] slotParticipantPairs);
 
     /**
+     * Install (or clear, with null) the per-scenario P-balance row of a distributed-slack participant
+     * whose row THIS scenario moves, as {@code {slot, participant, row}} triples ({@code participant}
+     * indexes {@code dsPhiRow}, {@code row} is an equation row in the same space as {@code dsPhiRow}).
+     *
+     * <p>{@code dsPhiRow} is structural, and under the coupler-tree relocation a child bus's P balance
+     * sits on its parent coupler's {@code DUMMY_P} row. A contingency that OPENS that coupler pins the
+     * dummy row to a {@code DUMMY_TARGET} identity and the stock-placement fallback returns the balance
+     * to the child's own {@code BUS_PHI} row — so for that scenario the participant's row is the
+     * child's, and the distribution must read its anchor and write its share there. Writing to the
+     * pinned row instead loses the share AND feeds the retain/water-fill totals a spurious
+     * {@code (0 - anchor)} of absorbed power, which makes the slack loop redistribute what OLF placed
+     * once.
+     */
+    public static native void setBatchDsRowOverrides(long handle, int[] slotParticipantRowTriples);
+
+    /**
      * Install (or clear, with null) the per-scenario reactive-limits controllers a fragmenting
      * contingency strands in another synchronous component, as {@code {slot, controller}} pairs.
      *

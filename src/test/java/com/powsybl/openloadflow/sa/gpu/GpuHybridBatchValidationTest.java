@@ -170,7 +170,7 @@ class GpuHybridBatchValidationTest {
                 gpuData.dqElem(), gpuData.dqSide(), gpuData.dqWeight(), gpuData.dqRow(), gpuData.dqKind(),
                 gpuData.ziIn(), gpuData.ziIdx(), gpuData.drRow(), gpuData.drCol(), gpuData.drCoef(),
                 gpuData.dbRow(), gpuData.dbCol(), gpuData.dbCoef(), gpuData.cbPcSide(), gpuData.vdlIn(), gpuData.vdlIdx(),
-                gpuData.qrPtr(), gpuData.qrRows(), gpuData.obQAlt(), gpuData.ziQAlt());
+                gpuData.qrPtr(), gpuData.qrRows(), gpuData.obQAlt(), gpuData.ziQAlt(), true);
         // (The batch-context handle + the per-scenario outer-loop bridges are now owned by
         // GpuHybridBatchOuterLoopEngine, which is invoked below.)
 

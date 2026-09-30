@@ -79,6 +79,17 @@ public final class GpuAcNewtonSolver {
         return a;
     }
 
+    /**
+     * Build the device-resident shared structure (row pairing, CSR pattern, per-family destinations).
+     *
+     * @param perScenarioRows whether this structure will be driven with PER-SCENARIO row modes (a batch
+     *                        context). It reserves the alternate placements the coupler-tree relocation
+     *                        needs when a scenario opens a coupler: a relocated child's DISTR_Q then has
+     *                        to leave the coupler's pinned {@code DUMMY_Q} row for the child's own V row.
+     *                        Those slots are unreachable in a sequential context — one row-mode vector,
+     *                        extracted with the coupler closed — and reserving them there is dead nnz
+     *                        that still reorders the factorization (5.8e-07 on the 15-coupler chain).
+     */
     public static native long createStructure(int n,
                                               double[] cbIn, int[] cbIdx, double[] obIn, int[] obIdx,
                                               double[] shIn, int[] shIdx, double[] hvIn, int[] hvIdx,
@@ -87,7 +98,7 @@ public final class GpuAcNewtonSolver {
                                               int[] drRow, int[] drCol, double[] drCoef,
                                               int[] dbRow, int[] dbCol, double[] dbCoef, int[] cbPcSide,
                                               double[] vdlIn, int[] vdlIdx, int[] qrPtr, int[] qrRows,
-                                              int[] obQAlt, int[] ziQAlt);
+                                              int[] obQAlt, int[] ziQAlt, boolean perScenarioRows);
 
     /**
      * Release a structure handle from {@link #createStructure} (idempotent for handle 0). Contexts
@@ -200,7 +211,7 @@ public final class GpuAcNewtonSolver {
                                  int[] obQAlt, int[] ziQAlt) {
         long structure = createStructure(x0.length, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
                 dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
-                noPcSide(cbIdx.length / 12), new double[0], new int[0], qrPtr, qrRows, obQAlt, ziQAlt);
+                noPcSide(cbIdx.length / 12), new double[0], new int[0], qrPtr, qrRows, obQAlt, ziQAlt, false);
         try {
             long handle = createContext(structure);
             try {
@@ -790,7 +801,7 @@ public final class GpuAcNewtonSolver {
         long structure = createStructure(n, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
                 dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
                 noPcSide(cbIdx.length / 12), new double[0], new int[0], new int[] {0}, new int[0],
-                noQAlt(obIdx.length / 6), noQAlt(ziIdx.length / 11));
+                noQAlt(obIdx.length / 6), noQAlt(ziIdx.length / 11), true);
         try {
             long handle = createBatchContext(structure, nScenarios, mode,
                     rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, new byte[rlVrow.length], new double[x0Base.length],

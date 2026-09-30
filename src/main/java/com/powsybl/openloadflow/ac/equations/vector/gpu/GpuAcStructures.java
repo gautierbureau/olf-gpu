@@ -95,6 +95,11 @@ public final class GpuAcStructures {
      * instance miss falls back to content matching over the structure inputs, so a different
      * FLAVOR of an already-cached equation-system state aliases the existing structure.
      *
+     * <p>Every consumer of this cache builds a BATCH context on the handle — the batched SA over its
+     * chunks, and the sequential solve as a batch of 1 — so the structure is built with per-scenario
+     * row modes ({@link GpuAcNewtonSolver#createStructure}). Only the one-shot
+     * {@code GpuAcNewtonSolver.solve} entry point, which builds a plain context, does not.
+     *
      * @param n    number of variables / equations
      * @param data the extraction (the caller must keep a strong reference for as long as it uses
      *             the handle — the structure is Cleaner-freed when every extraction mapped to it
@@ -119,7 +124,7 @@ public final class GpuAcStructures {
                         data.drRow(), data.drCol(), data.drCoef(),
                         data.dbRow(), data.dbCol(), data.dbCoef(), data.cbPcSide(),
                         data.vdlIn(), data.vdlIdx(), data.qrPtr(), data.qrRows(),
-                        data.obQAlt(), data.ziQAlt()), n);
+                        data.obQAlt(), data.ziQAlt(), true), n);
                 CACHE.put(data, structure);
                 BUILDS.incrementAndGet();
                 return structure.handle;

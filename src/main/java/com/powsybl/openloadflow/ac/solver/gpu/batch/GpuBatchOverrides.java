@@ -104,6 +104,12 @@ final class GpuBatchOverrides {
         }
     }
 
+    /** The row's current override, or {@code fallback} when it has none. */
+    double valueOr(int flat, double fallback) {
+        int at = positionOf.get(flat);
+        return at >= 0 ? value.getQuick(at) : fallback;
+    }
+
     int size() {
         return index.size();
     }

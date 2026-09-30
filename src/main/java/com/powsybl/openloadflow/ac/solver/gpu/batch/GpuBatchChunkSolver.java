@@ -341,6 +341,10 @@ final class GpuBatchChunkSolver {
             ziElemByNumAll.put(gpuData.ziBranchNums()[z], z);
         }
         List<Integer> ziOffSlotElemList = new ArrayList<>(); // per-scenario zi-element outages (switch opens)
+        // COUPLER-TREE relocation: {slot, dpRow, dqRow, childPhiRow, childVRow, childIsVoltageControlled}
+        // per (scenario, opened coupler whose child SURVIVES). The equations move back to the child's own
+        // rows in-kernel; this replays the same move on the TARGET side once every producer has run.
+        List<int[]> ziRelocTargetMoves = new ArrayList<>();
         List<Integer> ziOnSlotElemList = new ArrayList<>();
         List<Integer> ziTreeSlotElemValList = new ArrayList<>();   // {slot, ziElement, isTree} where OLF's tree moved // per-scenario zi-element enables (switch closes)
         List<Integer> shOvSlotElemList = new ArrayList<>();  // per-scenario shunt admittance overrides
@@ -472,6 +476,7 @@ final class GpuBatchChunkSolver {
                     int[] nActive = new int[chunkSize];
                     java.util.Arrays.fill(nActive, n);
                     ziOffSlotElemList.clear();
+                    ziRelocTargetMoves.clear();
                     ziTreeSlotElemValList.clear();
                     ziOnSlotElemList.clear();
                     shOvSlotElemList.clear();
@@ -747,8 +752,20 @@ final class GpuBatchChunkSolver {
                                 int[] rowZi = rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rowModePerScenario[s];
                                 rowZi[dpRow] = 0;
                                 rowZi[dqRow] = 0;
-                                overrides.add(s * n + dpRow, 0.0);
-                                overrides.add(s * n + dqRow, 0.0);
+                                boolean relocatedHere = (gpuData.ziIdx()[ze * 11 + 10] & 8) != 0
+                                        && ((gpuData.ziIdx()[ze * 11 + 10] >> 1) & 3) != 0;
+                                if (!relocatedHere) {
+                                    overrides.add(s * n + dpRow, 0.0);
+                                    overrides.add(s * n + dqRow, 0.0);
+                                }
+                                // ...but NOT on a RELOCATED coupler, whose dummy rows still carry the child
+                                // bus's P/Q equations at this point. A later producer COMPOSES onto them — the
+                                // loss pre-distribution adds its share to the row's existing override — and an
+                                // identity 0 parked here first makes it compose onto 0 instead of onto the
+                                // bus's base target: measured as a share of 0.1739 landing where the target
+                                // should have been 1.2171, which the distributed slack then converged 0.104 MW
+                                // away from the CPU. The identity is stamped at the END instead, by
+                                // moveRelocatedTarget, once the child's own row has taken the real value.
                                 // The RELOCATION gave this coupler's ZERO_V the CHILD bus's own V row. With the
                                 // coupler open that equation is gone, and OLF's post-contingency system has
                                 // BUS_TARGET_V active on that bus instead (read off the CPU dump for
@@ -794,16 +811,23 @@ final class GpuBatchChunkSolver {
                                         }
                                     }
                                     if (childFrozen) {
+                                        // The child went into the ISLAND: its equations are gone, so nothing
+                                        // travels — but the dummy rows must still END at their identity 0. A
+                                        // later producer (the DS anchor of the dead bus's generator) appends
+                                        // its own entry for the same row, and the device scatter races two:
+                                        // measured here as c01's DUMMY_P ending at 0.149 instead of 0.
+                                        ziRelocTargetMoves.add(new int[] {s, dpRow, dqRow, -1, -1, 1});
                                         continue;
                                     }
-                                    if (childPhiRow >= 0 && dpRow >= 0) {
-                                        overrides.add(s * n + childPhiRow, baseTargets[dpRow]);
-                                    }
-                                    // A child that is NOT voltage-controlled has its reactive balance on the
-                                    // coupler's DUMMY_Q instead, so its Q target follows the same way.
-                                    if (!applied && childVRow >= 0 && dqRow >= 0) {
-                                        overrides.add(s * n + childVRow, baseTargets[dqRow]);
-                                    }
+                                    // Recorded, not written here: the target a per-scenario producer puts on the
+                                    // dummy row AFTER this point has to travel too — the DS loss replay updates
+                                    // the child's P there, and the DISTR_Q renormalization its reactive share
+                                    // (measured on this fixture: row 15 ended with the renormalized -0.200 while
+                                    // the equation solved at row 10 against the BASE -0.133, 0.34 kV at vl3_b).
+                                    // Writing the base value now would also leave TWO entries on the dummy row,
+                                    // which the device scatter races on.
+                                    ziRelocTargetMoves.add(new int[] {s, dpRow, dqRow, childPhiRow, childVRow,
+                                        applied ? 1 : 0});
                                     if (System.getenv("OLF_GPU_ZITREE_TRACE") != null) {
                                         System.err.println("ZITREE_VID coupler=" + ziOut.getId()
                                                 + " child=" + (child == null ? "-" : child.getId())
@@ -1092,16 +1116,18 @@ final class GpuBatchChunkSolver {
                             // pre-distribution (which left the device DS loop to water-fill the
                             // mismatch during the solve, at a different point inside the slack band).
                             int ci = group.get(chunkStart + s);
-                            int[] frozen = frozenRowsByIndex[ci];
+                            // The SAME participant list the device's water-fill is masked with
+                            // (GpuBatchQualification.islandedDsParticipants), not a second row-only test here:
+                            // that one also matches on the BUS, which is what finds a participant whose P row
+                            // the coupler-tree relocation moved onto a coupler DUMMY_P — never a frozen row.
+                            // Missing it left the dead bus's generator in the pre-distribution while the device
+                            // excluded it from the solve, and the two disagreed by 0.05 MW per survivor.
                             boolean[] islandedDs = null;
-                            for (int i = 0; i < nds; i++) {
-                                for (int fr : frozen) {
-                                    if (fr == gpuData.dsPhiRow()[i]) {
-                                        if (islandedDs == null) {
-                                            islandedDs = new boolean[nds];
-                                        }
-                                        islandedDs[i] = true;
-                                    }
+                            if (islandedDsByIndex != null && islandedDsByIndex[ci] != null
+                                    && islandedDsByIndex[ci].length > 0) {
+                                islandedDs = new boolean[nds];
+                                for (int participant : islandedDsByIndex[ci]) {
+                                    islandedDs[participant] = true;
                                 }
                             }
                             double[] shares = GpuBatchLossPreDistribution.distribute(gpuData, preLossBySlot[s],
@@ -1192,6 +1218,21 @@ final class GpuBatchChunkSolver {
                     if (phases.continuousPhase() != null && !phases.continuousPhase().isEmpty()) {
                         GpuBatchContinuousPhase.applyPhaseOn(realCount, n, phases.continuousPhase(),
                                 rowModePerScenario, baseRowMode, disabledMask, overrides);
+                    }
+                    // COUPLER-TREE relocation, the TARGET half of the stock-placement fallback. A scenario
+                    // that opens a relocated coupler pins its DUMMY_P/DUMMY_Q rows and the kernels send the
+                    // child's equations back to the child's own PHI/V rows. The targets follow here, LAST, so
+                    // whatever the DS replay, the DISTR_Q renormalization or a gen outage left on the dummy
+                    // row is what travels — and the dummy row is left holding exactly one entry, its identity
+                    // 0, instead of racing two.
+                    for (int[] mv : ziRelocTargetMoves) {
+                        int sMv = mv[0];
+                        moveRelocatedTarget(overrides, baseTargets, n, sMv, mv[1], mv[3]);
+                        if (mv[5] == 0) {                    // a VOLTAGE-CONTROLLED child keeps BUS_TARGET_V on
+                            moveRelocatedTarget(overrides, baseTargets, n, sMv, mv[2], mv[4]);  // its V row
+                        } else if (mv[2] >= 0) {
+                            overrides.put(sMv * n + mv[2], 0.0);
+                        }
                     }
                     int[] targetOverrideIndex = overrides.indexArray();
                     double[] targetOverrideValue = overrides.valueArray();
@@ -2034,6 +2075,23 @@ final class GpuBatchChunkSolver {
      * absorbed total. Only valid when ONE solve covered the chunk (the read-backs are per solve): the caller
      * checks; a scenario left NaN reports the pre-distribution as before.
      */
+    /**
+     * Move the target standing on a relocated coupler's DUMMY row onto the child bus's own row, and leave the
+     * dummy row pinned at its {@code DUMMY_TARGET} identity of 0. The value taken is the row's per-scenario
+     * override when it has one, else its base target — the equation itself moved in-kernel, and a target left
+     * behind is a target the slack absorbs.
+     */
+    private static void moveRelocatedTarget(GpuBatchOverrides overrides, double[] baseTargets, int n,
+                                            int s, int dummyRow, int childRow) {
+        if (dummyRow < 0) {
+            return;
+        }
+        if (childRow >= 0) {
+            overrides.put(s * n + childRow, overrides.valueOr(s * n + dummyRow, baseTargets[dummyRow]));
+        }
+        overrides.put(s * n + dummyRow, 0.0);
+    }
+
     private static void recordDistributedActivePower(long handle, GpuAcData gpuData, int realCount, int chunkSize, int n,
                                                      List<Integer> group, int chunkStart, boolean dsSlackOnly,
                                                      int[] dsOvBus, double[] dsOvBaseDelta,

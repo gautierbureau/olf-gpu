@@ -11,6 +11,74 @@ complete. Keep the numbering: it is cited in commit messages.
 
 ## Open
 
+### #62 — Coupler relocation: a structural row a contingency un-relocates (2026-09-30)
+
+FIXED (54a866a) for the two middle-section fixtures; the pattern is the thing to remember.
+
+`dsPhiRow` and `dqMemberRow` are **structural** — decided once per extraction. Under the
+coupler-tree relocation a child bus's P/Q balances live on its parent coupler's
+`DUMMY_P`/`DUMMY_Q` rows, so those arrays point there. A contingency that **opens** that
+coupler pins the dummies to `DUMMY_TARGET` identities and the stock-placement fallback
+returns the balances to the bus's **own** rows. Every consumer still holding the structural
+row then writes to a dead row. Both middle-section fixtures had been red since the
+relocation went on by default, for exactly this reason on the two sides:
+
+| | OLF | device (before) |
+| --- | --- | --- |
+| bbs2 DS share | +0.173869 pu on `bus_target_p[5]` | on the pinned dummy; kernels read `(0 − anchor)` = −1.043213 as "absorbed" |
+| device slack passes | 1 (the pre-distribution) | **4**, over-placing 0.0687 pu |
+| `distr_q5` target | −0.2 (keys renormalized 1/3 → 1/2) | −0.133333333 (base keys) |
+| l2 Q1 | 239.0484 MVAr | 225.7150 (−13.33) |
+| vl3_b | 401.6903 kV | 401.3695 (−0.32) |
+
+**Method that worked, after two wrong readings.** `OLF_GPU_EQ_DUMP_CTG=<id>` prints OLF's
+own post-contingency system; its docstring already warned that reasoning about where a
+relocated row *could* go had produced two wrong fixes, because opening a coupler changes
+the GROUP and OLF may DEACTIVATE an equation rather than move it. Reading it settled both
+sides in one shot (bbs2 alive, `bus_target_p[5]` + `distr_q5` active on its own rows, keys
+0.5/0.5) — and settled the second fixture too, where only ONE `distr_q` row is active and
+the seeding writes two.
+
+**The collision that hid the Q half.** The coupler-opening block in `GpuBatchChunkSolver`
+also moves that row's target, using `baseTargets[dqRow]` — the base-key value. Both writes
+landed as **two override entries on one row**, and `applyTargetOverrideBatch` is one thread
+per entry doing `target[ovIndex[k]] = ovValue[k]`: which survives is a **race**. The base
+value was winning. `GpuBatchOverrides.add` documents "last one wins", which the device does
+not honour — so the ordering intent of any duplicate is fiction. Fixed by making the
+coupler block YIELD the row when the plan seeds a renormalized target for it, which keeps
+every scenario whose plan seeds none bit-identical. Two fixtures
+(`deviceBusLossIslanding{BaseCarrierMember,MergedPilotSurvivor}`) were *relying* on the
+race: forcing "renormalized wins" everywhere (`put`) turned them red, which is how the
+duplicate was found. **Any remaining duplicate override on one row is a latent bug of this
+kind** — deduplicating `indexArray()`/`valueArray()` to the documented last-wins is the
+real repair, not yet done.
+
+**Instruments were lying, and that cost measurements.**
+- The DS gate record is 8 doubles per scenario but the water-fill wrote `gateLast[6*s+5]`,
+  the stride of the 6-slot record it replaced: for `s=0` it overwrote `dsRetain` with the
+  placed amount (a FIRING pass printed the wrong column, `dsPlaced` stayed 0) and for every
+  `s>=1` it scribbled into ANOTHER scenario's slots. **Every `LOOP_PASS` number read off a
+  firing pass, in this file and elsewhere, was the wrong quantity.** Fixed to `8*s+7`; the
+  base pass now reads exactly (`retain 0.172854 + placed 0.129640 = mismatch`).
+- `PRELOSS_AFTER` compared the participants' total against the WHOLE mismatch (wrong
+  whenever the slack participates) and counted an islanded row's frozen target as a
+  distribution: it read the fixture as −1.669969 pu off OLF when the real gap was −0.0687.
+  Now prints `seededOnParticipants` and skips islanded rows.
+- `OLF_GPU_TARGET_ROW` takes a list or `lo-hi` range; one row per JVM run made "which
+  device row carries this equation" a five-minute question.
+- `islandedDistrQEntries` had no trace. `DQSEED` is the *generator* path's — its silence
+  says nothing about the islanding path, and reading it as "the target is never seeded"
+  sent one fix at an inert code path. `OLF_GPU_DQISL_TRACE` now prints that path.
+- **A compile error in a trace made four runs silently use stale classes** and produced a
+  "bit-identical, so my fix did nothing" reading that was simply false. Grep the mvn log
+  for `BUILD FAILURE` / `cannot find symbol` before believing any measurement.
+
+Result: suite 177/177 (was 175/177), and the fixtures match the CPU **at** the 1e-12 kV
+assertion rather than within it. GpuLoadFlow / GpuFullNewton / GpuAcStructures /
+GpuLineSearch green. Checkstyle unchanged at its 220 pre-existing violations (this branch
+is not at zero — CLAUDE.md's "must be 0" does not hold here).
+
+
 ### #61 — GPU SA host overhead: the GPU is no longer the bottleneck (2026-09-21)
 
 H100, rte6515, 14,260 contingencies (all kinds but busbar sections), RTE params: GPU arm ~47–51 s on one

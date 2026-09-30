@@ -54,104 +54,58 @@ before looking at the water-fill arithmetic.
 Suite 177/177 + GpuLoadFlow/GpuFullNewton/GpuAcStructures/GpuLineSearch green; checkstyle
 unchanged at 220.
 
-### #66 — The distributed-power TAIL is TWO things (2026-09-30)
+### #66 — The distributed-power tail: convergence slack ON TOP OF a water-fill residue floor (2026-09-30)
 
-OPEN. The only failing assertion on the full busbar scope
-(`assertTrue(worstDistributed < 1e-3)`): worst **1.398e-03 MW**. Characterised, and it splits.
+OPEN but fully CHARACTERISED and bounded. Worst 1.398e-03 MW at default criteria, over the
+`assertTrue(worstDistributed < 1e-3)` assertion.
 
-**Ruled out first.** Not the [[#64]] gate signature: for `BUS-5250_BBS` both arms fire exactly
-ONE distribution pass, so the AMOUNT differs, not the sequence. Not chunk composition: at
-`-Dolf.gpu.sa.maxBatch=512` the tail is byte-identical (same worst value, same six
-contingencies, same order) — a cross-chunk leak moves with the chunk size.
+**Ruled out, each with a measurement.** Not the [[#64]] gate signature (for BUS-5250_BBS both
+arms fire exactly ONE pass, so the AMOUNT differs, not the sequence). Not chunk composition
+(byte-identical at `-Dolf.gpu.sa.maxBatch=512`: same worst value, same six contingencies, same
+order). The states DO differ — 5430 of 6885 buses over 1e-12 kV, worst 1.563e-06 kV, 2.012e-08
+relative: broad and uniform, the signature of different ITERATES, not a localized model error.
 
-**The states really do differ** (`OLF_GPU_SA_BUSDIFF_CTG=BUS-5250_BBS`): 5430 of 6885 buses
-above 1e-12 kV, worst 1.563e-06 kV, **2.012e-08 relative** — broad and uniform, the signature of
-two arms stopping at different ITERATES, not of a localized modelling error. The arms already
-differ by 3.7e-07 pu at the FIRST slack check (device 0.007948472266 vs OLF 0.007948840), which
-the 0.01 pu gate then amplifies.
+**The squeeze separates two components** (`OLF_GPU_DBG_CONV_EPS`, tightening BOTH arms):
 
-**The squeeze splits the tail.** `OLF_GPU_DBG_CONV_EPS=1e-8` tightens the criterion on BOTH arms
-(the instrument's own comment: "the only honest way to tell a real state difference from
-convergence slack is to squeeze the slack and watch what survives"). Worst 1.398e-03 ->
-8.464e-04 MW, differing count 3689 -> 3565, violations diff 0 either way, and the assertion
-PASSES at 1e-8. Per contingency:
-
-| | eps=1e-4 | eps=1e-8 | verdict |
+| | eps=1e-4 | eps=1e-8 | eps=1e-10 |
 | --- | --- | --- | --- |
-| BUS-5250_BBS | 1.398e-03 | **4.749e-05** (29x down) | convergence slack |
-| BUS-4467_BBS | 9.564e-04 | **8.464e-04** (1.13x) | **eps-INDEPENDENT — real** |
+| BUS-4467_BBS | 9.564e-04 | 8.464e-04 | **8.464e-04** |
+| BUS-5250_BBS | 1.398e-03 | 4.749e-05 | **4.749e-05** |
+| scope worst | 1.398e-03 | 8.464e-04 | 8.464e-04 |
 
-So:
+1. **Convergence slack** — the part that shrinks from 1e-4 to 1e-8. Both arms use
+   `UNIFORM_CRITERIA` at the default `convEpsPerEq=1e-4` and the device implements OLF's exact
+   `‖F‖₂ < sqrt(convEpsPerEq² · n)` test, but a Newton stopping test does NOT pin a unique
+   iterate: cuDSS and KLU take different step sequences and land on different points that both
+   satisfy it. Asymmetries to close: the device's per-scenario `nActive` vs OLF's own equation
+   count in the threshold, and the MAX_VOLTAGE_CHANGE step clamp. (This is why the small-network
+   fixtures match at 1e-12 kV — their Newton resolves the fixed point — and rte6515 does not.)
 
-1. **Most of the tail is convergence slack.** Both arms use `UNIFORM_CRITERIA` with the default
-   `convEpsPerEq=1e-4` and the device implements OLF's exact criterion
-   (`‖F‖₂ < sqrt(convEpsPerEq² · n)`, per-scenario `nActive`) — but a Newton stopping test does
-   not pin a unique iterate. Different linear solvers (cuDSS vs KLU) take different step
-   sequences and land on different points that both satisfy it. Candidates for closing the
-   remaining asymmetry: `nActive` vs OLF's own equation count in the threshold, and the
-   MAX_VOLTAGE_CHANGE step clamp. This is why the small-network fixtures match at 1e-12 kV
-   (their Newton resolves the fixed point) and rte6515 does not (it stops at ~1e-6).
+2. **A hard floor that does NOT move below eps=1e-8**, and it is bounded by OLF's OWN water-fill
+   residue epsilon: `ActivePowerDistribution.P_RESIDUE_EPS = 1e-5` pu = **1e-3 MW**, the same
+   constant on both sides (`GpuBatchLossPreDistribution.P_RESIDUE_EPS`, the kernel's
+   `P_RESIDUE_EPS`). Both loops stop distributing once `|rem| <= 1e-5` pu and leave a DIFFERENT
+   undistributed leftover, so the reported totals differ by up to 1e-5 pu. Every floor value
+   observed is under that bound (worst 8.464e-04 MW), and the test's 1e-3 assertion is itself
+   written at P_RESIDUE_EPS. To close it the device's water-fill has to leave the SAME residue as
+   OLF's — i.e. match the termination and the saturation ORDER, which is where the discrete
+   clamp makes floating-point order visible ("OLF removes an element only on a STRICT overshoot").
 
-2. **`BUS-4467_BBS` is a real, discrete disagreement.** `cpu=1726.709369250` vs
-   `gpu=1726.710325644` MW, and it SURVIVES a 10^4x tighter criterion. At 1726 MW distributed
-   many participants saturate, and a saturated generator contributes its EXACT limit, so one
-   differing clamp decision gives exactly this kind of fixed offset. **Chase this one first** —
-   compare `OLF_DS_SPLIT`'s G lines against `OLF_GPU_GENCUM_DUMP` for it (the join that found
-   [[#64]]'s uniform scale-up) and look for a generator at a limit on one arm only. Note
-   `OLF_DS_TRACE` prints `DS_SAT` lines and the host replay prints `SEED_SAT`.
+**Two over-claims of mine, corrected by the 1e-10 run, recorded so they are not repeated.** I
+called BUS-4467_BBS "eps-independent, therefore a real separate defect" on a single 1e-8 point:
+a near-boundary clamp makes a slack-driven difference LOOK eps-independent, because a saturated
+generator contributes its exact limit. And I called BUS-5250_BBS "convergence slack" — it has a
+floor too (4.749e-05). One extra point on the curve (1e-10) was what separated slack from floor;
+two points could not.
 
-
-### #63 — A re-homed voltage main that is already PINNED (2026-09-30)
-
-Violation gap **71 -> 0** on the full busbar scope. The CAUSE is found and named; the fix in
-place is a plan-time refusal, so the on-device version below is still open.
-
-`BUS-6194_BBS_2` loses the middle of three coupled sections; the VC group re-homes to
-VL-6194_2 as a local main and `reHomedPvEntry` installs a VOLTAGE IDENTITY on its own row —
-without checking that the bus's reactive-limit entry is ALREADY PINNED (`baseLimitType=2`).
-A bus pinned at its reactive ceiling cannot hold its voltage: OLF has it as PQ.
-
-The whole chain, each step measured:
-
-1. host uploads row 12938 as mode 0, target 1.123 (`OLF_GPU_TARGET_ROW`)
-2. RL entry 993 for that bus is pinned, `lt=2` (`OLF_GPU_RL_TRACE` -> `GPU_RL_FINAL`)
-3. because it is ALREADY pinned, `reactiveLimitsBatch` never takes the switch path that would
-   set `mode[qidx] = 4`; it takes the "curve/SVC limit drift while pinned" branch, which writes
-   **only** `target[qidx] = lim - rlLoadQ` — no mode write
-4. device ENDS row 12938 at 0.6251 = maxQ - loadQ, mode still 0 (`OLF_GPU_FINAL_TARGET_ROW`)
-5. a mode-0 identity means x = target, so the bus VOLTAGE becomes the reactive limit:
-   `UNREALISTIC bus=VL-6194_2 v=0.625100000 band=[0.800, 1.200]`
-6. OLF's realistic-voltage check -> `FAILED` where OLF reports `CONVERGED` -> EMPTY result ->
-   all 71 of its violations lost, which was the entire scope gap
-
-**Fix in place:** refuse the identity when the entry is pinned
-(`PLAN:VC_REMERGE_PINNED_MAIN`, 3 contingencies on the full scope: BUS-6194_BBS_2,
-BUS-6157_BBS_1 and one more). Violations diff 71 -> 0, suite 177/177, and the scope's only
-genuine RUNTIME device failure is gone ("0 of them tried and failed", was 1).
-
-**STILL OPEN — put it back on the device.** This trades 2 contingencies to the CPU (device
-coverage 6552 -> 6550), and a CPU route is scaffolding. The on-device state is already known:
-a pinned bus IS mode 4 with `target = limit - loadQ`, which is exactly what the RL kernel
-writes — the ONLY wrong thing is the mode. So the re-homed entry should carry the PQ row form
-instead of `GenOutage.ROW_V_IDENTITY` when its entry is pinned, and `rlLocalVt` already exists
-to hold the 1.123 so `rlUnpinBatch`'s `mode[qidx] = pvForm; target[qidx] = savedTarget[rst]`
-can restore the identity if it later unpins. NOT implemented: the unpin path has to be
-verified, not assumed — every extension beyond a measurement cost something today (see the
-mode-0 guard in [[#65]], 1.06e-12 kV).
-
-### #64 — BUS-6113_BBS_1: the last distributed-active-power outlier (2026-09-30)
-
-OPEN, and now the ONLY failing assertion on the full busbar scope:
-`cpu=217.889505513 gpu=219.217524713 MW`, **1.328 MW**, violation delta -1. Next worst is
-1.569e-02 and the bulk ~3.7e-05; scope total sum abs DAP 1.481873 MW, so this one contingency
-is most of it.
-
-Ruled out so far: override conflicts (zero on it, [[#65]]) and the pinned-main identity — it
-is NOT among the `VC_REMERGE_PINNED_MAIN` refusals and still runs on device. Note
-`GpuBatchQualification.rlEntryOf`'s docstring cites it ("BUS-6113_BBS_1 pinned VL-6113_1 at
-RL#1, the device never looked — 7.1 kV") as the reason the re-homed-as-LOCAL check EXISTS, so
-that part is already handled; the residual 1.328 MW is something else. Not yet investigated.
-
+**Next step is an INSTRUMENT, not a fix.** OLF's `DS_RUN` / `DS_SPLIT` / `DS_SAT` traces carry NO
+contingency id, so in a 6667-contingency run they cannot be attributed, which is why every
+attempt fell back to an alone-run — and an alone-run builds a DIFFERENT network (the retained
+switches follow the contingency list), so it reproduces nothing here: both BUS-5250_BBS and
+BUS-4467_BBS PASS alone. The per-generator join that cracked [[#64]] (`OLF_DS_SPLIT` G lines
+against `OLF_GPU_GENCUM_DUMP`) needs that label. Add a contingency marker to the fork (a static
+the SA layer sets, so DS_SPLIT can both label and FILTER), then join for BUS-4467_BBS and find
+the generator whose clamp differs.
 
 ### #65 — Duplicate target overrides: measured, then fixed at the producer (2026-09-30)
 

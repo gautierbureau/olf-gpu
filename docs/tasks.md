@@ -155,15 +155,48 @@ dump. Not worth another run given the two reasons above.)
 composition; a differing saturation clamp; the pre-distribution seed; row/equation structure; the
 participant set; the dummy null space. SEVEN.
 
-**The contradiction to attack next.** For BUS-5250_BBS the post-contingency states differ by up to
-1.563e-06 kV (**2.012e-08 relative**) over 5430 of 6885 buses, and the slack mismatch by 9.553e-06
-pu — and NEITHER moves when eps tightens 10^4x. A 2e-08 relative state difference that is
-eps-independent sits 10^6 above machine precision and cannot be convergence depth: something in
-the system itself differs by that much. `OLF_VAR_DUMP` (fork 86607e525) now writes EVERY converged
-state variable keyed by element ID for one contingency; pair it with the device's converged state
-for the same slot and the differing variable is named directly, instead of inferred from an
-aggregate. That localization is how every real defect this week was actually found — the
-aggregates only ever said that a difference existed.
+**LOCALIZED 2026-10-01: the device's coupler `DUMMY_Q` values do not satisfy the chain.** The
+paired dump (`OLF_VAR_DUMP` fork-side, `OLF_GPU_SA_VAR_DUMP` device-side, both keyed by element ID
+and filtered by `OLF_TRACE_CTG`) joins 14494 converged variables for BUS-4467_BBS:
+
+| variable | differing | worst abs diff |
+| --- | --- | --- |
+| **DUMMY_Q** | 331 of 366 | **8.410878e-03** |
+| DUMMY_P | 271 of 366 | 5.637924e-07 |
+| BUS_V | 5349 of 6881 | 2.655704e-07 |
+| BUS_PHI | 6880 of 6881 | 8.231543e-08 |
+
+FOUR ORDERS OF MAGNITUDE between DUMMY_Q and everything else. And the values name the defect:
+
+```
+BUS-767_COUPLER_1   cpu -0.016666316452921118   gpu -0.0216
+BUS-767_COUPLER_2   cpu -0.011110877635280746   gpu -0.0027
+BUS-767_COUPLER_3   cpu -0.005555438817640373   gpu -0.0011
+```
+
+OLF's three are EXACTLY 3:2:1 multiples of -0.005555438817640373 (x3 and x2 reproduce the other
+two to the last digit) — a coupler CHAIN carrying cumulative downstream reactive injection, which
+is what a chain of busbar couplers must satisfy. The device's are multiples of nothing and do not
+sum (-0.0027 + -0.0011 = -0.0038, against -0.0216), and they are round to exactly four decimals,
+which is what INPUT DATA looks like, not a solved variable.
+
+**Why this is the bug.** DISTR_Q equations REFERENCE dummy_q — `distr_q1952 = -0.667 * -1.0 *
+dummy_q9161 + -0.667 * dummy_q9162 + ...` — so a wrong dummy_q enforces a different reactive split
+across the group, moving controller q, then losses, then the slack mismatch by ~9.5e-06 pu. Check
+it against the measured property list: eps-INDEPENDENT (a pinned or mis-solved dummy is not a
+convergence depth) ✓, PROPORTIONAL across participants (it perturbs the sharing, not one unit) ✓,
+nearly INVISIBLE in bus voltages (2.7e-07) ✓, chunk-size invariant ✓. That is the whole list, and
+no earlier candidate matched any of it.
+
+**Why it hid.** `BUSDIFF` — the harness's state comparison, and the basis of "bus voltages exact
+scope-wide" — compares BUS VOLTAGES ONLY. A wrong coupler dummy is invisible to it, in the base as
+well as in a contingency. Nothing in the suite looked at the dummy columns until this dump.
+
+**Next, narrow:** are those device DUMMY_Q rows mode-0 IDENTITIES pinned to a target? The
+four-decimal roundness says yes, which would put this in the same relocated-row family as [[#62]],
+[[#63]] and [[#64]]. Read the row's mode and target for one of the BUS-767 couplers
+(`OLF_GPU_TARGET_ROW` on its dummy column, `ziIdx[e*11+5]`) and compare with its dumped value: if
+value == target, the row is pinned and the chain was never solved.
 
 **A caution earned twice over.** The DS gate record's stride was a genuine lying instrument
 ([[#62]]); this one was NOT, and I asserted it was on a plausible-sounding mechanism without

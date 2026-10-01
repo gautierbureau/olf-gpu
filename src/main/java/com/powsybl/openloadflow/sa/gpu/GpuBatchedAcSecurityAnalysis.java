@@ -1286,6 +1286,56 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     }
 
     /**
+     * {@code OLF_GPU_SA_VAR_DUMP=<file>}: the DEVICE's converged state for one contingency, written as
+     * {@code <variableType> <elementId> <value>} — the same shape and keys as OLF's own
+     * {@code OLF_VAR_DUMP}, so the two files join directly with no row legend. Restricted to the
+     * contingency named by {@code OLF_TRACE_CTG}, which is also what filters the OLF side.
+     *
+     * <p>Why this pairing exists: on rte6515 the last distributed-power disagreement
+     * (BUS-4467_BBS / BUS-5250_BBS, tasks #66) shows a 2.012e-08 RELATIVE state difference over 5430
+     * buses that does NOT shrink when the Newton criterion tightens 10^4x. That cannot be convergence
+     * depth, so some variable differs by that much — and an aggregate norm can only say that one does.
+     * {@code precomputed.baseVariableRows()} is the authoritative variable-to-row map the state
+     * injection itself uses, so dumping through it cannot drift from what the device actually solved.
+     */
+    private void dumpDeviceStateVariables(double[] state, PrecomputedBatch precomputed, LfNetwork network,
+                                          Contingency contingency) {
+        String path = System.getenv("OLF_GPU_SA_VAR_DUMP");
+        String want = System.getenv("OLF_TRACE_CTG");
+        if (path == null || want != null && !want.equals(contingency.getId())) {
+            return;
+        }
+        Map<Variable<AcVariableType>, Integer> rows = precomputed.baseVariableRows();
+        if (rows == null) {
+            return;
+        }
+        try (java.io.Writer w = new java.io.FileWriter(path, true)) {
+            w.write("# VARS ctg=" + contingency.getId() + " device\n");
+            for (var e : rows.entrySet()) {
+                Variable<AcVariableType> v = e.getKey();
+                int row = e.getValue();
+                if (row < 0 || row >= state.length) {
+                    continue;
+                }
+                String id;
+                try {
+                    id = switch (v.getType().getElementType()) {
+                        case BUS -> network.getBus(v.getElementNum()).getId();
+                        case BRANCH -> network.getBranch(v.getElementNum()).getId();
+                        case SHUNT_COMPENSATOR -> network.getShunt(v.getElementNum()).getId();
+                        default -> "#" + v.getElementNum();
+                    };
+                } catch (RuntimeException ex) {
+                    id = "#" + v.getElementNum();
+                }
+                w.write(v.getType().name() + " " + id + " " + state[row] + "\n");
+            }
+        } catch (java.io.IOException | RuntimeException ex) {
+            LOGGER.warn("OLF_GPU_SA_VAR_DUMP failed: {}", ex.toString());
+        }
+    }
+
+    /**
      * {@code OLF_GPU_EQ_DUMP_CTG=<contingency id>}: writes OLF's OWN equation set for the POST-CONTINGENCY
      * state — {@code lfContingency.apply()} has already run when this is called, so the system here is the
      * one the CPU actually solves for that scenario, with inactive equations in {@code [ ]}.
@@ -1437,6 +1487,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             return super.runPostContingencySimulation(network, context, contingency, lfContingency, preContingencyLimitViolationManager,
                     securityAnalysisParameters, preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
         }
+
+        dumpDeviceStateVariables(state, precomputed, network, contingency);
 
         // Inject the precomputed post-contingency state (the branch is already disabled by
         // lfContingency.apply()), then reuse the engine's result-building unchanged.

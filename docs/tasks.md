@@ -278,10 +278,69 @@ row". It does NOT cover "this member's row IS a relocated dummy that must host a
 so the sharing has nowhere to live and extraction falls back to the own-Q balance. That is very
 likely also what draws the `PLAN:VC_REMERGE_MULTI` boundary (47 of the 55 plan refusals).
 
-**Fix is structural and NOT started:** extraction must host a group's DISTR_Q on relocated members'
-rows instead of their own Q balance. It changes the BASE for ~341 members, so it needs the full
-gate — 177-test suite, scope violations diff 0, worst DAP 1.4e-03 MW — and a decision about
-whether the base's reactive split changing is acceptable (it should be: it would become OLF's).
+### Implementation plan (drafted 2026-10-01, NOT started)
+
+**A. What OLF does — verified in `AcEquationSystemCreator`.**
+`createGeneratorReactivePowerDistributionEquations` walks `getMergedControllerElements()` and for
+each controller i creates `DISTR_Q` **on bus i**: `(qPct_i − 1)·q_i + Σ_{j≠i} qPct_i·q_j`, where
+`q_x = createReactiveTerms(bus x)`. For a coupler-connected bus those reactive terms ARE the
+`DUMMY_Q` variables, which is why `distr_q3025` references `dummy_q9212..9215`. So the equation is
+owned by the controller bus, pairs with that bus's `BUS_V`, and spans EVERY member's dummies.
+`recreateReactivePowerDistributionEquations` rebuilds the set when membership changes, and skips it
+entirely for a local control.
+
+**B. What the device does — verified.** Extraction DOES see the four DISTR_Q equations and assigns
+them to the coupler dummy rows (`OLF_GPU_DISTRQ_DUMP`):
+
+```
+controller=VL-2669_1 eqCol=646 assignedRow=14113 ownVRow=6050   (…_2/_3/_4 -> 14115/14117/14119)
+```
+
+and those same rows carry `baseMode=4` with targets 0.0257/0.0257/0.0200/0.0257 — an own-Q
+balance. Two equations, one row; mode 4 wins and the sharing is dropped, exactly as the extractor
+comment states ("row mode 4 … the DISTR_Q emissions at this row gate off"). The child's own `BUS_V`
+row is unavailable because the relocation puts `ZERO_V` there (verified from the matrix: row 6050 is
+`+1·v(_0) −1·v(_1)`).
+
+**C. THE REMAINING UNKNOWN, and it must be closed before any code.** In OLF's BASE,
+`bus_target_q[3025..3028]` are **INACTIVE** (bracketed; only DISTR_Q cols 646-649 are active), and
+the mode-4 gate fires only when `row(es, bus, BUS_TARGET_Q) >= 0`, i.e. ACTIVE — `row()` reports
+activity faithfully (`SingleEquation.column` is -1 when inactive and the index resets it on
+deactivation). **So the gate should not have fired at all.** Two candidates:
+  (C1) the structure the batched SA uses comes from an extraction pass taken at a state where those
+       controllers WERE pinned (the base LF's own RL loop switches during the solve; the DISTR_Q
+       dump shows passes 13 and 14 in a base-only run, so there are several), and the row modes are
+       that snapshot; or
+  (C2) a DIFFERENT bus whose `qRow[bn]` ALIASES the same dummy row has an active BUS_TARGET_Q and
+       assigned both the target and mode 4 there.
+These have different fixes, so decide first. **Cheapest test:** a one-line trace at the
+`mode[qr] = 4` site printing `bus`, `qr`, `q` and the target, gated on a row env, run on the SA
+(not base-only) and filtered to rows 14113-14119. That names the bus and the pass.
+
+**D. Then the fix, by branch.**
+  - If C2: the aliasing is the bug — one row cannot host two buses' reactive equations. Fix where
+    `qRow`/`relocatedQRow` assigns it, the same family as [[#62]]-[[#64]].
+  - If C1: the device's base must reach OLF's final pin state. Either extract after the base's outer
+    loops have settled, or let the device's own RL kernel unpin (mode 4 -> the DISTR_Q row) as OLF
+    does. Note the trap: OLF's RL trace shows only ONE base PQ->PV switch in the whole run
+    (VL-5997_1), so if those buses were never pinned by OLF, C1 reduces to "the snapshot was taken
+    before the VC merge was applied" — check `getMergedControllerElements()` size at extraction
+    (the DISTR_Q dump prints the bus's OWN control, which shows 1 member; `mainGenVc` resolves the
+    MAIN control and is what the row logic should use).
+  - Either way the device needs somewhere to put a relocated member's DISTR_Q that is not its own
+    `BUS_V` row (taken by `ZERO_V`) and not shared with an own-Q balance. The 2-way stock twin
+    (`dqAlt`/`dqSel`) is the existing mechanism and is NOT enough: it answers "the coupler died,
+    move it back", not "this row must host a GROUP equation".
+
+**E. Gate for any change.** 177-test `GpuBatchedAcSecurityAnalysisTest`; `GpuLoadFlowTest` /
+`GpuFullNewtonTest` / `GpuAcStructuresTest` / `GpuLineSearchTest`; full busbar scope with
+violations diff 0, base BUSDIFF 0, worst DAP <= 1.4e-03 MW and no loss of device coverage
+(6550/6667). It changes the BASE for ~341 members, so also re-check the base's own
+`distributedActivePower` (currently cpu 14.359916545 vs gpu 14.359916552 MW).
+
+**F. Harness gap to close regardless.** `BUSDIFF` compares BUS VOLTAGES ONLY. Add the dummy columns
+(or all state variables) to the comparison, or this class of difference stays invisible — it is how
+an 8.4e-03 pu reactive-split error survived every "bus voltages exact" claim in this file.
 
 **The only valid comparison, and the discipline broken five times here:** both arms at the SAME
 stage, from the SAME run. `OLF_GPU_EQ_DUMP` does exactly that for the BASE (it writes the device's

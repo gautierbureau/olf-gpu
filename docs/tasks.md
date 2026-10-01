@@ -398,7 +398,73 @@ Also settled: `controlledBus=VL-2669_1 members=[VL-2669_1(on)]` printed with `qP
 (= 1/5, a FIVE-member group's share) confirms the one-member listing is the bus's own DEPENDENT
 control object — the dump artefact noted above, not a merge defect.
 
-**Next measurement (code written, needs a rebuild + re-run):** `QROW_CLAIM` now also prints
+**ROOT CAUSE, MEASURED (2026-10-01). The disable is a TRANSIENT `MIN_REALISTIC_V` freeze, and
+the device bakes the frozen window into the STRUCTURE.**
+
+`QROW_CLAIM` now also prints the three disable paths' signatures, and the answer is unambiguous:
+
+```
+frozenQ=true  monitoringV=false  qLimit=MIN_REALISTIC_V  gens=1
+```
+
+So `ReactiveLimitsOuterLoop` froze these buses under its ROBUST-MODE UNREALISTIC-LOW-VOLTAGE rule
+(`ReactiveLimitsOuterLoop:296-304`), not under a reactive-limit rule:
+
+```java
+if (robustMode && remainsPV && generatorRemoteController) {   // Q IS within bounds
+    if (isUnrealisticLowVoltage(controllerBus)) {             // V < minRealisticVoltage * 1.02
+        controllerBus.setV(1);
+        buses.add(new ControllerBusToPqBus(..., QLimitType.MIN_REALISTIC_V));
+```
+
+With the RTE params (`minRealisticVoltage = 0.8`, `REALISTIC_VOLTAGE_MARGIN = 1.02`) the trip point
+is **0.816 pu** — far tighter than the 0.5 default, and easy to touch at a 20 kV generator section
+mid-iterate. `VL-2669` is a **20 kV** voltage level whose sections are coupler-joined, so each
+section is a distinct `LfBus` and `isGeneratorRemoteController` is TRUE for `_1.._4`.
+
+**This is why every pin comparison said the arms agreed.** A `MIN_REALISTIC_V` freeze is NOT a
+Q-limit pin: it has `qLimitType=MIN_REALISTIC_V`, never `MIN_Q`/`MAX_Q`, and it is TRANSIENT —
+`switchPqPv` clears it (`setQLimitType(null)`) when the voltage recovers. Comparing converged pin
+SETS therefore could not see it, and neither could `RL_SWITCH`-vs-`anyBaseLt`.
+
+**Ruled out by direct check, so these need not be re-explored:** `MONITORING_VOLTAGE` (the case has
+6 SVCs with `standbyAutomaton`, all at ~63 kV, NONE at VL-2669 — and `monitoringV=false`);
+`GeneratorVoltageControlManager.disableGeneratorVoltageControlsUnderMaxControlledNominalVoltage`
+(it would freeze a 20 kV group, since `generatorVoltageControlMinNominalVoltage = 120`, but it is
+built ONLY by `TransformerVoltageControlOuterLoop` and `transformerVoltageControlOn` is absent from
+`rte-loadflow-default-parameters.json`, hence false, so that outer loop never runs); and
+`minNominalVoltageRealisticVoltageCheck = 180` exempting the bus (it gates only
+`AcloadFlowEngine.isStateUnrealistic`, the whole-state check — NOT the outer loop's per-controller
+test, so a 20 kV bus is legitimately subject to the freeze).
+
+**The cycle, and where the structure is captured.** One GPU-only full-busbar run, pass numbers on
+both traces, phase markers interleaved by log line:
+
+```
+lines  67..114   passes  1-12   base LF: 1-6 CONTROLLING, RL freezes at 7, 7-12 FROZEN
+lines 115..116   GPU CENSUS (cold) / "GPU precomputed on device: 6550 / 6667"
+lines 117..      passes 13-24   the SA run: 13-18 controlling, 19-24 frozen -- the SAME cycle
+```
+
+Two complete 6-on/6-off cycles, and **the precompute's census line lands immediately after pass 12,
+the end of a FROZEN window**. Whether `DISTR_Q` exists at all is STRUCTURAL — it is fixed when
+`createStructure` runs — so a structure captured there carries own-Q balances for all 6550
+scenarios, and the per-solve `extractRowMode` / `extractTargets` refresh cannot put the sharing
+equation back. That is the whole of [[#66]].
+
+**Fix, and why it is not a timing patch.** Chasing the snapshot moment (re-extract after the base
+settles) is fragile: the cycle repeats inside the SA too (passes 13-24), so "settled" is not a
+single instant. The principled fix is the one the code ALREADY implements for exactly this problem:
+the CANONICAL, PIN-STATE-INDEPENDENT extraction behind `GpuAcRowIndexing.hasCandidateTable` —
+"extracted CANONICALLY (pin-state independent: every controller's frozen q row suppressed...)" per
+the comment in `GpuAcActivationExtractor`. A group with a candidate table already gets a structure
+that holds BOTH shapes and lets the in-kernel mode scan choose per scenario. **So the next step is
+to find why `VL-2669`'s group does NOT qualify**, i.e. which clause of `hasCandidateTable` rejects
+it (`MAIN` + not local + pilot `BUS_V` column present + the `pilotSelf`/rotation clause + every
+member having a `BUS_V` column). The census's `PLAN:VC_REMERGE_RELOC_VROW=3` and
+`PLAN:VC_REMERGE_PINNED_MAIN=3` suggest the relocated-V-row interaction is where it falls out.
+
+**Superseded (kept for the reasoning):** `QROW_CLAIM` also prints
 `frozenQ` / `monitoringV` / `qLimit` / `gens`, which separate OLF's THREE disable paths — they need
 opposite fixes and no pin dump can tell them apart:
 

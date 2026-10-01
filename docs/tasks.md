@@ -1934,12 +1934,37 @@ in-kernel mode scan is what must re-pick the carrier per scenario and gate it of
 it did not: the row stayed mode 1 with live sharing, and the per-scenario row-mode diff contained
 only the 18 island rows.
 
-**NOT YET ESTABLISHED, and do not assume it:** that these 2 rows CAUSE the 108 rejects. They look
-wrong in the base and in every scenario, yet only 108 of 6667 contingencies fail — so either an
-over-determined pair is benign in most scenarios and fatal in some, or this is a separate base-level
-defect that happens to live on the same buses. The next step is to settle that one way or the other:
-force those two rows to mode 4 (or suppress their dq emission) for a scenario that currently
-rejects, and see whether it converges.
+**CAUSALITY TESTED AND NOT ESTABLISHED — the intervention made it WORSE.** Rather than reason about
+it, `OLF_GPU_FORCE_MODE4=<row>[,<row>…]` (new, diagnostic-only, stamps mode 4 on the named rows at
+the end of `extractActivation`) forced the two rows and re-counted. They are `14403`
+(`DUMMY_Q(BUS-5997_COUPLER_1)`) and `14439` (`DUMMY_Q(BUS-6112_COUPLER_1)`), which match the
+`qRowAlt` in those groups' dump lines. Full busbar scope:
+
+| | baseline | rows forced to mode 4 |
+|---|---|---|
+| coverage | 6550 / 6667 | **6548 / 6667** |
+| `RUNTIME:status=-2` | 113 | **118** |
+| `max-iter-bad-solve` | 108 | **116** |
+| `DEVICE:MAX_ITERATION_REACHED` | 4 | 1 |
+| `PLAN:VC_REMERGE_PINNED_MAIN` | 3 | 4 |
+
+So gating the sharing there costs 2 contingencies and adds 5 rejects.
+
+**And the probe was NOT a faithful emulation of OLF, which is why this is inconclusive rather than
+exculpating.** For a pilot-self group whose pilot is pinned, OLF puts the PILOT'S REACTIVE BALANCE
+on the single enabled controller's row (that member is the carrier). Mode 4 is an OWN-Q balance
+against the member's OWN target — a THIRD, different equation. So the measurement shows mode 4 is
+the wrong content for those rows; it does not show the rows are innocent. To test the hypothesis
+properly the row must be made to carry the PILOT-CARRIER form, which is what `stateQRow` /
+`stateQCarrier` already compute for a candidate-table pilot — i.e. the question is whether the
+in-kernel mode scan picks that carrier for these 2-member pilot-self groups, and if not, why.
+
+**Still open, and the honest state of [[#67]]:** the equation systems agree everywhere the dumps can
+compare them EXCEPT these 2 rows; the targets, islanded sets, step clamp and iteration cap all
+agree; the device nonetheless cannot finish the first Newton solve on 108 contingencies; and the one
+difference found has not been shown to cause it. The 649 relocated buses remain the region a per-bus
+comparison cannot reach, and the reconciliation above (OLF 334 active vs device 336 live + 9 gated)
+is now fully explained by exactly those 2 rows — so that count is no longer an open discrepancy.
 
 **Superseded (kept): the probe the dump named.** this contingency must absorb
 `activePowerLoss = -1.243 pu` (124.3 MW of disconnected load), and the dump prints that value as

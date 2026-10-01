@@ -183,30 +183,16 @@ public final class GpuAcActivationExtractor {
                                 .map(c -> c.getMergedControllerElements().size() >= 2
                                         && c.getMergedControllerElements().stream().allMatch(m -> vCol[m.getNum()] >= 0))
                                 .orElse(false);
-                // ...and, under -Dolf.gpu.canonicalMemberMode, the same canonical treatment for a MEMBER of a
-                // candidate-table group. `enrolled` above requires pilotSelf, so it covers only the pilot;
-                // for a member mode4 reduces to !isFreeRemoteGenVcMember, and "free" is the FIRST ENABLED
-                // member, so a group whose members are all transiently frozen has no free member and every
-                // member's row is stamped mode 4 into baseRowMode — which every scenario without an explicit
-                // per-scenario mode inherits. See GpuAcRowIndexing.canonicalMemberModeEnabled (tasks #66).
-                // ...but ONLY for a REALISTIC-V freeze. Suppressing mode 4 for every pin breaks 20
-                // base-pinned fixtures (deviceRemoteFreeMemberBasePinned, javaRemoteMemberBasePinned,
-                // deviceRemoteGroupAllPinnedInBase, …): for a genuine Q-LIMIT pin baseRowMode IS
-                // load-bearing — the per-(scenario, entry) reactive-limit read does NOT reconstruct it for
-                // a MEMBER, only for the pilot. The two are cleanly distinguishable, and the distinction is
-                // exactly the one that matters: a MIN_Q/MAX_Q pin is modelled by the device's RL pack and
-                // must stay in the structure, while a MIN_REALISTIC_V/MAX_REALISTIC_V freeze has NO RL entry
-                // at all (it is not a Q limit — ReactiveLimitsOuterLoop sets it with Q inside its bounds)
-                // and is TRANSIENT, cleared by switchPqPv when the voltage recovers. Capturing that window
-                // is the #66 defect.
-                boolean realisticVFreeze = bus.getQLimitType()
-                        .map(t -> t == LfBus.QLimitType.MIN_REALISTIC_V || t == LfBus.QLimitType.MAX_REALISTIC_V)
-                        .orElse(false);
-                boolean canonicalMember = GpuAcRowIndexing.canonicalMemberModeEnabled() && realisticVFreeze
-                        && mainVc != null && GpuAcRowIndexing.hasCandidateTable(mainVc, es);
+                // `enrolled` requires pilotSelf, so for a MEMBER mode4 reduces to
+                // !isFreeRemoteGenVcMember, and "free" is the FIRST ENABLED member — a group whose members
+                // are all pinned has no free member and every member's row is stamped mode 4 into
+                // baseRowMode, which every scenario without an explicit per-scenario mode inherits. That is
+                // CORRECT for a genuine Q-limit pin (the 20 base-pinned fixtures rely on it). What used to
+                // reach here wrongly was a TRANSIENT MIN_REALISTIC_V freeze the device should never have
+                // made: see GpuAcOuterLoopPacks.isOlfRobustRemoteController (tasks #66), fixed at the SOURCE
+                // by exempting a merged member from robust mode as OLF's own predicate does, not here.
                 boolean mode4 = GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
-                        && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus))
-                        && !enrolled && !canonicalMember;
+                        && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) && !enrolled;
                 // OLF_GPU_QROW_TRACE=<row|busIdPrefix>[,…]: WHO claims a reactive row, and on what grounds.
                 // A relocated member's DISTR_Q is assigned to its parent coupler's DUMMY_Q row, and so is
                 // any bus whose qRow maps there with an ACTIVE BUS_TARGET_Q — two equations, one row, and
@@ -244,8 +230,7 @@ public final class GpuAcActivationExtractor {
                         System.err.printf("QROW_CLAIM pass=%d row=%d bus=%s busTargetQcol=%d distrQcol=%d "
                                 + "mainVc=%s mainMembers=%d enabled=%b ownVc=%s ownMembers=%d ownMerge=%s "
                                 + "frozenQ=%b monitoringV=%b qLimit=%s gens=%d candTable=%s "
-                                + "remoteCtl=%b pilotSelf=%b freeMember=%b enrolled=%b canonMember=%b "
-                                + "-> mode4=%b%n",
+                                + "remoteCtl=%b pilotSelf=%b freeMember=%b enrolled=%b -> mode4=%b%n",
                                 pass, qr, bus.getId(), q,
                                 GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.DISTR_Q),
                                 mainVc == null ? "-" : mainVc.getControlledBus().getId(),
@@ -260,8 +245,7 @@ public final class GpuAcActivationExtractor {
                                 // WHY the group misses the canonical pin-state-independent path (#66)
                                 GpuAcRowIndexing.candidateTableReason(mainVc, es),
                                 GpuAcRowIndexing.isRemoteGenVcControllerElement(bus), pilotSelf,
-                                GpuAcRowIndexing.isFreeRemoteGenVcMember(bus), enrolled, canonicalMember,
-                                mode4);
+                                GpuAcRowIndexing.isFreeRemoteGenVcMember(bus), enrolled, mode4);
                     }
                 }
                 if (mode4) {

@@ -739,13 +739,55 @@ single-threaded on both arms (its comment: "the base alone differs by 8e-6 kV at
 bit-identical at 1"). Correctness runs must stay at 1 thread; CLAUDE.md's "default 4" is the
 BENCHMARK test.
 
-**Fix shape.** Make the device's robust-mode exemption use OLF's predicate. Reusing class 2 is
-WRONG — it carries pilot-self semantics at other kernel sites (`enrolledPilot`, row handling). The
-contained change is an ADDITIVE per-entry flag alongside `rlMonitored`/`rlCmpVrow`, e.g.
-`rlRobustExempt[i] = bus.getGeneratorVoltageControl().map(c -> c.getControlledBus() == bus)
-.orElse(true)` (note OLF's `orElse(false)` on the REMOTE test means "no control at all" is also
-exempt), with the kernel gate becoming `robust && !rlRobustExempt[i] && …`. Touches: `GpuAcData`
-field + `sameStructureInputsAs`, the packer, the JNI setter, the device buffer, the two gate lines.
+**FIXED 2026-10-01 — `rlRemote` class 3.** No new array and no JNI change were needed: an AUDIT of
+every `rlRemote` reader showed a third class slots in for free. The pack now emits
+`2` = pilot-self, `1` = a remote member the robust rule APPLIES to, `3` = a remote member it
+EXEMPTS, from a verbatim copy of OLF's predicate (`GpuAcOuterLoopPacks.isOlfRobustRemoteController`,
+`bus.getGeneratorVoltageControl().map(c -> c.getControlledBus() != bus).orElse(false)` — note the
+`orElse(false)`: no control at all is also exempt). The kernel gate became
+`bool robustRemote = rlRemote[i] != 2 && rlRemote[i] != 3;`.
+
+Why class 3 is free (the audit, worth not redoing): every other reader treats it exactly like class
+1 — the TRUTHINESS tests (`rlRemote[i]` at .cu 4712/5560/5860/5883/6457/6500, Java `!= 0` at
+`GpuBatchChunkSolver:432`) see a remote member; the PILOT tests (`== 2` at .cu 5591/5592/5874/5882/
+6454, Java `!= 2` at `GpuNewtonRaphson:435` and `== 2` at `GpuBatchChunkSolver:771`) correctly see a
+non-pilot; and `rlRobustVResetBatch`'s `!= 1` early-return correctly SKIPS an exempt bus, since a
+bus the gate never pins to 3/4 must not get the robust V reset either.
+
+**Measured, same full busbar scope:**
+
+| | before | after |
+|---|---|---|
+| base control state of `VL-2669_1..4` | frozen, `qLimit=MIN_REALISTIC_V` | **`vcEnabled=true frozenQ=false qLimit=-`** |
+| `QROW_CLAIM` (an own-Q/frozen member) | 24 | **0** |
+| `DISTRQ_ROW` (sharing ACTIVE) | 24, alternating 6-on/6-off | **48, every one of 12 passes** |
+| BASE BUSDIFF | `0 of 0` (vacuous) | **worst 2.731e-11 kV over 6886 buses** |
+| violations | CPU=503923 GPU=503923 diff=0 | CPU=503923 GPU=503923 **diff=0** |
+| coverage / census | 6550/6667, census X | 6550/6667, **census X identical** |
+| unit gates | — | **200 run, 0 failures, 1 skipped** (no property gate) |
+
+The 6-on/6-off extraction cycle is GONE and no member ever claims an own-Q row, so the structure
+carries the sharing for all 6550 scenarios. `Q_PROBE_BASE_VC` also confirms the predicate directly:
+for bus `_1` it prints `ctlBus=VL-2669_1`, i.e. its own control really is LOCAL.
+
+**Checkstyle: the violation SETS are identical before and after** (diff of the sorted lists is
+empty — the branch's 220-odd are pre-existing, 74 of them an old indentation block in
+`GpuAcOuterLoopPacks`). Do not read a raw count as a delta; line numbers shift.
+
+**What this did NOT fix, and is now known to be a SEPARATE item:** worst `distributedActivePower`
+is `1.397830e-03` MW, versus `1.397828e-03` before — unchanged, and the test still fails that
+assertion. So #66 was never the cause of the DAP gap. That gap is its own open question.
+
+**Dead experiment removed:** `-Dolf.gpu.canonicalMemberMode` and
+`GpuAcRowIndexing.canonicalMemberModeEnabled()` are gone — its premise was retracted above and the
+real cause is fixed at the SOURCE. The `mode4` comment now records that a member inheriting mode 4
+from a genuine Q-LIMIT pin is CORRECT (the 20 base-pinned fixtures rely on it); what used to reach
+there wrongly was a freeze the device should never have made.
+
+**Also now explained, with no tie-breaking story:** `Q_PROBE_BASE_VC` prints
+`ctlV=0.62000000000000000 tgtV=0.62000000000000000 ctlV<tgtV=false d=0.000e+00` — the switch-back's
+strict `<` is an EXACT tie in both arms, so it could never have fired either way. The retracted
+"one arm lands a hair below" story was not just unevidenced, it was impossible.
 
 **Superseded reasoning (kept): "the fix IS a capture-timing fix after all".** The earlier
 objection ("the cycle repeats inside the SA too, so settled is not one instant") was wrong in an

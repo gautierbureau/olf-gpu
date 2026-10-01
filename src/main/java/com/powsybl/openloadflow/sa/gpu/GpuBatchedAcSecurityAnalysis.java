@@ -1328,7 +1328,12 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 } catch (RuntimeException ex) {
                     id = "#" + v.getElementNum();
                 }
-                w.write(v.getType().name() + " " + id + " " + state[row] + "\n");
+                // the DEVICE ROW too: the row's per-scenario MODE is what says which equation governs
+                // that bus here (1 = power/DISTR_Q, 4 = its own Q, 0 = identity), and that is the
+                // question #66 turns on -- OLF has VL-2669_1..4 on DISTR_Q at convergence while the
+                // device appears to leave them on their own BUS_TARGET_Q. Join against the modes in an
+                // OLF_GPU_VALS_DUMP of the same slot.
+                w.write(v.getType().name() + " " + id + " " + state[row] + " row=" + row + "\n");
             }
         } catch (java.io.IOException | RuntimeException ex) {
             LOGGER.warn("OLF_GPU_SA_VAR_DUMP failed: {}", ex.toString());

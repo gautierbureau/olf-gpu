@@ -202,8 +202,53 @@ the losses and the 9.553e-06 pu slack mismatch. That accounts for every measured
 eps-INDEPENDENT (a different equation set, not a convergence depth), PROPORTIONAL across
 participants, INVISIBLE to BUSDIFF, chunk-size invariant.
 
-**Confirming check still to do:** read the device's row modes for those four buses' reactive rows
-and show the DISTR_Q rows are inactive where OLF's are active.
+**CHECKED, and it refuted the mechanism I had inferred.** The device's rows for the chain buses
+hold, at slot 585:
+
+```
+BUS_V VL-2669_0  row 6048  mode 0  target 0.62     (matches OLF's BUS_TARGET_V)
+BUS_V VL-2669_1  row 6050  mode 1  +1*v(_0) -1*v(_1)   <- ZERO_V, F=0
+BUS_V VL-2669_2  row 6052  mode 1  +1*v(_1) -1*v(_2)   <- ZERO_V, F=0
+BUS_V VL-2669_3  row 6054  mode 1  +1*v(_2) -1*v(_3)   <- ZERO_V, F=0
+BUS_V VL-2669_4  row 6056  mode 1  +1*v(_3) -1*v(_4)   <- ZERO_V, F=0
+DUMMY_Q COUPLER_1 row 14113 mode 4 target +0.0257  -dq1 + dq2
+DUMMY_Q COUPLER_2 row 14115 mode 4 target +0.0257  -dq2 + dq3
+DUMMY_Q COUPLER_3 row 14117 mode 4 target +0.0200  -dq3 + dq4
+DUMMY_Q COUPLER_4 row 14119 mode 4 target +0.0257  -dq4
+```
+
+The V rows hold ZERO_V (the relocation's own design: couplers' ZERO_V/ZERO_PHI move to the child's
+rows), and the children's reactive balances sit on the coupler DUMMY_Q rows in **mode 4 — own Q
+balance, i.e. voltage control OFF** — against their individual targets. OLF at convergence has
+**DISTR_Q** there (target 0, residual -1.8e-16): control ON, reactive power SHARED. **So the two
+arms solve different equations for that group.** That part is settled and needs no more
+measurement; it is the 8.4e-03 pu dummy gap and the 9.553e-06 pu slack mismatch.
+
+**RETRACTED (3): "a missed PQ->PV switch-back".** OLF's whole RL activity for BUS-4467_BBS is
+`PV->PQ` on VL-6490_0 / VL-6489_0 / VL-6113_1 / VL-6231_0 / VL-6231_1 and one `PQ->PV` on
+VL-6515_0. **Nothing touches VL-2669.** So the group's DISTR_Q does not come from the
+reactive-limits loop and there is no switch-back to restore. (681 `PQ->PV` switches occur
+elsewhere in the run, so the trace works.)
+
+**RETRACTED (4): "OLF's solve switched 9 DISTR_Q on (323 -> 332)".** Those counts come from
+DIFFERENT ARMS. `eq2.post` was written by the GPU provider at its own entry, in a run with
+`OLF_GPU_SA_GPU_ONLY=1` (CPU arm given an empty contingency list); the converged `EQ` section fires
+in `AbstractSecurityAnalysis`, which the GPU provider OVERRIDES and returns from early for a
+device-solved contingency — so that section is the CPU arm's. Pre-solve on one arm against
+post-solve on the other says nothing about what either solve did. Fifth point-in-time/cross-arm
+error of the session, and the first to manufacture a MECHANISM rather than just a wrong number.
+
+**What is NOT established:** why. Mode 4 is reached either by PINNING a controller or by the
+control being off for the scenario from the start, and those need opposite fixes (restore an unpin
+vs form the group at all). RL is now excluded, so the live candidate is SETUP — whether the
+device's extraction/qualification has that group's voltage control enabled for this contingency.
+
+**The only valid comparison, and the discipline broken five times here:** both arms at the SAME
+stage, from the SAME run. `OLF_GPU_EQ_DUMP` does exactly that for the BASE (it writes the device's
+system and OLF's own dump of the same state), and `OLF_GPU_TARGET_ROW` separates a STRUCTURAL
+mode (`baseMode`) from a per-scenario one. If the two arms already disagree on this group in the
+BASE, the defect is in extraction and the base is where to fix it; if they agree there, it is
+per-contingency.
 
 **Two retractions, kept visible.** (1) "the device's dummies do not satisfy the chain" — backwards.
 (2) "OLF's converged state leaves 1.5e-03..4.2e-03 on its own BUS_TARGET_Q equations" — invalid:

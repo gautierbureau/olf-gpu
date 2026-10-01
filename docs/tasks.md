@@ -1892,7 +1892,56 @@ same `maxDv`/`maxDphi`, and `maxNewtonRaphsonIterations = 30` matches the reject
 system, same step clamp, same cap — and the device still needs more than 30 steps where OLF needs
 fewer. The reject is at `outer=0 it=30`: it cannot finish even the FIRST Newton solve.
 
-**Next probe, which the dump itself names:** this contingency must absorb
+**THE TARGETS AGREE TOO.** `OLF_GPU_LOSS_TRACE=<contingency id>` (it takes an ID, not `1`):
+
+```
+device: deviceScheduledLoss=-1.243000000 pu islanded=[the same 9 buses] lostGens=[] lostLoads=[]
+OLF:    activePowerLoss    =-1.243000000 pu (disconnectedGeneration=0, disconnectedLoad=1.243)
+```
+
+Identical to all nine decimals, same islanded set, and OLF's zero disconnected generation matches
+the device's empty `lostGens`.
+
+**ONE REAL EQUATION DIFFERENCE FOUND, AND IT IS EXACTLY 2 ROWS.** Resolving every dq-carrying device
+row to its member bus — 40 on a member's own `BUS_V` row, 305 on a parent coupler's `DUMMY_Q` row
+via the dump's `zi#K … dummyQ=ROW childSide=` mapping — and diffing against OLF's active set:
+
+```
+OLF active distr_q buses : 334
+device dq rows LIVE      : 336     GATED (mode 4): 9     unmapped: 0
+LIVE on device, INACTIVE in OLF (2): ['VL-5997_1', 'VL-6112_1']
+ACTIVE in OLF, not live on device  (0): []
+```
+
+**Those two buses are already on record as the delicate ones** — `GpuAcActivationExtractor`'s own
+comment: "the carriers of VL-5997 and VL-6112 came in at mode 4, the scan fell back to the identity
+pilot rows, the raw q and the couplers' DUMMY_Q vanished (dead columns 13171/13207) and **every
+scenario failed its first linear solve**". And [[#67]]'s rejects are at `outer=0`, the first solve.
+
+Why OLF has them inactive, from the dump's own group lines:
+
+```
+gvc pilot=VL-5997_0 controlled=VL-5997_0 local=false pilotIsController=true members=2:
+    VL-5997_0[vCol=13154 qRow=-1 qRowAlt=-244  enabled=FALSE]   <- the pilot, PINNED
+    VL-5997_1[vCol=13156 qRow=-1 qRowAlt=14403 enabled=true ]
+```
+
+A pilot-self group of TWO whose pilot is pinned has exactly ONE enabled controller, so by OLF's rule
+("DISTR_Q for every enabled controller except the FIRST, BUS_TARGET_Q for every pinned one") that
+member IS the first enabled one and gets NO sharing equation. The device encodes the group
+CANONICALLY (as if all controllers were enabled), which gives the member a DISTR_Q, and the
+in-kernel mode scan is what must re-pick the carrier per scenario and gate it off. For this scenario
+it did not: the row stayed mode 1 with live sharing, and the per-scenario row-mode diff contained
+only the 18 island rows.
+
+**NOT YET ESTABLISHED, and do not assume it:** that these 2 rows CAUSE the 108 rejects. They look
+wrong in the base and in every scenario, yet only 108 of 6667 contingencies fail — so either an
+over-determined pair is benign in most scenarios and fatal in some, or this is a separate base-level
+defect that happens to live on the same buses. The next step is to settle that one way or the other:
+force those two rows to mode 4 (or suppress their dq emission) for a scenario that currently
+rejects, and see whether it converges.
+
+**Superseded (kept): the probe the dump named.** this contingency must absorb
 `activePowerLoss = -1.243 pu` (124.3 MW of disconnected load), and the dump prints that value as
 "the reference for the device's scheduledActivePowerLoss (`OLF_GPU_LOSS_TRACE` prints that one)". A
 target that large being wrong would wreck the first solve, and TARGETS are part of the system. Run

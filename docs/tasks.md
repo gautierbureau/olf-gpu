@@ -319,7 +319,40 @@ is inconsistent with OLF's, and its mode-4 rule then picks the own-Q balance and
 (`assign()` does not throw, so only one of the two ever claims the row in `targetMap` — the other
 is simply never built. The earlier phrasing "two equations, one row" was loose.)
 
-**CANDIDATE FIX, minimal, and it matches the gate's own stated intent.** The comment at that site
+**CANDIDATE FIX KILLED by the measurement that was meant to justify it (2026-10-01).** Extending
+`OLF_GPU_QROW_TRACE` to print the merged control gives, at the extraction the batched SA uses:
+
+```
+row=14113 bus=VL-2669_1 busTargetQcol=11308 distrQcol=-1
+          mainVc=VL-2669_0 mainMembers=5 enabled=FALSE
+          ownVc=VL-2669_1 ownMembers=1 ownMerge=DEPENDENT -> mode4=true
+```
+
+Three readings, two of which retract earlier claims:
+
+- **`distrQcol = -1`: DISTR_Q is INACTIVE there.** "Both equations are active at the device's
+  extraction" (claim C, d8886c2) is WRONG — it compared the `DISTRQ_DUMP` of a BASE-ONLY run with
+  the `QROW` trace of the SA run. Two runs again, the same error as F0/targets/dummies.
+- **`mainVc=VL-2669_0`, `mainMembers=5`: the merge IS resolved.** `mainGenVc` is fine, so that lead
+  (the DISTR_Q dump showing a 1-member dependent) was a dump artefact, not a defect.
+- **`enabled=FALSE`: the control is genuinely DISABLED at extraction.** So BUS_TARGET_Q active +
+  DISTR_Q inactive + control off is a CONSISTENT pinned state, and `mode[qr] = 4` is the CORRECT
+  reading of it. The proposed `&& !mainVc.isControllerEnabled(bus)` guard is already satisfied —
+  the change would have been a NO-OP, shipped on momentum, with the gap unexplained afterwards.
+
+**So the question moves one step earlier, and the DISTR_Q-hosting gap is NOT what bites here.**
+Why is that control DISABLED at the device's extraction when OLF's converged base has it ENABLED
+(DISTR_Q active, `bus_target_q[3025..3028]` bracketed)? That is a BASE-level pin-state divergence
+between the arms — the [[#64]] family (a wrong pin decision), not an equation-hosting problem.
+
+Both arms report 15 base pins (OLF: 15 `PV->PQ` in `ctg=base`; device: 15 `anyBaseLt` entries in
+`GPU_RL_KINDS install`), so the COUNTS match while the SETS apparently do not. The device's list is
+by RL entry index, not bus id, so the next step is small: resolve those entry indices to bus ids
+and check whether VL-2669_1..4 are among the device's base pins. If they are, the device pins a
+group OLF leaves controlling, and the fix is in the base pin decision; if they are not, the
+`enabled=false` comes from somewhere else and that is the thing to find.
+
+**Superseded candidate (kept for the reasoning):** The comment at that site
 says "ACTIVE own-Q balance at a (non-free) remote gen-VC member = the RL-PINNED state", but the
 condition never tests whether the controller is actually DISABLED:
 

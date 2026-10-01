@@ -186,10 +186,21 @@ public final class GpuAcActivationExtractor {
                 String qrTrace = System.getenv("OLF_GPU_QROW_TRACE");
                 for (String tok : qrTrace == null ? new String[0] : qrTrace.split(",")) {
                     if (Integer.parseInt(tok.trim()) == qr) {
-                        System.err.printf("QROW_CLAIM row=%d bus=%s busNum=%d busTargetQcol=%d "
-                                + "alreadyClaimedByEqCol=%.0f remoteCtl=%b pilotSelf=%b freeMember=%b enrolled=%b -> mode4=%b%n",
-                                qr, bus.getId(), bus.getNum(), q,
-                                (double) targetMap[qr],
+                        // mainVc is what the row logic resolves (the MERGED group); the bus's own control is
+                        // a dependent. Printing both, plus whether the controller is ENABLED, says whether the
+                        // device is reading an inconsistent BUS_TARGET_Q/DISTR_Q pair or a genuinely pinned one.
+                        var ownVc = bus.getGeneratorVoltageControl().orElse(null);
+                        System.err.printf("QROW_CLAIM row=%d bus=%s busTargetQcol=%d distrQcol=%d "
+                                + "mainVc=%s mainMembers=%d enabled=%b ownVc=%s ownMembers=%d ownMerge=%s "
+                                + "remoteCtl=%b pilotSelf=%b freeMember=%b enrolled=%b -> mode4=%b%n",
+                                qr, bus.getId(), q,
+                                GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.DISTR_Q),
+                                mainVc == null ? "-" : mainVc.getControlledBus().getId(),
+                                mainVc == null ? 0 : mainVc.getMergedControllerElements().size(),
+                                mainVc != null && mainVc.isControllerEnabled(bus),
+                                ownVc == null ? "-" : ownVc.getControlledBus().getId(),
+                                ownVc == null ? 0 : ownVc.getMergedControllerElements().size(),
+                                ownVc == null ? "-" : ownVc.getMergeStatus().toString(),
                                 GpuAcRowIndexing.isRemoteGenVcControllerElement(bus), pilotSelf,
                                 GpuAcRowIndexing.isFreeRemoteGenVcMember(bus), enrolled, mode4);
                     }

@@ -659,7 +659,43 @@ the extraction instant. The axis is right; the test on it cannot be local.
 `GpuLoadFlowTest` + `GpuFullNewtonTest` + `GpuAcStructuresTest` + `GpuLineSearchTest` = **197 run,
 0 failures, 1 skipped**.
 
-**So the fix IS a capture-timing fix after all — and now it is well-founded.** The earlier
+**CAPTURE TIMING IS ALSO WRONG — measured at the boundary (2026-10-01).** A new
+`Q_PROBE_BASE_VC` print in `afterPreContingencySimulation` (the exact instant the precompute
+captures, i.e. after the base load flow converged) says the base LF genuinely ENDS frozen:
+
+```
+Q_PROBE_BASE_VC bus=VL-2669_0 vcEnabled=true  frozenQ=false qLimit=-               v=0.620000000
+Q_PROBE_BASE_VC bus=VL-2669_1 vcEnabled=false frozenQ=true  qLimit=MIN_REALISTIC_V v=0.620000000
+Q_PROBE_BASE_VC bus=VL-2669_2 vcEnabled=false frozenQ=true  qLimit=MIN_REALISTIC_V v=0.620000000
+Q_PROBE_BASE_VC bus=VL-2669_3 vcEnabled=false frozenQ=true  qLimit=MIN_REALISTIC_V v=0.620000000
+Q_PROBE_BASE_VC bus=VL-2669_4 vcEnabled=false frozenQ=true  qLimit=MIN_REALISTIC_V v=0.620000000
+```
+
+So a fresh extraction here would read the SAME frozen state — re-extracting after convergence
+cannot fix anything. Retracted before being coded.
+
+**And the voltage is the real story: v = 0.620000000 pu.** 62% of nominal on a 20 kV level, far
+below the 0.816 trip point — which is WHY the freeze sticks rather than being cleared by
+`switchPqPv`. The pilot `_0` still controls (`vcEnabled=true`), so V is pinned at its target and the
+couplers tie all five sections to exactly that value, which is why all five read an identical
+0.620000000.
+
+**THE HARNESS'S BASE COMPARISON HAS BEEN VACUOUS, AND THAT IS HOW A 0.62 pu BUS STAYED HIDDEN.**
+Every scope run in this file reporting `BASE BUSDIFF buses>1e-12kV=0 of 0` compared **zero buses**
+— `of 0` is the count COMPARED. The test's own comment already says so ("was not a clean base - it
+was no base compared at all, in every run this test has ever done") and adds an explicit N-state
+monitor, **but the monitors are only installed when `busDiff` is true**, i.e. when
+`OLF_GPU_SA_CTG_ONLY`, `OLF_GPU_SA_BUSDIFF_CTG` or `OLF_GPU_SA_BUSDIFF=1` is set. A plain full-scope
+run sets none of them, so it still prints `0 of 0`. **Treat "base BUSDIFF 0" from any run without
+one of those variables as NO EVIDENCE** — including the ones quoted earlier in this entry and the
+"base BUSDIFF 0" in the [[#62]]..[[#65]] gate descriptions.
+
+The cheap way to get a REAL base comparison (keeps the full list, the full network, and a small
+heap — the all-contingency monitor dies at the 14 GB ceiling): `OLF_GPU_SA_BUSDIFF_CTG=<one id>`,
+which installs the scoped monitor plus the `ContingencyContext.none()` base monitor, with
+`OLF_GPU_SA_MON_BUS=<bus ids>` to print the buses of interest on both arms.
+
+**Superseded reasoning (kept): "the fix IS a capture-timing fix after all".** The earlier
 objection ("the cycle repeats inside the SA too, so settled is not one instant") was wrong in an
 important way: the repeats at passes 13-24 are PER-CONTINGENCY solves, whereas the BASE load flow's
 CONVERGED state is a well-defined instant — and it is the reference, because OLF's converged base is

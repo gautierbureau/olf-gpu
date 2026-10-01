@@ -1028,6 +1028,15 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 if (java.util.Arrays.stream(qp.split(",")).anyMatch(b.getId()::startsWith)) {
                     System.err.printf("Q_PROBE_BASE bus=%s q=%.9f maxQ=%.9f busTargetP=%.9f%n",
                             b.getId(), b.getQ().eval() + b.getLoadTargetQ(), b.getMaxQ(), b.getTargetP());
+                    // The generator-voltage-control state AT THE INSTANT THE PRECOMPUTE CAPTURES, which is
+                    // what decides whether re-extracting here could fix anything (tasks #66): the device's
+                    // last base extraction read these buses FROZEN (qLimit=MIN_REALISTIC_V) while OLF's
+                    // converged base has their DISTR_Q active. If they read RELEASED here, the base LF
+                    // simply ended after its last extraction and a fresh extraction is the whole fix; if
+                    // they read FROZEN, the base LF itself diverged and the fix is not capture timing.
+                    System.err.printf("Q_PROBE_BASE_VC bus=%s vcEnabled=%b frozenQ=%b qLimit=%s v=%.9f%n",
+                            b.getId(), b.isGeneratorVoltageControlEnabled(), b.isGenerationTargetQFrozen(),
+                            b.getQLimitType().map(Object::toString).orElse("-"), b.getV());
                     // the BASE generator P: the reference every arm's slack distribution moves from
                     for (var g : b.getGenerators()) {
                         System.err.printf("Q_PROBE_BASE_GEN bus=%s gen=%s targetP=%.9f minP=%.9f maxP=%.9f participating=%b%n",

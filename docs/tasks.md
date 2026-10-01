@@ -372,10 +372,53 @@ relative to the base load flow's voltage-control update, and capture (or refresh
 `refreshContextValues` already re-pushes VALUES into a shared structure; row MODES and the
 equation set are structural, so a value refresh cannot repair this.
 
-**Next measurement, one run:** print the extraction PASS number in `QROW_CLAIM` and run the SA
-(not base-only) with `OLF_GPU_DISTRQ_DUMP` on the same group, so early and late passes are
-visible side by side in ONE run — the comparison this entry has botched five times by mixing runs.
-If a late SA pass sees `DISTR_Q` active, the batch is simply caching the wrong pass.
+**THE FLIP, MEASURED IN ONE RUN (2026-10-01).** Both traces now carry the extraction pass number,
+taken once at the top of `extractActivation`, and `OLF_GPU_QROW_TRACE` accepts a BUS-ID PREFIX so
+the measurement no longer needs the exact full-scope row numbers. Full busbar scope, one run,
+twelve extractions in one contiguous burst (no other output between them):
+
+| | passes 1-6 (`DISTRQ_ROW`) | passes 7-12 (`QROW_CLAIM`) |
+|---|---|---|
+| `DISTR_Q` | EXISTS, `eqCol=646..650` | INACTIVE, `distrQcol=-1` |
+| `BUS_TARGET_Q` | inactive (no claim line) | ACTIVE, `busTargetQcol=11308..11312` |
+| the bus's `isGeneratorVoltageControlEnabled()` | **true** | **false** |
+
+The two traces are MUTUALLY EXCLUSIVE across the 6/7 boundary, and that is itself the result:
+`QROW_CLAIM` only fires inside `if (q >= 0)` (an ACTIVE `BUS_TARGET_Q`) and `DISTRQ_ROW` only for an
+ACTIVE `DISTR_Q`. Both read the SAME per-bus flag — `GeneratorVoltageControl.isControllerEnabled(b)`
+is literally `b.isGeneratorVoltageControlEnabled()` — so this is ONE flag flipping, not two
+different questions.
+
+**So passes 1-6 match OLF's converged base EXACTLY** (group controlling, sharing active) and the
+device's own later extractions disable it. The snapshot-timing reading is confirmed, and sharpened:
+the device is not extracting "too early", it extracts the RIGHT state six times and then something
+turns the control off.
+
+Also settled: `controlledBus=VL-2669_1 members=[VL-2669_1(on)]` printed with `qPct=0.200000000`
+(= 1/5, a FIVE-member group's share) confirms the one-member listing is the bus's own DEPENDENT
+control object — the dump artefact noted above, not a merge defect.
+
+**Next measurement (code written, needs a rebuild + re-run):** `QROW_CLAIM` now also prints
+`frozenQ` / `monitoringV` / `qLimit` / `gens`, which separate OLF's THREE disable paths — they need
+opposite fixes and no pin dump can tell them apart:
+
+- `frozenQ=true` -> `freezeGenerationTargetQAndDisableGeneratorVoltageControl`, i.e. a PV->PQ pin
+  (`ReactiveLimitsOuterLoop`, or the tap manager's
+  `disableGeneratorVoltageControlsUnderMaxControlledNominalVoltage`). `qLimit` then names which.
+- `monitoringV=true` -> a `MONITORING_VOLTAGE` generator (an SVC with a stand-by automaton):
+  `LfNetworkLoaderImpl.createGeneratorVoltageControl` creates the control DISABLED AT LOAD and
+  `MonitoringVoltageOuterLoop` enables it during the solve. **This path is invisible to
+  `RL_SWITCH`** — which is exactly how the arms' pin SETS matched while `enabled` did not.
+- neither -> `LfContingency:234` / `NetworkCache:451`, or a `BusState` restore.
+
+The full writer list, so this is not re-derived: `setGeneratorVoltageControlEnabled` is private to
+`AbstractLfBus` and reached only from `freezeGenerationTargetQAndDisableGeneratorVoltageControl`
+(false) and `setGeneratorVoltageControlEnabledAndRecomputeTargetQ` (either); the latter's callers
+that pass FALSE are `LfNetworkLoaderImpl` 212 (MONITORING_VOLTAGE at load) and 222
+(`discardGeneratorVoltageControl`), `LfContingency` 234, `NetworkCache` 451 and `BusState` 127/161
+(restore); those that pass TRUE are `ReactiveLimitsOuterLoop` 227 (PQ->PV switch BACK),
+`MonitoringVoltageOuterLoop` 63, `GeneratorVoltageControlManager` 84 and
+`LfSecondaryVoltageControl` 141.
 
 **Superseded candidate (kept for the reasoning):** The comment at that site
 says "ACTIVE own-Q balance at a (non-free) remote gen-VC member = the RL-PINNED state", but the

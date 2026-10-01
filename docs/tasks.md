@@ -486,14 +486,54 @@ transiently frozen none is free, so all four get mode 4. That is precisely the l
 `hasCandidateTable`'s own javadoc forbids: "the pin state at extraction time must not leak into the
 structure (see computeQRow)".
 
-**Fix shape (to design, NOT yet coded).** For a member of a candidate-table group the mode must be
-CANONICAL — as if every controller were enabled — whether or not the bus is relocated, leaving the
-in-kernel mode scan to pick the carrier per scenario. The open question is whether that scan can
-address a RELOCATED member's row (the coupler `DUMMY_Q` column) as a candidate; the census's
-`PLAN:VC_REMERGE_RELOC_VROW=3` refusal is in that same territory and should be read before
-choosing. Do NOT just drop the `stubBr < 0` gate: `stateQRow` returns a member's own `BUS_V` row,
-which for a relocated child hosts `ZERO_V` (verified: row 6050 is `+1*v(_0) -1*v(_1)`), so routing
-there would collide. The candidate row for a relocated member is its parent's `DUMMY_Q`.
+**TWO WRONG LEADS, KILLED BY MEASUREMENT — the row and the pack are both FINE.**
+
+1. *The `stubBr < 0` gate is not the leak.* `stateQRow(bus, vCol, ziParentEdge, dummyQCol)` ALREADY
+   applies the relocation to the carrier (`return parent >= 0 && dummyQCol[parent] >= 0 ?
+   dummyQCol[parent] : vCol[carrier]`), and for a NON-PILOT member `stateQCarrier` returns the bus
+   itself — so the canonical branch would compute the SAME row the gated branch already does
+   (`dummyQCol[stubBr]`). The gate changes nothing for these buses.
+2. *The DISTR_Q pack is not missing them.* `buildDistrQContributions` is EXISTENCE-keyed
+   (`es.getEquation(gk, DISTR_Q).isEmpty()`) on the equation OBJECT, not the active index, and
+   `OLF_GPU_FREECTL_TRACE` shows the objects SURVIVE the freeze:
+
+   ```
+   FREECTL pilot=VL-2669_0 members=[VL-2669_0, VL-2669_1, VL-2669_2, VL-2669_3, VL-2669_4]
+           freeCtl=VL-2669_0
+           olfHasDistrQ=[VL-2669_0=true, VL-2669_1=true, VL-2669_2=true, VL-2669_3=true, VL-2669_4=true]
+   ```
+
+   So the union pattern DOES hold the sharing slots, and `freeCtl` is already canonical
+   (`controllers.get(0)`, the candidate-table branch). I had inferred OLF's
+   `recreateReactivePowerDistributionEquations` would DELETE a frozen member's equation; measured
+   false. (Also settled: the pilot `_0` IS one of its own controllers — a pilot-self group.)
+
+**So the leak is ONLY the row MODE.** The sharing terms are packed and the row is right; what turns
+them off is `mode[qr] = 4`, which the extractor comment describes as gating "the DISTR_Q emissions
+at this row" off. And mode 4 is written into `baseRowMode` from the frozen instant, while
+`GpuBatchChunkSolver` reads `rowModePerScenario[s] != null ? rowModePerScenario[s][r] :
+baseRowMode[r]` — so every scenario without an explicit per-scenario mode inherits the frozen 4.
+
+The canonical suppression ALREADY EXISTS but covers only the pilot:
+
+```java
+boolean enrolled = pilotSelf && pilotSelfRotationEnabled() && members.size() >= 2 && <all vCol >= 0>;
+boolean mode4 = isRemoteGenVcControllerElement(bus)
+        && (pilotSelf || !isFreeRemoteGenVcMember(bus)) && !enrolled;
+```
+
+`enrolled` requires `pilotSelf`, true only for `_0`. For `_1.._4`, `pilotSelf=false` so
+`enrolled=false` and `mode4 = !isFreeRemoteGenVcMember(bus)` — and "free" is *the first ENABLED
+member*, so with all four transiently frozen none is free and all four get mode 4.
+
+**Fix shape (to design, NOT yet coded).** Extend the canonical treatment from the pilot to every
+MEMBER of a candidate-table group, so `baseRowMode` is canonical (mode 1, sharing live) and the pin
+is expressed PER SCENARIO instead. **This is a design change, not a one-liner, and it has a known
+tripwire:** the 12 tests named in that comment
+(`deviceRemoteFreeMemberBasePinnedMatchesCpu` & co.) pass TODAY because `baseRowMode` carries a
+genuine base pin — making it canonical requires the per-scenario mode to carry it instead. Read how
+the pilot's `enrolled` case expresses its pin per scenario (the in-kernel mode scan) first: that is
+the template, and whether it can express a non-pilot member's pin decides the shape.
 
 **Superseded (kept for the reasoning):** `QROW_CLAIM` also prints
 `frozenQ` / `monitoringV` / `qLimit` / `gens`, which separate OLF's THREE disable paths — they need

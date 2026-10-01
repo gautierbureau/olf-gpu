@@ -155,11 +155,18 @@ dump. Not worth another run given the two reasons above.)
 composition; a differing saturation clamp; the pre-distribution seed; row/equation structure; the
 participant set; the dummy null space. SEVEN.
 
-**LOCALIZED 2026-10-01: the difference is confined to the coupler DUMMY_Q variables. The CAUSE is
-NOT yet established, and two readings of it have already been retracted.**
+**ANSWERED 2026-10-01: the two arms converge to DIFFERENT EQUATION SETS on a coupled group.**
 
-The paired dump (`OLF_VAR_DUMP` fork-side, `OLF_GPU_SA_VAR_DUMP` device-side, both keyed by element
-ID, both filtered by `OLF_TRACE_CTG`) joins 14494 converged variables for BUS-4467_BBS:
+**The principle that should have been applied on day one** (user, 2026-10-01): *"if the two
+systems do not agree at machine precision then the two equation systems are not the same — it is
+as simple as that."* A gap above machine precision is NOT a property of the solve. Every
+"same system, different solution" story is excluded a priori, and this entry burned most of a
+session on four of them — convergence slack, a coupler-dummy null space, a saturation-clamp
+quantum, a `P_RESIDUE_EPS` floor — each costing a ~20-minute scope run to kill. The first
+eps-squeeze that did not collapse the gap was already the proof. Go find the equation.
+
+**What it is.** The paired dump (`OLF_VAR_DUMP` + `OLF_GPU_SA_VAR_DUMP`, same point, keyed by
+element id, filtered by `OLF_TRACE_CTG`) confines the whole difference to the coupler dummies:
 
 | variable | differing | worst abs diff |
 | --- | --- | --- |
@@ -168,36 +175,46 @@ ID, both filtered by `OLF_TRACE_CTG`) joins 14494 converged variables for BUS-44
 | BUS_V | 5349 of 6881 | 2.655704e-07 |
 | BUS_PHI | 6880 of 6881 | 8.231543e-08 |
 
-Four orders of magnitude, on one variable type. That much is solid, and it is the first time this
-disagreement has been pinned to named variables. Both dumps are converged post-contingency states
-(their BUS_V agree to 2.655704e-07 pu over 6881 buses).
+OLF is properly converged there — `‖f − target‖₂ = 5.822350e-07`, worst residual 4.309392e-07 —
+which also confirms the retraction below. And the governing equations at CONVERGENCE name the
+defect:
 
-**RETRACTED (1):** "the device's dummies do not satisfy the chain". Backwards — see below.
+```
+EQ BUS_TARGET_V VL-2669_0   resid 0
+EQ DISTR_Q      VL-2669_1   resid -1.8e-16
+EQ DISTR_Q      VL-2669_2   resid -1.8e-16
+EQ DISTR_Q      VL-2669_3   resid -1.8e-16
+EQ DISTR_Q      VL-2669_4   resid -1.8e-16
+```
 
-**RETRACTED (2):** "OLF's converged state leaves 1.5e-03..4.2e-03 residuals on its own
-BUS_TARGET_Q equations, inside its ‖F‖₂ tolerance". That residual was computed with the targets
-printed in the F0 section, which are written BEFORE the solve, against the POST-solve state. A
-BUS_TARGET_Q target is NOT constant through the solve: the reactive-limits loop rewrites it when it
-pins a generator (`setGenerationTargetQ(limit)`), and the DISTR_Q target maintenance rewrites
-others. Mixing the two points in time makes the residual meaningless. **OLF is the reference: a
-computation showing it violating its own equations is evidence the computation is wrong.** (Third
-point-in-time error of the same session, after F0 and the dummy state — the lesson is to dump the
-state and the targets AT THE SAME POINT, always.)
+In OLF's converged system those buses are on **DISTR_Q** (reactive SHARING). Pre-solve they were on
+`BUS_TARGET_Q` with targets 0.0257 / 0.0257 / 0.02 / 0.0257, so OLF's solve SWITCHED them:
+DISTR_Q 323 -> 332 (+9), BUS_TARGET_Q 5578 -> 5571 (-7), BUS_TARGET_V 980 -> 978 (-2).
 
-By the same token, the device's dummy values matching those PRE-solve targets exactly is not
-evidence for the device either; if anything it raises the opposite question — whether the device is
-carrying targets OLF has since updated. Not decided, deliberately.
+Both arms' numbers then follow exactly:
+- OLF's dummy increments are all EQUAL (-0.0241962788) — enforced equal sharing under DISTR_Q;
+- the device's are -0.0257 / -0.0257 / -0.0200 — the individual BUS_TARGET_Q targets.
 
-**What is needed to decide it, and it is a small extension of the instrument already in place:**
-dump the CONVERGED TARGET alongside each converged variable, on both arms, at the same point.
-Then the residual of each equation is computable at each arm's own state with its own targets, and
-whichever equation one arm leaves unsatisfied names the defect. Until then, all that is established
-is WHERE the difference lives (coupler DUMMY_Q, 8.4e-03, with everything else at or below 5.6e-07).
+**So the device does not reproduce OLF's post-contingency re-activation of DISTR_Q on that coupled
+group.** The sharing is never enforced, each member sits at its own reactive target, the dummies
+differ by 8.4e-03 pu, and DISTR_Q's dependence on `dummy_q` carries it into the reactive split,
+the losses and the 9.553e-06 pu slack mismatch. That accounts for every measured property:
+eps-INDEPENDENT (a different equation set, not a convergence depth), PROPORTIONAL across
+participants, INVISIBLE to BUSDIFF, chunk-size invariant.
 
-**Why none of this was visible for weeks:** `BUSDIFF`, the harness's state comparison and the basis
-of every "bus voltages exact scope-wide" claim, compares BUS VOLTAGES ONLY. A dummy difference of
-8.4e-03 is invisible to it, in the base as much as in a contingency, and nothing in the suite
-looked at the dummy columns until this dump existed. That blind spot is worth closing on its own.
+**Confirming check still to do:** read the device's row modes for those four buses' reactive rows
+and show the DISTR_Q rows are inactive where OLF's are active.
+
+**Two retractions, kept visible.** (1) "the device's dummies do not satisfy the chain" — backwards.
+(2) "OLF's converged state leaves 1.5e-03..4.2e-03 on its own BUS_TARGET_Q equations" — invalid:
+computed from the PRE-solve targets in F0 against the POST-solve state, and a BUS_TARGET_Q target
+is not constant through a solve (a pin rewrites it with `setGenerationTargetQ(limit)`). OLF is the
+reference; a computation showing it violating its own equations is evidence the computation is
+wrong. Third point-in-time error of that session after `F0` and the dummy state — dump state and
+targets AT THE SAME POINT.
+
+**Why it hid for weeks:** `BUSDIFF` compares BUS VOLTAGES ONLY, so an 8.4e-03 dummy difference is
+invisible to it, in the base as much as in a contingency. Worth closing on its own.
 
 ### #65 — Duplicate target overrides: measured, then fixed at the producer (2026-09-30)
 

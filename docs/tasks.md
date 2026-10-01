@@ -155,8 +155,8 @@ dump. Not worth another run given the two reasons above.)
 composition; a differing saturation clamp; the pre-distribution seed; row/equation structure; the
 participant set; the dummy null space. SEVEN.
 
-**LOCALIZED 2026-10-01 — and the first reading of it was BACKWARDS. The DEVICE is exact; OLF's
-converged state carries the difference, inside its own tolerance.**
+**LOCALIZED 2026-10-01: the difference is confined to the coupler DUMMY_Q variables. The CAUSE is
+NOT yet established, and two readings of it have already been retracted.**
 
 The paired dump (`OLF_VAR_DUMP` fork-side, `OLF_GPU_SA_VAR_DUMP` device-side, both keyed by element
 ID, both filtered by `OLF_TRACE_CTG`) joins 14494 converged variables for BUS-4467_BBS:
@@ -168,52 +168,36 @@ ID, both filtered by `OLF_TRACE_CTG`) joins 14494 converged variables for BUS-44
 | BUS_V | 5349 of 6881 | 2.655704e-07 |
 | BUS_PHI | 6880 of 6881 | 8.231543e-08 |
 
-Four orders of magnitude, on one variable type. I first read the device's round four-decimal values
-as "input data, not a solved variable" and concluded the device was wrong. **Solving OLF's own
-equations settles it the other way.** For the VL-2669 chain the reactive balances contain ONLY
-dummy terms:
+Four orders of magnitude, on one variable type. That much is solid, and it is the first time this
+disagreement has been pinned to named variables. Both dumps are converged post-contingency states
+(their BUS_V agree to 2.655704e-07 pu over 6881 buses).
 
-```
-bus_target_q[3025] = -dummy_q9212 + dummy_q9213   target 0.0257
-bus_target_q[3026] = -dummy_q9213 + dummy_q9214   target 0.0257
-bus_target_q[3027] = -dummy_q9214 + dummy_q9215   target 0.0200
-bus_target_q[3028] = -dummy_q9215                 target 0.0257
-```
+**RETRACTED (1):** "the device's dummies do not satisfy the chain". Backwards — see below.
 
-whose analytic solution is -0.0971 / -0.0714 / -0.0457 / -0.0257. The DEVICE matches all four to
-every printed digit (residuals ~3e-18, machine zero); the CPU values are off by 3.2e-04 to
-2.7e-03, with residuals -1.504e-03, -1.504e-03, +4.196e-03, -1.504e-03. The round values were the
-correct answer: these are pure coupler-chain sections, so the dummy flow IS the cumulative load.
+**RETRACTED (2):** "OLF's converged state leaves 1.5e-03..4.2e-03 residuals on its own
+BUS_TARGET_Q equations, inside its ‖F‖₂ tolerance". That residual was computed with the targets
+printed in the F0 section, which are written BEFORE the solve, against the POST-solve state. A
+BUS_TARGET_Q target is NOT constant through the solve: the reactive-limits loop rewrites it when it
+pins a generator (`setGenerationTargetQ(limit)`), and the DISTR_Q target maintenance rewrites
+others. Mixing the two points in time makes the residual meaningless. **OLF is the reference: a
+computation showing it violating its own equations is evidence the computation is wrong.** (Third
+point-in-time error of the same session, after F0 and the dummy state — the lesson is to dump the
+state and the targets AT THE SAME POINT, always.)
 
-The CPU dump is genuinely a converged POST-contingency state — its BUS_V agrees with the device's
-to 2.655704e-07 pu over 6881 buses — and OLF's criterion ALLOWS the residual it stops at:
-`‖F‖₂ < sqrt(convEpsPerEq² · n)` = `sqrt(1e-8 · 14494)` = **1.204e-02**, against the ~4.9e-03
-those four equations contribute in quadrature.
+By the same token, the device's dummy values matching those PRE-solve targets exactly is not
+evidence for the device either; if anything it raises the opposite question — whether the device is
+carrying targets OLF has since updated. Not decided, deliberately.
 
-**So the reframing.** The coupler dummies are where OLF's convergence slack LANDS: they are weakly
-coupled to bus voltages, which is why BUS_V agrees to 2.7e-07 while DUMMY_Q differs by 8.4e-03.
-DISTR_Q equations REFERENCE dummy_q, so that slack propagates into the reactive split, the
-controllers' q, the losses, and finally the ~9.5e-06 pu slack-mismatch difference. **The device is
-the more exact of the two arms**, and "agreeing" here means the device reproducing OLF's stopping
-POINT, not correcting an error.
-
-**The one thing this does NOT explain, and the open thread:** squeezing `convEpsPerEq` to 1e-8 then
-1e-10 should have shrunk OLF's slack (its threshold falls to 1.2e-6) and closed the gap. It went
-1.398e-03 -> 8.464e-04 and then PINNED. Candidate: at tight eps OLF stops on its iteration budget
-instead (`maxNewtonRaphsonIterations=30` in the RTE params), so the residual stops falling. Test
-by checking OLF's iteration count and reported status for BUS-4467_BBS at eps=1e-10 — if it is
-hitting 30, the floor is the budget and the tail is fully explained.
+**What is needed to decide it, and it is a small extension of the instrument already in place:**
+dump the CONVERGED TARGET alongside each converged variable, on both arms, at the same point.
+Then the residual of each equation is computable at each arm's own state with its own targets, and
+whichever equation one arm leaves unsatisfied names the defect. Until then, all that is established
+is WHERE the difference lives (coupler DUMMY_Q, 8.4e-03, with everything else at or below 5.6e-07).
 
 **Why none of this was visible for weeks:** `BUSDIFF`, the harness's state comparison and the basis
 of every "bus voltages exact scope-wide" claim, compares BUS VOLTAGES ONLY. A dummy difference of
 8.4e-03 is invisible to it, in the base as much as in a contingency, and nothing in the suite
-looked at the dummy columns until this dump existed.
-
-**Three readings of this one disagreement, recorded so the pattern is visible:** (1) a differing
-clamp — killed by the per-generator join; (2) the device's dummies violate the chain — BACKWARDS,
-killed by solving the chain; (3) OLF's slack lands in the dummies and DISTR_Q propagates it — fits
-every measured property, with the squeeze pin still to explain. Each reversal came from computing
-the thing instead of reasoning about it.
+looked at the dummy columns until this dump existed. That blind spot is worth closing on its own.
 
 ### #65 — Duplicate target overrides: measured, then fixed at the producer (2026-09-30)
 

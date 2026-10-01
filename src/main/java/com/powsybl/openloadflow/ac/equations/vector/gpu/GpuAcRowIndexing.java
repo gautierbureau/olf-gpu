@@ -461,6 +461,33 @@ final class GpuAcRowIndexing {
     }
 
     /**
+     * {@code -Dolf.gpu.canonicalMemberMode=true} extends the pilot's CANONICAL row-mode treatment to every
+     * MEMBER of a candidate-table group, so the member's row stays a power row (mode 1, sharing live)
+     * instead of taking mode 4 from whatever pin state happened to hold at extraction.
+     *
+     * <p>Why it is needed (tasks #66): {@code mode4} reads {@code !isFreeRemoteGenVcMember(bus)}, and "free"
+     * is the FIRST ENABLED member, so a group whose members are all transiently frozen has no free member
+     * and every member's row is stamped mode 4 — into {@code baseRowMode}, which every scenario without an
+     * explicit per-scenario mode then inherits. On rte6515 the freeze is a {@code MIN_REALISTIC_V} one
+     * (`ReactiveLimitsOuterLoop`'s robust-mode unrealistic-low-voltage rule, trip point
+     * {@code minRealisticVoltage * 1.02} = 0.816 pu with the RTE parameters) which comes and goes WITHIN the
+     * solve, so the structure captured a window OLF had already left: VL-2669_1..4 ended on their own Q
+     * targets while OLF's converged base shares, and their DUMMY_Q differed by up to 8.410878e-03 pu.
+     *
+     * <p>Safe because the kernel does not need the row mode to know a member's pin: it reads the
+     * REACTIVE-LIMIT state per (scenario, entry) through {@code dqMemberQrGroup}/{@code dqMemberRlEntry} +
+     * {@code limitType}, which is "current from the seeding onwards" where the row modes "at seed time are
+     * still ambiguous". And a {@code MIN_REALISTIC_V} freeze is not a Q-limit pin at all — those buses have
+     * no RL entry, so canonically-unpinned is what OLF's converged base actually holds.
+     *
+     * <p>Default OFF while the base-pinned fixtures are re-measured: they pass today BECAUSE
+     * {@code baseRowMode} carries a genuine base pin.
+     */
+    static boolean canonicalMemberModeEnabled() {
+        return Boolean.parseBoolean(System.getProperty("olf.gpu.canonicalMemberMode", "false"));
+    }
+
+    /**
      * {@code -Dolf.gpu.ziTreeRelocation=false} turns OFF the coupler-tree relocation, which relocates every
      * non-root bus of a zero-impedance spanning tree (ON by default since 2026-09-29) and leaves only the
      * dead-end stubs it generalises. It is what OLF's own equation layout does with a coupler chain, and

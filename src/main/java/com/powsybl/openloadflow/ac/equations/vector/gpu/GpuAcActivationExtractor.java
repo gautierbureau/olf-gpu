@@ -183,8 +183,17 @@ public final class GpuAcActivationExtractor {
                                 .map(c -> c.getMergedControllerElements().size() >= 2
                                         && c.getMergedControllerElements().stream().allMatch(m -> vCol[m.getNum()] >= 0))
                                 .orElse(false);
+                // ...and, under -Dolf.gpu.canonicalMemberMode, the same canonical treatment for a MEMBER of a
+                // candidate-table group. `enrolled` above requires pilotSelf, so it covers only the pilot;
+                // for a member mode4 reduces to !isFreeRemoteGenVcMember, and "free" is the FIRST ENABLED
+                // member, so a group whose members are all transiently frozen has no free member and every
+                // member's row is stamped mode 4 into baseRowMode — which every scenario without an explicit
+                // per-scenario mode inherits. See GpuAcRowIndexing.canonicalMemberModeEnabled (tasks #66).
+                boolean canonicalMember = GpuAcRowIndexing.canonicalMemberModeEnabled()
+                        && mainVc != null && GpuAcRowIndexing.hasCandidateTable(mainVc, es);
                 boolean mode4 = GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
-                        && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) && !enrolled;
+                        && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus))
+                        && !enrolled && !canonicalMember;
                 // OLF_GPU_QROW_TRACE=<row|busIdPrefix>[,…]: WHO claims a reactive row, and on what grounds.
                 // A relocated member's DISTR_Q is assigned to its parent coupler's DUMMY_Q row, and so is
                 // any bus whose qRow maps there with an ACTIVE BUS_TARGET_Q — two equations, one row, and
@@ -222,7 +231,8 @@ public final class GpuAcActivationExtractor {
                         System.err.printf("QROW_CLAIM pass=%d row=%d bus=%s busTargetQcol=%d distrQcol=%d "
                                 + "mainVc=%s mainMembers=%d enabled=%b ownVc=%s ownMembers=%d ownMerge=%s "
                                 + "frozenQ=%b monitoringV=%b qLimit=%s gens=%d candTable=%s "
-                                + "remoteCtl=%b pilotSelf=%b freeMember=%b enrolled=%b -> mode4=%b%n",
+                                + "remoteCtl=%b pilotSelf=%b freeMember=%b enrolled=%b canonMember=%b "
+                                + "-> mode4=%b%n",
                                 pass, qr, bus.getId(), q,
                                 GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.DISTR_Q),
                                 mainVc == null ? "-" : mainVc.getControlledBus().getId(),
@@ -237,7 +247,8 @@ public final class GpuAcActivationExtractor {
                                 // WHY the group misses the canonical pin-state-independent path (#66)
                                 GpuAcRowIndexing.candidateTableReason(mainVc, es),
                                 GpuAcRowIndexing.isRemoteGenVcControllerElement(bus), pilotSelf,
-                                GpuAcRowIndexing.isFreeRemoteGenVcMember(bus), enrolled, mode4);
+                                GpuAcRowIndexing.isFreeRemoteGenVcMember(bus), enrolled, canonicalMember,
+                                mode4);
                     }
                 }
                 if (mode4) {

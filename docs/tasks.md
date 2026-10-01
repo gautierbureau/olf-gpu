@@ -562,6 +562,21 @@ represent it. Canonically-unpinned is exactly what OLF's CONVERGED base has.
    this whole entry is about: `DUMMY_Q` on `VL-2669_1..4` agreeing instead of differing by
    8.410878e-03 pu.
 
+**STEPS 1-3 DONE (2026-10-01).** `GpuAcRowIndexing.canonicalMemberModeEnabled()` +
+`canonicalMember` in the extractor's `mode4`; `canonMember=` added to `QROW_CLAIM`. With
+`-Dolf.gpu.canonicalMemberMode=true`:
+
+- `GpuBatchedAcSecurityAnalysisTest` **177 run, 0 failures, 1 skipped**
+- `GpuLoadFlowTest` + `GpuFullNewtonTest` + `GpuAcStructuresTest` + `GpuLineSearchTest`
+  **20 run, 0 failures, 0 skipped**
+
+**The tripwire is CLEAR**, and that is the substantive result: the 12 base-pinned fixtures
+(`deviceRemoteFreeMemberBasePinnedMatchesCpu` & co.) pass with `baseRowMode` no longer carrying the
+pin, which CONFIRMS the kernel's per-(scenario, entry) reactive-limit read covers MEMBERS and not
+just the pilot — the premise the whole plan rests on, now measured instead of assumed.
+
+Step 4 (full busbar scope, both arms) is RUNNING; default stays `false` until it reports.
+
 **Superseded (kept for the reasoning):** `QROW_CLAIM` also prints
 `frozenQ` / `monitoringV` / `qLimit` / `gens`, which separate OLF's THREE disable paths — they need
 opposite fixes and no pin dump can tell them apart:

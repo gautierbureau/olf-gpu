@@ -458,11 +458,42 @@ single instant. The principled fix is the one the code ALREADY implements for ex
 the CANONICAL, PIN-STATE-INDEPENDENT extraction behind `GpuAcRowIndexing.hasCandidateTable` —
 "extracted CANONICALLY (pin-state independent: every controller's frozen q row suppressed...)" per
 the comment in `GpuAcActivationExtractor`. A group with a candidate table already gets a structure
-that holds BOTH shapes and lets the in-kernel mode scan choose per scenario. **So the next step is
-to find why `VL-2669`'s group does NOT qualify**, i.e. which clause of `hasCandidateTable` rejects
-it (`MAIN` + not local + pilot `BUS_V` column present + the `pilotSelf`/rotation clause + every
-member having a `BUS_V` column). The census's `PLAN:VC_REMERGE_RELOC_VROW=3` and
-`PLAN:VC_REMERGE_PINNED_MAIN=3` suggest the relocated-V-row interaction is where it falls out.
+that holds BOTH shapes and lets the in-kernel mode scan choose per scenario.
+
+**THE DEFECT, LOCATED (2026-10-01). The group HAS a candidate table; the canonical path is gated
+off for RELOCATED members.** `candidateTableReason` (new, printed as `candTable=` in `QROW_CLAIM`)
+says `YES` on all 24 claim lines — so the "does not qualify" guess above was WRONG, and the
+`hasCandidateTable` clauses are all satisfied. The leak is one gate in
+`GpuAcActivationExtractor.extractActivation`:
+
+```java
+int qr = stubBr >= 0 ? dummyQCol[stubBr] : qRow[bus.getNum()];
+GeneratorVoltageControl mainVc = GpuAcRowIndexing.mainGenVc(bus);
+if (stubBr < 0 && mainVc != null && GpuAcRowIndexing.hasCandidateTable(mainVc, es)) {
+    qr = GpuAcRowIndexing.stateQRow(bus, vCol, stubBranchOfBus, dummyQCol);   // CANONICAL path
+}
+assign(es, targetMap, qr, q, AcEquationType.BUS_TARGET_Q, bus.getNum());
+...
+if (mode4) { mode[qr] = 4; }                                                  // pin-state dependent
+```
+
+`VL-2669_1..4` are coupler-relocated, so `stubBr >= 0`: the row is the parent coupler's `DUMMY_Q`
+column (correct — relocation is structural) but the **`stubBr < 0` gate skips the canonical
+pin-state-independent treatment for exactly these buses**, and `mode4` is then stamped from the
+instantaneous pin state anyway. `mode4` is pin-state dependent for a non-pilot member because it
+reads `!isFreeRemoteGenVcMember(bus)`, and "free" is *the first ENABLED member* — with all four
+transiently frozen none is free, so all four get mode 4. That is precisely the leak
+`hasCandidateTable`'s own javadoc forbids: "the pin state at extraction time must not leak into the
+structure (see computeQRow)".
+
+**Fix shape (to design, NOT yet coded).** For a member of a candidate-table group the mode must be
+CANONICAL — as if every controller were enabled — whether or not the bus is relocated, leaving the
+in-kernel mode scan to pick the carrier per scenario. The open question is whether that scan can
+address a RELOCATED member's row (the coupler `DUMMY_Q` column) as a candidate; the census's
+`PLAN:VC_REMERGE_RELOC_VROW=3` refusal is in that same territory and should be read before
+choosing. Do NOT just drop the `stubBr < 0` gate: `stateQRow` returns a member's own `BUS_V` row,
+which for a relocated child hosts `ZERO_V` (verified: row 6050 is `+1*v(_0) -1*v(_1)`), so routing
+there would collide. The candidate row for a relocated member is its parent's `DUMMY_Q`.
 
 **Superseded (kept for the reasoning):** `QROW_CLAIM` also prints
 `frozenQ` / `monitoringV` / `qLimit` / `gens`, which separate OLF's THREE disable paths — they need

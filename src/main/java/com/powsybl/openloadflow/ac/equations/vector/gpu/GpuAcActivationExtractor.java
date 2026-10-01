@@ -221,7 +221,7 @@ public final class GpuAcActivationExtractor {
                                         .GeneratorControlType.MONITORING_VOLTAGE);
                         System.err.printf("QROW_CLAIM pass=%d row=%d bus=%s busTargetQcol=%d distrQcol=%d "
                                 + "mainVc=%s mainMembers=%d enabled=%b ownVc=%s ownMembers=%d ownMerge=%s "
-                                + "frozenQ=%b monitoringV=%b qLimit=%s gens=%d "
+                                + "frozenQ=%b monitoringV=%b qLimit=%s gens=%d candTable=%s "
                                 + "remoteCtl=%b pilotSelf=%b freeMember=%b enrolled=%b -> mode4=%b%n",
                                 pass, qr, bus.getId(), q,
                                 GpuAcRowIndexing.row(es, bus.getNum(), AcEquationType.DISTR_Q),
@@ -234,6 +234,8 @@ public final class GpuAcActivationExtractor {
                                 bus.isGenerationTargetQFrozen(), monitoringV,
                                 bus.getQLimitType().map(Object::toString).orElse("-"),
                                 bus.getGenerators().size(),
+                                // WHY the group misses the canonical pin-state-independent path (#66)
+                                GpuAcRowIndexing.candidateTableReason(mainVc, es),
                                 GpuAcRowIndexing.isRemoteGenVcControllerElement(bus), pilotSelf,
                                 GpuAcRowIndexing.isFreeRemoteGenVcMember(bus), enrolled, mode4);
                     }

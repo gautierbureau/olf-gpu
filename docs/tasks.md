@@ -562,7 +562,21 @@ represent it. Canonically-unpinned is exactly what OLF's CONVERGED base has.
    this whole entry is about: `DUMMY_Q` on `VL-2669_1..4` agreeing instead of differing by
    8.410878e-03 pu.
 
-**STEPS 1-3 DONE (2026-10-01).** `GpuAcRowIndexing.canonicalMemberModeEnabled()` +
+**!! VOID — STEPS 3 AND 4 BELOW WERE RUN WITH THE FLAG OFF (caught 2026-10-01). !!** I passed the
+property as `-DargLine="-Dolf.gpu.canonicalMemberMode=true -Xmx30g"`, and `QROW_CLAIM` proves it
+never reached the extractor: `canonMember=false -> mode4=true` on all 24 lines while
+`candTable=YES`. With a plain `mvn -Dolf.gpu.canonicalMemberMode=true` the SAME run gives
+`canonMember=true -> mode4=false` on all 24. So "177/177 with the flag ON" was 177/177 with it OFF
+and proves NOTHING about the tripwire, and the neutral scope table measured the unchanged code.
+
+This is a LESSON ALREADY IN THIS FILE at the `pilotSelfRotation` entry: surefire forks, so a
+behaviour property must go through `mvn -Dolf.gpu.X=true` (it propagates `-D` to the fork), not
+`MAVEN_OPTS` and not `-DargLine` (which REPLACES surefire's own argLine). **Read that entry before
+overriding a property.** The corroborating detail I misread: "JVM max heap: 30688 MB" appears in
+runs with NO `argLine` at all — the pom sets the heap — so that line was never evidence the
+override took.
+
+**STEPS 1-3 (the VOID run's text, kept for the record):** `GpuAcRowIndexing.canonicalMemberModeEnabled()` +
 `canonicalMember` in the extractor's `mode4`; `canonMember=` added to `QROW_CLAIM`. With
 `-Dolf.gpu.canonicalMemberMode=true`:
 

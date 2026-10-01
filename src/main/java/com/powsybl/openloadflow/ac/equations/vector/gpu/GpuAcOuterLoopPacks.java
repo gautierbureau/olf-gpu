@@ -188,6 +188,27 @@ public final class GpuAcOuterLoopPacks {
         return vc != null && GpuAcRowIndexing.isRemoteGenVcControllerElement(bus) && vc.getControlledBus() != bus;
     }
 
+    /**
+     * OLF's OWN test for "is this a remote controller", which gates robust mode's unrealistic-voltage
+     * PV→PQ freeze — copied verbatim from {@code ReactiveLimitsOuterLoop.isGeneratorRemoteController}:
+     *
+     * <pre>return controllerBus.getGeneratorVoltageControl().map(c -&gt; c.getControlledBus() != controllerBus).orElse(false);</pre>
+     *
+     * <p>Note which control it asks: the bus's OWN {@code getGeneratorVoltageControl()}, NOT
+     * {@link #mainGenVc}. For a MERGED group every member keeps its own DEPENDENT control whose
+     * controlled bus is ITSELF, so OLF reads every such member as a LOCAL controller and skips the
+     * whole {@code robustMode && generatorRemoteController && …} block for it — while the device's
+     * {@code rlRemote} class, built from the MAIN control, calls that member "remote" and applies the
+     * rule. That gap is [[#66]]: on rte6515 the device froze VL-2669_1..4 with
+     * {@code MIN_REALISTIC_V} (their shared target, 12.4 kV on a 20 kV level = 0.62 pu, is below the
+     * 0.816 pu trip point) where OLF froze nothing, so mode-4 own-Q balances replaced the DISTR_Q
+     * sharing in the STRUCTURE and DUMMY_Q ended 8.410878e-03 pu off. Entries that answer false here
+     * are packed as class 3 and the kernel's robust gate exempts them.
+     */
+    public static boolean isOlfRobustRemoteController(LfBus bus) {
+        return bus.getGeneratorVoltageControl().map(c -> c.getControlledBus() != bus).orElse(false);
+    }
+
     /** A class-2 entry: a pilot that is one of its own controllers (packed as a remote entry). */
     public static boolean isPilotSelfEntry(LfBus bus) {
         GeneratorVoltageControl vc = mainGenVc(bus);
@@ -673,12 +694,19 @@ public final class GpuAcOuterLoopPacks {
                         rlVtarget.add(vc.getTargetValue());    // the GROUP target (pilot-referenced)
                         addSvcQuadratic(bus, rlSvcBmin, rlSvcBmax, rlV2Base);
                         rlMonitored.add((byte) 0);
-                        rlRemote.add((byte) (pilotSelf ? 2 : 1));
+                        // 2 = pilot-self; 1 = a remote member OLF's robust rule APPLIES to;
+                        // 3 = a remote member OLF's robust rule EXEMPTS, because the bus's OWN control is
+                        // local (see isOlfRobustRemoteController). Class 3 is truthy and not 2, so every
+                        // other rlRemote site treats it exactly like class 1 — only the kernel's robust
+                        // unrealistic-voltage gate and rlRobustVResetBatch (which tests == 1) single it out.
+                        byte remoteClass = pilotSelf ? (byte) 2
+                                : isOlfRobustRemoteController(bus) ? (byte) 1 : (byte) 3;
+                        rlRemote.add(remoteClass);
                         rlCmpVrow.add(pilotV);                 // switch conditions compare the PILOT's V
                         rlBusNum.add(bn);
                         if (System.getenv("OLF_GPU_RL_TRACE") != null) {
                             System.err.println("GPU_RL_ENTRY idx=" + (rlVrow.size() - 1) + " vRow=" + vCol[bn]
-                                    + " bus=" + bus.getId() + " remote=" + (pilotSelf ? 2 : 1) + " pilotVRow=" + pilotV);
+                                    + " bus=" + bus.getId() + " remote=" + remoteClass + " pilotVRow=" + pilotV);
                         }
                         rlNominalV.add(vc.getControlledBus().getNominalV());
                         rlPRow.add(GpuAcRowIndexing.row(es, bn, AcEquationType.BUS_TARGET_P) >= 0 ? columns.pRow()[bn] : -1);

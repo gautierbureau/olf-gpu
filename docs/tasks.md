@@ -345,12 +345,37 @@ Why is that control DISABLED at the device's extraction when OLF's converged bas
 (DISTR_Q active, `bus_target_q[3025..3028]` bracketed)? That is a BASE-level pin-state divergence
 between the arms — the [[#64]] family (a wrong pin decision), not an equation-hosting problem.
 
-Both arms report 15 base pins (OLF: 15 `PV->PQ` in `ctg=base`; device: 15 `anyBaseLt` entries in
-`GPU_RL_KINDS install`), so the COUNTS match while the SETS apparently do not. The device's list is
-by RL entry index, not bus id, so the next step is small: resolve those entry indices to bus ids
-and check whether VL-2669_1..4 are among the device's base pins. If they are, the device pins a
-group OLF leaves controlling, and the fix is in the base pin decision; if they are not, the
-`enabled=false` comes from somewhere else and that is the thing to find.
+**RESOLVED: there is NO base pin divergence, and `enabled=false` is not a pin.** Mapping the
+device's 15 `anyBaseLt` entry indices to bus ids gives VL-6439_0, VL-6452_0, VL-4244_0, VL-6515_0,
+VL-6003_0, VL-6027_0, VL-6095_0, VL-6106_0, VL-6130_0, VL-6157_0, VL-6173_0, VL-6194_0, VL-6226_0,
+VL-6229_0, VL-6239_0 — **identical** to OLF's base `PV->PQ` set (14 in its first pass plus
+VL-6106_0 in its second). The arms agree exactly on which controllers pin.
+
+And VL-2669 has ONE RL entry — `idx=486 bus=VL-2669_0 gens=5 vcEnabled=true basePv=true`,
+UNPINNED, at the pilot, covering all five generators. VL-2669_1..4 have NO RL entries. So the
+`enabled=false` the QROW trace reports cannot be a reactive-limit pin: there is nothing there to
+pin. (It is most likely the ordinary state of a merged DEPENDENT member, whose own control is off
+while the MAIN owns the group — OLF still lists it in `getMergedControllerElements()` and still
+gives it `DISTR_Q`.)
+
+**What remains is purely the SNAPSHOT MOMENT.** In a BASE-ONLY run, extraction passes 13/14/15 see
+`DISTR_Q` ACTIVE for those buses (`OLF_GPU_DISTRQ_DUMP`, `enabled=true`). In the SA run, the
+extraction the batch uses sees `DISTR_Q` INACTIVE and `BUS_TARGET_Q` ACTIVE (`distrQcol=-1`,
+`busTargetQcol=11308`). Same network, different moments: the batched SA's cached extraction is
+taken at a state where the merged dependents' controls are off, so extraction legitimately records
+an own-Q balance (mode 4) and the sharing equation is never built — and the structure then holds
+that for every scenario.
+
+**Fix direction (narrowed, still not coded):** make the batched SA's extraction come from the
+SETTLED base state rather than an unsettled one — i.e. establish WHEN `GpuAcDataCache` captures it
+relative to the base load flow's voltage-control update, and capture (or refresh) after. Note that
+`refreshContextValues` already re-pushes VALUES into a shared structure; row MODES and the
+equation set are structural, so a value refresh cannot repair this.
+
+**Next measurement, one run:** print the extraction PASS number in `QROW_CLAIM` and run the SA
+(not base-only) with `OLF_GPU_DISTRQ_DUMP` on the same group, so early and late passes are
+visible side by side in ONE run — the comparison this entry has botched five times by mixing runs.
+If a late SA pass sees `DISTR_Q` active, the batch is simply caching the wrong pass.
 
 **Superseded candidate (kept for the reasoning):** The comment at that site
 says "ACTIVE own-Q balance at a (non-free) remote gen-VC member = the RL-PINNED state", but the

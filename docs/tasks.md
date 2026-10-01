@@ -1872,10 +1872,50 @@ mode evicts the single-entry context cache) plus a full extra pass, and buys not
 **Census artefact to know:** the retry re-runs qualification, so with the pass ON the `PLAN:` counts
 DOUBLE (`VC_REMERGE_MULTI` 47 -> 94 etc.). They are per-attempt, not per-contingency.
 
-**Next, for whoever picks this up:** take ONE of the 108 and compare its device trajectory against
-the CPU's iterate by iterate (`OLF_GPU_DBG_NR` vs OLF's own Newton on the same equation system) —
-the same method that cracked [[#66]]. The question is not "why is the solve inaccurate" (mode 6
-shows it need not be) but "why does the device need more iterations than OLF for this scenario".
+**THE EQUATION SYSTEMS AGREE — checked on one of the 108 (2026-10-01).** The standing rule says a
+non-converging GPU means a different equation system, so that was checked FIRST, with the two
+dumps the code already pairs for it: `OLF_GPU_EQ_DUMP_CTG` (OLF's post-contingency equations,
+inactive ones bracketed) against `OLF_GPU_ROWMODE_DUMP_CTG` (the device's per-scenario row modes)
+plus `OLF_GPU_SA_EQ_DUMP` (the device's row map). Contingency `BUS-1039_BBS`, full busbar list kept
+so the network is the real one:
+
+| check | result |
+|---|---|
+| PV set: OLF `bus_target_v` ACTIVE vs device `BUS_V` mode 0 | 982 vs 982, EXACT |
+| per-bus V-row occupant (target_v / distr_q / target_q / none vs mode 0/1/4) | **0 mismatches over 6237 non-relocated buses** |
+| islanded set: OLF `disabled buses` vs device rows frozen to identity | 9 vs 9, and the SETS are equal (no bus on either side only) |
+| device island freeze | 18 rows = 9 buses x (V->1.0, PHI->0.0) |
+
+**And the iteration policy agrees too:** the RTE parameters set
+`stateVectorScalingMode = MAX_VOLTAGE_CHANGE`, which `GpuSaRunScope` mirrors as `lsMode=2` with the
+same `maxDv`/`maxDphi`, and `maxNewtonRaphsonIterations = 30` matches the reject's `it=30`. So same
+system, same step clamp, same cap — and the device still needs more than 30 steps where OLF needs
+fewer. The reject is at `outer=0 it=30`: it cannot finish even the FIRST Newton solve.
+
+**Next probe, which the dump itself names:** this contingency must absorb
+`activePowerLoss = -1.243 pu` (124.3 MW of disconnected load), and the dump prints that value as
+"the reference for the device's scheduledActivePowerLoss (`OLF_GPU_LOSS_TRACE` prints that one)". A
+target that large being wrong would wreck the first solve, and TARGETS are part of the system. Run
+`OLF_GPU_LOSS_TRACE=1` and compare. The still-unchecked region is the **649 relocated buses** (a
+per-bus V-row comparison is invalid there, since a relocated child's `DISTR_Q` lives on its parent
+coupler's `DUMMY_Q` row while its own V row hosts `ZERO_V`); the aggregate is OLF 334 active
+`distr_q` against 345 device dq-carrying rows, 336 at mode 1 and 9 at mode 4, which is NOT yet
+reconciled and is the next thing to nail down after the loss.
+
+**TWO DIAGNOSTIC DEFECTS FIXED ON THE WAY — both had been silently inventing differences:**
+
+1. `OLF_GPU_SA_EQ_DUMP` passed `new int[baseState.length]` as the row modes, so EVERY row printed
+   `mode=0` (identity), including the coupler `DUMMY_Q` rows that carry the `dq` sharing terms. Any
+   comparison against it reads a system difference wherever OLF has a power row. Now passes
+   `baseActivation.rowMode()`; the dump shows modes 0/1/4.
+2. My own parse of `OLF_GPU_EQ_DUMP_CTG` matched only the SCALAR equation names
+   (`bus_target_v3 = v3`) and silently dropped every VECTORIZED one
+   (`bus_target_q[0] = ac_q_array_closed_2(...)` — the element number is in BRACKETS). That hid all
+   6886 `bus_target_p` and all 6886 `bus_target_q` equations, i.e. the entire P/Q balance side, so a
+   first "0 mismatches" result had checked only the PV classification. The dump has BOTH shapes;
+   match `([a-z_\u03c6]+?)(?:\[(\d+)\]|(\d+))\s*=`. Correct inventory for `BUS-1039_BBS`:
+   `bus_target_p` 6876 active, `bus_target_q` 5561, `bus_target_v` 982, `distr_q` 334, `zero_v` 366,
+   `zero_phi` 366, `bus_target_phi` 1.
 
 
 ## Completed 2026-07-21

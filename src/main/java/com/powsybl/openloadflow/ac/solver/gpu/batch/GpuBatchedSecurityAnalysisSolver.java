@@ -293,8 +293,12 @@ public final class GpuBatchedSecurityAnalysisSolver {
         String saEqDump = System.getenv("OLF_GPU_SA_EQ_DUMP");   // the SA extraction's row map (GpuEquationDump)
         if (saEqDump != null && !saEqDump.isEmpty()) {
             try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(saEqDump))) {
+                // The REAL base row modes, not a zero-filled placeholder. This dump is half of the
+                // row-by-row comparison against OLF_GPU_EQ_DUMP_CTG, and with all-zero modes every row
+                // read "mode=0" (identity) — including the coupler DUMMY_Q rows that carry the DISTR_Q
+                // terms — which silently invents a system difference wherever OLF has a power row.
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuEquationDump.write(w, network, equationSystem, gpuData,
-                        new int[baseState.length]);
+                        baseActivation.rowMode());
             } catch (java.io.IOException | RuntimeException e) {
                 LOGGER.warn("OLF_GPU_SA_EQ_DUMP failed: {}", e.toString());
             }

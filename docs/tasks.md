@@ -111,13 +111,37 @@ target seeding) and after `applyRowMode` turns identity rows into `x - target`. 
 vs device `35.95`, and OLF's is dominated almost entirely by TWO equations — `distr_q1952/1953`
 at 519.00 and 518.98 — so those norms describe two equations, not the network.
 
-**Instrumentation done:** F0 now writes `f` and `target` SEPARATELY, not just their difference.
-With the difference alone a 519 cannot be attributed — a large residual, a large target, or an
-unconstrained variable all look the same. Those two equations are DISTR_Q rows built on coupler
-`DUMMY_Q` variables (`dummy_q9161`/`9162`), exactly the quantity a pre-contingency state leaves
-unconstrained, and the split makes that readable. **Next: re-dump and read whether the 519 is f or
-target** — if it is the target, F0 is behaving and the comparison needs the device's fill taken at
-the same seeding point; if it is f, those dummy variables are the lead.
+**Instrumentation done, and it answered:** F0 now writes `f` and `target` separately. The re-dump
+says **519.0048 is `f`, with `target = 0.0`** — same for 518.98, and for the next three
+(118.32 / 104.66 / -100.04, all DISTR_Q, all targets zero). A genuine evaluation, not a target
+artefact, so `dummy_q9161`/`9162` hold magnitudes around 780 pu — not a physical coupler flow.
+
+**Why, and it is the third and correct reading of this instrument.** `BusState` saves angle,
+voltage, `generationTargetQ`, shunt B/G … and NOT `dummy_p`/`dummy_q`. Those are equation-only
+variables of the zero-impedance couplers, so `NetworkState.restore()` between contingencies does
+NOT restore them: they carry whatever the PREVIOUS contingency's solve left. At the dump point the
+vector is fresh and the index is current, but the STATE is partly stale — precisely in the
+variables these DISTR_Q equations reference. (First reading: "stale equation vector" — wrong,
+mechanism. Second: "legitimately large" — wrong, it is not the base state. Third: stale
+equation-only STATE variables.) Harmless for OLF, whose solver re-converges them; it only means
+F0's dummy-referencing entries are not a "starting residual".
+
+**HYPOTHESIS for this bug, UNTESTED, but it fits every measured property.** The device tiles the
+BASE state to every scenario, so it starts each one from the base `dummy_q`; OLF starts from the
+previous contingency's. If the coupler dummies are UNDERDETERMINED — a null space, which a
+coupler loop gives — both arms converge, but to different points in that null space. Physical
+quantities would still agree (and they do: BUSDIFF 0 scope-wide, bus voltages exact), while a
+DISTR_Q equation that REFERENCES `dummy_q` enforces a slightly different reactive split, moving
+the controllers' q, the losses, and hence the slack mismatch by ~1e-5 pu. That would be:
+eps-independent (it is not a convergence depth), proportional across participants (it moves the
+sharing, not one unit), invisible in bus voltages, and identical under a chunk-size change — which
+is the full list of properties measured for BUS-4467_BBS.
+
+**How to test it, in order:** (1) do the dummy columns of the two arms' CONVERGED states differ
+for this contingency, while bus V agrees? (2) is the coupler configuration at VL-1697 a loop, i.e.
+is the dummy subsystem rank-deficient? (3) does forcing the device to start a scenario from the
+same dummy values OLF would have (or pinning the null space on both sides) close the 9.553e-06 pu?
+If (1) is no, the hypothesis dies immediately and cheaply.
 
 **A caution earned twice over.** The DS gate record's stride was a genuine lying instrument
 ([[#62]]); this one was NOT, and I asserted it was on a plausible-sounding mechanism without

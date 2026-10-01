@@ -575,7 +575,38 @@ represent it. Canonically-unpinned is exactly what OLF's CONVERGED base has.
 pin, which CONFIRMS the kernel's per-(scenario, entry) reactive-limit read covers MEMBERS and not
 just the pilot — the premise the whole plan rests on, now measured instead of assumed.
 
-Step 4 (full busbar scope, both arms) is RUNNING; default stays `false` until it reports.
+**STEP 4: the scope run is NEUTRAL, and the fix is therefore NOT yet demonstrated.** Full busbar
+scope, both arms, `-Dolf.gpu.canonicalMemberMode=true`:
+
+| | flag ON | recorded baseline |
+|---|---|---|
+| BASE BUSDIFF | 0 | 0 |
+| violations | CPU=503923 GPU=503923 diff=0 | diff=0 |
+| worst DAP | 1.397828e-03 MW | 1.398e-03 MW |
+| coverage | 6550 / 6667 | 6550 / 6667 |
+| census | identical (`VC_REMERGE_MULTI=47`, `PINNED_MAIN=3`, `RELOC_VROW=3`, …) | same |
+
+No regression anywhere, and no improvement either: `1.397828e-03` IS the baseline's `1.398e-03`.
+The test still fails its DAP assertion at that value, as it did before.
+
+**So the honest status: the code path is implemented and harmless, but NOTHING here shows it fixed
+#66.** The scope headline cannot show it — `BUSDIFF` compares bus VOLTAGES only and is blind to the
+reactive split, which is the whole reason #66 stayed hidden. Two possibilities, not yet separated:
+
+1. `canonicalMember` did not actually fire (the property reached the JVM — "JVM max heap: 30688 MB"
+   confirms the `argLine` override took — and `candTable=YES` was measured, so it SHOULD have, but
+   that is an inference, not a measurement).
+2. It fired and `DUMMY_Q` now agrees, but the residual 1.4e-03 MW DAP gap has a DIFFERENT cause,
+   which would mean #66 was never what drove the DAP difference.
+
+**Next, in this order — do NOT claim the fix before both:**
+(a) one run with the flag ON and `OLF_GPU_QROW_TRACE=VL-2669`, to see `canonMember=true -> mode4=false`
+    instead of `mode4=true`. Cheap, and it settles (1).
+(b) the `DUMMY_Q` comparison the entry is actually about: device `OLF_GPU_SA_VAR_DUMP` against the
+    fork's `OLF_VAR_DUMP` at the SAME point, filtered by `OLF_TRACE_CTG`, flag ON vs OFF — does the
+    8.410878e-03 pu gap on `VL-2669_1..4` (331 of 366) close?
+
+Default stays `false` until (a) and (b) report.
 
 **Superseded (kept for the reasoning):** `QROW_CLAIM` also prints
 `frozenQ` / `monitoringV` / `qLimit` / `gens`, which separate OLF's THREE disable paths — they need

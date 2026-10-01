@@ -622,6 +622,54 @@ reactive split, which is the whole reason #66 stayed hidden. Two possibilities, 
 
 Default stays `false` until (a) and (b) report.
 
+**(a) ANSWERED, and it VOIDED the two runs above** — see the VOID banner. With the property passed
+correctly the extractor reads `canonMember=true -> mode4=false` on all 24 lines.
+
+**THE REAL GATE RESULT, flag genuinely ON: 20 FAILURES — the plan's premise is FALSE.**
+
+```
+deviceBasePinnedMemberKeepsItsQWhenASiblingIsIslandedMatchesCpu   javaRemoteAllMembersPinnedMatchesCpu
+deviceRemoteForcedPvElectionMatchesCpu                            javaRemoteForcedPvMatchesCpu
+deviceRemoteFreeMemberBasePinnedMatchesCpu                        javaRemoteFreeAndSiblingPinMatchesCpu
+deviceRemoteGeneratorControlReactiveLimitsMatchesCpu              javaRemoteFreeMemberBasePinnedMatchesCpu
+deviceRemoteGroupAllPinnedInBaseMatchesCpu                        javaRemoteFreeMemberPostContingencyPinMatchesCpu
+deviceRemoteGroupLostInBaseRegainsControlInSamePassMatchesCpu     javaRemoteMemberBasePinnedMatchesCpu
+deviceRemoteGroupUnpinnedByContingencyRecomputesTargetQMatchesCpu javaRemoteMemberPostContingencyPinMatchesCpu
+deviceRemoteMemberBasePinnedReliefMatchesCpu                      javaRemoteOpenBranchMemberPinMatchesCpu
+deviceRemoteRobustRealisticVoltageMatchesCpu                      javaRemoteSingletonMemberPinMatchesCpu
+deviceRemoteSingletonMemberPinMatchesCpu                          deviceRemoteZeroImpMemberPinMatchesCpu
+```
+
+So `baseRowMode = 4` IS load-bearing for a genuine base pin: **the per-(scenario, entry)
+reactive-limit read reconstructs a pin for the PILOT but NOT for a MEMBER.** The kernel comment I
+built the plan on is true of the pilot path only. Premise retracted.
+
+**Refinement tried: suppress only for a REALISTIC-V freeze.** `MIN_Q`/`MAX_Q` is modelled by the
+device's RL pack and must stay in the structure; `MIN_REALISTIC_V`/`MAX_REALISTIC_V` has NO RL entry
+(set with Q inside its bounds) and is cleared by `switchPqPv`. That took **20 failures down to 1** —
+strong evidence the discriminator is the right axis.
+
+**But the ONE that remains disproves the rule: `deviceRemoteRobustRealisticVoltageMatchesCpu`**, the
+fixture built for exactly this rule: `bus voltage b1 for l23b expected 20.122797375361753 but was
+20.123052662204003` (2.55e-04 kV). **A realistic-V freeze CAN PERSIST into OLF's converged state**,
+so "ignore every realistic-V freeze" is wrong, and whether a freeze is transient is NOT knowable at
+the extraction instant. The axis is right; the test on it cannot be local.
+
+**Shipped path unaffected:** with the default (`false`), `GpuBatchedAcSecurityAnalysisTest` +
+`GpuLoadFlowTest` + `GpuFullNewtonTest` + `GpuAcStructuresTest` + `GpuLineSearchTest` = **197 run,
+0 failures, 1 skipped**.
+
+**So the fix IS a capture-timing fix after all — and now it is well-founded.** The earlier
+objection ("the cycle repeats inside the SA too, so settled is not one instant") was wrong in an
+important way: the repeats at passes 13-24 are PER-CONTINGENCY solves, whereas the BASE load flow's
+CONVERGED state is a well-defined instant — and it is the reference, because OLF's converged base is
+what the arms must agree on. The pass map shows the precompute capturing right after pass 12, the
+end of a FROZEN window, while OLF's converged base has those controls ENABLED. **Next step: build
+the structure from an extraction taken AFTER the base load flow converges** (or re-extract then),
+rather than from whatever instant the base LF last happened to extract at. That keeps a PERSISTENT
+realistic-V pin (it is still there at convergence, which is why `deviceRemoteRobustRealisticVoltage`
+must keep passing) and drops a TRANSIENT one, with no local "is this transient?" test needed.
+
 **Superseded (kept for the reasoning):** `QROW_CLAIM` also prints
 `frozenQ` / `monitoringV` / `qLimit` / `gens`, which separate OLF's THREE disable paths — they need
 opposite fixes and no pin dump can tell them apart:

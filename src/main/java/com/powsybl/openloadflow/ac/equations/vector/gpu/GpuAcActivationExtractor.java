@@ -189,7 +189,20 @@ public final class GpuAcActivationExtractor {
                 // member, so a group whose members are all transiently frozen has no free member and every
                 // member's row is stamped mode 4 into baseRowMode — which every scenario without an explicit
                 // per-scenario mode inherits. See GpuAcRowIndexing.canonicalMemberModeEnabled (tasks #66).
-                boolean canonicalMember = GpuAcRowIndexing.canonicalMemberModeEnabled()
+                // ...but ONLY for a REALISTIC-V freeze. Suppressing mode 4 for every pin breaks 20
+                // base-pinned fixtures (deviceRemoteFreeMemberBasePinned, javaRemoteMemberBasePinned,
+                // deviceRemoteGroupAllPinnedInBase, …): for a genuine Q-LIMIT pin baseRowMode IS
+                // load-bearing — the per-(scenario, entry) reactive-limit read does NOT reconstruct it for
+                // a MEMBER, only for the pilot. The two are cleanly distinguishable, and the distinction is
+                // exactly the one that matters: a MIN_Q/MAX_Q pin is modelled by the device's RL pack and
+                // must stay in the structure, while a MIN_REALISTIC_V/MAX_REALISTIC_V freeze has NO RL entry
+                // at all (it is not a Q limit — ReactiveLimitsOuterLoop sets it with Q inside its bounds)
+                // and is TRANSIENT, cleared by switchPqPv when the voltage recovers. Capturing that window
+                // is the #66 defect.
+                boolean realisticVFreeze = bus.getQLimitType()
+                        .map(t -> t == LfBus.QLimitType.MIN_REALISTIC_V || t == LfBus.QLimitType.MAX_REALISTIC_V)
+                        .orElse(false);
+                boolean canonicalMember = GpuAcRowIndexing.canonicalMemberModeEnabled() && realisticVFreeze
                         && mainVc != null && GpuAcRowIndexing.hasCandidateTable(mainVc, es);
                 boolean mode4 = GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
                         && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus))

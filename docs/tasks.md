@@ -155,9 +155,11 @@ dump. Not worth another run given the two reasons above.)
 composition; a differing saturation clamp; the pre-distribution seed; row/equation structure; the
 participant set; the dummy null space. SEVEN.
 
-**LOCALIZED 2026-10-01: the device's coupler `DUMMY_Q` values do not satisfy the chain.** The
-paired dump (`OLF_VAR_DUMP` fork-side, `OLF_GPU_SA_VAR_DUMP` device-side, both keyed by element ID
-and filtered by `OLF_TRACE_CTG`) joins 14494 converged variables for BUS-4467_BBS:
+**LOCALIZED 2026-10-01 — and the first reading of it was BACKWARDS. The DEVICE is exact; OLF's
+converged state carries the difference, inside its own tolerance.**
+
+The paired dump (`OLF_VAR_DUMP` fork-side, `OLF_GPU_SA_VAR_DUMP` device-side, both keyed by element
+ID, both filtered by `OLF_TRACE_CTG`) joins 14494 converged variables for BUS-4467_BBS:
 
 | variable | differing | worst abs diff |
 | --- | --- | --- |
@@ -166,51 +168,52 @@ and filtered by `OLF_TRACE_CTG`) joins 14494 converged variables for BUS-4467_BB
 | BUS_V | 5349 of 6881 | 2.655704e-07 |
 | BUS_PHI | 6880 of 6881 | 8.231543e-08 |
 
-FOUR ORDERS OF MAGNITUDE between DUMMY_Q and everything else. And the values name the defect:
+Four orders of magnitude, on one variable type. I first read the device's round four-decimal values
+as "input data, not a solved variable" and concluded the device was wrong. **Solving OLF's own
+equations settles it the other way.** For the VL-2669 chain the reactive balances contain ONLY
+dummy terms:
 
 ```
-BUS-767_COUPLER_1   cpu -0.016666316452921118   gpu -0.0216
-BUS-767_COUPLER_2   cpu -0.011110877635280746   gpu -0.0027
-BUS-767_COUPLER_3   cpu -0.005555438817640373   gpu -0.0011
+bus_target_q[3025] = -dummy_q9212 + dummy_q9213   target 0.0257
+bus_target_q[3026] = -dummy_q9213 + dummy_q9214   target 0.0257
+bus_target_q[3027] = -dummy_q9214 + dummy_q9215   target 0.0200
+bus_target_q[3028] = -dummy_q9215                 target 0.0257
 ```
 
-OLF's three are EXACTLY 3:2:1 multiples of -0.005555438817640373 (x3 and x2 reproduce the other
-two to the last digit) — a coupler CHAIN carrying cumulative downstream reactive injection, which
-is what a chain of busbar couplers must satisfy. The device's are multiples of nothing and do not
-sum (-0.0027 + -0.0011 = -0.0038, against -0.0216), and they are round to exactly four decimals,
-which is what INPUT DATA looks like, not a solved variable.
+whose analytic solution is -0.0971 / -0.0714 / -0.0457 / -0.0257. The DEVICE matches all four to
+every printed digit (residuals ~3e-18, machine zero); the CPU values are off by 3.2e-04 to
+2.7e-03, with residuals -1.504e-03, -1.504e-03, +4.196e-03, -1.504e-03. The round values were the
+correct answer: these are pure coupler-chain sections, so the dummy flow IS the cumulative load.
 
-**Why this is the bug.** DISTR_Q equations REFERENCE dummy_q — `distr_q1952 = -0.667 * -1.0 *
-dummy_q9161 + -0.667 * dummy_q9162 + ...` — so a wrong dummy_q enforces a different reactive split
-across the group, moving controller q, then losses, then the slack mismatch by ~9.5e-06 pu. Check
-it against the measured property list: eps-INDEPENDENT (a pinned or mis-solved dummy is not a
-convergence depth) ✓, PROPORTIONAL across participants (it perturbs the sharing, not one unit) ✓,
-nearly INVISIBLE in bus voltages (2.7e-07) ✓, chunk-size invariant ✓. That is the whole list, and
-no earlier candidate matched any of it.
+The CPU dump is genuinely a converged POST-contingency state — its BUS_V agrees with the device's
+to 2.655704e-07 pu over 6881 buses — and OLF's criterion ALLOWS the residual it stops at:
+`‖F‖₂ < sqrt(convEpsPerEq² · n)` = `sqrt(1e-8 · 14494)` = **1.204e-02**, against the ~4.9e-03
+those four equations contribute in quadrature.
 
-**Why it hid.** `BUSDIFF` — the harness's state comparison, and the basis of "bus voltages exact
-scope-wide" — compares BUS VOLTAGES ONLY. A wrong coupler dummy is invisible to it, in the base as
-well as in a contingency. Nothing in the suite looked at the dummy columns until this dump.
+**So the reframing.** The coupler dummies are where OLF's convergence slack LANDS: they are weakly
+coupled to bus voltages, which is why BUS_V agrees to 2.7e-07 while DUMMY_Q differs by 8.4e-03.
+DISTR_Q equations REFERENCE dummy_q, so that slack propagates into the reactive split, the
+controllers' q, the losses, and finally the ~9.5e-06 pu slack-mismatch difference. **The device is
+the more exact of the two arms**, and "agreeing" here means the device reproducing OLF's stopping
+POINT, not correcting an error.
 
-**Next, narrow:** are those device DUMMY_Q rows mode-0 IDENTITIES pinned to a target? The
-four-decimal roundness says yes, which would put this in the same relocated-row family as [[#62]],
-[[#63]] and [[#64]]. Read the row's mode and target for one of the BUS-767 couplers
-(`OLF_GPU_TARGET_ROW` on its dummy column, `ziIdx[e*11+5]`) and compare with its dumped value: if
-value == target, the row is pinned and the chain was never solved.
+**The one thing this does NOT explain, and the open thread:** squeezing `convEpsPerEq` to 1e-8 then
+1e-10 should have shrunk OLF's slack (its threshold falls to 1.2e-6) and closed the gap. It went
+1.398e-03 -> 8.464e-04 and then PINNED. Candidate: at tight eps OLF stops on its iteration budget
+instead (`maxNewtonRaphsonIterations=30` in the RTE params), so the residual stops falling. Test
+by checking OLF's iteration count and reported status for BUS-4467_BBS at eps=1e-10 — if it is
+hitting 30, the floor is the budget and the tail is fully explained.
 
-**A caution earned twice over.** The DS gate record's stride was a genuine lying instrument
-([[#62]]); this one was NOT, and I asserted it was on a plausible-sounding mechanism without
-checking the lazy-recompute path. Both directions cost a run. Check an instrument's write point,
-its guard AND its invalidation before spending a 20-minute scope run on it, and before writing a
-warning into it.
+**Why none of this was visible for weeks:** `BUSDIFF`, the harness's state comparison and the basis
+of every "bus voltages exact scope-wide" claim, compares BUS VOLTAGES ONLY. A dummy difference of
+8.4e-03 is invisible to it, in the base as much as in a contingency, and nothing in the suite
+looked at the dummy columns until this dump existed.
 
-**The instrument that unblocked all of this** (fork commit e6e7642ff, `OlfTraceScope`): OLF's
-`DS_RUN`/`DS_SPLIT`/`DS_SAT`/`DS_PASS`/`RL_SWITCH` carried no contingency id, so in a
-6667-contingency run none of them could be attributed, and the fallback — running the
-contingency alone — builds a DIFFERENT network (retained switches follow the contingency list),
-so both BUS-4467_BBS and BUS-5250_BBS PASS alone and reproduce nothing. `OLF_TRACE_CTG=<id>` now
-labels every line and filters the per-generator dumps on both sides (1341 lines instead of
-millions). The join above was impossible before it.
+**Three readings of this one disagreement, recorded so the pattern is visible:** (1) a differing
+clamp — killed by the per-generator join; (2) the device's dummies violate the chain — BACKWARDS,
+killed by solving the chain; (3) OLF's slack lands in the dummies and DISTR_Q propagates it — fits
+every measured property, with the squeeze pin still to explain. Each reversal came from computing
+the thing instead of reasoning about it.
 
 ### #65 — Duplicate target overrides: measured, then fixed at the producer (2026-09-30)
 

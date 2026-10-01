@@ -238,10 +238,50 @@ device-solved contingency — so that section is the CPU arm's. Pre-solve on one
 post-solve on the other says nothing about what either solve did. Fifth point-in-time/cross-arm
 error of the session, and the first to manufacture a MECHANISM rather than just a wrong number.
 
-**What is NOT established:** why. Mode 4 is reached either by PINNING a controller or by the
-control being off for the scenario from the start, and those need opposite fixes (restore an unpin
-vs form the group at all). RL is now excluded, so the live candidate is SETUP — whether the
-device's extraction/qualification has that group's voltage control enabled for this contingency.
+**ROOT CAUSE, and it is in the BASE, not in any contingency.** `OLF_GPU_TARGET_ROW` says the
+device's mode-4 own-Q state on those coupler DUMMY_Q rows is **STRUCTURAL** — `baseMode=4`,
+`base=0.0257` — decided at extraction, with no per-scenario override. And OLF's OWN base dump
+(`OLF_EQ_DUMP`) has **DISTR_Q** on the same buses, a five-member group sharing with 1/5 keys:
+
+```
+eq col=646 type=DISTR_Q elementNum=3025 id=VL-2669_1          (…_2, _3, _4 likewise)
+distr_q3025 = -0.8*(-1.0*dummy_q9212) + -0.8*dummy_q9213
+            + 0.2*ac_q_closed_1(v3024,v3029,…) + 0.2*dummy_q9212 + 0.2*(-1.0*dummy_q9213) + …
+```
+
+So **the device never builds the DISTR_Q sharing equation for a coupler-relocated group; extraction
+puts each child's OWN Q balance on that row instead.** The two arms' systems differ in the BASE.
+
+**Extent — this is not a corner case:**
+
+| | |
+| --- | --- |
+| OLF base DISTR_Q equations | **345** |
+| of those, referencing a coupler dummy | **341** |
+| distinct coupler dummies involved | 344 |
+| DUMMY_Q differing in the one-contingency join | **331 of 366** |
+
+Essentially EVERY DISTR_Q member in rte6515 is a coupler-relocated child. (Verified row by row for
+the VL-2669 group; the counts and the 331/366 corroborate the generality.)
+
+**Why it was invisible for the whole project.** `ZERO_V` pins every bus of a coupler chain to the
+head's voltage whatever the reactive SPLIT among them, so the voltages agree; the group's total
+reactive output is fixed by the voltage target, so external flows barely move (base active power
+agrees to 7e-09 MW). And `BUSDIFF` — the basis of every "bus voltages exact scope-wide" claim in
+this file, base included — compares BUS VOLTAGES ONLY. The reactive split was never checked by
+anything until the paired variable dump existed.
+
+**This answers the design question asked earlier in the session** ("why don't we have DISTR_Q
+equation alternates for relocation?"). The 2-way stock twin (`dqAlt`/`dqSel`, [[#65]] and the
+2026-09-29 stock-placement work) covers "the coupler died, move the equation back to the bus's own
+row". It does NOT cover "this member's row IS a relocated dummy that must host a GROUP equation" —
+so the sharing has nowhere to live and extraction falls back to the own-Q balance. That is very
+likely also what draws the `PLAN:VC_REMERGE_MULTI` boundary (47 of the 55 plan refusals).
+
+**Fix is structural and NOT started:** extraction must host a group's DISTR_Q on relocated members'
+rows instead of their own Q balance. It changes the BASE for ~341 members, so it needs the full
+gate — 177-test suite, scope violations diff 0, worst DAP 1.4e-03 MW — and a decision about
+whether the base's reactive split changing is acceptable (it should be: it would become OLF's).
 
 **The only valid comparison, and the discipline broken five times here:** both arms at the SAME
 stage, from the SAME run. `OLF_GPU_EQ_DUMP` does exactly that for the BASE (it writes the device's

@@ -695,6 +695,58 @@ heap — the all-contingency monitor dies at the 14 GB ceiling): `OLF_GPU_SA_BUS
 which installs the scoped monitor plus the `ContingencyContext.none()` base monitor, with
 `OLF_GPU_SA_MON_BUS=<bus ids>` to print the buses of interest on both arms.
 
+**ROOT CAUSE FOUND (2026-10-01) — the device's robust-mode exemption is NARROWER than OLF's.**
+An equation-level predicate mismatch, no tolerance anywhere. Chain, all measured:
+
+1. **The freeze is the DEVICE's own decision, written back into the `LfBus`.**
+   `GpuNewtonRaphson:403` does `bus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(qLimit)`
+   then `bus.setQLimitType(... case 3 -> MIN_REALISTIC_V ...)` from the device's reactive-limits
+   result. So `qLimit=MIN_REALISTIC_V` at VL-2669 is NOT OLF's outer loop — it is the device's.
+2. **OLF never freezes this group.** CPU arm (`OLF_GPU_DBG_RL`, single-threaded): the robust rule
+   IS live — `CPU_RL Switch bus 'VL-1251_1' PV -> PQ, q set to -0.35 = targetQ - because V < 16.0kV
+   when remote voltage target is maintained`, likewise VL-1459_1/_2 — but `grep -c 2669` is 3 and
+   NONE is a VL-2669 bus (one is a digit coincidence inside `q=102.10822669930263`, two are
+   VL-6226_0). So the rule fires elsewhere and skips VL-2669.
+3. **WHY OLF skips it.** `ReactiveLimitsOuterLoop.isGeneratorRemoteController` reads the bus's OWN
+   control object: `controllerBus.getGeneratorVoltageControl().map(c -> c.getControlledBus() !=
+   controllerBus).orElse(false)`. For a merged DEPENDENT member that own control is LOCAL
+   (`controlledBus == bus` — measured: `ownVc=VL-2669_1 ownMerge=DEPENDENT`), so the bus is NOT a
+   remote controller and the whole `robustMode && generatorRemoteController && …` block is skipped.
+4. **WHY the device freezes it.** The kernel gate is
+   `bool unrealisticLo = robust && rlRemote[i] != 2 && x[ridx] < vLoRobust;` and its own comment
+   says it exempts only "a pilot that controls its own bus (class 2)". `rlRemote` is assigned at
+   `GpuAcOuterLoopPacks:676` as `(byte) (pilotSelf ? 2 : 1)` with `pilotSelf = isPilotSelfEntry(bus)`,
+   computed from the **MAIN** control (`mainGenVc(bus).getControlledBus() == bus`). For VL-2669_1 the
+   MAIN is at VL-2669_0, so the member is class 1 = "remote" and the rule applies.
+
+**So the two predicates differ exactly for a merged dependent member:** OLF asks the bus's OWN
+control (local ⇒ exempt), the device asks the MERGED group (member ⇒ remote ⇒ subject). The rest of
+#66 follows: the device freezes, mode 4 own-Q balances replace the sharing in the structure,
+`DUMMY_Q` ends 8.410878e-03 pu off, and OLF's converged base keeps `DISTR_Q` active.
+
+**Also now explained without any tie-breaking story:** `v = 0.620000000` pu is simply the group's
+own target — `targetV = 12.4` kV on a 20 kV nominal level = 0.62 exactly — so the bus sits ON
+target, and `minRealisticVoltage = 0.8` (threshold 0.816 pu) declares that target unrealistic. The
+voltage is identical in both arms; only the EXEMPTION differs.
+
+**RETRACTED along the way, and not to be revisited:** (i) "the arms converge to different tightness
+so the strict `<` in the switch-back test falls differently" — a same-system-different-solution
+story, and I had ONE value from ONE arm when I made it; the switch-back test's other conjunct
+`canSwitchPqToPv = !bus.hasGeneratorsWithSlope()` is a static network property, identical in both.
+(ii) "the 4-thread CPU arm retains different switches, so the networks differ" — the test already
+sets `defaultThreads = kindsEnv.contains("busbar") ? "1" : "8"`, so every busbar run was ALREADY
+single-threaded on both arms (its comment: "the base alone differs by 8e-6 kV at 8 threads,
+bit-identical at 1"). Correctness runs must stay at 1 thread; CLAUDE.md's "default 4" is the
+BENCHMARK test.
+
+**Fix shape.** Make the device's robust-mode exemption use OLF's predicate. Reusing class 2 is
+WRONG — it carries pilot-self semantics at other kernel sites (`enrolledPilot`, row handling). The
+contained change is an ADDITIVE per-entry flag alongside `rlMonitored`/`rlCmpVrow`, e.g.
+`rlRobustExempt[i] = bus.getGeneratorVoltageControl().map(c -> c.getControlledBus() == bus)
+.orElse(true)` (note OLF's `orElse(false)` on the REMOTE test means "no control at all" is also
+exempt), with the kernel gate becoming `robust && !rlRobustExempt[i] && …`. Touches: `GpuAcData`
+field + `sameStructureInputsAs`, the packer, the JNI setter, the device buffer, the two gate lines.
+
 **Superseded reasoning (kept): "the fix IS a capture-timing fix after all".** The earlier
 objection ("the cycle repeats inside the SA too, so settled is not one instant") was wrong in an
 important way: the repeats at passes 13-24 are PER-CONTINGENCY solves, whereas the BASE load flow's

@@ -1034,9 +1034,21 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     // converged base has their DISTR_Q active. If they read RELEASED here, the base LF
                     // simply ended after its last extraction and a fresh extraction is the whole fix; if
                     // they read FROZEN, the base LF itself diverged and the fix is not capture timing.
-                    System.err.printf("Q_PROBE_BASE_VC bus=%s vcEnabled=%b frozenQ=%b qLimit=%s v=%.9f%n",
+                    // The TWO SIDES of ReactiveLimitsOuterLoop's switch-back test, at FULL precision and
+                    // as that method computes them, because a claim about which way a `<` resolves is
+                    // worthless without both numbers: `getBusV(bus)` is the CONTROLLED bus's v (not this
+                    // bus's) and `getBusTargetV(bus)` the control's target. ctlV < tgtV (strict) with a
+                    // MIN-kind qLimit is what switches a frozen bus back to PV.
+                    var vcp = b.getGeneratorVoltageControl().orElse(null);
+                    System.err.printf("Q_PROBE_BASE_VC bus=%s vcEnabled=%b frozenQ=%b qLimit=%s"
+                            + " ownV=%.17g ctlBus=%s ctlV=%.17g tgtV=%.17g ctlV<tgtV=%b d=%.3e%n",
                             b.getId(), b.isGeneratorVoltageControlEnabled(), b.isGenerationTargetQFrozen(),
-                            b.getQLimitType().map(Object::toString).orElse("-"), b.getV());
+                            b.getQLimitType().map(Object::toString).orElse("-"), b.getV(),
+                            vcp == null ? "-" : vcp.getControlledBus().getId(),
+                            vcp == null ? Double.NaN : vcp.getControlledBus().getV(),
+                            vcp == null ? Double.NaN : vcp.getTargetValue(),
+                            vcp != null && vcp.getControlledBus().getV() < vcp.getTargetValue(),
+                            vcp == null ? Double.NaN : vcp.getControlledBus().getV() - vcp.getTargetValue());
                     // the BASE generator P: the reference every arm's slack distribution moves from
                     for (var g : b.getGenerators()) {
                         System.err.printf("Q_PROBE_BASE_GEN bus=%s gen=%s targetP=%.9f minP=%.9f maxP=%.9f participating=%b%n",

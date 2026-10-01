@@ -526,14 +526,41 @@ boolean mode4 = isRemoteGenVcControllerElement(bus)
 `enrolled=false` and `mode4 = !isFreeRemoteGenVcMember(bus)` — and "free" is *the first ENABLED
 member*, so with all four transiently frozen none is free and all four get mode 4.
 
-**Fix shape (to design, NOT yet coded).** Extend the canonical treatment from the pilot to every
-MEMBER of a candidate-table group, so `baseRowMode` is canonical (mode 1, sharing live) and the pin
-is expressed PER SCENARIO instead. **This is a design change, not a one-liner, and it has a known
-tripwire:** the 12 tests named in that comment
-(`deviceRemoteFreeMemberBasePinnedMatchesCpu` & co.) pass TODAY because `baseRowMode` carries a
-genuine base pin — making it canonical requires the per-scenario mode to carry it instead. Read how
-the pilot's `enrolled` case expresses its pin per scenario (the in-kernel mode scan) first: that is
-the template, and whether it can express a non-pilot member's pin decides the shape.
+**THE PLAN (the per-scenario machinery already exists).** The kernel does NOT need the row mode to
+know a member's pin — it reads the REACTIVE-LIMIT state per (scenario, entry). From
+`olf_gpu_nr_jni.cu` around the pilot-Q mode scan:
+
+> OLF's own test for "this group has no controller": its ENABLED controllers
+> (`VoltageControl.isControllerEnabled` -> `isGeneratorVoltageControlEnabled`). On the device that
+> fact is the members' REACTIVE-LIMIT state, which is per (scenario, entry) and current from the
+> seeding onwards — **unlike the row modes this kernel used to infer it from**, which at seed time
+> are still ambiguous.
+
+i.e. `dqMemberQrGroup[m]` / `dqMemberRlEntry[m]` + `limitType[s * nrl + re]`. That is the template,
+and it already covers MEMBERS, not just the pilot.
+
+**And for this group it is not merely a workaround — it is the CORRECT model.** `VL-2669_1..4` have
+NO RL ENTRIES (measured: VL-2669's only entry is `idx=486 bus=VL-2669_0 gens=5`, at the pilot). A
+`MIN_REALISTIC_V` freeze is NOT a Q-limit pin, so the device's RL pack does not and should not
+represent it. Canonically-unpinned is exactly what OLF's CONVERGED base has.
+
+**Steps:**
+
+1. Give a candidate-table group's MEMBER the same canonical suppression the pilot gets, so
+   `mode4` is false and `baseRowMode` stays 1 (sharing live). Today `enrolled` requires
+   `pilotSelf`, which is true only for the pilot bus.
+2. Put it behind `-Dolf.gpu.canonicalMemberMode` (default OFF at first), the convention this repo
+   already uses for `olf.gpu.ziTreeRelocation` / `olf.gpu.pilotSelfRotation`, so both sides are
+   measurable in one build and the default flips only on evidence.
+3. Gate: the 12 base-pinned fixtures named in the extractor comment
+   (`deviceRemoteFreeMemberBasePinnedMatchesCpu` & co.) are the tripwire — they pass TODAY because
+   `baseRowMode` carries a genuine base pin. A member that is genuinely Q-limit pinned HAS an RL
+   entry, so the kernel can still see it; that is the thing to verify, not assume.
+4. Then the full gate: 177-test `GpuBatchedAcSecurityAnalysisTest`, `GpuLoadFlowTest`,
+   `GpuFullNewtonTest`, `GpuAcStructuresTest`, `GpuLineSearchTest`, and the full busbar scope at
+   violations diff 0 / base BUSDIFF 0 / worst DAP <= 1.4e-03 MW / coverage 6550+ — plus the thing
+   this whole entry is about: `DUMMY_Q` on `VL-2669_1..4` agreeing instead of differing by
+   8.410878e-03 pu.
 
 **Superseded (kept for the reasoning):** `QROW_CLAIM` also prints
 `frozenQ` / `monitoringV` / `qLimit` / `gens`, which separate OLF's THREE disable paths — they need

@@ -424,6 +424,9 @@ final class GpuBatchPrecomputer {
                             net, baseState, batch, es, target, deviceSolverParameters(context),
                             distributedSlack, reactiveLimits,
                             reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
+            results = retryRejectedOnDevice(results, batch, net, baseState, es, target, context,
+                    distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                    reportNode, config);
             Map<String, double[]> states = new HashMap<>();
             Map<String, int[]> islandedBuses = new HashMap<>();
             java.util.Set<String> exhausted = new java.util.HashSet<>();
@@ -515,6 +518,105 @@ final class GpuBatchPrecomputer {
      *  null-guard, named): the FIRST null wins, and an all-empty-but-non-null compose means the
      *  contingency touches nothing the device models. */
     @SuppressWarnings("java:S107")
+    /**
+     * SECOND DEVICE PASS over the scenarios the uniform batch could not solve, in the ROBUST
+     * single-matrix mode, before any CPU fallback.
+     *
+     * <p>Why this exists: the dominant non-batching reason on rte6515's full busbar scope is the
+     * kernel's {@code max-iter-bad-solve} — a scenario spends its whole iteration budget on Newton
+     * steps the UNPIVOTED batch factorization got wrong, so the device refuses to call the result
+     * OLF's answer and rejects it. Measured 2026-10-01: 108 of the 117 non-batched contingencies,
+     * and two thirds of those rejects sit within ONE DECADE of the acceptance gate
+     * ({@code lastSolveRatio} 1e-2..1e-1 against a 1e-2 threshold), with no NaN/Inf — inaccurate
+     * solves, not divergences. The remedy already exists and is proven on the BASE load flow, which
+     * falls into mode 6 automatically after a linear-solve reject ({@code GpuNewtonRaphson}); a chunk
+     * scenario simply had no route to it. Mode 6 is a per-scenario loop with matching and global
+     * column pivoting, which is what rte6515's 366 retained couplers need to factor at all.
+     *
+     * <p>Only scenarios that would otherwise LEAVE the device are retried, so the pass cannot change
+     * an answer the device already gave: a CONVERGED result is kept, and so is a
+     * {@code STATUS_MAX_ITERATION} one, which IS OLF's answer (MAX_ITERATION_REACHED, no network
+     * result) rather than a reject. A retried scenario that still fails falls back to the CPU exactly
+     * as before.
+     *
+     * <p><b>DEFAULT OFF, because it recovers NOTHING on rte6515 — measured 2026-10-01, full busbar
+     * scope:</b> {@code GPU_ROBUST_RETRY attempted=113 recovered=0 statuses={-2=74, 1=39}}. Mode 6
+     * turns 39 of the 113 from a bad solve into {@code STATUS_MAX_ITERATION} with a SOUND last solve
+     * — so pivoting does fix those factorizations — and leaves 74 still rejecting on a bad solve, but
+     * NOT ONE converges. The hypothesis this pass was built on ("the unpivoted batch factorization is
+     * why they fail, so pivot them") is therefore FALSE for this structure: the non-batched tail is a
+     * CONVERGENCE problem, not a factorization one, and the CPU replay does converge them. Kept as a
+     * lever (`-Dolf.gpu.sa.robustRetry=true`) so it can be re-tested on another grid, in the same
+     * spirit as the EXPERIMENTAL batch modes 4/5, not as a production path.
+     */
+    private static List<BatchScenarioResult> retryRejectedOnDevice(
+            List<BatchScenarioResult> results, List<BatchContingency> batch, LfNetwork net,
+            double[] baseState, EquationSystem<AcVariableType, AcEquationType> es,
+            com.powsybl.openloadflow.equations.TargetVector<AcVariableType, AcEquationType> target,
+            AcLoadFlowContext context,
+            boolean distributedSlack, boolean reactiveLimits, double reactiveLimitTol,
+            double slackDistTol, double convEpsPerEq, ReportNode reportNode, BatchConfig config) {
+        if (!Boolean.parseBoolean(System.getProperty("olf.gpu.sa.robustRetry", "false"))
+                || config.robustSolveMode()) {
+            return results;
+        }
+        java.util.Set<String> rejected = new java.util.HashSet<>();
+        for (BatchScenarioResult r : results) {
+            if (r.needsCpuFallback()) {
+                rejected.add(r.contingencyId());
+            }
+        }
+        if (rejected.isEmpty()) {
+            return results;
+        }
+        List<BatchContingency> retry = batch.stream().filter(c -> rejected.contains(c.contingencyId())).toList();
+        if (retry.isEmpty()) {
+            return results;
+        }
+        LOGGER.info("Batched N-1: retrying {} rejected scenarios on the device in the robust single-matrix mode",
+                retry.size());
+        List<BatchScenarioResult> retried;
+        try {
+            retried = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                    net, baseState, retry, es, target, deviceSolverParameters(context),
+                    distributedSlack, reactiveLimits,
+                    reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config.withRobustSolveMode());
+        } catch (RuntimeException e) {
+            // The retry is an OPTIONAL extra pass: a failure in it must not lose the first pass's
+            // results, which are already correct for every scenario that converged.
+            LOGGER.warn("Batched N-1: robust retry pass failed ({}); keeping the first pass's results",
+                    e.toString());
+            return results;
+        }
+        // CONVERGED ONLY. Accepting !needsCpuFallback() also accepts STATUS_MAX_ITERATION, and that is a
+        // REGRESSION, not a recovery: the precomputer reports such a result as OLF's own
+        // MAX_ITERATION_REACHED with no network result, replacing a CPU replay that may well have
+        // converged. Measured 2026-10-01 on the full busbar scope: 43 of 113 retried came back
+        // MAX_ITERATION (DEVICE:MAX_ITERATION_REACHED 4 -> 47) while device coverage stayed at
+        // 6550/6667 — nothing gained and 43 CPU answers thrown away. A retried scenario that does not
+        // CONVERGE keeps its reject and goes to the CPU exactly as before.
+        Map<String, BatchScenarioResult> better = new HashMap<>();
+        java.util.Map<Integer, Integer> retriedStatus = new java.util.TreeMap<>();
+        int recovered = 0;
+        for (BatchScenarioResult r : retried) {
+            retriedStatus.merge(r.convergenceStatus(), 1, Integer::sum);
+            if (r.convergenceStatus() == com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STATUS_CONVERGED) {
+                better.put(r.contingencyId(), r);
+                recovered++;
+            }
+        }
+        if (System.getenv("OLF_GPU_REJECT_TRACE") != null) {
+            System.err.println("GPU_ROBUST_RETRY attempted=" + retry.size() + " recovered=" + recovered
+                    + " statuses=" + retriedStatus);
+        }
+        GpuBatchScopeCensus.record("RETRY:robust-attempted=" + retry.size());
+        GpuBatchScopeCensus.record("RETRY:robust-recovered=" + recovered);
+        if (better.isEmpty()) {
+            return results;
+        }
+        return results.stream().map(r -> better.getOrDefault(r.contingencyId(), r)).toList();
+    }
+
     private static String composeRejectReason(List<LfBranch> branches, List<LfGenerator> gens, List<LoadLoss> loads,
                                               List<ShuntShift> shifts,
                                               List<com.powsybl.openloadflow.network.LfHvdc> hvdcs,

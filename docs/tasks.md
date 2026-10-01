@@ -1815,6 +1815,69 @@ already handles both (see "Active-set / control handling in the CPU adjoint" bel
 Blocked on RTE Nexus access.
 **Standing constraint: never read or load `.arc` files or any real network data.**
 
+### #67 — the non-batched tail is a CONVERGENCE problem, not a factorization one (2026-10-01)
+
+**Why it was opened.** 117 of 6667 contingencies do not batch on rte6515's full busbar scope
+(`GPU precomputed on device: 6550 / 6667`), and the no-CPU-fallback goal wants them on device.
+
+**Where they actually go** (`OLF_GPU_REJECT_TRACE=1`, GPU-only run):
+
+```
+108  reason=max-iter-bad-solve
+  5  reason=outer-loop-budget      (108 + 5 = 113 = the RUNTIME:status=-2 census exactly)
+```
+
+So the PLAN refusals in the census (`VC_REMERGE_MULTI=47`, `PINNED_MAIN=3`, `RELOC_VROW=3`,
+`ISLANDS_SLACK=1`) are refusals of a plan VARIANT that later succeeds — they do NOT own the 117.
+`max-iter-bad-solve` does: the scenario spent its whole iteration budget on Newton steps the
+factorization got wrong (`lastSolveRatio > LIN_SOLVE_FAIL_RATIO = 1e-2`), so the device refuses to
+call that OLF's answer. How bad, over the 184 bad-solve reject lines:
+
+| last-solve ratio (gate 1e-2) | count | worst ‖F‖ |
+|---|---|---|
+| 1e-2 … 1e-1 (within one decade of the gate) | 126 | 5.52 |
+| 1e-1 … 1 | 44 | 1.82 |
+| > 1 | 14 | 1.44 |
+
+No NaN/Inf anywhere — inaccurate solves, not divergences.
+
+**The obvious fix was tried and it DOES NOT WORK.** The device already recovers exactly this on the
+BASE load flow by rebuilding in mode 6 (`MODE_ROBUST`: mode 0's per-scenario loop with matching and
+global column pivoting on cuDSS's single-matrix API) after a linear-solve reject; a CHUNK scenario
+had no route to it and went to the CPU. So a second device pass was built —
+`GpuBatchPrecomputer.retryRejectedOnDevice` + `BatchConfig.withRobustSolveMode()` + the mode choice
+at `GpuBatchChunkSolver`'s `acquireBatchContext`. Result, full busbar scope:
+
+```
+GPU_ROBUST_RETRY attempted=113 recovered=0 statuses={-2=74, 1=39}
+```
+
+**Zero recovered.** Mode 6 turns 39 of the 113 from a bad solve into `STATUS_MAX_ITERATION` with a
+SOUND last solve — so pivoting genuinely fixes those factorizations — and leaves 74 still rejecting
+on a bad solve. Not one converges. **So "the unpivoted batch factorization is why they fail" is
+FALSE for this structure.** These scenarios do not converge on the device within the budget, and
+the CPU replay does converge them: that is the question to answer, and it is an equation/trajectory
+question, not a linear-algebra one.
+
+**A trap caught on the way.** The first version accepted `!needsCpuFallback()`, which also accepts
+`STATUS_MAX_ITERATION`, and reported `recovered=43` — but device coverage stayed at 6550/6667 while
+`DEVICE:MAX_ITERATION_REACHED` went 4 -> 47. Those 43 were not recovered; they were CPU answers
+replaced by "MAX_ITERATION_REACHED, no network result" claims from the device. A retry may only
+accept `STATUS_CONVERGED`.
+
+**Kept, default OFF:** `-Dolf.gpu.sa.robustRetry=true` re-enables the pass so it can be re-tested on
+another grid (same spirit as the EXPERIMENTAL batch modes 4/5). It costs a cuDSS analysis (switching
+mode evicts the single-entry context cache) plus a full extra pass, and buys nothing here.
+
+**Census artefact to know:** the retry re-runs qualification, so with the pass ON the `PLAN:` counts
+DOUBLE (`VC_REMERGE_MULTI` 47 -> 94 etc.). They are per-attempt, not per-contingency.
+
+**Next, for whoever picks this up:** take ONE of the 108 and compare its device trajectory against
+the CPU's iterate by iterate (`OLF_GPU_DBG_NR` vs OLF's own Newton on the same equation system) —
+the same method that cracked [[#66]]. The question is not "why is the solve inaccurate" (mode 6
+shows it need not be) but "why does the device need more iterations than OLF for this scenario".
+
+
 ## Completed 2026-07-21
 
 | # | Task | Evidence |

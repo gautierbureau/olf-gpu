@@ -345,7 +345,8 @@ final class GpuSaRunScope {
                 acParameters.isVoltageRemoteControlRobustMode(),
                 acParameters.getMinRealisticVoltage(), acParameters.getMaxRealisticVoltage(),
                 acParameters.getMinNominalVoltageRealisticVoltageCheck(),
-                com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOuterLoopTables.realisticFixingLoop(acParameters));
+                com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOuterLoopTables.realisticFixingLoop(acParameters),
+                false);                                      // the robust retry pass derives its own config
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
     }

@@ -245,7 +245,13 @@ final class GpuBatchChunkSolver {
 
         // Reuse a cached analyzed context when the pattern/admittances/chunk/mode match (across
         // SA runs on the same network) — the context is NOT destroyed here, it stays cached.
-        long handle = GpuBatchContextCache.acquireBatchContext(gpuData, chunkSize, GpuBatchContextCache.resolveBatchMode(), n);
+        // MODE: the run's configured batch mode, or the ROBUST single-matrix solve on the retry pass
+        // (config.robustSolveMode(), set only by BatchConfig.withRobustSolveMode) — mode 6 is mode 0's
+        // per-scenario loop with matching and global column pivoting, which is what rte6515's full
+        // busbar structure needs to factor at all. Switching mode EVICTS the single-entry context cache,
+        // so the retry pays one cuDSS analysis; that is the price of keeping the scenarios on device.
+        long handle = GpuBatchContextCache.acquireBatchContext(gpuData, chunkSize,
+                config.robustSolveMode() ? GpuBatchContextCache.MODE_ROBUST : GpuBatchContextCache.resolveBatchMode(), n);
         // PER_EQUATION_TYPE criterion: install the per-row thresholds on the (possibly cached)
         // context — or CLEAR a previous run's thresholds under UNIFORM_CRITERIA.
         GpuAcNewtonSolver.setBatchRowCriteria(handle,

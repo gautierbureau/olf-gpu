@@ -54,7 +54,8 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
                           PerEqCriteria perEqCriteria,
                           double genVcMinNominalV,
                           boolean rlRobustMode, double minRealisticVoltage, double maxRealisticVoltage,
-                          double minNominalVoltageRealisticVoltageCheck, int realisticFixingLoop) {
+                          double minNominalVoltageRealisticVoltageCheck, int realisticFixingLoop,
+                          boolean robustSolveMode) {
 
     /** PER_EQUATION_TYPE stopping thresholds (OLF PerEquationTypeStoppingCriteria ctor order;
      *  p/q in MW/MVAr, the rest pu/rad); null = UNIFORM_CRITERIA. */
@@ -69,7 +70,29 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
             false, 0.8, 1.2, false, false, false, false, null, -1,
             true, com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MIN_REALISTIC_VOLTAGE,
             com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MAX_REALISTIC_VOLTAGE,
-            com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MIN_NOMINAL_VOLTAGE_REALISTIC_VOLTAGE_CHECK, -1);
+            com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MIN_NOMINAL_VOLTAGE_REALISTIC_VOLTAGE_CHECK, -1,
+            false);
+
+    /**
+     * This config with the ROBUST single-matrix solve (mode 6) selected, for the SECOND device pass over
+     * scenarios the uniform batch could not solve.
+     *
+     * <p>A phase marker rather than a run setting, which is why it is derived here instead of being set
+     * at the two construction sites: the retry pass re-solves only the rejected scenarios, in mode 6's
+     * per-scenario loop with matching and global column pivoting. The base load flow already falls into
+     * that mode automatically after a linear-solve reject ({@code GpuNewtonRaphson}); this is the same
+     * remedy for a CHUNK scenario, which previously had no route to it and went to the CPU instead.
+     */
+    public BatchConfig withRobustSolveMode() {
+        return new BatchConfig(lsMode, maxDv, maxDphi, transformerControl, maxOuterIterations, maxPqPvSwitch,
+                dsRejectResidual, outerLoopMode, dsParams, incrementalTransformerControl, incTvcMaxTapShift,
+                incrementalShuntControl, incShuntMaxSectionShift, simpleShuntControl, incrementalRpcControl,
+                incrementalPhaseControl, simpleTransformerControl, tvcUseInitialTapPosition, hvdcFreezing,
+                hvdcLimits, secondaryVoltageControl, minPlausibleTargetV, maxPlausibleTargetV, voltageMonitoring,
+                continuousPhaseControl, contingencyLossPreDistribution, rlCurveExtrapolate, perEqCriteria,
+                genVcMinNominalV, rlRobustMode, minRealisticVoltage, maxRealisticVoltage,
+                minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, true);
+    }
 
     int dsRejectResidualFlag() {
         return dsRejectResidual ? 1 : 0;

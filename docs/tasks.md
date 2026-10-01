@@ -302,7 +302,49 @@ comment states ("row mode 4 … the DISTR_Q emissions at this row gate off"). Th
 row is unavailable because the relocation puts `ZERO_V` there (verified from the matrix: row 6050 is
 `+1·v(_0) −1·v(_1)`).
 
-**C. THE REMAINING UNKNOWN, and it must be closed before any code.** In OLF's BASE,
+**C. CLOSED 2026-10-01 — both equations are ACTIVE at the device's extraction.** The new
+`OLF_GPU_QROW_TRACE` says, in the SA run:
+
+```
+QROW_CLAIM row=14113 bus=VL-2669_1 busTargetQcol=11308 remoteCtl=true pilotSelf=false
+           freeMember=false enrolled=false -> mode4=true
+DISTRQ_ROW pass=13 controller=VL-2669_1 assignedRow=14113 enabled=true
+```
+
+`busTargetQcol >= 0` means `BUS_TARGET_Q` is genuinely ACTIVE for that bus (not a stale column:
+`EquationSystemIndex.removeEquation` does `setColumn(-1)` immediately on deactivation), and the
+same pass assigns that bus's `DISTR_Q` to the SAME row. In OLF's converged base only `DISTR_Q` is
+active (`bus_target_q[3025..3028]` bracketed). So the device extracts from a state where the pair
+is inconsistent with OLF's, and its mode-4 rule then picks the own-Q balance and drops the sharing.
+(`assign()` does not throw, so only one of the two ever claims the row in `targetMap` — the other
+is simply never built. The earlier phrasing "two equations, one row" was loose.)
+
+**CANDIDATE FIX, minimal, and it matches the gate's own stated intent.** The comment at that site
+says "ACTIVE own-Q balance at a (non-free) remote gen-VC member = the RL-PINNED state", but the
+condition never tests whether the controller is actually DISABLED:
+
+```java
+if (GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
+        && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) && !enrolled) {
+    mode[qr] = 4;
+}
+```
+
+Adding `&& mainVc != null && !mainVc.isControllerEnabled(bus)` makes mode 4 fire only for a
+genuinely pinned (control-off) member, which is what the comment claims it means, and leaves the
+row to the `DISTR_Q` sharing when the control is on. `isControllerEnabled` is the same predicate
+the DISTR_Q dump prints. **Risk to check:** several fixtures were built AROUND the current
+behaviour (the comment cites `deviceRemoteFreeMemberBasePinnedMatchesCpu` and ~12 tests, the
+all-pinned-group fixture, and a 976x LINEAR_SOLVE_FAILED regression on the enrolled-pilot path), so
+this must be judged on the full gate, not on BUS-4467_BBS alone.
+
+**Still unexplained and worth one measurement before coding:** WHY both are active at extraction
+while OLF's converged base has only DISTR_Q. If the device extracts before OLF's
+`updateRemoteVoltageControlEquations` has settled the pair, the better fix may be WHERE it
+extracts, not the gate. The DISTR_Q dump shows the bus's OWN control (1 member, qPct 0.2, so a
+merged DEPENDENT), while the row logic uses `mainGenVc` — check whether the two disagree here.
+
+**D-old. (superseded) THE REMAINING UNKNOWN as first written.** In OLF's BASE,
 `bus_target_q[3025..3028]` are **INACTIVE** (bracketed; only DISTR_Q cols 646-649 are active), and
 the mode-4 gate fires only when `row(es, bus, BUS_TARGET_Q) >= 0`, i.e. ACTIVE — `row()` reports
 activity faithfully (`SingleEquation.column` is -1 when inactive and the index resets it on

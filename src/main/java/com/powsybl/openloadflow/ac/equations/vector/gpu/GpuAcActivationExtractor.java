@@ -174,8 +174,27 @@ public final class GpuAcActivationExtractor {
                                 .map(c -> c.getMergedControllerElements().size() >= 2
                                         && c.getMergedControllerElements().stream().allMatch(m -> vCol[m.getNum()] >= 0))
                                 .orElse(false);
-                if (GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
-                        && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) && !enrolled) {
+                boolean mode4 = GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
+                        && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) && !enrolled;
+                // OLF_GPU_QROW_TRACE=<row>[,<row>…]: WHO claims a reactive row, and on what grounds.
+                // A relocated member's DISTR_Q is assigned to its parent coupler's DUMMY_Q row, and so is
+                // any bus whose qRow maps there with an ACTIVE BUS_TARGET_Q — two equations, one row, and
+                // the mode-4 own-Q wins, dropping the sharing (tasks #66). The gate below keys on an
+                // ACTIVE BUS_TARGET_Q, and in OLF's base those are INACTIVE for the measured group, so
+                // this prints the bus, the column it read, the target and the predicate to say which bus
+                // and which extraction pass actually claimed the row.
+                String qrTrace = System.getenv("OLF_GPU_QROW_TRACE");
+                for (String tok : qrTrace == null ? new String[0] : qrTrace.split(",")) {
+                    if (Integer.parseInt(tok.trim()) == qr) {
+                        System.err.printf("QROW_CLAIM row=%d bus=%s busNum=%d busTargetQcol=%d "
+                                + "alreadyClaimedByEqCol=%.0f remoteCtl=%b pilotSelf=%b freeMember=%b enrolled=%b -> mode4=%b%n",
+                                qr, bus.getId(), bus.getNum(), q,
+                                (double) targetMap[qr],
+                                GpuAcRowIndexing.isRemoteGenVcControllerElement(bus), pilotSelf,
+                                GpuAcRowIndexing.isFreeRemoteGenVcMember(bus), enrolled, mode4);
+                    }
+                }
+                if (mode4) {
                     mode[qr] = 4;
                 }
             }

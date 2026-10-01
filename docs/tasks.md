@@ -137,11 +137,33 @@ eps-independent (it is not a convergence depth), proportional across participant
 sharing, not one unit), invisible in bus voltages, and identical under a chunk-size change — which
 is the full list of properties measured for BUS-4467_BBS.
 
-**How to test it, in order:** (1) do the dummy columns of the two arms' CONVERGED states differ
-for this contingency, while bus V agrees? (2) is the coupler configuration at VL-1697 a loop, i.e.
-is the dummy subsystem rank-deficient? (3) does forcing the device to start a scenario from the
-same dummy values OLF would have (or pinning the null space on both sides) close the 9.553e-06 pu?
-If (1) is no, the hypothesis dies immediately and cheaply.
+**TESTED 2026-10-01 — the hypothesis is DEAD.** `OLF_DUMMY_DUMP` (new, fork 86607e525) writes the
+CONVERGED equation-only variables after each post-contingency solve. For BUS-4467_BBS: 732
+entries, mean |v| = **0.3506 pu**, max **11.63** (`DUMMY_P 9384`). Nothing near 780 — so that
+magnitude was ENTIRELY the stale pre-solve state, and the converged dummies are ordinary. Two
+independent reasons finish it off: determined variables cannot differ beyond convergence
+tolerance, and cuDSS factors the uniform batch WITHOUT pivoting, so a rank-deficient dummy
+subsystem would fail to factor rather than settle on an arbitrary null-space point — these
+scenarios factor cleanly, so `ZERO_V`/`ZERO_PHI` plus the balances determine the dummies.
+
+(Run limitation, for the next reader: only ONE dump section appeared, the CPU arm's. For a
+device-solved contingency the GPU provider returns from the precomputed state and never calls
+OLF's `runPostContingencySimulation`, so the device's converged dummies do NOT come out of this
+dump. Not worth another run given the two reasons above.)
+
+**Eliminated so far, each by measurement, not argument:** the [[#64]] slack-gate signature; chunk
+composition; a differing saturation clamp; the pre-distribution seed; row/equation structure; the
+participant set; the dummy null space. SEVEN.
+
+**The contradiction to attack next.** For BUS-5250_BBS the post-contingency states differ by up to
+1.563e-06 kV (**2.012e-08 relative**) over 5430 of 6885 buses, and the slack mismatch by 9.553e-06
+pu — and NEITHER moves when eps tightens 10^4x. A 2e-08 relative state difference that is
+eps-independent sits 10^6 above machine precision and cannot be convergence depth: something in
+the system itself differs by that much. `OLF_VAR_DUMP` (fork 86607e525) now writes EVERY converged
+state variable keyed by element ID for one contingency; pair it with the device's converged state
+for the same slot and the differing variable is named directly, instead of inferred from an
+aggregate. That localization is how every real defect this week was actually found — the
+aggregates only ever said that a difference existed.
 
 **A caution earned twice over.** The DS gate record's stride was a genuine lying instrument
 ([[#62]]); this one was NOT, and I asserted it was on a plausible-sounding mechanism without

@@ -2155,6 +2155,57 @@ NOT yet done: sampling both arms' residual AT THE SAME STAGE, which is the only 
 starts better / worse" question can be answered, and the per-iteration trajectory comparison
 (`OLF_GPU_DBG_NR` against OLF's own Newton) that was the original plan for this item.
 
+**MECHANISM FOUND: the step is CLAMPED to ~18% and stays there (2026-10-02).** New
+`OLF_GPU_STEP_TRACE=1` prints the MAX_VOLTAGE_CHANGE factor actually applied, per (iteration, slot),
+plus which variable binds it — nothing printed this before, and `||dx||inf` from `LIN_RESID` is NOT a
+proxy for it (the largest step component is typically a `DUMMY_P`/`DUMMY_Q` FLOW correction, and
+those carry `varType 2`, which the clamp IGNORES: `extractVarType` maps only `BUS_PHI`->0 and
+`BUS_V`->1). Slot 39 = `BUS-1039_BBS`:
+
+```
+STEP_FACTOR it=0 slot=39 f=0.180879102 maxDv=2.21142 atVrow=5706 maxDphi=2.27604 atPhirow=7179
+STEP_FACTOR it=1 slot=39 f=0.185022873 maxDv=2.16189 atVrow=5706 maxDphi=4.18842 atPhirow=3203
+```
+
+`f = 0.4 / 2.21 = 0.181` — the V cap binds exactly, **the SAME row 5706 binds both iterations, and
+`maxDv` barely moves (2.21 -> 2.16)**. So Newton takes 18% of its step, repeatedly, and 30 clamped
+iterations cannot cover the distance. That is a mechanism for the whole 108.
+
+**And the binding row is NOT a weak row — which kills the obvious explanation.** Row 5706 is
+`BUS_V(VL-2525_0)`, a mode-1 PQ bus with 7 nonzeros, and in the dumped matrix:
+
+```
+row=5706 mode=1 x=0.997945118 target=-0.077 F=-2.24674446e-13 diag=417.021265 max|row|=417.021265
+```
+
+Its residual is ZERO and its diagonal is the LARGEST entry in the row (417). So the 2.21 pu move is
+not `F_i/J_ii` at a weak diagonal — it is the SYSTEM's answer, forced by coupling. The residual
+actually lives on the coupler `DUMMY_P` rows (11.02 pu at `DUMMY_P(BUS-6139_COUPLER_3)`), whose
+diagonal is exactly -1 for all 366 of them (the dummy-flow coefficient), so a 1100 MW coupler
+mismatch propagates into large voltage/angle corrections network-wide.
+
+**Two more explanations ruled out:**
+
+- *A weak/ill-conditioned local row:* no — diagonal 417, F = 0 (above).
+- *The device pre-distributing the contingency loss while OLF lets the slack absorb it:* no —
+  `BatchConfig.contingencyLossPreDistribution` is set from powsybl's OWN
+  `CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_DEFAULT_VALUE`, so OLF pre-distributes too and the
+  device mirrors it. (`GpuSaRunScope` even refuses the batch when the parameter is non-default.)
+- *The clamp rule or its magnitudes differing:* no — the kernel computes
+  `f = min(1, maxDv/max|dv|, maxDphi/max|dphi|)`, identical to OLF's
+  `MaxVoltageChangeStateVectorScaling`, with the run's own `maxDv = 0.4` / `maxDphi = 1` and the same
+  `maxNewtonRaphsonIterations = 30`.
+
+**THE DECISIVE MEASUREMENT NOT YET MADE: OLF's OWN clamp factor for the same contingency.** Both
+arms have the same equations, the same targets, comparable initial residuals at the same equations
+(OLF 13.37 / 7.25 / 7.02 / 10.60 / 7.88 / 6.12 pu against the device's 11.02 / 9.79 / 7.50 / 6.70 /
+6.70 / 6.13 at the matching coupler children) and the same clamp rule — yet OLF converges inside 30
+iterations. So either OLF's factor is much closer to 1 (which would mean its STEP DIRECTION differs,
+sending us back to Jacobian VALUES, the one thing still uncompared), or OLF's factor is also ~0.18
+and its iterates still get there. **Instrument `MaxVoltageChangeStateVectorScaling` in the fork to
+print its `stepSize` per iteration, scoped by `OlfTraceScope`, and compare.** That single number
+splits the remaining hypotheses.
+
 **Still open, and the honest state of [[#67]]:** the equation systems agree everywhere the dumps can
 compare them; the targets, islanded sets, step clamp and iteration cap all
 agree; the device nonetheless cannot finish the first Newton solve on 108 contingencies; and the one

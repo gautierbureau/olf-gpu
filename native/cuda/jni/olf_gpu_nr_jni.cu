@@ -7149,6 +7149,47 @@ struct BatchSolverContext {
     }
 };
 
+// OLF_GPU_STEP_TRACE=1: the MAX_VOLTAGE_CHANGE clamp factor actually applied, per (iteration, slot).
+// The decisive number for "why does this scenario need more than its iteration budget": a factor near
+// 1 means Newton is taking its full step and the slowness is elsewhere, while a factor of a few
+// percent means the step is throttled and 30 iterations simply cannot cover the distance. Nothing
+// else printed it — ||dx||inf from LIN_RESID is NOT a proxy, because the largest component is
+// typically a DUMMY_P/DUMMY_Q flow correction and those carry varType 2, which the clamp IGNORES
+// (only BUS_V=1 and BUS_PHI=0 enter the maxima). See tasks #67.
+static void traceStepFactor(BatchSolverContext* ctx, int nS, int it, const std::vector<char>& active) {
+    static const bool on = std::getenv("OLF_GPU_STEP_TRACE") != nullptr;
+    if (!on || ctx->dStepFactor.p == nullptr) {
+        return;
+    }
+    std::vector<double> hf(nS);
+    CUDA_CHECK(cudaMemcpy(hf.data(), ctx->dStepFactor.p, (size_t) nS * sizeof(double), cudaMemcpyDeviceToHost));
+    // WHICH variable binds the clamp, and by how much. f alone says the step is throttled; the
+    // argmax says WHERE the wild direction is, which is the only way to tell an ill-conditioned
+    // direction from a legitimately large move.
+    int n = ctx->n;
+    std::vector<double> hdx((size_t) n * nS);
+    std::vector<int> hvt(n);
+    CUDA_CHECK(cudaMemcpy(hdx.data(), ctx->dDx.p, (size_t) n * nS * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hvt.data(), ctx->dVarType.p, (size_t) n * sizeof(int), cudaMemcpyDeviceToHost));
+    for (int s = 0; s < nS; s++) {
+        if (!active.empty() && !active[s]) {
+            continue;
+        }
+        double mdv = 0;
+        double mdphi = 0;
+        int argv = -1;
+        int argphi = -1;
+        for (int i = 0; i < n; i++) {
+            double av = std::fabs(hdx[(size_t) s * n + i]);
+            if (hvt[i] == 1 && av > mdv) { mdv = av; argv = i; }
+            if (hvt[i] == 0 && av > mdphi) { mdphi = av; argphi = i; }
+        }
+        std::fprintf(stderr, "STEP_FACTOR it=%d slot=%d f=%.9g maxDv=%.6g atVrow=%d maxDphi=%.6g atPhirow=%d\n",
+                     it, s, hf[s], mdv, argv, mdphi, argphi);
+    }
+}
+
+
 static void setupBatchMatricesUniform(BatchSolverContext* ctx) {
     int n = ctx->n;
     int nScenarios = ctx->nScenarios;
@@ -10653,6 +10694,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch));
         if (ctx->clampStep) {
             maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dVarType.as<int>(), ctx->dActive.as<char>(), ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>());
+            traceStepFactor(ctx, nS, it, active);
             axpy1BatchScaled<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS, ctx->dDx.as<double>(), ctx->dStepFactor.as<double>(), ctx->dX.as<double>());
         } else {
             axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDx.as<double>(), ctx->dX.as<double>());
@@ -10678,6 +10720,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         ctx->factored = true;
         if (ctx->clampStep) {
             maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dVarType.as<int>(), ctx->dActive.as<char>(), ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>());
+            traceStepFactor(ctx, nS, it, active);
             axpy1BatchScaled<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS, ctx->dDx.as<double>(), ctx->dStepFactor.as<double>(), ctx->dX.as<double>());
         } else {
             axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDx.as<double>(), ctx->dX.as<double>());
@@ -11000,6 +11043,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
         if (ctx->clampStep) {
             maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dVarType.as<int>(), ctx->dActive.as<char>(), ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>());
+            traceStepFactor(ctx, nS, it, active);
             axpy1BatchScaled<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS, ctx->dDx.as<double>(), ctx->dStepFactor.as<double>(), ctx->dX.as<double>());
         } else {
             axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDx.as<double>(), ctx->dX.as<double>());

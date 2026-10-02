@@ -10641,7 +10641,24 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     }
                     res.status[s] = badSolve ? (nS == 1 ? -3 : -2) : (checkOnlyAtEnd ? -2 : 1);
                     active[s] = 0;
-                    live[s] = 0;                             // did not converge: stop iterating its outer loops
+                    // OLF_GPU_STALL_TO_OUTER=1: keep the scenario LIVE so its OUTER loops still run.
+                    //
+                    // Why this is the shape of the fix for the non-batched tail (tasks #67): both arms
+                    // were measured taking the SAME clamped Newton path (step factors agreeing to
+                    // 7.1e-06 over 30 steps) and both OSCILLATE — f alternating ~0.19 / ~0.018. More
+                    // inner iterations buy nothing (OLF_GPU_MAXITER=120 converted ZERO scenarios), so
+                    // the budget is not the constraint; what breaks OLF's cycle is that its OUTER loops
+                    // CHANGE the problem between NR solves (slack distribution, PV->PQ), which is why
+                    // its 31 scaled steps span at least two NR solves. Retiring the scenario here
+                    // denies the device that escape.
+                    //
+                    // Only the inner solve stops (active[s]); live[s] survives so the outer-loop budget
+                    // still bounds the work, exactly as OLF's maxOuterLoopIterations does. A scenario
+                    // that stalls again on the next pass lands back here and its status stands.
+                    static const bool stallToOuter = std::getenv("OLF_GPU_STALL_TO_OUTER") != nullptr;
+                    if (!stallToOuter || deviceFixedIter || nS == 1) {
+                        live[s] = 0;                         // did not converge: stop iterating its outer loops
+                    }
                     nActive--;
                     anyChanged = true;
                 }

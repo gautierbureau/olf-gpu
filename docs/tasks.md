@@ -2249,6 +2249,26 @@ and the stall, not about finding a wrong equation:
    pass run instead of retiring the scenario** — keep `live[s]`, stop only `active[s]`, and reject
    only if it still stalls after the outer-loop budget. That is a different change from raising
    `maxIter`, and it is what OLF actually does.
+   **IMPLEMENTED AND IT IS A NO-OP (2026-10-02).** `OLF_GPU_STALL_TO_OUTER=1` keeps `live[s]` at the
+   `it == maxIter` branch (only `active[s]` stops). Result: coverage 6550 / 6667, 108
+   `max-iter-bad-solve`, census BIT-IDENTICAL to baseline. The flag does reactivate the scenario —
+   `active[s] = live[s]` runs for the next phase — so the conclusion is that **the outer loops find
+   nothing to do with an UNCONVERGED state**: the next phase enters with `solvePass = false` ("re-CHECK
+   every live scenario against the SAME state: STABLE never re-solves (OLF)"), so nothing perturbs the
+   problem and the cycle is never broken. Kept behind the flag, default off, as a recorded dead end.
+
+3. **THE NEW LEAD, and the sharpest one left: the STOPPING CRITERION at the boundary.** OLF's 31
+   scaled steps must span AT LEAST TWO NR solves (its own cap is 30 per solve), which means **OLF's
+   first NR FINISHED** — while the device's first 30 steps, agreeing with OLF's to 7.1e-06, did NOT.
+   If OLF's criterion is met at step ~30 and the device's is not, by a hair, then the device rejects
+   exactly where OLF proceeds to its outer loop, and everything else measured (same equations, same
+   targets, same path, same clamp, more iterations useless, outer loops inert on a stalled state)
+   follows. The device iterates on `||F||2 < sqrt(convEpsPerEq^2 * nActive)` with
+   `convEpsPerEq = 1e-4` under `UNIFORM_CRITERIA`; OLF applies its configured
+   `NewtonRaphsonStoppingCriteria`. **Next: print the device's `||F||2` / `||F||inf` per iteration for
+   slot 39 against its threshold, and OLF's stopping decision for the same contingency, and compare
+   at the step-30 boundary.** This is the one place a hair's difference flips a reject into a
+   continue, and it is not yet measured.
 
 **Superseded (kept): the decisive measurement not yet made was OLF's own clamp factor.** Both
 arms have the same equations, the same targets, comparable initial residuals at the same equations

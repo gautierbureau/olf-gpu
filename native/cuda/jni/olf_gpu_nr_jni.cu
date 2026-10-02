@@ -10398,6 +10398,15 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
 
     // OLF_GPU_FORCE_FIRST_STEP=1 (diagnostic): mirror OLF's "always at least one Newton step".
     const bool forceFirstStep = std::getenv("OLF_GPU_FORCE_FIRST_STEP") != nullptr;
+    // OLF_GPU_MAXITER=<n> (DIAGNOSTIC): override the inner Newton budget for this pass. One variable,
+    // to separate "the scenario needs more iterations" from "the scenario oscillates and more
+    // iterations buy nothing" on the non-batched tail (tasks #67) — both arms were measured taking the
+    // SAME clamped path and oscillating, so this says which of the two it is. Never for production: the
+    // budget is OLF's own maxNewtonRaphsonIterations and a run that needs more is not reproducing OLF.
+    static const char* maxIterEnv = std::getenv("OLF_GPU_MAXITER");
+    if (maxIterEnv != nullptr && *maxIterEnv != '\0') {
+        maxIter = std::atoi(maxIterEnv);
+    }
     for (int it = 0; it <= maxIter && nActive > 0; it++) {
         gLastPassIters = it;
         gNewtonIters++;

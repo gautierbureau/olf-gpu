@@ -2233,10 +2233,22 @@ run's status counts match, which is why no result was ever wrong — the cost is
 contingencies leave the device, against the no-CPU-fallback goal. The fix is therefore about BUDGET
 and the stall, not about finding a wrong equation:
 
-1. Give the device the same budget semantics OLF has — 30 inner iterations PER OUTER PASS rather
-   than 30 before the first outer pass completes. Cheapest, and it is what OLF actually does.
-2. Break the limit cycle. Both arms oscillate, so this helps both; it is an upstream-able
-   observation about `MAX_VOLTAGE_CHANGE` on this network rather than a GPU fix.
+1. ~~Give the device the same budget semantics OLF has — 30 inner iterations PER OUTER PASS.~~
+   **DISPROVED BY ONE VARIABLE (2026-10-02).** New `OLF_GPU_MAXITER=<n>` (diagnostic) overrides the
+   inner budget; at **120, four times the budget, NOTHING changes**: coverage stays 6550 / 6667 and
+   `max-iter-bad-solve` goes 108 -> 112. More iterations converge not one extra contingency, so the
+   tail is NOT iteration-starved. (Also: the premise was already shaky — `for (int it = 0; it <=
+   maxIter && nActive > 0; it++)` lives INSIDE the per-pass function, so `it` already resets per
+   outer pass; what the reject does is set `live[s] = 0`, permanently retiring the scenario so it
+   never reaches pass 1.)
+2. **THE LIMIT CYCLE IS THE CAUSE, and what breaks OLF's is the OUTER LOOP.** Both arms oscillate on
+   the identical path; OLF escapes because its outer loops CHANGE the problem between NR solves
+   (slack distribution, PV->PQ), which is why its 31 scaled steps span at least two NR solves. The
+   device inside `outer 0` has a fixed problem and oscillates indefinitely, then retires the
+   scenario. So the fix is NOT more inner iterations but: **on inner-budget exhaustion, let the OUTER
+   pass run instead of retiring the scenario** — keep `live[s]`, stop only `active[s]`, and reject
+   only if it still stalls after the outer-loop budget. That is a different change from raising
+   `maxIter`, and it is what OLF actually does.
 
 **Superseded (kept): the decisive measurement not yet made was OLF's own clamp factor.** Both
 arms have the same equations, the same targets, comparable initial residuals at the same equations

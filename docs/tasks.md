@@ -2318,10 +2318,23 @@ and the stall, not about finding a wrong equation:
    So **39 of the 108 stop leaving the device**, answering with the same status OLF gives, and both
    defaults are flipped ON. Remaining tail: 74.
 
-   **Cost, NOT MEASURED:** switching mode evicts the single-entry context cache, so the pass pays one
-   cuDSS analysis plus a solve over the rejected scenarios on EVERY run. That matters for the
-   cold-run-is-primary perf goal and should be timed before this is considered settled;
-   `-Dolf.gpu.sa.robustRetry=false` turns it off.
+   **COST MEASURED, and it is NEGATIVE — the pass PAYS FOR ITSELF (2026-10-02).** The worry was that
+   switching mode evicts the single-entry context cache, so the pass costs a cuDSS analysis plus a
+   solve over the rejected scenarios on every run. Both-arms full busbar scope, retry off against
+   retry on:
+
+   | | retry OFF | retry ON | |
+   |---|---|---|---|
+   | GPU COLD | 174751 ms (26.21 ms/ctg) | **150575 ms (22.59 ms/ctg)** | **-14%** |
+   | GPU warm | 174073 ms (26.11 ms/ctg) | **147439 ms (22.11 ms/ctg)** | **-15%** |
+   | vs CPU | x4.03 / x4.05 | **x4.93 / x5.04** | |
+
+   Removing 39 CPU replays of HARD, non-converging contingencies saves far more than the extra device
+   pass costs — a CPU replay of one of these runs OLF's full outer-loop machinery to a
+   MAX_ITERATION_REACHED verdict. (Caveat: the two runs are not perfectly matched — their CPU arms
+   differ by 5%, 704487 ms against 742567 ms — but the GPU gain is 14%, the opposite sign to a
+   slowdown and larger than that noise.) So the default-on decision stands on both correctness and
+   speed; `-Dolf.gpu.sa.robustRetry=false` still turns it off.
 
 4. **Superseded lead (kept): the STOPPING CRITERION at the boundary.** OLF's 31
    scaled steps must span AT LEAST TWO NR solves (its own cap is 30 per solve), which means **OLF's

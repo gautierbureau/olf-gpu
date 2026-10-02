@@ -2021,6 +2021,72 @@ prints targets only for rows DIFFERING from base) and OLF has its own `TargetVec
 dump BOTH target vectors for a rejecting scenario, keyed by element, and diff per row** — the same
 same-point, keyed-by-id discipline that cracked [[#66]].
 
+### #68 — the HVDC AC-emulation target lands on a relocated converter bus's ZERO_PHI row (2026-10-02)
+
+Found by doing what the equation-identity comparison could not: diffing the NUMBERS. Added
+`OLF_GPU_ROWMODE_DUMP_ALL=1` (the existing `OLF_GPU_ROWMODE_DUMP_CTG` prints only rows DIFFERING
+from base, so a wrong target that happens to equal the base's is invisible) at `%.17g`, and diffed
+the device's per-row target vector against OLF's `F0` section (`F0 <column> <type> <elementNum> <id>
+<residual> <f> <target>`) for `BUS-1039_BBS`: 14504 device rows vs 14486 OLF active equations, the
+18 difference being the 9 islanded buses x 2.
+
+**Result: 14407 rows compared, exactly 10 target mismatches, every one a `ZERO_PHI` on a VSC-station
+breaker — all 5 HVDC links x 2 stations, in near-equal-and-opposite PAIRS:**
+
+| breaker | OLF target | device target |
+|---|---|---|
+| `SYN_VSC_4_2` / `4_1` | 0 | -3.9271053690e-05 / +3.8489558261e-05 |
+| `SYN_VSC_1_1` / `1_2` | 0 | -1.0302481809e-05 / +1.0097462320e-05 |
+| `SYN_VSC_3_1` / `3_2` | 0 | -5.6748343971e-06 / +5.5619051620e-06 |
+| `SYN_VSC_2_1` / `2_2` | 0 | -1.0234645009e-06 / +1.0030975564e-06 |
+| `SYN_VSC_0_2` / `0_1` | 0 | -8.0468953445e-08 / +7.8867621265e-08 |
+
+A `ZERO_PHI` is `phi_parent - phi_child = 0`; its target MUST be 0. The magnitudes identify
+themselves: the CPU log's "Freezing HVDC SYN_HVDC_4 at previous active setPoint:
+0.003927105143741727 MW" / 100 = 3.9271051e-05 pu is the `SYN_VSC_4_2` value, and the +/- pairing is
+the link's two ends with its losses as the small asymmetry.
+
+**The targets are SWAPPED, verified on one coupler:**
+
+```
+row=14478 DUMMY_P(SYN_VSC_4_2_BREAKER) mode=1 terms=[hv#4.p2, zi#353.p1(+dP)]  target=0
+row=13679 BUS_PHI(VL-6215_5)           mode=1 terms=[zi#353.ZERO_PHI]          target=-3.927e-05
+```
+
+The row that actually carries the HVDC `p2` term has target 0, and the frozen setpoint sits on the
+`ZERO_PHI` row instead.
+
+**Cause.** `GpuBatchHvdcAcEmulation.buildControllers` resolves the converter buses' rows as the raw
+`BUS_PHI` VARIABLE row:
+
+```java
+Map<Integer, Integer> phiRows = …;                       // BUS_PHI variable row per bus
+int r1 = phiRows.get(hvdc.getBus1().getNum());
+int r2 = phiRows.get(hvdc.getBus2().getNum());
+```
+
+and stores them in `Ctl(… int bus1PRow, int bus2PRow …)`. That single number does DOUBLE DUTY: it is
+the row the P target is written to AND the column the angle is read from (`x[bus1PhiRow()]`). For a
+bus NOT behind a coupler those coincide, because the stable indexing makes row == paired variable
+column. **Under the coupler-tree relocation they do not:** a relocated child's P balance moves to its
+parent coupler's `DUMMY_P` row while its own `BUS_PHI` row hosts the coupler's `ZERO_PHI`. So the
+target write lands on the `ZERO_PHI` row. This is the bug class recorded in
+[[coupler-relocation-default]] — every consumer of a bus's row must ask for the RELOCATED row — and
+there is a `GpuAcRowIndexing.relocatedQRow` helper for the Q analogue but none for P. The code even
+documents a previous instance of the same family: "A converter bus whose BUS_TARGET_P is INACTIVE
+(the slack) is packed as `~phiRow` … Writing there pinned the base LF's slack angle at the freeze
+delta (BUS_TARGET_PHI residual 0.014, **base MAX_ITER**)".
+
+**Fix shape:** SPLIT the two roles — keep the bus's own `BUS_PHI` column for reading the angle, and
+resolve the P row through the relocation (the P analogue of `relocatedQRow`) for the target write.
+Do NOT simply swap the number: the angle read is correct today and must stay on the bus's own column.
+
+**NOT established:** that this causes [[#67]]'s 108 non-converging scenarios. The magnitudes here are
+1e-8..4e-5 pu, small for a 30-iteration failure — but the quoted comment shows a mis-placed freeze
+target has already produced a base MAX_ITER once, and these 10 rows are wrong in EVERY scenario, so
+it is also a candidate for the [[#67]] tail and for the systematic DAP cluster. Test after fixing:
+re-run the scope and compare the 108 reject count and the 3.733e-05 MW DAP cluster.
+
 **Still open, and the honest state of [[#67]]:** the equation systems agree everywhere the dumps can
 compare them; the targets, islanded sets, step clamp and iteration cap all
 agree; the device nonetheless cannot finish the first Newton solve on 108 contingencies; and the one

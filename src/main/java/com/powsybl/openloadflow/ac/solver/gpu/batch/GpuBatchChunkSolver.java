@@ -1990,11 +1990,17 @@ final class GpuBatchChunkSolver {
                             if (!rmCtg.equals(contingencies.get(group.get(chunkStart + s)).contingencyId())) {
                                 continue;
                             }
+                            // OLF_GPU_ROWMODE_DUMP_ALL=1: EVERY row, not only the ones differing from
+                            // base. Needed to diff the device's TARGET VECTOR against OLF's F0 section
+                            // (which prints f and target per ACTIVE equation): a target that is wrong
+                            // while equal to the base's is invisible in the differing-rows view, and
+                            // equation IDENTITY matching says nothing about the numbers (tasks #67).
+                            boolean rmAll = "1".equals(System.getenv("OLF_GPU_ROWMODE_DUMP_ALL"));
                             StringBuilder sb = new StringBuilder();
                             for (int r = 0; r < n; r++) {
                                 int m = devModes[s * n + r];
-                                if (m != baseRowMode[r]) {
-                                    sb.append(String.format("  row=%d mode=%d<-%d target=%.9g%n",
+                                if (rmAll || m != baseRowMode[r]) {
+                                    sb.append(String.format("  row=%d mode=%d<-%d target=%.17g%n",
                                             r, m, baseRowMode[r], devTargets[s * n + r]));
                                 }
                             }

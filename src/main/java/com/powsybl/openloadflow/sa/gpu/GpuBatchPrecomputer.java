@@ -539,15 +539,25 @@ final class GpuBatchPrecomputer {
      * result) rather than a reject. A retried scenario that still fails falls back to the CPU exactly
      * as before.
      *
-     * <p><b>DEFAULT OFF, because it recovers NOTHING on rte6515 — measured 2026-10-01, full busbar
-     * scope:</b> {@code GPU_ROBUST_RETRY attempted=113 recovered=0 statuses={-2=74, 1=39}}. Mode 6
-     * turns 39 of the 113 from a bad solve into {@code STATUS_MAX_ITERATION} with a SOUND last solve
-     * — so pivoting does fix those factorizations — and leaves 74 still rejecting on a bad solve, but
-     * NOT ONE converges. The hypothesis this pass was built on ("the unpivoted batch factorization is
-     * why they fail, so pivot them") is therefore FALSE for this structure: the non-batched tail is a
-     * CONVERGENCE problem, not a factorization one, and the CPU replay does converge them. Kept as a
-     * lever (`-Dolf.gpu.sa.robustRetry=true`) so it can be re-tested on another grid, in the same
-     * spirit as the EXPERIMENTAL batch modes 4/5, not as a production path.
+     * <p><b>DEFAULT ON since 2026-10-02, and what it actually buys:</b> mode 6 turns 39 of the 113
+     * from a bad solve into {@code STATUS_MAX_ITERATION} with a SOUND last solve
+     * ({@code GPU_ROBUST_RETRY attempted=113 recovered=39 statuses={-2=74, 1=39}}), taking CPU
+     * replays from 113 to 74. None of them CONVERGE — but that is the right answer: OLF does not
+     * converge them either. On the full busbar scope OLF's own statuses are
+     * {@code {CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}}, and with this pass on, BOTH arms
+     * report exactly that, with violations still diff 0 and the worst DAP unchanged.
+     *
+     * <p>It was first dismissed as recovering nothing, which was a measurement error worth recording:
+     * it was judged by COVERAGE (6550 / 6667, unmoved), and coverage counts precomputed device
+     * STATES — a {@code MAX_ITERATION_REACHED} result carries no state, so coverage CANNOT move for
+     * these. The metric is how many contingencies leave the device, and the guard against claiming
+     * {@code MAX_ITERATION} where OLF converges is the harness's STATUS-COUNT EQUALITY, which a
+     * GPU-only run never checks.
+     *
+     * <p>Cost, NOT yet measured: switching mode evicts the single-entry context cache, so the pass
+     * pays one cuDSS analysis plus a solve over the rejected scenarios on every run.
+     * {@code -Dolf.gpu.sa.robustRetry=false} disables it; {@code
+     * -Dolf.gpu.sa.robustRetryAcceptMaxIter=false} keeps the pass but accepts only CONVERGED.
      */
     private static List<BatchScenarioResult> retryRejectedOnDevice(
             List<BatchScenarioResult> results, List<BatchContingency> batch, LfNetwork net,
@@ -556,7 +566,7 @@ final class GpuBatchPrecomputer {
             AcLoadFlowContext context,
             boolean distributedSlack, boolean reactiveLimits, double reactiveLimitTol,
             double slackDistTol, double convEpsPerEq, ReportNode reportNode, BatchConfig config) {
-        if (!Boolean.parseBoolean(System.getProperty("olf.gpu.sa.robustRetry", "false"))
+        if (!Boolean.parseBoolean(System.getProperty("olf.gpu.sa.robustRetry", "true"))
                 || config.robustSolveMode()) {
             return results;
         }
@@ -608,7 +618,7 @@ final class GpuBatchPrecomputer {
         // it cannot rise for these by construction. The metric that moves is how many contingencies
         // LEAVE the device: measured 113 -> 70 (tasks #67).
         boolean acceptMaxIter = Boolean.parseBoolean(
-                System.getProperty("olf.gpu.sa.robustRetryAcceptMaxIter", "false"));
+                System.getProperty("olf.gpu.sa.robustRetryAcceptMaxIter", "true"));
         Map<String, BatchScenarioResult> better = new HashMap<>();
         java.util.Map<Integer, Integer> retriedStatus = new java.util.TreeMap<>();
         int recovered = 0;

@@ -2293,8 +2293,35 @@ and the stall, not about finding a wrong equation:
 
    The guard against claiming `MAX_ITERATION` for a scenario OLF actually converges is the harness's
    STATUS-COUNT EQUALITY, not coverage — and that check was never run on the mode-6 experiment,
-   because it was a GPU-only run. `-Dolf.gpu.sa.robustRetryAcceptMaxIter=true` now makes the
-   acceptance A/B-able so it can be validated against both arms.
+   because it was a GPU-only run.
+
+   **VALIDATED ON BOTH ARMS, AND NOW ON BY DEFAULT (2026-10-02).** Full busbar scope with
+   `-Dolf.gpu.sa.robustRetry=true -Dolf.gpu.sa.robustRetryAcceptMaxIter=true`:
+
+   ```
+   GPU_ROBUST_RETRY attempted=113 recovered=39 statuses={-2=74, 1=39}
+   statuses: CPU={CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}
+             GPU={CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}
+   violations: CPU=503923 GPU=503923 diff=0
+   distributedActivePower worst 1.397828e-03 MW  (unchanged)
+   CENSUS: RUNTIME:status=-2 = 74 (was 113), DEVICE:MAX_ITERATION_REACHED = 43 (was 4)
+   ```
+
+   | | before | with the retry |
+   |---|---|---|
+   | CPU replays (`status=-2`) | 113 | **74** |
+   | `DEVICE:MAX_ITERATION_REACHED` | 4 | 43 |
+   | CPU-vs-GPU status counts | match | **match** |
+   | violations | diff 0 | **diff 0** |
+   | unit gates | 200 / 0 / 1 | **200 / 0 / 1** |
+
+   So **39 of the 108 stop leaving the device**, answering with the same status OLF gives, and both
+   defaults are flipped ON. Remaining tail: 74.
+
+   **Cost, NOT MEASURED:** switching mode evicts the single-entry context cache, so the pass pays one
+   cuDSS analysis plus a solve over the rejected scenarios on EVERY run. That matters for the
+   cold-run-is-primary perf goal and should be timed before this is considered settled;
+   `-Dolf.gpu.sa.robustRetry=false` turns it off.
 
 4. **Superseded lead (kept): the STOPPING CRITERION at the boundary.** OLF's 31
    scaled steps must span AT LEAST TWO NR solves (its own cap is 30 per solve), which means **OLF's

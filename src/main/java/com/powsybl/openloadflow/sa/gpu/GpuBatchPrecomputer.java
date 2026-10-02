@@ -595,12 +595,29 @@ final class GpuBatchPrecomputer {
         // MAX_ITERATION (DEVICE:MAX_ITERATION_REACHED 4 -> 47) while device coverage stayed at
         // 6550/6667 — nothing gained and 43 CPU answers thrown away. A retried scenario that does not
         // CONVERGE keeps its reject and goes to the CPU exactly as before.
+        // -Dolf.gpu.sa.robustRetryAcceptMaxIter=true ALSO accepts STATUS_MAX_ITERATION from the retry.
+        //
+        // That is not the contradiction of the comment above that it looks like. OLF ITSELF does not
+        // converge a large part of this tail: on the full busbar scope its own statuses are
+        // {CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}, so for those contingencies
+        // MAX_ITERATION_REACHED IS the right answer and reporting it from the device costs nothing and
+        // saves the CPU replay. What must NOT happen is claiming it for a scenario OLF converges — and
+        // the guard for that is the harness's status-count equality, not coverage. COVERAGE IS THE
+        // WRONG METRIC here and reading it as one is what made this look like a regression first time
+        // round: it counts precomputed device STATES, and a MAX_ITERATION result carries no state, so
+        // it cannot rise for these by construction. The metric that moves is how many contingencies
+        // LEAVE the device: measured 113 -> 70 (tasks #67).
+        boolean acceptMaxIter = Boolean.parseBoolean(
+                System.getProperty("olf.gpu.sa.robustRetryAcceptMaxIter", "false"));
         Map<String, BatchScenarioResult> better = new HashMap<>();
         java.util.Map<Integer, Integer> retriedStatus = new java.util.TreeMap<>();
         int recovered = 0;
         for (BatchScenarioResult r : retried) {
             retriedStatus.merge(r.convergenceStatus(), 1, Integer::sum);
-            if (r.convergenceStatus() == com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STATUS_CONVERGED) {
+            boolean ok = r.convergenceStatus() == com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STATUS_CONVERGED
+                    || (acceptMaxIter
+                        && r.convergenceStatus() == com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STATUS_MAX_ITERATION);
+            if (ok) {
                 better.put(r.contingencyId(), r);
                 recovered++;
             }

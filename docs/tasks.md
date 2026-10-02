@@ -2257,7 +2257,46 @@ and the stall, not about finding a wrong equation:
    every live scenario against the SAME state: STABLE never re-solves (OLF)"), so nothing perturbs the
    problem and the cycle is never broken. Kept behind the flag, default off, as a recorded dead end.
 
-3. **THE NEW LEAD, and the sharpest one left: the STOPPING CRITERION at the boundary.** OLF's 31
+3. **THE ANSWER, AND IT RETRACTS MY OWN DISMISSAL OF THE MODE-6 RETRY (2026-10-02).**
+
+   `OLF_GPU_CONV_TRACE=39` gives the device's full stopping decision, iteration by iteration:
+
+   ```
+   it=0 norm2=36.33  it=5 norm2=17.81  it=10 norm2=10.19  it=15 norm2=5.31
+   it=19 norm2=3.61  it=21 norm2=3.07  it=25 norm2=2.42  it=29 norm2=2.12  it=30 norm2=2.26
+   thr2 = 1.20357799913425e-02  (= 1e-4 * sqrt(14486), OLF's OWN formula, and nActive=14486
+                                  is EXACTLY OLF's active-equation count)
+   ```
+
+   It converges steadily to ~2.1 and then STALLS in a 2-cycle, **176x above threshold**. At that rate
+   it needs roughly 250 iterations — which is also why `OLF_GPU_MAXITER=120` converted nothing.
+   **OLF's own cap is 30 per NR solve, so OLF cannot have converged this contingency either.**
+
+   And it does not. The harness prints both arms' statuses, and they are IDENTICAL:
+
+   ```
+   statuses: CPU={CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}
+             GPU={CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}
+   ```
+
+   **OLF itself reports MAX_ITERATION_REACHED for 60 contingencies and FAILED for 5** — 65 not
+   converged on either arm, matching the run's own "65 contingencies not CONVERGED on both arms". So
+   for a large part of the 108, `MAX_ITERATION_REACHED` IS the correct answer, and the device can
+   report it DIRECTLY instead of paying a CPU replay to arrive at the same thing.
+
+   **Which means the mode-6 retry was working and I judged it by the wrong metric.** It moved
+   `RUNTIME:status=-2` from **113 to 70** and `DEVICE:MAX_ITERATION_REACHED` from **4 to 47** — 43
+   contingencies that stopped leaving the device. I called that a regression because COVERAGE stayed
+   at 6550 / 6667. **Coverage cannot move for these by construction:** it counts precomputed device
+   STATES, and a `MAX_ITERATION_REACHED` result carries no state. The metric that matters is how many
+   contingencies leave the device for a CPU replay, and that improved by 43.
+
+   The guard against claiming `MAX_ITERATION` for a scenario OLF actually converges is the harness's
+   STATUS-COUNT EQUALITY, not coverage — and that check was never run on the mode-6 experiment,
+   because it was a GPU-only run. `-Dolf.gpu.sa.robustRetryAcceptMaxIter=true` now makes the
+   acceptance A/B-able so it can be validated against both arms.
+
+4. **Superseded lead (kept): the STOPPING CRITERION at the boundary.** OLF's 31
    scaled steps must span AT LEAST TWO NR solves (its own cap is 30 per solve), which means **OLF's
    first NR FINISHED** — while the device's first 30 steps, agreeing with OLF's to 7.1e-06, did NOT.
    If OLF's criterion is met at step ~30 and the device's is not, by a hair, then the device rejects

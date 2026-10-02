@@ -1990,6 +1990,37 @@ step clamp, iteration cap, and now the two rotation-carrier rows too. The remain
 the one the next item attacks: the **649 relocated buses**, where a per-bus V-row comparison is
 invalid by construction.
 
+**THE BLIND SPOT IS CLOSED — the relocated region agrees too (2026-10-02).** The 649 relocated
+buses could not be checked by a per-bus V-row comparison, so they were checked per COUPLER instead,
+using the dump's `zi#K branch= b1= b2= dummyP= dummyQ= childSide=` lines to pair each coupler's rows
+with its child's OLF equations. All 366 zi branches, of which 37 are `childSide=0` (unrelocated):
+
+| check, over the 329 relocated couplers | result |
+|---|---|
+| child's P balance: OLF `bus_target_p[child]` ACTIVE ⟺ device `DUMMY_P` row is a power row | **0 mismatches** |
+| child's Q: OLF `distr_q[child]` ⟺ device `DUMMY_Q` row mode 1 WITH dq terms; OLF `bus_target_q[child]` ⟺ mode 1 or 4; neither ⟺ the row hosts the pilot balance via the scan | **0 mismatches** |
+| child's V row hosts the coupler's `ZERO_V` | 329 / 329 |
+| child's PHI row hosts the coupler's `ZERO_PHI` | 329 / 329 |
+
+Consistent with OLF having all 366 `zero_v` and all 366 `zero_phi` ACTIVE and all 366
+`dummy_target_p` / `dummy_target_q` INACTIVE: the device hosts the child's balances on the dummy
+rows and the coupler's zero equations on the child's own rows, which is exactly that arrangement.
+
+**So the equation-system hypothesis for [[#67]] is EXHAUSTED on this contingency.** Everything the
+two dumps can express agrees: the PV set (982), the per-bus V-row occupant over 6237 non-relocated
+buses, the islanded sets (9, equal), the scheduled loss (-1.243000000 pu to nine decimals), the step
+clamp (`MAX_VOLTAGE_CHANGE` -> `lsMode=2`), the iteration cap (30 = the reject's `it=30`), the two
+rotation-carrier rows, and now all 329 relocated couplers on P, Q, V and PHI.
+
+**What is still NOT compared, and is the only dimension left:** the per-row NUMERIC TARGETS and the
+Jacobian VALUES. Equation IDENTITY matching does not mean the two sides solve the same numbers — a
+single wrong target on one row is a different system by the standing rule, and only the AGGREGATE
+loss has been checked so far, not the per-row target vector. The device exposes
+`GpuAcNewtonSolver.readBatchTargets(handle)` (already used by `OLF_GPU_ROWMODE_DUMP_CTG`, which
+prints targets only for rows DIFFERING from base) and OLF has its own `TargetVector`. **Next:
+dump BOTH target vectors for a rejecting scenario, keyed by element, and diff per row** — the same
+same-point, keyed-by-id discipline that cracked [[#66]].
+
 **Still open, and the honest state of [[#67]]:** the equation systems agree everywhere the dumps can
 compare them; the targets, islanded sets, step clamp and iteration cap all
 agree; the device nonetheless cannot finish the first Newton solve on 108 contingencies; and the one

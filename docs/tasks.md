@@ -2077,15 +2077,42 @@ documents a previous instance of the same family: "A converter bus whose BUS_TAR
 (the slack) is packed as `~phiRow` … Writing there pinned the base LF's slack angle at the freeze
 delta (BUS_TARGET_PHI residual 0.014, **base MAX_ITER**)".
 
-**Fix shape:** SPLIT the two roles — keep the bus's own `BUS_PHI` column for reading the angle, and
-resolve the P row through the relocation (the P analogue of `relocatedQRow`) for the target write.
-Do NOT simply swap the number: the angle read is correct today and must stay on the bus's own column.
+**THE FIX WAS IMPLEMENTED, MEASURED, AND REVERTED — it is CATASTROPHICALLY WRONG (2026-10-02).**
+The two roles were split (`Ctl` gained `bus1PhiCol`/`bus2PhiCol` for the angle read, `bus{1,2}PRow`
+kept for the target) and the target row resolved through a new `GpuAcData.relocatedPRow(phiCol)`, the
+P analogue of the reactive twin, derived from the same zero-impedance pack. It worked mechanically —
+the ten `ZERO_PHI` targets became exactly 0 — and the solve collapsed:
 
-**NOT established:** that this causes [[#67]]'s 108 non-converging scenarios. The magnitudes here are
-1e-8..4e-5 pu, small for a 30-iteration failure — but the quoted comment shows a mis-placed freeze
-target has already produced a base MAX_ITER once, and these 10 rows are wrong in EVERY scenario, so
-it is also a candidate for the [[#67]] tail and for the systematic DAP cluster. Test after fixing:
-re-run the scope and compare the 108 reject count and the 3.733e-05 MW DAP cluster.
+| | baseline | HVDC target on the relocated `DUMMY_P` row |
+|---|---|---|
+| `max-iter-bad-solve` | 108 | **13194** |
+
+Reverted; the baseline re-measures at exactly 108, and the gates are 200 run / 0 failures / 1 skipped.
+
+**So the PREMISE was wrong, and the "10 mismatches" are most likely a MAPPING ARTEFACT — the third
+in this comparison.** `GpuAcData`'s own class contract says a spanning-tree edge carries
+**`ZERO_V` on the `DUMMY_P` row and `ZERO_PHI` on the `DUMMY_Q` row** — NOT on the buses' own rows.
+My diff script mapped OLF's `ZERO_PHI(branch)` onto the child's own `BUS_PHI` row because the
+equation dump's `terms=` listing shows `zi#353.ZERO_PHI` scattering there, and inferred from that
+that the row's target must be 0. The device's arrangement is evidently not that, so the nonzero
+target on the bus's own PHI row is where the device WANTS the station's P target, and OLF's
+`ZERO_PHI` lives elsewhere in the device's layout.
+
+**What this costs and what it leaves.** The HVDC observation is retracted as a defect. What survives
+is: (i) `OLF_GPU_ROWMODE_DUMP_ALL=1` at `%.17g`, which is how any future target diff gets done;
+(ii) `GpuAcData.relocatedPRow`, kept UNUSED and javadoc'd as a warning with the 108 -> 13194 number,
+so the same wiring is not attempted again; (iii) the measured fact that **14407 of 14407 compared
+rows agree on target once the mapping artefacts are removed** — i.e. the target vectors agree too.
+
+**Method lesson, now three times over in this entry.** Every "difference" this comparison produced
+turned out to be my own mapping: `bus_target_q` mapped onto a pilot's V row (5 phantom mismatches),
+the structure's canonical dq rows read as a runtime set (2 phantom rows), and now `ZERO_PHI` mapped
+onto the child's own PHI row (10 phantom mismatches). **Before believing a dump-to-dump mismatch,
+confirm the row's occupant from the device side** (`row=… TYPE(id) … terms=[…]`) AND from the
+owning class's contract — the `terms=` listing alone is not the row's equation.
+
+**CLOSED as not-a-defect.** It was never shown to cause [[#67]]'s 108 rejects, and the attempted fix
+made them 13194, so the rows are doing what the device intends.
 
 **Still open, and the honest state of [[#67]]:** the equation systems agree everywhere the dumps can
 compare them; the targets, islanded sets, step clamp and iteration cap all

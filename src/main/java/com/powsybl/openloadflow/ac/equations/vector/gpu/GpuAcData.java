@@ -227,6 +227,45 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
         return ziIdx.length / 11;
     }
 
+    /**
+     * The relocated {@code DUMMY_P} row that hosts the ACTIVE-power balance of the bus whose own
+     * {@code BUS_PHI} column is {@code phiCol}, or {@code phiCol} itself when that bus is not a relocated
+     * coupler child.
+     *
+     * <p>Every consumer of "where does this bus's P equation live" must ask this, exactly as the reactive
+     * side must ask for the relocated Q row. Under the coupler-tree relocation a child's P balance moves to
+     * its parent coupler's {@code DUMMY_P} row while its own {@code BUS_PHI} row hosts the coupler's
+     * {@code ZERO_PHI} — so a row index that is correct as an ANGLE COLUMN is the WRONG place to write a P
+     * target. Writing there puts the target on the angle identity: measured on rte6515 (tasks #68), the HVDC
+     * AC-emulation freeze setpoints landed on all ten VSC-station breakers' {@code ZERO_PHI} rows, whose
+     * target must be 0, while the {@code DUMMY_P} rows that actually carry the HVDC p1/p2 terms had target 0.
+     *
+     * <p>Derived from the same zero-impedance pack as the reactive twin, so the two cannot drift.
+     *
+     * <p><b>UNUSED, and kept as a WARNING.</b> The one caller it was written for — the HVDC
+     * AC-emulation P target in {@code GpuBatchHvdcAcEmulation} — was measured CATASTROPHICALLY worse
+     * with it: {@code max-iter-bad-solve} went from 108 to 13194 on rte6515's full busbar scope. The
+     * premise was that a relocated child's P target must follow its P balance to the parent's
+     * {@code DUMMY_P} row, inferred from the equation dump's {@code terms=} listing; that inference is
+     * wrong, because a spanning-tree edge carries {@code ZERO_V} on the {@code DUMMY_P} row and
+     * {@code ZERO_PHI} on the {@code DUMMY_Q} row (see the class contract above), not on the buses' own
+     * rows. Do not wire this into a target writer without re-deriving the arrangement first.
+     */
+    public int relocatedPRow(int phiCol) {
+        if (ziIdx == null || phiCol < 0) {
+            return phiCol;
+        }
+        for (int e = 0; e < ziIdx.length / 11; e++) {
+            int o = e * 11;
+            int childSide = (ziIdx[o + 10] >> 1) & 3;
+            int ownPhi = childSide == 1 ? ziIdx[o + 8] : (childSide == 2 ? ziIdx[o + 9] : -1);
+            if (ownPhi == phiCol && ziIdx[o + 4] >= 0) {
+                return ziIdx[o + 4];
+            }
+        }
+        return phiCol;
+    }
+
     public int getDistrRhoContributionCount() {
         return drRow.length;
     }

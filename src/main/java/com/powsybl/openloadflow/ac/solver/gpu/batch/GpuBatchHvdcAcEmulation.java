@@ -61,20 +61,28 @@ public final class GpuBatchHvdcAcEmulation {
      *  BASE frame — the base status plus the base VSC station targetP contributions ALREADY inside
      *  baseTargets (0 for a linear base; a saturated/frozen base carries its injections there, so
      *  every status override composes as {@code baseTargets - baseD + d(status)}). */
-    public record Ctl(int hvElemIndex, int bus1PRow, int bus2PRow, double p0, double k,
+    public record Ctl(int hvElemIndex, int bus1PRow, int bus2PRow, int bus1PhiCol, int bus2PhiCol,
+               double p0, double k,
                double pMax12, double pMax21, double loss1, double loss2, double r,
                int baseStatus, double baseD1, double baseD2) {
 
-        // A converter bus whose BUS_TARGET_P is INACTIVE (the slack) is packed as ~phiRow: the angle
-        // still reads at that column, but its row hosts the PHI identity and must never receive a P
-        // target — OLF's slack simply absorbs the station's targetP. Writing there pinned the base
-        // LF's slack angle at the freeze delta (BUS_TARGET_PHI residual 0.014, base MAX_ITER).
+        // TWO DISTINCT ROLES, and they are NOT the same row under the coupler-tree relocation:
+        //   bus{1,2}PRow   = where the P TARGET is written (the bus's P equation). For a relocated
+        //                    coupler child that is the parent's DUMMY_P row, NOT the bus's own PHI row,
+        //                    which hosts the coupler's ZERO_PHI (target 0). See GpuAcData.relocatedPRow
+        //                    and tasks #68: conflating the two put the freeze setpoints on all ten
+        //                    VSC-station breakers' ZERO_PHI rows.
+        //   bus{1,2}PhiCol = the ANGLE COLUMN the emulation formula reads. Always the bus's OWN BUS_PHI
+        //                    column, relocation or not — a relocation moves EQUATIONS, never variables.
+        // A converter bus whose BUS_TARGET_P is INACTIVE (the slack) keeps the ~ encoding on PRow: it must
+        // never receive a P target — OLF's slack simply absorbs the station's targetP. Writing there pinned
+        // the base LF's slack angle at the freeze delta (BUS_TARGET_PHI residual 0.014, base MAX_ITER).
         public int bus1PhiRow() {
-            return bus1PRow >= 0 ? bus1PRow : ~bus1PRow;
+            return bus1PhiCol;
         }
 
         public int bus2PhiRow() {
-            return bus2PRow >= 0 ? bus2PRow : ~bus2PRow;
+            return bus2PhiCol;
         }
 
         public boolean bus1PActive() {
@@ -102,7 +110,8 @@ public final class GpuBatchHvdcAcEmulation {
     }
 
     public static List<Ctl> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                      int nElements) {
+                                      int nElements,
+                                      com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData gpuData) {
         Map<Integer, Integer> phiRows = new LinkedHashMap<>();
         for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
             if (v.getType() == AcVariableType.BUS_PHI) {
@@ -123,8 +132,19 @@ public final class GpuBatchHvdcAcEmulation {
                 case SATURATION_MODE_FROM_CS2_TO_CS1 -> SAT_2_TO_1;
                 case FROZEN -> FROZEN;
             };
-            int r1 = phiRows.get(hvdc.getBus1().getNum());
-            int r2 = phiRows.get(hvdc.getBus2().getNum());
+            // The bus's own BUS_PHI column (the angle the emulation reads) and, SEPARATELY, the row its
+            // P equation actually lives on — the parent coupler's DUMMY_P when the relocation moved it
+            // (tasks #68). Resolved through the zero-impedance pack so it cannot drift from the kernels.
+            int phi1 = phiRows.get(hvdc.getBus1().getNum());
+            int phi2 = phiRows.get(hvdc.getBus2().getNum());
+            // The P-target row is the bus's OWN PHI row, NOT the relocated DUMMY_P row. Routing it
+            // through GpuAcData.relocatedPRow was tried and is CATASTROPHICALLY WRONG: measured on the
+            // full busbar scope it took max-iter-bad-solve from 108 to 13194 (tasks #68). The device's
+            // zero-impedance arrangement is not the one the dumps' `terms=` listing suggests — per
+            // GpuAcData's own contract a spanning-tree edge carries ZERO_V on the DUMMY_P row and
+            // ZERO_PHI on the DUMMY_Q row — so the bus's own PHI row is where this target belongs.
+            int r1 = phi1;
+            int r2 = phi2;
             boolean p1Active = es.getEquation(hvdc.getBus1().getNum(), AcEquationType.BUS_TARGET_P)
                     .filter(com.powsybl.openloadflow.equations.Equation::isActive).isPresent();
             boolean p2Active = es.getEquation(hvdc.getBus2().getNum(), AcEquationType.BUS_TARGET_P)
@@ -136,6 +156,7 @@ public final class GpuBatchHvdcAcEmulation {
             }
             out.add(new Ctl(hvOffset + h,
                     p1Active ? r1 : ~r1, p2Active ? r2 : ~r2,
+                    phi1, phi2,
                     ac.getP0(), ac.getDroop() * 180 / Math.PI,
                     ac.getPMaxFromCS1toCS2(), ac.getPMaxFromCS2toCS1(),
                     hvdc.getConverterStation1().getLossFactor() / 100,

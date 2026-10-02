@@ -411,7 +411,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         preDistributedByIndex, distributedByIndex, config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
                         phases,
                         config.hvdcFreezing() || config.hvdcLimits()
-                                ? GpuBatchHvdcAcEmulation.buildControllers(network, equationSystem, nElements)
+                                ? GpuBatchHvdcAcEmulation.buildControllers(network, equationSystem, nElements, gpuData)
                                 : null,
                         config);
             }

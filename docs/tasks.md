@@ -2114,6 +2114,47 @@ owning class's contract — the `terms=` listing alone is not the row's equation
 **CLOSED as not-a-defect.** It was never shown to cause [[#67]]'s 108 rejects, and the attempted fix
 made them 13194, so the rows are doing what the device intends.
 
+**THE JACOBIAN IS STRUCTURALLY SOUND — no rank defect of the obvious kinds (2026-10-02).** Slot 39
+of the contingency chunk IS `BUS-1039_BBS` (the `ROWMODE_DUMP` names it, and the kernel's reject
+trace lists slot 39 among the 54 distinct rejecting slots), so the device's own matrix dump was
+taken for the very contingency whose equations and targets were verified above:
+`OLF_GPU_VALS_SCAN=1 OLF_GPU_VALS_SCAN_SLOT=39 OLF_GPU_VALS_DUMP=<path> OLF_GPU_VALS_DUMP_ANY=1
+OLF_GPU_VALS_DUMP_NTH=2` (the `VALS_SCAN` master switch is required — without it `VALS_DUMP` writes
+nothing). Header: `n 14504 nnz 101690 outer 0 seq 13 slot 0 nS 3307` — `outer 0`, the pass the reject
+happens in, and `slot 0` because `SCAN_SLOT` clones the traced slot there by design.
+
+| check on the CSR at `outer 0` | result |
+|---|---|
+| non-finite values | **0** |
+| zero ROWS | **0** |
+| zero COLUMNS | **0** (the "dead columns 13171/13207" failure mode is absent) |
+| zero DIAGONAL entries | **0** |
+| row modes | 13494 power / 1001 identity / 9 own-Q |
+
+**Where the residual lives:** on coupler `DUMMY_P` rows paired with their parent bus's `BUS_PHI`
+row, in near-identical pairs — `DUMMY_P(BUS-6174_COUPLER_1)` 7.49986 against `BUS_PHI(VL-6174_0)`
+7.50028, and `DUMMY_P(BUS-5967_COUPLER_1)` / `BUS_PHI(VL-5967_0)` both exactly 6.1324. That pairing
+is just the ±1 dummy coupling (the dummy column enters one bus row with +1 and the dummy row with
+-1), so a mismatch in a coupler's flow appears equally on both. `||F||2 = 36.33`, `||F||inf = 11.02`
+at row `DUMMY_P(BUS-6139_COUPLER_3)`, 99 rows above 1.0, all of them `BUS_PHI` / `BUS_V` /
+`DUMMY_P` / `DUMMY_Q`.
+
+**NOT A COMPARISON, and deliberately not drawn as one:** OLF's `F0` section for the same contingency
+gives `||f-target||2 = 623.0`, `||f-target||inf = 401.3` (263 rows > 1.0, the largest being
+`DISTR_Q VL-1697_2` at 401.3). It is TEMPTING to read that as "OLF starts from a far worse point and
+still converges" — but the two are NOT at the same point, and this file already records why: the
+device's `outer 0` fill is taken AFTER its island freeze, pre-loss target seeding and `applyRowMode`,
+while OLF's `F0` is its raw post-contingency start. An earlier session hit exactly this (OLF
+norm2=774.03 against the device's, not comparable). To compare starting points the two must be
+sampled at the same stage, which neither dump currently does.
+
+**So after equations, targets and now the matrix, [[#67]] still has no located cause.** What is ruled
+out: a different equation set, different targets, a structurally singular or non-finite matrix, a
+factorization problem (mode 6 fixes the factorization for 39 of the 113 and none converge). What is
+NOT yet done: sampling both arms' residual AT THE SAME STAGE, which is the only way the "device
+starts better / worse" question can be answered, and the per-iteration trajectory comparison
+(`OLF_GPU_DBG_NR` against OLF's own Newton) that was the original plan for this item.
+
 **Still open, and the honest state of [[#67]]:** the equation systems agree everywhere the dumps can
 compare them; the targets, islanded sets, step clamp and iteration cap all
 agree; the device nonetheless cannot finish the first Newton solve on 108 contingencies; and the one

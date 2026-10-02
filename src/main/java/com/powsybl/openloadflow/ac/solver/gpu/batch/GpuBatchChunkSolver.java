@@ -2138,9 +2138,17 @@ final class GpuBatchChunkSolver {
                         if (gc != null && ids.length > 0) {
                             try (java.io.PrintWriter w = new java.io.PrintWriter(
                                     new java.io.FileWriter(System.getenv("OLF_GPU_GENCUM_DUMP"), true))) {
+                                // OLF_TRACE_CTG=<id>: only that contingency, matching the OLF-side
+                                // filter on OLF_DS_SPLIT. One line per moved generator over 6667
+                                // contingencies is millions of lines on each side; the join that this
+                                // dump exists for needs one section from each.
+                                String gcWant = System.getenv("OLF_TRACE_CTG");
                                 for (int s2 = 0; s2 < realCount; s2++) {
-                                    w.printf("# GENCUM ctg=%s%n",
-                                            contingencies.get(group.get(chunkStart + s2)).contingencyId());
+                                    String gcId = contingencies.get(group.get(chunkStart + s2)).contingencyId();
+                                    if (gcWant != null && !gcWant.equals(gcId)) {
+                                        continue;
+                                    }
+                                    w.printf("# GENCUM ctg=%s%n", gcId);
                                     for (int g = 0; g < ids.length; g++) {
                                         double v = gc[s2 * ids.length + g];
                                         if (v != 0) {

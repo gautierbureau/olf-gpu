@@ -363,6 +363,44 @@ final class GpuAcRowIndexing {
         return members.stream().allMatch(m -> col(es, m.getNum(), AcVariableType.BUS_V) >= 0);
     }
 
+    /**
+     * WHICH clause of {@link #hasCandidateTable} decided, as a short tag for the diagnostics.
+     *
+     * <p>It exists because the answer matters: a group WITHOUT a candidate table is extracted in
+     * whatever pin state happens to hold at that instant, and a transient
+     * {@code MIN_REALISTIC_V} freeze then leaks into the STRUCTURE for every scenario (tasks #66).
+     * Knowing the group is rejected is not enough to fix that — the clause names the fix.
+     * Diagnostic only: allocates, so never call it on the extraction's happy path.
+     */
+    static String candidateTableReason(GeneratorVoltageControl vc, EquationSystem<AcVariableType, AcEquationType> es) {
+        if (vc == null) {
+            return "no-vc";
+        }
+        if (vc.getMergeStatus() != VoltageControl.MergeStatus.MAIN) {
+            return "not-main:" + vc.getMergeStatus();
+        }
+        if (vc.isLocalControl()) {
+            return "local-control";
+        }
+        LfBus pilot = vc.getControlledBus();
+        List<LfBus> members = vc.getMergedControllerElements();
+        if (members.isEmpty()) {
+            return "no-members";
+        }
+        if (col(es, pilot.getNum(), AcVariableType.BUS_V) < 0) {
+            return "pilot-no-vcol:" + pilot.getId();
+        }
+        if (members.contains(pilot) && !pilotSelfRotationEnabled()) {
+            return "pilot-self-rotation-off";
+        }
+        if (members.contains(pilot) && members.size() < 2) {
+            return "pilot-self-single";
+        }
+        String noVcol = members.stream().filter(m -> col(es, m.getNum(), AcVariableType.BUS_V) < 0)
+                .map(LfBus::getId).reduce((a, b) -> a + "+" + b).orElse(null);
+        return noVcol != null ? "member-no-vcol:" + noVcol : "YES";
+    }
+
     /** The FREE member: the first ENABLED merged controller. None when every controller is pinned. */
     static boolean isFreeRemoteGenVcMember(LfBus bus) {
         GeneratorVoltageControl vc = mainGenVc(bus);

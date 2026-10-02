@@ -5600,10 +5600,17 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             // voltageRemoteControlRobustMode (ReactiveLimitsOuterLoop.checkControllerBus): the criteria
             // below test this REMOTE controller's OWN voltage — the same x row the quadratic SVC delta
             // reads — against the realistic band shrunk by the 1.02 margin.
-            // OLF's robust criterion applies to REMOTE controllers only; a pilot that controls its
-            // own bus (class 2) is a local controller in that respect
-            bool unrealisticLo = robust && rlRemote[i] != 2 && x[ridx] < vLoRobust;
-            bool unrealisticHi = robust && rlRemote[i] != 2 && x[ridx] > vHiRobust;
+            // OLF's robust criterion applies to REMOTE controllers only, and "remote" is
+            // ReactiveLimitsOuterLoop.isGeneratorRemoteController: the bus's OWN voltage control, not the
+            // merged group's. Two classes are local in that respect and both are exempt here:
+            //   2 = a pilot that controls its own bus;
+            //   3 = a member of a MERGED group whose own (DEPENDENT) control points at ITSELF, which is
+            //       every merged member — OLF skips the whole robust block for them (tasks #66; the
+            //       device used to freeze rte6515's VL-2669_1..4 with MIN_REALISTIC_V where OLF froze
+            //       nothing, replacing the DISTR_Q sharing with mode-4 own-Q balances in the STRUCTURE).
+            bool robustRemote = rlRemote[i] != 2 && rlRemote[i] != 3;
+            bool unrealisticLo = robust && robustRemote && x[ridx] < vLoRobust;
+            bool unrealisticHi = robust && robustRemote && x[ridx] > vHiRobust;
             if (q < rliMin - tol) {
                 savedTarget[rst] = target[qidx];             // the DISTR_Q row target (NOT 0 in general:
                                                              // see updateDistrQTargetsBatch)
@@ -5824,7 +5831,9 @@ __global__ void rlRobustVResetBatch(int nrl, int nScenarios, int n, const int* r
     int i = tid % nrl;
     int s = tid / nrl;
     if (!rlActive[s]) return;
-    if (rlRemote == nullptr || rlRemote[i] != 1) return;     // robust mode is remote-controller only (not a class-2 pilot)
+    // robust mode is remote-controller only, in OLF's sense: not a class-2 pilot and not a class-3
+    // merged member whose own control is local (both are exempt from the gate that sets 3/4 at all)
+    if (rlRemote == nullptr || rlRemote[i] != 1) return;
     if (passSwitched[(size_t) s * nrl + i] != 1) return;     // switched PV -> PQ in THIS check
     size_t idx = (size_t) s * n + rlVrow[i];
     if (x[idx] < vLoRobust || x[idx] > vHiRobust) {

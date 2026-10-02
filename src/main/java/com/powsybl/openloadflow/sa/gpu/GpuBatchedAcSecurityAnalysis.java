@@ -1028,6 +1028,27 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 if (java.util.Arrays.stream(qp.split(",")).anyMatch(b.getId()::startsWith)) {
                     System.err.printf("Q_PROBE_BASE bus=%s q=%.9f maxQ=%.9f busTargetP=%.9f%n",
                             b.getId(), b.getQ().eval() + b.getLoadTargetQ(), b.getMaxQ(), b.getTargetP());
+                    // The generator-voltage-control state AT THE INSTANT THE PRECOMPUTE CAPTURES, which is
+                    // what decides whether re-extracting here could fix anything (tasks #66): the device's
+                    // last base extraction read these buses FROZEN (qLimit=MIN_REALISTIC_V) while OLF's
+                    // converged base has their DISTR_Q active. If they read RELEASED here, the base LF
+                    // simply ended after its last extraction and a fresh extraction is the whole fix; if
+                    // they read FROZEN, the base LF itself diverged and the fix is not capture timing.
+                    // The TWO SIDES of ReactiveLimitsOuterLoop's switch-back test, at FULL precision and
+                    // as that method computes them, because a claim about which way a `<` resolves is
+                    // worthless without both numbers: `getBusV(bus)` is the CONTROLLED bus's v (not this
+                    // bus's) and `getBusTargetV(bus)` the control's target. ctlV < tgtV (strict) with a
+                    // MIN-kind qLimit is what switches a frozen bus back to PV.
+                    var vcp = b.getGeneratorVoltageControl().orElse(null);
+                    System.err.printf("Q_PROBE_BASE_VC bus=%s vcEnabled=%b frozenQ=%b qLimit=%s"
+                            + " ownV=%.17g ctlBus=%s ctlV=%.17g tgtV=%.17g ctlV<tgtV=%b d=%.3e%n",
+                            b.getId(), b.isGeneratorVoltageControlEnabled(), b.isGenerationTargetQFrozen(),
+                            b.getQLimitType().map(Object::toString).orElse("-"), b.getV(),
+                            vcp == null ? "-" : vcp.getControlledBus().getId(),
+                            vcp == null ? Double.NaN : vcp.getControlledBus().getV(),
+                            vcp == null ? Double.NaN : vcp.getTargetValue(),
+                            vcp != null && vcp.getControlledBus().getV() < vcp.getTargetValue(),
+                            vcp == null ? Double.NaN : vcp.getControlledBus().getV() - vcp.getTargetValue());
                     // the BASE generator P: the reference every arm's slack distribution moves from
                     for (var g : b.getGenerators()) {
                         System.err.printf("Q_PROBE_BASE_GEN bus=%s gen=%s targetP=%.9f minP=%.9f maxP=%.9f participating=%b%n",
@@ -1286,6 +1307,61 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
     }
 
     /**
+     * {@code OLF_GPU_SA_VAR_DUMP=<file>}: the DEVICE's converged state for one contingency, written as
+     * {@code <variableType> <elementId> <value>} — the same shape and keys as OLF's own
+     * {@code OLF_VAR_DUMP}, so the two files join directly with no row legend. Restricted to the
+     * contingency named by {@code OLF_TRACE_CTG}, which is also what filters the OLF side.
+     *
+     * <p>Why this pairing exists: on rte6515 the last distributed-power disagreement
+     * (BUS-4467_BBS / BUS-5250_BBS, tasks #66) shows a 2.012e-08 RELATIVE state difference over 5430
+     * buses that does NOT shrink when the Newton criterion tightens 10^4x. That cannot be convergence
+     * depth, so some variable differs by that much — and an aggregate norm can only say that one does.
+     * {@code precomputed.baseVariableRows()} is the authoritative variable-to-row map the state
+     * injection itself uses, so dumping through it cannot drift from what the device actually solved.
+     */
+    private void dumpDeviceStateVariables(double[] state, PrecomputedBatch precomputed, LfNetwork network,
+                                          Contingency contingency) {
+        String path = System.getenv("OLF_GPU_SA_VAR_DUMP");
+        String want = System.getenv("OLF_TRACE_CTG");
+        if (path == null || want != null && !want.equals(contingency.getId())) {
+            return;
+        }
+        Map<Variable<AcVariableType>, Integer> rows = precomputed.baseVariableRows();
+        if (rows == null) {
+            return;
+        }
+        try (java.io.Writer w = new java.io.FileWriter(path, true)) {
+            w.write("# VARS ctg=" + contingency.getId() + " device\n");
+            for (var e : rows.entrySet()) {
+                Variable<AcVariableType> v = e.getKey();
+                int row = e.getValue();
+                if (row < 0 || row >= state.length) {
+                    continue;
+                }
+                String id;
+                try {
+                    id = switch (v.getType().getElementType()) {
+                        case BUS -> network.getBus(v.getElementNum()).getId();
+                        case BRANCH -> network.getBranch(v.getElementNum()).getId();
+                        case SHUNT_COMPENSATOR -> network.getShunt(v.getElementNum()).getId();
+                        default -> "#" + v.getElementNum();
+                    };
+                } catch (RuntimeException ex) {
+                    id = "#" + v.getElementNum();
+                }
+                // the DEVICE ROW too: the row's per-scenario MODE is what says which equation governs
+                // that bus here (1 = power/DISTR_Q, 4 = its own Q, 0 = identity), and that is the
+                // question #66 turns on -- OLF has VL-2669_1..4 on DISTR_Q at convergence while the
+                // device appears to leave them on their own BUS_TARGET_Q. Join against the modes in an
+                // OLF_GPU_VALS_DUMP of the same slot.
+                w.write(v.getType().name() + " " + id + " " + state[row] + " row=" + row + "\n");
+            }
+        } catch (java.io.IOException | RuntimeException ex) {
+            LOGGER.warn("OLF_GPU_SA_VAR_DUMP failed: {}", ex.toString());
+        }
+    }
+
+    /**
      * {@code OLF_GPU_EQ_DUMP_CTG=<contingency id>}: writes OLF's OWN equation set for the POST-CONTINGENCY
      * state — {@code lfContingency.apply()} has already run when this is called, so the system here is the
      * one the CPU actually solves for that scenario, with inactive equations in {@code [ ]}.
@@ -1341,11 +1417,31 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             // its first |f(x0)| line is the norm of), the contingency counterpart of OLF_GPU_F0_TRACE: lined
             // up against the device's first fill of that slot (OLF_GPU_VALS_SCAN_SLOT + OLF_GPU_VALS_DUMP), it
             // names the equation the two arms evaluate differently before any step blurs it.
+            // What this section IS, since a previous version of this comment got it wrong: the
+            // POST-contingency equation system evaluated at the PRE-contingency state. The dump runs on
+            // the first line of runPostContingencySimulation, before the solver touches x, but
+            // lfContingency.apply() has already deactivated equations, which invalidates the vector, so
+            // AbstractVector.getArray() RECREATES it against the current index -- verified on rte6515
+            // BUS-4467_BBS: fx0.length is 14494, exactly the active-equation count of the
+            // post-contingency system section, not the base's. So it is NOT stale.
+            //
+            // It is still NOT directly comparable with a device fill's norm. Both arms start from the
+            // base state, but the device's first fill is taken after its own seeding (frozen islanded
+            // rows held at a flat V=1/phi=0, the pre-loss target seeding) and after applyRowMode has
+            // turned identity rows into x - target. Measured: OLF norm2=774.03 against the device's
+            // 35.95, where OLF's is dominated almost entirely by TWO equations -- distr_q1952/1953 at
+            // 519.00 and 518.98 -- so the norms are a statement about those two, not about the network.
+            //
+            // Hence f and target are written SEPARATELY below. With only the difference printed, a value
+            // of 519 cannot be attributed: a large residual, a large target, or a variable the state
+            // does not constrain yet all look identical. Those two equations are DISTR_Q rows built on
+            // coupler DUMMY_Q variables (dummy_q9161/9162), whose base values are exactly what a
+            // pre-contingency state leaves unconstrained -- which the split makes readable.
             try {
                 double[] fx0 = context.getEquationVector().getArray();
                 double[] tg0 = context.getTargetVector().getArray();
                 double n2 = 0;
-                w.write("# F0: column type elementNum id residual (f(x0) - target)\n");
+                w.write("# F0: column type elementNum id residual(f-target) f target\n");
                 for (int c = 0; c < fx0.length; c++) {
                     double v = fx0[c] - (c < tg0.length ? tg0[c] : 0.0);
                     n2 += v * v;
@@ -1360,7 +1456,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     } catch (RuntimeException e) {
                         id = "#" + eq.getElementNum();
                     }
-                    w.write("F0 " + c + " " + eq.getType() + " " + eq.getElementNum() + " " + id + " " + v + "\n");
+                    w.write("F0 " + c + " " + eq.getType() + " " + eq.getElementNum() + " " + id + " " + v
+                            + " " + fx0[c] + " " + (c < tg0.length ? tg0[c] : 0.0) + "\n");
                 }
                 w.write("# F0 norm2=" + Math.sqrt(n2) + "\n");
             } catch (RuntimeException e) {
@@ -1416,6 +1513,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             return super.runPostContingencySimulation(network, context, contingency, lfContingency, preContingencyLimitViolationManager,
                     securityAnalysisParameters, preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
         }
+
+        dumpDeviceStateVariables(state, precomputed, network, contingency);
 
         // Inject the precomputed post-contingency state (the branch is already disabled by
         // lfContingency.apply()), then reuse the engine's result-building unchanged.

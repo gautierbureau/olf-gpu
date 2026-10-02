@@ -54,58 +54,856 @@ before looking at the water-fill arithmetic.
 Suite 177/177 + GpuLoadFlow/GpuFullNewton/GpuAcStructures/GpuLineSearch green; checkstyle
 unchanged at 220.
 
-### #66 — The distributed-power tail: convergence slack ON TOP OF a water-fill residue floor (2026-09-30)
+### #66 — The scope's last disagreement: the two arms solve slightly DIFFERENT systems (2026-09-30)
 
-OPEN but fully CHARACTERISED and bounded. Worst 1.398e-03 MW at default criteria, over the
-`assertTrue(worstDistributed < 1e-3)` assertion.
+OPEN, narrowed to one sentence and with the instrument that makes it chaseable now in place.
+Worst 1.398e-03 MW at default criteria, over the `assertTrue(worstDistributed < 1e-3)` assertion.
 
-**Ruled out, each with a measurement.** Not the [[#64]] gate signature (for BUS-5250_BBS both
-arms fire exactly ONE pass, so the AMOUNT differs, not the sequence). Not chunk composition
-(byte-identical at `-Dolf.gpu.sa.maxBatch=512`: same worst value, same six contingencies, same
-order). The states DO differ — 5430 of 6885 buses over 1e-12 kV, worst 1.563e-06 kV, 2.012e-08
-relative: broad and uniform, the signature of different ITERATES, not a localized model error.
-
-**The squeeze separates two components** (`OLF_GPU_DBG_CONV_EPS`, tightening BOTH arms):
+**The tail is two components** (`OLF_GPU_DBG_CONV_EPS`, tightening BOTH arms; three eps points,
+because two cannot tell slack from a floor):
 
 | | eps=1e-4 | eps=1e-8 | eps=1e-10 |
 | --- | --- | --- | --- |
 | BUS-4467_BBS | 9.564e-04 | 8.464e-04 | **8.464e-04** |
 | BUS-5250_BBS | 1.398e-03 | 4.749e-05 | **4.749e-05** |
-| scope worst | 1.398e-03 | 8.464e-04 | 8.464e-04 |
 
-1. **Convergence slack** — the part that shrinks from 1e-4 to 1e-8. Both arms use
-   `UNIFORM_CRITERIA` at the default `convEpsPerEq=1e-4` and the device implements OLF's exact
-   `‖F‖₂ < sqrt(convEpsPerEq² · n)` test, but a Newton stopping test does NOT pin a unique
-   iterate: cuDSS and KLU take different step sequences and land on different points that both
-   satisfy it. Asymmetries to close: the device's per-scenario `nActive` vs OLF's own equation
-   count in the threshold, and the MAX_VOLTAGE_CHANGE step clamp. (This is why the small-network
-   fixtures match at 1e-12 kV — their Newton resolves the fixed point — and rte6515 does not.)
+Above eps=1e-8 it is convergence slack (cuDSS and KLU satisfy the same `‖F‖₂` test at different
+iterates). **Below it there is a hard floor that does not move**, and the floor is the real bug.
 
-2. **A hard floor that does NOT move below eps=1e-8**, and it is bounded by OLF's OWN water-fill
-   residue epsilon: `ActivePowerDistribution.P_RESIDUE_EPS = 1e-5` pu = **1e-3 MW**, the same
-   constant on both sides (`GpuBatchLossPreDistribution.P_RESIDUE_EPS`, the kernel's
-   `P_RESIDUE_EPS`). Both loops stop distributing once `|rem| <= 1e-5` pu and leave a DIFFERENT
-   undistributed leftover, so the reported totals differ by up to 1e-5 pu. Every floor value
-   observed is under that bound (worst 8.464e-04 MW), and the test's 1e-3 assertion is itself
-   written at P_RESIDUE_EPS. To close it the device's water-fill has to leave the SAME residue as
-   OLF's — i.e. match the termination and the saturation ORDER, which is where the discrete
-   clamp makes floating-point order visible ("OLF removes an element only on a STRICT overshoot").
+**What the floor is NOT** — three hypotheses of mine, each killed by a measurement:
 
-**Two over-claims of mine, corrected by the 1e-10 run, recorded so they are not repeated.** I
-called BUS-4467_BBS "eps-independent, therefore a real separate defect" on a single 1e-8 point:
-a near-boundary clamp makes a slack-driven difference LOOK eps-independent, because a saturated
-generator contributes its exact limit. And I called BUS-5250_BBS "convergence slack" — it has a
-floor too (4.749e-05). One extra point on the curve (1e-10) was what separated slack from floor;
-two points could not.
+- *the [[#64]] gate signature*: no — both arms fire exactly ONE pass, so the AMOUNT differs.
+- *chunk composition*: no — byte-identical at `-Dolf.gpu.sa.maxBatch=512`.
+- *a differing saturation CLAMP* (my story for eps-independence, since a clamped generator
+  contributes its exact limit): **no** — the per-generator join shows the saturation sets AGREE
+  and 620 of 670 generators differ by 3-6e-09 pu each, summing to 9.553e-06 pu = the whole gap.
+  A PROPORTIONAL spread, not a clamp.
+- *a differing pre-distribution seed* (host-side, hence eps-independent — a good fit on paper):
+  **no** — the seeds match, device `absorbed=17.248640` vs OLF `previousMismatch=17.248639569`.
 
-**Next step is an INSTRUMENT, not a fix.** OLF's `DS_RUN` / `DS_SPLIT` / `DS_SAT` traces carry NO
-contingency id, so in a 6667-contingency run they cannot be attributed, which is why every
-attempt fell back to an alone-run — and an alone-run builds a DIFFERENT network (the retained
-switches follow the contingency list), so it reproduces nothing here: both BUS-5250_BBS and
-BUS-4467_BBS PASS alone. The per-generator join that cracked [[#64]] (`OLF_DS_SPLIT` G lines
-against `OLF_GPU_GENCUM_DUMP`) needs that label. Add a contingency marker to the fork (a static
-the SA layer sets, so DS_SPLIT can both label and FILTER), then join for BUS-4467_BBS and find
-the generator whose clamp differs.
+**What it IS.** The device's MEASURED slack mismatch after the solve is `0.018464` where OLF's is
+`0.018454123` — larger by ~9.6e-06 pu, which is exactly the gap, and it is then spread
+proportionally over every participant. Converged states that differ by ~1e-05 pu and do NOT move
+when the criterion tightens 10^4x are not converging differently: **the two arms are solving
+slightly different systems.** Small, genuine, and localized somewhere in this contingency's
+equation set.
+
+**The STRUCTURES agree exactly — checked, and it removes the last structural suspicion.** Device
+first fill of slot 585: `n=14504` rows, 985 identity (mode 0) + 13499 power (mode 1) + 20 own-Q
+(mode 4). OLF: 14494 ACTIVE equations = BUS_TARGET_P 6880 + BUS_TARGET_Q 5578 + BUS_TARGET_V 980
++ DISTR_Q 323 + ZERO_V 366 + ZERO_PHI 366 + BUS_TARGET_PHI 1. The difference is
+`14504 - 14494 = 10 = 2 x 5`, and the contingency disables exactly 5 buses — the device keeps a
+fixed row set and freezes an islanded bus's two rows as identities where OLF removes the
+equations. `islandedDsParticipants=2` is consistent too (only 2 of the 5 carry participating
+generators). So the row sets are right and the participant sets agree.
+
+**What `EQ_DUMP_CTG`'s F0 section actually is** (I first called it "stale by construction" and
+that was WRONG — corrected in a92dcc8's follow-up): the POST-contingency system evaluated at the
+PRE-contingency state. The dump runs before the solver touches x, but `lfContingency.apply()` has
+already deactivated equations, which invalidates the vector, so `AbstractVector.getArray()`
+RECREATES it against the current index. Proof from the dump itself: `fx0.length` = 14494 =
+exactly the active-equation count of its own post-contingency system section (independently
+counted), not the base's. Not stale.
+
+**It is still not comparable with a device fill's norm**, for a different reason: the device's
+first fill is taken after ITS seeding (frozen islanded rows at flat V=1/phi=0, the pre-loss
+target seeding) and after `applyRowMode` turns identity rows into `x - target`. OLF `norm2=774.03`
+vs device `35.95`, and OLF's is dominated almost entirely by TWO equations — `distr_q1952/1953`
+at 519.00 and 518.98 — so those norms describe two equations, not the network.
+
+**Instrumentation done, and it answered:** F0 now writes `f` and `target` separately. The re-dump
+says **519.0048 is `f`, with `target = 0.0`** — same for 518.98, and for the next three
+(118.32 / 104.66 / -100.04, all DISTR_Q, all targets zero). A genuine evaluation, not a target
+artefact, so `dummy_q9161`/`9162` hold magnitudes around 780 pu — not a physical coupler flow.
+
+**Why, and it is the third and correct reading of this instrument.** `BusState` saves angle,
+voltage, `generationTargetQ`, shunt B/G … and NOT `dummy_p`/`dummy_q`. Those are equation-only
+variables of the zero-impedance couplers, so `NetworkState.restore()` between contingencies does
+NOT restore them: they carry whatever the PREVIOUS contingency's solve left. At the dump point the
+vector is fresh and the index is current, but the STATE is partly stale — precisely in the
+variables these DISTR_Q equations reference. (First reading: "stale equation vector" — wrong,
+mechanism. Second: "legitimately large" — wrong, it is not the base state. Third: stale
+equation-only STATE variables.) Harmless for OLF, whose solver re-converges them; it only means
+F0's dummy-referencing entries are not a "starting residual".
+
+**HYPOTHESIS for this bug, UNTESTED, but it fits every measured property.** The device tiles the
+BASE state to every scenario, so it starts each one from the base `dummy_q`; OLF starts from the
+previous contingency's. If the coupler dummies are UNDERDETERMINED — a null space, which a
+coupler loop gives — both arms converge, but to different points in that null space. Physical
+quantities would still agree (and they do: BUSDIFF 0 scope-wide, bus voltages exact), while a
+DISTR_Q equation that REFERENCES `dummy_q` enforces a slightly different reactive split, moving
+the controllers' q, the losses, and hence the slack mismatch by ~1e-5 pu. That would be:
+eps-independent (it is not a convergence depth), proportional across participants (it moves the
+sharing, not one unit), invisible in bus voltages, and identical under a chunk-size change — which
+is the full list of properties measured for BUS-4467_BBS.
+
+**TESTED 2026-10-01 — the hypothesis is DEAD.** `OLF_DUMMY_DUMP` (new, fork 86607e525) writes the
+CONVERGED equation-only variables after each post-contingency solve. For BUS-4467_BBS: 732
+entries, mean |v| = **0.3506 pu**, max **11.63** (`DUMMY_P 9384`). Nothing near 780 — so that
+magnitude was ENTIRELY the stale pre-solve state, and the converged dummies are ordinary. Two
+independent reasons finish it off: determined variables cannot differ beyond convergence
+tolerance, and cuDSS factors the uniform batch WITHOUT pivoting, so a rank-deficient dummy
+subsystem would fail to factor rather than settle on an arbitrary null-space point — these
+scenarios factor cleanly, so `ZERO_V`/`ZERO_PHI` plus the balances determine the dummies.
+
+(Run limitation, for the next reader: only ONE dump section appeared, the CPU arm's. For a
+device-solved contingency the GPU provider returns from the precomputed state and never calls
+OLF's `runPostContingencySimulation`, so the device's converged dummies do NOT come out of this
+dump. Not worth another run given the two reasons above.)
+
+**Eliminated so far, each by measurement, not argument:** the [[#64]] slack-gate signature; chunk
+composition; a differing saturation clamp; the pre-distribution seed; row/equation structure; the
+participant set; the dummy null space. SEVEN.
+
+**ANSWERED 2026-10-01: the two arms converge to DIFFERENT EQUATION SETS on a coupled group.**
+
+**The principle that should have been applied on day one** (user, 2026-10-01): *"if the two
+systems do not agree at machine precision then the two equation systems are not the same — it is
+as simple as that."* A gap above machine precision is NOT a property of the solve. Every
+"same system, different solution" story is excluded a priori, and this entry burned most of a
+session on four of them — convergence slack, a coupler-dummy null space, a saturation-clamp
+quantum, a `P_RESIDUE_EPS` floor — each costing a ~20-minute scope run to kill. The first
+eps-squeeze that did not collapse the gap was already the proof. Go find the equation.
+
+**What it is.** The paired dump (`OLF_VAR_DUMP` + `OLF_GPU_SA_VAR_DUMP`, same point, keyed by
+element id, filtered by `OLF_TRACE_CTG`) confines the whole difference to the coupler dummies:
+
+| variable | differing | worst abs diff |
+| --- | --- | --- |
+| **DUMMY_Q** | 331 of 366 | **8.410878e-03** |
+| DUMMY_P | 271 of 366 | 5.637924e-07 |
+| BUS_V | 5349 of 6881 | 2.655704e-07 |
+| BUS_PHI | 6880 of 6881 | 8.231543e-08 |
+
+OLF is properly converged there — `‖f − target‖₂ = 5.822350e-07`, worst residual 4.309392e-07 —
+which also confirms the retraction below. And the governing equations at CONVERGENCE name the
+defect:
+
+```
+EQ BUS_TARGET_V VL-2669_0   resid 0
+EQ DISTR_Q      VL-2669_1   resid -1.8e-16
+EQ DISTR_Q      VL-2669_2   resid -1.8e-16
+EQ DISTR_Q      VL-2669_3   resid -1.8e-16
+EQ DISTR_Q      VL-2669_4   resid -1.8e-16
+```
+
+In OLF's converged system those buses are on **DISTR_Q** (reactive SHARING). Pre-solve they were on
+`BUS_TARGET_Q` with targets 0.0257 / 0.0257 / 0.02 / 0.0257, so OLF's solve SWITCHED them:
+DISTR_Q 323 -> 332 (+9), BUS_TARGET_Q 5578 -> 5571 (-7), BUS_TARGET_V 980 -> 978 (-2).
+
+Both arms' numbers then follow exactly:
+- OLF's dummy increments are all EQUAL (-0.0241962788) — enforced equal sharing under DISTR_Q;
+- the device's are -0.0257 / -0.0257 / -0.0200 — the individual BUS_TARGET_Q targets.
+
+**So the device does not reproduce OLF's post-contingency re-activation of DISTR_Q on that coupled
+group.** The sharing is never enforced, each member sits at its own reactive target, the dummies
+differ by 8.4e-03 pu, and DISTR_Q's dependence on `dummy_q` carries it into the reactive split,
+the losses and the 9.553e-06 pu slack mismatch. That accounts for every measured property:
+eps-INDEPENDENT (a different equation set, not a convergence depth), PROPORTIONAL across
+participants, INVISIBLE to BUSDIFF, chunk-size invariant.
+
+**CHECKED, and it refuted the mechanism I had inferred.** The device's rows for the chain buses
+hold, at slot 585:
+
+```
+BUS_V VL-2669_0  row 6048  mode 0  target 0.62     (matches OLF's BUS_TARGET_V)
+BUS_V VL-2669_1  row 6050  mode 1  +1*v(_0) -1*v(_1)   <- ZERO_V, F=0
+BUS_V VL-2669_2  row 6052  mode 1  +1*v(_1) -1*v(_2)   <- ZERO_V, F=0
+BUS_V VL-2669_3  row 6054  mode 1  +1*v(_2) -1*v(_3)   <- ZERO_V, F=0
+BUS_V VL-2669_4  row 6056  mode 1  +1*v(_3) -1*v(_4)   <- ZERO_V, F=0
+DUMMY_Q COUPLER_1 row 14113 mode 4 target +0.0257  -dq1 + dq2
+DUMMY_Q COUPLER_2 row 14115 mode 4 target +0.0257  -dq2 + dq3
+DUMMY_Q COUPLER_3 row 14117 mode 4 target +0.0200  -dq3 + dq4
+DUMMY_Q COUPLER_4 row 14119 mode 4 target +0.0257  -dq4
+```
+
+The V rows hold ZERO_V (the relocation's own design: couplers' ZERO_V/ZERO_PHI move to the child's
+rows), and the children's reactive balances sit on the coupler DUMMY_Q rows in **mode 4 — own Q
+balance, i.e. voltage control OFF** — against their individual targets. OLF at convergence has
+**DISTR_Q** there (target 0, residual -1.8e-16): control ON, reactive power SHARED. **So the two
+arms solve different equations for that group.** That part is settled and needs no more
+measurement; it is the 8.4e-03 pu dummy gap and the 9.553e-06 pu slack mismatch.
+
+**RETRACTED (3): "a missed PQ->PV switch-back".** OLF's whole RL activity for BUS-4467_BBS is
+`PV->PQ` on VL-6490_0 / VL-6489_0 / VL-6113_1 / VL-6231_0 / VL-6231_1 and one `PQ->PV` on
+VL-6515_0. **Nothing touches VL-2669.** So the group's DISTR_Q does not come from the
+reactive-limits loop and there is no switch-back to restore. (681 `PQ->PV` switches occur
+elsewhere in the run, so the trace works.)
+
+**RETRACTED (4): "OLF's solve switched 9 DISTR_Q on (323 -> 332)".** Those counts come from
+DIFFERENT ARMS. `eq2.post` was written by the GPU provider at its own entry, in a run with
+`OLF_GPU_SA_GPU_ONLY=1` (CPU arm given an empty contingency list); the converged `EQ` section fires
+in `AbstractSecurityAnalysis`, which the GPU provider OVERRIDES and returns from early for a
+device-solved contingency — so that section is the CPU arm's. Pre-solve on one arm against
+post-solve on the other says nothing about what either solve did. Fifth point-in-time/cross-arm
+error of the session, and the first to manufacture a MECHANISM rather than just a wrong number.
+
+**ROOT CAUSE, and it is in the BASE, not in any contingency.** `OLF_GPU_TARGET_ROW` says the
+device's mode-4 own-Q state on those coupler DUMMY_Q rows is **STRUCTURAL** — `baseMode=4`,
+`base=0.0257` — decided at extraction, with no per-scenario override. And OLF's OWN base dump
+(`OLF_EQ_DUMP`) has **DISTR_Q** on the same buses, a five-member group sharing with 1/5 keys:
+
+```
+eq col=646 type=DISTR_Q elementNum=3025 id=VL-2669_1          (…_2, _3, _4 likewise)
+distr_q3025 = -0.8*(-1.0*dummy_q9212) + -0.8*dummy_q9213
+            + 0.2*ac_q_closed_1(v3024,v3029,…) + 0.2*dummy_q9212 + 0.2*(-1.0*dummy_q9213) + …
+```
+
+So **the device never builds the DISTR_Q sharing equation for a coupler-relocated group; extraction
+puts each child's OWN Q balance on that row instead.** The two arms' systems differ in the BASE.
+
+**Extent — this is not a corner case:**
+
+| | |
+| --- | --- |
+| OLF base DISTR_Q equations | **345** |
+| of those, referencing a coupler dummy | **341** |
+| distinct coupler dummies involved | 344 |
+| DUMMY_Q differing in the one-contingency join | **331 of 366** |
+
+Essentially EVERY DISTR_Q member in rte6515 is a coupler-relocated child. (Verified row by row for
+the VL-2669 group; the counts and the 331/366 corroborate the generality.)
+
+**Why it was invisible for the whole project.** `ZERO_V` pins every bus of a coupler chain to the
+head's voltage whatever the reactive SPLIT among them, so the voltages agree; the group's total
+reactive output is fixed by the voltage target, so external flows barely move (base active power
+agrees to 7e-09 MW). And `BUSDIFF` — the basis of every "bus voltages exact scope-wide" claim in
+this file, base included — compares BUS VOLTAGES ONLY. The reactive split was never checked by
+anything until the paired variable dump existed.
+
+**This answers the design question asked earlier in the session** ("why don't we have DISTR_Q
+equation alternates for relocation?"). The 2-way stock twin (`dqAlt`/`dqSel`, [[#65]] and the
+2026-09-29 stock-placement work) covers "the coupler died, move the equation back to the bus's own
+row". It does NOT cover "this member's row IS a relocated dummy that must host a GROUP equation" —
+so the sharing has nowhere to live and extraction falls back to the own-Q balance. That is very
+likely also what draws the `PLAN:VC_REMERGE_MULTI` boundary (47 of the 55 plan refusals).
+
+### Implementation plan (drafted 2026-10-01, NOT started)
+
+**A. What OLF does — verified in `AcEquationSystemCreator`.**
+`createGeneratorReactivePowerDistributionEquations` walks `getMergedControllerElements()` and for
+each controller i creates `DISTR_Q` **on bus i**: `(qPct_i − 1)·q_i + Σ_{j≠i} qPct_i·q_j`, where
+`q_x = createReactiveTerms(bus x)`. For a coupler-connected bus those reactive terms ARE the
+`DUMMY_Q` variables, which is why `distr_q3025` references `dummy_q9212..9215`. So the equation is
+owned by the controller bus, pairs with that bus's `BUS_V`, and spans EVERY member's dummies.
+`recreateReactivePowerDistributionEquations` rebuilds the set when membership changes, and skips it
+entirely for a local control.
+
+**B. What the device does — verified.** Extraction DOES see the four DISTR_Q equations and assigns
+them to the coupler dummy rows (`OLF_GPU_DISTRQ_DUMP`):
+
+```
+controller=VL-2669_1 eqCol=646 assignedRow=14113 ownVRow=6050   (…_2/_3/_4 -> 14115/14117/14119)
+```
+
+and those same rows carry `baseMode=4` with targets 0.0257/0.0257/0.0200/0.0257 — an own-Q
+balance. Two equations, one row; mode 4 wins and the sharing is dropped, exactly as the extractor
+comment states ("row mode 4 … the DISTR_Q emissions at this row gate off"). The child's own `BUS_V`
+row is unavailable because the relocation puts `ZERO_V` there (verified from the matrix: row 6050 is
+`+1·v(_0) −1·v(_1)`).
+
+**C. CLOSED 2026-10-01 — both equations are ACTIVE at the device's extraction.** The new
+`OLF_GPU_QROW_TRACE` says, in the SA run:
+
+```
+QROW_CLAIM row=14113 bus=VL-2669_1 busTargetQcol=11308 remoteCtl=true pilotSelf=false
+           freeMember=false enrolled=false -> mode4=true
+DISTRQ_ROW pass=13 controller=VL-2669_1 assignedRow=14113 enabled=true
+```
+
+`busTargetQcol >= 0` means `BUS_TARGET_Q` is genuinely ACTIVE for that bus (not a stale column:
+`EquationSystemIndex.removeEquation` does `setColumn(-1)` immediately on deactivation), and the
+same pass assigns that bus's `DISTR_Q` to the SAME row. In OLF's converged base only `DISTR_Q` is
+active (`bus_target_q[3025..3028]` bracketed). So the device extracts from a state where the pair
+is inconsistent with OLF's, and its mode-4 rule then picks the own-Q balance and drops the sharing.
+(`assign()` does not throw, so only one of the two ever claims the row in `targetMap` — the other
+is simply never built. The earlier phrasing "two equations, one row" was loose.)
+
+**CANDIDATE FIX KILLED by the measurement that was meant to justify it (2026-10-01).** Extending
+`OLF_GPU_QROW_TRACE` to print the merged control gives, at the extraction the batched SA uses:
+
+```
+row=14113 bus=VL-2669_1 busTargetQcol=11308 distrQcol=-1
+          mainVc=VL-2669_0 mainMembers=5 enabled=FALSE
+          ownVc=VL-2669_1 ownMembers=1 ownMerge=DEPENDENT -> mode4=true
+```
+
+Three readings, two of which retract earlier claims:
+
+- **`distrQcol = -1`: DISTR_Q is INACTIVE there.** "Both equations are active at the device's
+  extraction" (claim C, d8886c2) is WRONG — it compared the `DISTRQ_DUMP` of a BASE-ONLY run with
+  the `QROW` trace of the SA run. Two runs again, the same error as F0/targets/dummies.
+- **`mainVc=VL-2669_0`, `mainMembers=5`: the merge IS resolved.** `mainGenVc` is fine, so that lead
+  (the DISTR_Q dump showing a 1-member dependent) was a dump artefact, not a defect.
+- **`enabled=FALSE`: the control is genuinely DISABLED at extraction.** So BUS_TARGET_Q active +
+  DISTR_Q inactive + control off is a CONSISTENT pinned state, and `mode[qr] = 4` is the CORRECT
+  reading of it. The proposed `&& !mainVc.isControllerEnabled(bus)` guard is already satisfied —
+  the change would have been a NO-OP, shipped on momentum, with the gap unexplained afterwards.
+
+**So the question moves one step earlier, and the DISTR_Q-hosting gap is NOT what bites here.**
+Why is that control DISABLED at the device's extraction when OLF's converged base has it ENABLED
+(DISTR_Q active, `bus_target_q[3025..3028]` bracketed)? That is a BASE-level pin-state divergence
+between the arms — the [[#64]] family (a wrong pin decision), not an equation-hosting problem.
+
+**RESOLVED: there is NO base pin divergence, and `enabled=false` is not a pin.** Mapping the
+device's 15 `anyBaseLt` entry indices to bus ids gives VL-6439_0, VL-6452_0, VL-4244_0, VL-6515_0,
+VL-6003_0, VL-6027_0, VL-6095_0, VL-6106_0, VL-6130_0, VL-6157_0, VL-6173_0, VL-6194_0, VL-6226_0,
+VL-6229_0, VL-6239_0 — **identical** to OLF's base `PV->PQ` set (14 in its first pass plus
+VL-6106_0 in its second). The arms agree exactly on which controllers pin.
+
+And VL-2669 has ONE RL entry — `idx=486 bus=VL-2669_0 gens=5 vcEnabled=true basePv=true`,
+UNPINNED, at the pilot, covering all five generators. VL-2669_1..4 have NO RL entries. So the
+`enabled=false` the QROW trace reports cannot be a reactive-limit pin: there is nothing there to
+pin. (It is most likely the ordinary state of a merged DEPENDENT member, whose own control is off
+while the MAIN owns the group — OLF still lists it in `getMergedControllerElements()` and still
+gives it `DISTR_Q`.)
+
+**What remains is purely the SNAPSHOT MOMENT.** In a BASE-ONLY run, extraction passes 13/14/15 see
+`DISTR_Q` ACTIVE for those buses (`OLF_GPU_DISTRQ_DUMP`, `enabled=true`). In the SA run, the
+extraction the batch uses sees `DISTR_Q` INACTIVE and `BUS_TARGET_Q` ACTIVE (`distrQcol=-1`,
+`busTargetQcol=11308`). Same network, different moments: the batched SA's cached extraction is
+taken at a state where the merged dependents' controls are off, so extraction legitimately records
+an own-Q balance (mode 4) and the sharing equation is never built — and the structure then holds
+that for every scenario.
+
+**Fix direction (narrowed, still not coded):** make the batched SA's extraction come from the
+SETTLED base state rather than an unsettled one — i.e. establish WHEN `GpuAcDataCache` captures it
+relative to the base load flow's voltage-control update, and capture (or refresh) after. Note that
+`refreshContextValues` already re-pushes VALUES into a shared structure; row MODES and the
+equation set are structural, so a value refresh cannot repair this.
+
+**THE FLIP, MEASURED IN ONE RUN (2026-10-01).** Both traces now carry the extraction pass number,
+taken once at the top of `extractActivation`, and `OLF_GPU_QROW_TRACE` accepts a BUS-ID PREFIX so
+the measurement no longer needs the exact full-scope row numbers. Full busbar scope, one run,
+twelve extractions in one contiguous burst (no other output between them):
+
+| | passes 1-6 (`DISTRQ_ROW`) | passes 7-12 (`QROW_CLAIM`) |
+|---|---|---|
+| `DISTR_Q` | EXISTS, `eqCol=646..650` | INACTIVE, `distrQcol=-1` |
+| `BUS_TARGET_Q` | inactive (no claim line) | ACTIVE, `busTargetQcol=11308..11312` |
+| the bus's `isGeneratorVoltageControlEnabled()` | **true** | **false** |
+
+The two traces are MUTUALLY EXCLUSIVE across the 6/7 boundary, and that is itself the result:
+`QROW_CLAIM` only fires inside `if (q >= 0)` (an ACTIVE `BUS_TARGET_Q`) and `DISTRQ_ROW` only for an
+ACTIVE `DISTR_Q`. Both read the SAME per-bus flag — `GeneratorVoltageControl.isControllerEnabled(b)`
+is literally `b.isGeneratorVoltageControlEnabled()` — so this is ONE flag flipping, not two
+different questions.
+
+**So passes 1-6 match OLF's converged base EXACTLY** (group controlling, sharing active) and the
+device's own later extractions disable it. The snapshot-timing reading is confirmed, and sharpened:
+the device is not extracting "too early", it extracts the RIGHT state six times and then something
+turns the control off.
+
+Also settled: `controlledBus=VL-2669_1 members=[VL-2669_1(on)]` printed with `qPct=0.200000000`
+(= 1/5, a FIVE-member group's share) confirms the one-member listing is the bus's own DEPENDENT
+control object — the dump artefact noted above, not a merge defect.
+
+**ROOT CAUSE, MEASURED (2026-10-01). The disable is a TRANSIENT `MIN_REALISTIC_V` freeze, and
+the device bakes the frozen window into the STRUCTURE.**
+
+`QROW_CLAIM` now also prints the three disable paths' signatures, and the answer is unambiguous:
+
+```
+frozenQ=true  monitoringV=false  qLimit=MIN_REALISTIC_V  gens=1
+```
+
+So `ReactiveLimitsOuterLoop` froze these buses under its ROBUST-MODE UNREALISTIC-LOW-VOLTAGE rule
+(`ReactiveLimitsOuterLoop:296-304`), not under a reactive-limit rule:
+
+```java
+if (robustMode && remainsPV && generatorRemoteController) {   // Q IS within bounds
+    if (isUnrealisticLowVoltage(controllerBus)) {             // V < minRealisticVoltage * 1.02
+        controllerBus.setV(1);
+        buses.add(new ControllerBusToPqBus(..., QLimitType.MIN_REALISTIC_V));
+```
+
+With the RTE params (`minRealisticVoltage = 0.8`, `REALISTIC_VOLTAGE_MARGIN = 1.02`) the trip point
+is **0.816 pu** — far tighter than the 0.5 default, and easy to touch at a 20 kV generator section
+mid-iterate. `VL-2669` is a **20 kV** voltage level whose sections are coupler-joined, so each
+section is a distinct `LfBus` and `isGeneratorRemoteController` is TRUE for `_1.._4`.
+
+**This is why every pin comparison said the arms agreed.** A `MIN_REALISTIC_V` freeze is NOT a
+Q-limit pin: it has `qLimitType=MIN_REALISTIC_V`, never `MIN_Q`/`MAX_Q`, and it is TRANSIENT —
+`switchPqPv` clears it (`setQLimitType(null)`) when the voltage recovers. Comparing converged pin
+SETS therefore could not see it, and neither could `RL_SWITCH`-vs-`anyBaseLt`.
+
+**Ruled out by direct check, so these need not be re-explored:** `MONITORING_VOLTAGE` (the case has
+6 SVCs with `standbyAutomaton`, all at ~63 kV, NONE at VL-2669 — and `monitoringV=false`);
+`GeneratorVoltageControlManager.disableGeneratorVoltageControlsUnderMaxControlledNominalVoltage`
+(it would freeze a 20 kV group, since `generatorVoltageControlMinNominalVoltage = 120`, but it is
+built ONLY by `TransformerVoltageControlOuterLoop` and `transformerVoltageControlOn` is absent from
+`rte-loadflow-default-parameters.json`, hence false, so that outer loop never runs); and
+`minNominalVoltageRealisticVoltageCheck = 180` exempting the bus (it gates only
+`AcloadFlowEngine.isStateUnrealistic`, the whole-state check — NOT the outer loop's per-controller
+test, so a 20 kV bus is legitimately subject to the freeze).
+
+**The cycle, and where the structure is captured.** One GPU-only full-busbar run, pass numbers on
+both traces, phase markers interleaved by log line:
+
+```
+lines  67..114   passes  1-12   base LF: 1-6 CONTROLLING, RL freezes at 7, 7-12 FROZEN
+lines 115..116   GPU CENSUS (cold) / "GPU precomputed on device: 6550 / 6667"
+lines 117..      passes 13-24   the SA run: 13-18 controlling, 19-24 frozen -- the SAME cycle
+```
+
+Two complete 6-on/6-off cycles, and **the precompute's census line lands immediately after pass 12,
+the end of a FROZEN window**. Whether `DISTR_Q` exists at all is STRUCTURAL — it is fixed when
+`createStructure` runs — so a structure captured there carries own-Q balances for all 6550
+scenarios, and the per-solve `extractRowMode` / `extractTargets` refresh cannot put the sharing
+equation back. That is the whole of [[#66]].
+
+**Fix, and why it is not a timing patch.** Chasing the snapshot moment (re-extract after the base
+settles) is fragile: the cycle repeats inside the SA too (passes 13-24), so "settled" is not a
+single instant. The principled fix is the one the code ALREADY implements for exactly this problem:
+the CANONICAL, PIN-STATE-INDEPENDENT extraction behind `GpuAcRowIndexing.hasCandidateTable` —
+"extracted CANONICALLY (pin-state independent: every controller's frozen q row suppressed...)" per
+the comment in `GpuAcActivationExtractor`. A group with a candidate table already gets a structure
+that holds BOTH shapes and lets the in-kernel mode scan choose per scenario.
+
+**THE DEFECT, LOCATED (2026-10-01). The group HAS a candidate table; the canonical path is gated
+off for RELOCATED members.** `candidateTableReason` (new, printed as `candTable=` in `QROW_CLAIM`)
+says `YES` on all 24 claim lines — so the "does not qualify" guess above was WRONG, and the
+`hasCandidateTable` clauses are all satisfied. The leak is one gate in
+`GpuAcActivationExtractor.extractActivation`:
+
+```java
+int qr = stubBr >= 0 ? dummyQCol[stubBr] : qRow[bus.getNum()];
+GeneratorVoltageControl mainVc = GpuAcRowIndexing.mainGenVc(bus);
+if (stubBr < 0 && mainVc != null && GpuAcRowIndexing.hasCandidateTable(mainVc, es)) {
+    qr = GpuAcRowIndexing.stateQRow(bus, vCol, stubBranchOfBus, dummyQCol);   // CANONICAL path
+}
+assign(es, targetMap, qr, q, AcEquationType.BUS_TARGET_Q, bus.getNum());
+...
+if (mode4) { mode[qr] = 4; }                                                  // pin-state dependent
+```
+
+`VL-2669_1..4` are coupler-relocated, so `stubBr >= 0`: the row is the parent coupler's `DUMMY_Q`
+column (correct — relocation is structural) but the **`stubBr < 0` gate skips the canonical
+pin-state-independent treatment for exactly these buses**, and `mode4` is then stamped from the
+instantaneous pin state anyway. `mode4` is pin-state dependent for a non-pilot member because it
+reads `!isFreeRemoteGenVcMember(bus)`, and "free" is *the first ENABLED member* — with all four
+transiently frozen none is free, so all four get mode 4. That is precisely the leak
+`hasCandidateTable`'s own javadoc forbids: "the pin state at extraction time must not leak into the
+structure (see computeQRow)".
+
+**TWO WRONG LEADS, KILLED BY MEASUREMENT — the row and the pack are both FINE.**
+
+1. *The `stubBr < 0` gate is not the leak.* `stateQRow(bus, vCol, ziParentEdge, dummyQCol)` ALREADY
+   applies the relocation to the carrier (`return parent >= 0 && dummyQCol[parent] >= 0 ?
+   dummyQCol[parent] : vCol[carrier]`), and for a NON-PILOT member `stateQCarrier` returns the bus
+   itself — so the canonical branch would compute the SAME row the gated branch already does
+   (`dummyQCol[stubBr]`). The gate changes nothing for these buses.
+2. *The DISTR_Q pack is not missing them.* `buildDistrQContributions` is EXISTENCE-keyed
+   (`es.getEquation(gk, DISTR_Q).isEmpty()`) on the equation OBJECT, not the active index, and
+   `OLF_GPU_FREECTL_TRACE` shows the objects SURVIVE the freeze:
+
+   ```
+   FREECTL pilot=VL-2669_0 members=[VL-2669_0, VL-2669_1, VL-2669_2, VL-2669_3, VL-2669_4]
+           freeCtl=VL-2669_0
+           olfHasDistrQ=[VL-2669_0=true, VL-2669_1=true, VL-2669_2=true, VL-2669_3=true, VL-2669_4=true]
+   ```
+
+   So the union pattern DOES hold the sharing slots, and `freeCtl` is already canonical
+   (`controllers.get(0)`, the candidate-table branch). I had inferred OLF's
+   `recreateReactivePowerDistributionEquations` would DELETE a frozen member's equation; measured
+   false. (Also settled: the pilot `_0` IS one of its own controllers — a pilot-self group.)
+
+**So the leak is ONLY the row MODE.** The sharing terms are packed and the row is right; what turns
+them off is `mode[qr] = 4`, which the extractor comment describes as gating "the DISTR_Q emissions
+at this row" off. And mode 4 is written into `baseRowMode` from the frozen instant, while
+`GpuBatchChunkSolver` reads `rowModePerScenario[s] != null ? rowModePerScenario[s][r] :
+baseRowMode[r]` — so every scenario without an explicit per-scenario mode inherits the frozen 4.
+
+The canonical suppression ALREADY EXISTS but covers only the pilot:
+
+```java
+boolean enrolled = pilotSelf && pilotSelfRotationEnabled() && members.size() >= 2 && <all vCol >= 0>;
+boolean mode4 = isRemoteGenVcControllerElement(bus)
+        && (pilotSelf || !isFreeRemoteGenVcMember(bus)) && !enrolled;
+```
+
+`enrolled` requires `pilotSelf`, true only for `_0`. For `_1.._4`, `pilotSelf=false` so
+`enrolled=false` and `mode4 = !isFreeRemoteGenVcMember(bus)` — and "free" is *the first ENABLED
+member*, so with all four transiently frozen none is free and all four get mode 4.
+
+**THE PLAN (the per-scenario machinery already exists).** The kernel does NOT need the row mode to
+know a member's pin — it reads the REACTIVE-LIMIT state per (scenario, entry). From
+`olf_gpu_nr_jni.cu` around the pilot-Q mode scan:
+
+> OLF's own test for "this group has no controller": its ENABLED controllers
+> (`VoltageControl.isControllerEnabled` -> `isGeneratorVoltageControlEnabled`). On the device that
+> fact is the members' REACTIVE-LIMIT state, which is per (scenario, entry) and current from the
+> seeding onwards — **unlike the row modes this kernel used to infer it from**, which at seed time
+> are still ambiguous.
+
+i.e. `dqMemberQrGroup[m]` / `dqMemberRlEntry[m]` + `limitType[s * nrl + re]`. That is the template,
+and it already covers MEMBERS, not just the pilot.
+
+**And for this group it is not merely a workaround — it is the CORRECT model.** `VL-2669_1..4` have
+NO RL ENTRIES (measured: VL-2669's only entry is `idx=486 bus=VL-2669_0 gens=5`, at the pilot). A
+`MIN_REALISTIC_V` freeze is NOT a Q-limit pin, so the device's RL pack does not and should not
+represent it. Canonically-unpinned is exactly what OLF's CONVERGED base has.
+
+**Steps:**
+
+1. Give a candidate-table group's MEMBER the same canonical suppression the pilot gets, so
+   `mode4` is false and `baseRowMode` stays 1 (sharing live). Today `enrolled` requires
+   `pilotSelf`, which is true only for the pilot bus.
+2. Put it behind `-Dolf.gpu.canonicalMemberMode` (default OFF at first), the convention this repo
+   already uses for `olf.gpu.ziTreeRelocation` / `olf.gpu.pilotSelfRotation`, so both sides are
+   measurable in one build and the default flips only on evidence.
+3. Gate: the 12 base-pinned fixtures named in the extractor comment
+   (`deviceRemoteFreeMemberBasePinnedMatchesCpu` & co.) are the tripwire — they pass TODAY because
+   `baseRowMode` carries a genuine base pin. A member that is genuinely Q-limit pinned HAS an RL
+   entry, so the kernel can still see it; that is the thing to verify, not assume.
+4. Then the full gate: 177-test `GpuBatchedAcSecurityAnalysisTest`, `GpuLoadFlowTest`,
+   `GpuFullNewtonTest`, `GpuAcStructuresTest`, `GpuLineSearchTest`, and the full busbar scope at
+   violations diff 0 / base BUSDIFF 0 / worst DAP <= 1.4e-03 MW / coverage 6550+ — plus the thing
+   this whole entry is about: `DUMMY_Q` on `VL-2669_1..4` agreeing instead of differing by
+   8.410878e-03 pu.
+
+**!! VOID — STEPS 3 AND 4 BELOW WERE RUN WITH THE FLAG OFF (caught 2026-10-01). !!** I passed the
+property as `-DargLine="-Dolf.gpu.canonicalMemberMode=true -Xmx30g"`, and `QROW_CLAIM` proves it
+never reached the extractor: `canonMember=false -> mode4=true` on all 24 lines while
+`candTable=YES`. With a plain `mvn -Dolf.gpu.canonicalMemberMode=true` the SAME run gives
+`canonMember=true -> mode4=false` on all 24. So "177/177 with the flag ON" was 177/177 with it OFF
+and proves NOTHING about the tripwire, and the neutral scope table measured the unchanged code.
+
+This is a LESSON ALREADY IN THIS FILE at the `pilotSelfRotation` entry: surefire forks, so a
+behaviour property must go through `mvn -Dolf.gpu.X=true` (it propagates `-D` to the fork), not
+`MAVEN_OPTS` and not `-DargLine` (which REPLACES surefire's own argLine). **Read that entry before
+overriding a property.** The corroborating detail I misread: "JVM max heap: 30688 MB" appears in
+runs with NO `argLine` at all — the pom sets the heap — so that line was never evidence the
+override took.
+
+**STEPS 1-3 (the VOID run's text, kept for the record):** `GpuAcRowIndexing.canonicalMemberModeEnabled()` +
+`canonicalMember` in the extractor's `mode4`; `canonMember=` added to `QROW_CLAIM`. With
+`-Dolf.gpu.canonicalMemberMode=true`:
+
+- `GpuBatchedAcSecurityAnalysisTest` **177 run, 0 failures, 1 skipped**
+- `GpuLoadFlowTest` + `GpuFullNewtonTest` + `GpuAcStructuresTest` + `GpuLineSearchTest`
+  **20 run, 0 failures, 0 skipped**
+
+**The tripwire is CLEAR**, and that is the substantive result: the 12 base-pinned fixtures
+(`deviceRemoteFreeMemberBasePinnedMatchesCpu` & co.) pass with `baseRowMode` no longer carrying the
+pin, which CONFIRMS the kernel's per-(scenario, entry) reactive-limit read covers MEMBERS and not
+just the pilot — the premise the whole plan rests on, now measured instead of assumed.
+
+**STEP 4: the scope run is NEUTRAL, and the fix is therefore NOT yet demonstrated.** Full busbar
+scope, both arms, `-Dolf.gpu.canonicalMemberMode=true`:
+
+| | flag ON | recorded baseline |
+|---|---|---|
+| BASE BUSDIFF | 0 | 0 |
+| violations | CPU=503923 GPU=503923 diff=0 | diff=0 |
+| worst DAP | 1.397828e-03 MW | 1.398e-03 MW |
+| coverage | 6550 / 6667 | 6550 / 6667 |
+| census | identical (`VC_REMERGE_MULTI=47`, `PINNED_MAIN=3`, `RELOC_VROW=3`, …) | same |
+
+No regression anywhere, and no improvement either: `1.397828e-03` IS the baseline's `1.398e-03`.
+The test still fails its DAP assertion at that value, as it did before.
+
+**So the honest status: the code path is implemented and harmless, but NOTHING here shows it fixed
+#66.** The scope headline cannot show it — `BUSDIFF` compares bus VOLTAGES only and is blind to the
+reactive split, which is the whole reason #66 stayed hidden. Two possibilities, not yet separated:
+
+1. `canonicalMember` did not actually fire (the property reached the JVM — "JVM max heap: 30688 MB"
+   confirms the `argLine` override took — and `candTable=YES` was measured, so it SHOULD have, but
+   that is an inference, not a measurement).
+2. It fired and `DUMMY_Q` now agrees, but the residual 1.4e-03 MW DAP gap has a DIFFERENT cause,
+   which would mean #66 was never what drove the DAP difference.
+
+**Next, in this order — do NOT claim the fix before both:**
+(a) one run with the flag ON and `OLF_GPU_QROW_TRACE=VL-2669`, to see `canonMember=true -> mode4=false`
+    instead of `mode4=true`. Cheap, and it settles (1).
+(b) the `DUMMY_Q` comparison the entry is actually about: device `OLF_GPU_SA_VAR_DUMP` against the
+    fork's `OLF_VAR_DUMP` at the SAME point, filtered by `OLF_TRACE_CTG`, flag ON vs OFF — does the
+    8.410878e-03 pu gap on `VL-2669_1..4` (331 of 366) close?
+
+Default stays `false` until (a) and (b) report.
+
+**(a) ANSWERED, and it VOIDED the two runs above** — see the VOID banner. With the property passed
+correctly the extractor reads `canonMember=true -> mode4=false` on all 24 lines.
+
+**THE REAL GATE RESULT, flag genuinely ON: 20 FAILURES — the plan's premise is FALSE.**
+
+```
+deviceBasePinnedMemberKeepsItsQWhenASiblingIsIslandedMatchesCpu   javaRemoteAllMembersPinnedMatchesCpu
+deviceRemoteForcedPvElectionMatchesCpu                            javaRemoteForcedPvMatchesCpu
+deviceRemoteFreeMemberBasePinnedMatchesCpu                        javaRemoteFreeAndSiblingPinMatchesCpu
+deviceRemoteGeneratorControlReactiveLimitsMatchesCpu              javaRemoteFreeMemberBasePinnedMatchesCpu
+deviceRemoteGroupAllPinnedInBaseMatchesCpu                        javaRemoteFreeMemberPostContingencyPinMatchesCpu
+deviceRemoteGroupLostInBaseRegainsControlInSamePassMatchesCpu     javaRemoteMemberBasePinnedMatchesCpu
+deviceRemoteGroupUnpinnedByContingencyRecomputesTargetQMatchesCpu javaRemoteMemberPostContingencyPinMatchesCpu
+deviceRemoteMemberBasePinnedReliefMatchesCpu                      javaRemoteOpenBranchMemberPinMatchesCpu
+deviceRemoteRobustRealisticVoltageMatchesCpu                      javaRemoteSingletonMemberPinMatchesCpu
+deviceRemoteSingletonMemberPinMatchesCpu                          deviceRemoteZeroImpMemberPinMatchesCpu
+```
+
+So `baseRowMode = 4` IS load-bearing for a genuine base pin: **the per-(scenario, entry)
+reactive-limit read reconstructs a pin for the PILOT but NOT for a MEMBER.** The kernel comment I
+built the plan on is true of the pilot path only. Premise retracted.
+
+**Refinement tried: suppress only for a REALISTIC-V freeze.** `MIN_Q`/`MAX_Q` is modelled by the
+device's RL pack and must stay in the structure; `MIN_REALISTIC_V`/`MAX_REALISTIC_V` has NO RL entry
+(set with Q inside its bounds) and is cleared by `switchPqPv`. That took **20 failures down to 1** —
+strong evidence the discriminator is the right axis.
+
+**But the ONE that remains disproves the rule: `deviceRemoteRobustRealisticVoltageMatchesCpu`**, the
+fixture built for exactly this rule: `bus voltage b1 for l23b expected 20.122797375361753 but was
+20.123052662204003` (2.55e-04 kV). **A realistic-V freeze CAN PERSIST into OLF's converged state**,
+so "ignore every realistic-V freeze" is wrong, and whether a freeze is transient is NOT knowable at
+the extraction instant. The axis is right; the test on it cannot be local.
+
+**Shipped path unaffected:** with the default (`false`), `GpuBatchedAcSecurityAnalysisTest` +
+`GpuLoadFlowTest` + `GpuFullNewtonTest` + `GpuAcStructuresTest` + `GpuLineSearchTest` = **197 run,
+0 failures, 1 skipped**.
+
+**CAPTURE TIMING IS ALSO WRONG — measured at the boundary (2026-10-01).** A new
+`Q_PROBE_BASE_VC` print in `afterPreContingencySimulation` (the exact instant the precompute
+captures, i.e. after the base load flow converged) says the base LF genuinely ENDS frozen:
+
+```
+Q_PROBE_BASE_VC bus=VL-2669_0 vcEnabled=true  frozenQ=false qLimit=-               v=0.620000000
+Q_PROBE_BASE_VC bus=VL-2669_1 vcEnabled=false frozenQ=true  qLimit=MIN_REALISTIC_V v=0.620000000
+Q_PROBE_BASE_VC bus=VL-2669_2 vcEnabled=false frozenQ=true  qLimit=MIN_REALISTIC_V v=0.620000000
+Q_PROBE_BASE_VC bus=VL-2669_3 vcEnabled=false frozenQ=true  qLimit=MIN_REALISTIC_V v=0.620000000
+Q_PROBE_BASE_VC bus=VL-2669_4 vcEnabled=false frozenQ=true  qLimit=MIN_REALISTIC_V v=0.620000000
+```
+
+So a fresh extraction here would read the SAME frozen state — re-extracting after convergence
+cannot fix anything. Retracted before being coded.
+
+**And the voltage is the real story: v = 0.620000000 pu.** 62% of nominal on a 20 kV level, far
+below the 0.816 trip point — which is WHY the freeze sticks rather than being cleared by
+`switchPqPv`. The pilot `_0` still controls (`vcEnabled=true`), so V is pinned at its target and the
+couplers tie all five sections to exactly that value, which is why all five read an identical
+0.620000000.
+
+**THE HARNESS'S BASE COMPARISON HAS BEEN VACUOUS, AND THAT IS HOW A 0.62 pu BUS STAYED HIDDEN.**
+Every scope run in this file reporting `BASE BUSDIFF buses>1e-12kV=0 of 0` compared **zero buses**
+— `of 0` is the count COMPARED. The test's own comment already says so ("was not a clean base - it
+was no base compared at all, in every run this test has ever done") and adds an explicit N-state
+monitor, **but the monitors are only installed when `busDiff` is true**, i.e. when
+`OLF_GPU_SA_CTG_ONLY`, `OLF_GPU_SA_BUSDIFF_CTG` or `OLF_GPU_SA_BUSDIFF=1` is set. A plain full-scope
+run sets none of them, so it still prints `0 of 0`. **Treat "base BUSDIFF 0" from any run without
+one of those variables as NO EVIDENCE** — including the ones quoted earlier in this entry and the
+"base BUSDIFF 0" in the [[#62]]..[[#65]] gate descriptions.
+
+The cheap way to get a REAL base comparison (keeps the full list, the full network, and a small
+heap — the all-contingency monitor dies at the 14 GB ceiling): `OLF_GPU_SA_BUSDIFF_CTG=<one id>`,
+which installs the scoped monitor plus the `ContingencyContext.none()` base monitor, with
+`OLF_GPU_SA_MON_BUS=<bus ids>` to print the buses of interest on both arms.
+
+**ROOT CAUSE FOUND (2026-10-01) — the device's robust-mode exemption is NARROWER than OLF's.**
+An equation-level predicate mismatch, no tolerance anywhere. Chain, all measured:
+
+1. **The freeze is the DEVICE's own decision, written back into the `LfBus`.**
+   `GpuNewtonRaphson:403` does `bus.freezeGenerationTargetQAndDisableGeneratorVoltageControl(qLimit)`
+   then `bus.setQLimitType(... case 3 -> MIN_REALISTIC_V ...)` from the device's reactive-limits
+   result. So `qLimit=MIN_REALISTIC_V` at VL-2669 is NOT OLF's outer loop — it is the device's.
+2. **OLF never freezes this group.** CPU arm (`OLF_GPU_DBG_RL`, single-threaded): the robust rule
+   IS live — `CPU_RL Switch bus 'VL-1251_1' PV -> PQ, q set to -0.35 = targetQ - because V < 16.0kV
+   when remote voltage target is maintained`, likewise VL-1459_1/_2 — but `grep -c 2669` is 3 and
+   NONE is a VL-2669 bus (one is a digit coincidence inside `q=102.10822669930263`, two are
+   VL-6226_0). So the rule fires elsewhere and skips VL-2669.
+3. **WHY OLF skips it.** `ReactiveLimitsOuterLoop.isGeneratorRemoteController` reads the bus's OWN
+   control object: `controllerBus.getGeneratorVoltageControl().map(c -> c.getControlledBus() !=
+   controllerBus).orElse(false)`. For a merged DEPENDENT member that own control is LOCAL
+   (`controlledBus == bus` — measured: `ownVc=VL-2669_1 ownMerge=DEPENDENT`), so the bus is NOT a
+   remote controller and the whole `robustMode && generatorRemoteController && …` block is skipped.
+4. **WHY the device freezes it.** The kernel gate is
+   `bool unrealisticLo = robust && rlRemote[i] != 2 && x[ridx] < vLoRobust;` and its own comment
+   says it exempts only "a pilot that controls its own bus (class 2)". `rlRemote` is assigned at
+   `GpuAcOuterLoopPacks:676` as `(byte) (pilotSelf ? 2 : 1)` with `pilotSelf = isPilotSelfEntry(bus)`,
+   computed from the **MAIN** control (`mainGenVc(bus).getControlledBus() == bus`). For VL-2669_1 the
+   MAIN is at VL-2669_0, so the member is class 1 = "remote" and the rule applies.
+
+**So the two predicates differ exactly for a merged dependent member:** OLF asks the bus's OWN
+control (local ⇒ exempt), the device asks the MERGED group (member ⇒ remote ⇒ subject). The rest of
+#66 follows: the device freezes, mode 4 own-Q balances replace the sharing in the structure,
+`DUMMY_Q` ends 8.410878e-03 pu off, and OLF's converged base keeps `DISTR_Q` active.
+
+**Also now explained without any tie-breaking story:** `v = 0.620000000` pu is simply the group's
+own target — `targetV = 12.4` kV on a 20 kV nominal level = 0.62 exactly — so the bus sits ON
+target, and `minRealisticVoltage = 0.8` (threshold 0.816 pu) declares that target unrealistic. The
+voltage is identical in both arms; only the EXEMPTION differs.
+
+**RETRACTED along the way, and not to be revisited:** (i) "the arms converge to different tightness
+so the strict `<` in the switch-back test falls differently" — a same-system-different-solution
+story, and I had ONE value from ONE arm when I made it; the switch-back test's other conjunct
+`canSwitchPqToPv = !bus.hasGeneratorsWithSlope()` is a static network property, identical in both.
+(ii) "the 4-thread CPU arm retains different switches, so the networks differ" — the test already
+sets `defaultThreads = kindsEnv.contains("busbar") ? "1" : "8"`, so every busbar run was ALREADY
+single-threaded on both arms (its comment: "the base alone differs by 8e-6 kV at 8 threads,
+bit-identical at 1"). Correctness runs must stay at 1 thread; CLAUDE.md's "default 4" is the
+BENCHMARK test.
+
+**FIXED 2026-10-01 — `rlRemote` class 3.** No new array and no JNI change were needed: an AUDIT of
+every `rlRemote` reader showed a third class slots in for free. The pack now emits
+`2` = pilot-self, `1` = a remote member the robust rule APPLIES to, `3` = a remote member it
+EXEMPTS, from a verbatim copy of OLF's predicate (`GpuAcOuterLoopPacks.isOlfRobustRemoteController`,
+`bus.getGeneratorVoltageControl().map(c -> c.getControlledBus() != bus).orElse(false)` — note the
+`orElse(false)`: no control at all is also exempt). The kernel gate became
+`bool robustRemote = rlRemote[i] != 2 && rlRemote[i] != 3;`.
+
+Why class 3 is free (the audit, worth not redoing): every other reader treats it exactly like class
+1 — the TRUTHINESS tests (`rlRemote[i]` at .cu 4712/5560/5860/5883/6457/6500, Java `!= 0` at
+`GpuBatchChunkSolver:432`) see a remote member; the PILOT tests (`== 2` at .cu 5591/5592/5874/5882/
+6454, Java `!= 2` at `GpuNewtonRaphson:435` and `== 2` at `GpuBatchChunkSolver:771`) correctly see a
+non-pilot; and `rlRobustVResetBatch`'s `!= 1` early-return correctly SKIPS an exempt bus, since a
+bus the gate never pins to 3/4 must not get the robust V reset either.
+
+**Measured, same full busbar scope:**
+
+| | before | after |
+|---|---|---|
+| base control state of `VL-2669_1..4` | frozen, `qLimit=MIN_REALISTIC_V` | **`vcEnabled=true frozenQ=false qLimit=-`** |
+| `QROW_CLAIM` (an own-Q/frozen member) | 24 | **0** |
+| `DISTRQ_ROW` (sharing ACTIVE) | 24, alternating 6-on/6-off | **48, every one of 12 passes** |
+| BASE BUSDIFF | `0 of 0` (vacuous) | **worst 2.731e-11 kV over 6886 buses** |
+| violations | CPU=503923 GPU=503923 diff=0 | CPU=503923 GPU=503923 **diff=0** |
+| coverage / census | 6550/6667, census X | 6550/6667, **census X identical** |
+| unit gates | — | **200 run, 0 failures, 1 skipped** (no property gate) |
+
+The 6-on/6-off extraction cycle is GONE and no member ever claims an own-Q row, so the structure
+carries the sharing for all 6550 scenarios. `Q_PROBE_BASE_VC` also confirms the predicate directly:
+for bus `_1` it prints `ctlBus=VL-2669_1`, i.e. its own control really is LOCAL.
+
+**Checkstyle: the violation SETS are identical before and after** (diff of the sorted lists is
+empty — the branch's 220-odd are pre-existing, 74 of them an old indentation block in
+`GpuAcOuterLoopPacks`). Do not read a raw count as a delta; line numbers shift.
+
+**What this did NOT fix, and is now known to be a SEPARATE item:** worst `distributedActivePower`
+is `1.397830e-03` MW, versus `1.397828e-03` before — unchanged, and the test still fails that
+assertion. So #66 was never the cause of the DAP gap. That gap is its own open question.
+
+**Dead experiment removed:** `-Dolf.gpu.canonicalMemberMode` and
+`GpuAcRowIndexing.canonicalMemberModeEnabled()` are gone — its premise was retracted above and the
+real cause is fixed at the SOURCE. The `mode4` comment now records that a member inheriting mode 4
+from a genuine Q-LIMIT pin is CORRECT (the 20 base-pinned fixtures rely on it); what used to reach
+there wrongly was a freeze the device should never have made.
+
+**Also now explained, with no tie-breaking story:** `Q_PROBE_BASE_VC` prints
+`ctlV=0.62000000000000000 tgtV=0.62000000000000000 ctlV<tgtV=false d=0.000e+00` — the switch-back's
+strict `<` is an EXACT tie in both arms, so it could never have fired either way. The retracted
+"one arm lands a hair below" story was not just unevidenced, it was impossible.
+
+**Superseded reasoning (kept): "the fix IS a capture-timing fix after all".** The earlier
+objection ("the cycle repeats inside the SA too, so settled is not one instant") was wrong in an
+important way: the repeats at passes 13-24 are PER-CONTINGENCY solves, whereas the BASE load flow's
+CONVERGED state is a well-defined instant — and it is the reference, because OLF's converged base is
+what the arms must agree on. The pass map shows the precompute capturing right after pass 12, the
+end of a FROZEN window, while OLF's converged base has those controls ENABLED. **Next step: build
+the structure from an extraction taken AFTER the base load flow converges** (or re-extract then),
+rather than from whatever instant the base LF last happened to extract at. That keeps a PERSISTENT
+realistic-V pin (it is still there at convergence, which is why `deviceRemoteRobustRealisticVoltage`
+must keep passing) and drops a TRANSIENT one, with no local "is this transient?" test needed.
+
+**Superseded (kept for the reasoning):** `QROW_CLAIM` also prints
+`frozenQ` / `monitoringV` / `qLimit` / `gens`, which separate OLF's THREE disable paths — they need
+opposite fixes and no pin dump can tell them apart:
+
+- `frozenQ=true` -> `freezeGenerationTargetQAndDisableGeneratorVoltageControl`, i.e. a PV->PQ pin
+  (`ReactiveLimitsOuterLoop`, or the tap manager's
+  `disableGeneratorVoltageControlsUnderMaxControlledNominalVoltage`). `qLimit` then names which.
+- `monitoringV=true` -> a `MONITORING_VOLTAGE` generator (an SVC with a stand-by automaton):
+  `LfNetworkLoaderImpl.createGeneratorVoltageControl` creates the control DISABLED AT LOAD and
+  `MonitoringVoltageOuterLoop` enables it during the solve. **This path is invisible to
+  `RL_SWITCH`** — which is exactly how the arms' pin SETS matched while `enabled` did not.
+- neither -> `LfContingency:234` / `NetworkCache:451`, or a `BusState` restore.
+
+The full writer list, so this is not re-derived: `setGeneratorVoltageControlEnabled` is private to
+`AbstractLfBus` and reached only from `freezeGenerationTargetQAndDisableGeneratorVoltageControl`
+(false) and `setGeneratorVoltageControlEnabledAndRecomputeTargetQ` (either); the latter's callers
+that pass FALSE are `LfNetworkLoaderImpl` 212 (MONITORING_VOLTAGE at load) and 222
+(`discardGeneratorVoltageControl`), `LfContingency` 234, `NetworkCache` 451 and `BusState` 127/161
+(restore); those that pass TRUE are `ReactiveLimitsOuterLoop` 227 (PQ->PV switch BACK),
+`MonitoringVoltageOuterLoop` 63, `GeneratorVoltageControlManager` 84 and
+`LfSecondaryVoltageControl` 141.
+
+**Superseded candidate (kept for the reasoning):** The comment at that site
+says "ACTIVE own-Q balance at a (non-free) remote gen-VC member = the RL-PINNED state", but the
+condition never tests whether the controller is actually DISABLED:
+
+```java
+if (GpuAcRowIndexing.isRemoteGenVcControllerElement(bus)
+        && (pilotSelf || !GpuAcRowIndexing.isFreeRemoteGenVcMember(bus)) && !enrolled) {
+    mode[qr] = 4;
+}
+```
+
+Adding `&& mainVc != null && !mainVc.isControllerEnabled(bus)` makes mode 4 fire only for a
+genuinely pinned (control-off) member, which is what the comment claims it means, and leaves the
+row to the `DISTR_Q` sharing when the control is on. `isControllerEnabled` is the same predicate
+the DISTR_Q dump prints. **Risk to check:** several fixtures were built AROUND the current
+behaviour (the comment cites `deviceRemoteFreeMemberBasePinnedMatchesCpu` and ~12 tests, the
+all-pinned-group fixture, and a 976x LINEAR_SOLVE_FAILED regression on the enrolled-pilot path), so
+this must be judged on the full gate, not on BUS-4467_BBS alone.
+
+**Still unexplained and worth one measurement before coding:** WHY both are active at extraction
+while OLF's converged base has only DISTR_Q. If the device extracts before OLF's
+`updateRemoteVoltageControlEquations` has settled the pair, the better fix may be WHERE it
+extracts, not the gate. The DISTR_Q dump shows the bus's OWN control (1 member, qPct 0.2, so a
+merged DEPENDENT), while the row logic uses `mainGenVc` — check whether the two disagree here.
+
+**D-old. (superseded) THE REMAINING UNKNOWN as first written.** In OLF's BASE,
+`bus_target_q[3025..3028]` are **INACTIVE** (bracketed; only DISTR_Q cols 646-649 are active), and
+the mode-4 gate fires only when `row(es, bus, BUS_TARGET_Q) >= 0`, i.e. ACTIVE — `row()` reports
+activity faithfully (`SingleEquation.column` is -1 when inactive and the index resets it on
+deactivation). **So the gate should not have fired at all.** Two candidates:
+  (C1) the structure the batched SA uses comes from an extraction pass taken at a state where those
+       controllers WERE pinned (the base LF's own RL loop switches during the solve; the DISTR_Q
+       dump shows passes 13 and 14 in a base-only run, so there are several), and the row modes are
+       that snapshot; or
+  (C2) a DIFFERENT bus whose `qRow[bn]` ALIASES the same dummy row has an active BUS_TARGET_Q and
+       assigned both the target and mode 4 there.
+These have different fixes, so decide first. **Cheapest test:** a one-line trace at the
+`mode[qr] = 4` site printing `bus`, `qr`, `q` and the target, gated on a row env, run on the SA
+(not base-only) and filtered to rows 14113-14119. That names the bus and the pass.
+
+**D. Then the fix, by branch.**
+  - If C2: the aliasing is the bug — one row cannot host two buses' reactive equations. Fix where
+    `qRow`/`relocatedQRow` assigns it, the same family as [[#62]]-[[#64]].
+  - If C1: the device's base must reach OLF's final pin state. Either extract after the base's outer
+    loops have settled, or let the device's own RL kernel unpin (mode 4 -> the DISTR_Q row) as OLF
+    does. Note the trap: OLF's RL trace shows only ONE base PQ->PV switch in the whole run
+    (VL-5997_1), so if those buses were never pinned by OLF, C1 reduces to "the snapshot was taken
+    before the VC merge was applied" — check `getMergedControllerElements()` size at extraction
+    (the DISTR_Q dump prints the bus's OWN control, which shows 1 member; `mainGenVc` resolves the
+    MAIN control and is what the row logic should use).
+  - Either way the device needs somewhere to put a relocated member's DISTR_Q that is not its own
+    `BUS_V` row (taken by `ZERO_V`) and not shared with an own-Q balance. The 2-way stock twin
+    (`dqAlt`/`dqSel`) is the existing mechanism and is NOT enough: it answers "the coupler died,
+    move it back", not "this row must host a GROUP equation".
+
+**E. Gate for any change.** 177-test `GpuBatchedAcSecurityAnalysisTest`; `GpuLoadFlowTest` /
+`GpuFullNewtonTest` / `GpuAcStructuresTest` / `GpuLineSearchTest`; full busbar scope with
+violations diff 0, base BUSDIFF 0, worst DAP <= 1.4e-03 MW and no loss of device coverage
+(6550/6667). It changes the BASE for ~341 members, so also re-check the base's own
+`distributedActivePower` (currently cpu 14.359916545 vs gpu 14.359916552 MW).
+
+**F. Harness gap to close regardless.** `BUSDIFF` compares BUS VOLTAGES ONLY. Add the dummy columns
+(or all state variables) to the comparison, or this class of difference stays invisible — it is how
+an 8.4e-03 pu reactive-split error survived every "bus voltages exact" claim in this file.
+
+**The only valid comparison, and the discipline broken five times here:** both arms at the SAME
+stage, from the SAME run. `OLF_GPU_EQ_DUMP` does exactly that for the BASE (it writes the device's
+system and OLF's own dump of the same state), and `OLF_GPU_TARGET_ROW` separates a STRUCTURAL
+mode (`baseMode`) from a per-scenario one. If the two arms already disagree on this group in the
+BASE, the defect is in extraction and the base is where to fix it; if they agree there, it is
+per-contingency.
+
+**Two retractions, kept visible.** (1) "the device's dummies do not satisfy the chain" — backwards.
+(2) "OLF's converged state leaves 1.5e-03..4.2e-03 on its own BUS_TARGET_Q equations" — invalid:
+computed from the PRE-solve targets in F0 against the POST-solve state, and a BUS_TARGET_Q target
+is not constant through a solve (a pin rewrites it with `setGenerationTargetQ(limit)`). OLF is the
+reference; a computation showing it violating its own equations is evidence the computation is
+wrong. Third point-in-time error of that session after `F0` and the dummy state — dump state and
+targets AT THE SAME POINT.
+
+**Why it hid for weeks:** `BUSDIFF` compares BUS VOLTAGES ONLY, so an 8.4e-03 dummy difference is
+invisible to it, in the base as much as in a contingency. Worth closing on its own.
 
 ### #65 — Duplicate target overrides: measured, then fixed at the producer (2026-09-30)
 
@@ -232,6 +1030,22 @@ coupled sections, the population [[#62]]'s fixes moved most.
 ### #62 — Coupler relocation: a structural row a contingency un-relocates (2026-09-30)
 
 FIXED (54a866a) for the two middle-section fixtures; the pattern is the thing to remember.
+
+**Attribution, corrected.** The per-scenario STOCK PLACEMENT this builds on (`dqAlt`/`dqSel`, the
+three-destination stock pair on the reloc pool, `stockPairOut`/`stockPairPick`) was the
+**2026-09-29** session's work (ec422f1, 53c8035, 5353094), not this one's. Do NOT read the
+`Claude-Session:` trailer as provenance — this environment stamps the SAME session URL on every
+commit made from it, so several distinct sessions share one URL. The AUTHOR DATE is the signal
+(and the `Co-Authored-By` model line: 1a0bf35 is Claude Fable 5.1).
+
+**That session left a handover naming all three suspects, and it was not read first.** Its entry
+ends: "So one consumer still reads the dead row. Next: ... check which of the member's tables
+still points at c12's `DUMMY_Q`: the reactive-limit entry rows, the DISTR_Q member row (`mRow`),
+or the injection-override rows." Two of the three were then rediscovered independently over a
+full day — the DISTR_Q member row (787985b) and the reactive-limit rows (9b957d3, the q read at
+`rlQrow`) — plus the DS participant row. **The third, the INJECTION-OVERRIDE rows, is still
+unverified: no measurement either way.** Read the newest `docs/tasks.md` entry before starting;
+it is a handover from whoever ran last, not a diary.
 
 `dsPhiRow` and `dqMemberRow` are **structural** — decided once per extraction. Under the
 coupler-tree relocation a child bus's P/Q balances live on its parent coupler's

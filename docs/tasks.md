@@ -2196,7 +2196,49 @@ mismatch propagates into large voltage/angle corrections network-wide.
   `MaxVoltageChangeStateVectorScaling`, with the run's own `maxDv = 0.4` / `maxDphi = 1` and the same
   `maxNewtonRaphsonIterations = 30`.
 
-**THE DECISIVE MEASUREMENT NOT YET MADE: OLF's OWN clamp factor for the same contingency.** Both
+**ANSWERED: THE TWO ARMS TAKE THE SAME NEWTON PATH. [[#67]] IS AN ITERATION-BUDGET PROBLEM, NOT AN
+EQUATION PROBLEM (2026-10-02).** `MaxVoltageChangeStateVectorScaling` in the fork now prints its own
+`stepSize` under `OLF_STEP_TRACE=1`, scoped by `OlfTraceScope` (so `OLF_TRACE_CTG=<id>` isolates one
+contingency). Run against `OLF_GPU_STEP_TRACE=1` on the same GPU-only run — the rejected contingency
+is CPU-routed INSIDE the GPU provider, so one run produces both sides:
+
+| step | device `f` | OLF `f` |
+|---|---|---|
+| 0 | 0.180879102 | 0.180878732 |
+| 1 | 0.185022873 | 0.185022597 |
+| 2 | 0.0503344306 | 0.0503343347 |
+| 3 | 0.121389299 | 0.121389102 |
+| 4 | 0.119122665 | 0.119122490 |
+| 5 | 0.105761096 | 0.105760896 |
+
+**Over steps 0..29 the maximum RELATIVE difference is 7.098e-06 (median 1.891e-06), and the binding
+variable is the same every time** — device rows 5706 / 7178 / 7418 against OLF's 5704 / 7168 / 7408,
+the same variables under each arm's own numbering (`elem2853` IS `VL-2525_0`). By the standing rule,
+identical trajectories mean identical equation systems: that question is now closed for this
+contingency, from both ends.
+
+**What both arms actually do: they OSCILLATE.** `f` alternates ~0.19 / ~0.018 with `maxDv` swinging
+2.05 <-> 22.4 — a limit cycle under the MAX_VOLTAGE_CHANGE clamp, on both sides. The contingency is
+simply HARD: 9 islanded buses, 17 branches out, 124.3 MW of load to redistribute, and a Newton that
+cannot settle at `maxDv = 0.4`.
+
+**The ONLY difference is what each side does when the cycle outlasts the budget.** At step 30 the
+device's factor goes to 1 — it has abandoned the scenario (30 inner iterations in `outer 0`
+exhausted, `status -2`, `max-iter-bad-solve`) — while OLF is still oscillating at `f = 0.193713` and
+keeps going, because its `maxNewtonRaphsonIterations = 30` is a budget PER NR SOLVE that each
+outer-loop pass refreshes, whereas the device spends all 30 inside its first outer pass and rejects.
+
+**So the 108 are not a device defect in the equations.** The CPU fallback then solves them and the
+run's status counts match, which is why no result was ever wrong — the cost is purely that 108
+contingencies leave the device, against the no-CPU-fallback goal. The fix is therefore about BUDGET
+and the stall, not about finding a wrong equation:
+
+1. Give the device the same budget semantics OLF has — 30 inner iterations PER OUTER PASS rather
+   than 30 before the first outer pass completes. Cheapest, and it is what OLF actually does.
+2. Break the limit cycle. Both arms oscillate, so this helps both; it is an upstream-able
+   observation about `MAX_VOLTAGE_CHANGE` on this network rather than a GPU fix.
+
+**Superseded (kept): the decisive measurement not yet made was OLF's own clamp factor.** Both
 arms have the same equations, the same targets, comparable initial residuals at the same equations
 (OLF 13.37 / 7.25 / 7.02 / 10.60 / 7.88 / 6.12 pu against the device's 11.02 / 9.79 / 7.50 / 6.70 /
 6.70 / 6.13 at the matching coupler children) and the same clamp rule — yet OLF converges inside 30

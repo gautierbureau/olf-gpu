@@ -1959,8 +1959,39 @@ properly the row must be made to carry the PILOT-CARRIER form, which is what `st
 `stateQCarrier` already compute for a candidate-table pilot — i.e. the question is whether the
 in-kernel mode scan picks that carrier for these 2-member pilot-self groups, and if not, why.
 
+**RETRACTED 2026-10-02 — the 2-row difference is a FALSE POSITIVE. It compared the STRUCTURE against
+OLF's RUNTIME.** Task-1 follow-up, reading the kernel rather than inferring:
+
+- **Does the scan select the pilot-carrier for a 2-member pilot-self group? YES.** The pilot's
+  `qRowAlt = -244` decodes as `-2 - g` (`ExtractionColumns`), i.e. candidate-table group 242, so the
+  pilot's Q is routed by the in-kernel scan. `relocChoose` picks "the FIRST member row whose
+  per-scenario mode is neither identity (0) nor pinned (4)"; `VL-5997_0`'s own V row is mode 0
+  (it holds `bus_target_v`), so the scan picks the member's row — **14403**, exactly where OLF puts
+  the pilot's pinned `bus_target_q`.
+- **Is the sharing gated at that row? YES, and the gate already exists** — the plan-B4 branch in
+  `fillDistrQBatch`: `if (g >= 0 && !psGateOff && d0 <= -2 && -2 - d0 == qrRows[qrPtr[g] +
+  relocChoose(...)]) return;`, whose own comment is "the CURRENT pilot-Q carrier's row … its DISTR_Q
+  row is inactive this scenario, exactly like OLF deactivating the new free member's DISTR_Q".
+- **And `psGateOff` is false exactly when it must be.** `pilotSelfGateBatch` sets
+  `skip = limitType == 0 ? 1 : 0` — an UNPINNED pilot skips the suppression (its q feeds those very
+  sharing rows, so suppressing would leave the system one equation short: the comment records that
+  measurement), a PINNED pilot does not. `VL-5997_0`/`VL-6112_0` are pinned (`enabled=false`), so the
+  gate FIRES and the `dq` emission at 14403/14439 stops for the scenario.
+
+So the runtime equation set at those rows is the pilot's balance alone, which is what OLF has. The
+`336 live vs 334` count read dq-carrying rows and their BASE MODE out of the structure — which holds
+the terms CANONICALLY by design — and compared that against OLF's active set. Wrong quantity. It
+also explains the forced-mode-4 result above: that probe broke a correctly-gated arrangement, which
+is why coverage FELL.
+
+**Net effect on [[#67]]: there is NO identified equation-system difference.** Everything the dumps
+can compare agrees — PV set, per-bus V-row occupant over 6237 buses, islanded sets, scheduled loss,
+step clamp, iteration cap, and now the two rotation-carrier rows too. The remaining blind spot is
+the one the next item attacks: the **649 relocated buses**, where a per-bus V-row comparison is
+invalid by construction.
+
 **Still open, and the honest state of [[#67]]:** the equation systems agree everywhere the dumps can
-compare them EXCEPT these 2 rows; the targets, islanded sets, step clamp and iteration cap all
+compare them; the targets, islanded sets, step clamp and iteration cap all
 agree; the device nonetheless cannot finish the first Newton solve on 108 contingencies; and the one
 difference found has not been shown to cause it. The 649 relocated buses remain the region a per-bus
 comparison cannot reach, and the reconciliation above (OLF 334 active vs device 336 live + 9 gated)

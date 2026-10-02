@@ -430,6 +430,21 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         }
     }
 
+    /** {@code OLF_GPU_SA_STATUS_LIST=1}: every NON-CONVERGED contingency of an arm, by id. The
+     *  aggregate counts say the arms AGREE; only the ids say WHICH contingencies OLF itself fails, and
+     *  that is what splits a device reject into "OLF fails it too, so the device may answer it
+     *  directly" and "OLF converges it, so the device is losing one" (tasks #67). */
+    private static void listNonConverged(String arm, SecurityAnalysisResult r) {
+        if (!"1".equals(System.getenv("OLF_GPU_SA_STATUS_LIST"))) {
+            return;
+        }
+        for (PostContingencyResult p : r.getPostContingencyResults()) {
+            if (p.getStatus() != PostContingencyComputationStatus.CONVERGED) {
+                System.out.println("  NONCONV " + arm + " " + p.getContingency().getId() + " " + p.getStatus().name());
+            }
+        }
+    }
+
     private static Map<String, Long> statusCounts(SecurityAnalysisResult r) {
         Map<String, Long> counts = new TreeMap<>();
         for (PostContingencyResult p : r.getPostContingencyResults()) {
@@ -1156,6 +1171,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         long cpuViolations = violationCount(cpu);
         long gpuViolations = violationCount(gpuCold);
         System.out.printf("  statuses: CPU=%s GPU=%s%n", statusCounts(cpu), statusCounts(gpuCold));
+        listNonConverged("CPU", cpu);
+        listNonConverged("GPU", gpuCold);
         System.out.printf("  violations: CPU=%d GPU=%d diff=%d%n", cpuViolations, gpuViolations,
                 Math.abs(cpuViolations - gpuViolations));
 

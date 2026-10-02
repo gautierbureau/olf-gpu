@@ -2021,6 +2021,62 @@ prints targets only for rows DIFFERING from base) and OLF has its own `TargetVec
 dump BOTH target vectors for a rejecting scenario, keyed by element, and diff per row** — the same
 same-point, keyed-by-id discipline that cracked [[#66]].
 
+### #69 — the non-batched tail SPLIT: 55 are genuinely lost, and one class is an OUTER-loop cycle (2026-10-02)
+
+**The split, measured.** New `OLF_GPU_SA_STATUS_LIST=1` lists every NON-CONVERGED contingency of each
+arm BY ID (the aggregate counts only say the arms agree; the ids say WHICH contingencies OLF itself
+fails). Both-arms full busbar scope:
+
+```
+CPU non-converged: 65  {MAX_ITERATION_REACHED: 60, FAILED: 5}
+GPU non-converged: 65  {MAX_ITERATION_REACHED: 60, FAILED: 5}
+same id sets: True    status disagreements: 0
+```
+
+The arms' non-converged ID SETS are IDENTICAL with zero status disagreements — a stronger check than
+the count equality the test asserts. Intersecting those with the device's rejects:
+
+| device rejects (`status=-2`) | 84 |
+|---|---|
+| OLF ALSO fails -> the device may answer directly | **29** |
+| OLF CONVERGES -> genuinely lost to the CPU | **55** |
+
+So after [[#67]]'s retry the remaining tail is two populations, and only the 55 are a real loss.
+(`BUS-1039_BBS`, the contingency [[#67]] was diagnosed on, is in OLF's own
+`MAX_ITERATION_REACHED` set and is no longer rejected — the retry answers it. That conclusion holds.)
+
+**One of the 55 characterised, and it is an OUTER-LOOP LIMIT CYCLE.** `BUS-1219_BBS` (slot 241 via
+`OLF_GPU_ROWMODE_DUMP_CTG`), device `OLF_GPU_CONV_TRACE=241` against OLF's `OLF_STEP_TRACE`:
+
+```
+OLF : 11 steps, f=1.00000000 EVERY ONE (no clamping at all), maxDv 0.033 -> 0.0011 -> 8.1e-05,
+      quadratic, across 2 NR solves.
+device, per pass:  37.88 -> 1.45 -> 0.0118   converged
+                    6.43 -> 0.0597 -> 4.1e-05 converged
+                    5.5952083543771 -> 4.181 -> 2.767 -> 1.353 -> 2.7e-11 converged
+                    5.5952083543765 -> 4.181 -> 2.767 -> 1.353 -> 2.5e-11 converged
+                    5.5952083543765 -> ... BIT-IDENTICAL ... converged
+                    (140 convergence checks over 32 passes)
+GPU_REJECT slot=241 reason=outer-loop-budget outer=32 it=0
+```
+
+**The inner Newton CONVERGES EVERY PASS; the OUTER loop re-poses a BIT-IDENTICAL problem forever**
+and the scenario dies on the outer budget, not the inner one. Within a pass the `inf` residual falls
+by EXACTLY 1.0 per step (3.95640976953125 -> 2.95640977 -> 1.95640977 -> 0.95640977), which is
+exactly `maxDphi = 1`: a ~4-unit correction on a unit-diagonal (DUMMY) row delivered 1.0 at a time.
+Then the outer loop re-applies the same ~4-unit offset. Some outer loop is not registering its own
+effect — it reads a state the inner solve has already fixed and re-applies the same delta.
+
+**DO NOT GENERALISE FROM IT.** `outer-loop-budget` is only ~5 of the rejects against 108
+`max-iter-bad-solve`, so `BUS-1219_BBS` is the MINORITY class and at least 50 of the 55 fail the
+other way. The next step is to pick a `max-iter-bad-solve` member OF THE 55 (not of the 29 OLF also
+fails, which is the trap that made [[#67]] look like an equation bug) and trace it the same way:
+`OLF_GPU_ROWMODE_DUMP_CTG=<id>` for the slot, then `OLF_GPU_CONV_TRACE=<slot>` against
+`OLF_STEP_TRACE=1 OLF_TRACE_CTG=<id>`.
+
+**Which outer loop cycles is NOT yet identified** for the `BUS-1219_BBS` class — that needs the
+device's outer-loop driver trace, not another convergence trace.
+
 ### #68 — the HVDC AC-emulation target lands on a relocated converter bus's ZERO_PHI row (2026-10-02)
 
 Found by doing what the equation-identity comparison could not: diffing the NUMBERS. Added

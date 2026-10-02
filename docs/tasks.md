@@ -2067,9 +2067,43 @@ exactly `maxDphi = 1`: a ~4-unit correction on a unit-diagonal (DUMMY) row deliv
 Then the outer loop re-applies the same ~4-unit offset. Some outer loop is not registering its own
 effect — it reads a state the inner solve has already fixed and re-applies the same delta.
 
-**DO NOT GENERALISE FROM IT.** `outer-loop-budget` is only ~5 of the rejects against 108
-`max-iter-bad-solve`, so `BUS-1219_BBS` is the MINORITY class and at least 50 of the 55 fail the
-other way. The next step is to pick a `max-iter-bad-solve` member OF THE 55 (not of the 29 OLF also
+**AND THE GENERALISATION WOULD HAVE BEEN WRONG — the 55 are almost all QUALIFICATION REFUSALS, not
+solver failures.** Tracing a second member, `BUS-2341_BBS_1`, exposed it: **OLF converges it in 2
+STEPS** (trivial), and the device produces `status=-2` with **NO kernel `GPU_REJECT slot=` line at
+all** and no slot from `OLF_GPU_ROWMODE_DUMP_CTG`. The reason is
+`GpuBatchedSecurityAnalysisSolver:431`: a scenario whose result row is NULL — one never batched —
+is marked `STATUS_REJECTED`. **So `RUNTIME:status=-2` CONFLATES kernel rejects with PLAN-TIME
+refusals**, and the census's `PLAN:` entries carry no contingency id (only `MAPPER:` reasons do),
+which is why the plan population was invisible.
+
+The accounting then closes EXACTLY (arithmetic, not id-level proof — the `PLAN:` trace prints no
+ids):
+
+| population | count | OLF | nature |
+|---|---|---|---|
+| `PLAN:VC_REMERGE_MULTI` | 47 | CONVERGES | device DECLINES to batch |
+| `PLAN:VC_REMERGE_PINNED_MAIN` | 3 | CONVERGES | same |
+| `PLAN:VC_REMERGE_RELOC_VROW` | 3 | CONVERGES | same |
+| `PLAN`/`VALIDATOR:ISLANDS_SLACK` | 1 | CONVERGES | same |
+| runtime reject, OUTER-LOOP CYCLE (`BUS-1219_BBS`) | 1 | CONVERGES | genuine SOLVER BUG |
+| runtime rejects, `max-iter-bad-solve` | 29 | ALSO FAILS | normal — answer directly |
+| **leaving the device** | **84** | | |
+
+54 plan + 1 solver bug = the 55 lost; + 29 answerable = 84. **So the dominant gap is NOT a solver
+bug**: it is `VC_REMERGE_MULTI`, where a coupler outage re-splits a merged generator-voltage-control
+group and the re-homed cluster is not LOCAL (`if (!local) return new ReHomed(pv, left,
+"VC_REMERGE_MULTI")` in `GpuBatchQualification`), so the device refuses the layout. Supporting it
+means laying out a RE-HOMED REMOTE group per scenario — real work, not a bug fix.
+
+**Priority follows the user's rule** ("if the CPU fails it is normal that the GPU fails and it should
+answer directly; if the CPU converges and the GPU does not, it is a bug"): the 29 cannot be answered
+directly UNTIL the 55 are fixed, because the device cannot tell the populations apart in advance —
+"device fails ⇒ report it" is only safe once a device failure implies an OLF failure. So: 47
+`VC_REMERGE_MULTI` first (the bulk), then the 7 other plan refusals, then the 1 outer-loop cycle,
+and the 29 come along for free.
+
+**Superseded caution (kept):** `outer-loop-budget` is only ~5 of the kernel rejects against 108
+`max-iter-bad-solve`, so `BUS-1219_BBS` looked like a minority class of the 55. The next step is to pick a `max-iter-bad-solve` member OF THE 55 (not of the 29 OLF also
 fails, which is the trap that made [[#67]] look like an equation bug) and trace it the same way:
 `OLF_GPU_ROWMODE_DUMP_CTG=<id>` for the slot, then `OLF_GPU_CONV_TRACE=<slot>` against
 `OLF_STEP_TRACE=1 OLF_TRACE_CTG=<id>`.

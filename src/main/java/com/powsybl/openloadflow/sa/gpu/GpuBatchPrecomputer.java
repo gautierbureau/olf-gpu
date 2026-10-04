@@ -435,7 +435,9 @@ final class GpuBatchPrecomputer {
             for (BatchScenarioResult r : results) {
                 if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                     System.err.println("QUALIFY_TRACE result " + r.contingencyId() + " status=" + r.convergenceStatus()
-                            + " iters=" + r.iterations() + " norm=" + r.finalMismatch());
+                            + " iters=" + r.iterations() + " norm=" + r.finalMismatch()
+                            + (GpuBatchScopeCensus.planRefusedIds().contains(r.contingencyId())
+                                    ? " (never batched: refused at plan time)" : ""));
                 }
                 if (r.hasConverged()) {
                     states.put(r.contingencyId(), r.state());

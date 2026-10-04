@@ -1605,6 +1605,23 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
      * installs, and the surviving sharing rows are plain DISTR_Q rows.
      */
     private static Network lostPilotSectionNetwork() {
+        return lostPilotSectionNetwork(true);
+    }
+
+    /** @param pilotLine whether the pilot section bbs0 carries a line. WITH it bbs0 is the coupler tree's ROOT
+     *  (GpuAcRowIndexing roots a tree at the first bus with an impedant branch) and the elected main vl12_1 is
+     *  the killed coupler's CHILD — its identity comes from the stock placement. WITHOUT it bbs0 cannot root
+     *  a tree, vl12_1 becomes the root and keeps its OWN row, so its identity is the explicit ROW_V_IDENTITY
+     *  of remoteMainIdentityEntries — rte6515 BUS-2640_BBS_1's shape, where that row also carries the
+     *  member's DISTR_Q seed. */
+    private static Network lostPilotSectionNetwork(boolean pilotLine) {
+        return lostPilotSectionNetwork(pilotLine, false);
+    }
+
+    /** @param pilotPinned cap g0's reactive ceiling so the BASE load flow pins the pilot at MAX_Q before it is
+     *  lost (rte6515 BUS-6194_BBS_1 / BUS-6003_BBS_1: the islanded pilot's limit type still read its base pin,
+     *  which the pilot-self gate took as "its balance rides the carrier"). */
+    private static Network lostPilotSectionNetwork(boolean pilotLine, boolean pilotPinned) {
         Network network = Network.create("lost-pilot-section", "code");
         com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
         for (String vl : List.of("vl0", "vl3", "vl4")) {
@@ -1617,6 +1634,10 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         vl12.getNodeBreakerView().newBusbarSection().setId("bbs0").setNode(0).add();
         vl12.getNodeBreakerView().newBusbarSection().setId("bbs1").setNode(1).add();
         vl12.getNodeBreakerView().newBusbarSection().setId("bbs2").setNode(2).add();
+        // setRetained here is INERT for the security analysis: OLF re-derives the retained set from the
+        // contingency list (only a switch some listed contingency opens stays a bus-breaker separator and
+        // becomes an LfSwitch). The couplers exist on the LF network because the test lists a loss on each
+        // side of them, see deviceLostPilotSectionReHomesSurvivingClusterMatchesCpu.
         vl12.getNodeBreakerView().newBreaker().setId("c01").setNode1(0).setNode2(1).setRetained(true).setOpen(false).add();
         vl12.getNodeBreakerView().newBreaker().setId("c12").setNode1(1).setNode2(2).setRetained(true).setOpen(false).add();
         int node = 10;
@@ -1636,7 +1657,10 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         vl12.newGenerator().setId("g2").setNode(15)
                 .setMinP(0).setMaxP(500).setTargetP(100).setTargetQ(0).setTargetV(405).setVoltageRegulatorOn(true).add();
         for (String g : List.of("g0", "g1", "g2")) {
-            network.getGenerator(g).newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(300).add();
+            // pilotPinned: g0 cannot cover its share of the base reactive need, so the BASE load flow pins it at
+            // MAX_Q while g1/g2 keep holding 406 kV (OLF: BUS_TARGET_V stays on the main, g0 PQ at its limit).
+            network.getGenerator(g).newMinMaxReactiveLimits().setMinQ(-300)
+                    .setMaxQ(pilotPinned && g.equals("g0") ? 5 : 300).add();
         }
         network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
                 .setMinP(0).setMaxP(2000).setTargetP(500).setTargetV(400).setVoltageRegulatorOn(true).add();
@@ -1647,7 +1671,9 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .setVoltageLevel1("vl12").setNode1(n)
                 .setVoltageLevel2(ends[1]).setBus2(ends[1] + "_b").setConnectableBus2(ends[1] + "_b")
                 .setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
-        line.accept(new String[] {"l0", "vl0"}, 12);
+        if (pilotLine) {
+            line.accept(new String[] {"l0", "vl0"}, 12);
+        }
         line.accept(new String[] {"l1", "vl3"}, 14);
         line.accept(new String[] {"l2", "vl4"}, 16);
         network.newLine().setId("l34").setVoltageLevel1("vl3").setBus1("vl3_b").setConnectableBus1("vl3_b")
@@ -1661,8 +1687,51 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     void deviceLostPilotSectionReHomesSurvivingClusterMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        // bbs2's loss is in the list ONLY so that c12 exists on the LF network: OLF retains exactly the
+        // node-breaker switches some listed contingency opens (Networks.retainAndCloseNecessarySwitches
+        // resets every other retained flag first), so with bbs0 alone c12 collapses, vl12_1 and vl12_2
+        // are ONE bus and the scenario degenerates to the single-bus LOCAL re-home. Measured: the device
+        // extraction then had two vl12 buses and one coupler, and this test passed through the old path.
         assertMergedPilotLossMatchesCpu(lostPilotSectionNetwork(),
-                List.of(new Contingency("bus-pilot", new com.powsybl.contingency.BusbarSectionContingency("bbs0"))));
+                List.of(new Contingency("bus-pilot", new com.powsybl.contingency.BusbarSectionContingency("bbs0")),
+                        new Contingency("bus-leaf", new com.powsybl.contingency.BusbarSectionContingency("bbs2"))), 2);
+    }
+
+    /** The same loss with the elected main the coupler tree's ROOT (bbs0 has no line, so it cannot root a
+     *  tree): vl12_1 keeps its own row and its voltage identity is the explicit ROW_V_IDENTITY, on the very row
+     *  the islanded-pilot path also seeds with vl12_1's renormalized DISTR_Q target. rte6515 BUS-2640_BBS_1:
+     *  the two overrides raced on the device, the 0.0 seed won in the 6667-contingency batch (V driven to 0,
+     *  193.85 MW of distributed active power and +197 violations against OLF) and the 1.034 identity won in a
+     *  3-contingency batch. A mode-0 row no longer takes a DISTR_Q seed and GpuBatchOverrides never hands the
+     *  device one row twice. */
+    @org.junit.jupiter.api.Test
+    void deviceLostPilotSectionRootMainExplicitIdentityMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        GpuBatchScopeCensus.reset();
+        assertMergedPilotLossMatchesCpu(lostPilotSectionNetwork(false),
+                List.of(new Contingency("bus-pilot", new com.powsybl.contingency.BusbarSectionContingency("bbs0")),
+                        new Contingency("bus-leaf", new com.powsybl.contingency.BusbarSectionContingency("bbs2"))), 2);
+        assertEquals(0L, GpuBatchScopeCensus.snapshot().getOrDefault("HOST:OVERRIDE_CONFLICT", 0L).longValue(),
+                "a sound plan writes every row's target once");
+    }
+
+    /** The lost pilot was PINNED at its reactive ceiling in the BASE (g0 capped at 5 MVar). OLF: the base keeps
+     *  BUS_TARGET_V on vl12_0 with g1/g2 controlling and g0 PQ at its limit; the contingency then removes the bus
+     *  and re-homes the survivors exactly as when the pilot was unpinned. On the device the islanded pilot's RL
+     *  entry kept its base limit type, which the pilot-self gate read as "pinned: its balance rides the carrier" —
+     *  it suppressed the carrier member's own DISTR_Q for a balance OLF had removed with the bus. rte6515
+     *  BUS-6194_BBS_1 (FAILED where OLF converges, 60 violations lost) and BUS-6003_BBS_1 (0.473 MW). */
+    @org.junit.jupiter.api.Test
+    void deviceLostBasePinnedPilotSectionMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        GpuBatchScopeCensus.reset();
+        assertMergedPilotLossMatchesCpu(lostPilotSectionNetwork(true, true),
+                List.of(new Contingency("bus-pilot", new com.powsybl.contingency.BusbarSectionContingency("bbs0")),
+                        new Contingency("bus-leaf", new com.powsybl.contingency.BusbarSectionContingency("bbs2"))), 2);
+        assertEquals(0L, GpuBatchScopeCensus.snapshot().getOrDefault("HOST:OVERRIDE_CONFLICT", 0L).longValue(),
+                "a sound plan writes every row's target once");
     }
 
     private static Network mergedPilotLossNetwork() {
@@ -2138,14 +2207,18 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     private void assertMergedPilotLossMatchesCpu(Network network, List<Contingency> ctgs) {
+        assertMergedPilotLossMatchesCpu(network, ctgs, 1);
+    }
+
+    private void assertMergedPilotLossMatchesCpu(Network network, List<Contingency> ctgs, int expectedOnDevice) {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true);
         com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
                 .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
                 .setSlackBusesIds(List.of("vl0_b"));           // breakers mode: bus/breaker ids
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
-        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
-                "the pilot-islanding bus loss must batch on-device (or the test proves nothing)");
+        assertEquals(expectedOnDevice, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "every listed bus loss must batch on-device (or the test proves nothing)");
     }
 
     /** A busbar-section loss that islands the PILOT (controlled section) of a voltage control whose

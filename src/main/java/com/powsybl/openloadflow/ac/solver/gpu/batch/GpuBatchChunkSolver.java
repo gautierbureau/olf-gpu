@@ -705,6 +705,9 @@ final class GpuBatchChunkSolver {
                                     }
                                 }
                             }
+                            // Rows that host a PILOT'S relocated reactive balance this scenario (the carrier a frozen base
+                            // carrier handed it to): a DISTR_Q target seed must not land on them, see the seed loop below.
+                            gnu.trove.set.hash.TIntHashSet pilotBalanceRows = new gnu.trove.set.hash.TIntHashSet();
                             int[] frozen = frozenRowsByIndex[ci];
                             if (frozen.length > 0) {         // fragmenting outage: freeze the islanded buses' rows
                                 int[] row = baseRowMode.clone();
@@ -784,6 +787,7 @@ final class GpuBatchChunkSolver {
                                     if (baseCarrier >= 0 && newCarrier >= 0 && newCarrier != baseCarrier
                                             && row[baseCarrier] == 0 && baseRowMode[baseCarrier] != 0 && !unpinnedPilotSelf) {
                                         overrides.add(s * n + newCarrier, baseTargets[baseCarrier]);
+                                        pilotBalanceRows.add(newCarrier);
                                         if (System.getenv("OLF_GPU_SA_RESID") != null) {
                                             System.err.printf("CARRIER_MOVED ctg=%s group=%d from=%d to=%d pilotQ=%.9f%n",
                                                     contingencies.get(ci).contingencyId(), g, baseCarrier, newCarrier,
@@ -1051,23 +1055,43 @@ final class GpuBatchChunkSolver {
                                             // Seed only where the row still HOSTS a DISTR_Q equation this
                                             // scenario. Mode 4 means it hosts its own reactive balance (an RL
                                             // pin, or a control the contingency killed and whose BUS_TARGET_Q
-                                            // the injection override owns), and updateDistrQTargetsBatch
-                                            // refuses to maintain a DISTR_Q target there -- "A DISTR_Q target
-                                            // has no business here" -- so uploading one is a write this code
-                                            // does not own. (Mode 0, the voltage identity the same kernel also
-                                            // refuses, is NOT skipped here: no measured conflict was on a
-                                            // mode-0 row, and skipping it moved deviceMultiChunkMatchesCpu's
-                                            // B3 by 1.06e-12 kV -- past its 1e-12 assertion. Guard what was
-                                            // measured.) It landed as a SECOND
-                                            // override on a row that already had one, and
-                                            // applyTargetOverrideBatch resolves two entries on one row by a
-                                            // race (one thread per entry writing target[ovIndex[k]]).
-                                            // Measured over the full busbar scope (OLF_GPU_OV_DUP_TRACE):
-                                            // 26 rows across 24 contingencies disagreed, EVERY one of them
-                                            // mode 4, all from this one site -- among them BUS-1359_BBS_1 and
-                                            // BUS-1869_BBS_1 (the +-2 violation pair) and BUS-1599_BBS_1 (the
-                                            // second-worst distributed-power difference).
-                                            if (dqMode == 4) {
+                                            // the injection override owns); mode 0 means it is an IDENTITY —
+                                            // a re-homed control's voltage target (reHomedPvEntry, the remote
+                                            // main of a split group) or a frozen/outaged row. updateDistrQ-
+                                            // TargetsBatch refuses to maintain a DISTR_Q target on either ("A
+                                            // DISTR_Q target has no business here"), so uploading one is a
+                                            // write this code does not own: it lands as a SECOND override on a
+                                            // row that already has one. Measured over the full busbar scope
+                                            // (OLF_GPU_OV_DUP_TRACE): 26 mode-4 rows across 24 contingencies
+                                            // disagreed, all from this site — BUS-1359_BBS_1 and BUS-1869_BBS_1
+                                            // (the +-2 violation pair), BUS-1599_BBS_1. Then, once the split
+                                            // re-homes batched (tasks #70), the mode-0 case: BUS-2640_BBS_1's
+                                            // elected main VL-2640_1 got its 1.034 identity on row 5956 AND
+                                            // this seed's 0.0 (its renormalized DISTR_Q target); the device
+                                            // picked 0.0 in the full 6667-contingency batch (slot 1844: V
+                                            // driven to 0, 193.85 MW of distributed power, +197 violations)
+                                            // and 1.034 in a 3-contingency batch (slot 0, bit-identical to
+                                            // OLF). The earlier "mode 0 is NOT skipped: skipping it moved
+                                            // deviceMultiChunkMatchesCpu by 1.06e-12 kV" was the race's own
+                                            // noise being guarded.
+                                            if (dqMode == 4 || dqMode == 0) {
+                                                continue;
+                                            }
+                                            // ...nor on the row that HOSTS A PILOT'S BALANCE this scenario: a frozen base
+                                            // carrier hands the pilot's reactive balance to the next live member's row
+                                            // (the block above stamps the pilot's target there), and that member's own
+                                            // renormalized DISTR_Q target is not that row's equation any more. The two
+                                            // writes raced on the device and the pilot's won by luck — measured once the
+                                            // race was closed: deviceBusLossIslandingBaseCarrierMemberMatchesCpu, row 2
+                                            // −2.0 (b4's load) shadowed by this seed's 0.0, b2 22.49 → 22.04 kV.
+                                            if (pilotBalanceRows.contains(dqRow2)) {
+                                                continue;
+                                            }
+                                            // Any OTHER earlier override on a seed row is a producer this code does not
+                                            // know about: keep the more specific one, and count it so a composition gap
+                                            // (two seeds for one row from two paths) is measurable, never a race.
+                                            if (overrides.has(s * n + dqRow2)) {
+                                                com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("HOST:DQSEED_SHADOWED");
                                                 continue;
                                             }
                                             overrides.add(s * n + dqRow2, go.dqTargetValues()[t]);
@@ -1330,6 +1354,15 @@ final class GpuBatchChunkSolver {
                     }
                     int[] targetOverrideIndex = overrides.indexArray();
                     double[] targetOverrideValue = overrides.valueArray();
+                    if (overrides.conflictingAddCount() > 0) {
+                        // Two producers disagreed on one row's target. GpuBatchOverrides resolved it to the
+                        // later one (no row reaches the device twice), but a sound plan has NO such row:
+                        // every one so far was a write that should not exist (a DISTR_Q seed on a mode-0/4
+                        // row). Name it; OLF_GPU_OV_DUP_TRACE=1 lists the rows.
+                        LOGGER.warn("GPU batched SA: {} conflicting target overrides in chunk at {} (resolved to the later"
+                                + " writer; OLF_GPU_OV_DUP_TRACE=1 lists them)", overrides.conflictingAddCount(), chunkStart);
+                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("HOST:OVERRIDE_CONFLICT");
+                    }
                     if (GpuBatchOverrides.dupTrace()) {
                         // The invariant GpuBatchOverrides states in its javadoc, measured on the entries
                         // actually handed to the device: a row with two entries is written by two threads

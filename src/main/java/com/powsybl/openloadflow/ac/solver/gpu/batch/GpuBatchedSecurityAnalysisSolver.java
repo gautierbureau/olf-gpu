@@ -428,6 +428,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         plan.islandedNumsByIndex()[i] != null ? plan.islandedNumsByIndex()[i] : new int[0],
                         preDistributedByIndex[i], distributedByIndex[i]));
             } else {
+                // Never batched: the plan refused it. Named by id for the harness, because the same
+                // STATUS_REJECTED also comes back for a scenario the device TRIED and threw away, and the
+                // census counts cannot tell the two apart per contingency.
+                com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.planRefused(id);
                 results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, GpuBatchStatus.STATUS_REJECTED, new int[0],
                         Double.NaN, Double.NaN));
             }
@@ -580,6 +584,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 results.add(new BatchScenarioResult(id, state, (int) st[n], st[n + 1], GpuBatchStatus.STATUS_CONVERGED, new int[0]));
                 engineConverged++;
             } else {
+                if (e < 0) {
+                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.planRefused(id);   // never reached the engine
+                }
                 results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, GpuBatchStatus.STATUS_REJECTED, new int[0]));
             }
         }

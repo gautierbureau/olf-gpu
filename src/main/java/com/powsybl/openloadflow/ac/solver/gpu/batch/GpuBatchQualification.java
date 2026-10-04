@@ -564,8 +564,7 @@ final class GpuBatchQualification {
                     // island, 31 of them exactly "pilot section lost, two sections survive" (tasks #69).
                     // Two or more surviving non-local clusters of ONE base group would be two new groups
                     // sharing one candidate table — still refused.
-                    boolean wholeSurvivors = cluster.size() == alive.size()
-                            || (!alive.contains(main.getControlledBus()) && cluster.size() == alive.size());
+                    boolean wholeSurvivors = cluster.size() == alive.size();
                     if (!wholeSurvivors || !remoteMains.isEmpty()) {
                         return new ReHomed(pv, left, "VC_REMERGE_MULTI", remoteMains, remoteCluster);
                     }
@@ -598,12 +597,15 @@ final class GpuBatchQualification {
     /**
      * The voltage identities a surviving REMOTE cluster's elected main still needs EXPLICITLY. The stock
      * placement (GpuBatchChunkSolver's killed-coupler block) already installs one on the CHILD of every
-     * coupler the contingency opens, which on rte6515 is the elected main in 45 of 46 refused re-homes;
-     * the 46th (VL-6029: the lost pilot's neighbour has no control, so the elected main is two couplers
-     * away) gets it here. Emitting it in BOTH places would be a duplicate override on one row (#62's race),
-     * so a main whose own row is the relocated child row of an OUTAGED coupler is skipped. Returns null when
-     * an identity cannot be hosted (no V row, frozen, or the bus is PINNED at a reactive limit — a pinned bus
-     * cannot also hold its voltage, see the pvTargets loop above), with the reject tag in {@code reject[0]}.
+     * coupler the contingency opens — on rte6515 the elected main is that child in most accepted re-homes
+     * ({@code blockCovers}); a main whose own row is NOT relocated (the tree's root, BUS-2640_BBS_1's
+     * VL-2640_1) gets an explicit ROW_V_IDENTITY here. Emitting it in BOTH places would be a duplicate
+     * override on one row (#62's race), so a main whose own row is the relocated child row of an OUTAGED
+     * coupler is skipped. A main whose own row carries a LIVE coupler's ZERO_V (BUS-6029_BBS_1: the lost
+     * pilot's neighbour has no control, the elected main is two couplers away) is refused: its identity
+     * would displace that equation. Returns null when an identity cannot be hosted (no V row, frozen, that
+     * relocation, or the bus is PINNED at a reactive limit — a pinned bus cannot also hold its voltage, see
+     * the pvTargets loop above), with the reject tag in {@code reject[0]}.
      */
     private static List<GenOutage> remoteMainIdentityEntries(ReHomed reHomed, EquationSystem<AcVariableType, AcEquationType> es,
                                                              GpuAcData gpuData, java.util.Map<Integer, int[]> relocRows,
@@ -618,20 +620,28 @@ final class GpuBatchQualification {
             }
             int[] reloc = relocRows.get(vVar.getRow());
             boolean blockCovers = reloc != null && outagedZiNums.contains(reloc[0]);
+            int rl = rlEntryOf(gpuData, e.getKey());
+            boolean basePinned = gpuData.rlBaseQLimitType() != null && rl >= 0 && gpuData.rlBaseQLimitType()[rl] != 0;
             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
-                System.err.printf("QUALIFY_TRACE remoteMain bus=%s vRow=%d target=%.6f blockCovers=%b%n",
-                        e.getKey().getId(), vVar.getRow(), e.getValue(), blockCovers);
+                System.err.printf("QUALIFY_TRACE remoteMain bus=%s vRow=%d target=%.6f blockCovers=%b basePinned=%b%n",
+                        e.getKey().getId(), vVar.getRow(), e.getValue(), blockCovers, basePinned);
+            }
+            // A main PINNED at its reactive limit in the base cannot hold a voltage identity in EITHER placement.
+            // This test used to sit below the blockCovers exit, so the killed-coupler block installed the identity on
+            // a pinned child and the RL kernel's "limit drift while pinned" branch then wrote the reactive limit as
+            // that row's target: rte6515 BUS-6194_BBS_1, VL-6194_1 (base MAX_Q) held V = 0.6251 = maxQ - loadQ,
+            // FAILED where OLF converges with 60 violations; BUS-6003_BBS_1 (VL-6003_1, base MAX_Q) 0.27 kV and
+            // 0.457 MW. OLF has the pinned main PQ with BUS_TARGET_V off until it unpins — a per-scenario pilot the
+            // device does not host yet (tasks #70), so the scenario is the CPU's.
+            if (basePinned) {
+                reject[0] = "PLAN:VC_REMERGE_PINNED_MAIN";
+                return null;
             }
             if (blockCovers) {
                 continue;
             }
             if (reloc != null) {
                 reject[0] = "PLAN:VC_REMERGE_RELOC_VROW";   // its own row carries a LIVE coupler's ZERO_V
-                return null;
-            }
-            int rl = rlEntryOf(gpuData, e.getKey());
-            if (gpuData.rlBaseQLimitType() != null && rl >= 0 && gpuData.rlBaseQLimitType()[rl] != 0) {
-                reject[0] = "PLAN:VC_REMERGE_PINNED_MAIN";
                 return null;
             }
             out.add(reHomedPvEntry(vVar.getRow(), e.getValue(), rl));
@@ -1245,7 +1255,7 @@ final class GpuBatchQualification {
                     continue;
                 }
                 deadControlBuses.removeAll(reHomed.pvTargets().keySet());
-                    deadControlBuses.removeAll(reHomed.remoteClusterBuses());   // a surviving remote cluster, not dead
+                deadControlBuses.removeAll(reHomed.remoteClusterBuses());   // a surviving remote cluster, not dead
                 for (LfBus lb : reHomed.leftControllers()) {
                     if (!lostVcControllers.contains(lb)) {
                         lostVcControllers.add(lb);
@@ -1301,6 +1311,7 @@ final class GpuBatchQualification {
                     }
                     boolean ok = true;
                     boolean relocIdentity = false;
+                    boolean pinnedMain = false;
                     for (var e : reHomed.pvTargets().entrySet()) {
                         var vVar = es.getVariableSet().getVariable(e.getKey().getNum(), AcVariableType.BUS_V);
                         if (vVar == null || vVar.getRow() < 0) {
@@ -1312,11 +1323,25 @@ final class GpuBatchQualification {
                             relocIdentity = true;            // its own row carries the coupler's ZERO_V
                             break;
                         }
-                        pvOn.add(reHomedPvEntry(vVar.getRow(), e.getValue(), rlEntryOf(gpuData, e.getKey())));
+                        int reHomedRl = rlEntryOf(gpuData, e.getKey());
+                        // Same rule as the island site above: a bus PINNED at its reactive limit in the base
+                        // cannot hold a voltage identity (OLF has it PQ). This site lacked the check, so a
+                        // middle-section loss whose surviving section is base-pinned batched with the
+                        // identity: rte6515 BUS-6157_BBS_1 (VL-6157_1, baseLimitType=1), BUS-6194_BBS_2
+                        // (VL-6194_2, 2) and BUS-6229_BBS_1 (VL-6229_1, 2) — three device failures on
+                        // systems OLF converges, replayed on the CPU.
+                        if (gpuData.rlBaseQLimitType() != null && reHomedRl >= 0
+                                && gpuData.rlBaseQLimitType()[reHomedRl] != 0) {
+                            ok = false;
+                            pinnedMain = true;
+                            break;
+                        }
+                        pvOn.add(reHomedPvEntry(vVar.getRow(), e.getValue(), reHomedRl));
                     }
                     if (!ok) {
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(
-                                relocIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
+                                pinnedMain ? "PLAN:VC_REMERGE_PINNED_MAIN"
+                                        : relocIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
                         continue;
                     }
                     if (!reHomed.remoteMainTargets().isEmpty()) {

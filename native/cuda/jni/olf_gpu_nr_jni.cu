@@ -4665,7 +4665,7 @@ static void psgStep(Ctx* ctx, int nS, int n, int outer, const char* tag) {
 // would double-count it. Once a reactive limit pins it, OLF activates its BUS_TARGET_Q and the carrier row
 // is exactly where that balance goes — the relocation the CPU does statically, here per scenario.
 __global__ void pilotSelfGateBatch(int nQr, int nScenarios, int nrl, const int* psPilotEntry,
-                                   const char* limitType, char* psSkip) {
+                                   const char* limitType, const char* rlIslanded, char* psSkip) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nQr * nScenarios) return;
     int g = tid % nQr;
@@ -4675,7 +4675,15 @@ __global__ void pilotSelfGateBatch(int nQr, int nScenarios, int nrl, const int* 
     if (e == PS_NO_ENTRY) {
         skip = 1;                                            // pilot-self, never pinnable ⇒ always controlling
     } else if (e >= 0 && e < nrl) {
-        skip = limitType[(size_t) s * nrl + e] == 0 ? 1 : 0;  // unpinned ⇒ skip; pinned ⇒ its balance rides the carrier
+        // An ISLANDED pilot (its section lost with the contingency) has no balance anywhere — OLF removed
+        // the bus. Its limit type still reads its BASE pin (initRlLimitTypeBatch seeds an enrolled pilot's
+        // kind from the base), and "pinned" here means "its balance rides the carrier": the carrier's own
+        // DISTR_Q was suppressed for a balance that does not exist and the row went empty. Measured on
+        // rte6515 BUS-6194_BBS_1 (pilot VL-6194_0 base-pinned MAX_Q then islanded: FAILED where OLF
+        // converges with 60 violations) and BUS-6003_BBS_1 (0.473 MW of distributed active power).
+        // Unpinned or islanded ⇒ skip; pinned and alive ⇒ its balance rides the carrier.
+        bool islanded = rlIslanded != nullptr && rlIslanded[(size_t) s * nrl + e];
+        skip = (islanded || limitType[(size_t) s * nrl + e] == 0) ? 1 : 0;
     } else {
         skip = 0;                                            // not a pilot-self group
     }
@@ -6462,16 +6470,21 @@ __global__ void negateIntoBatch(int total, const double* F, double* b) {  // b =
 // The other mixed state (members pinned, pilot controlling) is an ordinary layout: pilot identity,
 // members at their own Q. One thread per (scenario, class-2 entry).
 __global__ void rlPilotSelfMixedGate(int nrl, int nScenarios, const char* rlRemote, const int* rlCmpVrow,
-                                     const char* limitType, char* bad, const int* psEntry, int nQr) {
+                                     const char* limitType, const char* rlIslanded, char* bad,
+                                     const int* psEntry, int nQr) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= nrl * nScenarios) return;
     int i = t % nrl;
     int s = t / nrl;
     if (rlRemote[i] != 2 || limitType[(size_t) s * nrl + i] == 0) return;   // only a PINNED pilot
+    // ...that is still ON this component: an islanded pilot keeps its base limit type but has no pin and no
+    // balance (OLF removed the bus), and an islanded member is not "still controlling" either.
+    if (rlIslanded != nullptr && rlIslanded[(size_t) s * nrl + i]) return;
     if (isEnrolledPilot(psEntry, nQr, i)) return;            // enrolled (rotation): the carrier hosts its balance
     for (int j = 0; j < nrl; j++) {                          // ... with a member still controlling
         if (j != i && rlCmpVrow[j] == rlCmpVrow[i] && rlRemote[j] != 0
-                && limitType[(size_t) s * nrl + j] == 0) {
+                && limitType[(size_t) s * nrl + j] == 0
+                && !(rlIslanded != nullptr && rlIslanded[(size_t) s * nrl + j])) {
             bad[s] = 1;
             return;
         }
@@ -9895,7 +9908,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             // rte6515's base started from |f(x0)| 117.908 against OLF's 117.845.
             pilotSelfGateBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
                     ctx->st->nQr, nS, ctx->nrl, ctx->dPsPilotEntry.as<int>(),
-                    ctx->dRlLimitType.as<char>(), ctx->dPsSkip.as<char>());
+                    ctx->dRlLimitType.as<char>(),
+                    ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr, ctx->dPsSkip.as<char>());
         }
         if (!fOnly) {
             CUDA_CHECK(cudaMemsetAsync(ctx->dVals.p, 0, static_cast<size_t>(nnz) * nS * sizeof(double), ctx->stream));
@@ -11450,6 +11464,7 @@ psgStep(ctx, nS, n, outer, "afterRL");
                 CUDA_CHECK(cudaMemsetAsync(ctx->dRlMixedBad.p, 0, nS * sizeof(char), ctx->stream));
                 rlPilotSelfMixedGate<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS,
                         ctx->dRlRemote.as<char>(), ctx->dRlCmpVrow.as<int>(), ctx->dRlLimitType.as<char>(),
+                        ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
                         ctx->dRlMixedBad.as<char>(),
                         psEntryPtr(ctx), ctx->st->nQr);
                 std::vector<char> mixed(nS);
@@ -12751,7 +12766,8 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
         // relocate only once a reactive limit has pinned it, and the RL pass moves pins between passes.
         pilotSelfGateBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(
                 ctx->st->nQr, nS, ctx->nrl, ctx->dPsPilotEntry.as<int>(),
-                ctx->dRlLimitType.as<char>(), ctx->dPsSkip.as<char>());
+                ctx->dRlLimitType.as<char>(),
+                ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr, ctx->dPsSkip.as<char>());
     }
     if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->dDqAlt.as<int>(), ctx->st->dDqSel.as<int>(), ctx->st->dDqZiRow.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqInact,
                 ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,

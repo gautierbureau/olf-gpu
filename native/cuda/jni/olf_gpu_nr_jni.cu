@@ -5001,7 +5001,14 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
         // member without a packed DISTR_Q row (the base free member, superseded mid-scenario) has
         // no row to maintain here — the RL kernel owns it while pinned.
         int carrier = qrRows[qrPtr[qg] + relocChoose(qg, qrPtr, qrRows, mode + (size_t) s * n)];
-        if (mrow == carrier) {
+        // A group whose PILOT ROW is frozen this scenario has lost its pilot to an island (tasks #69): its
+        // surviving sections form a NEW group OLF re-elects a main for, and that main's sharing rows are
+        // plain DISTR_Q rows renormalized over the survivors — there is NO base-pilot balance left to
+        // relocate onto a carrier. Writing pilotQ (the dead pilot's BASE target) there would replace the
+        // survivor's sharing equation with a stale number. updatePilotVeqBatch already exits on the same
+        // test; this is its counterpart on the target side.
+        bool pilotFrozen = rowIsFrozen(nFrozen, frozenSlotRow, s, qrRows[qrPtr[qg]]);
+        if (mrow == carrier && !pilotFrozen) {
             int pe = psEntry != nullptr ? psEntry[qg] : -1;  // the group's own pilot, when it is one of its controllers
             if (pe < 0) {
                 target[(size_t) s * n + mrow] = pilotQ[(size_t) s * nQr + qg];

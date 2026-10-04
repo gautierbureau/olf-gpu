@@ -1593,6 +1593,78 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
      *  generator and the load are injection losses, no full branch outage (a line on the lost section
      *  would become one and route the plan to the branch-combo path instead). Equipment switches are
      *  disconnectors so the trip propagates through them (a breaker would stop it). */
+    /**
+     * The dominant NON-BATCHED shape of rte6515's full busbar scope (tasks #69, 31 of 46 refused re-homes):
+     * a merged voltage-control group whose PILOT SECTION is lost while TWO coupler-joined sections survive,
+     * each with its own LOCAL generator. OLF re-runs the merge on the surviving zero-impedance network,
+     * elects a new main (highest target, then controlled-bus id), rebuilds DISTR_Q over the survivors with
+     * keys renormalized over them, and puts BUS_TARGET_V on the new main. The device used to refuse the
+     * whole contingency as PLAN:VC_REMERGE_MULTI ("a cluster of several controls is a NEW remote group the
+     * tables cannot host"). It CAN host it: the lost pilot is an inactive member (its key leaves the
+     * renormalization), the killed coupler's child gets the voltage identity the stock placement already
+     * installs, and the surviving sharing rows are plain DISTR_Q rows.
+     */
+    private static Network lostPilotSectionNetwork() {
+        Network network = Network.create("lost-pilot-section", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vl3", "vl4")) {
+            com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(vl).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            v.getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        com.powsybl.iidm.network.VoltageLevel vl12 = s.newVoltageLevel().setId("vl12").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.NODE_BREAKER).add();
+        vl12.getNodeBreakerView().newBusbarSection().setId("bbs0").setNode(0).add();
+        vl12.getNodeBreakerView().newBusbarSection().setId("bbs1").setNode(1).add();
+        vl12.getNodeBreakerView().newBusbarSection().setId("bbs2").setNode(2).add();
+        vl12.getNodeBreakerView().newBreaker().setId("c01").setNode1(0).setNode2(1).setRetained(true).setOpen(false).add();
+        vl12.getNodeBreakerView().newBreaker().setId("c12").setNode1(1).setNode2(2).setRetained(true).setOpen(false).add();
+        int node = 10;
+        for (String[] eq : new String[][] {{"g0", "0"}, {"ld0", "0"}, {"l0", "0"}, {"g1", "1"}, {"l1", "1"}, {"g2", "2"}, {"l2", "2"}}) {
+            vl12.getNodeBreakerView().newDisconnector().setId("d_" + eq[0]).setNode1(Integer.parseInt(eq[1])).setNode2(node + 10).setOpen(false).add();
+            vl12.getNodeBreakerView().newBreaker().setId("b_" + eq[0]).setNode1(node + 10).setNode2(node).setOpen(false).add();
+            node++;
+        }
+        // every section regulates ITS OWN bus: three LOCAL controls that the retained couplers MERGE into one
+        // group. bbs0 carries the highest target so it is the base MAIN; bbs1 outranks bbs2 by id at equal
+        // targets, so OLF elects bbs1 once bbs0 is lost.
+        vl12.newGenerator().setId("g0").setNode(10)
+                .setMinP(0).setMaxP(500).setTargetP(100).setTargetQ(0).setTargetV(406).setVoltageRegulatorOn(true).add();
+        vl12.newLoad().setId("ld0").setNode(11).setP0(30).setQ0(40).add();
+        vl12.newGenerator().setId("g1").setNode(13)
+                .setMinP(0).setMaxP(500).setTargetP(100).setTargetQ(0).setTargetV(405).setVoltageRegulatorOn(true).add();
+        vl12.newGenerator().setId("g2").setNode(15)
+                .setMinP(0).setMaxP(500).setTargetP(100).setTargetQ(0).setTargetV(405).setVoltageRegulatorOn(true).add();
+        for (String g : List.of("g0", "g1", "g2")) {
+            network.getGenerator(g).newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(300).add();
+        }
+        network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(500).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl0").newLoad().setId("lds").setBus("vl0_b").setConnectableBus("vl0_b").setP0(500).setQ0(100).add();
+        network.getVoltageLevel("vl3").newLoad().setId("ld3").setBus("vl3_b").setConnectableBus("vl3_b").setP0(150).setQ0(50).add();
+        network.getVoltageLevel("vl4").newLoad().setId("ld4").setBus("vl4_b").setConnectableBus("vl4_b").setP0(150).setQ0(50).add();
+        java.util.function.BiConsumer<String[], Integer> line = (ends, n) -> network.newLine().setId(ends[0])
+                .setVoltageLevel1("vl12").setNode1(n)
+                .setVoltageLevel2(ends[1]).setBus2(ends[1] + "_b").setConnectableBus2(ends[1] + "_b")
+                .setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        line.accept(new String[] {"l0", "vl0"}, 12);
+        line.accept(new String[] {"l1", "vl3"}, 14);
+        line.accept(new String[] {"l2", "vl4"}, 16);
+        network.newLine().setId("l34").setVoltageLevel1("vl3").setBus1("vl3_b").setConnectableBus1("vl3_b")
+                .setVoltageLevel2("vl4").setBus2("vl4_b").setConnectableBus2("vl4_b").setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        network.newLine().setId("l04").setVoltageLevel1("vl0").setBus1("vl0_b").setConnectableBus1("vl0_b")
+                .setVoltageLevel2("vl4").setBus2("vl4_b").setConnectableBus2("vl4_b").setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        return network;
+    }
+
+    @org.junit.jupiter.api.Test
+    void deviceLostPilotSectionReHomesSurvivingClusterMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertMergedPilotLossMatchesCpu(lostPilotSectionNetwork(),
+                List.of(new Contingency("bus-pilot", new com.powsybl.contingency.BusbarSectionContingency("bbs0"))));
+    }
+
     private static Network mergedPilotLossNetwork() {
         Network network = Network.create("merged-pilot-loss", "code");
         com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();

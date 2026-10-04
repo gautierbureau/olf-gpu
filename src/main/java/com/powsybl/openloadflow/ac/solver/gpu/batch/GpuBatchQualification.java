@@ -467,7 +467,8 @@ final class GpuBatchQualification {
 
     /** The outcome of OLF's voltage-control RE-MERGE after a contingency: buses that become plain PV buses at their
      *  own target, the controllers that thereby leave their base group's DISTR_Q, or a reject tag. */
-    record ReHomed(java.util.LinkedHashMap<LfBus, Double> pvTargets, List<LfBus> leftControllers, String reject) {
+    record ReHomed(java.util.LinkedHashMap<LfBus, Double> pvTargets, List<LfBus> leftControllers, String reject,
+                   java.util.LinkedHashMap<LfBus, Double> remoteMainTargets, java.util.Set<LfBus> remoteClusterBuses) {
     }
 
     /**
@@ -481,7 +482,7 @@ final class GpuBatchQualification {
      * BUS-6002_BBS_2 (coupler open, VL-6002_2 8.7 kV off, 29 phantom violations). A cluster with several controls
      * or a remote controller is a NEW remote group the tables cannot host — CPU, tagged.
      */
-    static ReHomed reHomedControls(List<LfBus> islandedBuses, List<LfBranch> outagedZiBranches) {
+    static ReHomed reHomedControls(List<LfBus> islandedBuses, List<LfBranch> outagedZiBranches, String contingencyId) {
         java.util.Set<LfBus> islanded = new java.util.HashSet<>(islandedBuses);
         java.util.Set<LfBranch> outaged = new java.util.HashSet<>(outagedZiBranches);
         java.util.LinkedHashSet<com.powsybl.openloadflow.network.GeneratorVoltageControl> mains = new java.util.LinkedHashSet<>();
@@ -501,6 +502,8 @@ final class GpuBatchQualification {
         }
         java.util.LinkedHashMap<LfBus, Double> pv = new java.util.LinkedHashMap<>();
         List<LfBus> left = new ArrayList<>();
+        java.util.LinkedHashMap<LfBus, Double> remoteMains = new java.util.LinkedHashMap<>();
+        java.util.Set<LfBus> remoteCluster = new java.util.LinkedHashSet<>();
         for (var main : mains) {
             java.util.Map<LfBus, com.powsybl.openloadflow.network.VoltageControl<LfBus>> controlOf = new java.util.LinkedHashMap<>();
             controlOf.put(main.getControlledBus(), main);
@@ -542,12 +545,42 @@ final class GpuBatchQualification {
                 boolean local = cluster.size() == 1
                         && newMain.getControllerElements().stream().allMatch(ce -> ce == newMain.getControlledBus());
                 if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
-                    System.err.printf("QUALIFY_TRACE reHome main=%s cluster=%s newMain=%s target=%.6f local=%b%n",
-                            main.getControlledBus().getId(), cluster.stream().map(LfBus::getId).toList(),
+                    System.err.printf("QUALIFY_TRACE reHome ctg=%s main=%s cluster=%s newMain=%s target=%.6f local=%b%n",
+                            contingencyId, main.getControlledBus().getId(), cluster.stream().map(LfBus::getId).toList(),
                             newMain.getControlledBus().getId(), newMain.getTargetValue(), local);
                 }
                 if (!local) {
-                    return new ReHomed(pv, left, "VC_REMERGE_MULTI");
+                    // A cluster of SEVERAL controls (or one with a remote controller) is a NEW remote group:
+                    // OLF re-elects its main, rebuilds DISTR_Q over the cluster's controllers with keys
+                    // renormalized over them (updateReactiveKeys: islanded -> 0) and puts BUS_TARGET_V on
+                    // the new main. The device hosts that WITHOUT a new table when the cluster is EVERY
+                    // survivor of the base group (one surviving cluster, the lost sections gone with the
+                    // island): the lost controllers are INACTIVE members (their keys leave the denominator,
+                    // islandedDistrQEntries / distrQWeightOverrides), the survivors' DISTR_Q rows stay plain
+                    // sharing rows, and the new main's voltage identity is either the one the stock
+                    // placement already installs on a killed coupler's child or an explicit ROW_V_IDENTITY
+                    // (the caller decides, it holds the relocation map). Measured on rte6515's full busbar
+                    // scope: 46 distinct refused re-homes, 45 with the elected main coupler-adjacent to the
+                    // island, 31 of them exactly "pilot section lost, two sections survive" (tasks #69).
+                    // Two or more surviving non-local clusters of ONE base group would be two new groups
+                    // sharing one candidate table — still refused.
+                    boolean wholeSurvivors = cluster.size() == alive.size()
+                            || (!alive.contains(main.getControlledBus()) && cluster.size() == alive.size());
+                    if (!wholeSurvivors || !remoteMains.isEmpty()) {
+                        return new ReHomed(pv, left, "VC_REMERGE_MULTI", remoteMains, remoteCluster);
+                    }
+                    remoteMains.put(newMain.getControlledBus(), newMain.getTargetValue());
+                    remoteCluster.addAll(cluster);
+                    for (LfBus cb : controlOf.keySet()) {   // the controllers the cluster LOST: the islanded/disabled
+                        if (!cluster.contains(cb)) {        // sections' own controllers leave the group's keys
+                            for (LfBus ce : controlOf.get(cb).getControllerElements()) {
+                                if (!left.contains(ce)) {
+                                    left.add(ce);
+                                }
+                            }
+                        }
+                    }
+                    continue;
                 }
                 pv.put(newMain.getControlledBus(), newMain.getTargetValue());
                 for (LfBus ce : newMain.getControllerElements()) {
@@ -557,10 +590,55 @@ final class GpuBatchQualification {
                 }
             }
         }
-        return new ReHomed(pv, left, null);
+        return new ReHomed(pv, left, null, remoteMains, remoteCluster);
     }
 
     /** Row-mode-only GenOutage: the bus's V row becomes a VOLTAGE IDENTITY at {@code vTarget} (a re-homed control). */
+
+    /**
+     * The voltage identities a surviving REMOTE cluster's elected main still needs EXPLICITLY. The stock
+     * placement (GpuBatchChunkSolver's killed-coupler block) already installs one on the CHILD of every
+     * coupler the contingency opens, which on rte6515 is the elected main in 45 of 46 refused re-homes;
+     * the 46th (VL-6029: the lost pilot's neighbour has no control, so the elected main is two couplers
+     * away) gets it here. Emitting it in BOTH places would be a duplicate override on one row (#62's race),
+     * so a main whose own row is the relocated child row of an OUTAGED coupler is skipped. Returns null when
+     * an identity cannot be hosted (no V row, frozen, or the bus is PINNED at a reactive limit — a pinned bus
+     * cannot also hold its voltage, see the pvTargets loop above), with the reject tag in {@code reject[0]}.
+     */
+    private static List<GenOutage> remoteMainIdentityEntries(ReHomed reHomed, EquationSystem<AcVariableType, AcEquationType> es,
+                                                             GpuAcData gpuData, java.util.Map<Integer, int[]> relocRows,
+                                                             java.util.Set<Integer> outagedZiNums, java.util.Set<Integer> frozenSet,
+                                                             String[] reject) {
+        List<GenOutage> out = new ArrayList<>();
+        for (var e : reHomed.remoteMainTargets().entrySet()) {
+            var vVar = es.getVariableSet().getVariable(e.getKey().getNum(), AcVariableType.BUS_V);
+            if (vVar == null || vVar.getRow() < 0 || frozenSet.contains(vVar.getRow())) {
+                reject[0] = "PLAN:VC_REMERGE_NO_VROW";
+                return null;
+            }
+            int[] reloc = relocRows.get(vVar.getRow());
+            boolean blockCovers = reloc != null && outagedZiNums.contains(reloc[0]);
+            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                System.err.printf("QUALIFY_TRACE remoteMain bus=%s vRow=%d target=%.6f blockCovers=%b%n",
+                        e.getKey().getId(), vVar.getRow(), e.getValue(), blockCovers);
+            }
+            if (blockCovers) {
+                continue;
+            }
+            if (reloc != null) {
+                reject[0] = "PLAN:VC_REMERGE_RELOC_VROW";   // its own row carries a LIVE coupler's ZERO_V
+                return null;
+            }
+            int rl = rlEntryOf(gpuData, e.getKey());
+            if (gpuData.rlBaseQLimitType() != null && rl >= 0 && gpuData.rlBaseQLimitType()[rl] != 0) {
+                reject[0] = "PLAN:VC_REMERGE_PINNED_MAIN";
+                return null;
+            }
+            out.add(reHomedPvEntry(vVar.getRow(), e.getValue(), rl));
+        }
+        return out;
+    }
+
     private static GenOutage reHomedPvEntry(int vRow, double vTarget, int rlEntry) {
         return new GenOutage(-1, 0, vRow, vTarget, true, true,
                 -1, 0, 0, 0, 0, rlEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
@@ -935,12 +1013,13 @@ final class GpuBatchQualification {
                     List<com.powsybl.openloadflow.network.LfHvdc> islandedHvdcs = new ArrayList<>();
                     VcSplit vcSplit = classifyVcSplit(es, q.islandedBuses(), lostVcControllers, deadControlBuses,
                             islandedHvdcs);
-                    ReHomed reHomed = reHomedControls(q.islandedBuses(), c.outagedZiBranches());
+                    ReHomed reHomed = reHomedControls(q.islandedBuses(), c.outagedZiBranches(), c.contingencyId());
                     if (reHomed.reject() != null) {
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:" + reHomed.reject());
                         continue;
                     }
-                    deadControlBuses.removeAll(reHomed.pvTargets().keySet());   // re-homed, not dead
+                    deadControlBuses.removeAll(reHomed.pvTargets().keySet());
+                    deadControlBuses.removeAll(reHomed.remoteClusterBuses());   // a surviving remote cluster, not dead   // re-homed, not dead
                     for (LfBus lb : reHomed.leftControllers()) {
                         if (!lostVcControllers.contains(lb)) {
                             lostVcControllers.add(lb);
@@ -1045,6 +1124,20 @@ final class GpuBatchQualification {
                             live.add(reHomedPvEntry(vVar.getRow(), e.getValue(), reHomedRl));
                         }
                     }
+                    String[] remoteReject = new String[1];
+                    if (live != null && !reHomed.remoteMainTargets().isEmpty()) {
+                        List<GenOutage> remoteIds = remoteMainIdentityEntries(reHomed, es, gpuData, relocRows,
+                                outagedZiNums, frozenSet, remoteReject);
+                        if (remoteIds == null) {
+                            live = null;
+                        } else {
+                            live.addAll(remoteIds);
+                        }
+                    }
+                    if (live == null && remoteReject[0] != null) {
+                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(remoteReject[0]);
+                        continue;
+                    }
                     if (live == null) {
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(
                                 pinnedMain ? "PLAN:VC_REMERGE_PINNED_MAIN"
@@ -1146,12 +1239,13 @@ final class GpuBatchQualification {
                 List<com.powsybl.openloadflow.network.LfHvdc> islandedHvdcs = new ArrayList<>();
                 VcSplit vcSplit = classifyVcSplit(es, q.islandedBuses(), lostVcControllers, deadControlBuses,
                         islandedHvdcs);
-                ReHomed reHomed = reHomedControls(q.islandedBuses(), c.outagedZiBranches());
+                ReHomed reHomed = reHomedControls(q.islandedBuses(), c.outagedZiBranches(), c.contingencyId());
                 if (reHomed.reject() != null) {
                     com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:" + reHomed.reject());
                     continue;
                 }
                 deadControlBuses.removeAll(reHomed.pvTargets().keySet());
+                    deadControlBuses.removeAll(reHomed.remoteClusterBuses());   // a surviving remote cluster, not dead
                 for (LfBus lb : reHomed.leftControllers()) {
                     if (!lostVcControllers.contains(lb)) {
                         lostVcControllers.add(lb);
@@ -1200,7 +1294,7 @@ final class GpuBatchQualification {
                     }
                     genOutagesByIndex[i] = vcOff.toArray(new GenOutage[0]);
                 }
-                if (!reHomed.pvTargets().isEmpty()) {
+                if (!reHomed.pvTargets().isEmpty() || !reHomed.remoteMainTargets().isEmpty()) {
                     List<GenOutage> pvOn = new ArrayList<>();
                     if (genOutagesByIndex[i] != null) {
                         pvOn.addAll(java.util.Arrays.asList(genOutagesByIndex[i]));
@@ -1224,6 +1318,16 @@ final class GpuBatchQualification {
                         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(
                                 relocIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
                         continue;
+                    }
+                    if (!reHomed.remoteMainTargets().isEmpty()) {
+                        String[] remoteReject = new String[1];
+                        List<GenOutage> remoteIds = remoteMainIdentityEntries(reHomed, es, gpuData, relocRows,
+                                outagedZiNums, java.util.Set.of(), remoteReject);
+                        if (remoteIds == null) {
+                            com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(remoteReject[0]);
+                            continue;
+                        }
+                        pvOn.addAll(remoteIds);
                     }
                     genOutagesByIndex[i] = pvOn.toArray(new GenOutage[0]);
                 }

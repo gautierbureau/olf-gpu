@@ -2021,6 +2021,68 @@ prints targets only for rows DIFFERING from base) and OLF has its own `TargetVec
 dump BOTH target vectors for a rejecting scenario, keyed by element, and diff per row** — the same
 same-point, keyed-by-id discipline that cracked [[#66]].
 
+### #70 — host the surviving REMOTE cluster of a split voltage-control group (2026-10-04, IN PROGRESS)
+
+**What `VC_REMERGE_MULTI` actually refused.** `OLF_GPU_QUALIFY_TRACE` on the full busbar scope, with
+the contingency id now on the `reHome` line: **46 distinct refused re-homes**, 31 of them exactly
+"pilot section lost, two coupler-joined sections survive" (`main=VL-2341_0 cluster=[VL-2341_1,
+VL-2341_2] newMain=VL-2341_1`), the rest 3–6 sections. In **45 of 46** OLF's elected new main is
+coupler-adjacent to the island — i.e. it is the CHILD of the coupler the contingency opens, which is
+exactly where `GpuBatchChunkSolver`'s killed-coupler block already installs a voltage identity
+(`rowZi[childVRow] = 0` + the child's own target). The 46th (VL-6029) has a control-less section
+between the lost pilot and the elected main.
+
+**OLF's rule for the new group** (`LfZeroImpedanceNetwork.updateVoltageControlMergeStatus` +
+`recreateReactivePowerDistributionEquations` + `updateRemoteVoltageControlEquations`): re-elect the
+main (highest target, then controlled-bus id), rebuild `DISTR_Q` over the CLUSTER's controllers with
+keys renormalized by `updateReactiveKeys` (islanded -> 0), `BUS_TARGET_V` on the new main, the
+dependents' V targets off, `DISTR_Q` active for every enabled controller except the FIRST.
+
+**Why the device can host it without a new table** — every piece already exists:
+- the lost pilot is an INACTIVE dq member (`islandedDistrQEntries` emits one per islanded packed
+  member; the kernel's `updateDistrQTargetsBatch` drops its key from the denominator);
+- the survivors' weights renormalize through `distrQWeightOverrides` with the lost controllers'
+  generators as "gone" (the RENORMALIZE channel) — once `leftControllers` names them;
+- the new main's identity comes from the killed-coupler block (45/46), or an explicit
+  `ROW_V_IDENTITY` when the elected main is not a killed coupler's child;
+- the lost pilot's raw q and carrier override are already suppressed for a pilot-self group with an
+  RL entry (`psSkip = limitType == 0`, islanded entries keep their base limit type 0); the one hole —
+  `updateDistrQTargetsBatch` writing the DEAD pilot's `pilotQ` onto `relocChoose`'s pick when
+  `psEntry < 0` (`PS_NO_ENTRY`) — is closed by a `rowIsFrozen(pilot row)` guard mirroring
+  `updatePilotVeqBatch`.
+
+**Implemented:** `reHomedControls` accepts a non-local cluster when it is EVERY survivor of the base
+group (one surviving cluster), returning `remoteClusterBuses` (removed from `deadControlBuses`, so no
+own-Q entries) and `remoteMainTargets` (the elected main); the lost sections' controllers go to
+`leftControllers` (-> weight overrides + inactive entries). `remoteMainIdentityEntries` adds the
+explicit identity only when the killed-coupler block does not cover the main, refusing
+`VC_REMERGE_RELOC_VROW` when the main's own V row hosts a LIVE coupler's `ZERO_V` (VL-6029: row 13248
+= `zi#327.ZERO_V`) and `VC_REMERGE_PINNED_MAIN` when it is pinned. Kernel guard in
+`updateDistrQTargetsBatch`. New fixture `deviceLostPilotSectionReHomesSurvivingClusterMatchesCpu`.
+
+**Measured so far (GPU-only full busbar scope; census counts are per-attempt, doubled by the retry):**
+
+| | before | after |
+|---|---|---|
+| device coverage | 6550 / 6667 | **6585 / 6667** (+35) |
+| `PLAN:VC_REMERGE_MULTI` | 47 | 22 |
+| `RUNTIME:status=-2` (leaving the device) | 74 | **36** |
+| unit gates | 200 / 0 / 1 | **201 / 0 / 1** |
+
+37 of the 47 re-homes accepted. The 10 still refused are MIDDLE-section losses where the base main
+SURVIVES in its own cluster and a SECOND non-local cluster forms (`BUS-6002_BBS_2`: main VL-6002_0
+alive, cluster [_2.._5]) — two groups on one candidate table; refused by design for now, next step.
+
+**NOT YET PROVEN CORRECT — the both-arms run is in flight.** Statuses, violations, BUSDIFF and DAP must
+hold; the GPU-only numbers above say nothing about agreement.
+
+**Open defect in the fixture:** it passes for the WRONG reason. Its trace shows `merged=[vl12_0,
+vl12_1] … cluster=[vl12_1] local=true` and the device extraction has ONLY two `vl12` buses and ONE
+coupler (`zi#0 branch=c01`) although the builder declares `c12` retained between nodes 1 and 2 — so
+`bbs1` and `bbs2` collapsed into one bus and the fixture exercises the LOCAL re-home, not the new
+path. To be diagnosed by comparing with `middleSectionLossNetwork` (same two retained breakers,
+three buses) once the device is free.
+
 ### #69 — the non-batched tail SPLIT: 55 are genuinely lost, and one class is an OUTER-loop cycle (2026-10-02)
 
 **The split, measured.** New `OLF_GPU_SA_STATUS_LIST=1` lists every NON-CONVERGED contingency of each

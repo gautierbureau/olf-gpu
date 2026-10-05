@@ -1622,6 +1622,11 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
      *  lost (rte6515 BUS-6194_BBS_1 / BUS-6003_BBS_1: the islanded pilot's limit type still read its base pin,
      *  which the pilot-self gate took as "its balance rides the carrier"). */
     private static Network lostPilotSectionNetwork(boolean pilotLine, boolean pilotPinned) {
+        return lostPilotSectionNetwork(pilotLine, pilotPinned, false);
+    }
+
+    /** @param remoteSurvivors g1/g2 regulate bbs0 remotely (one REMOTE group) instead of their own sections. */
+    private static Network lostPilotSectionNetwork(boolean pilotLine, boolean pilotPinned, boolean remoteSurvivors) {
         Network network = Network.create("lost-pilot-section", "code");
         com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
         for (String vl : List.of("vl0", "vl3", "vl4")) {
@@ -1652,10 +1657,17 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         vl12.newGenerator().setId("g0").setNode(10)
                 .setMinP(0).setMaxP(500).setTargetP(100).setTargetQ(0).setTargetV(406).setVoltageRegulatorOn(true).add();
         vl12.newLoad().setId("ld0").setNode(11).setP0(30).setQ0(40).add();
-        vl12.newGenerator().setId("g1").setNode(13)
-                .setMinP(0).setMaxP(500).setTargetP(100).setTargetQ(0).setTargetV(405).setVoltageRegulatorOn(true).add();
-        vl12.newGenerator().setId("g2").setNode(15)
-                .setMinP(0).setMaxP(500).setTargetP(100).setTargetQ(0).setTargetV(405).setVoltageRegulatorOn(true).add();
+        for (String[] g : new String[][] {{"g1", "13"}, {"g2", "15"}}) {
+            // remoteSurvivors: g1/g2 regulate bbs0 REMOTELY (one remote group, pilot bbs0), so losing bbs0 kills
+            // their control instead of re-homing it — two dead-control survivors on a coupler chain.
+            var adder = vl12.newGenerator().setId(g[0]).setNode(Integer.parseInt(g[1]))
+                    .setMinP(0).setMaxP(500).setTargetP(100).setTargetQ(0).setVoltageRegulatorOn(true)
+                    .setTargetV(remoteSurvivors ? 406 : 405);
+            if (remoteSurvivors) {
+                adder.setRegulatingTerminal(vl12.getNodeBreakerView().getBusbarSection("bbs0").getTerminal());
+            }
+            adder.add();
+        }
         for (String g : List.of("g0", "g1", "g2")) {
             // pilotPinned: g0 cannot cover its share of the base reactive need, so the BASE load flow pins it at
             // MAX_Q while g1/g2 keep holding 406 kV (OLF: BUS_TARGET_V stays on the main, g0 PQ at its limit).
@@ -1732,6 +1744,20 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                         new Contingency("bus-leaf", new com.powsybl.contingency.BusbarSectionContingency("bbs2"))), 2);
         assertEquals(0L, GpuBatchScopeCensus.snapshot().getOrDefault("HOST:OVERRIDE_CONFLICT", 0L).longValue(),
                 "a sound plan writes every row's target once");
+    }
+
+    /** g1/g2 regulate the pilot section bbs0 REMOTELY; losing bbs0 kills their control (OLF: BUS_TARGET_Q at both,
+     *  the survivors stay a coupler chain vl12_1 — c12 — vl12_2). vl12_1's own reactive balance, back on its own
+     *  row once c01 is dead, must still carry c12's +dummy_q: the device routed that term through a two-way
+     *  alternate selected on the DEAD coupler's dummy row and sent it into that identity (wiped). rte6515
+     *  BUS-1359_BBS_1 / BUS-1869_BBS_1: 0.465 / 0.338 kV on the survivors, +-2 violations, in every run. */
+    @org.junit.jupiter.api.Test
+    void deviceLostPilotWithRemoteSurvivorsOnCouplerChainMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertMergedPilotLossMatchesCpu(lostPilotSectionNetwork(true, false, true),
+                List.of(new Contingency("bus-pilot", new com.powsybl.contingency.BusbarSectionContingency("bbs0")),
+                        new Contingency("bus-leaf", new com.powsybl.contingency.BusbarSectionContingency("bbs2"))), 2);
     }
 
     private static Network mergedPilotLossNetwork() {

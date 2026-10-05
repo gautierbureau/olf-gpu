@@ -2177,6 +2177,36 @@ VL-1359_2]`), present in every run since before #70. Device rows agree with OLF'
 difference is in a TARGET or a term — being read off a 3-contingency run with both arms' dumps
 (`OLF_VAR_DUMP` + `OLF_GPU_ROWMODE_DUMP_CTG`).
 
+**Read off (2026-10-05): a TERM.** The 3-contingency list reproduces it (0.4648 kV on BUS-1359_BBS_2/3 = the
+survivors themselves: OLF 65.863 kV, device 66.328). OLF's converged `EQ BUS_TARGET_Q VL-1359_1 … target 0.0`
+and the device's `row=2936 mode=4 target=0.0` agree; the device's first-fill matrix (`OLF_GPU_VALS_SCAN=1
+OLF_GPU_VALS_DUMP=… _ANY=1 _NTH=2 _SCAN_SLOT=0`, columns named through the SA eq dump) shows row 2936
+(VL-1359_1's own reactive balance) with its three branch terms but **no `DUMMY_Q(BUS-1359_COUPLER_2)` column**,
+while OLF's `bus_target_q[1468] = … + -1.0 * dummy_q9042 + dummy_q9043` carries the live coupler's dummy
+(the P row 2937 does carry `+DUMMY_P(COUPLER_2)`). Cause: VL-1359_1 is a DISTR_Q controller (own Q balance
+SUPPRESSED, `b1Q = -1`) relocated onto COUPLER_1's dummy row; the zi dest builder gave COUPLER_2's bus1
+dummy-Q term a plain two-way alternate "emit at the dummy row 13045 when that row is mode 0/4" — mode 4 in
+the base (pinned/dead there) is right, but mode 0 (COUPLER_1 dead this scenario) sent the term into the
+identity row, where applyRowMode wipes it, instead of the bus's OWN row (relocOwn[13045] = 2936). The cb/sh
+raw-q families already encode this as a STOCK PAIR (`stockPairOut` / `stockPairPick`: dummy row on mode 4,
+own row on mode 0 + own mode 4, nothing while sharing); the zi family now does the same for a suppressed
+side whose alternate is a relocated home, and the pattern gets the (own row, dummyQ) slot. Fixture
+`deviceLostPilotWithRemoteSurvivorsOnCouplerChainMatchesCpu` (g1/g2 regulate bbs0 remotely, bbs0 lost, the
+survivors chained by c12) — measured against the OLD native lib first: `vl3_b expected 396.486 but was 394.741`
+(1.75 kV), `split=CONTROL_DIES deadControl=[vl12_1, vl12_2]` — the shape reproduces. With the fix: 20 targeted
+tests green, and the 3-contingency rte6515 list gives `BUSDIFF ctg=BUS-1359_BBS_1 … worst abs=5.369e-11 kV`,
+`violations: CPU=214 GPU=214` (was 0.4648 kV, 214 vs 212).
+
+**Final proof of the day (`gpu-load-final.log`, full busbar scope, GPU arm vs the saved CPU arm):** statuses
+identical `{CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}`, `violations: CPU=503923 GPU=503923 diff=0`
+with NO per-contingency violation difference left, `conflictRows=0`, device coverage 6583 / 6667, BUS-1359_BBS_1
+4.654e-09 kV and BUS-1869_BBS_1 6.320e-06 kV (were 0.465 / 0.338). Every remaining bus difference is in the
+1e-6 kV class with DAP ≤ 1.4e-03 MW (BUS-2640_BBS_1 2.2e-06, BUS-5250_BBS 1.6e-06, BUS-5525_BBS 1.2e-06 kV) —
+the stopping-point class the DAP tail is, which is the next item, not #70. The full test's only failing
+assertion is that DAP bar (BUS-5250_BBS 1.398e-03 MW > 1e-3). Unit suite 308 tests, the single failure being
+the pre-existing coupler-chain first-step test noted above. #70 is DONE for the single-cluster re-home; the
+21 plan refusals (two surviving clusters, pinned mains, relocated main rows) stay honest CPU answers.
+
 **A second race the closure exposed (same day).** With duplicates resolved deterministically to the LATER writer,
 `deviceBusLossIslandingBaseCarrierMemberMatchesCpu` failed by 0.45 kV: `OV_CONFLICT ctg=bus-b1 row=2 mode=1
 shadowed=-2.000000000 new=0.000000000 by=GpuBatchChunkSolver.java:1076`. The frozen base carrier hands the

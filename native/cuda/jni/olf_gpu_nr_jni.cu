@@ -2730,6 +2730,28 @@ static void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const s
                     }
                     dd[2 + side] = -2 - st->hQrRows[st->hQrPtr[g]];   // frozen F -> fallback (qBuf)
                     anyDyn = true;
+                } else if (stockPairOut(frozenQ[side], altRow, relocOwn)) {
+                    // STOCK PAIR for this endpoint's +-dummyQ, exactly as the cb/sh raw-q families encode it
+                    // (stockPairOut / stockPairPick): a DISTR_Q controller whose own Q balance is SUPPRESSED
+                    // and relocated onto its PARENT coupler's dummy row has three destinations for this
+                    // coupler's dummy term — the parent's DUMMY_Q row while a pin holds its balance there
+                    // (mode 4), its OWN row while the parent coupler is dead this scenario (the dummy row is
+                    // an identity and the balance is back home), nothing while it shares. The plain two-way
+                    // alternate selected on the dummy row sent the term INTO the dead coupler's identity row
+                    // (wiped) and the bus's own reactive balance lost its live coupler's dummy: rte6515
+                    // BUS-1359_BBS_1 / BUS-1869_BBS_1 (pilot section lost, two remote controllers survive
+                    // on a coupler chain) — OLF's bus_target_q[VL-1359_1] carries +dummy_q(COUPLER_2), the
+                    // device's row did not, 0.465 / 0.338 kV and +-2 violations in every run.
+                    int own = relocOwn[altRow];
+                    ziGrp[fSlot] = altRow;                   // the selector is the dummy row itself
+                    ziOff[fSlot] = -static_cast<int>(ziPool.size()) - 1;
+                    ziPool.push_back(-2 - own);
+                    ziPool.push_back(-2 - altRow);
+                    ziGrp[jSlot] = altRow;
+                    ziOff[jSlot] = -static_cast<int>(ziPool.size()) - 1;
+                    ziPool.push_back(pos.at(own, z[5]));
+                    ziPool.push_back(pos.at(altRow, z[5]));
+                    anyDyn = true;
                 } else if (altRow >= 0 && altRow != frozenQ[side]) {
                     ziAlt[fSlot] = -2 - altRow;
                     ziAlt[jSlot] = pos.at(altRow, z[5]);
@@ -3047,6 +3069,9 @@ SharedStructure* buildStructure(int n,
                     }
                 } else if (altRow >= 0) {
                     pat.emplace_back(altRow, dqCol);
+                    if (relocOwn != nullptr && relocOwn[altRow] >= 0) {
+                        pat.emplace_back(relocOwn[altRow], dqCol);   // the stock pair's OWN-row slot
+                    }
                 }
             }
         }

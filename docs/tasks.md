@@ -2246,6 +2246,43 @@ mismatch readings differ (OLF 6.13e-04 vs device 1.45e-04 pu) — the retain sha
 participant that OLF's water-fill drops. Harmless here (neither arm distributes) but it is a candidate for the
 sub-1e-4 MW tail.
 
+### #75 — the DAP tail below 1.4e-4 MW is KLU's forward error read by OLF's stopping criterion (2026-10-05, MEASURED)
+
+BUS-716_BBS, the head of the tail after #74 (1.353e-04 MW), differs at the FIRST slack check: OLF `DS_PASS
+mismatch=0.057195631`, device `dsRem=0.057196984834` — 1.354e-06 pu = the gap — with no switch and no
+pre-distribution before it (`previousMismatch=0`). Both arms' first post-contingency Newton solve, traced
+(`OLF_NR_TRACE=1 OLF_NR_ITER_TRACE=1` on the CPU arm, `OLF_GPU_CONV_TRACE=2994` on the device, slot from
+`LOOP_TRACE_CTG`):
+
+| | OLF (KLU) | device, IR=0 | device, IR=4 (default) | device, IR=8 |
+|---|---|---|---|---|
+| ‖F‖₂ at entry | 35.97019031573278 | 35.97019031573512 | 35.97019031573509 | 35.97019031573524 |
+| after step 1 | **5.05632848098e-02** | 5.05848962592e-02 | **5.05632838301e-02** | 5.05632838302e-02 |
+| after step 2 (both stop) | 2.12192626685e-04 | 2.53843895e-04 | 2.12131551e-04 | 2.12131551e-04 |
+
+The two arms enter at the same residual to 14 digits and both stop after two steps (OLF's ‖F‖₂ < 1.204e-02),
+so the equations, the targets and the stopping decision are the same; the FIRST STEP is not. The device's step is
+converged under refinement — IR=4 and IR=8 agree to 1e-13 and two independent runs to 3e-14 — and its backward
+residual ratio is 1.6e-15 (`OLF_GPU_LIN_RESID=1`, slot 2994). OLF's step sits 9.8e-10 above it (2e-08 relative),
+which on a Jacobian of condition ~5e8 (the `irSteps` note) is KLU's unrefined forward error (κ·ε ≈ 5e-08). The
+loose criterion then freezes that deviation into the state the slack check reads: 1.35e-06 pu at the slack row,
+1.19e-07 kV at the worst bus. With IR=0 the device's own forward error is 4e-05 relative and the scope's DAP worst
+is 1.07 MW (the run fails), so the refinement is load-bearing and the default stays 4.
+
+**What this means.** The residual tail (BUS-716_BBS 1.35e-04, BUS-2414_BBS_1 1.2e-05, BUS-4603_BBS 1.1e-05 MW
+and the ~3600 contingencies above 1e-9 MW) is the CPU arm's linear-solve error at a two-step stopping point, not
+a device defect: the device computes the exact Newton step, OLF does not, and nothing on the device can make its
+exact step equal KLU's inexact one. The two ways to close it are both on the CPU side or in the comparison:
+refine KLU's solve in OLF (an upstream change — one IR step would take its forward error to ~1e-11), or compare
+at a criterion tight enough that both arms iterate the deviation away (the `#66` eps-squeeze already showed the
+BUS-4467 class floor; this class does collapse, by construction). Not re-measured here on purpose: the only
+confirmation left is KLU's own forward error on this matrix (dump slot 2994's it=0 system, KLU solve vs one
+refined solve), which would put a number on OLF's side instead of inferring it from κ·ε.
+
+Also corrected today: CLAUDE.md said "no state-vector scaling / line search on device"; the batch applies OLF's
+MAX_VOLTAGE_CHANGE clamp per scenario and OLF's exact stopping test, and refines cuDSS solves 4× on networks with
+zero-impedance branches.
+
 ### #70 — host the surviving REMOTE cluster of a split voltage-control group (2026-10-04, IN PROGRESS)
 
 **What `VC_REMERGE_MULTI` actually refused.** `OLF_GPU_QUALIFY_TRACE` on the full busbar scope, with

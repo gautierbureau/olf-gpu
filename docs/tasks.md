@@ -2155,6 +2155,25 @@ scenarios with an uncontrolled section between the island and the elected main; 
 BBS_1 (pins VL-6490_0, VL-5967_1, VL-6055_0, VL-6231_0/_1, unpins VL-6095_0), so the first question is whether the
 device's decision sequence is the same.
 
+**Read off (same day):** it is the same sequence, and NOT a placement defect. The device's final rows for
+BUS-6029_BBS_1 (slot 2330) carry OLF's layout exactly — VL-6490_0 / VL-6055_0 / VL-6231_0 pinned (mode 1 ← 0),
+VL-6095_0 unpinned (mode 0 ← 1), the cross identity on COUPLER_2's dummy row (`row=14427 mode=6 target=1.039`),
+VL-6029_3's sharing row live — and the worst buses are BUS-6231_BBS_1/_2 (245.000612 vs 245.000555 kV). The
+device's pinned target there is 0.57075810 where OLF pins at qLimit 0.570780403: a **reactive-capability CURVE
+limit evaluated at a slightly different generator P** (2.2e-5 pu). On the 4-contingency list the same contingency
+agrees to 2.1e-10 kV with the pinned target equal to OLF's to 1e-13 (1.1415608051 — there VL-6231 is ONE section,
+in the full list its two sections carry one generator each), so the difference is the per-generator
+distributed-slack P reconstruction the curve channel reads (`genCum`) for generators split across the sections of
+a merged zero-impedance group — the same channel as the remaining DAP tail (9.6e-4 MW), not #72. Opened as **#73**.
+
+### #73 — curve limits at the DS-moved P of generators split across merged sections (2026-10-05, OPEN)
+
+Symptom: BUS-6029_BBS_1/2/4 at 1.4e-05 … 5.7e-05 kV, the pinned target of VL-6231_0 off OLF's by 2.2e-5 pu while the
+same contingency on a 4-contingency list (VL-6231 un-split) matches to 1e-13. Suspect: `rlCurveLimitsBatch`'s p_now
+for a generator whose bus is one SECTION of a merged group — the per-generator water-fill cumulative (`dGenCum`) or
+its share fallback — versus OLF's targetP after the distributed-slack loop. Measure with `OLF_GPU_CV_PROBE=<entry>`
+(VL-6231_0's entry) on the full list against OLF's generator targetP (`OLF_VAR_DUMP`), before touching the channel.
+
 ### #70 — host the surviving REMOTE cluster of a split voltage-control group (2026-10-04, IN PROGRESS)
 
 **What `VC_REMERGE_MULTI` actually refused.** `OLF_GPU_QUALIFY_TRACE` on the full busbar scope, with

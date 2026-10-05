@@ -924,6 +924,15 @@ final class GpuBatchChunkSolver {
                             // back. The split is physically equivalent either way - this is about solving
                             // the system OLF solves, from the state OLF solves it at.
                             for (LfBranch nonTree : contingencies.get(ci).stickyNonTreeZi()) {
+                                // The contingency's OWN opened couplers are out of the tree too (the replay
+                                // reports the tree OLF solves on), but the opening path above already owns
+                                // them - identities, target migration, the child's BUS_TARGET_V. Handling them
+                                // again here overwrote that voltage target with the reactive one: network.xiidm
+                                // IKFR (opens IKFH) converged on the CPU and came back non-converged, 66.9 MW
+                                // against -2.42. They stay in stillOut below, so they are not re-coupled either.
+                                if (contingencies.get(ci).outagedZiBranches().contains(nonTree)) {
+                                    continue;
+                                }
                                 Integer ze = ziElemByNumAll.get(nonTree.getNum());
                                 if (ze == null || gpuData.ziIdx()[ze * 11 + 10] == 0) {
                                     continue;                // absent, or already out of the base tree

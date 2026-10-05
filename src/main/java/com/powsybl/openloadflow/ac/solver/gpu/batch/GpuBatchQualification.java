@@ -468,7 +468,10 @@ final class GpuBatchQualification {
     /** The outcome of OLF's voltage-control RE-MERGE after a contingency: buses that become plain PV buses at their
      *  own target, the controllers that thereby leave their base group's DISTR_Q, or a reject tag. */
     record ReHomed(java.util.LinkedHashMap<LfBus, Double> pvTargets, List<LfBus> leftControllers, String reject,
-                   java.util.LinkedHashMap<LfBus, Double> remoteMainTargets, java.util.Set<LfBus> remoteClusterBuses) {
+                   java.util.LinkedHashMap<LfBus, Double> remoteMainTargets, java.util.Set<LfBus> remoteClusterBuses,
+                   /** Per controlled bus of a surviving cluster that is NOT the base main's: its SUBGROUP label
+                    *  (1, 2, ...) this scenario — the base main's own cluster stays label 0 (tasks #71). */
+                   java.util.LinkedHashMap<LfBus, Integer> subgroupOf) {
     }
 
     /**
@@ -482,7 +485,8 @@ final class GpuBatchQualification {
      * BUS-6002_BBS_2 (coupler open, VL-6002_2 8.7 kV off, 29 phantom violations). A cluster with several controls
      * or a remote controller is a NEW remote group the tables cannot host — CPU, tagged.
      */
-    static ReHomed reHomedControls(List<LfBus> islandedBuses, List<LfBranch> outagedZiBranches, String contingencyId) {
+    static ReHomed reHomedControls(List<LfBus> islandedBuses, List<LfBranch> outagedZiBranches, String contingencyId,
+                                   EquationSystem<AcVariableType, AcEquationType> es) {
         java.util.Set<LfBus> islanded = new java.util.HashSet<>(islandedBuses);
         java.util.Set<LfBranch> outaged = new java.util.HashSet<>(outagedZiBranches);
         java.util.LinkedHashSet<com.powsybl.openloadflow.network.GeneratorVoltageControl> mains = new java.util.LinkedHashSet<>();
@@ -504,6 +508,7 @@ final class GpuBatchQualification {
         List<LfBus> left = new ArrayList<>();
         java.util.LinkedHashMap<LfBus, Double> remoteMains = new java.util.LinkedHashMap<>();
         java.util.Set<LfBus> remoteCluster = new java.util.LinkedHashSet<>();
+        java.util.LinkedHashMap<LfBus, Integer> subgroupOf = new java.util.LinkedHashMap<>();
         for (var main : mains) {
             java.util.Map<LfBus, com.powsybl.openloadflow.network.VoltageControl<LfBus>> controlOf = new java.util.LinkedHashMap<>();
             controlOf.put(main.getControlledBus(), main);
@@ -566,12 +571,20 @@ final class GpuBatchQualification {
                     // sharing one candidate table — still refused.
                     boolean wholeSurvivors = cluster.size() == alive.size();
                     if (!wholeSurvivors || !remoteMains.isEmpty()) {
-                        return new ReHomed(pv, left, "VC_REMERGE_MULTI", remoteMains, remoteCluster);
+                        // tasks #71: the base main keeps its own cluster (or another cluster already re-homed) and
+                        // THIS cluster is a further OLF group on the same candidate table — a SUBGROUP: its members
+                        // pair keys and q terms among themselves only, its elected main gets the identity, the base
+                        // pilot's carrier is picked among label-0 members. Needs the group's candidate table
+                        // (subgroupPairs checks every labelled member is enrolled in one).
+                        int label = subgroupOf.values().stream().mapToInt(Integer::intValue).max().orElse(0) + 1;
+                        for (LfBus b : cluster) {
+                            subgroupOf.put(b, label);
+                        }
                     }
                     remoteMains.put(newMain.getControlledBus(), newMain.getTargetValue());
                     remoteCluster.addAll(cluster);
-                    for (LfBus cb : controlOf.keySet()) {   // the controllers the cluster LOST: the islanded/disabled
-                        if (!cluster.contains(cb)) {        // sections' own controllers leave the group's keys
+                    for (LfBus cb : controlOf.keySet()) {   // the controllers the group LOST: the islanded/disabled
+                        if (!alive.contains(cb)) {          // sections' own controllers leave the group's keys
                             for (LfBus ce : controlOf.get(cb).getControllerElements()) {
                                 if (!left.contains(ce)) {
                                     left.add(ce);
@@ -589,7 +602,7 @@ final class GpuBatchQualification {
                 }
             }
         }
-        return new ReHomed(pv, left, null, remoteMains, remoteCluster);
+        return new ReHomed(pv, left, null, remoteMains, remoteCluster, subgroupOf);
     }
 
     /** A plan refusal, counted in the census AND named by contingency id: the census counts are per attempt and
@@ -597,6 +610,112 @@ final class GpuBatchQualification {
     private static void refuse(BatchContingency c, String tag) {
         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(tag);
         com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.planRefused(c.contingencyId(), tag);
+    }
+
+
+    /** tasks #71: the {dq member, label} pairs of a re-home with subgroups, or null (and a reject tag) when a
+     *  labelled bus's controller is not a packed member or the candidate table's member order cannot be trusted. */
+    private static int[] subgroupPairs(ReHomed reHomed, GpuAcData gpuData, String[] reject) {
+        if (reHomed.subgroupOf().isEmpty()) {
+            return null;
+        }
+        if (!qrMemberOrderConsistent(gpuData)) {
+            reject[0] = "PLAN:VC_REMERGE_SUBGROUP_TABLE";
+            return null;
+        }
+        List<Integer> out = new ArrayList<>();
+        for (var e : reHomed.subgroupOf().entrySet()) {
+            var vc = e.getKey().getGeneratorVoltageControl().orElse(null);
+            List<LfBus> controllers = vc != null ? vc.getControllerElements() : List.of(e.getKey());
+            for (LfBus ce : controllers) {
+                int slot = GpuBatchInjectionOutages.dqMemberSlot(gpuData, ce);
+                if (slot < 0) {
+                    reject[0] = "PLAN:VC_REMERGE_SUBGROUP_UNPACKED";
+                    return null;
+                }
+                if (gpuData.dqMemberQrGroup() == null || gpuData.dqMemberQrGroup()[slot] < 0) {
+                    reject[0] = "PLAN:VC_REMERGE_SUBGROUP_TABLE";    // no candidate table: no per-scenario carrier pick
+                    return null;
+                }
+                out.add(slot);
+                out.add(e.getValue());
+            }
+        }
+        return out.stream().mapToInt(Integer::intValue).toArray();
+    }
+
+    /** The kernels map candidate c of qr group g to dq member qrMemberStart[g] + c - 1: true when every packed
+     *  member with a row sits at that candidate (merged controller order on both sides). */
+    static boolean qrMemberOrderConsistent(GpuAcData gpuData) {
+        int[] start = qrMemberStart(gpuData);
+        int[] qrPtr = gpuData.qrPtr();
+        int[] qrRows = gpuData.qrRows();
+        int[] mRow = gpuData.dqMemberRow();
+        byte[] mHasRow = gpuData.dqMemberHasRow();
+        int[] mQrGroup = gpuData.dqMemberQrGroup();
+        if (start == null || qrPtr == null || mRow == null || mQrGroup == null) {
+            return false;
+        }
+        for (int m = 0; m < mQrGroup.length; m++) {
+            int g = mQrGroup[m];
+            if (g < 0 || mHasRow[m] == 0 || mRow[m] < 0) {
+                continue;
+            }
+            int c = m - start[g] + 1;
+            if (c < 1 || qrPtr[g] + c >= qrPtr[g + 1] || qrRows[qrPtr[g] + c] != mRow[m]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** qr group -> its first dq member, -1 for a group without packed members. */
+    static int[] qrMemberStart(GpuAcData gpuData) {
+        int[] mQrGroup = gpuData.dqMemberQrGroup();
+        int[] qrPtr = gpuData.qrPtr();
+        if (mQrGroup == null || qrPtr == null || qrPtr.length < 2) {
+            return null;
+        }
+        int[] start = new int[qrPtr.length - 1];
+        java.util.Arrays.fill(start, -1);
+        for (int m = 0; m < mQrGroup.length; m++) {
+            int g = mQrGroup[m];
+            if (g >= 0 && g < start.length && start[g] < 0) {
+                start[g] = m;
+            }
+        }
+        return start;
+    }
+
+    /** Drop the host-replayed weight overrides of a group the scenario SPLIT: the kernel's dynamic keys, now
+     *  subgroup-aware, own those rows (a host weight computed over the whole base group would overwrite them). */
+    private static double[][] withoutSplitGroups(double[][] ov, int[] subPairs, GpuAcData gpuData) {
+        if (ov == null || subPairs == null) {
+            return ov;
+        }
+        java.util.Set<Integer> labelled = new java.util.HashSet<>();
+        for (int p = 0; p < subPairs.length; p += 2) {
+            labelled.add(subPairs[p]);
+        }
+        java.util.Set<Integer> groups = new java.util.HashSet<>();
+        for (int m : labelled) {
+            groups.add(gpuData.dqMemberGroupStart()[m]);
+        }
+        List<Integer> keep = new ArrayList<>();
+        for (int k = 0; k < ov[0].length; k++) {
+            int c = (int) ov[0][k];
+            int kM = gpuData.dqKMember() != null ? gpuData.dqKMember()[c] : -1;
+            if (kM >= 0 && groups.contains(gpuData.dqMemberGroupStart()[kM])) {
+                continue;
+            }
+            keep.add(k);
+        }
+        double[][] out = new double[2][keep.size()];
+        for (int i = 0; i < keep.size(); i++) {
+            out[0][i] = ov[0][keep.get(i)];
+            out[1][i] = ov[1][keep.get(i)];
+        }
+        return out;
     }
 
     /** Row-mode-only GenOutage: the bus's V row becomes a VOLTAGE IDENTITY at {@code vTarget} (a re-homed control). */
@@ -844,7 +963,9 @@ final class GpuBatchQualification {
                          *  processHvdcsWithoutPower zeroes both converter stations' targetP; in AC
                          *  emulation those targets are already 0 (the injection is an equation term,
                          *  not a target), so masking the element is the whole of it. */
-                        List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex) {
+                        List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
+                        /** Per scenario, {dq member, subgroup label} pairs of a split group (tasks #71), else null. */
+                        int[][] dqSubByIndex) {
     }
 
     /**
@@ -886,6 +1007,7 @@ final class GpuBatchQualification {
         double[][] drOvCByIndex = new double[contingencies.size()][];
         int[][] islandedDsByIndex = new int[contingencies.size()][];
         int[][] islandedRlByIndex = new int[contingencies.size()][];
+        int[][] dqSubByIndex = new int[contingencies.size()][];
         int islandingCount = 0;
         for (int i = 0; i < qualifications.size(); i++) {
             GpuBatchContingencyValidator.Qualification q = qualifications.get(i);
@@ -1030,9 +1152,15 @@ final class GpuBatchQualification {
                     List<com.powsybl.openloadflow.network.LfHvdc> islandedHvdcs = new ArrayList<>();
                     VcSplit vcSplit = classifyVcSplit(es, q.islandedBuses(), lostVcControllers, deadControlBuses,
                             islandedHvdcs);
-                    ReHomed reHomed = reHomedControls(q.islandedBuses(), c.outagedZiBranches(), c.contingencyId());
+                    ReHomed reHomed = reHomedControls(q.islandedBuses(), c.outagedZiBranches(), c.contingencyId(), es);
                     if (reHomed.reject() != null) {
                         refuse(c, "PLAN:" + reHomed.reject());
+                        continue;
+                    }
+                    String[] subReject = new String[1];
+                    dqSubByIndex[i] = subgroupPairs(reHomed, gpuData, subReject);
+                    if (subReject[0] != null) {
+                        refuse(c, subReject[0]);
                         continue;
                     }
                     deadControlBuses.removeAll(reHomed.pvTargets().keySet());
@@ -1183,7 +1311,8 @@ final class GpuBatchQualification {
                             inactiveForTargets.add(ib);
                         }
                     }
-                    for (GenOutage go : GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, inactiveForTargets, relocDummyQRows, outagedZiNums)) {
+                    for (GenOutage go : GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, inactiveForTargets, relocDummyQRows, outagedZiNums,
+                            GpuBatchInjectionOutages.labelsOf(dqSubByIndex[i]))) {
                         live.add(go.withoutFrozenTargetRows(frozenSet));
                     }
                     gos = live.toArray(new GenOutage[0]);
@@ -1216,7 +1345,7 @@ final class GpuBatchQualification {
                 }
                 if (goneForKeys.stream().anyMatch(g -> g.getBus() != null
                         && es.getEquation(g.getBus().getNum(), AcEquationType.DISTR_Q).isPresent())) {
-                    double[][] ov = distrQWeightOverrides(es, gpuData, goneForKeys);
+                    double[][] ov = withoutSplitGroups(distrQWeightOverrides(es, gpuData, goneForKeys), dqSubByIndex[i], gpuData);
                     if (ov == null) {
                         refuse(c, "PLAN:DISTR_Q_WEIGHT_REDIFF");
                         continue;                            // weight rediff unavailable — CPU
@@ -1256,9 +1385,15 @@ final class GpuBatchQualification {
                 List<com.powsybl.openloadflow.network.LfHvdc> islandedHvdcs = new ArrayList<>();
                 VcSplit vcSplit = classifyVcSplit(es, q.islandedBuses(), lostVcControllers, deadControlBuses,
                         islandedHvdcs);
-                ReHomed reHomed = reHomedControls(q.islandedBuses(), c.outagedZiBranches(), c.contingencyId());
+                ReHomed reHomed = reHomedControls(q.islandedBuses(), c.outagedZiBranches(), c.contingencyId(), es);
                 if (reHomed.reject() != null) {
                     refuse(c, "PLAN:" + reHomed.reject());
+                    continue;
+                }
+                String[] subReject = new String[1];
+                dqSubByIndex[i] = subgroupPairs(reHomed, gpuData, subReject);
+                if (subReject[0] != null) {
+                    refuse(c, subReject[0]);
                     continue;
                 }
                 deadControlBuses.removeAll(reHomed.pvTargets().keySet());
@@ -1371,7 +1506,7 @@ final class GpuBatchQualification {
                     List<com.powsybl.openloadflow.network.LfGenerator> goneControllers = lostVcControllers.stream()
                             .flatMap(b -> b.getGenerators().stream())
                             .toList();
-                    double[][] vcOv = distrQWeightOverrides(es, gpuData, goneControllers);
+                    double[][] vcOv = withoutSplitGroups(distrQWeightOverrides(es, gpuData, goneControllers), dqSubByIndex[i], gpuData);
                     if (vcOv == null) {
                         refuse(c, "PLAN:DISTR_Q_WEIGHT_REDIFF");
                         continue;
@@ -1379,7 +1514,8 @@ final class GpuBatchQualification {
                     dqOvContribByIndex[i] = java.util.Arrays.stream(vcOv[0]).mapToInt(d -> (int) d).toArray();
                     dqOvWByIndex[i] = vcOv[1];
                     // and the survivors' DISTR_Q row TARGETS + the islanded members' inactive entries
-                    List<GenOutage> dq = GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, lostVcControllers, relocDummyQRows, outagedZiNums);
+                    List<GenOutage> dq = GpuBatchInjectionOutages.islandedDistrQEntries(gpuData, lostVcControllers, relocDummyQRows, outagedZiNums,
+                            GpuBatchInjectionOutages.labelsOf(dqSubByIndex[i]));
                     if (!dq.isEmpty()) {
                         List<GenOutage> merged = new ArrayList<>();
                         if (genOutagesByIndex[i] != null) {
@@ -1483,6 +1619,6 @@ final class GpuBatchQualification {
         return new ScenarioPlan(batchedIndices, frozenRowsByIndex, islandedNumsByIndex,
                 frozenTargetsByIndex, genOutagesByIndex, islandingCount, activePowerLossByIndex,
                 dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
-                islandedRlByIndex, islandedHvdcsByIndex);
+                islandedRlByIndex, islandedHvdcsByIndex, dqSubByIndex);
     }
 }

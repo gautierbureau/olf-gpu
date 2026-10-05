@@ -1065,6 +1065,13 @@ struct RelocTables {
     // tell "the coupler is dead AND this bus is PINNED at home" (its own q belongs on its own row) from
     // "the coupler is dead and it still SHARES" (its DISTR_Q, diverted home, carries its q).
     const int* relocOwn = nullptr;
+    // Per (scenario, dq member): the member's SUBGROUP this scenario (0 = the base pilot's group). A contingency
+    // that splits a merged group behind its surviving main leaves two OLF groups on ONE candidate table (tasks
+    // #71): keys and q contributions pair only within a subgroup, and the base pilot's carrier is picked among
+    // subgroup-0 members only. Null = no split anywhere in the batch.
+    const char* dqSub = nullptr;
+    const int* qrMemberStart = nullptr;                      // qr group -> its first dq member (candidate 1)
+    int nDqMembers = 0;
 };
 
 // GROUP pilot-Q relocation (plan-A6): candidates = [fallback row, member rows in merged order];
@@ -1076,6 +1083,9 @@ __device__ inline RelocTables relocForScenario(RelocTables rt, int s) {
     if (rt.psSkip != nullptr) {
         rt.psSkip += (size_t) s * rt.psGroups;
     }
+    if (rt.dqSub != nullptr) {
+        rt.dqSub += (size_t) s * rt.nDqMembers;
+    }
     return rt;
 }
 
@@ -1083,6 +1093,26 @@ __device__ inline int relocChoose(int g, const int* qrPtr, const int* qrRows, co
     int p0 = qrPtr[g];
     int cnt = qrPtr[g + 1] - p0;
     for (int c = 1; c < cnt; c++) {
+        int m = mode[qrRows[p0 + c]];
+        if (m != 0 && m != 4) {
+            return c;
+        }
+    }
+    return 0;
+}
+
+// relocChoose restricted to the base pilot's SUBGROUP (tasks #71): candidate c is member qrMemberStart[g] + c - 1,
+// and a member the scenario moved to another subgroup can host neither the pilot's balance nor be its carrier.
+// sub is already offset to the scenario (relocForScenario / the caller).
+__device__ inline int relocChooseSub(int g, const int* qrPtr, const int* qrRows, const int* mode,
+                                     const char* sub, const int* qrMemberStart) {
+    if (sub == nullptr || qrMemberStart == nullptr || qrMemberStart[g] < 0) {
+        return relocChoose(g, qrPtr, qrRows, mode);
+    }
+    int p0 = qrPtr[g];
+    int cnt = qrPtr[g + 1] - p0;
+    for (int c = 1; c < cnt; c++) {
+        if (sub[qrMemberStart[g] + c - 1] != 0) continue;
         int m = mode[qrRows[p0 + c]];
         if (m != 0 && m != 4) {
             return c;
@@ -1119,7 +1149,7 @@ __device__ inline int ziDynDest(int frozen, int slot, const int* alt, const int*
         if (rt.psSkip != nullptr && rt.psSkip[rg]) {
             return -1;                                       // pilot-self group, pilot unpinned: no raw q
         }
-        return rt.pool[rt.off[slot] + relocChoose(rg, rt.qrPtr, rt.qrRows, mode)];
+        return rt.pool[rt.off[slot] + relocChooseSub(rg, rt.qrPtr, rt.qrRows, mode, rt.dqSub, rt.qrMemberStart)];
     }
     int sr = sel != nullptr ? sel[slot] : -1;
     if (sr <= -2) {
@@ -1139,7 +1169,7 @@ __device__ void scatterAddDyn(int nout, const int* dest, const int* altDest, con
         } else if (rg >= 0 && rt.psSkip != nullptr && rt.psSkip[rg]) {
             continue;                                        // pilot-self group, pilot unpinned: no raw q
         } else if (rg >= 0) {
-            d = rt.pool[rt.off[eOff + k] + relocChoose(rg, rt.qrPtr, rt.qrRows, mode)];
+            d = rt.pool[rt.off[eOff + k] + relocChooseSub(rg, rt.qrPtr, rt.qrRows, mode, rt.dqSub, rt.qrMemberStart)];
         } else {
             int sr = selRow[k];
             bool useAlt = sr >= 0 ? (mode[sr] == 0 || mode[sr] == 4)
@@ -2907,6 +2937,11 @@ static RelocTables withPilotSelf(RelocTables rt, Ctx* ctx) {
         rt.psSkip = ctx->dPsSkip.template as<char>();
         rt.psGroups = ctx->st->nQr;
     }
+    if (ctx->hasDqSub) {                                     // tasks #71: per-scenario subgroups of a split group
+        rt.dqSub = ctx->dDqSub.template as<char>();
+        rt.qrMemberStart = ctx->dQrMemberStart.template as<int>();
+        rt.nDqMembers = ctx->nDqMembers;
+    }
     return rt;
 }
 
@@ -3437,6 +3472,9 @@ struct SolverContext {
     DeviceBuf dPsPilotEntry;
     DeviceBuf dPsSkip;
     bool hasPilotSelf = false;
+    bool hasDqSub = false;                                   // never set on the base context (tasks #71 is batch-only)
+    DeviceBuf dDqSub, dQrMemberStart;
+    int nDqMembers = 0;
     int n = 0;
     int nnz = 0;
     int ndq = 0, nzi = 0, ndr = 0, ndb = 0;                  // copies of the structure counts
@@ -4055,7 +4093,7 @@ __device__ void scatterAddFDyn(int nres, const int* dest, const int* altDest, co
         } else if (rg >= 0 && rt.psSkip != nullptr && rt.psSkip[rg]) {
             continue;                                        // pilot-self group, pilot unpinned: no raw q
         } else if (rg >= 0) {
-            d = rt.pool[rt.off[eOff + idx] + relocChoose(rg, rt.qrPtr, rt.qrRows, mode)];
+            d = rt.pool[rt.off[eOff + idx] + relocChooseSub(rg, rt.qrPtr, rt.qrRows, mode, rt.dqSub, rt.qrMemberStart)];
         } else {
             int sr = selRow[idx];
             bool useAlt = sr >= 0 ? (mode[sr] == 0 || mode[sr] == 4)
@@ -4274,7 +4312,8 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
                                 const int* mQrGroup, const int* qrPtr, const int* qrRows,
                                 int nR1Ov, const int* r1OvSlotElem, const double* r1OvVal,
                                 int nShOv, const int* shOvSlotElem, const double* shOvGb,
-                                int dqTraceRow) {
+                                int dqTraceRow,
+                                const char* dqSub, const int* qrMemberStart, int nDqMembersAll) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ndq * nScenarios) return;
     int c = tid % ndq;
@@ -4301,7 +4340,8 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
             // stay ACTIVE. Suppressing it there dropped an equation without gaining one: one short, singular.
             bool psGateOff = psSkip != nullptr && g >= 0 && psSkip[(size_t) s * psGroups + g];
             if (g >= 0 && !psGateOff && d0 <= -2
-                    && -2 - d0 == qrRows[qrPtr[g] + relocChoose(g, qrPtr, qrRows, mode + (size_t) s * n)]) {
+                    && -2 - d0 == qrRows[qrPtr[g] + relocChooseSub(g, qrPtr, qrRows, mode + (size_t) s * n,
+                            dqSub != nullptr ? dqSub + (size_t) s * nDqMembersAll : nullptr, qrMemberStart)]) {
                 return;
             }
         }
@@ -4324,11 +4364,17 @@ __global__ void fillDistrQBatch(int ndq, int nScenarios, int n, int nnz, int nEl
         // zero-then-sum arithmetic in member order, driven by the per-(entry, scenario) limitType.
         int gs = mGroupStart[kM];
         int gc = mGroupCount[kM];
+        // SUBGROUPS (tasks #71): a split group's members pair only within their own subgroup — the other
+        // subgroup's keys leave this denominator and its members' q terms leave this row (below).
+        const char* subS = dqSub != nullptr ? dqSub + (size_t) s * nDqMembersAll : nullptr;
+        char subK = subS != nullptr ? subS[kM] : 0;
+        if (subS != nullptr && dqJMember[c] >= 0 && subS[dqJMember[c]] != subK) return;
         double sum = 0.0;
         for (int m = gs; m < gs + gc; m++) {
             int re = mRlEntry[m];
             bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != 0;
-            sum += (pinned || dqMemberInactive(nDqInact, dqInactSlotMember, s, m)) ? 0.0 : mKey[m];
+            bool otherSub = subS != nullptr && subS[m] != subK;
+            sum += (pinned || otherSub || dqMemberInactive(nDqInact, dqInactSlotMember, s, m)) ? 0.0 : mKey[m];
         }
         // the PINNED member's q terms STAY in every survivor's row (weight = the renormalized
         // qPct of the ROW OWNER); the pin is balanced on the TARGET side instead — OLF's
@@ -4985,7 +5031,8 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                                          int nFrozen, const int* frozenSlotRow,
                                          int nTqOv, const int* tqOvKey, const double* tqOvVal,
                                          const int* mTgtPtr, const int* mTgtPeer,
-                                         const int* psEntry, int psMask, const int* relocOwn) {
+                                         const int* psEntry, int psMask, const int* relocOwn,
+                                const char* dqSub, const int* qrMemberStart) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nMembers * nScenarios) return;
     int k = tid % nMembers;
@@ -5033,7 +5080,8 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
         // Q target (captured at solve init); its DISTR_Q compensation does not apply. A non-carrier
         // member without a packed DISTR_Q row (the base free member, superseded mid-scenario) has
         // no row to maintain here — the RL kernel owns it while pinned.
-        int carrier = qrRows[qrPtr[qg] + relocChoose(qg, qrPtr, qrRows, mode + (size_t) s * n)];
+        int carrier = qrRows[qrPtr[qg] + relocChooseSub(qg, qrPtr, qrRows, mode + (size_t) s * n,
+                dqSub != nullptr ? dqSub + (size_t) s * nMembers : nullptr, qrMemberStart)];
         // A group whose PILOT ROW is frozen this scenario has lost its pilot to an island (tasks #69): its
         // surviving sections form a NEW group OLF re-elects a main for, and that main's sharing rows are
         // plain DISTR_Q rows renormalized over the survivors — there is NO base-pilot balance left to
@@ -5066,11 +5114,14 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     int gs = mGroupStart[k];
     int gc = mGroupCount[k];
     double sum = 0.0;
+    const char* subS = dqSub != nullptr ? dqSub + (size_t) s * nMembers : nullptr;
+    char subK = subS != nullptr ? subS[k] : 0;
     for (int m = gs; m < gs + gc; m++) {                     // live keys over the WHOLE merged group (updateReactiveKeys)
         int re = mRlEntry[m];
         bool pinned = re >= 0 && limitType[(size_t) s * nrl + re] != 0;
         bool inactive = dqMemberInactive(nDqInact, dqInactSlotMember, s, m);
-        sum += (pinned || inactive) ? 0.0 : mKey[m];
+        bool otherSub = subS != nullptr && subS[m] != subK;  // a split group's other subgroup (tasks #71)
+        sum += (pinned || inactive || otherSub) ? 0.0 : mKey[m];
     }
     // targetQ over the peers AcTargetVector sums for THIS member: the elements of its OWN control
     // (getGeneratorVoltageControl().getMergedControllerElements()), which for a control merged INTO this
@@ -5155,7 +5206,8 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
                                     int nRlVtOv, const int* rlVtOvSlotIdx, const double* rlVtOvVal,
                                     const double* svcRlVt,
                                     int nDqMembers, const int* dqMemberQrGroup, const int* dqMemberRlEntry,
-                                    const char* rlIslandedMask) {
+                                    const char* rlIslandedMask,
+                                const char* dqSub, const int* qrMemberStart) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nQr * nScenarios) return;
     int g = tid % nQr;
@@ -5212,6 +5264,7 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
     if (pe >= 0 && dqMemberQrGroup != nullptr && dqMemberRlEntry != nullptr && limitType != nullptr && nrl > 0) {
         for (int m = 0; m < nDqMembers; m++) {
             if (dqMemberQrGroup[m] != g) continue;
+            if (dqSub != nullptr && dqSub[(size_t) s * nDqMembers + m] != 0) continue;   // another subgroup's controller (#71)
             int re = dqMemberRlEntry[m];
             if (re < 0 || re >= nrl) continue;
             if (rlIslandedMask != nullptr && rlIslandedMask[(size_t) s * nrl + re]) continue;   // OLF disables it
@@ -5239,7 +5292,8 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
             if (m != 0 && m != 4) lost = false;
         }
     } else {
-        lost = relocChoose(g, qrPtr, qrRows, mode + (size_t) s * n) == 0;
+        lost = relocChooseSub(g, qrPtr, qrRows, mode + (size_t) s * n,
+                dqSub != nullptr ? dqSub + (size_t) s * nDqMembers : nullptr, qrMemberStart) == 0;
     }
     // With the fact known the layout is applied EVERY pass, the first fill included; otherwise it stays where it
     // was — inside the reactive-limits phase, which is all the row-mode inference could support.
@@ -6517,7 +6571,8 @@ __global__ void negateIntoBatch(int total, const double* F, double* b) {  // b =
 // members at their own Q. One thread per (scenario, class-2 entry).
 __global__ void rlPilotSelfMixedGate(int nrl, int nScenarios, const char* rlRemote, const int* rlCmpVrow,
                                      const char* limitType, const char* rlIslanded, char* bad,
-                                     const int* psEntry, int nQr) {
+                                     const int* psEntry, int nQr,
+                                int nDqMembers, const int* dqMemberRlEntry, const char* dqSub) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= nrl * nScenarios) return;
     int i = t % nrl;
@@ -6531,6 +6586,13 @@ __global__ void rlPilotSelfMixedGate(int nrl, int nScenarios, const char* rlRemo
         if (j != i && rlCmpVrow[j] == rlCmpVrow[i] && rlRemote[j] != 0
                 && limitType[(size_t) s * nrl + j] == 0
                 && !(rlIslanded != nullptr && rlIslanded[(size_t) s * nrl + j])) {
+            if (dqSub != nullptr && dqMemberRlEntry != nullptr) {   // a member of ANOTHER subgroup is not this
+                bool other = false;                                  // pilot's controller any more (tasks #71)
+                for (int m = 0; m < nDqMembers; m++) {
+                    if (dqMemberRlEntry[m] == j && dqSub[(size_t) s * nDqMembers + m] != 0) { other = true; break; }
+                }
+                if (other) continue;
+            }
             bad[s] = 1;
             return;
         }
@@ -6845,6 +6907,9 @@ struct BatchSolverContext {
     DeviceBuf dRlLoadQDyn;                                       // per (scenario, controller) — shed load Q
     int nDqInact = 0;                                            // {slot, dqMember} pairs: a controller
     DeviceBuf dDqInact;                                          // that stops controlling in ONE scenario
+    bool hasDqSub = false;                                       // tasks #71: per (scenario, dq member) subgroup
+    DeviceBuf dDqSub;                                            // labels (char, dense nS x nDqMembers) and the
+    DeviceBuf dQrMemberStart;                                    // qr group -> first dq member map
     // Reactive capability CURVES at runtime P (setBatchRlCurves): per participating curve gen —
     // cvIdx {rlIdx, pRow, ptsOff, npts, dsGenSlot}, cvIn {basePpu, share, baseRowTargetP, baseEvalMinPu, baseEvalMaxPu},
     // cvPts {p_MW, minQ_MW, maxQ_MW} sorted by p; dRlMinQDyn/dRlMaxQDyn = nS*nrl evaluated limits.
@@ -9454,7 +9519,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->nSvc > 0 ? ctx->dSvcRlVt.as<double>() : nullptr,
                     ctx->nDqMembers, ctx->dDqMemberQrGroup.p ? ctx->dDqMemberQrGroup.as<int>() : nullptr,
                     ctx->dDqMemberRlEntry.p ? ctx->dDqMemberRlEntry.as<int>() : nullptr,
-                    ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr);
+                    ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
+                    ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr);
         }
     };
     auto launchDistrQTargetsInner = [&]() {
@@ -9482,7 +9548,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->dDqMemberTgtPtr.as<int>(), ctx->dDqMemberTgtPeer.as<int>(),
                         psEntryPtr(ctx), psMaskEnv(),
                         std::getenv("OLF_GPU_NO_TGT_STOCK") == nullptr && ctx->st->dRelocOwn.p != nullptr
-                                ? ctx->st->dRelocOwn.as<int>() : nullptr);
+                                ? ctx->st->dRelocOwn.as<int>() : nullptr,
+                    ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr);
         }
     };
     std::vector<char> rlActive(nS), rlSwitched(nS), wasActive(nS);
@@ -10009,7 +10076,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     int dqTraceRow = gpuDqTraceRow();
     if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->dDqAlt.as<int>(), ctx->st->dDqSel.as<int>(), ctx->st->dDqZiRow.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqInact,
                 ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
-                ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr ? ctx->dPsSkip.as<char>() : nullptr, ctx->st->nQr, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr, ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), dqTraceRow);
+                ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr ? ctx->dPsSkip.as<char>() : nullptr, ctx->st->nQr, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr, ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), dqTraceRow,
+                    ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr, ctx->nDqMembers);
         if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr, ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
         if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx), ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr);
@@ -11543,7 +11611,8 @@ psgStep(ctx, nS, n, outer, "afterRL");
                         ctx->dRlRemote.as<char>(), ctx->dRlCmpVrow.as<int>(), ctx->dRlLimitType.as<char>(),
                         ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
                         ctx->dRlMixedBad.as<char>(),
-                        psEntryPtr(ctx), ctx->st->nQr);
+                        psEntryPtr(ctx), ctx->st->nQr,
+                    ctx->nDqMembers, ctx->dDqMemberRlEntry.p != nullptr ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr);
                 std::vector<char> mixed(nS);
                 CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
                 CUDA_CHECK(cudaMemcpy(mixed.data(), ctx->dRlMixedBad.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
@@ -12848,7 +12917,8 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
     }
     if (ctx->ndq) fillDistrQBatch<<<grid(ctx->ndq * nS), BLOCK, 0, ctx->stream>>>(ctx->ndq, nS, n, nnz, ctx->nElements, ctx->cbOffset, ctx->obOffset, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->dDqAlt.as<int>(), ctx->st->dDqSel.as<int>(), ctx->st->dDqZiRow.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->nDqOv, ctx->nDqOv ? ctx->dDqOvIdx.as<int>() : nullptr, ctx->nDqOv ? ctx->dDqOvW.as<double>() : nullptr, ctx->dMode.as<int>(), ctx->nDqInact,
                 ctx->nDqInact ? ctx->dDqInact.as<int>() : nullptr,
-                ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr ? ctx->dPsSkip.as<char>() : nullptr, ctx->st->nQr, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr, ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), dqTraceRow);
+                ctx->nDqDyn ? ctx->dDqKMember.as<int>() : nullptr, ctx->nDqDyn || ctx->hasDqQrGroups ? ctx->dDqJMember.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberKey.as<double>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberRlEntry.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupStart.as<int>() : nullptr, ctx->nDqDyn ? ctx->dDqMemberGroupCount.as<int>() : nullptr, ctx->dRlLimitType.as<char>(), ctx->nrl, ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr ? ctx->dPsSkip.as<char>() : nullptr, ctx->st->nQr, ctx->hasDqQrGroups ? ctx->dDqMemberQrGroup.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrPtr.as<int>() : nullptr, ctx->st->nQr > 0 ? ctx->st->dQrRows.as<int>() : nullptr, ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), dqTraceRow,
+                    ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr, ctx->nDqMembers);
     if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr, ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
     if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
     if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx), ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr);
@@ -13428,6 +13498,26 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->dDqInact.upload(sm, static_cast<size_t>(n2) * sizeof(int));
     env->ReleaseIntArrayElements(jSlotMember, sm, JNI_ABORT);
     ctx->nDqInact = n2 / 2;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDqSubgroups(
+        JNIEnv* env, jclass, jlong handle, jbyteArray jDense, jintArray jQrMemberStart) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jDense == nullptr || env->GetArrayLength(jDense) == 0) {
+        ctx->hasDqSub = false;
+        return;
+    }
+    jbyte* d = env->GetByteArrayElements(jDense, nullptr);
+    ctx->dDqSub.upload(d, static_cast<size_t>(env->GetArrayLength(jDense)));
+    env->ReleaseByteArrayElements(jDense, d, JNI_ABORT);
+    jint* q = env->GetIntArrayElements(jQrMemberStart, nullptr);
+    ctx->dQrMemberStart.upload(q, static_cast<size_t>(env->GetArrayLength(jQrMemberStart)) * sizeof(int));
+    env->ReleaseIntArrayElements(jQrMemberStart, q, JNI_ABORT);
+    ctx->hasDqSub = true;
 }
 
 extern "C" JNIEXPORT void JNICALL

@@ -1608,6 +1608,91 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         return lostPilotSectionNetwork(true);
     }
 
+    /** A chain of {@code sections} busbar sections, every section with its OWN local control (g0 at the end
+     *  section bbs0 carries the highest target, so it is the base MAIN), each section tied to the meshed external
+     *  network by a line. Listing the loss of EVERY section keeps every coupler retained (OLF retains only the
+     *  switches a listed contingency opens), so a middle-section loss leaves the main's cluster on one side and a
+     *  second cluster on the other — tasks #71's shape. */
+    private static Network splitGroupNetwork(int sections) {
+        Network network = Network.create("split-group-" + sections, "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vl3", "vl4")) {
+            com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(vl).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            v.getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        com.powsybl.iidm.network.VoltageLevel vl12 = s.newVoltageLevel().setId("vl12").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.NODE_BREAKER).add();
+        for (int k = 0; k < sections; k++) {
+            vl12.getNodeBreakerView().newBusbarSection().setId("bbs" + k).setNode(k).add();
+            if (k > 0) {
+                vl12.getNodeBreakerView().newBreaker().setId("c" + (k - 1) + k).setNode1(k - 1).setNode2(k)
+                        .setRetained(true).setOpen(false).add();
+            }
+        }
+        int node = 100;
+        String[] externals = {"vl0", "vl3", "vl4"};
+        for (int k = 0; k < sections; k++) {
+            int gNode = node++;
+            int lNode = node++;
+            for (int[] pair : new int[][] {{gNode, 0}, {lNode, 1}}) {
+                vl12.getNodeBreakerView().newDisconnector().setId("d" + k + "_" + pair[1]).setNode1(k).setNode2(pair[0] + 50).setOpen(false).add();
+                vl12.getNodeBreakerView().newBreaker().setId("b" + k + "_" + pair[1]).setNode1(pair[0] + 50).setNode2(pair[0]).setOpen(false).add();
+            }
+            vl12.newGenerator().setId("g" + k).setNode(gNode)
+                    .setMinP(0).setMaxP(500).setTargetP(80).setTargetQ(0).setTargetV(k == 0 ? 406 : 405).setVoltageRegulatorOn(true).add();
+            network.getGenerator("g" + k).newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(300).add();
+            String ext = externals[k % 3];
+            network.newLine().setId("l" + k).setVoltageLevel1("vl12").setNode1(lNode)
+                    .setVoltageLevel2(ext).setBus2(ext + "_b").setConnectableBus2(ext + "_b")
+                    .setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        }
+        vl12.newLoad().setId("ld0").setNode(node).setP0(30).setQ0(40).add();
+        vl12.getNodeBreakerView().newDisconnector().setId("dld").setNode1(0).setNode2(node + 50).setOpen(false).add();
+        vl12.getNodeBreakerView().newBreaker().setId("bld").setNode1(node + 50).setNode2(node).setOpen(false).add();
+        network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(500).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl0").newLoad().setId("lds").setBus("vl0_b").setConnectableBus("vl0_b").setP0(500).setQ0(100).add();
+        network.getVoltageLevel("vl3").newLoad().setId("ld3").setBus("vl3_b").setConnectableBus("vl3_b").setP0(150).setQ0(50).add();
+        network.getVoltageLevel("vl4").newLoad().setId("ld4").setBus("vl4_b").setConnectableBus("vl4_b").setP0(150).setQ0(50).add();
+        network.newLine().setId("l34").setVoltageLevel1("vl3").setBus1("vl3_b").setConnectableBus1("vl3_b")
+                .setVoltageLevel2("vl4").setBus2("vl4_b").setConnectableBus2("vl4_b").setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        network.newLine().setId("l04").setVoltageLevel1("vl0").setBus1("vl0_b").setConnectableBus1("vl0_b")
+                .setVoltageLevel2("vl4").setBus2("vl4_b").setConnectableBus2("vl4_b").setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        return network;
+    }
+
+    private void assertSplitGroupMatchesCpu(int sections) {
+        List<Contingency> ctgs = new java.util.ArrayList<>();
+        for (int k = 0; k < sections; k++) {
+            ctgs.add(new Contingency("bus-" + k, new com.powsybl.contingency.BusbarSectionContingency("bbs" + k)));
+        }
+        GpuBatchScopeCensus.reset();
+        assertMergedPilotLossMatchesCpu(splitGroupNetwork(sections), ctgs, sections);
+        assertEquals(0L, GpuBatchScopeCensus.snapshot().getOrDefault("HOST:OVERRIDE_CONFLICT", 0L).longValue(),
+                "a sound plan writes every row's target once");
+    }
+
+    /** Four sections, the main at the end: losing bbs1 leaves the main alone on one side and a second cluster
+     *  {bbs2, bbs3} that OLF re-merges into a NEW group on the other — two groups on one candidate table (tasks
+     *  #71, rte6515 BUS-6002_BBS_2 and ten more). Every section's loss is listed (couplers retained), so the same
+     *  run also covers the pilot loss (#70) and the leaf loss. */
+    @org.junit.jupiter.api.Test
+    void deviceSplitGroupBehindSurvivingMainMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertSplitGroupMatchesCpu(4);
+    }
+
+    /** Five sections: losing bbs2 keeps TWO controllers with the main (bbs0, bbs1 — its DISTR_Q row stays a
+     *  sharing row of subgroup 0) and splits off {bbs3, bbs4}. */
+    @org.junit.jupiter.api.Test
+    void deviceSplitGroupWithTwoControllersOnMainSideMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertSplitGroupMatchesCpu(5);
+    }
+
     /** @param pilotLine whether the pilot section bbs0 carries a line. WITH it bbs0 is the coupler tree's ROOT
      *  (GpuAcRowIndexing roots a tree at the first bus with an impedant branch) and the elected main vl12_1 is
      *  the killed coupler's CHILD — its identity comes from the stock placement. WITHOUT it bbs0 cannot root

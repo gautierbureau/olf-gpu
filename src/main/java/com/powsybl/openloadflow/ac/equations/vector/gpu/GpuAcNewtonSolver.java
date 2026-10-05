@@ -732,6 +732,11 @@ public final class GpuAcNewtonSolver {
      *  the denominator, clobbering the right target with the base one. Cleared when the chunk has none. */
     public static native void setBatchDqInactiveMembers(long handle, int[] slotMember);
 
+    /** tasks #71: per (scenario, dq member) SUBGROUP labels of a group a contingency split behind its surviving
+     *  main (dense {@code chunkSize x nDqMembers} bytes, 0 = the base pilot's group) and the qr group -> first
+     *  dq member map the kernels use to pair candidates with members. Null clears the channel. */
+    public static native void setBatchDqSubgroups(long handle, byte[] dense, int[] qrMemberStart);
+
     /** The generators an outage REMOVES, as (scenario, DS generator slot) pairs. With the identity the
      *  outaged bus's survivors take part in the per-generator slack water-fill like any others, instead
      *  of the bus riding on one aggregate entry — which leaves their own P unknown to everything that

@@ -406,7 +406,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         GpuBatchHvdcAcEmulation.elementIndices(network, nElements), rowCriteria, rlCurves,
                         plan.dqOvContribByIndex(), plan.dqOvWByIndex(),
                         plan.drOvContribByIndex(), plan.drOvCByIndex(), plan.islandedDsByIndex(),
-                        plan.islandedRlByIndex(), plan.islandedHvdcsByIndex(),
+                        plan.islandedRlByIndex(), plan.islandedHvdcsByIndex(), plan.dqSubByIndex(),
                         n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                         preDistributedByIndex, distributedByIndex, config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
                         phases,

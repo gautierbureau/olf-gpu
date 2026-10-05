@@ -81,6 +81,27 @@ final class GpuBatchInjectionOutages {
     static List<GenOutage> islandedDistrQEntries(GpuAcData gpuData, List<LfBus> islandedControllers,
                                                 java.util.Map<Integer, int[]> relocDummyQRows,
                                                 java.util.Set<Integer> outagedZiNums) {
+        return islandedDistrQEntries(gpuData, islandedControllers, relocDummyQRows, outagedZiNums, null);
+    }
+
+    /** {dq member -> subgroup label} from the plan's flat {member, label} pairs; null when there are none. */
+    static java.util.Map<Integer, Integer> labelsOf(int[] subPairs) {
+        if (subPairs == null || subPairs.length == 0) {
+            return null;
+        }
+        java.util.Map<Integer, Integer> out = new java.util.HashMap<>();
+        for (int p = 0; p < subPairs.length; p += 2) {
+            out.put(subPairs[p], subPairs[p + 1]);
+        }
+        return out;
+    }
+
+    /** @param labelOf tasks #71: a split group's subgroup labels — a member's renormalized target sums the keys
+     *  of ITS subgroup only, exactly as the kernel's updateDistrQTargetsBatch will maintain it. */
+    static List<GenOutage> islandedDistrQEntries(GpuAcData gpuData, List<LfBus> islandedControllers,
+                                                java.util.Map<Integer, int[]> relocDummyQRows,
+                                                java.util.Set<Integer> outagedZiNums,
+                                                java.util.Map<Integer, Integer> labelOf) {
         List<GenOutage> out = new ArrayList<>();
         int[] mBusNum = gpuData.dqMemberBusNum();
         if (mBusNum == null || islandedControllers.isEmpty()) {
@@ -106,9 +127,11 @@ final class GpuBatchInjectionOutages {
             int[] rows = new int[0];
             double[] values = new double[0];
             if (groupsDone.add(gs)) {                        // the group's targets once, on its first entry
-                double keySum = 0;
-                for (int m = gs; m < gs + gc; m++) {         // live keys over the whole merged group
-                    keySum += !inactive.contains(m) && memberKeepsKey(any, mBusNum[m], m, -1) ? mKey[m] : 0;
+                java.util.Map<Integer, Double> keySumByLabel = new java.util.HashMap<>();
+                for (int m = gs; m < gs + gc; m++) {         // live keys over the whole merged group, per subgroup
+                    int lbl = labelOf != null ? labelOf.getOrDefault(m, 0) : 0;
+                    double kk = !inactive.contains(m) && memberKeepsKey(any, mBusNum[m], m, -1) ? mKey[m] : 0;
+                    keySumByLabel.merge(lbl, kk, Double::sum);
                 }
                 List<Integer> r = new ArrayList<>();
                 List<Double> v = new ArrayList<>();
@@ -123,6 +146,7 @@ final class GpuBatchInjectionOutages {
                     if (!any.getNetwork().getBus(mBusNum[m]).isGeneratorVoltageControlEnabled()) {
                         continue;
                     }
+                    double keySum = keySumByLabel.getOrDefault(labelOf != null ? labelOf.getOrDefault(m, 0) : 0, 0.0);
                     double qpk = keySum == 0 || !memberKeepsKey(any, mBusNum[m], m, -1) ? 0 : mKey[m] / keySum;
                     // dqMemberRow is STRUCTURAL: under the coupler-tree relocation a child controller's
                     // reactive row is its parent coupler's DUMMY_Q. A scenario that OPENS that coupler pins
@@ -158,7 +182,7 @@ final class GpuBatchInjectionOutages {
                                 .append(" inactive=").append(inactive.contains(m))
                                 .append(" keeps=").append(memberKeepsKey(any, mBusNum[m], m, -1)).append(']');
                     }
-                    System.err.println("DQISL group=" + gs + " count=" + gc + " keySum=" + keySum
+                    System.err.println("DQISL group=" + gs + " count=" + gc + " keySumByLabel=" + keySumByLabel
                             + " rows=" + r + " values=" + v + sb);
                 }
             }

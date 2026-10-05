@@ -84,6 +84,7 @@ final class GpuBatchChunkSolver {
                                                int[][] drOvContribByIndex, double[][] drOvCByIndex,
                                                int[][] islandedDsByIndex, int[][] islandedRlByIndex,
                                                List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
+                                               int[][] dqSubByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, double[] preDistributedByIndex,
@@ -105,7 +106,7 @@ final class GpuBatchChunkSolver {
                         baseTargets, baseRowMode, frozenRowsByIndex, frozenTargetsByIndex, genOutagesByIndex,
                         activePowerLossByIndex, hvdcElemIndex, rowCriteria, rlCurves,
                         dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
-                        islandedRlByIndex, islandedHvdcsByIndex,
+                        islandedRlByIndex, islandedHvdcsByIndex, dqSubByIndex,
                         n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                         preDistributedByIndex, distributedByIndex, varType, phases, hvdcControllers, config);
                 return;
@@ -228,6 +229,7 @@ final class GpuBatchChunkSolver {
                                                int[][] drOvContribByIndex, double[][] drOvCByIndex,
                                                int[][] islandedDsByIndex, int[][] islandedRlByIndex,
                                                List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
+                                               int[][] dqSubByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, double[] preDistributedByIndex,
@@ -491,6 +493,10 @@ final class GpuBatchChunkSolver {
                     // after this loop and composes its shares onto the participants' rows).
                     int[][] dsRowOvBySlot = new int[chunkSize][];
                     List<Integer> rlIslandedList = new ArrayList<>();
+                    // tasks #71: per (scenario, dq member) subgroup labels of a split group, dense, null when none
+                    int nDqMembersAll = gpuData.dqMemberBusNum() != null ? gpuData.dqMemberBusNum().length : 0;
+                    byte[] dqSubDense = new byte[chunkSize * nDqMembersAll];
+                    boolean anyDqSub = false;
                     List<Integer> rlLocalList = new ArrayList<>();     // (slot, entry): re-homed PV buses checked as LOCAL
                     List<Double> rlLocalVt = new ArrayList<>();        // their own voltage target (pu)
                     // {slot, rlEntry} pairs + {dMinQ, dMaxQ}: the reactive capability a lost generator
@@ -606,6 +612,12 @@ final class GpuBatchChunkSolver {
                                     rlIslandedList.add(s);
                                     rlIslandedList.add(controller);
                                 }
+                            }
+                            if (dqSubByIndex != null && dqSubByIndex[ci] != null && nDqMembersAll > 0) {
+                                for (int p = 0; p < dqSubByIndex[ci].length; p += 2) {
+                                    dqSubDense[s * nDqMembersAll + dqSubByIndex[ci][p]] = (byte) dqSubByIndex[ci][p + 1];
+                                }
+                                anyDqSub = true;
                             }
                             List<LfBranch> branches = contingencies.get(ci).outagedBranches();
                             List<LfShunt> shunts = contingencies.get(ci).outagedShunts();
@@ -1616,6 +1628,8 @@ final class GpuBatchChunkSolver {
                             dsRowOvList.isEmpty() ? null : dsRowOvList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchRlIslanded(handle,
                             rlIslandedList.isEmpty() ? null : rlIslandedList.stream().mapToInt(Integer::intValue).toArray());
+                    GpuAcNewtonSolver.setBatchDqSubgroups(handle, anyDqSub ? dqSubDense : null,
+                            anyDqSub ? GpuBatchQualification.qrMemberStart(gpuData) : null);
                     GpuAcNewtonSolver.setBatchRlLocal(handle,
                             rlLocalList.isEmpty() ? null : rlLocalList.stream().mapToInt(Integer::intValue).toArray(),
                             rlLocalList.isEmpty() ? null : rlLocalVt.stream().mapToDouble(Double::doubleValue).toArray());

@@ -2073,6 +2073,31 @@ Host side: a GenOutage marker (`pqRowMode = ROW_PILOT_DETACHED`, `inactiveDqMemb
 `rlEntry` = the pilot's RL entry → `rlLocalOv` at its own target) → `setBatchDetachedPilots(slot, group)`.
 Fixture: four sections, main at an end, lose the second — `lostPilotSectionNetwork` with the loss moved.
 
+**Implemented differently, as SUBGROUP LABELS (2026-10-05):** rather than detaching the pilot, every surviving
+cluster that is not the base main's gets a per-scenario label (1, 2, …) on its dq members — dense
+`char[nS x nDqMembers]` via `setBatchDqSubgroups` + a `qr group -> first dq member` map — and the kernels pair
+within a label: `fillDistrQBatch` (key sums and a contribution of another label leaves the row),
+`updateDistrQTargetsBatch` (key sums), `relocChooseSub` for every carrier pick (the base pilot's balance rides
+label-0 members only; `RelocTables` carries the labels), `updatePilotVeqBatch` (the "no enabled controller" scan)
+and `rlPilotSelfMixedGate`. The host seeds a member's renormalized DISTR_Q target over its own label's keys and
+drops its replayed weight overrides for a split group (the kernel's dynamic keys own those rows). The base main's
+cluster needs no special treatment at all — with two controllers on its side its DISTR_Q row stays a label-0
+sharing row, with one it is the pilot alone and the existing pilot-self logic covers it. `reHomedControls` labels
+instead of refusing when every labelled member is enrolled in a candidate table whose member order the kernels'
+`qrMemberStart[g] + c - 1` mapping reproduces (`qrMemberOrderConsistent`, else `PLAN:VC_REMERGE_SUBGROUP_TABLE`).
+Fixtures `deviceSplitGroupBehindSurvivingMainMatchesCpu` (4 sections, every loss listed) and
+`deviceSplitGroupWithTwoControllersOnMainSideMatchesCpu` (5 sections) pass at 1e-12 kV with every loss batched.
+
+**Proof (`gpu-load-71.log`, full busbar scope, GPU arm vs the saved CPU arm):** `PLAN:VC_REMERGE_MULTI` is gone
+from the census (was 11 contingencies), device coverage **6595 / 6667** (was 6584), statuses identical
+`{CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}`, `violations: CPU=503923 GPU=503923 diff=0`, device failures on
+OLF-converging systems 0, and the newly batched splits agree at machine precision (BUS-6002_BBS_2 5.3e-11 kV,
+BUS-6139_BBS_2 2.4e-11, BUS-6218_BBS_3 3.2e-11, BUS-689_BBS_2 3.2e-11). Full suite 310 tests, the one failure
+the pre-existing coupler-chain first-step test. **Left: 10 plan refusals on OLF-converging systems** — 5
+`VC_REMERGE_PINNED_MAIN` (a base-pinned elected main: needs the per-scenario pilot pin treatment, i.e. the
+pinned main's balance riding a carrier of ITS subgroup with its identity kept), 4 `VC_REMERGE_RELOC_VROW` (the
+elected main's own V row hosts a LIVE coupler's ZERO_V), 1 `ISLANDS_SLACK` (#34).
+
 ### #70 — host the surviving REMOTE cluster of a split voltage-control group (2026-10-04, IN PROGRESS)
 
 **What `VC_REMERGE_MULTI` actually refused.** `OLF_GPU_QUALIFY_TRACE` on the full busbar scope, with

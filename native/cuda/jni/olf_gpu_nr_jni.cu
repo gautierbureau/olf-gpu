@@ -4914,6 +4914,21 @@ __device__ double rlCurveEval(double pMW, const double* pts, int npts, int sel, 
 static const int cvProbeEntry = std::getenv("OLF_GPU_CV_PROBE") == nullptr ? -1
         : (std::string(std::getenv("OLF_GPU_CV_PROBE")) == "all" ? -2
            : std::atoi(std::getenv("OLF_GPU_CV_PROBE")));
+// The host readback ([CV-HOST]) takes a COMMA list of entries (the device printf keeps the first).
+static std::vector<int> cvProbeEntries() {
+    std::vector<int> v;
+    const char* e = std::getenv("OLF_GPU_CV_PROBE");
+    if (e == nullptr || std::string(e) == "all") return v;
+    std::string str(e);
+    size_t pos = 0;
+    while (pos <= str.size()) {
+        size_t c = str.find(',', pos);
+        if (c == std::string::npos) c = str.size();
+        if (c > pos) v.push_back(std::atoi(str.substr(pos, c - pos).c_str()));
+        pos = c + 1;
+    }
+    return v;
+}
 // OLF_GPU_CV_PROBE_SLOT=<slot>: the scenario the probe prints for (default 0 — the base load flow's single slot).
 // "ctg" resolves to the chunk-LOCAL slot the host set for OLF_GPU_LOOP_TRACE_CTG (kernel scenario indices
 // are chunk-local; a global contingency index never matches one).
@@ -4922,6 +4937,8 @@ static const bool cvProbeSlotByCtg = std::getenv("OLF_GPU_CV_PROBE_SLOT") != nul
 static const int cvProbeSlot = std::getenv("OLF_GPU_CV_PROBE_SLOT") == nullptr || cvProbeSlotByCtg ? 0
         : std::atoi(std::getenv("OLF_GPU_CV_PROBE_SLOT"));
 
+__host__ __device__ inline int dsRowOf(const int* dsPhiRow, const int* dsRowOv, int s, int nds, int i);
+
 __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int cvExtrapolate,
                                    const int* cvIdx, const double* cvIn, const double* cvPts,
                                    const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
@@ -4929,6 +4946,7 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
                                    int nQOv, const int* qOvSlotEntry, const double* qOvMinMax,
                                    const int* cvOvPtr, const int* cvOvEntry, const double* cvOvVal,
                                    const double* genCum, const char* genCumValid, int ngen,
+                                   const int* dsPhiRow, const int* dsRowOv, int nds, const int* dgBus,
                                    double* minQDyn, double* maxQDyn, double* loadQDyn, int cvProbeEntry, int cvProbeSlot) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
@@ -4960,6 +4978,18 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
         const double* pts = cvPts + cvIdx[g * 5 + 2] * 3;
         int npts = cvIdx[g * 5 + 3];
         int slot = cvIdx[g * 5 + 4];
+        // The row that HOSTS this bus's active balance THIS scenario: the slack pack's row for the bus
+        // (a coupler-relocated child's is its parent coupler's DUMMY_P row), moved back to the bus's own
+        // PHI row by dsRowOv when the coupler dies. The static pRow is the bus's own PHI row, which for a
+        // relocated child hosts ZERO_PHI (target 0, never moved): read there, the share reconstruction
+        // put the child's generator at its BASE P while its pilot sibling sat at the pre-distributed
+        // one. Measured on rte6515 BUS-4467_BBS: VL-6231_1 pinned at 0.576013 where OLF (and the pilot
+        // VL-6231_0) had 0.566571 - the same unit halves at the same P - and the 9.4e-3 pu of reactive
+        // power that put on the coupler moved the slack mismatch by 9.6e-6 pu, the whole 9.56e-4 MW
+        // distributed-power gap.
+        if (slot >= 0 && dgBus != nullptr && dsPhiRow != nullptr) {
+            pRow = dsRowOf(dsPhiRow, dsRowOv, s, nds, dgBus[slot]);
+        }
         // This generator's OWN movement, straight from the distributed-slack water-fill, which clamps
         // PER GENERATOR. Splitting its bus's movement by a fixed share is exact only while the
         // intra-bus split stays proportional, and a clamp breaks that: measured on rte6515 GEN-6172 at
@@ -9700,6 +9730,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
                         ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
                         ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
+                        ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr,
+                        ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
+                        ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
                         ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
                         ctx->dRlLoadQDyn.as<double>(), cvProbeEntry, cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot);
             }
@@ -11615,18 +11648,25 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
                         ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
                         ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
+                        ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr,
+                        ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
+                        ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
                         ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
                         ctx->dRlLoadQDyn.as<double>(), cvProbeEntry, cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot);
                 // Host-side readback of the probed entry's dynamic limits (device printf is not reliably
                 // captured by the test runner): the limit the RL pass that follows will pin at.
                 int cvHostSlot = cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot;
-                if (cvProbeEntry >= 0 && cvHostSlot >= 0 && cvHostSlot < nS) {
-                    double lim[2];
-                    size_t off = static_cast<size_t>(cvHostSlot) * ctx->nrl + cvProbeEntry;
-                    CUDA_CHECK(cudaMemcpy(&lim[0], ctx->dRlMinQDyn.as<double>() + off, sizeof(double), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(&lim[1], ctx->dRlMaxQDyn.as<double>() + off, sizeof(double), cudaMemcpyDeviceToHost));
-                    fprintf(stderr, "[CV-HOST] outer=%d slot=%d entry=%d minQDyn=%.12f maxQDyn=%.12f\n",
-                            outer, cvHostSlot, cvProbeEntry, lim[0], lim[1]);
+                static const std::vector<int> cvHostEntries = cvProbeEntries();
+                if (cvHostSlot >= 0 && cvHostSlot < nS) {
+                    for (int pe : cvHostEntries) {
+                        if (pe < 0 || pe >= ctx->nrl) continue;
+                        double lim[2];
+                        size_t off = static_cast<size_t>(cvHostSlot) * ctx->nrl + pe;
+                        CUDA_CHECK(cudaMemcpy(&lim[0], ctx->dRlMinQDyn.as<double>() + off, sizeof(double), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpy(&lim[1], ctx->dRlMaxQDyn.as<double>() + off, sizeof(double), cudaMemcpyDeviceToHost));
+                        fprintf(stderr, "[CV-HOST] outer=%d slot=%d entry=%d minQDyn=%.12f maxQDyn=%.12f\n",
+                                outer, cvHostSlot, pe, lim[0], lim[1]);
+                    }
                 }
             }
             CUDA_CHECK(cudaMemsetAsync(ctx->dRlPassSwitched.p, 0, static_cast<size_t>(ctx->nrl) * nS, ctx->stream));
@@ -12076,6 +12116,9 @@ psgStep(ctx, nS, n, outer, "afterAllPinned");
                     nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
                     ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
                     ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
+                    ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr,
+                    ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
+                    ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
                     ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
                     ctx->dRlLoadQDyn.as<double>(), -1, 0);
         }

@@ -4087,9 +4087,46 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 "both contingencies must batch (or the test proves nothing)");
     }
 
+    /** A curve generator on the CHILD section of a coupler-joined pair (g1 on bbs1, relocated under the
+     *  retained coupler), pinned by the loss of a generator whose active power the security analysis
+     *  PRE-DISTRIBUTES: both arms must evaluate g1's curve at the pre-distributed P. The device's share
+     *  reconstruction read the child's own PHI row, which hosts ZERO_PHI (target 0) under the relocation,
+     *  so it evaluated the curve at the BASE P and pinned 8e-4 pu off while OLF pinned at the moved P
+     *  (tasks #66/#73 tail, rte6515 BUS-4467_BBS: VL-6231_1 pinned at 0.576013 against OLF's 0.566571,
+     *  the pilot VL-6231_0 — same unit, same P — exact; 9.56e-4 MW of distributed power). The slack
+     *  threshold stays at its DEFAULT so no slack round runs before the pin and the fallback is what
+     *  evaluates the curve. GPU SA == CPU SA at 1e-12. */
+    @org.junit.jupiter.api.Test
+    void deviceRelocatedChildCurvePinnedAtPreDistributedPMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = pilotSelfCurveNetwork(true, 100);
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0_b"));
+        // ...and the loss of the PILOT section itself (bbs0: g0 and the load), which kills the coupler: the
+        // surviving child's balance moves back to its own PHI row (dsRowOv) and the kernel must follow it
+        // there - the structural dummy row is an identity at 0 in that scenario
+        List<Contingency> ctgs = List.of(
+                new Contingency("bus-1", new com.powsybl.contingency.BusbarSectionContingency("bbs1")),
+                new Contingency("bus-0", new com.powsybl.contingency.BusbarSectionContingency("bbs0")),
+                new Contingency("g3", new com.powsybl.contingency.GeneratorContingency("g3")));
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(3, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "every contingency must batch (or the test proves nothing)");
+    }
+
     /** splitGroupNetwork(2) with a reactive-capability curve on g0 (MAX_Q 60 -> 62 MVAr over 0..500 MW, so a
      *  slack move of a few hundred kW drifts the limit by ~1e-5 pu) and a 60 MVAr ceiling on g1. */
     private static Network pilotSelfCurveNetwork() {
+        return pilotSelfCurveNetwork(false, 0);
+    }
+
+    /** @param curveOnChild the same curve on g1 (the relocated child section's generator) as well
+     *  @param g3TargetP active power on the vl3 support generator, pre-distributed by the SA when it is lost */
+    private static Network pilotSelfCurveNetwork(boolean curveOnChild, double g3TargetP) {
         Network network = splitGroupNetwork(2);
         network.getGenerator("g0").setTargetV(PSC_TARGET_V);
         network.getGenerator("g1").setTargetV(PSC_TARGET_V);
@@ -4097,15 +4134,29 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .beginPoint().setP(0).setMinQ(-300).setMaxQ(PSC_MAX_Q).endPoint()
                 .beginPoint().setP(500).setMinQ(-300).setMaxQ(PSC_MAX_Q + 2).endPoint()
                 .add();
-        network.getGenerator("g1").newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(PSC_MAX_Q).add();
+        if (curveOnChild) {
+            network.getGenerator("g1").newReactiveCapabilityCurve()
+                    .beginPoint().setP(0).setMinQ(-300).setMaxQ(PSC_MAX_Q).endPoint()
+                    .beginPoint().setP(500).setMinQ(-300).setMaxQ(PSC_MAX_Q + 2).endPoint()
+                    .add();
+        } else {
+            network.getGenerator("g1").newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(PSC_MAX_Q).add();
+        }
         network.getLoad("ld0").setQ0(PSC_LOAD_Q);
         // heavy reactive loads behind vl3: g3 carries them in the base, the merged sections once g3 is lost
         network.getLoad("ld3").setQ0(PSC_REMOTE_Q);
         network.getLoad("ld4").setQ0(PSC_REMOTE_Q);
         // reactive support at vl3 with no active power: its loss moves (almost) no P, only the reactive need
         network.getVoltageLevel("vl3").newGenerator().setId("g3").setBus("vl3_b").setConnectableBus("vl3_b")
-                .setMinP(0).setMaxP(100).setTargetP(0).setTargetV(400).setVoltageRegulatorOn(true).add();
+                .setMinP(0).setMaxP(Math.max(100, 2 * g3TargetP)).setTargetP(g3TargetP).setTargetV(400).setVoltageRegulatorOn(true).add();
         network.getGenerator("g3").newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(300).add();
+        if (g3TargetP > 0) {
+            // a lost PARTICIPATING generator with a participating slack is a shape the device routes to the
+            // CPU (PARTICIPATING_SLACK): keep the slack out of the distribution so the loss pre-distributes
+            // over g0/g1 on the device
+            network.getGenerator("gs").newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                    .withParticipate(false).add();
+        }
         return network;
     }
 

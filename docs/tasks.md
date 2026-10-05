@@ -2197,6 +2197,55 @@ second slack round drifts the curve by ~2e-8 pu): fails on the old gate (1.75e-8
 the batched SA class 189/189. The split-section wording of the title was a misdiagnosis — nothing about the split
 mattered beyond VL-6231_0 being a pilot-self pilot.
 
+### #74 — the DAP tail's head: a relocated child's curve read its own PHI row (2026-10-05, DONE)
+
+The worst remaining `distributedActivePower` difference, BUS-4467_BBS at 9.564e-04 MW, carried the same bus
+signature as #73 (BUS-6231_BBS_1/2 worst, then 6171/5976/6225/6005) with a 1.85 MW second slack round. Measured
+against OLF pass by pass (`OLF_OL_TRACE` + `OLF_DS_TRACE` on the CPU arm, `OLF_GPU_LOOP_TRACE_CTG` on the device):
+the SEQUENCE is identical — first slack check 0.002820383 on both arms (stable), the same six switches, then a
+slack round — and the only number apart is that second check, OLF 0.018454123 vs device 0.018463687: 9.6e-06 pu,
+the whole 9.56e-04 MW. The paired converged dump (`OLF_VAR_DUMP` / `OLF_GPU_SA_VAR_DUMP`) puts the worst variable
+at `DUMMY_Q BUS-6231_COUPLER_1` (3.1e-06 pu) — the reactive split of the two VL-6231 sections.
+
+`[CV-HOST]` on both entries (1340 = VL-6231_0, the pilot-self pilot; 1341 = VL-6231_1, its coupler-relocated
+child) at the pin pass: 1340 maxQ 0.566570618018 = OLF's qLimit to 1e-12; **1341 maxQ 0.576013011409** — the same
+unit halves (GEN-6231 / GEN-6231#0, same P, same curve) evaluated at DIFFERENT P. After the slack round (outer 47)
+both read 0.566558432, so the per-generator water-fill path is right and only the pre-slack SHARE FALLBACK is not:
+it reconstructs p_now from `target[pRow] - baseRowTarget`, with pRow the bus's OWN `BUS_PHI` row — which for a
+relocated child hosts `ZERO_PHI` (target 0, never moved by the pre-distribution), while the bus's active balance,
+and the 0.0223 pu the security analysis pre-distributed onto it, live on its parent coupler's `DUMMY_P` row. So
+the child pinned at the BASE-P limit; the 9.4e-3 pu that put on the coupler changed the losses the next slack
+check read. OLF then keeps the pin-time limit (drift under the threshold, #73) while the device re-froze the child
+at its moved limit, leaving the 1.2e-5 pu it ended with. The curve dump (`OLF_GPU_CURVE_DUMP`) confirms both halves
+have DS slots (666/667) and identical packs; genCumValid is simply 0 until the first slack round runs.
+
+**Fix.** The host packs the slack pack's row for the bus (`GpuAcData.dsPhiRow()` via `dsBusNum`) and the kernel
+resolves it PER SCENARIO through `dsRowOf(dsPhiRow, dsRowOv, s, nds, dgBus[slot])` — the row the slack pack itself
+retargets, moved back to the child's own row when the coupler dies. Full busbar scope, GPU arm vs the saved CPU arm:
+BUS-4467_BBS 2.870e-05 → **4.087e-11 kV**; DAP worst **9.564e-04 → 1.353e-04 MW** (BUS-6115_BBS_1, 9.6e-05, left
+the top five too); statuses `{CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}` both arms; violations
+503923 = 503923; coverage 6604/6667; device failures on OLF-converging systems 0. Fixture
+`deviceRelocatedChildCurvePinnedAtPreDistributedPMatchesCpu`: a curve on the relocated child's generator, a listed
+section loss to retain the coupler, a 100 MW support generator at vl3 whose loss the SA pre-distributes (slack
+non-participating — a lost participating generator with a participating slack is `PARTICIPATING_SLACK`, a CPU
+shape), both sections pinned at the pre-distributed P (qLimit 0.606601878 against a base-P 0.604334), DEFAULT slack
+threshold so no slack round precedes the pin. The fixture fails on the old code (2.8e-3 kV at vl3) and passes with
+the fix; it exercises the HOST half (the packed row) — the loss of the pilot section (bbs0, listed too) kills the
+coupler but pins nothing, so the kernel's per-scenario `dsRowOv` resolution is reasoned, not fixture-proven:
+a surviving child whose curve must be read on its own PHI row after the coupler dies still wants a fixture that
+pins it there.
+
+**Remaining tail after this** (`OLF_GPU_SA_DAP_DUMP`): BUS-716_BBS 1.353e-04, BUS-2414_BBS_1 1.24e-05,
+BUS-4603_BBS 1.07e-05, BUS-1599_BBS_2 5.3e-06, BUS-349_BBS 4.5e-06 MW. Method that worked here, to repeat on
+BUS-716_BBS: busdiff → the worst buses name the controller; `[CV-HOST]`/`SW_PASS` on its entries against OLF's
+`RL_SWITCH` qLimit; the per-pass slack checks against `DS_PASS`.
+
+**Side observation, not pursued:** with the support generator AT its maxP (no headroom), the same fixture's
+bbs1 loss differs by 2.5e-09 kV at vl4 with no switch and no slack round on either arm, and the two arms' slack
+mismatch readings differ (OLF 6.13e-04 vs device 1.45e-04 pu) — the retain share `rho` counts a saturated
+participant that OLF's water-fill drops. Harmless here (neither arm distributes) but it is a candidate for the
+sub-1e-4 MW tail.
+
 ### #70 — host the surviving REMOTE cluster of a split voltage-control group (2026-10-04, IN PROGRESS)
 
 **What `VC_REMERGE_MULTI` actually refused.** `OLF_GPU_QUALIFY_TRACE` on the full busbar scope, with

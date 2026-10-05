@@ -5420,7 +5420,7 @@ __device__ inline double hvdcAbsActivePowerWithLosses(double pController, double
 __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nElements, int hvOffset,
                                          int mode,
                                          const int* hvElem, const int* hvBus1Row, const int* hvBus2Row,
-                                         const double* hvIn, const char* hvCtgOut,
+                                         const int* hvBus1Phi, const int* hvBus2Phi, const double* hvIn, const char* hvCtgOut,
                                          const double* x, double* target, char* disabled,
                                          int* status, double* appliedD1, double* appliedD2,
                                          const char* rlActive, char* switched) {
@@ -5439,8 +5439,8 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
         size_t elemSlot = (size_t) s * nElements + hvElem[h];
         if (st == HV_LINEAR && disabled[elemSlot]) return;
         const double* xs = x + (size_t) s * n;
-        double ph1 = xs[hvBus1Row[h] >= 0 ? hvBus1Row[h] : ~hvBus1Row[h]];   // ~row: P row inactive (slack)
-        double ph2 = xs[hvBus2Row[h] >= 0 ? hvBus2Row[h] : ~hvBus2Row[h]];
+        double ph1 = xs[hvBus1Phi[h]];                       // the ANGLE column: not the P row under a relocation
+        double ph2 = xs[hvBus2Phi[h]];
         double pp1 = hvdc::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
         double pp2 = hvdc::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
         if (st == HV_LINEAR) {                               // OLF checkAcEmulationMode
@@ -7086,7 +7086,7 @@ struct BatchSolverContext {
     // what put the device's last DS check on a pre-pin state.
     int nhv = 0;                                             // AC-emulation HVDCs in the loop tables
     int hvLimitsActive = 0;                                  // AcHvdcAcEmulationLimits configured
-    DeviceBuf dHvElem, dHvBus1Row, dHvBus2Row;               // per hvdc
+    DeviceBuf dHvElem, dHvBus1Row, dHvBus2Row, dHvBus1Phi, dHvBus2Phi;               // per hvdc
     DeviceBuf dHvIn;                                         // per hvdc x9: p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2
     DeviceBuf dHvCtgOut;                                     // per (scenario, hvdc): outaged BY the contingency
     DeviceBuf dHvStatus;                                     // per (scenario, hvdc): LINEAR/SAT_1_2/SAT_2_1/FROZEN
@@ -11265,6 +11265,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 ctx->nhv, nS, n, ctx->nElements, ctx->hvOffset,
                 loopKind == LOOP_HVDC_FREEZE ? 0 : 1,
                 ctx->dHvElem.as<int>(), ctx->dHvBus1Row.as<int>(), ctx->dHvBus2Row.as<int>(),
+                ctx->dHvBus1Phi.as<int>(), ctx->dHvBus2Phi.as<int>(),
                 ctx->dHvIn.as<double>(), ctx->dHvCtgOut.as<char>(),
                 ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dDisabled.as<char>(),
                 ctx->dHvStatus.as<int>(), ctx->dHvAppliedD1.as<double>(), ctx->dHvAppliedD2.as<double>(),
@@ -13367,7 +13368,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 extern "C" JNIEXPORT void JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchHvdcLoops(
         JNIEnv* env, jclass, jlong handle, jintArray jElem, jintArray jBus1Row, jintArray jBus2Row,
-        jdoubleArray jIn, jbyteArray jCtgOut, jintArray jStatus,
+        jintArray jBus1Phi, jintArray jBus2Phi, jdoubleArray jIn, jbyteArray jCtgOut, jintArray jStatus,
         jdoubleArray jAppliedD1, jdoubleArray jAppliedD2, jint limitsActive) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
     if (ctx == nullptr) {
@@ -13391,6 +13392,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     upI(jElem, ctx->dHvElem);
     upI(jBus1Row, ctx->dHvBus1Row);
     upI(jBus2Row, ctx->dHvBus2Row);
+    upI(jBus1Phi, ctx->dHvBus1Phi);
+    upI(jBus2Phi, ctx->dHvBus2Phi);
     upD(jIn, ctx->dHvIn);
     upI(jStatus, ctx->dHvStatus);
     upD(jAppliedD1, ctx->dHvAppliedD1);

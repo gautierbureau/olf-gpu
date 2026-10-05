@@ -63,19 +63,20 @@ public final class GpuBatchHvdcAcEmulation {
      *  every status override composes as {@code baseTargets - baseD + d(status)}). */
     public record Ctl(int hvElemIndex, int bus1PRow, int bus2PRow, double p0, double k,
                double pMax12, double pMax21, double loss1, double loss2, double r,
-               int baseStatus, double baseD1, double baseD2) {
+               int baseStatus, double baseD1, double baseD2, int bus1PhiRow, int bus2PhiRow) {
 
-        // A converter bus whose BUS_TARGET_P is INACTIVE (the slack) is packed as ~phiRow: the angle
-        // still reads at that column, but its row hosts the PHI identity and must never receive a P
-        // target — OLF's slack simply absorbs the station's targetP. Writing there pinned the base
-        // LF's slack angle at the freeze delta (BUS_TARGET_PHI residual 0.014, base MAX_ITER).
-        public int bus1PhiRow() {
-            return bus1PRow >= 0 ? bus1PRow : ~bus1PRow;
-        }
-
-        public int bus2PhiRow() {
-            return bus2PRow >= 0 ? bus2PRow : ~bus2PRow;
-        }
+        // The P-target ROW and the angle COLUMN are two different indices. The angle is always the
+        // bus's BUS_PHI variable; the P balance is on that same index only for a bus the coupler-tree
+        // relocation left alone - a relocated child's balance sits on its parent coupler's DUMMY_P
+        // row, and its own PHI row hosts that coupler's ZERO_PHI (target 0). Writing the freeze delta
+        // on the PHI row there asked a zero-impedance coupler for a 5 rad angle: network.xiidm's
+        // ADNN_5/ADNN_6 converter buses, every busbar scenario stalling at |F| ~ 12 behind a +-347
+        // circulating step on ADOU/ADPM.
+        //
+        // A converter bus whose BUS_TARGET_P is INACTIVE (the slack) has bus?PRow < 0: its row hosts
+        // the PHI identity and must never receive a P target — OLF's slack simply absorbs the
+        // station's targetP. Writing there pinned the base LF's slack angle at the freeze delta
+        // (BUS_TARGET_PHI residual 0.014, base MAX_ITER).
 
         public boolean bus1PActive() {
             return bus1PRow >= 0;
@@ -112,6 +113,8 @@ public final class GpuBatchHvdcAcEmulation {
         List<LfHvdc> packed = network.getHvdcs().stream()
                 .filter(h -> h.getBus1() != null && h.getBus2() != null && h.isAcEmulation())
                 .toList();                                   // the packer's exact enumeration order
+        int[] pRow = packed.isEmpty() ? null
+                : com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor.busPowerRows(network, es)[0];
         int hvOffset = nElements - packed.size();
         List<Ctl> out = new ArrayList<>();
         for (int h = 0; h < packed.size(); h++) {
@@ -125,6 +128,8 @@ public final class GpuBatchHvdcAcEmulation {
             };
             int r1 = phiRows.get(hvdc.getBus1().getNum());
             int r2 = phiRows.get(hvdc.getBus2().getNum());
+            int pr1 = pRow[hvdc.getBus1().getNum()];
+            int pr2 = pRow[hvdc.getBus2().getNum()];
             boolean p1Active = es.getEquation(hvdc.getBus1().getNum(), AcEquationType.BUS_TARGET_P)
                     .filter(com.powsybl.openloadflow.equations.Equation::isActive).isPresent();
             boolean p2Active = es.getEquation(hvdc.getBus2().getNum(), AcEquationType.BUS_TARGET_P)
@@ -135,14 +140,14 @@ public final class GpuBatchHvdcAcEmulation {
                         hvdc.getConverterStation2().getTargetP(), p1Active);
             }
             out.add(new Ctl(hvOffset + h,
-                    p1Active ? r1 : ~r1, p2Active ? r2 : ~r2,
+                    p1Active ? pr1 : -1, p2Active ? pr2 : -1,
                     ac.getP0(), ac.getDroop() * 180 / Math.PI,
                     ac.getPMaxFromCS1toCS2(), ac.getPMaxFromCS2toCS1(),
                     hvdc.getConverterStation1().getLossFactor() / 100,
                     hvdc.getConverterStation2().getLossFactor() / 100, hvdc.getR(),
                     baseStatus,
                     baseStatus == LINEAR ? 0 : hvdc.getConverterStation1().getTargetP(),
-                    baseStatus == LINEAR ? 0 : hvdc.getConverterStation2().getTargetP()));
+                    baseStatus == LINEAR ? 0 : hvdc.getConverterStation2().getTargetP(), r1, r2));
         }
         return out;
     }
@@ -424,19 +429,23 @@ public final class GpuBatchHvdcAcEmulation {
                                             boolean[][] disabledMask, double[] appliedD1, double[] appliedD2,
                                             boolean limits) {
         if (ctls == null || ctls.isEmpty()) {
-            GpuAcNewtonSolver.setBatchHvdcLoops(handle, null, null, null, null, null, null, null, null, 0);
+            GpuAcNewtonSolver.setBatchHvdcLoops(handle, null, null, null, null, null, null, null, null, null, null, 0);
             return null;
         }
         int nh = ctls.size();
         int[] hvElem = new int[nh];
         int[] hvB1 = new int[nh];
         int[] hvB2 = new int[nh];
+        int[] hvPhi1 = new int[nh];
+        int[] hvPhi2 = new int[nh];
         double[] hvIn = new double[nh * 9];
         for (int h = 0; h < nh; h++) {
             Ctl c = ctls.get(h);
             hvElem[h] = c.hvElemIndex();          // GLOBAL element index
             hvB1[h] = c.bus1PRow();
             hvB2[h] = c.bus2PRow();
+            hvPhi1[h] = c.bus1PhiRow();
+            hvPhi2[h] = c.bus2PhiRow();
             hvIn[h * 9] = c.p0();
             hvIn[h * 9 + 1] = c.k();
             hvIn[h * 9 + 2] = c.pMax12();
@@ -457,7 +466,7 @@ public final class GpuBatchHvdcAcEmulation {
                         && disabledMask[s2][ctls.get(h).hvElemIndex()] ? 1 : 0);
             }
         }
-        GpuAcNewtonSolver.setBatchHvdcLoops(handle, hvElem, hvB1, hvB2, hvIn, ctgOut,
+        GpuAcNewtonSolver.setBatchHvdcLoops(handle, hvElem, hvB1, hvB2, hvPhi1, hvPhi2, hvIn, ctgOut,
                 flatStatus, appliedD1, appliedD2, limits ? 1 : 0);
         return ctgOut;
     }

@@ -414,6 +414,10 @@ public final class GpuAcNewtonSolver {
      */
     public static native void setBatchRlIslanded(long handle, int[] slotControllerPairs);
 
+    /** (scenario, reactive-limit entry) pairs whose UNPIN the device cannot host (a pinned member of a re-homed
+     *  cluster with no enabled controller): the kernel rejects the scenario instead of switching (CPU replay). */
+    public static native void setBatchRlNoUnpin(long handle, int[] slotEntryPairs);
+
     /** Re-homed voltage controls (GpuBatchQualification.reHomedControls): per (slot, entry) pair the entry is
      *  checked by the reactive-limits pass as a LOCAL controller at {@code vTargets[k]} — the bus is a plain PV
      *  bus this scenario, whatever its base packing. Null clears the context's list. */

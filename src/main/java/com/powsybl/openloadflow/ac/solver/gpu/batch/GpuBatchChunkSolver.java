@@ -493,6 +493,7 @@ final class GpuBatchChunkSolver {
                     // after this loop and composes its shares onto the participants' rows).
                     int[][] dsRowOvBySlot = new int[chunkSize][];
                     List<Integer> rlIslandedList = new ArrayList<>();
+                    List<Integer> rlNoUnpinList = new ArrayList<>();   // (scenario, entry): an unpin rejects the scenario
                     // tasks #71: per (scenario, dq member) subgroup labels of a split group, dense, null when none
                     int nDqMembersAll = gpuData.dqMemberBusNum() != null ? gpuData.dqMemberBusNum().length : 0;
                     byte[] dqSubDense = new byte[chunkSize * nDqMembersAll];
@@ -885,7 +886,15 @@ final class GpuBatchChunkSolver {
                                     // below the write it was guarding.
                                     boolean applied = childVRow >= 0 && child != null && !child.isDisabled()
                                             && child.isGeneratorVoltageControlled() && childVc.isPresent();
-                                    if (applied) {
+                                    boolean childPinned = applied
+                                            && GpuBatchQualification.basePinned(gpuData, GpuBatchQualification.rlEntryOf(gpuData, child));
+                                    if (applied && childPinned) {
+                                        // The child is PQ in the base (reactive limit): its balance comes home at
+                                        // the pinned value, no identity (the qualification refused such a child as
+                                        // VC_REMERGE_PINNED_MAIN until the entry channels below existed).
+                                        rowZi[childVRow] = 4;
+                                        overrides.add(s * n + childVRow, child.getTargetQ());
+                                    } else if (applied) {
                                         rowZi[childVRow] = 0;
                                         overrides.add(s * n + childVRow, childVc.orElseThrow().getTargetValue());
                                     }
@@ -1039,7 +1048,11 @@ final class GpuBatchChunkSolver {
                                     if (go.reHomesRlEntry()) {
                                         rlLocalList.add(s);
                                         rlLocalList.add(go.rlEntry());
-                                        rlLocalVt.add(go.qTarget());
+                                        rlLocalVt.add(go.reHomeVTarget());
+                                    }
+                                    if (go.forbidsUnpin()) {
+                                        rlNoUnpinList.add(s);
+                                        rlNoUnpinList.add(go.rlEntry());
                                     }
                                     if (go.silencesReactiveLimitEntry()) {
                                         // Nothing left to control voltage at that bus: mask its
@@ -1086,7 +1099,7 @@ final class GpuBatchChunkSolver {
                                             // OLF). The earlier "mode 0 is NOT skipped: skipping it moved
                                             // deviceMultiChunkMatchesCpu by 1.06e-12 kV" was the race's own
                                             // noise being guarded.
-                                            if (dqMode == 4 || dqMode == 0) {
+                                            if (dqMode == 4 || dqMode == 0 || dqMode == 6) {
                                                 continue;
                                             }
                                             // ...nor on the row that HOSTS A PILOT'S BALANCE this scenario: a frozen base
@@ -1628,6 +1641,8 @@ final class GpuBatchChunkSolver {
                             dsRowOvList.isEmpty() ? null : dsRowOvList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchRlIslanded(handle,
                             rlIslandedList.isEmpty() ? null : rlIslandedList.stream().mapToInt(Integer::intValue).toArray());
+                    GpuAcNewtonSolver.setBatchRlNoUnpin(handle,
+                            rlNoUnpinList.isEmpty() ? null : rlNoUnpinList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchDqSubgroups(handle, anyDqSub ? dqSubDense : null,
                             anyDqSub ? GpuBatchQualification.qrMemberStart(gpuData) : null);
                     GpuAcNewtonSolver.setBatchRlLocal(handle,

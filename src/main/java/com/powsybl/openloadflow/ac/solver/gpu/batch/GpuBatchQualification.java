@@ -526,15 +526,26 @@ final class GpuBatchQualification {
                 if (!seen.add(start)) {
                     continue;
                 }
-                List<LfBus> cluster = new ArrayList<>(List.of(start));   // BFS over the surviving zero-impedance edges
-                for (int k = 0; k < cluster.size(); k++) {
-                    for (LfBranch br : cluster.get(k).getBranches()) {
+                // BFS over the surviving zero-impedance edges through EVERY live bus — an uncontrolled section
+                // between two controlled ones still joins them (OLF's zero-impedance network is the bus set, not
+                // the controlled set): walking controlled buses only split a group behind a plain section and
+                // re-homed a controller OLF keeps merged (the 4-section fixture with bbs1 uncontrolled, bus-3:
+                // vl12_2 "re-homed" 1.4 kV off; rte6515 BUS-6029_BBS_4's VL-6029_2 behind the uncontrolled VL-6029_1).
+                List<LfBus> cluster = new ArrayList<>(List.of(start));   // the CONTROLLED buses reached
+                List<LfBus> walk = new ArrayList<>(List.of(start));      // every bus reached
+                java.util.Set<LfBus> walked = new java.util.HashSet<>(List.of(start));
+                for (int k = 0; k < walk.size(); k++) {
+                    for (LfBranch br : walk.get(k).getBranches()) {
                         if (!br.isZeroImpedance(com.powsybl.openloadflow.network.LoadFlowModel.AC) || outaged.contains(br)
                                 || br.isDisabled()) {
                             continue;
                         }
-                        LfBus other = br.getBus1() == cluster.get(k) ? br.getBus2() : br.getBus1();
-                        if (other != null && alive.contains(other) && seen.add(other)) {
+                        LfBus other = br.getBus1() == walk.get(k) ? br.getBus2() : br.getBus1();
+                        if (other == null || islanded.contains(other) || other.isDisabled() || !walked.add(other)) {
+                            continue;
+                        }
+                        walk.add(other);
+                        if (alive.contains(other) && seen.add(other)) {
                             cluster.add(other);
                         }
                     }
@@ -599,6 +610,14 @@ final class GpuBatchQualification {
                     if (!left.contains(ce)) {
                         left.add(ce);
                     }
+                }
+                // A locally re-homed bus is its OWN OLF group too: label it so the base pilot's "enabled
+                // controller" scan and the DISTR_Q rows of the main's side stop counting it (rte6515
+                // BUS-6194_BBS_2: the re-homed VL-6194_2 unpinned, the kernel read it as a live controller of the
+                // pinned main VL-6194_0 and restored the main's identity OLF has off — 4.775 kV).
+                if (!alive.isEmpty() && alive.stream().anyMatch(b -> b == main.getControlledBus())) {
+                    int label = subgroupOf.values().stream().mapToInt(Integer::intValue).max().orElse(0) + 1;
+                    subgroupOf.put(newMain.getControlledBus(), label);
                 }
             }
         }
@@ -760,15 +779,42 @@ final class GpuBatchQualification {
             // 0.457 MW. OLF has the pinned main PQ with BUS_TARGET_V off until it unpins — a per-scenario pilot the
             // device does not host yet (tasks #70), so the scenario is the CPU's.
             if (basePinned) {
-                reject[0] = "PLAN:VC_REMERGE_PINNED_MAIN";
-                return null;
+                // The elected main is PQ in OLF. If EVERY controller of its cluster is pinned too, OLF's re-merged
+                // group has no enabled controller: BUS_TARGET_V stays off and the cluster is plain PQ at the
+                // limits — the stock placement's layout already (mode 4 rows at the pinned targets), so no
+                // identity is installed; an UNPIN would re-activate BUS_TARGET_V on the main, which the device
+                // cannot host for a lost pilot's table, so each member's entry forbids it (kernel reject, CPU
+                // replay). rte6515 BUS-6194_BBS_1 (VL-6194_1/_2 both MAX_Q) and BUS-6003_BBS_1: OLF never
+                // unpins them. A pinned main beside an ENABLED sibling (BUS_TARGET_V kept through the sibling)
+                // is still refused.
+                int mainLabel = reHomed.subgroupOf().getOrDefault(e.getKey(), 0);
+                List<GenOutage> guards = new ArrayList<>();
+                for (LfBus cb : reHomed.remoteClusterBuses()) {
+                    if (reHomed.subgroupOf().getOrDefault(cb, 0) != mainLabel) {
+                        continue;
+                    }
+                    var cvc = cb.getGeneratorVoltageControl().orElse(null);
+                    List<LfBus> ctl = cvc != null ? cvc.getControllerElements() : List.of(cb);
+                    for (LfBus ce : ctl) {
+                        int ceRl = rlEntryOf(gpuData, ce);
+                        if (!basePinned(gpuData, ceRl)) {
+                            reject[0] = "PLAN:VC_REMERGE_PINNED_MAIN";
+                            return null;
+                        }
+                        guards.add(noUnpinEntry(ceRl));
+                    }
+                }
+                out.addAll(guards);
+                continue;
             }
             if (blockCovers) {
                 continue;
             }
             if (reloc != null) {
-                reject[0] = "PLAN:VC_REMERGE_RELOC_VROW";   // its own row carries a LIVE coupler's ZERO_V
-                return null;
+                // its own row carries a LIVE coupler's ZERO_V: the identity goes on the parent's DUMMY_Q row as
+                // a cross identity (rte6515 BUS-6029_BBS_1/2: the elected main two couplers from the island)
+                out.add(reHomedCrossEntry(reloc[1], e.getValue(), rl, false, 0));
+                continue;
             }
             out.add(reHomedPvEntry(vVar.getRow(), e.getValue(), rl));
         }
@@ -781,10 +827,40 @@ final class GpuBatchQualification {
                 new int[0], new double[0], GenOutage.ROW_V_IDENTITY, -1, 0, -1, 0, -1, 0);
     }
 
+    /** A re-homed control whose bus the BASE pinned: its own row starts as its reactive balance at the pinned
+     *  value (mode 4, {@code qTarget} = LfBus.getTargetQ(), the frozen generation minus the load) and its entry is a
+     *  LOCAL PV bus at {@code vTarget}, so an unpin restores the identity as OLF re-activates BUS_TARGET_V. */
+    private static GenOutage reHomedPinnedPvEntry(int vRow, double qTarget, double vTarget, int rlEntry) {
+        return new GenOutage(-1, 0, vRow, qTarget, true, true,
+                -1, 0, 0, 0, 0, rlEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
+                new int[0], new double[0], GenOutage.ROW_PINNED_V, -1, vTarget, -1, 0, -1, 0);
+    }
+
+    /** A re-homed control whose own V row hosts a LIVE coupler's ZERO_V (tasks #70, VC_REMERGE_RELOC_VROW): its
+     *  identity is a CROSS identity on the parent coupler's DUMMY_Q row (mode 6, the bus's V column), or — base
+     *  pinned — that row starts as the balance at the pinned value and the entry unpins back to the cross form. */
+    private static GenOutage reHomedCrossEntry(int dummyQRow, double vTarget, int rlEntry, boolean pinned, double qTarget) {
+        return pinned ? reHomedPinnedPvEntry(dummyQRow, qTarget, vTarget, rlEntry)
+                : new GenOutage(-1, 0, dummyQRow, vTarget, true, true,
+                -1, 0, 0, 0, 0, rlEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
+                new int[0], new double[0], GenOutage.ROW_CROSS_V_IDENTITY, -1, 0, -1, 0, -1, 0);
+    }
+
+    /** A base-pinned member of a re-homed cluster with no enabled controller: no row change, unpin forbidden. */
+    private static GenOutage noUnpinEntry(int rlEntry) {
+        return new GenOutage(-1, 0, -1, 0, false, false,
+                -1, 0, 0, 0, 0, rlEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
+                new int[0], new double[0], GenOutage.ROW_PINNED_NO_UNPIN, -1, 0, -1, 0, -1, 0);
+    }
+
+    static boolean basePinned(GpuAcData gpuData, int rlEntry) {
+        return gpuData.rlBaseQLimitType() != null && rlEntry >= 0 && gpuData.rlBaseQLimitType()[rlEntry] != 0;
+    }
+
     /** The bus's reactive-limit entry, or -1: a re-homed bus is checked as a LOCAL controller by the device
      *  (OLF checks it as the PV bus it now is; BUS-6113_BBS_1 pinned VL-6113_1 at RL#1, the device never
      *  looked — 7.1 kV). */
-    private static int rlEntryOf(GpuAcData gpuData, LfBus bus) {
+    static int rlEntryOf(GpuAcData gpuData, LfBus bus) {
         int[] rlBusNum = gpuData.rlBusNum();
         if (rlBusNum != null) {
             for (int e = 0; e < rlBusNum.length; e++) {
@@ -1231,12 +1307,15 @@ final class GpuBatchQualification {
                                 live = null;
                                 break;
                             }
-                            if (relocQRow(vVar.getRow(), relocRows, outagedZiNums) != vVar.getRow()) {
-                                relocIdentity = true;        // its own row carries the coupler's ZERO_V
-                                live = null;
-                                break;
-                            }
                             int reHomedRl = rlEntryOf(gpuData, e.getKey());
+                            int crossRow = relocQRow(vVar.getRow(), relocRows, outagedZiNums);
+                            if (crossRow != vVar.getRow()) {
+                                // its own row carries a LIVE coupler's ZERO_V: cross identity on the parent's
+                                // DUMMY_Q row (rte6515 BUS-6014_BBS_1/2 VL-6014_3, BUS-6029_BBS_4 VL-6029_2)
+                                live.add(reHomedCrossEntry(crossRow, e.getValue(), reHomedRl,
+                                        basePinned(gpuData, reHomedRl), e.getKey().getTargetQ()));
+                                continue;
+                            }
                             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                                 // Is the bus we are about to give a VOLTAGE IDENTITY already PINNED at its
                                 // reactive limit? A pinned bus cannot hold its voltage — OLF has it as PQ —
@@ -1260,11 +1339,12 @@ final class GpuBatchQualification {
                             // loadQ), outside the realistic band [0.8, 1.2] — the run reported FAILED where
                             // OLF reports CONVERGED, losing all 71 of its violations, the WHOLE violation
                             // gap of the full busbar scope.
-                            if (gpuData.rlBaseQLimitType() != null && reHomedRl >= 0
-                                    && gpuData.rlBaseQLimitType()[reHomedRl] != 0) {
-                                pinnedMain = true;
-                                live = null;
-                                break;
+                            if (basePinned(gpuData, reHomedRl)) {
+                                // Base-pinned: start as the reactive balance at the pinned value, checked as a
+                                // LOCAL PV bus at the re-homed voltage target (ROW_PINNED_V). rte6515
+                                // BUS-6157_BBS_1 (unpins, re-pins MAX_Q), BUS-6194_BBS_2 (unpins), BUS-6229_BBS_1.
+                                live.add(reHomedPinnedPvEntry(vVar.getRow(), e.getKey().getTargetQ(), e.getValue(), reHomedRl));
+                                continue;
                             }
                             live.add(reHomedPvEntry(vVar.getRow(), e.getValue(), reHomedRl));
                         }
@@ -1460,23 +1540,22 @@ final class GpuBatchQualification {
                             ok = false;
                             break;
                         }
-                        if (relocQRow(vVar.getRow(), relocRows, outagedZiNums) != vVar.getRow()) {
-                            ok = false;
-                            relocIdentity = true;            // its own row carries the coupler's ZERO_V
-                            break;
-                        }
                         int reHomedRl = rlEntryOf(gpuData, e.getKey());
+                        int crossRow = relocQRow(vVar.getRow(), relocRows, outagedZiNums);
+                        if (crossRow != vVar.getRow()) {
+                            pvOn.add(reHomedCrossEntry(crossRow, e.getValue(), reHomedRl,
+                                    basePinned(gpuData, reHomedRl), e.getKey().getTargetQ()));
+                            continue;
+                        }
                         // Same rule as the island site above: a bus PINNED at its reactive limit in the base
                         // cannot hold a voltage identity (OLF has it PQ). This site lacked the check, so a
                         // middle-section loss whose surviving section is base-pinned batched with the
                         // identity: rte6515 BUS-6157_BBS_1 (VL-6157_1, baseLimitType=1), BUS-6194_BBS_2
                         // (VL-6194_2, 2) and BUS-6229_BBS_1 (VL-6229_1, 2) — three device failures on
                         // systems OLF converges, replayed on the CPU.
-                        if (gpuData.rlBaseQLimitType() != null && reHomedRl >= 0
-                                && gpuData.rlBaseQLimitType()[reHomedRl] != 0) {
-                            ok = false;
-                            pinnedMain = true;
-                            break;
+                        if (basePinned(gpuData, reHomedRl)) {
+                            pvOn.add(reHomedPinnedPvEntry(vVar.getRow(), e.getKey().getTargetQ(), e.getValue(), reHomedRl));
+                            continue;
                         }
                         pvOn.add(reHomedPvEntry(vVar.getRow(), e.getValue(), reHomedRl));
                     }

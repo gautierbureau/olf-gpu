@@ -2098,6 +2098,63 @@ the pre-existing coupler-chain first-step test. **Left: 10 plan refusals on OLF-
 pinned main's balance riding a carrier of ITS subgroup with its identity kept), 4 `VC_REMERGE_RELOC_VROW` (the
 elected main's own V row hosts a LIVE coupler's ZERO_V), 1 `ISLANDS_SLACK` (#34).
 
+### #72 — pinned re-homed mains and re-homed mains under a live coupler (2026-10-05, IN PROGRESS)
+
+**PINNED_MAIN (5).** OLF's post-contingency switches (saved CPU arm, `OLF_RL_TRACE`) settle it: the pinned
+bus is PQ at its limit and a cluster with NO enabled controller keeps `BUS_TARGET_V` off (BUS-6194_BBS_1 and
+BUS-6003_BBS_1: both survivors pinned, never unpinned); a pinned LOCAL re-home can UNPIN (BUS-6157_BBS_1 unpins
+VL-6157_1 then re-pins it at MAX_Q, BUS-6194_BBS_2 unpins VL-6194_2, BUS-6229_BBS_1 stays). So:
+- local re-home of a base-pinned bus → `ROW_PINNED_V`: the row starts as the reactive balance at the pinned
+  value (`LfBus.getTargetQ()`, the frozen generation minus the load) and the entry is a LOCAL PV bus at the
+  re-homed voltage target (`rlLocalOv`), so the kernel's existing local unpin restores the identity;
+- a remote cluster whose controllers are ALL base-pinned → no identity (the killed-coupler block keeps a pinned
+  child's balance at home, mode 4) and one `ROW_PINNED_NO_UNPIN` entry per controller: an unpin would need
+  `BUS_TARGET_V` on a lost pilot's table, so the kernel rejects the scenario (`unpin-unrepresentable`, CPU
+  replay) instead of switching — never fired on rte6515; a pinned main beside an ENABLED sibling stays refused.
+Fixtures `deviceLostPilotLocalPinnedSurvivorMatchesCpu` (2 sections, survivor pinned) and
+`deviceLostPilotAllPinnedClusterMatchesCpu` (3 sections, both survivors pinned) pass at 1e-12 kV.
+
+**RELOC_VROW (4).** The elected main's own V row hosts a LIVE coupler's ZERO_V (it is a child of an alive
+coupler: BUS-6029_BBS_1/2's VL-6029_2 two couplers from the island, BUS-6014_BBS_1/2's VL-6014_3, BUS-6029_BBS_4).
+Its reactive equation lives on the parent coupler's `DUMMY_Q` row, whose pattern already holds the child's own
+dq/dV slot — so `BUS_TARGET_V` goes THERE as a **cross identity**: device row mode 6 = "identity on column
+`relocOwn[row]`" (`applyRowModeBatch`), treated as an identity by every carrier pick and target maintainer, with
+the reactive-limit kernel pinning/unpinning that relocated row (`pinIdx`, the voltage still read at the bus's
+own column) and the pinned form riding the existing stock pair (dummy row on mode 4). No new array: `relocOwn`
+is structural. Entries `ROW_CROSS_V_IDENTITY` (`vRow` = the dummy row, `qTarget` = the voltage target), or
+`ROW_PINNED_V` on the dummy row when the bus is base-pinned. Fixtures: `deviceLostPilotReHomedUnderLiveCouplerMatchesCpu`
+(3 sections, the middle uncontrolled), `deviceLostPilotRemoteClusterUnderLiveCouplerMatchesCpu` (4 sections) and
+`deviceLostPilotPinnedUnderLiveCouplerMatchesCpu`.
+
+**Two more defects the fixtures and the first proof exposed (2026-10-05):**
+- `reHomedControls`' cluster BFS walked CONTROLLED buses only, so an uncontrolled section between two controlled
+  ones split the group and re-homed a controller OLF keeps merged (the 4-section fixture with bbs1 uncontrolled,
+  bus-3: vl12_2 "re-homed" 1.4 kV off, bus-2 a singular solve; rte6515 BUS-6029_BBS_4's VL-6029_2 behind the
+  uncontrolled VL-6029_1). It walks every live bus now and collects the controlled ones.
+- a LOCALLY re-homed bus beside a SURVIVING main was not labelled, so the base pilot's "enabled controller" scan
+  (`updatePilotVeqBatch`) still counted it: BUS-6194_BBS_2 — VL-6194_2 re-homed and unpinned, the kernel read it as
+  a live controller of the base-pinned main VL-6194_0 and restored the main's identity at 1.123 where OLF has it
+  PQ at its limit (row 13634 `mode=0 target=1.123`, 4.775 kV on BUS-6194_BBS_1). A local re-home now gets its own
+  label too (keys, q terms and the pilot's scan all leave it alone). 17 fixtures green.
+
+Diagnostic full-scope run before those two (`gpu-load-73.log`): plan refusals down to **1** (`ISLANDS_SLACK`),
+statuses identical, violations 503923 = 503923, device failures 0, coverage 6604 / 6667; BUS-6014_BBS_1/2 (cross
+identity) at 3e-11 / 4e-11 kV; BUS-6029_BBS_1/2/4 at 5.7e-05 / 1.4e-05 / 2.0e-05 kV — to be read after the BFS fix
+(BUS-6029_BBS_4 was mis-split by it).
+
+**Proof (`gpu-load-75.log`, full busbar scope, GPU arm vs the saved CPU arm):** plan refusals on OLF-converging
+systems **1** (BUS-4714_BBS, `ISLANDS_SLACK`), device failures on OLF-converging systems 0, coverage
+**6604 / 6667**, statuses identical `{CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}`, `violations: CPU=503923
+GPU=503923 diff=0`, `conflictRows=0`. The pinned mains agree at machine precision (BUS-6003_BBS_1 1.4e-10,
+BUS-6157_BBS_1 3.6e-11, BUS-6194_BBS_2 2.6e-11 kV; the latter with OLF's unpin reproduced). One
+`unpin-unrepresentable` reject fired (slot 2297, an all-pinned cluster the device wanted to unpin where OLF did
+not — replayed, hence the equal statuses; the pre-unpin state differed, to be looked at). Full suite 315 tests,
+the one failure the pre-existing coupler-chain first-step test. **Left in this class:** the BUS-6029 family —
+BUS-6029_BBS_1 5.7e-05, BUS-6029_BBS_2 1.4e-05, BUS-6029_BBS_4 2.0e-05 kV (DAP ~4e-09 MW): the cross-identity
+scenarios with an uncontrolled section between the island and the elected main; OLF switches five more buses in
+BBS_1 (pins VL-6490_0, VL-5967_1, VL-6055_0, VL-6231_0/_1, unpins VL-6095_0), so the first question is whether the
+device's decision sequence is the same.
+
 ### #70 — host the surviving REMOTE cluster of a split voltage-control group (2026-10-04, IN PROGRESS)
 
 **What `VC_REMERGE_MULTI` actually refused.** `OLF_GPU_QUALIFY_TRACE` on the full busbar scope, with

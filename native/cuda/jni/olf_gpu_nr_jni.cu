@@ -1094,7 +1094,7 @@ __device__ inline int relocChoose(int g, const int* qrPtr, const int* qrRows, co
     int cnt = qrPtr[g + 1] - p0;
     for (int c = 1; c < cnt; c++) {
         int m = mode[qrRows[p0 + c]];
-        if (m != 0 && m != 4) {
+        if (m != 0 && m != 4 && m != 6) {
             return c;
         }
     }
@@ -1114,7 +1114,7 @@ __device__ inline int relocChooseSub(int g, const int* qrPtr, const int* qrRows,
     for (int c = 1; c < cnt; c++) {
         if (sub[qrMemberStart[g] + c - 1] != 0) continue;
         int m = mode[qrRows[p0 + c]];
-        if (m != 0 && m != 4) {
+        if (m != 0 && m != 4 && m != 6) {
             return c;
         }
     }
@@ -4620,7 +4620,8 @@ __global__ void fillZeroImpBatch(int nzi, int nScenarios, int n, int nnz,
 // which buses are PV/slack). Same mask semantics as the single-solve applyRowMode.
 __global__ void applyRowModeBatch(int n, int nScenarios, int nnz, const int* mode, const int* rowPtr,
                                   const int* diagPos, const double* x, const double* target,
-                                  double* vals, double* F, const char* active, const double* rowSlope) {
+                                  double* vals, double* F, const char* active, const double* rowSlope,
+                                  const int* colIdx, const int* relocOwn) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n * nScenarios) return;
     int r = tid % n;
@@ -4628,7 +4629,17 @@ __global__ void applyRowModeBatch(int n, int nScenarios, int nnz, const int* mod
     if (!active[s]) return;
     int m = mode[(size_t) s * n + r];
     double* valsS = vals + (size_t) s * nnz;
-    if (m == 0) {                                            // identity: v/phi/rho/a1/b pinned to target
+    if (m == 6) {
+        // CROSS identity (tasks #70, VC_REMERGE_RELOC_VROW): this coupler DUMMY_Q row hosts the relocated child's
+        // reactive equation, and the child is a re-homed voltage-controlled bus whose own V row carries the live
+        // coupler's ZERO_V — so BUS_TARGET_V lands HERE on the child's V column (relocOwn[r] = its own V row =
+        // its V column), the slot the child's own dq/dV term already reserves in the pattern.
+        int col = relocOwn != nullptr ? relocOwn[r] : -1;
+        for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
+            valsS[k] = colIdx[k] == col ? 1.0 : 0.0;
+        }
+        F[(size_t) s * n + r] = (col >= 0 ? x[(size_t) s * n + col] : 0.0) - target[(size_t) s * n + r];
+    } else if (m == 0) {                                     // identity: v/phi/rho/a1/b pinned to target
         for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
             valsS[k] = 0.0;
         }
@@ -5056,8 +5067,8 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
     if (mrow >= 0 && rowIsFrozen(nFrozen, frozenSlotRow, s, mrow)) {
         return;                                              // islanded: the row is frozen, not ours to write
     }
-    if (mrow >= 0 && mode[(size_t) s * n + mrow] == 0) {
-        // The row is a VOLTAGE IDENTITY this scenario: a control OLF re-merged onto this bus after a
+    if (mrow >= 0 && (mode[(size_t) s * n + mrow] == 0 || mode[(size_t) s * n + mrow] == 6)) {
+        // The row is a VOLTAGE IDENTITY this scenario (6: a cross identity on the relocated child's V column): a control OLF re-merged onto this bus after a
         // zero-impedance split (GpuBatchQualification.reHomedControls — the bus is a plain PV bus at its
         // own target, and the member has left the group), or a frozen/outaged row. A DISTR_Q target
         // written here replaces the voltage target: measured on rte6515 BUS-6029_BBS_1, VL-6029_1's
@@ -5629,7 +5640,8 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                                     int robust,
                                     int noPinRow, int swLogSlot, double* swLog, int* swLogCnt, int passId,
                                     const int* psEntry, int nQr,
-                                    const char* rlLocalOv, const double* rlLocalVt) {
+                                    const char* rlLocalOv, const double* rlLocalVt,
+                                    const char* rlNoUnpin, char* unpinBad) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -5779,6 +5791,12 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             // distributed slack), 2.079e-05 kV network-wide.
             bool wantsBack = (!minPin && v > vt) || (minPin && v < vt);
             bool back = wantsBack && switchCount[rst] < maxSwitch;
+            if (back && rlNoUnpin != nullptr && rlNoUnpin[rst]) {
+                // a pinned member of a re-homed cluster with no enabled controller: OLF would re-activate the
+                // cluster's BUS_TARGET_V, which this table cannot host for a lost pilot — reject, CPU replay
+                unpinBad[s] = 1;
+                back = false;
+            }
             if (back) {
                 if (!enrolledPilot) {
                     mode[qidx] = pvForm;                     // back to the DISTR_Q share row (the V identity for a pilot)
@@ -5850,22 +5868,33 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                  rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]));
         return;
     }
-    if ((mode[idx] == 0 || mode[idx] == 2) && limitType[st] == 0) {   // currently PV — check the reactive limits
+    // A re-homed LOCAL control whose own V row carries a live coupler's ZERO_V keeps its identity (mode 6, on its
+    // own V column) and its pinned balance (mode 4) on the RELOCATED row — the parent coupler's DUMMY_Q (tasks #70,
+    // VC_REMERGE_RELOC_VROW). The voltage is still read at the bus's own column (idx).
+    size_t pinIdx = idx;
+    if (localOv && rlQrow != nullptr && rlQrow[i] >= 0 && rlQrow[i] != vrow) {
+        size_t r2 = (size_t) s * n + rlQrow[i];
+        if (mode[r2] == 6 || (mode[r2] == 4 && mode[idx] != 4)) {
+            pinIdx = r2;
+        }
+    }
+    const bool crossRow = pinIdx != idx;
+    if ((mode[pinIdx] == 0 || mode[pinIdx] == 2 || mode[pinIdx] == 6) && limitType[st] == 0) {   // currently PV — check the reactive limits
         double q = qBuf[qIdx] + rlLoadQ[li];
         if (q < liMin - tol) {
-            savedTarget[st] = target[idx];                   // remember the row target for the switch-back
-            savedMode[st] = static_cast<char>(mode[idx]);   // and the PV form (0, or 2 for a slope SVC)
-            mode[idx] = localOv ? 4 : 1;                 // a re-homed member: own Q through its ALTERNATE dest
-            target[idx] = liMin - rlLoadQ[li];
+            savedTarget[st] = target[pinIdx];                // remember the row target for the switch-back
+            savedMode[st] = static_cast<char>(mode[pinIdx]);   // and the PV form (0, 2 for a slope SVC, 6 cross)
+            mode[pinIdx] = localOv ? 4 : 1;              // a re-homed member: own Q through its ALTERNATE dest
+            target[pinIdx] = liMin - rlLoadQ[li];
             limitType[st] = 1;
             switchCount[st]++;
             switched[s] = 1;
             passSwitched[st] = 1;
         } else if (q > liMax + tol) {
-            savedTarget[st] = target[idx];
-            savedMode[st] = static_cast<char>(mode[idx]);
-            mode[idx] = localOv ? 4 : 1;                 // a re-homed member: own Q through its ALTERNATE dest
-            target[idx] = liMax - rlLoadQ[li];
+            savedTarget[st] = target[pinIdx];
+            savedMode[st] = static_cast<char>(mode[pinIdx]);
+            mode[pinIdx] = localOv ? 4 : 1;              // a re-homed member: own Q through its ALTERNATE dest
+            target[pinIdx] = liMax - rlLoadQ[li];
             limitType[st] = 2;
             switchCount[st]++;
             switched[s] = 1;
@@ -5886,8 +5915,8 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                  || (minPin && v < vt));                             // minQ-pinned but v below target
         bool back = wantsBack && switchCount[st] < maxSwitch;
         if (back) {
-            mode[idx] = 0;                                  // PQ → PV: resume voltage control
-            target[idx] = vt;
+            mode[pinIdx] = crossRow ? 6 : 0;                // PQ → PV: resume voltage control (cross identity stays cross)
+            target[pinIdx] = vt;
             limitType[st] = 0;
             switched[s] = 1;
             passSwitched[st] = 2;
@@ -5897,8 +5926,8 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             // the pinned Q at the NEW limit when it drifted by more than the mismatch tol.
             // Unreachable with static limits — gated on the channels.
             double lim = limitType[st] == 1 ? liMin : liMax;
-            if (fabs(lim - (target[idx] + rlLoadQ[li])) > tol) {
-                target[idx] = lim - rlLoadQ[li];
+            if (fabs(lim - (target[pinIdx] + rlLoadQ[li])) > tol) {
+                target[pinIdx] = lim - rlLoadQ[li];
                 switched[s] = 1;
                 passSwitched[st] = 3;
             }
@@ -7196,6 +7225,8 @@ struct BatchSolverContext {
     // Same idea for the reactive-limits pass: per (scenario, controller), 1 = its bus is in another
     // synchronous component in this scenario, so the loop must not look at it.
     int nRlIslanded = 0;
+    DeviceBuf dRlNoUnpin, dRlUnpinBad;                       // (scenario, entry) unpin forbidden; per-scenario flag
+    int nRlNoUnpin = 0;
     DeviceBuf dRlLocalOv, dRlLocalVt;                        // re-homed PV buses: (scenario, entry) mask + own V target
     int nRlLocal = 0;
     DeviceBuf dRlIslanded;
@@ -10081,7 +10112,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr, ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
         if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
         if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx), ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr);
-        applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>());
+        applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>(),
+                    ctx->st->dColIdx.as<int>(), ctx->st->dRelocOwn.p != nullptr ? ctx->st->dRelocOwn.as<int>() : nullptr);
         // OLF_GPU_VALS_SCAN_PREREPAIR: scan/dump the fill BEFORE the zero-diagonal repair rewrites hazard rows
         // (a row that reads as a borrowed donor after the repair was EMPTY before it — the defect is upstream).
         static const bool scanPreRepair = std::getenv("OLF_GPU_VALS_SCAN_PREREPAIR") != nullptr;
@@ -11600,7 +11632,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dSwLogCnt.p ? ctx->dSwLogCnt.as<int>() : nullptr, outer,
                     psEntryPtr(ctx), ctx->st->nQr,
                     ctx->nRlLocal > 0 ? ctx->dRlLocalOv.as<char>() : nullptr,
-                    ctx->nRlLocal > 0 ? ctx->dRlLocalVt.as<double>() : nullptr);
+                    ctx->nRlLocal > 0 ? ctx->dRlLocalVt.as<double>() : nullptr,
+                    ctx->nRlNoUnpin > 0 ? ctx->dRlNoUnpin.as<char>() : nullptr, ctx->nRlNoUnpin > 0 ? ctx->dRlUnpinBad.as<char>() : nullptr);
 psgStep(ctx, nS, n, outer, "afterRL");
             if (ctx->nRlPilotSelf > 0) {
                 // a pilot that is its own controller pinned while a member of its group is not (or
@@ -11619,6 +11652,19 @@ psgStep(ctx, nS, n, outer, "afterRL");
                 for (int s = 0; s < nS; s++) {
                     if (mixed[s] && live[s]) {
                         traceReject(s, "pilot-self-mixed-pin", outer, 0);
+                        res.status[s] = -2;
+                        active[s] = 0;
+                        live[s] = 0;
+                    }
+                }
+            }
+            if (ctx->nRlNoUnpin > 0) {
+                std::vector<char> ub(nS);
+                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                CUDA_CHECK(cudaMemcpy(ub.data(), ctx->dRlUnpinBad.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
+                for (int s = 0; s < nS; s++) {
+                    if (ub[s] && live[s]) {
+                        traceReject(s, "unpin-unrepresentable", outer, 0);
                         res.status[s] = -2;
                         active[s] = 0;
                         live[s] = 0;
@@ -12047,7 +12093,8 @@ psgStep(ctx, nS, n, outer, "afterAllPinned");
                 ctx->dSwLogCnt.p ? ctx->dSwLogCnt.as<int>() : nullptr, 999999,
                     psEntryPtr(ctx), ctx->st->nQr,
                     ctx->nRlLocal > 0 ? ctx->dRlLocalOv.as<char>() : nullptr,
-                    ctx->nRlLocal > 0 ? ctx->dRlLocalVt.as<double>() : nullptr);
+                    ctx->nRlLocal > 0 ? ctx->dRlLocalVt.as<double>() : nullptr,
+                    ctx->nRlNoUnpin > 0 ? ctx->dRlNoUnpin.as<char>() : nullptr, ctx->nRlNoUnpin > 0 ? ctx->dRlUnpinBad.as<char>() : nullptr);
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         std::vector<char> aSw(nS), aPs(static_cast<size_t>(ctx->nrl) * nS);
         CUDA_CHECK(cudaMemcpy(aSw.data(), ctx->dRlSwitched.p, nS, cudaMemcpyDeviceToHost));
@@ -12922,7 +12969,8 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
     if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr, ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
     if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
     if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx), ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr);
-    applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>());
+    applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>(),
+                    ctx->st->dColIdx.as<int>(), ctx->st->dRelocOwn.p != nullptr ? ctx->st->dRelocOwn.as<int>() : nullptr);
     hazRepairValues(ctx, nS, ctx->dVals.as<double>());
 
     if (!ctx->analyzed) {
@@ -14354,6 +14402,35 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
 
 // Reactive-limits controllers STRANDED in another synchronous component: install (or clear, with
 // null) the per-scenario mask as {slot, controller} pairs.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlNoUnpin(
+        JNIEnv* env, jclass, jlong handle, jintArray jPairs) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jPairs == nullptr || env->GetArrayLength(jPairs) == 0 || ctx->nrl == 0) {
+        ctx->nRlNoUnpin = 0;
+        return;
+    }
+    size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nrl;
+    std::vector<char> mask(len, 0);
+    int nPairs = env->GetArrayLength(jPairs) / 2;
+    jint* pairs = env->GetIntArrayElements(jPairs, nullptr);
+    for (int k = 0; k < nPairs; k++) {
+        int s = pairs[2 * k];
+        int i = pairs[2 * k + 1];
+        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nrl) {
+            mask[(size_t) s * ctx->nrl + i] = 1;
+        }
+    }
+    env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
+    ctx->dRlNoUnpin.upload(mask.data(), len);
+    std::vector<char> zero(ctx->nScenarios, 0);
+    ctx->dRlUnpinBad.upload(zero.data(), ctx->nScenarios);
+    ctx->nRlNoUnpin = nPairs;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlIslanded(
         JNIEnv* env, jclass, jlong handle, jintArray jPairs) {

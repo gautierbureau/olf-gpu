@@ -1614,6 +1614,16 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
      *  switches a listed contingency opens), so a middle-section loss leaves the main's cluster on one side and a
      *  second cluster on the other — tasks #71's shape. */
     private static Network splitGroupNetwork(int sections) {
+        return splitGroupNetwork(sections, java.util.Set.of());
+    }
+
+    /** @param pinnedGens sections whose generator gets a 5 MVar reactive ceiling, so the BASE load flow pins it. */
+    private static Network splitGroupNetwork(int sections, java.util.Set<Integer> pinnedGens) {
+        return splitGroupNetwork(sections, pinnedGens, java.util.Set.of());
+    }
+
+    /** @param noControl sections whose generator does NOT regulate voltage (a plain PQ section in the chain). */
+    private static Network splitGroupNetwork(int sections, java.util.Set<Integer> pinnedGens, java.util.Set<Integer> noControl) {
         Network network = Network.create("split-group-" + sections, "code");
         com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
         for (String vl : List.of("vl0", "vl3", "vl4")) {
@@ -1640,8 +1650,9 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 vl12.getNodeBreakerView().newBreaker().setId("b" + k + "_" + pair[1]).setNode1(pair[0] + 50).setNode2(pair[0]).setOpen(false).add();
             }
             vl12.newGenerator().setId("g" + k).setNode(gNode)
-                    .setMinP(0).setMaxP(500).setTargetP(80).setTargetQ(0).setTargetV(k == 0 ? 406 : 405).setVoltageRegulatorOn(true).add();
-            network.getGenerator("g" + k).newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(300).add();
+                    .setMinP(0).setMaxP(500).setTargetP(80).setTargetQ(0).setTargetV(k == 0 ? 406 : 405)
+                    .setVoltageRegulatorOn(!noControl.contains(k)).add();
+            network.getGenerator("g" + k).newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(pinnedGens.contains(k) ? 5 : 300).add();
             String ext = externals[k % 3];
             network.newLine().setId("l" + k).setVoltageLevel1("vl12").setNode1(lNode)
                     .setVoltageLevel2(ext).setBus2(ext + "_b").setConnectableBus2(ext + "_b")
@@ -1663,12 +1674,20 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     private void assertSplitGroupMatchesCpu(int sections) {
+        assertSplitGroupMatchesCpu(sections, java.util.Set.of());
+    }
+
+    private void assertSplitGroupMatchesCpu(int sections, java.util.Set<Integer> pinnedGens) {
+        assertSplitGroupMatchesCpu(sections, pinnedGens, java.util.Set.of());
+    }
+
+    private void assertSplitGroupMatchesCpu(int sections, java.util.Set<Integer> pinnedGens, java.util.Set<Integer> noControl) {
         List<Contingency> ctgs = new java.util.ArrayList<>();
         for (int k = 0; k < sections; k++) {
             ctgs.add(new Contingency("bus-" + k, new com.powsybl.contingency.BusbarSectionContingency("bbs" + k)));
         }
         GpuBatchScopeCensus.reset();
-        assertMergedPilotLossMatchesCpu(splitGroupNetwork(sections), ctgs, sections);
+        assertMergedPilotLossMatchesCpu(splitGroupNetwork(sections, pinnedGens, noControl), ctgs, sections);
         assertEquals(0L, GpuBatchScopeCensus.snapshot().getOrDefault("HOST:OVERRIDE_CONFLICT", 0L).longValue(),
                 "a sound plan writes every row's target once");
     }
@@ -1682,6 +1701,55 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         assertSplitGroupMatchesCpu(4);
+    }
+
+    /** Two sections with the SURVIVOR's generator pinned in the base: losing the main re-homes a LOCAL control to
+     *  a bus OLF has PQ at its limit — the device starts the row as the reactive balance at the pinned value and
+     *  checks the entry as a local PV bus at the re-homed target, so an unpin restores the identity (rte6515
+     *  BUS-6157_BBS_1 unpins then re-pins at the other limit, BUS-6194_BBS_2 unpins, BUS-6229_BBS_1 stays). */
+    @org.junit.jupiter.api.Test
+    void deviceLostPilotLocalPinnedSurvivorMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertSplitGroupMatchesCpu(2, java.util.Set.of(1));
+    }
+
+    /** Three sections with BOTH survivors pinned in the base: the re-merged cluster has no enabled controller, so
+     *  OLF keeps BUS_TARGET_V off — plain PQ at the limits; the device installs no identity and forbids an unpin
+     *  (rte6515 BUS-6194_BBS_1, BUS-6003_BBS_1: OLF never unpins them). */
+    @org.junit.jupiter.api.Test
+    void deviceLostPilotAllPinnedClusterMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertSplitGroupMatchesCpu(3, java.util.Set.of(1, 2));
+    }
+
+    /** Three sections, the middle one WITHOUT voltage control: losing the main re-homes a LOCAL control to bbs2,
+     *  whose own V row hosts the LIVE coupler c12's ZERO_V — the identity goes on c12's DUMMY_Q row as a cross
+     *  identity on bbs2's V column (rte6515 BUS-6014_BBS_1/2, BUS-6029_BBS_4: VC_REMERGE_RELOC_VROW). */
+    @org.junit.jupiter.api.Test
+    void deviceLostPilotReHomedUnderLiveCouplerMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertSplitGroupMatchesCpu(3, java.util.Set.of(), java.util.Set.of(1));
+    }
+
+    /** Four sections with the second uncontrolled: losing the main leaves a REMOTE cluster {bbs2, bbs3} whose elected
+     *  main bbs2 sits under the live coupler c12 (rte6515 BUS-6029_BBS_1/2). */
+    @org.junit.jupiter.api.Test
+    void deviceLostPilotRemoteClusterUnderLiveCouplerMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertSplitGroupMatchesCpu(4, java.util.Set.of(), java.util.Set.of(1));
+    }
+
+    /** The same under-live-coupler shape with the re-homed bus PINNED in the base: the cross row starts as the
+     *  balance at the pinned value and unpins back to the cross identity. */
+    @org.junit.jupiter.api.Test
+    void deviceLostPilotPinnedUnderLiveCouplerMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertSplitGroupMatchesCpu(3, java.util.Set.of(2), java.util.Set.of(1));
     }
 
     /** Five sections: losing bbs2 keeps TWO controllers with the main (bbs0, bbs1 — its DISTR_Q row stays a

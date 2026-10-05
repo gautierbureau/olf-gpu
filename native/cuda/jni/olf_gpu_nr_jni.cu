@@ -4914,6 +4914,13 @@ __device__ double rlCurveEval(double pMW, const double* pts, int npts, int sel, 
 static const int cvProbeEntry = std::getenv("OLF_GPU_CV_PROBE") == nullptr ? -1
         : (std::string(std::getenv("OLF_GPU_CV_PROBE")) == "all" ? -2
            : std::atoi(std::getenv("OLF_GPU_CV_PROBE")));
+// OLF_GPU_CV_PROBE_SLOT=<slot>: the scenario the probe prints for (default 0 — the base load flow's single slot).
+// "ctg" resolves to the chunk-LOCAL slot the host set for OLF_GPU_LOOP_TRACE_CTG (kernel scenario indices
+// are chunk-local; a global contingency index never matches one).
+static const bool cvProbeSlotByCtg = std::getenv("OLF_GPU_CV_PROBE_SLOT") != nullptr
+        && std::string(std::getenv("OLF_GPU_CV_PROBE_SLOT")) == "ctg";
+static const int cvProbeSlot = std::getenv("OLF_GPU_CV_PROBE_SLOT") == nullptr || cvProbeSlotByCtg ? 0
+        : std::atoi(std::getenv("OLF_GPU_CV_PROBE_SLOT"));
 
 __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int cvExtrapolate,
                                    const int* cvIdx, const double* cvIn, const double* cvPts,
@@ -4922,7 +4929,7 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
                                    int nQOv, const int* qOvSlotEntry, const double* qOvMinMax,
                                    const int* cvOvPtr, const int* cvOvEntry, const double* cvOvVal,
                                    const double* genCum, const char* genCumValid, int ngen,
-                                   double* minQDyn, double* maxQDyn, double* loadQDyn, int cvProbeEntry) {
+                                   double* minQDyn, double* maxQDyn, double* loadQDyn, int cvProbeEntry, int cvProbeSlot) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -4973,7 +4980,7 @@ __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int 
         }
         double mnAdd = rlCurveEval(pNow * 100.0, pts, npts, 0, cvExtrapolate) / 100.0 - cvIn[g * 5 + 3];
         double mxAdd = rlCurveEval(pNow * 100.0, pts, npts, 1, cvExtrapolate) / 100.0 - cvIn[g * 5 + 4];
-        if ((cvProbeEntry == -2 || (cvProbeEntry >= 0 && i == cvProbeEntry)) && s == 0) {
+        if ((cvProbeEntry == -2 || (cvProbeEntry >= 0 && i == cvProbeEntry)) && s == cvProbeSlot) {
             // OLF_GPU_CV_PROBE=<rl entry>: the P this curve is evaluated AT, and where that P came
             // from. OLF re-reads bus.getMinQ() at the generator's CURRENT targetP; the device
             // reconstructs it, and the two only agree while the reconstruction does.
@@ -5218,7 +5225,7 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
                                     const double* svcRlVt,
                                     int nDqMembers, const int* dqMemberQrGroup, const int* dqMemberRlEntry,
                                     const char* rlIslandedMask,
-                                const char* dqSub, const int* qrMemberStart) {
+                                const char* dqSub, const int* qrMemberStart, double tol) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nQr * nScenarios) return;
     int g = tid % nQr;
@@ -5320,8 +5327,14 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
         target[pi] = savedVTarget[fi];
         veqOff[fi] = 0;
         switched[s] = act ? 1 : switched[s];
-    } else if (act && lost && veqOff[fi] && pe >= 0 && fabs(target[pi] - flipTarget) > 1e-12) {
-        target[pi] = flipTarget;                             // the pinned pilot's limit moved (curve limits)
+    } else if (act && lost && veqOff[fi] && pe >= 0 && fabs(target[pi] - flipTarget) > tol) {
+        // The pinned pilot's limit moved (curve limits). OLF re-freezes a pinned bus at its moved limit only
+        // past maxReactivePowerMismatch (checkPqBusWithQLimitType: |maxQ - q| > tol), the same gate the member
+        // path above this kernel applies; a 1e-12 gate here re-stamped a pilot OLF leaves at its pin-time
+        // limit. Measured on rte6515 BUS-6029_BBS_1 (#73): VL-6231_0's curve moved 2.23e-5 pu with the second
+        // slack distribution, under the 1e-4 pu threshold - OLF kept 0.570780403, the device stamped
+        // 0.570758104 and the network sat 5.68e-5 kV off.
+        target[pi] = flipTarget;
         switched[s] = 1;
     } else if (lost && !veqOff[fi] && pe >= 0 && mode[pi] == 1 && rlVtarget != nullptr) {
         // Lost already in the BASE: the activation laid the pilot's row out as its own Q balance (OLF's
@@ -9551,7 +9564,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->nDqMembers, ctx->dDqMemberQrGroup.p ? ctx->dDqMemberQrGroup.as<int>() : nullptr,
                     ctx->dDqMemberRlEntry.p ? ctx->dDqMemberRlEntry.as<int>() : nullptr,
                     ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
-                    ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr);
+                    ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
+                    REACTIVE_LIMIT_TOL);
         }
     };
     auto launchDistrQTargetsInner = [&]() {
@@ -9687,7 +9701,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
                         ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
                         ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
-                        ctx->dRlLoadQDyn.as<double>(), cvProbeEntry);
+                        ctx->dRlLoadQDyn.as<double>(), cvProbeEntry, cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot);
             }
             seedRlModeFromState<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n,
                     ctx->dRlVrow.as<int>(), ctx->dRlQrow.p ? ctx->dRlQrow.as<int>() : nullptr,
@@ -11602,7 +11616,18 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
                         ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
                         ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
-                        ctx->dRlLoadQDyn.as<double>(), cvProbeEntry);
+                        ctx->dRlLoadQDyn.as<double>(), cvProbeEntry, cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot);
+                // Host-side readback of the probed entry's dynamic limits (device printf is not reliably
+                // captured by the test runner): the limit the RL pass that follows will pin at.
+                int cvHostSlot = cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot;
+                if (cvProbeEntry >= 0 && cvHostSlot >= 0 && cvHostSlot < nS) {
+                    double lim[2];
+                    size_t off = static_cast<size_t>(cvHostSlot) * ctx->nrl + cvProbeEntry;
+                    CUDA_CHECK(cudaMemcpy(&lim[0], ctx->dRlMinQDyn.as<double>() + off, sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(&lim[1], ctx->dRlMaxQDyn.as<double>() + off, sizeof(double), cudaMemcpyDeviceToHost));
+                    fprintf(stderr, "[CV-HOST] outer=%d slot=%d entry=%d minQDyn=%.12f maxQDyn=%.12f\n",
+                            outer, cvHostSlot, cvProbeEntry, lim[0], lim[1]);
+                }
             }
             CUDA_CHECK(cudaMemsetAsync(ctx->dRlPassSwitched.p, 0, static_cast<size_t>(ctx->nrl) * nS, ctx->stream));
             static const char* noPinEnv = std::getenv("OLF_GPU_RL_NOPIN_ROW");
@@ -12052,7 +12077,7 @@ psgStep(ctx, nS, n, outer, "afterAllPinned");
                     ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
                     ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
                     ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
-                    ctx->dRlLoadQDyn.as<double>(), -1);
+                    ctx->dRlLoadQDyn.as<double>(), -1, 0);
         }
         CUDA_CHECK(cudaMemsetAsync(ctx->dRlPassSwitched.p, 0, static_cast<size_t>(ctx->nrl) * nS, ctx->stream));
         CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitched.p, 0, nS, ctx->stream));

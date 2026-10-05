@@ -4058,6 +4058,62 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         // the automaton fired, and the state still matches the CPU at 1e-12.
     }
 
+    /** Two merged sections (retained coupler), both generators regulating the main's own bus — a PILOT-SELF
+     *  group — with a reactive-capability CURVE on the main's generator. A line loss drives both sections past
+     *  MAX_Q and the pins change the losses enough for a distributed-slack round to run AFTER them, which moves
+     *  the curve limit by LESS than maxReactivePowerMismatch. OLF leaves such a pin at its pin-time limit
+     *  (checkPqBusWithQLimitType re-freezes only past the threshold); the device's member path did the same but
+     *  its enrolled-pilot re-stamp fired above 1e-12 (tasks #73, rte6515 BUS-6029_BBS_1: VL-6231_0 stamped
+     *  0.570758104 against OLF's 0.570780403, 5.68e-05 kV). GPU SA == CPU SA at 1e-12 at the DEFAULT criteria. */
+    @org.junit.jupiter.api.Test
+    void devicePinnedPilotSelfKeepsItsLimitUnderThresholdMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = pilotSelfCurveNetwork();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusPMaxMismatch(1e-4)               // a slack round fires AFTER the pins, moving the curve
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0_b"));
+        // the section loss is LISTED so the coupler is retained and the two sections are two buses (OLF
+        // retains only the switches a listed contingency touches); losing g3's reactive support at vl3 is
+        // what drives both sections past MAX_Q
+        List<Contingency> ctgs = List.of(
+                new Contingency("bus-1", new com.powsybl.contingency.BusbarSectionContingency("bbs1")),
+                new Contingency("g3", new com.powsybl.contingency.GeneratorContingency("g3")));
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "both contingencies must batch (or the test proves nothing)");
+    }
+
+    /** splitGroupNetwork(2) with a reactive-capability curve on g0 (MAX_Q 60 -> 62 MVAr over 0..500 MW, so a
+     *  slack move of a few hundred kW drifts the limit by ~1e-5 pu) and a 60 MVAr ceiling on g1. */
+    private static Network pilotSelfCurveNetwork() {
+        Network network = splitGroupNetwork(2);
+        network.getGenerator("g0").setTargetV(PSC_TARGET_V);
+        network.getGenerator("g1").setTargetV(PSC_TARGET_V);
+        network.getGenerator("g0").newReactiveCapabilityCurve()
+                .beginPoint().setP(0).setMinQ(-300).setMaxQ(PSC_MAX_Q).endPoint()
+                .beginPoint().setP(500).setMinQ(-300).setMaxQ(PSC_MAX_Q + 2).endPoint()
+                .add();
+        network.getGenerator("g1").newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(PSC_MAX_Q).add();
+        network.getLoad("ld0").setQ0(PSC_LOAD_Q);
+        // heavy reactive loads behind vl3: g3 carries them in the base, the merged sections once g3 is lost
+        network.getLoad("ld3").setQ0(PSC_REMOTE_Q);
+        network.getLoad("ld4").setQ0(PSC_REMOTE_Q);
+        // reactive support at vl3 with no active power: its loss moves (almost) no P, only the reactive need
+        network.getVoltageLevel("vl3").newGenerator().setId("g3").setBus("vl3_b").setConnectableBus("vl3_b")
+                .setMinP(0).setMaxP(100).setTargetP(0).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getGenerator("g3").newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(300).add();
+        return network;
+    }
+
+    private static final double PSC_TARGET_V = 401;
+    private static final double PSC_MAX_Q = 60;
+    private static final double PSC_LOAD_Q = 0;
+    private static final double PSC_REMOTE_Q = 150;
+
     /** A bus pinned at a reactive limit that MOVES, once it has used up its PV-PQ switch budget. OLF
      *  caps the SWITCH (maxPqPvSwitch, applied in switchPqPv) but keeps re-freezing a pinned bus at its
      *  current limit every check; the device gated its whole pinned-bus block on that cap, so a capped

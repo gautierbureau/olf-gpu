@@ -2166,13 +2166,36 @@ in the full list its two sections carry one generator each), so the difference i
 distributed-slack P reconstruction the curve channel reads (`genCum`) for generators split across the sections of
 a merged zero-impedance group — the same channel as the remaining DAP tail (9.6e-4 MW), not #72. Opened as **#73**.
 
-### #73 — curve limits at the DS-moved P of generators split across merged sections (2026-10-05, OPEN)
+### #73 — a pinned pilot-self PILOT re-stamped at a sub-threshold curve drift (2026-10-05, DONE)
 
 Symptom: BUS-6029_BBS_1/2/4 at 1.4e-05 … 5.7e-05 kV, the pinned target of VL-6231_0 off OLF's by 2.2e-5 pu while the
 same contingency on a 4-contingency list (VL-6231 un-split) matches to 1e-13. Suspect: `rlCurveLimitsBatch`'s p_now
 for a generator whose bus is one SECTION of a merged group — the per-generator water-fill cumulative (`dGenCum`) or
 its share fallback — versus OLF's targetP after the distributed-slack loop. Measure with `OLF_GPU_CV_PROBE=<entry>`
 (VL-6231_0's entry) on the full list against OLF's generator targetP (`OLF_VAR_DUMP`), before touching the channel.
+
+**Measured (full list, slot 2330).** The suspect was wrong: the P channel is exact. Device row targets for
+VL-6231_0's P (13721) and VL-6231_1's relocated P (14498) = 1.1469127793758390 vs OLF's 1.1469127793758054
+(3e-14); OLF's `OLF_DS_SPLIT` shows GEN-6231 and GEN-6231#0 moving identically. The pinned Q targets split:
+VL-6231_1 (member, mode 4 on the coupler dummy) 0.5707804025575266 = OLF's 0.5707804025575688; VL-6231_0 (the
+PILOT-SELF pilot, mode 0→1) 0.5707581042516531. `OLF_GPU_CV_PROBE=1340 OLF_GPU_CV_PROBE_SLOT=ctg` (new: the
+chunk-local slot the host resolves for `OLF_GPU_LOOP_TRACE_CTG`, with a host readback `[CV-HOST]` because device
+printf is not captured by surefire) gives the device's own curve limit pass by pass: 0.570780402558 at the pin
+(RL outer 35–41), then the second slack round (outer 42, mismatch 0.038224 = OLF's second DS_SPLIT) moves P by
++5.25e-5 pu and the limit to 0.570758104 (outer 47+). OLF re-freezes a pinned bus at its moved limit only past
+`maxReactivePowerMismatch` (`checkPqBusWithQLimitType`: |maxQ − q| > 1e-2 MVAr = 1e-4 pu), so it keeps the
+pin-time limit; the device's MEMBER path (`reactiveLimitsBatch`, `tol`) does the same — which is why VL-6231_1 was
+exact — but the enrolled pilot's re-stamp in `updatePilotVeqBatch` fired above 1e-12.
+
+**Fix.** `updatePilotVeqBatch` takes `tol` (the run's `REACTIVE_LIMIT_TOL`) and gates the moved-limit re-stamp
+on it. Full busbar scope: BUS-6029_BBS_1 5.68e-05 → 6.5e-11 kV, _2 1.4e-05 → 4.9e-11, _4 2.0e-05 → 3.1e-11;
+statuses `{CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}` both arms, violations 503923 = 503923, device
+failures on OLF-converging systems 0, coverage 6604/6667, DAP worst unchanged (9.564e-04 MW). Fixture
+`devicePinnedPilotSelfKeepsItsLimitUnderThresholdMatchesCpu` (two merged sections, curve on the main's generator,
+a listed section loss retains the coupler, losing a P-less reactive-support generator pins both sections and a
+second slack round drifts the curve by ~2e-8 pu): fails on the old gate (1.75e-8 kV at vl3), passes with the fix;
+the batched SA class 189/189. The split-section wording of the title was a misdiagnosis — nothing about the split
+mattered beyond VL-6231_0 being a pilot-self pilot.
 
 ### #70 — host the surviving REMOTE cluster of a split voltage-control group (2026-10-04, IN PROGRESS)
 

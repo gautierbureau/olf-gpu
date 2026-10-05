@@ -83,10 +83,19 @@ final class GpuBatchOverrides {
         }
     }
 
+    private static final java.util.Set<Integer> WATCH = System.getenv("OLF_GPU_OV_WATCH") == null ? java.util.Set.of()
+            : java.util.Arrays.stream(System.getenv("OLF_GPU_OV_WATCH").split(",")).map(String::trim)
+                    .map(Integer::valueOf).collect(java.util.stream.Collectors.toUnmodifiableSet());
+
     /** Append an override for {@code flat} (the caller guarantees the row is not already there,
      *  or accepts that a later {@link #compose} resolves to this newer entry — the same
      *  "last one wins" a {@code lastIndexOf} scan gave). */
     void add(int flat, double v) {
+        if (WATCH.contains(flat)) {                          // OLF_GPU_OV_WATCH=<flat>[,<flat>]: who writes it
+            System.err.println("OV_WATCH flat=" + flat + " v=" + v + " at " + java.util.Arrays.stream(new Throwable().getStackTrace())
+                    .filter(f -> f.getClassName().startsWith("com.powsybl.openloadflow")).limit(4)
+                    .map(f -> f.getFileName() + ":" + f.getLineNumber()).reduce((a, b) -> a + "<" + b).orElse("?"));
+        }
         int prev = positionOf.put(flat, index.size());
         if (prev >= 0) {
             duplicateAppends++;

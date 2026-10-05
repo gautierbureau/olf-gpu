@@ -1746,6 +1746,33 @@ final class GpuBatchChunkSolver {
                         }
                         GpuAcNewtonSolver.setBatchLoopTraceSlot(handle, traceSlot);
                     }
+                    if (System.getenv("OLF_GPU_ROW_PROBE") != null && realCount > 1) {
+                        // OLF_GPU_ROW_PROBE=<row>[,<row>]: slot 1's row mode and target next to the base's,
+                        // and every row whose mode slot 1 changed - what the scenario solves differently.
+                        int[] m1 = rowModePerScenario[1];
+                        java.util.List<Integer> changed = new java.util.ArrayList<>();
+                        for (int r = 0; r < n; r++) {
+                            if (m1[r] != baseRowMode[r]) {
+                                changed.add(r);
+                            }
+                        }
+                        java.util.Map<Integer, Double> ov1 = new java.util.TreeMap<>();
+                        for (int k = 0; k < targetOverrideIndex.length; k++) {
+                            if (targetOverrideIndex[k] / n == 1) {
+                                ov1.put(targetOverrideIndex[k] % n, targetOverrideValue[k]);
+                            }
+                        }
+                        System.err.println("ROW_PROBE ctg=" + contingencies.get(group.get(chunkStart + 1)).contingencyId()
+                                + " modeChanged=" + changed.subList(0, Math.min(40, changed.size())) + " n=" + changed.size()
+                                + " overrides=" + ov1.size());
+                        for (String t : System.getenv("OLF_GPU_ROW_PROBE").split(",")) {
+                            int r = Integer.parseInt(t.trim());
+                            System.err.printf("ROW_PROBE row=%d baseMode=%d mode1=%d baseTarget=%.9f ov1=%s x=%.9f%n",
+                                    r, baseRowMode[r], m1[r], baseTargets[r], ov1.get(r), baseState[r]);
+                        }
+                        ov1.entrySet().stream().limit(60).forEach(e -> System.err.printf(
+                                "ROW_PROBE ov row=%d value=%.9f base=%.9f%n", e.getKey(), e.getValue(), baseTargets[e.getKey()]));
+                    }
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
                             dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,

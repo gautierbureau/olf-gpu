@@ -1628,6 +1628,35 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
                 }
             }
         }
+        // OLF_GPU_VALS_SCAN_TINY=1: NAME the tiny-pivot rows, not just count them, with what each row
+        // actually holds. An EMPTY row (no nonzero at all) is an equation that was erased; a row with
+        // off-diagonal entries but no diagonal is an equation placed on a column it does not depend on.
+        // Those two point at different code, and the count alone cannot tell them apart.
+        static const bool tinyList = std::getenv("OLF_GPU_VALS_SCAN_TINY") != nullptr;
+        if (tinyList && tinyDiag > 0) {
+            int shown = 0;
+            for (int r = 0; r < n && shown < 30; r++) {
+                if (diagPos[r] < 0 || std::fabs(vs[diagPos[r]]) >= 1e-12) {
+                    continue;
+                }
+                int nz = 0;
+                double rowMax = 0.0;
+                int rowMaxCol = -1;
+                for (int k = rowPtr[r]; k < rowPtr[r + 1]; k++) {
+                    if (vs[k] != 0.0) {
+                        nz++;
+                        if (std::fabs(vs[k]) > rowMax) {
+                            rowMax = std::fabs(vs[k]);
+                            rowMaxCol = colIdx[k];
+                        }
+                    }
+                }
+                std::fprintf(stderr, "VALS_TINY outer=%d it=%d slot=%d row=%d mode=%d slots=%d nonzero=%d rowMax=%.3e at col=%d diag=%.3e\n",
+                             outer, it, s, r, mode[static_cast<size_t>(s) * n + r], rowPtr[r + 1] - rowPtr[r],
+                             nz, rowMax, rowMaxCol, vs[diagPos[r]]);
+                shown++;
+            }
+        }
         // RANK, not scaling: when no ordering and no pivoting strategy helps a finite, well-scaled matrix
         // with no tiny diagonal, the remaining explanation is that it is SINGULAR — and pivoting cannot fix
         // rank deficiency. Two structural witnesses are cheap to check here: a row that DUPLICATES another

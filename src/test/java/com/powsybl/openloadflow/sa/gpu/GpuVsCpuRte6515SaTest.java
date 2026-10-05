@@ -1221,7 +1221,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             System.out.printf("  DEVICE FAILURES on a system OLF converges: %d (tried and failed — each one a device"
                     + " bug): %s%n", triedAndFailedOlfConverged.size(), triedAndFailedOlfConverged);
             System.out.printf("  PLAN REFUSALS on a system OLF converges: %d (scope gaps, CPU answers): %s%n",
-                    refusedOlfConverged.size(), refusedOlfConverged);
+                    refusedOlfConverged.size(),
+                    refusedOlfConverged.stream().map(id -> id + "(" + GpuBatchScopeCensus.planRefusalTag(id) + ")").toList());
             System.out.printf("  STATUS COMPARISON covers the %d device-solved contingencies; for the rest both"
                     + " arms report the SAME CPU computation%n", onDevice.size());
         }

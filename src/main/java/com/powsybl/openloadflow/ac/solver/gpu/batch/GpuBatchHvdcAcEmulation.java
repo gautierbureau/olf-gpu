@@ -89,6 +89,17 @@ public final class GpuBatchHvdcAcEmulation {
             return bus1PRow >= 0;
         }
 
+        /** The row the side-1 P target is written to THIS scenario: the relocated row, or the bus's own PHI row
+         *  once the scenario has opened the parent coupler (that dummy row is then a mode-0 identity and the
+         *  balance is back home — the stock placement the kernels follow through relocOwn). */
+        public int bus1WriteRow(int[] rowMode) {
+            return bus1PRow >= 0 && rowMode != null && bus1PRow != bus1PhiCol && rowMode[bus1PRow] == 0 ? bus1PhiCol : bus1PRow;
+        }
+
+        public int bus2WriteRow(int[] rowMode) {
+            return bus2PRow >= 0 && rowMode != null && bus2PRow != bus2PhiCol && rowMode[bus2PRow] == 0 ? bus2PhiCol : bus2PRow;
+        }
+
         public boolean bus2PActive() {
             return bus2PRow >= 0;
         }
@@ -137,14 +148,18 @@ public final class GpuBatchHvdcAcEmulation {
             // (tasks #68). Resolved through the zero-impedance pack so it cannot drift from the kernels.
             int phi1 = phiRows.get(hvdc.getBus1().getNum());
             int phi2 = phiRows.get(hvdc.getBus2().getNum());
-            // The P-target row is the bus's OWN PHI row, NOT the relocated DUMMY_P row. Routing it
-            // through GpuAcData.relocatedPRow was tried and is CATASTROPHICALLY WRONG: measured on the
-            // full busbar scope it took max-iter-bad-solve from 108 to 13194 (tasks #68). The device's
-            // zero-impedance arrangement is not the one the dumps' `terms=` listing suggests — per
-            // GpuAcData's own contract a spanning-tree edge carries ZERO_V on the DUMMY_P row and
-            // ZERO_PHI on the DUMMY_Q row — so the bus's own PHI row is where this target belongs.
-            int r1 = phi1;
-            int r2 = phi2;
+            // The P-target row IS the relocated DUMMY_P row (GpuAcData.relocatedPRow) — the row the bus's P
+            // balance lives on under the coupler-tree relocation; the bus's own PHI row hosts the coupler's
+            // ZERO_PHI there (target 0). The 2026-10-02 attempt at exactly this was "catastrophic" (108 ->
+            // 13194 bad solves) because the kernel read the ANGLE at the same index it wrote the target to, so
+            // a relocated bus's angle was read off a DUMMY_P variable. The two roles are separate arrays now
+            // (bus{1,2}PhiCol for the reads, bus{1,2}PRow for the writes), and the kernel falls back to the own
+            // row in a scenario that kills the parent coupler (relocOwn, the stock placement). Measured as the
+            // only device failure on an OLF-converging busbar contingency, BUS-1219_BBS: the saturation
+            // delta of SYN_HVDC_4 landed on a ZERO_PHI row, reversed the emulated flow and the limits loop
+            // toggled SAT_2_TO_1 <-> SAT_1_TO_2 to its 32-pass budget (tasks #68 / #69).
+            int r1 = gpuData.relocatedPRow(phi1);
+            int r2 = gpuData.relocatedPRow(phi2);
             boolean p1Active = es.getEquation(hvdc.getBus1().getNum(), AcEquationType.BUS_TARGET_P)
                     .filter(com.powsybl.openloadflow.equations.Equation::isActive).isPresent();
             boolean p2Active = es.getEquation(hvdc.getBus2().getNum(), AcEquationType.BUS_TARGET_P)
@@ -286,10 +301,21 @@ public final class GpuBatchHvdcAcEmulation {
                                double[] baseState, double[] x0PerScenario, int[] seedIdx, double[] seedVal,
                                boolean[][] disabledMask, double[] baseTargets, GpuBatchOverrides overrides,
                                double[] appliedD1, double[] appliedD2) {
+        return applyFreeze(chunkSize, realCount, n, ctls, baseState, x0PerScenario, seedIdx, seedVal, disabledMask,
+                baseTargets, overrides, appliedD1, appliedD2, null);
+    }
+
+    /** @param rowModePerScenario the per-scenario row modes (null = base layout everywhere): a converter bus whose
+     *  parent coupler the scenario opens takes its P target on its OWN row (see Ctl.bus1WriteRow). */
+    static int[][] applyFreeze(int chunkSize, int realCount, int n, List<Ctl> ctls,
+                               double[] baseState, double[] x0PerScenario, int[] seedIdx, double[] seedVal,
+                               boolean[][] disabledMask, double[] baseTargets, GpuBatchOverrides overrides,
+                               double[] appliedD1, double[] appliedD2, int[][] rowModePerScenario) {
         int[][] status = new int[chunkSize][ctls.size()];
         double[] warm = baseState.clone();
         int[][] seedsOf = x0PerScenario == null && seedIdx != null ? seedsByScenario(seedIdx, realCount, n) : null;
         for (int s = 0; s < realCount; s++) {
+            int[] rm = rowModePerScenario == null ? null : rowModePerScenario[s];
             if (x0PerScenario != null) {
                 System.arraycopy(x0PerScenario, s * n, warm, 0, n);
             } else if (seedsOf != null) {
@@ -328,10 +354,10 @@ public final class GpuBatchHvdcAcEmulation {
                 // base frame: baseTargets (or the row's existing override — e.g. a lost load on the
                 // converter bus) already carry the base injections
                 if (c.bus1PActive()) {
-                    overrides.merge(s * n + c.bus1PRow(), baseTargets[c.bus1PRow()], c.baseD1(), d[0]);
+                    overrides.merge(s * n + c.bus1WriteRow(rm), baseTargets[c.bus1WriteRow(rm)], c.baseD1(), d[0]);
                 }
                 if (c.bus2PActive()) {
-                    overrides.merge(s * n + c.bus2PRow(), baseTargets[c.bus2PRow()], c.baseD2(), d[1]);
+                    overrides.merge(s * n + c.bus2WriteRow(rm), baseTargets[c.bus2WriteRow(rm)], c.baseD2(), d[1]);
                 }
             }
             if (seedsOf != null) {
@@ -372,9 +398,10 @@ public final class GpuBatchHvdcAcEmulation {
     static void applyStatusOverrides(int chunkSize, int realCount, int n, List<Ctl> ctls,
                                      int[][] status, byte[] ctgOut, boolean[][] disabledMask,
                                      double[] baseTargets, GpuBatchOverrides overrides,
-                                     double[] appliedD1, double[] appliedD2) {
+                                     double[] appliedD1, double[] appliedD2, int[][] rowModePerScenario) {
         int nh = ctls.size();
         for (int s = 0; s < realCount; s++) {
+            int[] rm = rowModePerScenario == null ? null : rowModePerScenario[s];
             for (int h = 0; h < nh; h++) {
                 Ctl c = ctls.get(h);
                 if (ctgOut[s * nh + h] != 0) {
@@ -384,10 +411,10 @@ public final class GpuBatchHvdcAcEmulation {
                     disabledMask[s][c.hvElemIndex()] = false;
                     if (c.baseStatus() != LINEAR) {          // strip the base injections from the targets
                         if (c.bus1PActive()) {
-                            overrides.merge(s * n + c.bus1PRow(), baseTargets[c.bus1PRow()], c.baseD1(), 0);
+                            overrides.merge(s * n + c.bus1WriteRow(rm), baseTargets[c.bus1WriteRow(rm)], c.baseD1(), 0);
                         }
                         if (c.bus2PActive()) {
-                            overrides.merge(s * n + c.bus2PRow(), baseTargets[c.bus2PRow()], c.baseD2(), 0);
+                            overrides.merge(s * n + c.bus2WriteRow(rm), baseTargets[c.bus2WriteRow(rm)], c.baseD2(), 0);
                         }
                     }
                 } else {
@@ -402,10 +429,10 @@ public final class GpuBatchHvdcAcEmulation {
                             : new double[] {appliedD1[s * nh + h] + c.baseD1(),
                                             appliedD2[s * nh + h] + c.baseD2()};
                     if (c.bus1PActive()) {
-                        overrides.merge(s * n + c.bus1PRow(), baseTargets[c.bus1PRow()], c.baseD1(), d[0]);
+                        overrides.merge(s * n + c.bus1WriteRow(rm), baseTargets[c.bus1WriteRow(rm)], c.baseD1(), d[0]);
                     }
                     if (c.bus2PActive()) {
-                        overrides.merge(s * n + c.bus2PRow(), baseTargets[c.bus2PRow()], c.baseD2(), d[1]);
+                        overrides.merge(s * n + c.bus2WriteRow(rm), baseTargets[c.bus2WriteRow(rm)], c.baseD2(), d[1]);
                     }
                 }
             }
@@ -445,19 +472,23 @@ public final class GpuBatchHvdcAcEmulation {
                                             boolean[][] disabledMask, double[] appliedD1, double[] appliedD2,
                                             boolean limits) {
         if (ctls == null || ctls.isEmpty()) {
-            GpuAcNewtonSolver.setBatchHvdcLoops(handle, null, null, null, null, null, null, null, null, 0);
+            GpuAcNewtonSolver.setBatchHvdcLoops(handle, null, null, null, null, null, null, null, null, null, null, 0);
             return null;
         }
         int nh = ctls.size();
         int[] hvElem = new int[nh];
         int[] hvB1 = new int[nh];
         int[] hvB2 = new int[nh];
+        int[] hvPhi1 = new int[nh];
+        int[] hvPhi2 = new int[nh];
         double[] hvIn = new double[nh * 9];
         for (int h = 0; h < nh; h++) {
             Ctl c = ctls.get(h);
             hvElem[h] = c.hvElemIndex();          // GLOBAL element index
-            hvB1[h] = c.bus1PRow();
+            hvB1[h] = c.bus1PRow();               // where the P target is WRITTEN (relocated row, ~ when inactive)
             hvB2[h] = c.bus2PRow();
+            hvPhi1[h] = c.bus1PhiCol();           // where the ANGLE is READ (always the bus's own column)
+            hvPhi2[h] = c.bus2PhiCol();
             hvIn[h * 9] = c.p0();
             hvIn[h * 9 + 1] = c.k();
             hvIn[h * 9 + 2] = c.pMax12();
@@ -478,7 +509,7 @@ public final class GpuBatchHvdcAcEmulation {
                         && disabledMask[s2][ctls.get(h).hvElemIndex()] ? 1 : 0);
             }
         }
-        GpuAcNewtonSolver.setBatchHvdcLoops(handle, hvElem, hvB1, hvB2, hvIn, ctgOut,
+        GpuAcNewtonSolver.setBatchHvdcLoops(handle, hvElem, hvB1, hvB2, hvPhi1, hvPhi2, hvIn, ctgOut,
                 flatStatus, appliedD1, appliedD2, limits ? 1 : 0);
         return ctgOut;
     }

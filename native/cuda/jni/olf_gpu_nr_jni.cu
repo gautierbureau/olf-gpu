@@ -5460,10 +5460,12 @@ __device__ inline double hvdcAbsActivePowerWithLosses(double pController, double
 __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nElements, int hvOffset,
                                          int mode,
                                          const int* hvElem, const int* hvBus1Row, const int* hvBus2Row,
+                                         const int* hvBus1Phi, const int* hvBus2Phi,
+                                         const int* rowMode, const int* relocOwn,
                                          const double* hvIn, const char* hvCtgOut,
                                          const double* x, double* target, char* disabled,
                                          int* status, double* appliedD1, double* appliedD2,
-                                         const char* rlActive, char* switched) {
+                                         const char* rlActive, char* switched, int traceSlot) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nh * nScenarios) return;
     int h = tid % nh;
@@ -5472,6 +5474,15 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
     const double* p = hvIn + (size_t) h * 9;                 // p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2
     int st = status[(size_t) s * nh + h];
     int next = st;
+    if (s == traceSlot && mode == 1) {                       // OLF_GPU_HVDC_LOOP_TRACE=<slot>: the fork's HVDC_CHECK twin
+        const double* xs = x + (size_t) s * n;
+        double ph1 = xs[hvBus1Phi[h]];
+        double ph2 = xs[hvBus2Phi[h]];
+        printf("HVDC_CHECK s=%d h=%d elem=%d before=%d p1=%.12f p2=%.12f pmax12=%.9f pmax21=%.9f ph1=%.12f ph2=%.12f disabled=%d\n",
+               s, h, hvElem[h], st, hvdc::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2),
+               hvdc::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2), p[2], p[3], ph1, ph2,
+               (int) disabled[(size_t) s * nElements + hvElem[h]]);
+    }
     if (mode == 0) {                                         // FreezingHvdcACEmulation: unfreeze
         if (st != HV_FROZEN) return;
         next = HV_LINEAR;
@@ -5479,8 +5490,10 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
         size_t elemSlot = (size_t) s * nElements + hvElem[h];
         if (st == HV_LINEAR && disabled[elemSlot]) return;
         const double* xs = x + (size_t) s * n;
-        double ph1 = xs[hvBus1Row[h] >= 0 ? hvBus1Row[h] : ~hvBus1Row[h]];   // ~row: P row inactive (slack)
-        double ph2 = xs[hvBus2Row[h] >= 0 ? hvBus2Row[h] : ~hvBus2Row[h]];
+        // The ANGLE is the bus's own BUS_PHI column, whatever row its P balance lives on (tasks #68: reading
+        // it at the target row made a relocated converter bus read a DUMMY_P variable as its angle).
+        double ph1 = xs[hvBus1Phi[h]];
+        double ph2 = xs[hvBus2Phi[h]];
         double pp1 = hvdc::p1(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
         double pp2 = hvdc::p2(p[0], p[1], p[4], p[5], p[6], ph1, ph2);
         if (st == HV_LINEAR) {                               // OLF checkAcEmulationMode
@@ -5521,11 +5534,19 @@ __global__ void hvdcAcEmulationLoopBatch(int nh, int nScenarios, int n, int nEle
     // scenario and both add to the SAME converter-row target; a plain read-modify-write loses one
     // of the two unfreeze increments and leaves that link's frozen flow counted twice (measured:
     // 0.126 kV on every batched branch contingency of a network with a doubled 500 MW link).
-    if (hvBus1Row[h] >= 0) {                                 // an inactive P row (the slack) absorbs it, as OLF's does
-        atomicAdd(&target[(size_t) s * n + hvBus1Row[h]], want1 - appliedD1[(size_t) s * nh + h]);
+    // The P TARGET goes to the row that hosts the bus's P balance THIS scenario: the parent coupler's DUMMY_P
+    // row under the coupler-tree relocation, or the bus's own PHI row once a contingency has opened that
+    // coupler (the dummy row is then an identity and the balance is back home — relocOwn, the same stock
+    // placement every other target writer follows). An inactive P row (the slack, ~ encoded) absorbs it, as OLF's does.
+    int w1 = hvBus1Row[h];
+    int w2 = hvBus2Row[h];
+    if (w1 >= 0 && relocOwn != nullptr && relocOwn[w1] >= 0 && rowMode[(size_t) s * n + w1] == 0) w1 = relocOwn[w1];
+    if (w2 >= 0 && relocOwn != nullptr && relocOwn[w2] >= 0 && rowMode[(size_t) s * n + w2] == 0) w2 = relocOwn[w2];
+    if (w1 >= 0) {
+        atomicAdd(&target[(size_t) s * n + w1], want1 - appliedD1[(size_t) s * nh + h]);
     }
-    if (hvBus2Row[h] >= 0) {
-        atomicAdd(&target[(size_t) s * n + hvBus2Row[h]], want2 - appliedD2[(size_t) s * nh + h]);
+    if (w2 >= 0) {
+        atomicAdd(&target[(size_t) s * n + w2], want2 - appliedD2[(size_t) s * nh + h]);
     }
     appliedD1[(size_t) s * nh + h] = want1;
     appliedD2[(size_t) s * nh + h] = want2;
@@ -7131,7 +7152,8 @@ struct BatchSolverContext {
     // what put the device's last DS check on a pre-pin state.
     int nhv = 0;                                             // AC-emulation HVDCs in the loop tables
     int hvLimitsActive = 0;                                  // AcHvdcAcEmulationLimits configured
-    DeviceBuf dHvElem, dHvBus1Row, dHvBus2Row;               // per hvdc
+    DeviceBuf dHvElem, dHvBus1Row, dHvBus2Row;               // per hvdc: the rows the P TARGETS are written to
+    DeviceBuf dHvBus1Phi, dHvBus2Phi;                        // per hvdc: the angle COLUMNS the emulation reads (#68)
     DeviceBuf dHvIn;                                         // per hvdc x9: p0 k pMax12 pMax21 loss1 loss2 r baseD1 baseD2
     DeviceBuf dHvCtgOut;                                     // per (scenario, hvdc): outaged BY the contingency
     DeviceBuf dHvStatus;                                     // per (scenario, hvdc): LINEAR/SAT_1_2/SAT_2_1/FROZEN
@@ -11377,14 +11399,44 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dMode.as<int>(),
                 ctx->dMonActivated.as<double>(), ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
     } else if (loopKind == LOOP_HVDC_FREEZE || loopKind == LOOP_HVDC_LIMITS) {
+        // OLF_GPU_HVDC_LOOP_TRACE=<slot>: the status of every link of that scenario before and after this pass,
+        // read back on the host (device printf is not relied on), beside the kernel's own per-link print.
+        static const char* hvTraceEnv = std::getenv("OLF_GPU_HVDC_LOOP_TRACE");
+        static const int hvTraceSlot = hvTraceEnv != nullptr ? std::atoi(hvTraceEnv) : -1;
+        std::vector<int> hvBefore;
+        if (hvTraceSlot >= 0 && hvTraceSlot < nS && ctx->nhv > 0) {
+            hvBefore.resize(ctx->nhv);
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            CUDA_CHECK(cudaMemcpy(hvBefore.data(), ctx->dHvStatus.as<int>() + (size_t) hvTraceSlot * ctx->nhv,
+                                  ctx->nhv * sizeof(int), cudaMemcpyDeviceToHost));
+        }
         hvdcAcEmulationLoopBatch<<<grid(ctx->nhv * nS), BLOCK, 0, ctx->stream>>>(
                 ctx->nhv, nS, n, ctx->nElements, ctx->hvOffset,
                 loopKind == LOOP_HVDC_FREEZE ? 0 : 1,
                 ctx->dHvElem.as<int>(), ctx->dHvBus1Row.as<int>(), ctx->dHvBus2Row.as<int>(),
+                ctx->dHvBus1Phi.as<int>(), ctx->dHvBus2Phi.as<int>(),
+                ctx->dMode.as<int>(), ctx->st->dRelocOwn.p != nullptr ? ctx->st->dRelocOwn.as<int>() : nullptr,
                 ctx->dHvIn.as<double>(), ctx->dHvCtgOut.as<char>(),
                 ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dDisabled.as<char>(),
                 ctx->dHvStatus.as<int>(), ctx->dHvAppliedD1.as<double>(), ctx->dHvAppliedD2.as<double>(),
-                ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>());
+                ctx->dRlActive.as<char>(), ctx->dRlSwitched.as<char>(), hvTraceSlot);
+        if (!hvBefore.empty()) {
+            std::vector<int> hvAfter(ctx->nhv);
+            std::vector<double> d1(ctx->nhv), d2(ctx->nhv);
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            CUDA_CHECK(cudaMemcpy(hvAfter.data(), ctx->dHvStatus.as<int>() + (size_t) hvTraceSlot * ctx->nhv,
+                                  ctx->nhv * sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(d1.data(), ctx->dHvAppliedD1.as<double>() + (size_t) hvTraceSlot * ctx->nhv,
+                                  ctx->nhv * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(d2.data(), ctx->dHvAppliedD2.as<double>() + (size_t) hvTraceSlot * ctx->nhv,
+                                  ctx->nhv * sizeof(double), cudaMemcpyDeviceToHost));
+            for (int h = 0; h < ctx->nhv; h++) {
+                if (hvBefore[h] != hvAfter[h]) {
+                    std::fprintf(stderr, "HVDC_LOOP s=%d outer=%d kind=%d h=%d status %d -> %d appliedD1=%.9f appliedD2=%.9f\n",
+                                 hvTraceSlot, outer, loopKind, h, hvBefore[h], hvAfter[h], d1[h], d2[h]);
+                }
+            }
+        }
     } else if (inDsPhase) {                                // distributed-slack outer loop: spread the slack mismatch
         if (ctx->dsSlackOnly) {
             slackOnlyDsCheck<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->dsSlackPhiRow, ctx->dsSlackTargetP,
@@ -13485,6 +13537,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
 extern "C" JNIEXPORT void JNICALL
 Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchHvdcLoops(
         JNIEnv* env, jclass, jlong handle, jintArray jElem, jintArray jBus1Row, jintArray jBus2Row,
+        jintArray jBus1Phi, jintArray jBus2Phi,
         jdoubleArray jIn, jbyteArray jCtgOut, jintArray jStatus,
         jdoubleArray jAppliedD1, jdoubleArray jAppliedD2, jint limitsActive) {
     auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
@@ -13509,6 +13562,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     upI(jElem, ctx->dHvElem);
     upI(jBus1Row, ctx->dHvBus1Row);
     upI(jBus2Row, ctx->dHvBus2Row);
+    upI(jBus1Phi, ctx->dHvBus1Phi);
+    upI(jBus2Phi, ctx->dHvBus2Phi);
     upD(jIn, ctx->dHvIn);
     upI(jStatus, ctx->dHvStatus);
     upD(jAppliedD1, ctx->dHvAppliedD1);

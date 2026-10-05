@@ -242,14 +242,16 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
      *
      * <p>Derived from the same zero-impedance pack as the reactive twin, so the two cannot drift.
      *
-     * <p><b>UNUSED, and kept as a WARNING.</b> The one caller it was written for — the HVDC
-     * AC-emulation P target in {@code GpuBatchHvdcAcEmulation} — was measured CATASTROPHICALLY worse
-     * with it: {@code max-iter-bad-solve} went from 108 to 13194 on rte6515's full busbar scope. The
-     * premise was that a relocated child's P target must follow its P balance to the parent's
-     * {@code DUMMY_P} row, inferred from the equation dump's {@code terms=} listing; that inference is
-     * wrong, because a spanning-tree edge carries {@code ZERO_V} on the {@code DUMMY_P} row and
-     * {@code ZERO_PHI} on the {@code DUMMY_Q} row (see the class contract above), not on the buses' own
-     * rows. Do not wire this into a target writer without re-deriving the arrangement first.
+     * <p>Used by {@code GpuBatchHvdcAcEmulation} for the converter buses' P-target rows since 2026-10-05. The
+     * first attempt (2026-10-02) was measured "catastrophic" (max-iter-bad-solve 108 -> 13194) and blamed the
+     * premise; the premise was right — a relocated child's P balance DOES live on the parent's {@code DUMMY_P}
+     * row, the child's own PHI row hosting the coupler's {@code ZERO_PHI} — and the failure was the kernel
+     * reading the bus ANGLE at the same index it wrote the target to (a {@code DUMMY_P} variable read as an
+     * angle). The angle column and the target row are separate arrays now, and a scenario that opens the parent
+     * coupler diverts the write to the own row (relocOwn). Measured on rte6515 BUS-1219_BBS: the saturation
+     * delta of SYN_HVDC_4 landing on a ZERO_PHI row reversed the emulated flow and the limits loop toggled
+     * between the two saturation sides to its budget — the one device failure on an OLF-converging busbar
+     * contingency (tasks #68 / #69).
      */
     public int relocatedPRow(int phiCol) {
         if (ziIdx == null || phiCol < 0) {

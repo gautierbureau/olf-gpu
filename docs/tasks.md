@@ -2021,6 +2021,58 @@ prints targets only for rows DIFFERING from base) and OLF has its own `TargetVec
 dump BOTH target vectors for a rejecting scenario, keyed by element, and diff per row** — the same
 same-point, keyed-by-id discipline that cracked [[#66]].
 
+### #69/#68 — BUS-1219_BBS's outer-loop cycle IS #68, and #68's premise was right (2026-10-05)
+
+`OLF_GPU_LOOP_TRACE_CTG=BUS-1219_BBS` named the cycling loop: `kind=2` = **AcHvdcAcEmulationLimits**, flipping
+every pass (`switched=1 nChanged=1`) to the 32-pass budget. A host-side trace of the loop's transitions
+(`OLF_GPU_HVDC_LOOP_TRACE=<slot>`, the fork's twin `OLF_HVDC_TRACE=1`) shows SYN_HVDC_4 going LINEAR →
+SAT_2_TO_1 (as OLF does: p2 = 2.75 > pmax 2.0) and then **SAT_2_TO_1 ↔ SAT_1_TO_2 forever**, i.e. the emulated flow
+REVERSES once the saturation injections are applied; OLF's stays at p2 = 3.1 and settles. Alone on the list the
+device converges and matches OLF to 2e-10 kV — the full list has every feeder breaker retained, so the converter
+bus is a coupler CHILD and its P balance lives on the parent's `DUMMY_P` row while its own PHI row hosts
+`ZERO_PHI`: the loop's ±2 pu saturation deltas landed on the `ZERO_PHI` row (#68's finding exactly) and forced
+the angles apart instead of injecting power.
+
+Why #68's fix "was catastrophic": the kernel read the bus ANGLE at the same index it wrote the target to
+(`ph1 = x[hvBus1Row]`), so routing the write to the `DUMMY_P` row made it read a dummy variable as an angle. The
+two roles are now separate arrays (`bus{1,2}PhiCol` read, `bus{1,2}PRow` = `GpuAcData.relocatedPRow` written),
+with the dead-parent-coupler fallback to the own row on both the kernel (`mode == 0 && relocOwn`) and the host
+freeze/status writers (`Ctl.bus1WriteRow(rowMode)`). The `GpuAcData.relocatedPRow` "UNUSED, kept as a warning"
+javadoc said the dumps' `terms=` listing was misleading; it was not.
+
+**Proof (`gpu-load-68b.log`, full busbar scope, GPU arm vs the saved CPU arm):** BUS-1219_BBS now converges on
+the device — SYN_HVDC_4 goes LINEAR → SAT_2_TO_1 once (`HVDC_LOOP s=241 outer=6 … 0 -> 2`) and stays, worst bus
+8.2e-10 kV against OLF — so **`DEVICE FAILURES on a system OLF converges: 0`**. Statuses identical
+`{CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}`, `violations: CPU=503923 GPU=503923 diff=0`, coverage
+6584 / 6667, DAP worst 9.6e-04 MW (was 1.398e-03: the HVDC targets on relocated converter rows were part of the
+tail). The 21 plan refusals are now listed with their reason: 11 `VC_REMERGE_MULTI`, 5 `VC_REMERGE_PINNED_MAIN`,
+4 `VC_REMERGE_RELOC_VROW`, 1 `ISLANDS_SLACK` (validator). Full suite 308 tests, the one failure the pre-existing
+coupler-chain first-step test.
+
+### #71 — the base main SURVIVES a middle-section loss and a second cluster forms (2026-10-05, DESIGN)
+
+The largest of the 21 plan refusals left after #70 (`PLAN:VC_REMERGE_MULTI`, ~9 contingencies: BUS-6002_BBS_2/3/4,
+BUS-6139_BBS_2/3, BUS-6218_BBS_2/3, BUS-6134_BBS_2, BUS-689_BBS_2, BUS-710_BBS_2): the lost section is the one
+NEXT to the base main, so the main keeps its own section alone and the far sections form a second cluster that
+OLF re-merges into a NEW group (elected main, DISTR_Q over the cluster only). Both groups live on ONE candidate
+table whose pilot is the base main. What the device needs per scenario — a **detached pilot** channel, one char
+per (scenario, group):
+- keys: the pilot out of every denominator (the existing inactive-member entry does it);
+- terms: the pilot's q contributions LEAVE the members' DISTR_Q rows (`fillDistrQBatch`: skip `dqJMember ==
+  pilot` — unlike an islanded member, whose elements are disabled, the detached pilot's branches are live);
+- the pilot's own row keeps its BUS_TARGET_V identity (OLF: the main's group still has its own controller), and a
+  pin on it is a LOCAL pin — mode 4 on its own row with its raw q routed to candidate 0 of the group pool
+  (`scatterAddDyn` / `ziDynDest`: `pool[off + 0]` when detached and `mode[pilotRow] == 4`, never the carrier);
+- `pilotSelfGateBatch` skip = 1 (no balance rides a carrier), `rlPilotSelfMixedGate` ignores it,
+  `updatePilotVeqBatch` never flips it (the members' pins belong to the other group now), and
+  `updateDistrQTargetsBatch` never writes `pilotQ` to the carrier for it;
+- the surviving cluster's elected main gets its identity from the killed-coupler block (`blockCovers`) or an
+  explicit ROW_V_IDENTITY, exactly as #70 does — `reHomedControls` accepts the split when the main's own cluster
+  is {main} with a single controller element and ONE other non-local cluster forms.
+Host side: a GenOutage marker (`pqRowMode = ROW_PILOT_DETACHED`, `inactiveDqMember` = the pilot's slot,
+`rlEntry` = the pilot's RL entry → `rlLocalOv` at its own target) → `setBatchDetachedPilots(slot, group)`.
+Fixture: four sections, main at an end, lose the second — `lostPilotSectionNetwork` with the loss moved.
+
 ### #70 — host the surviving REMOTE cluster of a split voltage-control group (2026-10-04, IN PROGRESS)
 
 **What `VC_REMERGE_MULTI` actually refused.** `OLF_GPU_QUALIFY_TRACE` on the full busbar scope, with

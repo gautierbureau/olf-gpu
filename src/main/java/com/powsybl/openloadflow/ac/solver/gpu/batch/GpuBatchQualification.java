@@ -592,6 +592,13 @@ final class GpuBatchQualification {
         return new ReHomed(pv, left, null, remoteMains, remoteCluster);
     }
 
+    /** A plan refusal, counted in the census AND named by contingency id: the census counts are per attempt and
+     *  carry no id, which made 19 refusals read as device failures (tasks #70). */
+    private static void refuse(BatchContingency c, String tag) {
+        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(tag);
+        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.planRefused(c.contingencyId(), tag);
+    }
+
     /** Row-mode-only GenOutage: the bus's V row becomes a VOLTAGE IDENTITY at {@code vTarget} (a re-homed control). */
 
     /**
@@ -900,7 +907,7 @@ final class GpuBatchQualification {
                     distrRhoControllers.contains(so.branch())
                     || es.getVariableSet().getVariable(so.branch().getNum(), AcVariableType.BRANCH_RHO1).getRow() >= 0
                     || es.getVariableSet().getVariable(so.branch().getNum(), AcVariableType.BRANCH_ALPHA1).getRow() >= 0)) {
-                com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:VAR_CARRYING_SIDE_OPEN");
+                refuse(c, "PLAN:VAR_CARRYING_SIDE_OPEN");
                 continue;                                    // var-carrying / DISTR_RHO side-open — CPU
             }
             if (!c.lostGenerators().isEmpty() || !c.lostLoads().isEmpty() || !c.shuntShifts().isEmpty()
@@ -927,7 +934,7 @@ final class GpuBatchQualification {
                     }
                 }
                 if (!recloseOk) {
-                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:RECLOSE_UNPACKED_BASE_OPEN");
+                    refuse(c, "PLAN:RECLOSE_UNPACKED_BASE_OPEN");
                     continue;                                // reclose of an unpacked base-open branch — CPU
                 }
                 boolean tapOk = true;
@@ -939,7 +946,7 @@ final class GpuBatchQualification {
                     }
                 }
                 if (!tapOk) {
-                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:CONTROLLED_OR_UNPACKED_TAP");
+                    refuse(c, "PLAN:CONTROLLED_OR_UNPACKED_TAP");
                     continue;                                // controlled/unpacked transformer tap — CPU
                 }
                 java.util.Set<Integer> islandedNumSet = new java.util.HashSet<>();
@@ -948,7 +955,7 @@ final class GpuBatchQualification {
                 }
                 if (!c.shuntShifts().isEmpty()
                         && !canBatchShuntOutage(c.shuntShifts().stream().map(ShuntShift::shunt).toList(), elementMapper, gpuData)) {
-                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:SHUNT_UNPACKED");
+                    refuse(c, "PLAN:SHUNT_UNPACKED");
                     continue;                                // unpacked shunt (controller / SVC) — CPU
                 }
                 // A lost generator whose bus the contingency ISLANDS is not an injection outage: the
@@ -968,7 +975,7 @@ final class GpuBatchQualification {
                     // (was tagged SHUNT_SHAPE, a copy-paste from the block above: this is the INJECTION
                     // outage shape, and the census is how we pick what to fix — a tag that lies about
                     // the reason sends the next person at the wrong gate.)
-                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:INJECTION_OUTAGE_SHAPE");
+                    refuse(c, "PLAN:INJECTION_OUTAGE_SHAPE");
                     if (System.getenv("OLF_GPU_GENOUT_REJECT") != null) {
                         // The exit named itself and its bus a moment ago; name the CONTINGENCY too, so
                         // the reason, the bus and the id that reproduces it are on adjacent lines.
@@ -982,7 +989,7 @@ final class GpuBatchQualification {
                 // survivors' renormalized shares). A strategy PAIR still cannot: its anchor shift moves
                 // EVERY distributed-slack row, so there is no single bus step to take back out — CPU.
                 if (curvePRows != null && c.contingencyId().indexOf(GpuBatchStatus.STRATEGY_KEY_SEP) >= 0) {
-                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:PAIR_CURVE_LINKAGE");
+                    refuse(c, "PLAN:PAIR_CURVE_LINKAGE");
                     continue;                                // same reason as the other arm: one tag
                 }
                 List<LfBus> islandLostVcControllers = new ArrayList<>();   // filled by the island-injection path
@@ -992,7 +999,7 @@ final class GpuBatchQualification {
                         if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                             System.err.println("QUAL_REJECT drOv " + c.contingencyId());
                         }
-                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:DISTR_RHO_GROUP_OUTAGE");
+                        refuse(c, "PLAN:DISTR_RHO_GROUP_OUTAGE");
                         continue;                            // multi-member / no-survivor group outage — CPU
                     }
                     if (drOv[0].length > 0) {
@@ -1025,7 +1032,7 @@ final class GpuBatchQualification {
                             islandedHvdcs);
                     ReHomed reHomed = reHomedControls(q.islandedBuses(), c.outagedZiBranches(), c.contingencyId());
                     if (reHomed.reject() != null) {
-                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:" + reHomed.reject());
+                        refuse(c, "PLAN:" + reHomed.reject());
                         continue;
                     }
                     deadControlBuses.removeAll(reHomed.pvTargets().keySet());
@@ -1045,7 +1052,7 @@ final class GpuBatchQualification {
                                     + " islandedHvdcs=%d lostControllers=%s%n", c.contingencyId(), vcSplit, islandedHvdcs.size(),
                                     lostVcControllers.stream().map(LfBus::getId).toList());
                         }
-                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");
+                        refuse(c, "PLAN:ISLANDS_REMOTE_VC_MEMBER");
                         continue;
                     }
                     FrozenIsland fi = islandedFrozen(es, q.islandedBuses(), relocatedCouplers);
@@ -1083,7 +1090,7 @@ final class GpuBatchQualification {
                                 System.err.printf("QUALIFY_TRACE reject %s tag=ISLANDS_REMOTE_VC_MEMBER site=island-deadControl-frozenV"
                                         + " deadControl=%s%n", c.contingencyId(), deadControlBuses.stream().map(LfBus::getId).toList());
                             }
-                            com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");
+                            refuse(c, "PLAN:ISLANDS_REMOTE_VC_MEMBER");
                             continue;
                         }
                     }
@@ -1145,11 +1152,11 @@ final class GpuBatchQualification {
                         }
                     }
                     if (live == null && remoteReject[0] != null) {
-                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(remoteReject[0]);
+                        refuse(c, remoteReject[0]);
                         continue;
                     }
                     if (live == null) {
-                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(
+                        refuse(c, 
                                 pinnedMain ? "PLAN:VC_REMERGE_PINNED_MAIN"
                                         : relocIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
                         continue;
@@ -1211,7 +1218,7 @@ final class GpuBatchQualification {
                         && es.getEquation(g.getBus().getNum(), AcEquationType.DISTR_Q).isPresent())) {
                     double[][] ov = distrQWeightOverrides(es, gpuData, goneForKeys);
                     if (ov == null) {
-                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:DISTR_Q_WEIGHT_REDIFF");
+                        refuse(c, "PLAN:DISTR_Q_WEIGHT_REDIFF");
                         continue;                            // weight rediff unavailable — CPU
                     }
                     dqOvContribByIndex[i] = java.util.Arrays.stream(ov[0]).mapToInt(d -> (int) d).toArray();
@@ -1251,7 +1258,7 @@ final class GpuBatchQualification {
                         islandedHvdcs);
                 ReHomed reHomed = reHomedControls(q.islandedBuses(), c.outagedZiBranches(), c.contingencyId());
                 if (reHomed.reject() != null) {
-                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:" + reHomed.reject());
+                    refuse(c, "PLAN:" + reHomed.reject());
                     continue;
                 }
                 deadControlBuses.removeAll(reHomed.pvTargets().keySet());
@@ -1274,7 +1281,7 @@ final class GpuBatchQualification {
                                 lostVcControllers.stream().map(LfBus::getId).toList(),
                                 deadControlBuses.stream().map(LfBus::getId).toList());
                     }
-                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");
+                    refuse(c, "PLAN:ISLANDS_REMOTE_VC_MEMBER");
                     continue;                                // an islanded HVDC endpoint — CPU
                 }
                 if (!deadControlBuses.isEmpty()) {
@@ -1299,7 +1306,7 @@ final class GpuBatchQualification {
                             System.err.printf("QUALIFY_TRACE reject %s tag=ISLANDS_REMOTE_VC_MEMBER site=tail-deadControl-noVrow"
                                     + " deadControl=%s%n", c.contingencyId(), deadControlBuses.stream().map(LfBus::getId).toList());
                         }
-                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:ISLANDS_REMOTE_VC_MEMBER");
+                        refuse(c, "PLAN:ISLANDS_REMOTE_VC_MEMBER");
                         continue;                            // no V row to flip — CPU
                     }
                     genOutagesByIndex[i] = vcOff.toArray(new GenOutage[0]);
@@ -1339,7 +1346,7 @@ final class GpuBatchQualification {
                         pvOn.add(reHomedPvEntry(vVar.getRow(), e.getValue(), reHomedRl));
                     }
                     if (!ok) {
-                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(
+                        refuse(c, 
                                 pinnedMain ? "PLAN:VC_REMERGE_PINNED_MAIN"
                                         : relocIdentity ? "PLAN:VC_REMERGE_RELOC_VROW" : "PLAN:VC_REMERGE_NO_VROW");
                         continue;
@@ -1349,7 +1356,7 @@ final class GpuBatchQualification {
                         List<GenOutage> remoteIds = remoteMainIdentityEntries(reHomed, es, gpuData, relocRows,
                                 outagedZiNums, java.util.Set.of(), remoteReject);
                         if (remoteIds == null) {
-                            com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record(remoteReject[0]);
+                            refuse(c, remoteReject[0]);
                             continue;
                         }
                         pvOn.addAll(remoteIds);
@@ -1366,7 +1373,7 @@ final class GpuBatchQualification {
                             .toList();
                     double[][] vcOv = distrQWeightOverrides(es, gpuData, goneControllers);
                     if (vcOv == null) {
-                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:DISTR_Q_WEIGHT_REDIFF");
+                        refuse(c, "PLAN:DISTR_Q_WEIGHT_REDIFF");
                         continue;
                     }
                     dqOvContribByIndex[i] = java.util.Arrays.stream(vcOv[0]).mapToInt(d -> (int) d).toArray();
@@ -1387,7 +1394,7 @@ final class GpuBatchQualification {
                     if (System.getenv("OLF_GPU_BATCH_TRACE") != null) {
                         System.err.println("QUAL_REJECT drOv2 " + c.contingencyId());
                     }
-                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:DISTR_RHO_GROUP_OUTAGE2");
+                    refuse(c, "PLAN:DISTR_RHO_GROUP_OUTAGE2");
                     continue;                                // multi-member / no-survivor group outage — CPU
                 }
                 if (drOv[0].length > 0) {
@@ -1395,7 +1402,7 @@ final class GpuBatchQualification {
                     drOvCByIndex[i] = drOv[1];
                 }
                 if (curvePRows != null && c.contingencyId().indexOf(GpuBatchStatus.STRATEGY_KEY_SEP) >= 0) {
-                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:PAIR_CURVE_LINKAGE");
+                    refuse(c, "PLAN:PAIR_CURVE_LINKAGE");
                     continue;                                // pair anchor shifts skew the curve linkage — CPU
                 }
                 FrozenIsland fi = islandedFrozen(es, q.islandedBuses(), relocatedCouplers);

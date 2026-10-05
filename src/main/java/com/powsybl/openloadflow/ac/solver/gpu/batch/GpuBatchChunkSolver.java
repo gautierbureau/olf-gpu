@@ -1565,7 +1565,7 @@ final class GpuBatchChunkSolver {
                         if (config.hvdcFreezing()) {
                             hvdcStatus = GpuBatchHvdcAcEmulation.applyFreeze(chunkSize, realCount, n, hvdcControllers,
                                     baseState, x0Full, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null,
-                                    disabledMask, baseTargets, overrides, hvAppliedD1, hvAppliedD2);
+                                    disabledMask, baseTargets, overrides, hvAppliedD1, hvAppliedD2, rowModePerScenario);
                             targetOverrideIndex = overrides.indexArray();
                             targetOverrideValue = overrides.valueArray();
                         } else {
@@ -1831,7 +1831,7 @@ final class GpuBatchChunkSolver {
                             overrides.restore(preHvdcOverrides);
                             GpuBatchHvdcAcEmulation.applyStatusOverrides(chunkSize, realCount, n,
                                     hvdcControllers, hvdcStatus, ctgOutOf, disabledMask, baseTargets, overrides,
-                                    hvAppliedD1, hvAppliedD2);
+                                    hvAppliedD1, hvAppliedD2, rowModePerScenario);
                             targetOverrideIndex = overrides.indexArray();
                             targetOverrideValue = overrides.valueArray();
                         }

@@ -446,6 +446,7 @@ public final class GpuAcNewtonSolver {
      *        deltas the pre-solve freeze already applied — transitions are applied incrementally
      */
     public static native void setBatchHvdcLoops(long handle, int[] elem, int[] bus1Row, int[] bus2Row,
+                                                int[] bus1Phi, int[] bus2Phi,
                                                 double[] in, byte[] ctgOut, int[] status,
                                                 double[] appliedD1, double[] appliedD2, int limitsActive);
 

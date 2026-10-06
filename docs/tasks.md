@@ -2291,6 +2291,24 @@ Also corrected today: CLAUDE.md said "no state-vector scaling / line search on d
 MAX_VOLTAGE_CHANGE clamp per scenario and OLF's exact stopping test, and refines cuDSS solves 4× on networks with
 zero-impedance branches.
 
+### network.xiidm, full non-busbar scope: wall time vs a 20-thread CPU (2026-10-06, injection-scope)
+
+`OLF_GPU_SA_CASE_FILE=network.xiidm OLF_GPU_SA_CTG_KINDS=branch,generator,load,hvdc,svc,shunt,battery
+OLF_GPU_SA_GEN_MIN_KV=0 OLF_GPU_SA_LOAD_TOP=100000` = 24379 contingencies (10540 branches, 6071 generators, 7495
+loads, 6 HVDC, 6 SVC, 240 shunts, 21 batteries), RTE parameters, this branch at cf2fd96 (base-outer7-divergence
+merged through #76). Timing only — a multi-threaded CPU arm is not comparable on results (its partitioning retains
+other switches), so the exact comparison is run separately against a 1-thread arm:
+
+| arm | wall | per contingency |
+|---|---|---|
+| CPU, 20 threads (`OLF_GPU_SA_CPU_THREADS=20`) | 417.7 s | 17.13 ms |
+| GPU, cold (`OLF_GPU_SA_COLD_ONLY=1`) | 198.3 s | 8.13 ms |
+
+**GPU 2.11x the 20-thread CPU**, 24374 / 24379 on device (3 OLF-own MAX_ITERATION_REACHED, 2 device
+`max-iter-bad-solve` rejects — FUCZ and FUDC, to be read against the 1-thread arm). Method notes: the CPU-arm
+`save` mode runs the CPU arm ONLY (the GPU wall time comes from a `load` run); the 1-thread arm on this scope
+needs more than the 3 h first budgeted (exit 124 at 10800 s), re-run with 6 h.
+
 ### #76 — GEN-1522: a pilot that loses its own generator kept its voltage identity (2026-10-06, DONE)
 
 Asked whether GEN-1522, the 2026-09-22 worst DAP on the rte network (~1e-6 MW then), was fixed. Measured with

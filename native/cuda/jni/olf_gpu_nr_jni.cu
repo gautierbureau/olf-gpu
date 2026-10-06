@@ -107,8 +107,37 @@ long long gWidthIterSum = 0;
 long long gCompactIters = 0;
 // OLF_GPU_PHASE_TIME: cuDSS symbolic analyses run — the main contexts (a batch, the base load flow) and the
 // straggler-compaction context (one per compact WIDTH it is analyzed at).
+// Per scenario at the end of a completed batch call: how many SOLVE PASSES it took part in (1 = the state came
+// right out of the first inner Newton; each further pass is an outer loop that changed something and
+// re-solved), the first pass's iterations and the total. Histogram key = passes (capped at 15).
+long long gOlHistCount[16] = {0}, gOlHistFirst[16] = {0}, gOlHistTotal[16] = {0};
+long long gOlNotConverged = 0, gOlNotConvergedIters = 0;
 long long gAnalysesMain = 0;
 long long gAnalysesCompact = 0;
+// Wall time of every symbolic analysis, per CALL SITE (source line), with a device sync on both sides so the
+// reordering's host work and its device kernels are both inside. Only under OLF_GPU_PHASE_TIME (the syncs are
+// not free); printed by the JNI_PHASE_TIME line as ANALYSIS_TIME.
+// Same for factorizations (F) and solves (S); key = phase letter * 100000 + line.
+std::map<int, std::pair<long long, double>> gAnalysisSites;   // key -> (count, ms)
+struct AnalysisTimer {
+    int line;
+    bool on;
+    std::chrono::steady_clock::time_point t0;
+    explicit AnalysisTimer(int l, char ph = 'A') : line(ph * 100000 + l), on(std::getenv("OLF_GPU_PHASE_TIME") != nullptr) {
+        if (on) {
+            cudaDeviceSynchronize();
+            t0 = std::chrono::steady_clock::now();
+        }
+    }
+    ~AnalysisTimer() {
+        if (on) {
+            cudaDeviceSynchronize();
+            auto& e = gAnalysisSites[line];
+            e.first++;
+            e.second += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        }
+    }
+};
 
 using namespace powsybl::openloadflow;
 
@@ -3607,7 +3636,7 @@ double luBytesPerScenario(SharedStructure& st) {
         CUDSS_CHECK(cudssMatrixCreateDn(&ds.matB, n, 1, n, dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
         CUDSS_CHECK(cudssMatrixCreateDn(&ds.matX, n, 1, n, dX.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
         gAnalysesMain++;
-        CUDSS_CHECK(cudssExecute(ds.handle, CUDSS_PHASE_ANALYSIS, ds.config, ds.data, ds.matA, ds.matX, ds.matB));
+        { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ds.handle, CUDSS_PHASE_ANALYSIS, ds.config, ds.data, ds.matA, ds.matX, ds.matB)); }
         // cuDSS's OWN device-memory estimate for one matrix with this pattern — [0] permanent,
         // [1] peak (16 int64 entries). This is the number to size with: the LU numeric factors are
         // only part of what a factorization allocates, and the workspace is the part our model used
@@ -3840,14 +3869,14 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
         hazRepairRightHandSide(ctx, 1, ctx->dB.as<double>());
         if (!ctx->analyzed) {
             gAnalysesMain++;
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
+            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB)); }
             traceLuNnz(ctx->ds.handle, ctx->ds.data, "base");
         }
         // ONE cudssExecute per iteration (phases are OR-able bit flags): first pass factorizes,
         // later ones refactorize reusing the pivot order — fused with the solve either way.
-        CUDSS_CHECK(cudssExecute(ctx->ds.handle,
+        { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->ds.handle,
                 (ctx->analyzed ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION) | CUDSS_PHASE_SOLVE,
-                ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
+                ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB)); }
         ctx->analyzed = true;
         static const bool linResidSeqOn = std::getenv("OLF_GPU_LIN_RESID") != nullptr;
         if (linResidSeqOn) {
@@ -7432,6 +7461,8 @@ struct BatchSolverContext {
     int pausedLoopIdx = 0;
     int pausedSeqChanged = 0;
     std::vector<int> pausedProdIters;
+    std::vector<int> olFirst, olIters, olPasses;              // OLF_GPU_PHASE_TIME: per-scenario Newton work by
+                                                             // solve pass (kept across a host-loop pause)
     std::vector<char> pausedLive, pausedActive;
     std::vector<char> hostChanged;                           // per scenario: the host loop was UNSTABLE
     int nmon = 0;
@@ -9760,6 +9791,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // sequence's current state on the device — re-uploading the base rows would throw away the
     // distributed slack, the HVDC deltas and the monitoring activations it has accumulated.
     const bool resume = ctx->driverResume != 0;
+    if (!resume || ctx->olPasses.size() != static_cast<size_t>(nS)) {
+        ctx->olFirst.assign(nS, 0);
+        ctx->olIters.assign(nS, 0);
+        ctx->olPasses.assign(nS, 0);
+    }
     ctx->driverResume = 0;
     ctx->driverPaused = 0;
     if (resume && (ctx->nTvc > 0 || ctx->nFlc > 0 || ctx->nCph > 0 || ctx->nTvd > 0)) {
@@ -10597,7 +10633,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         fillActiveBatch(false);
         if (!ctx->analyzed) {
             gAnalysesMain++;
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
             ctx->analyzed = true;
         }
         CUDA_CHECK(cudaMemsetAsync(ctx->dTvcSensi.p, 0, nst * sizeof(double), ctx->stream));
@@ -10610,7 +10646,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
             int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
             first = false;
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            { AnalysisTimer at_(__LINE__, ((phase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((phase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
             tvcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nTvc, ctx->dTvcVRow.as<int>(),
                     ctx->dDx.as<double>(), ctx->dTvcSensi.as<double>());
         }
@@ -10696,7 +10732,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         fillActiveBatch(false);
         if (!ctx->analyzed) {
             gAnalysesMain++;
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
             ctx->analyzed = true;
         }
         CUDA_CHECK(cudaMemsetAsync(ctx->dShcSensi.p, 0, static_cast<size_t>(nS) * nShc * sizeof(double), ctx->stream));
@@ -10709,7 +10745,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
             int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
             first = false;
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            { AnalysisTimer at_(__LINE__, ((phase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((phase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
             shcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nShc, ctx->dShcVRow.as<int>(),
                     ctx->dDx.as<double>(), ctx->dShcSensi.as<double>());
         }
@@ -10768,7 +10804,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         fillActiveBatch(false);
         if (!ctx->analyzed) {
             gAnalysesMain++;
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
             ctx->analyzed = true;
         }
         CUDA_CHECK(cudaMemsetAsync(ctx->dFlcSensi.p, 0, nst * sizeof(double), ctx->stream));
@@ -10781,7 +10817,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
             int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
             first = false;
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            { AnalysisTimer at_(__LINE__, ((phase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((phase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
             flcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nF, ctx->cbOffset,
                     ctx->dFlcKind.as<int>(), ctx->dFlcSide.as<int>(), ctx->dFlcCtlPack.as<int>(),
                     ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
@@ -10903,7 +10939,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         fillActiveBatch(false);
         if (!ctx->analyzed) {
             gAnalysesMain++;
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
             ctx->analyzed = true;
         }
         bool first = true;
@@ -10914,7 +10950,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
             int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
             first = false;
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            { AnalysisTimer at_(__LINE__, ((phase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((phase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
             svcGatherBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n, i,
                     ctx->nElements, ctx->cbOffset, ctx->shOffset,
                     ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(),
@@ -11314,12 +11350,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
         if (!ctx->analyzed) {
             gAnalysesMain++;
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch));
+            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch)); }
             traceLuNnz(ctx->ds.handle, ctx->ds.data, "batch-api", ctx->nScenarios);
             ctx->analyzed = true;
         }
-        CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
-                ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch));
+        { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
+                ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch)); }
         if (adaptiveIr() && ctx->st->nzi > 0 && ctx->dR.p != nullptr) {
             // adaptive refinement (see adaptiveIr): refine while an active lane's backward residual is above tol
             static const int irMax = irMaxSteps();
@@ -11339,7 +11375,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             };
             double worst = worstRatio();
             for (int step = irBase; step < irMax && worst > tol; step++) {
-                CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_SOLVE, ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matDeltaBatch, ctx->matRBatch));
+                { AnalysisTimer at_(__LINE__, 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_SOLVE, ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matDeltaBatch, ctx->matRBatch)); }
                 axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDelta.as<double>(), ctx->dDx.as<double>());
                 gIrExtraSteps++;
                 double next = worstRatio();
@@ -11368,13 +11404,13 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
         if (!ctx->analyzed) {
             gAnalysesMain++;
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matBig, ctx->matBigX, ctx->matBigB));
+            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matBig, ctx->matBigX, ctx->matBigB)); }
             traceLuNnz(ctx->ds.handle, ctx->ds.data, "blkdiag", ctx->nScenarios);
             ctx->analyzed = true;
         }
-        CUDSS_CHECK(cudssExecute(ctx->ds.handle,
+        { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->ds.handle,
                 (ctx->factored ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION) | CUDSS_PHASE_SOLVE,
-                ctx->ds.config, ctx->ds.data, ctx->matBig, ctx->matBigX, ctx->matBigB));
+                ctx->ds.config, ctx->ds.data, ctx->matBig, ctx->matBigX, ctx->matBigB)); }
         ctx->factored = true;
         if (ctx->clampStep) {
             maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dVarType.as<int>(), ctx->dActive.as<char>(), ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>());
@@ -11405,7 +11441,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         std::chrono::steady_clock::now().time_since_epoch()).count();
             }
             gAnalysesMain++;
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
             double ms = -1.0;
             if (timeIt) {
                 CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -11499,7 +11535,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     CUDSS_CHECK(cudssDataCreate(ctx->dsC.handle, &cached));
                     CUDSS_CHECK(cudssConfigSet(ctx->dsC.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
                     gAnalysesCompact++;
-                    CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_ANALYSIS, ctx->dsC.config, cached, ctx->matUbC, ctx->matUbCX, ctx->matUbCB));
+                    { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_ANALYSIS, ctx->dsC.config, cached, ctx->matUbC, ctx->matUbCX, ctx->matUbCB)); }
                 } else if (w != ctx->compactWidth) {
                     CUDSS_CHECK(cudssConfigSet(ctx->dsC.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
                 }
@@ -11514,12 +11550,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     CUDSS_CHECK(cudssDataCreate(ctx->dsC.handle, &ctx->dsC.data));
                     CUDSS_CHECK(cudssConfigSet(ctx->dsC.config, CUDSS_CONFIG_UBATCH_SIZE, &w, sizeof(w)));
                     gAnalysesCompact++;
-                    CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_ANALYSIS, ctx->dsC.config, ctx->dsC.data, ctx->matUbC, ctx->matUbCX, ctx->matUbCB));
+                    { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_ANALYSIS, ctx->dsC.config, ctx->dsC.data, ctx->matUbC, ctx->matUbCX, ctx->matUbCB)); }
                     ctx->compactWidth = w;
                 }
                 compactData = ctx->dsC.data;
             }
-            CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE, ctx->dsC.config, compactData, ctx->matUbC, ctx->matUbCX, ctx->matUbCB));
+            { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE, ctx->dsC.config, compactData, ctx->matUbC, ctx->matUbCX, ctx->matUbCB)); }
             if (adaptiveIr() && ctx->st->nzi > 0 && ctx->dRC.p != nullptr && ctx->dIrScore.p != nullptr && ctx->dIrScore.cap >= static_cast<size_t>(w) * sizeof(double)) {
                 // adaptive refinement on the compacted lanes (all w are real or a duplicate of a real one)
                 static const int irMax = irMaxSteps();
@@ -11539,7 +11575,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 };
                 double worst = worstRatio();
                 for (int step = irBase; step < irMax && worst > tol; step++) {
-                    CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_SOLVE, ctx->dsC.config, compactData, ctx->matUbC, ctx->matUbCDelta, ctx->matUbCR));
+                    { AnalysisTimer at_(__LINE__, 'S'); CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_SOLVE, ctx->dsC.config, compactData, ctx->matUbC, ctx->matUbCDelta, ctx->matUbCR)); }
                     axpy1Batch<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n * w, ctx->dDeltaC.as<double>(), ctx->dDxC.as<double>());
                     gIrExtraSteps++;
                     double next = worstRatio();
@@ -11553,7 +11589,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             CUDA_CHECK(cudaMemsetAsync(ctx->dDx.p, 0, static_cast<size_t>(n) * nS * sizeof(double), ctx->stream));
             scatterScenarios<<<grid(n * nReal), BLOCK, 0, ctx->stream>>>(n, nReal, ctx->dMapC.as<int>(), ctx->dDxC.as<double>(), ctx->dDx.as<double>());
         } else {
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, ubPhase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            { AnalysisTimer at_(__LINE__, ((ubPhase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((ubPhase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, ubPhase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
             if (adaptiveIr() && ctx->st->nzi > 0 && ctx->dR.p != nullptr && ctx->matUbR != nullptr && ctx->dIrScore.p != nullptr) {
                 // adaptive refinement on the full-width UBATCH solve (see adaptiveIr)
                 static const int irMax = irMaxSteps();
@@ -11573,7 +11609,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 };
                 double worst = worstRatio();
                 for (int step = irBase; step < irMax && worst > tol; step++) {
-                    CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_SOLVE, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbDelta, ctx->matUbR));
+                    { AnalysisTimer at_(__LINE__, 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_SOLVE, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbDelta, ctx->matUbR)); }
                     axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDelta.as<double>(), ctx->dDx.as<double>());
                     gIrExtraSteps++;
                     double next = worstRatio();
@@ -11786,18 +11822,25 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matX, dxS));
             if (!ctx->analyzed) {
                 gAnalysesMain++;
-                CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
+                { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB)); }
                 traceLuNnz(ctx->ds.handle, ctx->ds.data, "per-scenario", ctx->nScenarios);
                 ctx->analyzed = true;
             }
-            CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
-                    ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB));
+            { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
+                    ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB)); }
             double* xS = ctx->dX.as<double>() + (size_t) s * n;
             axpy1One<<<grid(n), BLOCK, 0, ctx->stream>>>(n, dxS, xS);
         }
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync
         }
     }   // ---- end inner Newton loop ----
+    for (int s = 0; s < nS; s++) {                           // per-scenario Newton work by pass (cheap, host)
+        if (wasActive[s]) {
+            if (ctx->olPasses[s] == 0) ctx->olFirst[s] = res.iters[s];
+            ctx->olIters[s] += res.iters[s];
+            ctx->olPasses[s]++;
+        }
+    }
     }   // ---- end if (solvePass) ----
 
     // ---- AcloadFlowEngine's realistic-voltage check, on this INTERMEDIATE state ----
@@ -12768,6 +12811,20 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
             rlStateOut[k] = (lt[k] & 7) | (sc[k] << 3);
         }
     }
+    if (!ctx->driverPaused && std::getenv("OLF_GPU_PHASE_TIME") != nullptr && ctx->olPasses.size() == static_cast<size_t>(nS)) {
+        for (int s = 0; s < nS; s++) {
+            if (ctx->olPasses[s] == 0) continue;
+            if (res.status[s] != 0) {                         // not finished converged on device (CPU replay,
+                gOlNotConverged++;                           // max-iter, ...): its work is counted apart
+                gOlNotConvergedIters += ctx->olIters[s];
+                continue;
+            }
+            int k = std::min(ctx->olPasses[s], 15);
+            gOlHistCount[k]++;
+            gOlHistFirst[k] += ctx->olFirst[s];
+            gOlHistTotal[k] += ctx->olIters[s];
+        }
+    }
     CUDA_CHECK(cudaMemcpy(res.x.data(), ctx->dX.p, nTot * sizeof(double), cudaMemcpyDeviceToHost));
     return res;
 }
@@ -13437,6 +13494,23 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
                 calls, marshalNs / 1000000, solveNs / 1000000, packNs / 1000000,
                 gOuterPasses, gSolvePasses, gNewtonIters, gActiveIterSum, gWidthIterSum, gCompactIters,
                 gAnalysesMain, gAnalysesCompact, gIrChecks, gIrExtraSteps);
+        double tot[4] = {0, 0, 0, 0};
+        long long cnt[4] = {0, 0, 0, 0};
+        for (const auto& kv : gAnalysisSites) {
+            int ph = kv.first / 100000, line = kv.first % 100000;
+            int k = ph == 'A' ? 0 : ph == 'F' ? 1 : ph == 'S' ? 2 : 3;
+            tot[k] += kv.second.second;
+            cnt[k] += kv.second.first;
+            fprintf(stderr, "CUDSS_PHASE_SITE %c line=%d count=%lld ms=%.1f\n", ph, line, kv.second.first, kv.second.second);
+        }
+        for (int k = 1; k < 16; k++) {
+            if (gOlHistCount[k] == 0) continue;
+            fprintf(stderr, "GPU_OL_HIST passes=%d%s scenarios=%lld firstNrIters=%lld totalNrIters=%lld\n", k,
+                    k == 15 ? "+" : "", gOlHistCount[k], gOlHistFirst[k], gOlHistTotal[k]);
+        }
+        fprintf(stderr, "GPU_OL_HIST notConvergedOnDevice=%lld iters=%lld\n", gOlNotConverged, gOlNotConvergedIters);
+        fprintf(stderr, "CUDSS_PHASE_TIME analysis=%lld x %.1f ms | factorization=%lld x %.1f ms | solve=%lld x %.1f ms"
+                " | factorization+solve=%lld x %.1f ms\n", cnt[0], tot[0], cnt[1], tot[1], cnt[2], tot[2], cnt[3], tot[3]);
     }
     return out;
 }
@@ -13542,7 +13616,7 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
 
     if (!ctx->analyzed) {
         gAnalysesMain++;
-        CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+        { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
         ctx->analyzed = true;
     }
     DeviceBuf dObs, dOut;
@@ -13556,7 +13630,7 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
         setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
         hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
         int phase = CUDSS_PHASE_SOLVE | (ki == 0 ? CUDSS_PHASE_FACTORIZATION : 0);
-        CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+        { AnalysisTimer at_(__LINE__, ((phase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((phase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
         gatherSensiBatch<<<grid(nS * m), BLOCK, 0, ctx->stream>>>(n, nS, k, m, ki, dObs.as<int>(),
                 ctx->dDx.as<double>(), dOut.as<double>());
     }
@@ -15805,9 +15879,9 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveTra
         CUDSS_CHECK(cudssMatrixCreateDn(&ds.matB, nn, 1, nn, dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
         CUDSS_CHECK(cudssMatrixCreateDn(&ds.matX, nn, 1, nn, dX.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
         gAnalysesMain++;
-        CUDSS_CHECK(cudssExecute(ds.handle, CUDSS_PHASE_ANALYSIS, ds.config, ds.data, ds.matA, ds.matX, ds.matB));
-        CUDSS_CHECK(cudssExecute(ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
-                                 ds.config, ds.data, ds.matA, ds.matX, ds.matB));
+        { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ds.handle, CUDSS_PHASE_ANALYSIS, ds.config, ds.data, ds.matA, ds.matX, ds.matB)); }
+        { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
+                                 ds.config, ds.data, ds.matA, ds.matX, ds.matB)); }
         CUDA_CHECK(cudaDeviceSynchronize());
 
         std::vector<double> x(nn);

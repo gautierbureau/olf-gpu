@@ -1510,8 +1510,17 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         double[] state = precomputed.states().get(contingency.getId());
         if (state == null || !precomputed.isReady()) {
             // not batched (multi-element / islanding / out of scope / rejected) — standard CPU path
-            return super.runPostContingencySimulation(network, context, contingency, lfContingency, preContingencyLimitViolationManager,
-                    securityAnalysisParameters, preContingencyNetworkResult, createResultExtension, limitReductions, preDistributedActivePower);
+            long tCpu = System.nanoTime();
+            PostContingencyResult cpuResult = super.runPostContingencySimulation(network, context, contingency, lfContingency,
+                    preContingencyLimitViolationManager, securityAnalysisParameters, preContingencyNetworkResult,
+                    createResultExtension, limitReductions, preDistributedActivePower);
+            // The CPU replay's own cost (OLF's whole outer-loop run for this contingency), apart from the
+            // device-answered ones; the count is printed in the "ms" column like the remap counter.
+            PHASE_NS.computeIfAbsent("   CPU replay: OLF solve + results", k -> new java.util.concurrent.atomic.LongAdder())
+                    .add(System.nanoTime() - tCpu);
+            PHASE_NS.computeIfAbsent("   CPU replay: contingencies (count)", k -> new java.util.concurrent.atomic.LongAdder())
+                    .add(1_000_000);
+            return cpuResult;
         }
 
         dumpDeviceStateVariables(state, precomputed, network, contingency);

@@ -2309,6 +2309,67 @@ other switches), so the exact comparison is run separately against a 1-thread ar
 `save` mode runs the CPU arm ONLY (the GPU wall time comes from a `load` run); the 1-thread arm on this scope
 needs more than the 3 h first budgeted (exit 124 at 10800 s), re-run with 6 h.
 
+### #79 — where the Newton work goes: outer loops, refinement, analyses, CPU replay (2026-10-06, injection-scope)
+
+Asked: how many symbolic analyses run; whether fewer triangular solves is a lever at all when the GPU must do
+the CPU's Newton iterations; the CPU replay's cost; how many contingencies really need outer loops versus being
+right after the first inner Newton. Network.xiidm, full non-busbar scope (24,379 contingencies).
+
+**Instruments (new).** Native, under `OLF_GPU_PHASE_TIME`: `CUDSS_PHASE_TIME` / `CUDSS_PHASE_SITE` time every
+cuDSS analysis (A), factorization (F, the compact path's factorization+solve), full-width factorization+solve
+(G) and solve-only (S) call with a device sync on both sides (so the run's wall time is not a reference);
+`GPU_OL_HIST` = per device-converged scenario, the solve passes it took part in, its first pass's Newton
+iterations and its total. Fork (`olf-local-patches`), under `OLF_OL_STATS`: `AcloadFlowEngine` keeps the first
+inner solve's iterations and, per outer loop, the re-solves it triggered and their iterations;
+`AbstractSecurityAnalysis` prints `CPU_OL_STATS ctg=… firstNr= totalNr= outer= status= loops=Name:resolves/iters`
+per contingency; `native/cuda/ol_stats.py <log>` turns it into the histogram. Java: the GPU provider's CPU
+branch is timed (`CPU replay: …` in SA_PHASE_TIME).
+
+**1. Symbolic analyses are not a cost**: 16 in the whole run (1 base, 2 batch main, 12 compaction widths,
+1 robust), **1.2 s** together.
+
+**2. The GPU does exactly the CPU's Newton work** (CPU arm at 20 threads; the 1-thread run tonight repeats it):
+
+| | CPU | GPU |
+|---|---|---|
+| Newton iterations, total | 234,153 | 233,909 |
+| of which in the first inner solve | 26,697 | 26,352 |
+| of which outer-loop re-solves | **207,456 (88.6 %)** | 207,557 (88.7 %) |
+
+The solve-pass histograms match bin by bin (passes 4: 2653 / 2649; 5: 2606 / 2607; 11: 11,403 / 11,348;
+12: 6077 / 6133). **Almost no contingency is right after the first inner Newton**: the minimum is 2 passes
+(6 contingencies), and **17,480 contingencies take 11 or 12 passes** of about one Newton iteration each. Per
+outer loop on the CPU:
+
+| outer loop | contingencies it re-solved | re-solves | Newton iterations |
+|---|---|---|---|
+| ReactiveLimits | 24,296 | 170,757 | 170,891 (73 % of all) |
+| FreezingHvdcACEmulation | 24,376 (every one) | 24,376 | 24,395 |
+| DistributedSlack | 11,796 | 12,170 | 12,170 |
+
+So the Newton count is OLF's and the device cannot go below it. The lever on the
+Newton side is OLF's own outer-loop sequence (7 reactive-limit re-solves of one iteration per contingency on
+average; a freezing-HVDC re-solve for every contingency), which is a question about OLF's semantics, not the
+device. What reactive-limit chain repeats across 17k contingencies is the next thing to look at (a few buses
+switching one per pass, the same in every contingency, would show in `OLF_RL_TRACE` on two of them).
+
+**3. Refinement is solve work that does NOT come from the Newton count**:
+
+| cuDSS call | count | time (synced) |
+|---|---|---|
+| full-width factorization + solve | 106 | 21.3 s |
+| compacted factorization + solve | 150 | 6.8 s |
+| **refinement solves (solve only)** | **543** | **22.4 s** |
+| analyses | 16 | 1.2 s |
+
+543 refinement solves for 256 Newton linear solves, 2.1 per factorization, 43 % of the cuDSS time. That is the
+lever "fewer triangular solves" really refers to: an accurate first solve needs no refinement, and the
+refinement exists only because of the repaired zero-diagonal rows of the zero-impedance (coupler) branches.
+
+**4. CPU replay is small on this scope**: 3 contingencies (FUCZ, FUDC — the two device failures — and DQCQ,
+MAX_ITERATION_REACHED after 31 iterations), **1.5 s** of the run. The robust device retries (5) are inside
+the precompute. On scopes with more plan refusals this number is what to watch.
+
 ### #78 — the in-suite flake was a device read-before-write (2026-10-06, injection-scope)
 
 `devicePilotLosingItsOwnGeneratorWithPinningSurvivorMatchesCpu` (#76) failed in 3 of 7 runs of its class and

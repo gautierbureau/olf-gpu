@@ -366,10 +366,38 @@ final class GpuBatchQualification {
             for (LfBus bus : touched) {
                 updateMainReactiveKeys(bus);
             }
-            GpuAcData nd = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
-                    .extract(network, es, false, false);
-            double[] newW = nd.dqWeight();
             double[] baseW = gpuData.dqWeight();
+            // OLF_GPU_DQ_REWEIGHT=extract: the whole-network re-extraction instead of the analytic reweight (A/B)
+            String reweightMode = System.getenv("OLF_GPU_DQ_REWEIGHT");
+            double[] newW = "extract".equals(reweightMode) ? null : reweightedDqWeights(es, gpuData, touched);
+            GpuAcData nd = null;
+            if (newW == null || "check".equals(reweightMode)) {
+                // the free role of a table-less group may move with the loss: re-extract, as before
+                nd = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
+                        .extract(network, es, false, false);
+                if ("check".equals(reweightMode) && newW != null) {
+                    // OLF_GPU_DQ_REWEIGHT=check: both, the extraction wins, every difference named
+                    double[] ex = nd.dqWeight();
+                    int nd0 = 0;
+                    StringBuilder sb = new StringBuilder();
+                    if (ex.length != newW.length) {
+                        sb.append(" LENGTH ").append(newW.length).append(" vs ").append(ex.length);
+                    } else {
+                        for (int k = 0; k < ex.length; k++) {
+                            if (ex[k] != newW[k]) {
+                                if (nd0++ < 8) {
+                                    sb.append(String.format(" k=%d row=%d kind=%d kM=%d jM=%d analytic=%.6f extract=%.6f base=%.6f",
+                                            k, gpuData.dqRow()[k], gpuData.dqKind()[k], gpuData.dqKMember()[k], gpuData.dqJMember()[k],
+                                            newW[k], ex[k], baseW[k]));
+                                }
+                            }
+                        }
+                    }
+                    System.err.println("DQ_REWEIGHT_CHECK lost=" + lost.stream().map(g -> g.getId()).toList()
+                            + " touched=" + touched.stream().map(LfBus::getId).toList() + " differing=" + nd0 + sb);
+                }
+                newW = nd.dqWeight();
+            }
             if (newW.length != baseW.length) {
                 return null;                                 // structural drift — not a pure reweight
             }
@@ -381,7 +409,7 @@ final class GpuBatchQualification {
                 if (newW[k] != baseW[k]) {
                     idx.add((double) k);
                     w.add(newW[k]);
-                    if (dqOvTrace && traced++ < 12) {        // the two packs' metadata at a differing index
+                    if (dqOvTrace && traced++ < 12 && nd != null) {   // the two packs' metadata at a differing index
                         System.err.printf("DQOV_PACK k=%d old(row=%d kind=%d elem=%d side=%d w=%.6f) new(row=%d kind=%d elem=%d side=%d w=%.6f)%n",
                                 k, gpuData.dqRow()[k], gpuData.dqKind()[k], gpuData.dqElem()[k], gpuData.dqSide()[k], baseW[k],
                                 nd.dqRow()[k], nd.dqKind()[k], nd.dqElem()[k], nd.dqSide()[k], newW[k]);
@@ -405,6 +433,71 @@ final class GpuBatchQualification {
     }
 
     /** OLF's own key update: on the group's MAIN control, never on a member's dependent one. */
+    /**
+     * The base DISTR_Q pack's weights after {@link #updateMainReactiveKeys} ran on the touched buses, WITHOUT
+     * re-extracting the network: a contribution's weight is {@code qPct_k - (j == k ? 1 : 0)} for the row's
+     * controller k and the contributing controller j (GpuAcOuterLoopPacks.buildDistrQContributions), and the
+     * toggle changes only the qPct of the touched groups' controllers. Measured on network.xiidm: the
+     * whole-network extraction this replaces cost 18.8 s of a 207 s cold run (one per generator contingency at
+     * a DISTR_Q member). Returns null when a touched bus is the free controller of a group WITHOUT a candidate
+     * table — there the loss can move the free role, which changes the pack's row set, not only its weights.
+     */
+    private static double[] reweightedDqWeights(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,
+                                                java.util.Set<LfBus> touched) {
+        int[] kMember = gpuData.dqKMember();
+        int[] jMember = gpuData.dqJMember();
+        int[] memberBus = gpuData.dqMemberBusNum();
+        double[] baseW = gpuData.dqWeight();
+        if (kMember == null || jMember == null || memberBus == null || baseW == null) {
+            return null;
+        }
+        int[] memberQrGroup = gpuData.dqMemberQrGroup();
+        java.util.Map<Integer, Integer> memberOfBus = new java.util.HashMap<>();
+        for (int m = 0; m < memberBus.length; m++) {
+            memberOfBus.put(memberBus[m], m);
+        }
+        java.util.Map<Integer, Double> qPctByBus = new java.util.HashMap<>();
+        for (LfBus bus : touched) {
+            var main = bus.getGeneratorVoltageControl()
+                    .<com.powsybl.openloadflow.network.GeneratorVoltageControl>map(
+                            com.powsybl.openloadflow.network.VoltageControl::getMainVoltageControl).orElse(null);
+            if (main == null) {
+                continue;
+            }
+            // a group WITH a candidate table has a fixed free member (the first); without one the free role is
+            // "first enabled" and may move with the loss - the pack's own qr-group index says which it is
+            Integer m0 = memberOfBus.get(bus.getNum());
+            if (m0 == null || memberQrGroup == null || m0 >= memberQrGroup.length || memberQrGroup[m0] < 0) {
+                return null;
+            }
+            for (LfBus m : main.getMergedControllerElements()) {
+                qPctByBus.put(m.getNum(), m.getRemoteControlReactivePercent());
+            }
+        }
+        int[] kind = gpuData.dqKind();
+        int[] side = gpuData.dqSide();
+        double[] w = baseW.clone();
+        for (int i = 0; i < w.length; i++) {
+            int k = kMember[i];
+            if (k < 0 || k >= memberBus.length) {
+                continue;
+            }
+            Double qpk = qPctByBus.get(memberBus[k]);
+            if (qpk == null) {
+                continue;                                    // a group the loss did not touch keeps its weights
+            }
+            double weight = qpk - (jMember[i] == k ? 1.0 : 0.0);
+            // a zero-impedance spanning-tree edge's DUMMY_Q term (kind 3) enters with the coupler side's sign,
+            // +1 at bus1 and -1 at bus2 (buildDistrQContributions) - measured without it: every such weight
+            // came out sign-flipped and seven busbar-section fixtures failed
+            if (kind != null && side != null && kind[i] == 3 && side[i] != 0) {
+                weight = -weight;
+            }
+            w[i] = weight;
+        }
+        return w;
+    }
+
     private static void updateMainReactiveKeys(LfBus bus) {
         bus.getGeneratorVoltageControl()
                 .<com.powsybl.openloadflow.network.GeneratorVoltageControl>map(

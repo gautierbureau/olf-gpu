@@ -225,6 +225,37 @@ constexpr int BLOCK = 64;
 // The open lever, if the two refinement solves per iteration ever matter for wall time, is to SCALE
 // the borrowed row so the repaired diagonal is commensurate with the row's other entries rather than
 // to drop the refinement.
+// ADAPTIVE refinement (default when OLF_GPU_IR_STEPS is unset): cuDSS runs irBaseSteps internally, then the batch
+// loop measures every lane's backward residual ratio ||b - J dx||inf / ||b||inf and refines (r = b - J dx,
+// J d = r, dx += d) only while an active lane sits above OLF_GPU_IR_TOL, up to irMaxSteps in all. Measured on
+// network.xiidm (24,379 contingencies, 443 batched Newton iterations): the fixed 4 steps cost 5 forward/backward
+// solves per factorization, 64.7 s of the 126 s of kernels, and 2 fixed steps left two busbar scenarios at a
+// linear-solve failure (ratio ~1e-6 on a coupler-heavy chunk) - the count a lane needs depends on which other
+// matrices share its batch, so it is decided per iteration from the residual itself.
+// OLF_GPU_ZI_MASKS=0: the fill kernel's per-thread list scans instead of the dense per-scenario masks (A/B)
+inline bool ziMasksEnabled() {
+    static const bool off = std::getenv("OLF_GPU_ZI_MASKS") != nullptr && std::string(std::getenv("OLF_GPU_ZI_MASKS")) == "0";
+    return !off;
+}
+inline bool adaptiveIr() {
+    const char* e = std::getenv("OLF_GPU_IR_STEPS");
+    return e == nullptr || *e == '\0';
+}
+inline int irBaseSteps() {
+    const char* e = std::getenv("OLF_GPU_IR_BASE");
+    return e != nullptr && *e != '\0' ? std::atoi(e) : 1;
+}
+inline int irMaxSteps() {
+    const char* e = std::getenv("OLF_GPU_IR_MAX");
+    return e != nullptr && *e != '\0' ? std::atoi(e) : 4;
+}
+inline double irTol() {
+    const char* e = std::getenv("OLF_GPU_IR_TOL");
+    return e != nullptr && *e != '\0' ? std::atof(e) : 1e-12;
+}
+static long gIrExtraSteps = 0;                               // adaptive refinement solves actually run
+static long gIrChecks = 0;                                   // residual checks (one per batched iteration at least)
+
 inline int irSteps(bool hasZeroImpedance) {
     const char* e = std::getenv("OLF_GPU_IR_STEPS");
     if (e != nullptr && *e != '\0') {
@@ -4598,25 +4629,35 @@ __global__ void fillZeroImpBatch(int nzi, int nScenarios, int n, int nnz,
                                  int nziBase, int nZiOn, const int* ziOnSlotElem,
                                  int nZiOff, const int* ziOffSlotElem,
                                  const int* ziAlt, const int* ziSel, const int* mode, int ziDyn,
-                                 RelocTables rt, int nZiTree, const int* ziTreeSlotElemVal) {
+                                 RelocTables rt, int nZiTree, const int* ziTreeSlotElemVal,
+                                 const char* ziOffMask, const char* ziOnMask, const char* ziTreeMask) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nzi * nScenarios) return;
     int e = tid % nzi;
     int s = tid / nzi;
     if (!active[s]) return;
-    for (int k = 0; k < nZiOff; k++) {                       // per-scenario switch OUTAGE (node-breaker
-        if (ziOffSlotElem[2 * k] == s && ziOffSlotElem[2 * k + 1] == e) {   // contingency propagation)
-            return;
+    size_t me = (size_t) s * nzi + e;                        // the dense (scenario, element) masks, when built
+    if (ziOffMask != nullptr) {
+        if (ziOffMask[me]) return;                           // per-scenario switch OUTAGE
+    } else {
+        for (int k = 0; k < nZiOff; k++) {                   // per-scenario switch OUTAGE (node-breaker
+            if (ziOffSlotElem[2 * k] == s && ziOffSlotElem[2 * k + 1] == e) {   // contingency propagation)
+                return;
+            }
         }
     }
     if (e >= nziBase) {
         // BASE-OPEN closable switch element: contributes ONLY in scenarios that CLOSE it —
         // sparse (slot, elem) enable list, a handful of entries per run.
         bool on = false;
-        for (int k = 0; k < nZiOn; k++) {
-            if (ziOnSlotElem[2 * k] == s && ziOnSlotElem[2 * k + 1] == e) {
-                on = true;
-                break;
+        if (ziOnMask != nullptr) {
+            on = ziOnMask[me] != 0;
+        } else {
+            for (int k = 0; k < nZiOn; k++) {
+                if (ziOnSlotElem[2 * k] == s && ziOnSlotElem[2 * k + 1] == e) {
+                    on = true;
+                    break;
+                }
             }
         }
         if (!on) return;
@@ -4651,10 +4692,15 @@ __global__ void fillZeroImpBatch(int nzi, int nScenarios, int n, int nnz,
     addAt(d6, 1.0, valsS, FS);                               // J(bus1 Q, dummyQ)
     addAt(d7, -1.0, valsS, FS);                              // J(bus2 Q, dummyQ)
     int isTree = q[10] & 1;                                  // the tree at EXTRACTION...
-    for (int k = 0; k < nZiTree; k++) {                      // ...overridden where OLF's has moved by then
-        if (ziTreeSlotElemVal[3 * k] == s && ziTreeSlotElemVal[3 * k + 1] == e) {
-            isTree = ziTreeSlotElemVal[3 * k + 2];
-            break;
+    if (ziTreeMask != nullptr) {
+        char t = ziTreeMask[me];                             // ...overridden where OLF's has moved by then
+        if (t >= 0) isTree = t;
+    } else {
+        for (int k = 0; k < nZiTree; k++) {
+            if (ziTreeSlotElemVal[3 * k] == s && ziTreeSlotElemVal[3 * k + 1] == e) {
+                isTree = ziTreeSlotElemVal[3 * k + 2];
+                break;
+            }
         }
     }
     if (isTree) {                                            // spanning-tree edge: voltage/angle coupling
@@ -6731,6 +6777,45 @@ __global__ void axpy1One(int n, const double* dx, double* x) {           // sing
     if (i < n) x[i] += dx[i];
 }
 
+// r = b - J dx per scenario (the refinement residual; the right-hand side as SOLVED, row repairs included)
+__global__ void residualBatch(int n, int nS, int nnz, const int* rowPtr, const int* colIdx,
+                              const double* vals, const double* dx, const double* b, double* r) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n * nS) return;
+    int s = t / n;
+    int i = t - s * n;
+    const double* v = vals + (size_t) s * nnz;
+    const double* d = dx + (size_t) s * n;
+    double acc = 0.0;
+    for (int k = rowPtr[i]; k < rowPtr[i + 1]; k++) {
+        acc += v[k] * d[colIdx[k]];
+    }
+    r[t] = b[t] - acc;
+}
+
+// per scenario: ||r||inf / ||b||inf (0 for an inactive lane or a zero right-hand side)
+__global__ void irScoreBatch(int n, int nS, const double* r, const double* b, const char* active, double* score) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nS) return;
+    if (active != nullptr && !active[s]) {
+        score[s] = 0.0;
+        return;
+    }
+    const double* rs = r + (size_t) s * n;
+    const double* bs = b + (size_t) s * n;
+    double mr = 0.0, mb = 0.0;
+    for (int i = 0; i < n; i++) {
+        mr = fmax(mr, fabs(rs[i]));
+        mb = fmax(mb, fabs(bs[i]));
+    }
+    score[s] = mb > 0.0 ? (isfinite(mr) ? mr / mb : 1e300) : 0.0;
+}
+
+__global__ void subBatch(int total, const double* d, double* x) {        // x -= d (undo a refinement step)
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t < total) x[t] -= d[t];
+}
+
 __global__ void negateIntoBatch(int total, const double* F, double* b) {  // b = -F over all scenarios
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < total) b[i] = -F[i];
@@ -7043,12 +7128,20 @@ struct BatchSolverContext {
     int nZiTree = 0;
     DeviceBuf dZiOffSlotElem;                                // nZiOff*2 ints (slot, zi elem) — scenarios that OPEN a switch
     DeviceBuf dZiOnSlotElem;                                 // nZiOn*2 ints (slot, zi elem) — scenarios that CLOSE a switch
+    // DENSE (scenario, zi element) forms of the three lists above and of the tree overrides, nScenarios*nzi chars
+    // each: the fill kernel read them as linear scans PER THREAD, O(nzi * nS * (nZiOff + nZiOn + nZiTree)) - on
+    // network.xiidm's full non-busbar scope fillZeroImpBatch was the top kernel, 32 s of 126 s (45 ms a launch).
+    DeviceBuf dZiOffMask, dZiOnMask, dZiTreeMask;            // off/on: 1 = listed; tree: -1 = no override, else 0/1
+    bool hasZiMasks = false;
     int nR1Ov = 0;                                           // per-scenario closed-branch tap overrides (tap/PST actions)
     DeviceBuf dR1OvSlotElem, dR1OvVal;                       // nR1Ov*2 ints / nR1Ov*8 doubles (full cbIn row per entry)
     // ---- solve-only batch compaction (mode 3, tol > 0): lazily allocated on first engage ----
     DeviceBuf dValsC, dBC, dDxC, dMapC;                      // nnz*cap / n*cap / n*cap / cap ints
     CudssCtx dsC;                                            // dedicated handle/config/data for the compact width
     cudssMatrix_t matUbC = nullptr, matUbCB = nullptr, matUbCX = nullptr;
+    cudssMatrix_t matUbCR = nullptr, matUbCDelta = nullptr;   // adaptive refinement on the compacted solve
+    cudssMatrix_t matUbR = nullptr, matUbDelta = nullptr;     // ...and on the full-width UBATCH solve
+    DeviceBuf dRC, dDeltaC;
     int compactCap = 0;                                      // buffer capacity (nS/2)
     int compactWidth = 0;                                    // currently ANALYZED ubatch width (0 = none)
     // One ANALYZED cuDSS data object per compact width (OLF_GPU_COMPACT_CACHE, default on): a data object's
@@ -7416,6 +7509,9 @@ struct BatchSolverContext {
     // across all scenarios with per-scenario value pointers; B/X are batched dense (n x 1).
     // The host pointer + size arrays must outlive the matrix objects, so they live here.
     cudssMatrix_t matABatch = nullptr, matBBatch = nullptr, matXBatch = nullptr;
+    cudssMatrix_t matRBatch = nullptr, matDeltaBatch = nullptr;   // adaptive refinement: residual and correction
+    DeviceBuf dR, dDelta, dRPtrs, dDeltaPtrs, dIrScore;
+    std::vector<void*> rPtrs, deltaPtrs;
     std::vector<void*> valPtrs, rowStartPtrs, rowEndPtrs, colPtrs, bPtrs, xPtrs;   // host: arrays of device pointers
     DeviceBuf dValPtrs, dRowStartPtrs, dRowEndPtrs, dColPtrs, dBPtrs, dXPtrs;       // device copies (cuDSS 0.8 wants device arrays)
     std::vector<int> nrowsArr, ncolsArr, ncols1Arr, nnzArr, ldArr;                  // host size arrays: int32 + CUDSS_R_32I
@@ -7445,6 +7541,12 @@ struct BatchSolverContext {
         if (matABatch) cudssMatrixDestroy(matABatch);
         if (matBBatch) cudssMatrixDestroy(matBBatch);
         if (matXBatch) cudssMatrixDestroy(matXBatch);
+        if (matRBatch) cudssMatrixDestroy(matRBatch);
+        if (matDeltaBatch) cudssMatrixDestroy(matDeltaBatch);
+        if (matUbR) cudssMatrixDestroy(matUbR);
+        if (matUbDelta) cudssMatrixDestroy(matUbDelta);
+        if (matUbCR) cudssMatrixDestroy(matUbCR);
+        if (matUbCDelta) cudssMatrixDestroy(matUbCDelta);
         if (matBig) cudssMatrixDestroy(matBig);
         if (matBigB) cudssMatrixDestroy(matBigB);
         if (matBigX) cudssMatrixDestroy(matBigX);
@@ -7551,6 +7653,24 @@ static void setupBatchMatricesUniform(BatchSolverContext* ctx) {
         CUDSS_CHECK(cudssMatrixCreateBatchDn(&ctx->matXBatch, nScenarios,
                 ctx->nrowsArr.data(), ctx->ncols1Arr.data(), ctx->ldArr.data(),
                 ctx->dXPtrs.as<void*>(), OLF_CUDSS_BDN_TYPES, CUDSS_LAYOUT_COL_MAJOR));
+        // the refinement residual and correction, same layout as B and X
+        ctx->dR.alloc(static_cast<size_t>(n) * nScenarios * sizeof(double));
+        ctx->dDelta.alloc(static_cast<size_t>(n) * nScenarios * sizeof(double));
+        ctx->dIrScore.alloc(static_cast<size_t>(nScenarios) * sizeof(double));
+        ctx->rPtrs.resize(nScenarios);
+        ctx->deltaPtrs.resize(nScenarios);
+        for (int s = 0; s < nScenarios; s++) {
+            ctx->rPtrs[s] = ctx->dR.as<double>() + (size_t) s * n;
+            ctx->deltaPtrs[s] = ctx->dDelta.as<double>() + (size_t) s * n;
+        }
+        ctx->dRPtrs.upload(ctx->rPtrs.data(), ptrBytes);
+        ctx->dDeltaPtrs.upload(ctx->deltaPtrs.data(), ptrBytes);
+        CUDSS_CHECK(cudssMatrixCreateBatchDn(&ctx->matRBatch, nScenarios,
+                ctx->nrowsArr.data(), ctx->ncols1Arr.data(), ctx->ldArr.data(),
+                ctx->dRPtrs.as<void*>(), OLF_CUDSS_BDN_TYPES, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateBatchDn(&ctx->matDeltaBatch, nScenarios,
+                ctx->nrowsArr.data(), ctx->ncols1Arr.data(), ctx->ldArr.data(),
+                ctx->dDeltaPtrs.as<void*>(), OLF_CUDSS_BDN_TYPES, CUDSS_LAYOUT_COL_MAJOR));
 }
 
 static void setupBatchMatricesBlockDiag(BatchSolverContext* ctx) {
@@ -7602,6 +7722,20 @@ static void setupBatchMatricesUbatch(BatchSolverContext* ctx) {
                 CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
         CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matUbB, n, 1, n, ctx->dB.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
         CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matUbX, n, 1, n, ctx->dDx.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        // adaptive refinement: the residual and the correction, the same single-block dense shape as B and X
+        if (!ctx->dR.p) {
+            ctx->dR.alloc(static_cast<size_t>(n) * ctx->nScenarios * sizeof(double));
+            ctx->dDelta.alloc(static_cast<size_t>(n) * ctx->nScenarios * sizeof(double));
+            // zeroed: a solve covers UBATCH_SIZE = nScenarios lanes while a short last chunk fills nS < nScenarios
+            // of them - the padding lanes' residual must be a clean 0, not whatever the allocation held
+            CUDA_CHECK(cudaMemset(ctx->dR.p, 0, static_cast<size_t>(n) * ctx->nScenarios * sizeof(double)));
+            CUDA_CHECK(cudaMemset(ctx->dDelta.p, 0, static_cast<size_t>(n) * ctx->nScenarios * sizeof(double)));
+        }
+        if (!ctx->dIrScore.p) {
+            ctx->dIrScore.alloc(static_cast<size_t>(ctx->nScenarios) * sizeof(double));
+        }
+        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matUbR, n, 1, n, ctx->dR.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+        CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matUbDelta, n, 1, n, ctx->dDelta.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
     }
 }
 
@@ -7831,7 +7965,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     CUDSS_CHECK(cudssCreate(&ctx->ds.handle));
     CUDSS_CHECK(cudssSetStream(ctx->ds.handle, ctx->stream));
     CUDSS_CHECK(cudssConfigCreate(&ctx->ds.config));
-    int ir = irSteps(ctx->st->nzi > 0);
+    int ir = adaptiveIr() && ctx->st->nzi > 0 ? irBaseSteps() : irSteps(ctx->st->nzi > 0);
     CUDSS_CHECK(cudssConfigSet(ctx->ds.config, CUDSS_CONFIG_IR_N_STEPS, &ir, sizeof(ir)));
     if (mode == 6) {
         applyRobustSingleMatrixConfig(ctx->ds.config);       // its own ordering: never set the ordering twice
@@ -7923,6 +8057,28 @@ static void uploadBatchOverrides(BatchSolverContext* ctx, int lsMode, double max
     } else if (!ctx->dZiOnSlotElem.p) {
         int dummyZi[2] = {-1, -1};
         ctx->dZiOnSlotElem.upload(dummyZi, sizeof(dummyZi));
+    }
+    if (ctx->nzi > 0 && ziMasksEnabled()) {                  // the dense (scenario, element) forms (see dZiOffMask)
+        size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nzi;
+        std::vector<char> off(len, 0), on(len, 0);
+        for (int k = 0; k < nZiOff; k++) {
+            int sl = ziOffSlotElem[2 * k], e = ziOffSlotElem[2 * k + 1];
+            if (sl >= 0 && sl < ctx->nScenarios && e >= 0 && e < ctx->nzi) off[(size_t) sl * ctx->nzi + e] = 1;
+        }
+        for (int k = 0; k < nZiOn; k++) {
+            int sl = ziOnSlotElem[2 * k], e = ziOnSlotElem[2 * k + 1];
+            if (sl >= 0 && sl < ctx->nScenarios && e >= 0 && e < ctx->nzi) on[(size_t) sl * ctx->nzi + e] = 1;
+        }
+        ctx->dZiOffMask.upload(off.data(), len);
+        ctx->dZiOnMask.upload(on.data(), len);
+        if (!ctx->dZiTreeMask.p) {
+            std::vector<char> tree(len, (char) -1);
+            ctx->dZiTreeMask.upload(tree.data(), len);
+        }
+        ctx->hasZiMasks = true;
+        if (std::getenv("OLF_GPU_PHASE_TIME") != nullptr) {
+            std::fprintf(stderr, "ZI_LISTS nzi=%d nScenarios=%d nZiOff=%d nZiOn=%d\n", ctx->nzi, ctx->nScenarios, nZiOff, nZiOn);
+        }
     }
     ctx->nR1Ov = nR1Ov;
     ctx->hR1OvBaseSlotElem.assign(r1OvSlotElem, r1OvSlotElem + (size_t) nR1Ov * 2);
@@ -10278,7 +10434,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr, ctx->nDqMembers);
         if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr, ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
         if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
-        if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx), ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr);
+        if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx), ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr, ctx->hasZiMasks ? ctx->dZiOffMask.as<char>() : nullptr, ctx->hasZiMasks ? ctx->dZiOnMask.as<char>() : nullptr, ctx->hasZiMasks ? ctx->dZiTreeMask.as<char>() : nullptr);
         applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>(),
                     ctx->st->dColIdx.as<int>(), ctx->st->dRelocOwn.p != nullptr ? ctx->st->dRelocOwn.as<int>() : nullptr);
         // OLF_GPU_VALS_SCAN_PREREPAIR: scan/dump the fill BEFORE the zero-diagonal repair rewrites hazard rows
@@ -11053,6 +11209,36 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
         CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
                 ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch));
+        if (adaptiveIr() && ctx->st->nzi > 0 && ctx->dR.p != nullptr) {
+            // adaptive refinement (see adaptiveIr): refine while an active lane's backward residual is above tol
+            static const int irMax = irMaxSteps();
+            static const int irBase = irBaseSteps();
+            static const double tol = irTol();
+            std::vector<double> sc(nS);
+            auto worstRatio = [&]() {
+                residualBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(), ctx->st->dColIdx.as<int>(),
+                        ctx->dVals.as<double>(), ctx->dDx.as<double>(), ctx->dB.as<double>(), ctx->dR.as<double>());
+                irScoreBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dR.as<double>(), ctx->dB.as<double>(), ctx->dActive.as<char>(), ctx->dIrScore.as<double>());
+                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                CUDA_CHECK(cudaMemcpy(sc.data(), ctx->dIrScore.as<double>(), nS * sizeof(double), cudaMemcpyDeviceToHost));
+                gIrChecks++;
+                double worst = 0.0;
+                for (int s2 = 0; s2 < nS; s2++) worst = std::max(worst, sc[s2]);
+                return worst;
+            };
+            double worst = worstRatio();
+            for (int step = irBase; step < irMax && worst > tol; step++) {
+                CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_SOLVE, ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matDeltaBatch, ctx->matRBatch));
+                axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDelta.as<double>(), ctx->dDx.as<double>());
+                gIrExtraSteps++;
+                double next = worstRatio();
+                if (!(next < worst)) {                                // no progress on the worst lane: undo and stop (the
+                    subBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDelta.as<double>(), ctx->dDx.as<double>());   // step is noise)
+                    break;
+                }
+                worst = next;
+            }
+        }
         if (ctx->clampStep) {
             maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dVarType.as<int>(), ctx->dActive.as<char>(), ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>());
             traceStepFactor(ctx, nS, it, active);
@@ -11150,13 +11336,17 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 CUDSS_CHECK(cudssSetStream(ctx->dsC.handle, ctx->stream));
                 CUDSS_CHECK(cudssConfigCreate(&ctx->dsC.config));
                 applyReorderAlg(ctx->dsC.config, ctx->st->nzi > 0);
-                int irC = irSteps(ctx->st->nzi > 0);
+                int irC = adaptiveIr() && ctx->st->nzi > 0 ? irBaseSteps() : irSteps(ctx->st->nzi > 0);
                 CUDSS_CHECK(cudssConfigSet(ctx->dsC.config, CUDSS_CONFIG_IR_N_STEPS, &irC, sizeof(irC)));
                 CUDSS_CHECK(cudssMatrixCreateCsr(&ctx->matUbC, n, n, nnz,
                         ctx->st->dRowPtr.as<int>(), nullptr, ctx->st->dColIdx.as<int>(), ctx->dValsC.as<double>(),
                         OLF_CUDSS_CSR_TYPES, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
                 CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matUbCB, n, 1, n, ctx->dBC.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
                 CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matUbCX, n, 1, n, ctx->dDxC.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+                ctx->dRC.alloc(static_cast<size_t>(n) * ctx->compactCap * sizeof(double));
+                ctx->dDeltaC.alloc(static_cast<size_t>(n) * ctx->compactCap * sizeof(double));
+                CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matUbCR, n, 1, n, ctx->dRC.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
+                CUDSS_CHECK(cudssMatrixCreateDn(&ctx->matUbCDelta, n, 1, n, ctx->dDeltaC.as<double>(), OLF_CUDSS_DN_TYPE, CUDSS_LAYOUT_COL_MAJOR));
             }
             std::vector<int> cmap;
             cmap.reserve(ctx->compactCap);
@@ -11219,10 +11409,70 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 compactData = ctx->dsC.data;
             }
             CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE, ctx->dsC.config, compactData, ctx->matUbC, ctx->matUbCX, ctx->matUbCB));
+            if (adaptiveIr() && ctx->st->nzi > 0 && ctx->dRC.p != nullptr && ctx->dIrScore.p != nullptr && ctx->dIrScore.cap >= static_cast<size_t>(w) * sizeof(double)) {
+                // adaptive refinement on the compacted lanes (all w are real or a duplicate of a real one)
+                static const int irMax = irMaxSteps();
+                static const int irBase = irBaseSteps();
+                static const double tol = irTol();
+                std::vector<double> sc(w);
+                auto worstRatio = [&]() {
+                    residualBatch<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n, w, nnz, ctx->st->dRowPtr.as<int>(), ctx->st->dColIdx.as<int>(),
+                            ctx->dValsC.as<double>(), ctx->dDxC.as<double>(), ctx->dBC.as<double>(), ctx->dRC.as<double>());
+                    irScoreBatch<<<grid(w), BLOCK, 0, ctx->stream>>>(n, w, ctx->dRC.as<double>(), ctx->dBC.as<double>(), nullptr, ctx->dIrScore.as<double>());
+                    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                    CUDA_CHECK(cudaMemcpy(sc.data(), ctx->dIrScore.as<double>(), w * sizeof(double), cudaMemcpyDeviceToHost));
+                    gIrChecks++;
+                    double worst = 0.0;
+                    for (int s2 = 0; s2 < w; s2++) worst = std::max(worst, sc[s2]);
+                    return worst;
+                };
+                double worst = worstRatio();
+                for (int step = irBase; step < irMax && worst > tol; step++) {
+                    CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_SOLVE, ctx->dsC.config, compactData, ctx->matUbC, ctx->matUbCDelta, ctx->matUbCR));
+                    axpy1Batch<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n * w, ctx->dDeltaC.as<double>(), ctx->dDxC.as<double>());
+                    gIrExtraSteps++;
+                    double next = worstRatio();
+                    if (!(next < worst)) {                                // no progress on the worst lane: undo and stop (the
+                        subBatch<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n * w, ctx->dDeltaC.as<double>(), ctx->dDxC.as<double>());   // step is noise)
+                        break;
+                    }
+                    worst = next;
+                }
+            }
             CUDA_CHECK(cudaMemsetAsync(ctx->dDx.p, 0, static_cast<size_t>(n) * nS * sizeof(double), ctx->stream));
             scatterScenarios<<<grid(n * nReal), BLOCK, 0, ctx->stream>>>(n, nReal, ctx->dMapC.as<int>(), ctx->dDxC.as<double>(), ctx->dDx.as<double>());
         } else {
             CUDSS_CHECK(cudssExecute(ctx->ds.handle, ubPhase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB));
+            if (adaptiveIr() && ctx->st->nzi > 0 && ctx->dR.p != nullptr && ctx->matUbR != nullptr && ctx->dIrScore.p != nullptr) {
+                // adaptive refinement on the full-width UBATCH solve (see adaptiveIr)
+                static const int irMax = irMaxSteps();
+                static const int irBase = irBaseSteps();
+                static const double tol = irTol();
+                std::vector<double> sc(nS);
+                auto worstRatio = [&]() {
+                    residualBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(), ctx->st->dColIdx.as<int>(),
+                            ctx->dVals.as<double>(), ctx->dDx.as<double>(), ctx->dB.as<double>(), ctx->dR.as<double>());
+                    irScoreBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dR.as<double>(), ctx->dB.as<double>(), ctx->dActive.as<char>(), ctx->dIrScore.as<double>());
+                    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                    CUDA_CHECK(cudaMemcpy(sc.data(), ctx->dIrScore.as<double>(), nS * sizeof(double), cudaMemcpyDeviceToHost));
+                    gIrChecks++;
+                    double worst = 0.0;
+                    for (int s2 = 0; s2 < nS; s2++) worst = std::max(worst, sc[s2]);
+                    return worst;
+                };
+                double worst = worstRatio();
+                for (int step = irBase; step < irMax && worst > tol; step++) {
+                    CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_SOLVE, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbDelta, ctx->matUbR));
+                    axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDelta.as<double>(), ctx->dDx.as<double>());
+                    gIrExtraSteps++;
+                    double next = worstRatio();
+                    if (!(next < worst)) {                                // no progress on the worst lane: undo and stop (the
+                        subBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDelta.as<double>(), ctx->dDx.as<double>());   // step is noise)
+                        break;
+                    }
+                    worst = next;
+                }
+            }
         }
         // OLF_GPU_DX_DUMP=<path>: the FIRST solve's first Newton step, written out whole — the
         // assembled Jacobian (CSR triplets), the mismatch F it was built at, and the step dx it
@@ -11524,7 +11774,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     // reads the slack row's balance from dQbuf — without the coupler's dummy-P the DS sees a
     // phantom mismatch equal to the through-flow and distributes it FOREVER (measured: +392 MW
     // runaway on the first switch-close scenario until the per-scenario budget rejected it).
-    if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), nullptr, nullptr, nullptr, 0, RelocTables{}, ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr);
+    if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), nullptr, nullptr, nullptr, 0, RelocTables{}, ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr, ctx->hasZiMasks ? ctx->dZiOffMask.as<char>() : nullptr, ctx->hasZiMasks ? ctx->dZiOnMask.as<char>() : nullptr, ctx->hasZiMasks ? ctx->dZiTreeMask.as<char>() : nullptr);
     // Remote-member OWN q (plan-B3): fill each member's own reactive injection into its (suppressed,
     // hence free) qBuf row so the RL kernel evaluates remote entries like local ones.
     if (ctx->nRmq > 0) {
@@ -12215,7 +12465,7 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
         if (ctx->st->ob.ne) fillOpenBranchBatch<<<grid(ctx->st->ob.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, nS, n, nnz, ctx->nElements, ctx->obOffset, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), nullptr, nullptr, nullptr, 0, RelocTables{});
         if (ctx->st->sh.ne) fillShuntBatch<<<grid(ctx->st->sh.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, nS, n, nnz, ctx->nElements, ctx->shOffset, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dDisabled.as<char>(), ctx->dRlActive.as<char>(), ctx->nShOv, ctx->dShOvSlotElem.as<int>(), ctx->dShOvGb.as<double>(), nullptr, nullptr, nullptr, 0, RelocTables{});
         if (ctx->st->nvdl) fillVdlBatch<<<grid(ctx->st->nvdl * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nvdl, nS, n, nnz, ctx->st->dVdlIn.as<double>(), ctx->st->dVdlIdx.as<int>(), ctx->st->dVdlDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>());
-        if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), nullptr, nullptr, nullptr, 0, RelocTables{}, ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr);
+        if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), nullptr, nullptr, nullptr, 0, RelocTables{}, ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr, ctx->hasZiMasks ? ctx->dZiOffMask.as<char>() : nullptr, ctx->hasZiMasks ? ctx->dZiOnMask.as<char>() : nullptr, ctx->hasZiMasks ? ctx->dZiTreeMask.as<char>() : nullptr);
         if (ctx->nRmq > 0) {
             fillRemoteMemberQBatch<<<grid(ctx->nRmq * nS), BLOCK, 0, ctx->stream>>>(ctx->nRmq, nS, n,
                     ctx->nElements, ctx->cbOffset, ctx->obOffset,
@@ -13072,10 +13322,10 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         calls++;
         fprintf(stderr, "JNI_PHASE_TIME calls=%lld marshal=%lld ms solve=%lld ms pack=%lld ms "
                 "| outerPasses=%lld (solving=%lld) newtonIters=%lld activeIterSum=%lld widthIterSum=%lld compactIters=%lld"
-                " | cuDSS analyses main=%lld compaction=%lld\n",
+                " | cuDSS analyses main=%lld compaction=%lld | irChecks=%ld irExtraSolves=%ld\n",
                 calls, marshalNs / 1000000, solveNs / 1000000, packNs / 1000000,
                 gOuterPasses, gSolvePasses, gNewtonIters, gActiveIterSum, gWidthIterSum, gCompactIters,
-                gAnalysesMain, gAnalysesCompact);
+                gAnalysesMain, gAnalysesCompact, gIrChecks, gIrExtraSteps);
     }
     return out;
 }
@@ -13174,7 +13424,7 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
                     ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr, ctx->nDqMembers);
     if (ctx->ndr) fillDistrRhoBatch<<<grid(ctx->ndr * nS), BLOCK, 0, ctx->stream>>>(ctx->ndr, nS, n, nnz, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nDrOv, ctx->nDrOv ? ctx->dDrOvIdx.as<int>() : nullptr, ctx->nDrOv ? ctx->dDrOvC.as<double>() : nullptr, ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
     if (ctx->ndb) fillDistrShuntBBatch<<<grid(ctx->ndb * nS), BLOCK, 0, ctx->stream>>>(ctx->ndb, nS, n, nnz, ctx->st->dDbCol.as<int>(), ctx->st->dDbCoef.as<double>(), ctx->st->dDbDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>());
-    if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx), ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr);
+    if (ctx->nzi) fillZeroImpBatch<<<grid(ctx->nzi * nS), BLOCK, 0, ctx->stream>>>(ctx->nzi, nS, n, nnz, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->nziBase, ctx->nZiOn, ctx->dZiOnSlotElem.as<int>(), ctx->nZiOff, ctx->dZiOffSlotElem.as<int>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx), ctx->nZiTree, ctx->nZiTree ? ctx->dZiTreeSlotElemVal.as<int>() : nullptr, ctx->hasZiMasks ? ctx->dZiOffMask.as<char>() : nullptr, ctx->hasZiMasks ? ctx->dZiOnMask.as<char>() : nullptr, ctx->hasZiMasks ? ctx->dZiTreeMask.as<char>() : nullptr);
     applyRowModeBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->dMode.as<int>(), ctx->st->dRowPtr.as<int>(), ctx->st->dDiagPos.as<int>(), ctx->dX.as<double>(), ctx->dTarget.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dActive.as<char>(), ctx->dRowSlope.as<double>(),
                     ctx->st->dColIdx.as<int>(), ctx->st->dRelocOwn.p != nullptr ? ctx->st->dRelocOwn.as<int>() : nullptr);
     hazRepairValues(ctx, nS, ctx->dVals.as<double>());
@@ -13699,6 +13949,27 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
         jint* p = env->GetIntArrayElements(jSlotElemVal, nullptr);
         ctx->dZiTreeSlotElemVal.upload(p, static_cast<size_t>(len) * sizeof(int));
         env->ReleaseIntArrayElements(jSlotElemVal, p, JNI_ABORT);
+    }
+    // Built whenever the masks are enabled, NOT only once the off/on setter has run: the two setters' order is
+    // the caller's, and gating this one on hasZiMasks dropped every tree override of a chunk whose tree list
+    // arrived first - the extraction-time tree then stood in for OLF's, and a coupler child like LLJ_2 on
+    // network.xiidm lost its ZERO_V coupling in 2,308 scenarios (V 0.787, FAILED as unrealistic).
+    if (ctx->nzi > 0 && ziMasksEnabled()) {                  // the dense form (see dZiTreeMask)
+        ctx->hasZiMasks = true;
+        size_t mlen = static_cast<size_t>(ctx->nScenarios) * ctx->nzi;
+        std::vector<char> tree(mlen, (char) -1);
+        if (len > 0) {
+            jint* p = env->GetIntArrayElements(jSlotElemVal, nullptr);
+            for (int k = 0; k < len / 3; k++) {
+                int sl = p[3 * k], e = p[3 * k + 1];
+                if (sl >= 0 && sl < ctx->nScenarios && e >= 0 && e < ctx->nzi) tree[(size_t) sl * ctx->nzi + e] = (char) (p[3 * k + 2] != 0 ? 1 : 0);
+            }
+            env->ReleaseIntArrayElements(jSlotElemVal, p, JNI_ABORT);
+        }
+        ctx->dZiTreeMask.upload(tree.data(), mlen);
+        if (std::getenv("OLF_GPU_PHASE_TIME") != nullptr) {
+            std::fprintf(stderr, "ZI_LISTS nZiTree=%d\n", len / 3);
+        }
     }
 }
 

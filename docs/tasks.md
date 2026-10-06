@@ -2309,6 +2309,94 @@ other switches), so the exact comparison is run separately against a 1-thread ar
 `save` mode runs the CPU arm ONLY (the GPU wall time comes from a `load` run); the 1-thread arm on this scope
 needs more than the 3 h first budgeted (exit 124 at 10800 s), re-run with 6 h.
 
+### #77 — network.xiidm cold GPU run, where the 207 s go (2026-10-06, injection-scope)
+
+Same scope and arms as the wall-time entry above, instrumented the rte6515 way (`OLF_SA_PROFILE=1
+OLF_GPU_PHASE_TIME=1 OLF_GPU_SA_JFR=<file>`, then a separate run under Nsight Systems, `nsys profile --trace=cuda`
+around the mvn, `nsys stats --report cuda_gpu_kern_sum,cuda_api_sum`). JFR does NOT see time inside the JNI
+solve (the thread is in native code), so its 74 s weighted total IS the Java share; the device share comes from
+the JNI timers. Cold GPU arm 207 s instrumented (198 s plain):
+
+| part | wall | detail |
+|---|---|---|
+| base load flow + setup | 2.4 s | |
+| **precompute** | **166.8 s** | JNI solve **133.4 s** (marshal 3.4, pack 1.3); Java 33 s: `planScenarios` → `distrQWeightOverrides` **18.8 s** (a whole-network `GpuAcDataExtractor.extract` per generator contingency at a DISTR_Q member: `ExtractionColumns.of` 13.3 s, `ziTreeRelocation` 10.9 s), chunk solver host 10 s |
+| per-contingency loop | 28.5 s | `injectState` 14.5 s (**16,105 remap rebuilds** of 24,379: OLF publishes a new sorted-variable list after every restore, the injector rebuilt its permutation on list identity), `updateBusesFromState` 9.7 s (the per-bus array path was DISABLED by the couplers' DUMMY_P/DUMMY_Q variables, so every contingency took the exact walk: `AcSolverUtil.updateNetwork` + `isStateUnrealistic`), violations 5.5 s, restore 4.6 s |
+
+Unlike rte6515 (#61, where single-threaded host code was the bottleneck), **the device solve is 64 % here**. Its
+kernels (126.5 s of the 133 s; 9 chunks of ≤ 2709, 261 outer passes, 443 batched Newton iterations,
+activeIterSum 234,089 scenario-iterations = 9.6 per scenario, widthIterSum 278,144 so ~16 % padded lanes):
+
+| kernel | time | launches | per launch |
+|---|---|---|---|
+| **`fillZeroImpBatch`** | **32.2 s (25 %)** | 704 | 45.7 ms |
+| cuDSS `fwd_batch_ker` | 28.1 s | 660 | 42.6 ms |
+| cuDSS `spmv_ker` | 18.7 s | 1432 | 13.0 ms |
+| cuDSS `bwd_batch_ker` | 17.9 s | 660 | 27.1 ms |
+| cuDSS `factorize_batch_ker` | 16.2 s | 132 | 122.6 ms |
+| `fillClosedBranchBatch` | 5.3 s | 701 | 7.6 ms |
+| everything else | < 2 s each | | |
+
+Two device leads: (D-A) the zero-impedance fill — each thread (element × scenario) ran three LINEAR SCANS over the
+per-scenario (slot, element) lists (switch outages, base-open closures, tree overrides), O(nzi·nS·(lists)) per
+launch; dense per-scenario masks built at upload replace them. (D-B) iterative refinement: 5 forward/backward
+solves per factorization (1 + `OLF_GPU_IR_STEPS`, 4 on a network with couplers) — the fwd/bwd/spmv trio is
+64.7 s, four fifths of it refinement; cuDSS 0.7.1 has no refinement tolerance (`CUDSS_CONFIG_IR_TOL` "not
+supported right now"), so the lever is the step count (IR=0 is known to break parity: DAP worst 1.07 MW; IR=2 under
+test on the exact rte6515 generator kind). Host leads H1 (analytic DISTR_Q reweight instead of a re-extraction),
+H2 (element-wise reference compare of the variable list instead of a rebuild), H3 (let DUMMY_P/DUMMY_Q keep the
+per-bus array path) are coded; measurements below.
+
+**Measured, same scope, GPU arm cold against the same 20-thread CPU arm (417.7 s), statuses identical
+`{CONVERGED=24376, MAX_ITERATION_REACHED=3}` on both arms, 24374/24379 on device; exact parity kept on rte6515's
+generator kind (1389/1389, 85876 violations, DAP worst 2.4e-06) and branch kind (9040/9042, 583458, 7.3e-07),
+fixture suites 226/226:**
+
+| state | GPU cold | device solve | vs CPU-20t |
+|---|---|---|---|
+| start (profiled run) | 207 s | 133.4 s | x2.02 |
+| + H1 + H3 (host) | 177.5 s | 133 s | x2.35 |
+| + D-A zero-impedance masks | 146 s | 102.1 s | x2.86 |
+| + D-B adaptive refinement (default) | **139.7 s** | **91.3 s** | **x2.93** |
+
+- **D-A**: `fillZeroImpBatch` 32 s → the masks replace three per-thread list scans; on this scope the lists are
+  144–1335 switch outages and ~11,000 tree overrides per 2709-scenario chunk, times 2653 elements × 2709 lanes
+  of scanning. `OLF_GPU_ZI_MASKS=0` restores the scans (A/B). A first version gated the tree-override mask on
+  the off/on setter having run first; the setters' order is the caller's, so chunks whose tree list came first
+  lost every override and a coupler child (LLJ_2, zi#22 LMQ) lost its ZERO_V: 2,308 scenarios FAILED as
+  unrealistic (V 0.787) under BOTH refinement policies. Found by switching each change off in turn
+  (`OLF_GPU_BUS_ARRAY=0`, `OLF_GPU_ZI_MASKS=0`, `OLF_GPU_DQ_REWEIGHT=extract`): only the masks switch cleared it.
+- **D-B**: cuDSS 0.7.1 has no refinement tolerance, so the loop is ours: cuDSS runs `OLF_GPU_IR_BASE` (1) step,
+  then per batched iteration the kernels `residualBatch` / `irScoreBatch` measure every lane's
+  ‖b − J·dx‖∞/‖b‖∞ and the batch refines (J·δ = r, dx += δ) while a lane sits above `OLF_GPU_IR_TOL` (1e-12),
+  at most `OLF_GPU_IR_MAX` (4) in all, undoing a step that does not lower the worst ratio. On this scope
+  541 checks, **285 extra solves for 443 batched iterations (0.64 per iteration against 3 fixed)**.
+  `OLF_GPU_IR_STEPS=<n>` keeps a fixed count (A/B: 4 → 146.6 s, same statuses). Fixed 2 was tried first:
+  73 s of solve but two busbar scenarios of rte6515 at a linear-solve failure, which is why the count is
+  decided from the residual. It hooks the UBATCH full-width and compacted solves (the production path) and
+  the batch-matrix API path; the sequential robust retry keeps 4.
+- **H1**: `distrQWeightOverrides` recomputes the touched groups' weights analytically (`reweightedDqWeights`:
+  `qPct_k − (j == k)`, with the coupler side's sign on kind-3 terms — the first version dropped that sign and
+  seven busbar fixtures caught it; `OLF_GPU_DQ_REWEIGHT=check` prints every difference against the extraction,
+  `=extract` restores it). Groups without a candidate table still re-extract (the free role may move).
+- **H3**: `updateBusesFromState` keeps its per-bus array path when the base holds DUMMY_P/DUMMY_Q (equation-only
+  variables the network update never writes); `AcSolverUtil.updateNetwork` 8.45 s → 1.5 s. `OLF_GPU_BUS_ARRAY=0`
+  restores the exact walk.
+- **H2 is NOT in**: an element-wise compare of the sorted variable list against the base order did not reduce
+  the 16,105 remap rebuilds (12,006 with a weaker variant) — OLF's rebuilt list does not hold the same Variable
+  instances in the same order, so the identity test fails even when the set is the base's. `injectState` stays
+  at ~12.7 s; the lever is a cheaper permutation build or an OLF-side fact ("the index is back to the base").
+
+**Where the remaining 139.7 s go** (same instruments): device solve 91.3 s (factorization 16 s, the forward/
+backward solves now ~1.6 per factorization, the closed-branch fill 5.3 s, the zero-impedance fill after the
+masks to be re-profiled), precompute Java ~16 s, per-contingency loop 20 s (inject 12.7, violations 5.4, restore
+4.6), marshal + pack 5 s, base and setup 2.4 s.
+
+The rte6515 busbar scope was used as a coupler-heavy regression gate during this work and showed device failures
+that moved from run to run (BUS-5011, BUS-570_1/2, BUS-4913/6308/900, BUS-6218_3 — a different set each run,
+with every change switched off as well); busbar sections are outside this scope and that is recorded as an
+open question for the busbar track, not gated here.
+
 ### #76 — GEN-1522: a pilot that loses its own generator kept its voltage identity (2026-10-06, DONE)
 
 Asked whether GEN-1522, the 2026-09-22 worst DAP on the rte network (~1e-6 MW then), was fixed. Measured with

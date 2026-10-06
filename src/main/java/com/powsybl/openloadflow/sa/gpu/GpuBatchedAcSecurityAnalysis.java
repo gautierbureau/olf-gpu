@@ -1754,6 +1754,8 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
      * back to {@link #updateNetworkAndCheckRealistic} unless the base system is exactly one BUS_V and one BUS_PHI
      * per bus.
      */
+    private static final boolean BUS_ARRAY_OFF = "0".equals(System.getenv("OLF_GPU_BUS_ARRAY"));
+
     private static boolean updateBusesFromState(double[] state, PrecomputedBatch precomputed, LfNetwork network,
                                                 AcLoadFlowParameters parameters, RunState rs) {
         Map<Variable<AcVariableType>, Integer> baseRows = precomputed.baseVariableRows();
@@ -1771,8 +1773,13 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                     vRow[v.getElementNum()] = e.getValue();
                 } else if (v.getType() == AcVariableType.BUS_PHI && v.getElementNum() < nb) {
                     phiRow[v.getElementNum()] = e.getValue();
-                } else {
-                    usable = false;                          // another kind of variable: keep the exact walk
+                } else if (v.getType() != AcVariableType.DUMMY_P && v.getType() != AcVariableType.DUMMY_Q) {
+                    // another kind the network update WRITES (BRANCH_RHO1/ALPHA1, SHUNT_B, the asymmetrical
+                    // ones): keep the exact walk. A zero-impedance coupler's DUMMY_P/DUMMY_Q is equation-only -
+                    // AcSolverUtil.updateNetwork does nothing with it - so it must not send a network with
+                    // couplers down the slow path: on network.xiidm every one of 24,379 contingencies walked
+                    // all ~46k variable objects twice (updateNetwork + isStateUnrealistic, 9.7 s of a 207 s run).
+                    usable = false;
                 }
             }
             for (int b = 0; b < nb && usable; b++) {
@@ -1782,7 +1789,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             rs.phiRowOfBus = phiRow;
             rs.busRowsUsable = usable;
         }
-        if (!rs.busRowsUsable || state == null) {
+        if (!rs.busRowsUsable || state == null || BUS_ARRAY_OFF) {   // OLF_GPU_BUS_ARRAY=0: the exact walk (A/B)
             return updateNetworkAndCheckRealistic(precomputed.equationSystem(), network, parameters, rs);
         }
         if (rs.realisticBandApplies == null || rs.realisticBandNetwork != network) {

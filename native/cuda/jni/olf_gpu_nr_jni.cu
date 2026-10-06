@@ -262,7 +262,7 @@ constexpr int BLOCK = 64;
 // solves per factorization, 64.7 s of the 126 s of kernels, and 2 fixed steps left two busbar scenarios at a
 // linear-solve failure (ratio ~1e-6 on a coupler-heavy chunk) - the count a lane needs depends on which other
 // matrices share its batch, so it is decided per iteration from the residual itself.
-// OLF_GPU_IR_BASE is 0 since 2026-10-06: cuDSS's own single internal step cost a 16 ms spmv_ker per solve
+// OLF_GPU_IR_BASE was 0 for part of 2026-10-06 (back to 1, see irBaseSteps): cuDSS's own single internal step cost a 16 ms spmv_ker per solve
 // (10.4 s of the 86 s of kernels on network.xiidm) and the launch counts showed it never went on to a second
 // solve - the library checked and stopped - while residualBatch measures the same product in 1.2 ms. With the
 // library step off the loop checks 794 times and refines 538 for 443 iterations: solve 93.2 s -> 69.4 s, cold
@@ -276,9 +276,16 @@ inline bool adaptiveIr() {
     const char* e = std::getenv("OLF_GPU_IR_STEPS");
     return e == nullptr || *e == '\0';
 }
+// BACK TO 1 (2026-10-06, same day): the step's cost was measured on network.xiidm WITHOUT busbar outages, and on
+// the full busbar scope - the structures whose repaired zero diagonals this refinement exists for - turning it off
+// cost most of the device share. Full network.xiidm busbar scope, GPU-only, same code: base without the step
+// 5121 / 5422 of 12918 on device (two runs), 7339 with it before the change; with the parent-row repair, the step on
+// gave 12869 on device and 98 violations off the CPU against 12364-12621 and 196-1274 without. Only systems WITH
+// zero-impedance couplers ever read this (irSteps(false) = 0 otherwise): a coupler-free network is unaffected, but
+// network.xiidm's non-busbar scopes have couplers too and give back that measured speed-up (cold 116 s -> ~140 s).
 inline int irBaseSteps() {
     const char* e = std::getenv("OLF_GPU_IR_BASE");
-    return e != nullptr && *e != '\0' ? std::atoi(e) : 0;
+    return e != nullptr && *e != '\0' ? std::atoi(e) : 1;
 }
 inline int irMaxSteps() {
     const char* e = std::getenv("OLF_GPU_IR_MAX");

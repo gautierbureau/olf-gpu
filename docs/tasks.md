@@ -2347,11 +2347,13 @@ outer loop on the CPU:
 | FreezingHvdcACEmulation | 24,376 (every one) | 24,376 | 24,395 |
 | DistributedSlack | 11,796 | 12,170 | 12,170 |
 
-So the Newton count is OLF's and the device cannot go below it. The lever on the
-Newton side is OLF's own outer-loop sequence (7 reactive-limit re-solves of one iteration per contingency on
-average; a freezing-HVDC re-solve for every contingency), which is a question about OLF's semantics, not the
-device. What reactive-limit chain repeats across 17k contingencies is the next thing to look at (a few buses
-switching one per pass, the same in every contingency, would show in `OLF_RL_TRACE` on two of them).
+So the Newton count is OLF's and the device cannot go below it. OLF's Java is the REFERENCE: its outer-loop
+sequence (7 reactive-limit re-solves of one iteration per contingency on average) and the HVDC freeze are what
+the device reproduces, not levers. The freeze fires exactly once per contingency by design: the SA's
+`startWithFrozenACEmulation` defaults to TRUE (`OpenSecurityAnalysisParameters`, while the LF default is false),
+`AcSecurityAnalysis` turns it on for every contingency load flow, `FreezingHvdcACEmulationOuterloop.initialize`
+freezes each connected AC-emulation HVDC, and its first check unfreezes them and returns UNSTABLE — one forced
+re-solve, about 10 % of the Newton iterations on this network.
 
 **3. Refinement is solve work that does NOT come from the Newton count**:
 
@@ -2363,8 +2365,11 @@ switching one per pass, the same in every contingency, would show in `OLF_RL_TRA
 | analyses | 16 | 1.2 s |
 
 543 refinement solves for 256 Newton linear solves, 2.1 per factorization, 43 % of the cuDSS time. That is the
-lever "fewer triangular solves" really refers to: an accurate first solve needs no refinement, and the
-refinement exists only because of the repaired zero-diagonal rows of the zero-impedance (coupler) branches.
+lever "fewer triangular solves" really refers to — but NOT by removing refinement (measured: off → DAP 1.07 MW;
+fixed 2 → two rte6515 busbar scenarios at a linear-solve failure). The adaptive check already stops when a lane
+is accurate; the lever is a first solve accurate enough that it stops at zero, i.e. the conditioning of the
+repaired zero-diagonal rows of the zero-impedance (coupler) branches (scaling them, the open note above the
+adaptive policy).
 
 **4. CPU replay is small on this scope**: 3 contingencies (FUCZ, FUDC — the two device failures — and DQCQ,
 MAX_ITERATION_REACHED after 31 iterations), **1.5 s** of the run. The robust device retries (5) are inside

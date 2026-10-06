@@ -2371,6 +2371,18 @@ is accurate; the lever is a first solve accurate enough that it stops at zero, i
 repaired zero-diagonal rows of the zero-impedance (coupler) branches (scaling them, the open note above the
 adaptive policy).
 
+**The 1-thread exact run (2026-10-06 evening, rebased on 478d38f's zero-diagonal repair):** CPU 1 thread
+11,337 s (465 ms/contingency), GPU cold 110.7 s (x102, with the phase-time syncs on); statuses identical
+`{CONVERGED=24376, MAX_ITERATION_REACHED=3}`, **violations 6190 = 6190**, distributed active power worst
+**5.56e-05 MW** (11,458 contingencies above 1e-9 MW), 24,374 / 24,379 on device, device failures FUCZ, FUDC.
+Outer-loop histograms, 1-thread CPU against GPU: Newton total 233,865 vs 233,909, first inner solve 26,345 vs
+26,352; bins 3, 4, 7, 8, 11, 12, 13 identical to the contingency AND the iteration (11,348 / 125,289 both
+sides); bins 5, 6, 9, 10 differ by 1–3 contingencies (2608/2607, 1047/1050, 4/5, 7/9) — a handful whose
+outer-loop sequence differs from OLF's while the results still agree; the GPU histogram has no ids yet, so
+naming them needs a per-scenario GPU record. Refinement solves fell 543 → **353** with the rebased repair
+(its zero-diagonal fix on re-coupled loop couplers is exactly the conditioning lever), cuDSS solve-only time
+22.4 → 15.4 s.
+
 **4. CPU replay is small on this scope**: 3 contingencies (FUCZ, FUDC — the two device failures — and DQCQ,
 MAX_ITERATION_REACHED after 31 iterations), **1.5 s** of the run. The robust device retries (5) are inside
 the precompute. On scopes with more plan refusals this number is what to watch.

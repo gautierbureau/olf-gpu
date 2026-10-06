@@ -494,6 +494,7 @@ final class GpuBatchChunkSolver {
                     int[][] dsRowOvBySlot = new int[chunkSize][];
                     List<Integer> rlIslandedList = new ArrayList<>();
                     List<Integer> rlNoUnpinList = new ArrayList<>();   // (scenario, entry): an unpin rejects the scenario
+                    List<Integer> rlGenLostList = new ArrayList<>();   // (scenario, entry): the bus lost every generator
                     // tasks #71: per (scenario, dq member) subgroup labels of a split group, dense, null when none
                     int nDqMembersAll = gpuData.dqMemberBusNum() != null ? gpuData.dqMemberBusNum().length : 0;
                     byte[] dqSubDense = new byte[chunkSize * nDqMembersAll];
@@ -1055,13 +1056,31 @@ final class GpuBatchChunkSolver {
                                         rlNoUnpinList.add(go.rlEntry());
                                     }
                                     if (go.silencesReactiveLimitEntry()) {
-                                        // Nothing left to control voltage at that bus: mask its
-                                        // reactive-limit entry for this scenario, the same channel a
-                                        // contingency-stranded controller uses. A bus the BASE loadflow
-                                        // pinned PQ otherwise keeps a seeded limit type and can switch
-                                        // BACK to PV with its only generator gone.
-                                        rlIslandedList.add(s);
-                                        rlIslandedList.add(go.rlEntry());
+                                        // Nothing left to control voltage at that bus: its reactive-limit
+                                        // entry is seeded FROZEN for this scenario (setBatchRlGenLost) - no
+                                        // pin, no switch back to PV with its only generator gone, and not a
+                                        // live controller to the pilot-self layout. NOT the islanded channel
+                                        // a contingency-stranded controller uses: "islanded" means the bus
+                                        // itself is gone and closes the pilot-self gate (no balance to
+                                        // emit), while this bus is alive and its reactive balance must be
+                                        // emitted - on the carrier, then on its own row once every survivor
+                                        // pins. Measured on rte6515 GEN-1522 (the pilot VL-1522_0 loses its
+                                        // only generator, the survivor VL-1522_1 pins): islanded, the gate
+                                        // suppressed the pilot's q, its row flipped to host it assembled
+                                        // EMPTY and the bus sat at its 1.122 target against OLF's 1.0811,
+                                        // 3.2 kV at VL-1525.
+                                        // Only the PILOT of a pilot-self group (the row flip armed below) needs
+                                        // the frozen channel: a dead MEMBER's balance is already expressed by the
+                                        // inactive-member weights on the survivors' DISTR_Q rows, and frozen it
+                                        // would also be emitted raw on the carrier (deviceGenOutageAtDistrQBus,
+                                        // deviceTwoMemberPilotControllerLosingAController: 0.37 kV).
+                                        if (go.flipsPilotRowWhenAllPinned()) {
+                                            rlGenLostList.add(s);
+                                            rlGenLostList.add(go.rlEntry());
+                                        } else {
+                                            rlIslandedList.add(s);
+                                            rlIslandedList.add(go.rlEntry());
+                                        }
                                     }
                                     if (go.deactivatesDqMember()) {
                                         dqInactList.add(s);
@@ -1643,6 +1662,8 @@ final class GpuBatchChunkSolver {
                             rlIslandedList.isEmpty() ? null : rlIslandedList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchRlNoUnpin(handle,
                             rlNoUnpinList.isEmpty() ? null : rlNoUnpinList.stream().mapToInt(Integer::intValue).toArray());
+                    GpuAcNewtonSolver.setBatchRlGenLost(handle,
+                            rlGenLostList.isEmpty() ? null : rlGenLostList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchDqSubgroups(handle, anyDqSub ? dqSubDense : null,
                             anyDqSub ? GpuBatchQualification.qrMemberStart(gpuData) : null);
                     GpuAcNewtonSolver.setBatchRlLocal(handle,

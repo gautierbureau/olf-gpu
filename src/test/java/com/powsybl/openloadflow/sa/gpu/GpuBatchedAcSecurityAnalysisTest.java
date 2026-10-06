@@ -1416,6 +1416,73 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpuNoEngage(network, ctgs, 1e-11, lfp);
     }
 
+    /** The SINGLE-survivor variant of the shape above, with the survivor driven past its reactive limit:
+     *  g1 and g2 both regulate b1 (the pilot is one of its own controllers), g1 is lost, and g2 — capped at
+     *  30 MVar against b1's 60 MVar load — PINS. OLF then drops b1's BUS_TARGET_V and solves its BUS_TARGET_Q
+     *  (the dead bus's own balance). The device arms the outaged-pilot row flip for exactly this
+     *  (GenOutage.flipsPilotRowWhenAllPinned: mode 4, the own-Q balance the member alternate dest routes
+     *  the pilot's q to), but the pilot-self kernel's "control lost" layout ran first and put the row in
+     *  mode 1 — an EMPTY row for a pilot-that-is-its-own-controller — so the voltage stayed exactly at the
+     *  identity's value. Measured on rte6515 GEN-1522: VL-1522_0 at 1.122 (its target) against OLF's 1.0811,
+     *  3.2 kV at VL-1525 and 1.98e-2 MW of distributed power, with identical switch sets on both arms.
+     *  GPU SA == CPU SA at 1e-12, and the outage must BATCH. */
+    @org.junit.jupiter.api.Test
+    void devicePilotLosingItsOwnGeneratorWithPinningSurvivorMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = pilotIsControllerSingleSurvivorNetwork();
+        List<Contingency> ctgs = List.of(
+                new Contingency("g1", new com.powsybl.contingency.GeneratorContingency("g1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0_0"));
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the outage must batch (or the test proves nothing)");
+    }
+
+    private static Network pilotIsControllerSingleSurvivorNetwork() {
+        // A 400 kV mesh: the pilot bus vlp carries its own generator g1 (regulating vlp) and reactive load; g2 at
+        // vlc regulates vlp REMOTELY, capped at 15 MVar; gs at vl0 is the slack. The reactive keys follow the
+        // ranges, so g1 (+-300) carries the base need and g2 stays inside its ceiling; with g1 lost, g2 alone
+        // cannot hold vlp and pins.
+        Network network = Network.create("pilot-self-single-survivor", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vlp", "vlc", "vld")) {
+            com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(vl).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            v.getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(400).setTargetV(400).setVoltageRegulatorOn(true).add();
+        // a lost PARTICIPATING generator with a participating slack is a CPU shape (PARTICIPATING_SLACK):
+        // keep the slack out of the distribution so the loss pre-distributes over g2 on the device
+        network.getGenerator("gs").newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                .withParticipate(false).add();
+        network.getVoltageLevel("vl0").newLoad().setId("ld0").setBus("vl0_b").setConnectableBus("vl0_b").setP0(300).setQ0(60).add();
+        network.getVoltageLevel("vlp").newGenerator().setId("g1").setBus("vlp_b").setConnectableBus("vlp_b")
+                .setMinP(0).setMaxP(500).setTargetP(100).setTargetV(401).setVoltageRegulatorOn(true).add();
+        network.getGenerator("g1").newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(300).add();
+        network.getVoltageLevel("vlp").newLoad().setId("ldp").setBus("vlp_b").setConnectableBus("vlp_b").setP0(80).setQ0(40).add();
+        network.getVoltageLevel("vlc").newGenerator().setId("g2").setBus("vlc_b").setConnectableBus("vlc_b")
+                .setMinP(0).setMaxP(500).setTargetP(100).setTargetV(401).setVoltageRegulatorOn(true)
+                .setRegulatingTerminal(network.getGenerator("g1").getTerminal()).add();
+        network.getGenerator("g2").newMinMaxReactiveLimits().setMinQ(-15).setMaxQ(15).add();
+        network.getVoltageLevel("vld").newLoad().setId("ldd").setBus("vld_b").setConnectableBus("vld_b").setP0(200).setQ0(50).add();
+        java.util.function.BiConsumer<String, String[]> line = (id, ends) -> network.newLine().setId(id)
+                .setVoltageLevel1(ends[0]).setBus1(ends[0] + "_b").setConnectableBus1(ends[0] + "_b")
+                .setVoltageLevel2(ends[1]).setBus2(ends[1] + "_b").setConnectableBus2(ends[1] + "_b")
+                .setR(0.5).setX(12).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        line.accept("l0p", new String[] {"vl0", "vlp"});
+        line.accept("lpc", new String[] {"vlp", "vlc"});
+        line.accept("l0c", new String[] {"vl0", "vlc"});
+        line.accept("lpd", new String[] {"vlp", "vld"});
+        line.accept("l0d", new String[] {"vl0", "vld"});
+        return network;
+    }
+
     private static Network pilotIsControllerNetwork() {
         Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory
                 .createWithGeneratorRemoteControl();

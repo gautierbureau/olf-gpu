@@ -3339,7 +3339,22 @@ SharedStructure* buildStructure(int n,
             // out of the set left them unrepaired: network.xiidm's 1000-section busbar window, ALWQ re-coupled
             // when its loop's tree coupler ALVS opened - 189 linear-solve rejects. Only a relocated edge (its
             // ZERO rows already sit on a child's own rows, which have a diagonal) is still skipped here.
-            if (ziDeadSide(z) != 0) continue;                // stub / tree relocation: rows already diagonal
+            if (ziDeadSide(z) != 0) {
+                // A RELOCATED edge (stub or tree): its own rows already have a diagonal - the child's balance on the
+                // dummy rows, the ZERO rows on the child's own V / PHI rows. But the PARENT end still carries this
+                // edge's dummies in its balance, and a section whose every coupler is relocated has nothing BUT
+                // dummies there: once a scenario changes those (an outage around it), its home P / Q rows sit with
+                // no diagonal and no registered donor. Register them, borrowing this edge's ZERO rows, which carry
+                // the parent's phi / v columns (network.xiidm's full busbar scope: IBAJ_0, 1375 scenario solves).
+                int child = ziDeadSide(z);
+                int parPhi = child == 1 ? z[9] : z[8];
+                int parV = child == 1 ? z[7] : z[6];
+                int zPhi = rowMap[ziZeroPhiRow(z)];
+                int zV = rowMap[ziZeroVRow(z)];
+                if (parPhi >= 0) addDonor(slotOf(rowMap[parPhi], 1), zPhi);
+                if (parV >= 0) addDonor(slotOf(rowMap[parV], -1), zV);
+                continue;
+            }
             // ZERO_V sits on the DUMMY_P row (its diagonal column is dummy-P, carried by the endpoint
             // P rows); ZERO_PHI on the DUMMY_Q row (dummy-Q, carried by the endpoint Q rows). The first
             // cut had these two swapped, so no dummy row ever found a donor: invisible at 28 couplers
@@ -3480,6 +3495,27 @@ SharedStructure* buildStructure(int n,
         st->dHazSign.upload(hazSigns.data(), hazSigns.size() * sizeof(char));
         if (std::getenv("OLF_GPU_TRACE") != nullptr) {
             std::fprintf(stderr, "zero-diagonal repair: %d hazard rows, %zu donor candidates\n", st->nHaz, donor.size());
+        }
+        // OLF_GPU_HAZ_ROWS=<row>[,<row>]: is this row in the repair set, and which rows may it borrow?
+        // (physical rows, the space VALS_TINY reports in)
+        if (const char* hr = std::getenv("OLF_GPU_HAZ_ROWS")) {
+            std::string list(hr);
+            size_t pos = 0;
+            while (pos <= list.size()) {
+                size_t comma = list.find(',', pos);
+                int want = std::atoi(list.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos).c_str());
+                auto it = hazSlot.find(want);
+                if (it == hazSlot.end()) {
+                    std::fprintf(stderr, "HAZ_ROW row=%d NOT REGISTERED\n", want);
+                } else {
+                    int i = it->second;
+                    std::fprintf(stderr, "HAZ_ROW row=%d slot=%d sign=%d donors=", want, i, (int) hazSigns[i]);
+                    for (int d : hazDonors[i]) std::fprintf(stderr, "%d ", d);
+                    std::fprintf(stderr, "\n");
+                }
+                if (comma == std::string::npos) break;
+                pos = comma + 1;
+            }
         }
     }
     st->dRowPtr.upload(st->rowPtr.data(), (n + 1) * sizeof(int));

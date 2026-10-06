@@ -2397,6 +2397,54 @@ that moved from run to run (BUS-5011, BUS-570_1/2, BUS-4913/6308/900, BUS-6218_3
 with every change switched off as well); busbar sections are outside this scope and that is recorded as an
 open question for the busbar track, not gated here.
 
+**Second profile (2026-10-06, after D-A/D-B/H1/H3, `nsys stats` re-exported with `--force-export=true` — the
+first attempt failed on a stale `.sqlite` beside the recording):** 86.3 s of kernels for the 91 s solve:
+
+| kernel | time | launches | per launch |
+|---|---|---|---|
+| cuDSS `fwd_batch_ker` | 26.6 s (31 %) | 634 | 41.9 ms |
+| cuDSS `bwd_batch_ker` | 16.9 s | 634 | 26.7 ms |
+| cuDSS `factorize_batch_ker` | 16.1 s | 132 | 121.9 ms |
+| cuDSS `spmv_ker` | 10.4 s | 647 | 16.1 ms |
+| `fillClosedBranchBatch` | 5.3 s | 701 | 7.6 ms |
+| `irScoreBatch` + `residualBatch` | 2.1 s | 545 + 545 | 2.7 + 1.2 ms |
+| `fillZeroImpBatch` | 1.0 s (was 32.2) | 704 | 1.4 ms |
+| everything else | < 1 s each | | |
+
+The masks took the zero-impedance fill out of the picture (32.2 → 1.0 s). What is left is cuDSS: the batched
+triangular solves are HALF the kernel time at 69 ms per forward+backward pair, 57 % of a factorization — and
+`spmv_ker` is cuDSS's OWN residual for its one internal refinement step (`OLF_GPU_IR_BASE` = 1), 16 ms per
+solve where our `residualBatch` does the same product in 1.2 ms (the 647 ≈ 634 launch counts say that step
+never went on to a second solve: the library checked and stopped).
+
+- **D-C, cuDSS's internal refinement OFF (`OLF_GPU_IR_BASE=0`), the adaptive loop alone**: solve 93.2 s →
+  **69.4 s**, GPU cold 139.7 s → **116.2 s (x3.60 vs CPU-20t)**, identical statuses, identical Newton
+  trajectory counts (443 batched iterations, activeIterSum 234,089), the same two device failures as the
+  reference (FUCZ, FUDC) and the same 20-thread-arm DAP mismatch (1.93 MW, retained switches). The loop now
+  checks 794 times and refines 538 (1.2 per iteration): more of our cheap checks and solves, none of the
+  library's expensive check. Parity gates (rte6515 generator and branch kinds exact) below.
+- **H2 exact hint, measured and REVERTED**: a caller-side proof that the scenario disabled nothing carrying a
+  variable (no bus, no branch with RHO1/ALPHA1, no SHUNT_B shunt, no HVDC) plus a size match let the injector
+  keep the identity permutation without a rebuild — rebuild count unchanged at 12,006 and `injectState`
+  14.3 s. So those 12,006 rebuilds are scenarios whose variable COUNT changes (a bus loses its variables), not
+  OLF republishing an unchanged list; and the rebuild is already array-keyed (`baseRowKeyed`), so the 14 s is
+  the `setValuesOnly` + per-rebuild allocation, not hash lookups. Not pursued further this round.
+- `OLF_GPU_SOLVE_ALG` (0.8.0: default|general) and `OLF_GPU_FACT_ALG` (default|multiblock|general) reach every
+  cuDSS config this file builds, for the sweep below.
+- **D-C is the default** (`OLF_GPU_IR_BASE` 0; 1 restores the library step). Gates: rte6515 generator kind
+  1389/1389, 85,876 violations diff 0, DAP worst 1.04e-06 MW; branch kind 9040/9042, 583,458 diff 0, 7.3e-07 MW;
+  the fixture suites 226/226 but for the in-suite flake below.
+- **cuDSS algorithm sweep, no gain** (network scope, D-C on, cold): solve-phase `general` 69.6 s solve /
+  119.3 s cold; factorization `multiblock` 72.5 s / 118.5 s (it changes the LU probe: 10 chunks of ≤ 2438,
+  479 iterations); factorization `general` 70.3 s / 118.8 s; the defaults 69.4 s / 116.2 s. Defaults kept.
+
+**Where the 116 s go now**: device solve 69 s (forward/backward solves ~45 s at ~1.2 extra solves per
+iteration, factorization 16 s, closed-branch fill 5 s), precompute Java ~16 s, per-contingency loop 20 s,
+marshal + pack 5 s, base and setup 2 s. The next device lever is the triangular-solve pair itself (69 ms per
+batched pair, 57 % of a factorization — a cuDSS property, not ours), i.e. fewer solves per iteration: a
+looser-but-exact refinement decision (the check is 4 ms, a refinement 69 ms) or an initial solve the library
+gets right more often (scaling the repaired zero-diagonal rows, the open lever noted above the adaptive policy).
+
 ### #76 — GEN-1522: a pilot that loses its own generator kept its voltage identity (2026-10-06, DONE)
 
 Asked whether GEN-1522, the 2026-09-22 worst DAP on the rte network (~1e-6 MW then), was fixed. Measured with

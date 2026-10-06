@@ -232,6 +232,11 @@ constexpr int BLOCK = 64;
 // solves per factorization, 64.7 s of the 126 s of kernels, and 2 fixed steps left two busbar scenarios at a
 // linear-solve failure (ratio ~1e-6 on a coupler-heavy chunk) - the count a lane needs depends on which other
 // matrices share its batch, so it is decided per iteration from the residual itself.
+// OLF_GPU_IR_BASE is 0 since 2026-10-06: cuDSS's own single internal step cost a 16 ms spmv_ker per solve
+// (10.4 s of the 86 s of kernels on network.xiidm) and the launch counts showed it never went on to a second
+// solve - the library checked and stopped - while residualBatch measures the same product in 1.2 ms. With the
+// library step off the loop checks 794 times and refines 538 for 443 iterations: solve 93.2 s -> 69.4 s, cold
+// 139.7 s -> 116.2 s, identical statuses and Newton counts, rte6515 generator/branch kinds exact.
 // OLF_GPU_ZI_MASKS=0: the fill kernel's per-thread list scans instead of the dense per-scenario masks (A/B)
 inline bool ziMasksEnabled() {
     static const bool off = std::getenv("OLF_GPU_ZI_MASKS") != nullptr && std::string(std::getenv("OLF_GPU_ZI_MASKS")) == "0";
@@ -243,7 +248,7 @@ inline bool adaptiveIr() {
 }
 inline int irBaseSteps() {
     const char* e = std::getenv("OLF_GPU_IR_BASE");
-    return e != nullptr && *e != '\0' ? std::atoi(e) : 1;
+    return e != nullptr && *e != '\0' ? std::atoi(e) : 0;
 }
 inline int irMaxSteps() {
     const char* e = std::getenv("OLF_GPU_IR_MAX");
@@ -440,7 +445,65 @@ inline void applyRobustSingleMatrixConfig(cudssConfig_t config) {
 // AMD is kept where it is safe and was measured to pay — the 2026-07-16 sweep won on
 // case9241pegase (LU_NNZ 260076 vs 304772, warm SA -11%), a network with no retained switches and
 // therefore no zero-impedance branch, so it never exercised a zero diagonal.
+// OLF_GPU_SOLVE_ALG / OLF_GPU_FACT_ALG: cuDSS's solve- and factorization-phase algorithm selectors,
+// reached from EVERY config this file builds (batch, compaction, robust single-matrix, adjoint). A/B knobs
+// for the 2026-10-06 network.xiidm profile, where the batched triangular solves (fwd 26.6 s + bwd 16.9 s)
+// were half the kernel time. 0.8.0 names them (solve: default|general; factorization:
+// default|multiblock|general); 0.7 only has the ordinals (default|1|2|3|4|5). Unset = library default.
+inline void applyAlgOverrides(cudssConfig_t config) {
+    const char* s = std::getenv("OLF_GPU_SOLVE_ALG");
+    const char* f = std::getenv("OLF_GPU_FACT_ALG");
+#if CUDSS_VERSION >= 800
+    if (s != nullptr && *s != '\0') {
+        std::string want(s);
+        cudssSolveAlg_t alg;
+        if (want == "default") {
+            alg = CUDSS_SOLVE_ALG_DEFAULT;
+        } else if (want == "general") {
+            alg = CUDSS_SOLVE_ALG_GENERAL;
+        } else {
+            throw std::runtime_error("OLF_GPU_SOLVE_ALG: unknown value '" + want + "' (default|general)");
+        }
+        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_SOLVE_ALG, &alg, sizeof(alg)));
+    }
+    if (f != nullptr && *f != '\0') {
+        std::string want(f);
+        cudssFactorizationAlg_t alg;
+        if (want == "default") {
+            alg = CUDSS_FACTORIZATION_ALG_DEFAULT;
+        } else if (want == "multiblock") {
+            alg = CUDSS_FACTORIZATION_ALG_MULTIBLOCK;
+        } else if (want == "general") {
+            alg = CUDSS_FACTORIZATION_ALG_GENERAL;
+        } else {
+            throw std::runtime_error("OLF_GPU_FACT_ALG: unknown value '" + want + "' (default|multiblock|general)");
+        }
+        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_FACTORIZATION_ALG, &alg, sizeof(alg)));
+    }
+#else
+    auto parse = [](const char* name, const char* value) {
+        std::string want(value);
+        if (want == "default") {
+            return CUDSS_ALG_DEFAULT;
+        }
+        if (want.size() == 1 && want[0] >= '1' && want[0] <= '5') {
+            return static_cast<cudssAlgType_t>(CUDSS_ALG_1 + (want[0] - '1'));
+        }
+        throw std::runtime_error(std::string(name) + ": unknown value '" + want + "' (default|1|2|3|4|5)");
+    };
+    if (s != nullptr && *s != '\0') {
+        cudssAlgType_t alg = parse("OLF_GPU_SOLVE_ALG", s);
+        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_SOLVE_ALG, &alg, sizeof(alg)));
+    }
+    if (f != nullptr && *f != '\0') {
+        cudssAlgType_t alg = parse("OLF_GPU_FACT_ALG", f);
+        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_FACTORIZATION_ALG, &alg, sizeof(alg)));
+    }
+#endif
+}
+
 inline void applyReorderAlg(cudssConfig_t config, bool hasZeroImpedance) {
+    applyAlgOverrides(config);
     const char* e = std::getenv("OLF_GPU_REORDER_ALG");
     if (e == nullptr || *e == '\0') {
 #if CUDSS_VERSION >= 800

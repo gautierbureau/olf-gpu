@@ -373,6 +373,11 @@ final class GpuBatchPrecomputer {
             }
             LOGGER.info("GPU batched SA: precomputed {} of {} branch (N-1..N-k) contingencies on the device",
                     states.size(), batch.size());
+            // ...and on stderr, unconditionally: the device's share is decided HERE, before the CPU replays the
+            // contingencies it did not solve. On a large scope that replay is the long tail (network.xiidm's full
+            // busbar scope: about two hours on one thread), and the engagement number should not wait for it.
+            System.err.println("GPU_PRECOMPUTED " + states.size() + " / " + batch.size() + " batched scenarios on device"
+                    + " census=" + GpuBatchScopeCensus.snapshot());
 
             return new PrecomputedBatch(states, islandedBuses, exhausted, baseVariableRows, es, screenData, screenMapper,
                     preDistributed, distributed);

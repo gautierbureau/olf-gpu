@@ -3167,7 +3167,13 @@ SharedStructure* buildStructure(int n,
         };
         for (int e = 0; e < nzi; e++) {
             const int* z = ziIdx + static_cast<size_t>(e) * 11;
-            if (!ziSpan(z) || ziDeadSide(z) != 0) continue;  // loop edge: identity dummies; stub: relocated
+            // A LOOP edge (out of the base tree) is registered too: its dummies are identities in the base, but a
+            // scenario whose contingency re-elects OLF's tree RE-COUPLES it (GpuBatchChunkSolver), and its ZERO_V /
+            // ZERO_PHI then sit on those dummy rows with a zero diagonal exactly like a tree edge's. Leaving them
+            // out of the set left them unrepaired: network.xiidm's 1000-section busbar window, ALWQ re-coupled
+            // when its loop's tree coupler ALVS opened - 189 linear-solve rejects. Only a relocated edge (its
+            // ZERO rows already sit on a child's own rows, which have a diagonal) is still skipped here.
+            if (ziDeadSide(z) != 0) continue;                // stub / tree relocation: rows already diagonal
             // ZERO_V sits on the DUMMY_P row (its diagonal column is dummy-P, carried by the endpoint
             // P rows); ZERO_PHI on the DUMMY_Q row (dummy-Q, carried by the endpoint Q rows). The first
             // cut had these two swapped, so no dummy row ever found a donor: invisible at 28 couplers
@@ -3181,12 +3187,25 @@ SharedStructure* buildStructure(int n,
             int qbRow = z[3] >= 0 ? z[3] : z[7];
             int qa = qaRow >= 0 ? rowMap[qaRow] : -1;
             int qb = qbRow >= 0 ? rowMap[qbRow] : -1;
+            // An endpoint that is a RELOCATED child has its balance on its parent coupler's dummy rows (pa / qa
+            // above), but a scenario that opens that parent moves the balance HOME, onto the child's own PHI / V
+            // rows - and for a section whose only branches are couplers that home row has no diagonal. Register
+            // the home rows as well (the same row as pa / qa for a bus that was never relocated): they borrow this
+            // coupler's ZERO rows, and they are donors for its dummy rows (ALPJ_5 and ALWQ, the mirrored pair).
+            int phA = z[8] >= 0 ? rowMap[z[8]] : -1;
+            int phB = z[9] >= 0 ? rowMap[z[9]] : -1;
+            int vA = z[6] >= 0 ? rowMap[z[6]] : -1;
+            int vB = z[7] >= 0 ? rowMap[z[7]] : -1;
             int sP = slotOf(dP, -1);
             int sQ = slotOf(dQ, -1);
             addDonor(sP, pa);
             addDonor(sP, pb);
             addDonor(sQ, qa);
             addDonor(sQ, qb);
+            addDonor(sP, phA);
+            addDonor(sP, phB);
+            addDonor(sQ, vA);
+            addDonor(sQ, vB);
             for (int side = 0; side < 2; side++) {           // endpoint Q riding a relocation group
                 int alt = ziQAlt[e * 2 + side];
                 if (alt <= -2 && !st->hQrPtr.empty()) {
@@ -3203,6 +3222,10 @@ SharedStructure* buildStructure(int n,
             if (pb >= 0) addDonor(slotOf(pb, 1), dQ);
             if (qa >= 0) addDonor(slotOf(qa, -1), dP);      // v_a is carried by ZERO_V
             if (qb >= 0) addDonor(slotOf(qb, -1), dP);
+            if (phA >= 0 && phA != pa) addDonor(slotOf(phA, 1), dQ);
+            if (phB >= 0 && phB != pb) addDonor(slotOf(phB, 1), dQ);
+            if (vA >= 0 && vA != qa) addDonor(slotOf(vA, -1), dP);
+            if (vB >= 0 && vB != qb) addDonor(slotOf(vB, -1), dP);
         }
         if (!hazRows.empty()) {
             // DONOR ORDER decides LU stability without pivoting. The kernel takes the FIRST candidate
@@ -13025,9 +13048,19 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
     int n = ctx->n;
     int nS = ctx->nScenarios;
     jclass doubleArrayClass = env->FindClass("[D");
+    // A null from either allocation means the Java HEAP is exhausted and an OutOfMemoryError is pending: return
+    // and let it surface in Java. Writing into the null row instead was a SIGSEGV in JNIHandles::resolve that
+    // killed the JVM - network.xiidm's full busbar scope, the robust retry packing its results on top of the
+    // ~14000 precomputed states.
     jobjectArray out = env->NewObjectArray(nS, doubleArrayClass, nullptr);
+    if (out == nullptr) {
+        return nullptr;
+    }
     for (int s = 0; s < nS; s++) {
         jdoubleArray row = env->NewDoubleArray(n + 3);
+        if (row == nullptr) {
+            return nullptr;
+        }
         env->SetDoubleArrayRegion(row, 0, n, res.x.data() + (size_t) s * n);
         double tail[3] = {static_cast<double>(res.iters[s]), res.norm[s], static_cast<double>(res.status[s])};
         env->SetDoubleArrayRegion(row, n, 3, tail);

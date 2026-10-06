@@ -1056,7 +1056,7 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                 boolean hvdcLimits = driverLoop("AcHvdcAcEmulationLimits") != null;
                 boolean hvdcFreeze = driverLoop("FreezingHvdcACEmulation") != null;
                 if (hvdcLimits || hvdcFreeze) {
-                    hvdcCtls = GpuBatchHvdcAcEmulation.buildControllers(network, equationSystem, nElements);
+                    hvdcCtls = GpuBatchHvdcAcEmulation.buildControllers(network, equationSystem, nElements, cachedData);
                 }
                 if (hvdcCtls != null && !hvdcCtls.isEmpty()) {
                     int nh = hvdcCtls.size();

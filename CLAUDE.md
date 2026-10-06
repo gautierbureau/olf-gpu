@@ -144,7 +144,7 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
   validation allowlists the four `ac_{p,q}_array_closed_{1,2}` evaluators + per-element
   scalar terms. GPU iterates to 1e-8 pu infnorm; final status judged by the CONFIGURED
   stopping criteria CPU-side (so LoadFlow states differ from the CPU run only within
-  the criteria's slack, ~1e-5; no state-vector scaling / line search on device).
+  the criteria's slack, ~1e-5). The batched SA applies OLF's MAX_VOLTAGE_CHANGE step clamp per scenario and OLF's exact ‖F‖₂ stopping test when `convEpsPerEq` is passed; cuDSS solves get 4 refinement steps on networks with zero-impedance branches (`OLF_GPU_IR_STEPS` overrides).
 - Tests: `GpuLoadFlowTest` (rung 3: plain LoadFlow.run GPU vs CPU per family network),
   `GpuFullNewtonTest` (rung 2: one per family network; reference = OLF's own
   `JacobianMatrix` Newton on the SAME equation system — any missed/duplicated term makes

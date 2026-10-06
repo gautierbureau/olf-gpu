@@ -307,6 +307,9 @@ final class GpuBatchPrecomputer {
                             net, baseState, batch, es, target, deviceSolverParameters(context),
                             distributedSlack, reactiveLimits,
                             reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config);
+            results = retryRejectedOnDevice(results, batch, net, baseState, es, target, context,
+                    distributedSlack, reactiveLimits, reactiveLimitTol, slackDistTol, convEpsPerEq,
+                    reportNode, config);
             Map<String, double[]> states = new HashMap<>();
             Map<String, int[]> islandedBuses = new HashMap<>();
             java.util.Set<String> exhausted = new java.util.HashSet<>();
@@ -315,7 +318,9 @@ final class GpuBatchPrecomputer {
             for (BatchScenarioResult r : results) {
                 if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                     System.err.println("QUALIFY_TRACE result " + r.contingencyId() + " status=" + r.convergenceStatus()
-                            + " iters=" + r.iterations() + " norm=" + r.finalMismatch());
+                            + " iters=" + r.iterations() + " norm=" + r.finalMismatch()
+                            + (GpuBatchScopeCensus.planRefusedIds().contains(r.contingencyId())
+                                    ? " (never batched: refused at plan time)" : ""));
                 }
                 if (r.hasConverged()) {
                     states.put(r.contingencyId(), r.state());
@@ -398,6 +403,132 @@ final class GpuBatchPrecomputer {
      *  null-guard, named): the FIRST null wins, and an all-empty-but-non-null compose means the
      *  contingency touches nothing the device models. */
     @SuppressWarnings("java:S107")
+    /**
+     * SECOND DEVICE PASS over the scenarios the uniform batch could not solve, in the ROBUST
+     * single-matrix mode, before any CPU fallback.
+     *
+     * <p>Why this exists: the dominant non-batching reason on rte6515's full busbar scope is the
+     * kernel's {@code max-iter-bad-solve} — a scenario spends its whole iteration budget on Newton
+     * steps the UNPIVOTED batch factorization got wrong, so the device refuses to call the result
+     * OLF's answer and rejects it. Measured 2026-10-01: 108 of the 117 non-batched contingencies,
+     * and two thirds of those rejects sit within ONE DECADE of the acceptance gate
+     * ({@code lastSolveRatio} 1e-2..1e-1 against a 1e-2 threshold), with no NaN/Inf — inaccurate
+     * solves, not divergences. The remedy already exists and is proven on the BASE load flow, which
+     * falls into mode 6 automatically after a linear-solve reject ({@code GpuNewtonRaphson}); a chunk
+     * scenario simply had no route to it. Mode 6 is a per-scenario loop with matching and global
+     * column pivoting, which is what rte6515's 366 retained couplers need to factor at all.
+     *
+     * <p>Only scenarios that would otherwise LEAVE the device are retried, so the pass cannot change
+     * an answer the device already gave: a CONVERGED result is kept, and so is a
+     * {@code STATUS_MAX_ITERATION} one, which IS OLF's answer (MAX_ITERATION_REACHED, no network
+     * result) rather than a reject. A retried scenario that still fails falls back to the CPU exactly
+     * as before.
+     *
+     * <p><b>DEFAULT ON since 2026-10-02, and what it actually buys:</b> mode 6 turns 39 of the 113
+     * from a bad solve into {@code STATUS_MAX_ITERATION} with a SOUND last solve
+     * ({@code GPU_ROBUST_RETRY attempted=113 recovered=39 statuses={-2=74, 1=39}}), taking CPU
+     * replays from 113 to 74. None of them CONVERGE — but that is the right answer: OLF does not
+     * converge them either. On the full busbar scope OLF's own statuses are
+     * {@code {CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}}, and with this pass on, BOTH arms
+     * report exactly that, with violations still diff 0 and the worst DAP unchanged.
+     *
+     * <p>It was first dismissed as recovering nothing, which was a measurement error worth recording:
+     * it was judged by COVERAGE (6550 / 6667, unmoved), and coverage counts precomputed device
+     * STATES — a {@code MAX_ITERATION_REACHED} result carries no state, so coverage CANNOT move for
+     * these. The metric is how many contingencies leave the device, and the guard against claiming
+     * {@code MAX_ITERATION} where OLF converges is the harness's STATUS-COUNT EQUALITY, which a
+     * GPU-only run never checks.
+     *
+     * <p>Cost, NOT yet measured: switching mode evicts the single-entry context cache, so the pass
+     * pays one cuDSS analysis plus a solve over the rejected scenarios on every run.
+     * {@code -Dolf.gpu.sa.robustRetry=false} disables it; {@code
+     * -Dolf.gpu.sa.robustRetryAcceptMaxIter=false} keeps the pass but accepts only CONVERGED.
+     */
+    private static List<BatchScenarioResult> retryRejectedOnDevice(
+            List<BatchScenarioResult> results, List<BatchContingency> batch, LfNetwork net,
+            double[] baseState, EquationSystem<AcVariableType, AcEquationType> es,
+            com.powsybl.openloadflow.equations.TargetVector<AcVariableType, AcEquationType> target,
+            AcLoadFlowContext context,
+            boolean distributedSlack, boolean reactiveLimits, double reactiveLimitTol,
+            double slackDistTol, double convEpsPerEq, ReportNode reportNode, BatchConfig config) {
+        if (!Boolean.parseBoolean(System.getProperty("olf.gpu.sa.robustRetry", "true"))
+                || config.robustSolveMode()) {
+            return results;
+        }
+        java.util.Set<String> rejected = new java.util.HashSet<>();
+        for (BatchScenarioResult r : results) {
+            if (r.needsCpuFallback()) {
+                rejected.add(r.contingencyId());
+            }
+        }
+        if (rejected.isEmpty()) {
+            return results;
+        }
+        List<BatchContingency> retry = batch.stream().filter(c -> rejected.contains(c.contingencyId())).toList();
+        if (retry.isEmpty()) {
+            return results;
+        }
+        LOGGER.info("Batched N-1: retrying {} rejected scenarios on the device in the robust single-matrix mode",
+                retry.size());
+        List<BatchScenarioResult> retried;
+        try {
+            retried = GpuBatchedSecurityAnalysisSolver.solveBatchN1(
+                    net, baseState, retry, es, target, deviceSolverParameters(context),
+                    distributedSlack, reactiveLimits,
+                    reactiveLimitTol, slackDistTol, convEpsPerEq, reportNode, config.withRobustSolveMode());
+        } catch (RuntimeException e) {
+            // The retry is an OPTIONAL extra pass: a failure in it must not lose the first pass's
+            // results, which are already correct for every scenario that converged.
+            LOGGER.warn("Batched N-1: robust retry pass failed ({}); keeping the first pass's results",
+                    e.toString());
+            return results;
+        }
+        // CONVERGED ONLY. Accepting !needsCpuFallback() also accepts STATUS_MAX_ITERATION, and that is a
+        // REGRESSION, not a recovery: the precomputer reports such a result as OLF's own
+        // MAX_ITERATION_REACHED with no network result, replacing a CPU replay that may well have
+        // converged. Measured 2026-10-01 on the full busbar scope: 43 of 113 retried came back
+        // MAX_ITERATION (DEVICE:MAX_ITERATION_REACHED 4 -> 47) while device coverage stayed at
+        // 6550/6667 — nothing gained and 43 CPU answers thrown away. A retried scenario that does not
+        // CONVERGE keeps its reject and goes to the CPU exactly as before.
+        // -Dolf.gpu.sa.robustRetryAcceptMaxIter=true ALSO accepts STATUS_MAX_ITERATION from the retry.
+        //
+        // That is not the contradiction of the comment above that it looks like. OLF ITSELF does not
+        // converge a large part of this tail: on the full busbar scope its own statuses are
+        // {CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}, so for those contingencies
+        // MAX_ITERATION_REACHED IS the right answer and reporting it from the device costs nothing and
+        // saves the CPU replay. What must NOT happen is claiming it for a scenario OLF converges — and
+        // the guard for that is the harness's status-count equality, not coverage. COVERAGE IS THE
+        // WRONG METRIC here and reading it as one is what made this look like a regression first time
+        // round: it counts precomputed device STATES, and a MAX_ITERATION result carries no state, so
+        // it cannot rise for these by construction. The metric that moves is how many contingencies
+        // LEAVE the device: measured 113 -> 70 (tasks #67).
+        boolean acceptMaxIter = Boolean.parseBoolean(
+                System.getProperty("olf.gpu.sa.robustRetryAcceptMaxIter", "true"));
+        Map<String, BatchScenarioResult> better = new HashMap<>();
+        java.util.Map<Integer, Integer> retriedStatus = new java.util.TreeMap<>();
+        int recovered = 0;
+        for (BatchScenarioResult r : retried) {
+            retriedStatus.merge(r.convergenceStatus(), 1, Integer::sum);
+            boolean ok = r.convergenceStatus() == com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STATUS_CONVERGED
+                    || (acceptMaxIter
+                        && r.convergenceStatus() == com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchStatus.STATUS_MAX_ITERATION);
+            if (ok) {
+                better.put(r.contingencyId(), r);
+                recovered++;
+            }
+        }
+        if (System.getenv("OLF_GPU_REJECT_TRACE") != null) {
+            System.err.println("GPU_ROBUST_RETRY attempted=" + retry.size() + " recovered=" + recovered
+                    + " statuses=" + retriedStatus);
+        }
+        GpuBatchScopeCensus.record("RETRY:robust-attempted=" + retry.size());
+        GpuBatchScopeCensus.record("RETRY:robust-recovered=" + recovered);
+        if (better.isEmpty()) {
+            return results;
+        }
+        return results.stream().map(r -> better.getOrDefault(r.contingencyId(), r)).toList();
+    }
+
     private static String composeRejectReason(List<LfBranch> branches, List<LfGenerator> gens, List<LoadLoss> loads,
                                               List<ShuntShift> shifts,
                                               List<com.powsybl.openloadflow.network.LfHvdc> hvdcs,

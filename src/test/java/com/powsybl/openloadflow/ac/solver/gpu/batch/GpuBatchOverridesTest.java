@@ -99,8 +99,8 @@ class GpuBatchOverridesTest {
         assertArrayEquals(new double[] {1.0, 2.0, 11.0}, ov.valueArray(), 0.0);
 
         GpuBatchOverrides.Snapshot t = ov.snapshot();
-        ov.add(2, 9.0);                                      // row 2 appended twice: the index forgot position 1
-        ov.restore(t);                                       // rebuild path
+        ov.add(2, 9.0);                                      // row 2 added twice: replaced in place, counted as a duplicate
+        ov.restore(t);                                       // rebuild path (a duplicate since the snapshot)
         ov.compose(2, 0.0, 1.0);
         assertArrayEquals(new int[] {1, 2, 3}, ov.indexArray());
         assertArrayEquals(new double[] {1.0, 3.0, 11.0}, ov.valueArray(), 0.0, "row 2 resolves to its original entry");
@@ -117,14 +117,22 @@ class GpuBatchOverridesTest {
         assertArrayEquals(new double[] {4.0 - 1.0 + 0.5, 10.0 - 2.0 + 0.25}, ov.valueArray(), 0.0);
     }
 
-    /** A row appended twice resolves to its LAST entry, as the rebuilt index it replaces decided. */
+    /** A row added twice keeps ONE entry holding the LAST value: the device must never see a row twice
+     *  (applyTargetOverrideBatch would pick the survivor by scheduling — rte6515 BUS-2640_BBS_1, 193 MW), and
+     *  the disagreement is counted so the chunk solver can name it. */
     @Test
     void aDuplicatedRowResolvesToItsLastEntry() {
         GpuBatchOverrides ov = new GpuBatchOverrides();
         ov.add(5, 1.0);
         ov.add(5, 2.0);
         ov.compose(5, 0.0, 1.0);
-        assertArrayEquals(new double[] {1.0, 3.0}, ov.valueArray(), 0.0);
-        assertEquals(2, ov.size());
+        assertArrayEquals(new int[] {5}, ov.indexArray());
+        assertArrayEquals(new double[] {3.0}, ov.valueArray(), 0.0);
+        assertEquals(1, ov.size());
+        assertEquals(1, ov.conflictingAddCount(), "1.0 then 2.0 on one row is a conflict");
+        ov.add(5, 3.0);                                      // same value again: a benign duplicate
+        assertEquals(1, ov.conflictingAddCount());
+        ov.clear();
+        assertEquals(0, ov.conflictingAddCount());
     }
 }

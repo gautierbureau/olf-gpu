@@ -61,25 +61,43 @@ public final class GpuBatchHvdcAcEmulation {
      *  BASE frame — the base status plus the base VSC station targetP contributions ALREADY inside
      *  baseTargets (0 for a linear base; a saturated/frozen base carries its injections there, so
      *  every status override composes as {@code baseTargets - baseD + d(status)}). */
-    public record Ctl(int hvElemIndex, int bus1PRow, int bus2PRow, double p0, double k,
+    public record Ctl(int hvElemIndex, int bus1PRow, int bus2PRow, int bus1PhiCol, int bus2PhiCol,
+               double p0, double k,
                double pMax12, double pMax21, double loss1, double loss2, double r,
-               int baseStatus, double baseD1, double baseD2, int bus1PhiRow, int bus2PhiRow) {
+               int baseStatus, double baseD1, double baseD2) {
 
-        // The P-target ROW and the angle COLUMN are two different indices. The angle is always the
-        // bus's BUS_PHI variable; the P balance is on that same index only for a bus the coupler-tree
-        // relocation left alone - a relocated child's balance sits on its parent coupler's DUMMY_P
-        // row, and its own PHI row hosts that coupler's ZERO_PHI (target 0). Writing the freeze delta
-        // on the PHI row there asked a zero-impedance coupler for a 5 rad angle: network.xiidm's
-        // ADNN_5/ADNN_6 converter buses, every busbar scenario stalling at |F| ~ 12 behind a +-347
-        // circulating step on ADOU/ADPM.
-        //
-        // A converter bus whose BUS_TARGET_P is INACTIVE (the slack) has bus?PRow < 0: its row hosts
-        // the PHI identity and must never receive a P target — OLF's slack simply absorbs the
-        // station's targetP. Writing there pinned the base LF's slack angle at the freeze delta
-        // (BUS_TARGET_PHI residual 0.014, base MAX_ITER).
+        // TWO DISTINCT ROLES, and they are NOT the same row under the coupler-tree relocation:
+        //   bus{1,2}PRow   = where the P TARGET is written (the bus's P equation). For a relocated
+        //                    coupler child that is the parent's DUMMY_P row, NOT the bus's own PHI row,
+        //                    which hosts the coupler's ZERO_PHI (target 0). See GpuAcData.relocatedPRow
+        //                    and tasks #68: conflating the two put the freeze setpoints on all ten
+        //                    VSC-station breakers' ZERO_PHI rows.
+        //   bus{1,2}PhiCol = the ANGLE COLUMN the emulation formula reads. Always the bus's OWN BUS_PHI
+        //                    column, relocation or not — a relocation moves EQUATIONS, never variables.
+        // A converter bus whose BUS_TARGET_P is INACTIVE (the slack) keeps the ~ encoding on PRow: it must
+        // never receive a P target — OLF's slack simply absorbs the station's targetP. Writing there pinned
+        // the base LF's slack angle at the freeze delta (BUS_TARGET_PHI residual 0.014, base MAX_ITER).
+        public int bus1PhiRow() {
+            return bus1PhiCol;
+        }
+
+        public int bus2PhiRow() {
+            return bus2PhiCol;
+        }
 
         public boolean bus1PActive() {
             return bus1PRow >= 0;
+        }
+
+        /** The row the side-1 P target is written to THIS scenario: the relocated row, or the bus's own PHI row
+         *  once the scenario has opened the parent coupler (that dummy row is then a mode-0 identity and the
+         *  balance is back home — the stock placement the kernels follow through relocOwn). */
+        public int bus1WriteRow(int[] rowMode) {
+            return bus1PRow >= 0 && rowMode != null && bus1PRow != bus1PhiCol && rowMode[bus1PRow] == 0 ? bus1PhiCol : bus1PRow;
+        }
+
+        public int bus2WriteRow(int[] rowMode) {
+            return bus2PRow >= 0 && rowMode != null && bus2PRow != bus2PhiCol && rowMode[bus2PRow] == 0 ? bus2PhiCol : bus2PRow;
         }
 
         public boolean bus2PActive() {
@@ -103,7 +121,8 @@ public final class GpuBatchHvdcAcEmulation {
     }
 
     public static List<Ctl> buildControllers(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,
-                                      int nElements) {
+                                      int nElements,
+                                      com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcData gpuData) {
         Map<Integer, Integer> phiRows = new LinkedHashMap<>();
         for (Variable<AcVariableType> v : es.getIndex().getSortedVariablesToFind()) {
             if (v.getType() == AcVariableType.BUS_PHI) {
@@ -113,8 +132,6 @@ public final class GpuBatchHvdcAcEmulation {
         List<LfHvdc> packed = network.getHvdcs().stream()
                 .filter(h -> h.getBus1() != null && h.getBus2() != null && h.isAcEmulation())
                 .toList();                                   // the packer's exact enumeration order
-        int[] pRow = packed.isEmpty() ? null
-                : com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor.busPowerRows(network, es)[0];
         int hvOffset = nElements - packed.size();
         List<Ctl> out = new ArrayList<>();
         for (int h = 0; h < packed.size(); h++) {
@@ -126,10 +143,23 @@ public final class GpuBatchHvdcAcEmulation {
                 case SATURATION_MODE_FROM_CS2_TO_CS1 -> SAT_2_TO_1;
                 case FROZEN -> FROZEN;
             };
-            int r1 = phiRows.get(hvdc.getBus1().getNum());
-            int r2 = phiRows.get(hvdc.getBus2().getNum());
-            int pr1 = pRow[hvdc.getBus1().getNum()];
-            int pr2 = pRow[hvdc.getBus2().getNum()];
+            // The bus's own BUS_PHI column (the angle the emulation reads) and, SEPARATELY, the row its
+            // P equation actually lives on — the parent coupler's DUMMY_P when the relocation moved it
+            // (tasks #68). Resolved through the zero-impedance pack so it cannot drift from the kernels.
+            int phi1 = phiRows.get(hvdc.getBus1().getNum());
+            int phi2 = phiRows.get(hvdc.getBus2().getNum());
+            // The P-target row IS the relocated DUMMY_P row (GpuAcData.relocatedPRow) — the row the bus's P
+            // balance lives on under the coupler-tree relocation; the bus's own PHI row hosts the coupler's
+            // ZERO_PHI there (target 0). The 2026-10-02 attempt at exactly this was "catastrophic" (108 ->
+            // 13194 bad solves) because the kernel read the ANGLE at the same index it wrote the target to, so
+            // a relocated bus's angle was read off a DUMMY_P variable. The two roles are separate arrays now
+            // (bus{1,2}PhiCol for the reads, bus{1,2}PRow for the writes), and the kernel falls back to the own
+            // row in a scenario that kills the parent coupler (relocOwn, the stock placement). Measured as the
+            // only device failure on an OLF-converging busbar contingency, BUS-1219_BBS: the saturation
+            // delta of SYN_HVDC_4 landed on a ZERO_PHI row, reversed the emulated flow and the limits loop
+            // toggled SAT_2_TO_1 <-> SAT_1_TO_2 to its 32-pass budget (tasks #68 / #69).
+            int r1 = gpuData.relocatedPRow(phi1);
+            int r2 = gpuData.relocatedPRow(phi2);
             boolean p1Active = es.getEquation(hvdc.getBus1().getNum(), AcEquationType.BUS_TARGET_P)
                     .filter(com.powsybl.openloadflow.equations.Equation::isActive).isPresent();
             boolean p2Active = es.getEquation(hvdc.getBus2().getNum(), AcEquationType.BUS_TARGET_P)
@@ -140,14 +170,15 @@ public final class GpuBatchHvdcAcEmulation {
                         hvdc.getConverterStation2().getTargetP(), p1Active);
             }
             out.add(new Ctl(hvOffset + h,
-                    p1Active ? pr1 : -1, p2Active ? pr2 : -1,
+                    p1Active ? r1 : ~r1, p2Active ? r2 : ~r2,
+                    phi1, phi2,
                     ac.getP0(), ac.getDroop() * 180 / Math.PI,
                     ac.getPMaxFromCS1toCS2(), ac.getPMaxFromCS2toCS1(),
                     hvdc.getConverterStation1().getLossFactor() / 100,
                     hvdc.getConverterStation2().getLossFactor() / 100, hvdc.getR(),
                     baseStatus,
                     baseStatus == LINEAR ? 0 : hvdc.getConverterStation1().getTargetP(),
-                    baseStatus == LINEAR ? 0 : hvdc.getConverterStation2().getTargetP(), r1, r2));
+                    baseStatus == LINEAR ? 0 : hvdc.getConverterStation2().getTargetP()));
         }
         return out;
     }
@@ -270,10 +301,21 @@ public final class GpuBatchHvdcAcEmulation {
                                double[] baseState, double[] x0PerScenario, int[] seedIdx, double[] seedVal,
                                boolean[][] disabledMask, double[] baseTargets, GpuBatchOverrides overrides,
                                double[] appliedD1, double[] appliedD2) {
+        return applyFreeze(chunkSize, realCount, n, ctls, baseState, x0PerScenario, seedIdx, seedVal, disabledMask,
+                baseTargets, overrides, appliedD1, appliedD2, null);
+    }
+
+    /** @param rowModePerScenario the per-scenario row modes (null = base layout everywhere): a converter bus whose
+     *  parent coupler the scenario opens takes its P target on its OWN row (see Ctl.bus1WriteRow). */
+    static int[][] applyFreeze(int chunkSize, int realCount, int n, List<Ctl> ctls,
+                               double[] baseState, double[] x0PerScenario, int[] seedIdx, double[] seedVal,
+                               boolean[][] disabledMask, double[] baseTargets, GpuBatchOverrides overrides,
+                               double[] appliedD1, double[] appliedD2, int[][] rowModePerScenario) {
         int[][] status = new int[chunkSize][ctls.size()];
         double[] warm = baseState.clone();
         int[][] seedsOf = x0PerScenario == null && seedIdx != null ? seedsByScenario(seedIdx, realCount, n) : null;
         for (int s = 0; s < realCount; s++) {
+            int[] rm = rowModePerScenario == null ? null : rowModePerScenario[s];
             if (x0PerScenario != null) {
                 System.arraycopy(x0PerScenario, s * n, warm, 0, n);
             } else if (seedsOf != null) {
@@ -312,10 +354,10 @@ public final class GpuBatchHvdcAcEmulation {
                 // base frame: baseTargets (or the row's existing override — e.g. a lost load on the
                 // converter bus) already carry the base injections
                 if (c.bus1PActive()) {
-                    overrides.merge(s * n + c.bus1PRow(), baseTargets[c.bus1PRow()], c.baseD1(), d[0]);
+                    overrides.merge(s * n + c.bus1WriteRow(rm), baseTargets[c.bus1WriteRow(rm)], c.baseD1(), d[0]);
                 }
                 if (c.bus2PActive()) {
-                    overrides.merge(s * n + c.bus2PRow(), baseTargets[c.bus2PRow()], c.baseD2(), d[1]);
+                    overrides.merge(s * n + c.bus2WriteRow(rm), baseTargets[c.bus2WriteRow(rm)], c.baseD2(), d[1]);
                 }
             }
             if (seedsOf != null) {
@@ -356,9 +398,10 @@ public final class GpuBatchHvdcAcEmulation {
     static void applyStatusOverrides(int chunkSize, int realCount, int n, List<Ctl> ctls,
                                      int[][] status, byte[] ctgOut, boolean[][] disabledMask,
                                      double[] baseTargets, GpuBatchOverrides overrides,
-                                     double[] appliedD1, double[] appliedD2) {
+                                     double[] appliedD1, double[] appliedD2, int[][] rowModePerScenario) {
         int nh = ctls.size();
         for (int s = 0; s < realCount; s++) {
+            int[] rm = rowModePerScenario == null ? null : rowModePerScenario[s];
             for (int h = 0; h < nh; h++) {
                 Ctl c = ctls.get(h);
                 if (ctgOut[s * nh + h] != 0) {
@@ -368,10 +411,10 @@ public final class GpuBatchHvdcAcEmulation {
                     disabledMask[s][c.hvElemIndex()] = false;
                     if (c.baseStatus() != LINEAR) {          // strip the base injections from the targets
                         if (c.bus1PActive()) {
-                            overrides.merge(s * n + c.bus1PRow(), baseTargets[c.bus1PRow()], c.baseD1(), 0);
+                            overrides.merge(s * n + c.bus1WriteRow(rm), baseTargets[c.bus1WriteRow(rm)], c.baseD1(), 0);
                         }
                         if (c.bus2PActive()) {
-                            overrides.merge(s * n + c.bus2PRow(), baseTargets[c.bus2PRow()], c.baseD2(), 0);
+                            overrides.merge(s * n + c.bus2WriteRow(rm), baseTargets[c.bus2WriteRow(rm)], c.baseD2(), 0);
                         }
                     }
                 } else {
@@ -386,10 +429,10 @@ public final class GpuBatchHvdcAcEmulation {
                             : new double[] {appliedD1[s * nh + h] + c.baseD1(),
                                             appliedD2[s * nh + h] + c.baseD2()};
                     if (c.bus1PActive()) {
-                        overrides.merge(s * n + c.bus1PRow(), baseTargets[c.bus1PRow()], c.baseD1(), d[0]);
+                        overrides.merge(s * n + c.bus1WriteRow(rm), baseTargets[c.bus1WriteRow(rm)], c.baseD1(), d[0]);
                     }
                     if (c.bus2PActive()) {
-                        overrides.merge(s * n + c.bus2PRow(), baseTargets[c.bus2PRow()], c.baseD2(), d[1]);
+                        overrides.merge(s * n + c.bus2WriteRow(rm), baseTargets[c.bus2WriteRow(rm)], c.baseD2(), d[1]);
                     }
                 }
             }
@@ -442,10 +485,10 @@ public final class GpuBatchHvdcAcEmulation {
         for (int h = 0; h < nh; h++) {
             Ctl c = ctls.get(h);
             hvElem[h] = c.hvElemIndex();          // GLOBAL element index
-            hvB1[h] = c.bus1PRow();
+            hvB1[h] = c.bus1PRow();               // where the P target is WRITTEN (relocated row, ~ when inactive)
             hvB2[h] = c.bus2PRow();
-            hvPhi1[h] = c.bus1PhiRow();
-            hvPhi2[h] = c.bus2PhiRow();
+            hvPhi1[h] = c.bus1PhiCol();           // where the ANGLE is READ (always the bus's own column)
+            hvPhi2[h] = c.bus2PhiCol();
             hvIn[h * 9] = c.p0();
             hvIn[h * 9 + 1] = c.k();
             hvIn[h * 9 + 2] = c.pMax12();

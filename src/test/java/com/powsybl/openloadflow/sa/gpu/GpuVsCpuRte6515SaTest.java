@@ -480,6 +480,21 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         }
     }
 
+    /** {@code OLF_GPU_SA_STATUS_LIST=1}: every NON-CONVERGED contingency of an arm, by id. The
+     *  aggregate counts say the arms AGREE; only the ids say WHICH contingencies OLF itself fails, and
+     *  that is what splits a device reject into "OLF fails it too, so the device may answer it
+     *  directly" and "OLF converges it, so the device is losing one" (tasks #67). */
+    private static void listNonConverged(String arm, SecurityAnalysisResult r) {
+        if (!"1".equals(System.getenv("OLF_GPU_SA_STATUS_LIST"))) {
+            return;
+        }
+        for (PostContingencyResult p : r.getPostContingencyResults()) {
+            if (p.getStatus() != PostContingencyComputationStatus.CONVERGED) {
+                System.out.println("  NONCONV " + arm + " " + p.getContingency().getId() + " " + p.getStatus().name());
+            }
+        }
+    }
+
     private static Map<String, Long> statusCounts(SecurityAnalysisResult r) {
         Map<String, Long> counts = new TreeMap<>();
         for (PostContingencyResult p : r.getPostContingencyResults()) {
@@ -1231,6 +1246,8 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         long cpuViolations = violationCount(cpu);
         long gpuViolations = violationCount(gpuCold);
         System.out.printf("  statuses: CPU=%s GPU=%s%n", statusCounts(cpu), statusCounts(gpuCold));
+        listNonConverged("CPU", cpu);
+        listNonConverged("GPU", gpuCold);
         System.out.printf("  violations: CPU=%d GPU=%d diff=%d%n", cpuViolations, gpuViolations,
                 Math.abs(cpuViolations - gpuViolations));
 
@@ -1260,19 +1277,27 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
             // Split the declined ones, or the number misleads: a scenario REFUSED AT PLAN TIME was never
             // attempted on the device (an unmodeled shape — OLF converges those perfectly well, they are a
             // scope gap), while one the device TRIED and threw away is a device failure whenever OLF converges
-            // it. The census gives the plan/validator classes by count, which is enough to separate them.
-            long planRefused = GpuBatchScopeCensus.snapshot().entrySet().stream()
-                    .filter(e -> e.getKey().startsWith("PLAN:") || e.getKey().startsWith("VALIDATOR:"))
-                    .mapToLong(Map.Entry::getValue).sum();
+            // it. By ID (GpuBatchScopeCensus.planRefusedIds): the census COUNTS are per attempt — cold + warm
+            // runs and the robust retry each count a refusal again — and subtracting them from a
+            // per-contingency list printed "-20 of them tried and failed" and called 12 plan refusals
+            // (VC_REMERGE_PINNED_MAIN / RELOC_VROW) device failures (2026-10-04).
+            java.util.Set<String> planRefusedIds = GpuBatchScopeCensus.planRefusedIds();
+            List<String> triedAndFailedOlfConverged = declinedButOlfConverged.stream()
+                    .filter(id -> !planRefusedIds.contains(id)).toList();
+            List<String> refusedOlfConverged = declinedButOlfConverged.stream()
+                    .filter(planRefusedIds::contains).toList();
+            long declinedRefused = cpu.getPostContingencyResults().stream()
+                    .map(p -> p.getContingency().getId())
+                    .filter(id -> !onDevice.contains(id) && planRefusedIds.contains(id)).count();
             System.out.printf("  DEVICE VERDICT: %d of %d simulated solved on device; %d declined = %d refused at"
-                    + " plan time (unmodeled shape, OLF converges them) + %d tried and failed%n",
-                    onDevice.size(), cpu.getPostContingencyResults().size(), declined, planRefused,
-                    declined - planRefused);
-            System.out.printf("  DEVICE FAILURES on a system OLF converges: %d of the %d declined%s%n",
-                    declinedButOlfConverged.size(), declined,
-                    declinedButOlfConverged.isEmpty() ? " (none — every declined one is OLF's own non-convergence)"
-                            : " (" + (declinedButOlfConverged.size() - planRefused) + " of them tried and failed): "
-                              + declinedButOlfConverged);
+                    + " plan time (unmodeled shape) + %d tried on the device and failed%n",
+                    onDevice.size(), cpu.getPostContingencyResults().size(), declined, declinedRefused,
+                    declined - declinedRefused);
+            System.out.printf("  DEVICE FAILURES on a system OLF converges: %d (tried and failed — each one a device"
+                    + " bug): %s%n", triedAndFailedOlfConverged.size(), triedAndFailedOlfConverged);
+            System.out.printf("  PLAN REFUSALS on a system OLF converges: %d (scope gaps, CPU answers): %s%n",
+                    refusedOlfConverged.size(),
+                    refusedOlfConverged.stream().map(id -> id + "(" + GpuBatchScopeCensus.planRefusalTag(id) + ")").toList());
             System.out.printf("  STATUS COMPARISON covers the %d device-solved contingencies; for the rest both"
                     + " arms report the SAME CPU computation%n", onDevice.size());
         }

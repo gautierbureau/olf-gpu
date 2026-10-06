@@ -46,8 +46,11 @@ final class GpuBatchOverrides {
     /** Bumped by {@link #clear} and {@link #restore}: a snapshot taken in an earlier generation cannot assume the
      *  entries before it are still in place. */
     private int generation;
-    /** Appends of a row that already had an entry (the index then forgets the earlier position). */
+    /** Adds of a row that already had an entry (its value was replaced in place). */
     private int duplicateAppends;
+    /** Of those, the adds whose value DIFFERED from the entry they replaced: two producers disagreeing on one
+     *  row's target. Counted on every run — the chunk solver names the chunk when it is non-zero. */
+    private int conflictCount;
 
     /** OLF_GPU_OV_DUP_TRACE: measure the invariant this class states in its own javadoc — a row must
      *  carry at most ONE override, because applyTargetOverrideBatch is one thread per entry writing
@@ -75,6 +78,7 @@ final class GpuBatchOverrides {
         value.resetQuick();
         positionOf.clear();
         generation++;
+        conflictCount = 0;
         if (DUP_TRACE) {
             dupRows.clear();
             conflictRows.clear();
@@ -87,22 +91,37 @@ final class GpuBatchOverrides {
             : java.util.Arrays.stream(System.getenv("OLF_GPU_OV_WATCH").split(",")).map(String::trim)
                     .map(Integer::valueOf).collect(java.util.stream.Collectors.toUnmodifiableSet());
 
-    /** Append an override for {@code flat} (the caller guarantees the row is not already there,
-     *  or accepts that a later {@link #compose} resolves to this newer entry — the same
-     *  "last one wins" a {@code lastIndexOf} scan gave). */
+    /** Adds since the last {@link #clear} that replaced an existing entry with a DIFFERENT value — a target two
+     *  producers disagreed on, resolved deterministically to the later one. Zero on a sound plan. */
+    int conflictingAddCount() {
+        return conflictCount;
+    }
+
+    /** Add an override for {@code flat}. A row that already has an entry gets its VALUE REPLACED in place —
+     *  "last one wins", decided HERE and not by the device. This used to append a second entry, and
+     *  applyTargetOverrideBatch (one thread per entry writing {@code target[ovIndex[k]]}) then picked the
+     *  survivor by scheduling: rte6515 BUS-2640_BBS_1's re-homed voltage identity (1.034) on row 5956 lost to a
+     *  DISTR_Q seed of 0.0 in the 6667-contingency batch (slot 1844, 193.85 MW of distributed power and
+     *  +197 violations against OLF) and won in a 3-contingency batch (slot 0, bit-identical to OLF). The
+     *  entries handed to the device now never hold a row twice; a conflicting duplicate is still COUNTED
+     *  (always, one compare on a rare path) so the chunk solver can name it. */
     void add(int flat, double v) {
         if (WATCH.contains(flat)) {                          // OLF_GPU_OV_WATCH=<flat>[,<flat>]: who writes it
             System.err.println("OV_WATCH flat=" + flat + " v=" + v + " at " + java.util.Arrays.stream(new Throwable().getStackTrace())
                     .filter(f -> f.getClassName().startsWith("com.powsybl.openloadflow")).limit(4)
                     .map(f -> f.getFileName() + ":" + f.getLineNumber()).reduce((a, b) -> a + "<" + b).orElse("?"));
         }
-        int prev = positionOf.put(flat, index.size());
+        int prev = positionOf.get(flat);
         if (prev >= 0) {
             duplicateAppends++;
+            double shadowed = value.getQuick(prev);
+            boolean conflict = Double.compare(shadowed, v) != 0;
+            if (conflict) {
+                conflictCount++;
+            }
             if (DUP_TRACE) {
                 dupRows.add(flat);
-                double shadowed = value.getQuick(prev);
-                if (Double.compare(shadowed, v) != 0 && conflictRows.add(flat) && conflictSamples.size() < 40) {
+                if (conflict && conflictRows.add(flat) && conflictSamples.size() < 40) {
                     conflictSamples.add(new double[] {flat, shadowed, v});
                     conflictSites.add(java.util.Arrays.stream(new Throwable().getStackTrace())
                             .filter(f -> f.getClassName().startsWith("com.powsybl.openloadflow"))
@@ -111,9 +130,17 @@ final class GpuBatchOverrides {
                             .reduce((a, b) -> a + "<" + b).orElse("?"));
                 }
             }
+            value.setQuick(prev, v);
+            return;
         }
+        positionOf.put(flat, index.size());
         index.add(flat);
         value.add(v);
+    }
+
+    /** Does {@code flat} already carry an override? */
+    boolean has(int flat) {
+        return positionOf.get(flat) >= 0;
     }
 
     /** Add {@code delta} to the row's existing override, or create it at {@code base + delta}. */

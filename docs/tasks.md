@@ -1815,6 +1815,1139 @@ already handles both (see "Active-set / control handling in the CPU adjoint" bel
 Blocked on RTE Nexus access.
 **Standing constraint: never read or load `.arc` files or any real network data.**
 
+### #67 — the non-batched tail is a CONVERGENCE problem, not a factorization one (2026-10-01)
+
+**Why it was opened.** 117 of 6667 contingencies do not batch on rte6515's full busbar scope
+(`GPU precomputed on device: 6550 / 6667`), and the no-CPU-fallback goal wants them on device.
+
+**Where they actually go** (`OLF_GPU_REJECT_TRACE=1`, GPU-only run):
+
+```
+108  reason=max-iter-bad-solve
+  5  reason=outer-loop-budget      (108 + 5 = 113 = the RUNTIME:status=-2 census exactly)
+```
+
+So the PLAN refusals in the census (`VC_REMERGE_MULTI=47`, `PINNED_MAIN=3`, `RELOC_VROW=3`,
+`ISLANDS_SLACK=1`) are refusals of a plan VARIANT that later succeeds — they do NOT own the 117.
+`max-iter-bad-solve` does: the scenario spent its whole iteration budget on Newton steps the
+factorization got wrong (`lastSolveRatio > LIN_SOLVE_FAIL_RATIO = 1e-2`), so the device refuses to
+call that OLF's answer. How bad, over the 184 bad-solve reject lines:
+
+| last-solve ratio (gate 1e-2) | count | worst ‖F‖ |
+|---|---|---|
+| 1e-2 … 1e-1 (within one decade of the gate) | 126 | 5.52 |
+| 1e-1 … 1 | 44 | 1.82 |
+| > 1 | 14 | 1.44 |
+
+No NaN/Inf anywhere — inaccurate solves, not divergences.
+
+**The obvious fix was tried and it DOES NOT WORK.** The device already recovers exactly this on the
+BASE load flow by rebuilding in mode 6 (`MODE_ROBUST`: mode 0's per-scenario loop with matching and
+global column pivoting on cuDSS's single-matrix API) after a linear-solve reject; a CHUNK scenario
+had no route to it and went to the CPU. So a second device pass was built —
+`GpuBatchPrecomputer.retryRejectedOnDevice` + `BatchConfig.withRobustSolveMode()` + the mode choice
+at `GpuBatchChunkSolver`'s `acquireBatchContext`. Result, full busbar scope:
+
+```
+GPU_ROBUST_RETRY attempted=113 recovered=0 statuses={-2=74, 1=39}
+```
+
+**Zero recovered.** Mode 6 turns 39 of the 113 from a bad solve into `STATUS_MAX_ITERATION` with a
+SOUND last solve — so pivoting genuinely fixes those factorizations — and leaves 74 still rejecting
+on a bad solve. Not one converges. **So "the unpivoted batch factorization is why they fail" is
+FALSE for this structure.** These scenarios do not converge on the device within the budget, and
+the CPU replay does converge them: that is the question to answer, and it is an equation/trajectory
+question, not a linear-algebra one.
+
+**A trap caught on the way.** The first version accepted `!needsCpuFallback()`, which also accepts
+`STATUS_MAX_ITERATION`, and reported `recovered=43` — but device coverage stayed at 6550/6667 while
+`DEVICE:MAX_ITERATION_REACHED` went 4 -> 47. Those 43 were not recovered; they were CPU answers
+replaced by "MAX_ITERATION_REACHED, no network result" claims from the device. A retry may only
+accept `STATUS_CONVERGED`.
+
+**Kept, default OFF:** `-Dolf.gpu.sa.robustRetry=true` re-enables the pass so it can be re-tested on
+another grid (same spirit as the EXPERIMENTAL batch modes 4/5). It costs a cuDSS analysis (switching
+mode evicts the single-entry context cache) plus a full extra pass, and buys nothing here.
+
+**Census artefact to know:** the retry re-runs qualification, so with the pass ON the `PLAN:` counts
+DOUBLE (`VC_REMERGE_MULTI` 47 -> 94 etc.). They are per-attempt, not per-contingency.
+
+**THE EQUATION SYSTEMS AGREE — checked on one of the 108 (2026-10-01).** The standing rule says a
+non-converging GPU means a different equation system, so that was checked FIRST, with the two
+dumps the code already pairs for it: `OLF_GPU_EQ_DUMP_CTG` (OLF's post-contingency equations,
+inactive ones bracketed) against `OLF_GPU_ROWMODE_DUMP_CTG` (the device's per-scenario row modes)
+plus `OLF_GPU_SA_EQ_DUMP` (the device's row map). Contingency `BUS-1039_BBS`, full busbar list kept
+so the network is the real one:
+
+| check | result |
+|---|---|
+| PV set: OLF `bus_target_v` ACTIVE vs device `BUS_V` mode 0 | 982 vs 982, EXACT |
+| per-bus V-row occupant (target_v / distr_q / target_q / none vs mode 0/1/4) | **0 mismatches over 6237 non-relocated buses** |
+| islanded set: OLF `disabled buses` vs device rows frozen to identity | 9 vs 9, and the SETS are equal (no bus on either side only) |
+| device island freeze | 18 rows = 9 buses x (V->1.0, PHI->0.0) |
+
+**And the iteration policy agrees too:** the RTE parameters set
+`stateVectorScalingMode = MAX_VOLTAGE_CHANGE`, which `GpuSaRunScope` mirrors as `lsMode=2` with the
+same `maxDv`/`maxDphi`, and `maxNewtonRaphsonIterations = 30` matches the reject's `it=30`. So same
+system, same step clamp, same cap — and the device still needs more than 30 steps where OLF needs
+fewer. The reject is at `outer=0 it=30`: it cannot finish even the FIRST Newton solve.
+
+**THE TARGETS AGREE TOO.** `OLF_GPU_LOSS_TRACE=<contingency id>` (it takes an ID, not `1`):
+
+```
+device: deviceScheduledLoss=-1.243000000 pu islanded=[the same 9 buses] lostGens=[] lostLoads=[]
+OLF:    activePowerLoss    =-1.243000000 pu (disconnectedGeneration=0, disconnectedLoad=1.243)
+```
+
+Identical to all nine decimals, same islanded set, and OLF's zero disconnected generation matches
+the device's empty `lostGens`.
+
+**ONE REAL EQUATION DIFFERENCE FOUND, AND IT IS EXACTLY 2 ROWS.** Resolving every dq-carrying device
+row to its member bus — 40 on a member's own `BUS_V` row, 305 on a parent coupler's `DUMMY_Q` row
+via the dump's `zi#K … dummyQ=ROW childSide=` mapping — and diffing against OLF's active set:
+
+```
+OLF active distr_q buses : 334
+device dq rows LIVE      : 336     GATED (mode 4): 9     unmapped: 0
+LIVE on device, INACTIVE in OLF (2): ['VL-5997_1', 'VL-6112_1']
+ACTIVE in OLF, not live on device  (0): []
+```
+
+**Those two buses are already on record as the delicate ones** — `GpuAcActivationExtractor`'s own
+comment: "the carriers of VL-5997 and VL-6112 came in at mode 4, the scan fell back to the identity
+pilot rows, the raw q and the couplers' DUMMY_Q vanished (dead columns 13171/13207) and **every
+scenario failed its first linear solve**". And [[#67]]'s rejects are at `outer=0`, the first solve.
+
+Why OLF has them inactive, from the dump's own group lines:
+
+```
+gvc pilot=VL-5997_0 controlled=VL-5997_0 local=false pilotIsController=true members=2:
+    VL-5997_0[vCol=13154 qRow=-1 qRowAlt=-244  enabled=FALSE]   <- the pilot, PINNED
+    VL-5997_1[vCol=13156 qRow=-1 qRowAlt=14403 enabled=true ]
+```
+
+A pilot-self group of TWO whose pilot is pinned has exactly ONE enabled controller, so by OLF's rule
+("DISTR_Q for every enabled controller except the FIRST, BUS_TARGET_Q for every pinned one") that
+member IS the first enabled one and gets NO sharing equation. The device encodes the group
+CANONICALLY (as if all controllers were enabled), which gives the member a DISTR_Q, and the
+in-kernel mode scan is what must re-pick the carrier per scenario and gate it off. For this scenario
+it did not: the row stayed mode 1 with live sharing, and the per-scenario row-mode diff contained
+only the 18 island rows.
+
+**CAUSALITY TESTED AND NOT ESTABLISHED — the intervention made it WORSE.** Rather than reason about
+it, `OLF_GPU_FORCE_MODE4=<row>[,<row>…]` (new, diagnostic-only, stamps mode 4 on the named rows at
+the end of `extractActivation`) forced the two rows and re-counted. They are `14403`
+(`DUMMY_Q(BUS-5997_COUPLER_1)`) and `14439` (`DUMMY_Q(BUS-6112_COUPLER_1)`), which match the
+`qRowAlt` in those groups' dump lines. Full busbar scope:
+
+| | baseline | rows forced to mode 4 |
+|---|---|---|
+| coverage | 6550 / 6667 | **6548 / 6667** |
+| `RUNTIME:status=-2` | 113 | **118** |
+| `max-iter-bad-solve` | 108 | **116** |
+| `DEVICE:MAX_ITERATION_REACHED` | 4 | 1 |
+| `PLAN:VC_REMERGE_PINNED_MAIN` | 3 | 4 |
+
+So gating the sharing there costs 2 contingencies and adds 5 rejects.
+
+**And the probe was NOT a faithful emulation of OLF, which is why this is inconclusive rather than
+exculpating.** For a pilot-self group whose pilot is pinned, OLF puts the PILOT'S REACTIVE BALANCE
+on the single enabled controller's row (that member is the carrier). Mode 4 is an OWN-Q balance
+against the member's OWN target — a THIRD, different equation. So the measurement shows mode 4 is
+the wrong content for those rows; it does not show the rows are innocent. To test the hypothesis
+properly the row must be made to carry the PILOT-CARRIER form, which is what `stateQRow` /
+`stateQCarrier` already compute for a candidate-table pilot — i.e. the question is whether the
+in-kernel mode scan picks that carrier for these 2-member pilot-self groups, and if not, why.
+
+**RETRACTED 2026-10-02 — the 2-row difference is a FALSE POSITIVE. It compared the STRUCTURE against
+OLF's RUNTIME.** Task-1 follow-up, reading the kernel rather than inferring:
+
+- **Does the scan select the pilot-carrier for a 2-member pilot-self group? YES.** The pilot's
+  `qRowAlt = -244` decodes as `-2 - g` (`ExtractionColumns`), i.e. candidate-table group 242, so the
+  pilot's Q is routed by the in-kernel scan. `relocChoose` picks "the FIRST member row whose
+  per-scenario mode is neither identity (0) nor pinned (4)"; `VL-5997_0`'s own V row is mode 0
+  (it holds `bus_target_v`), so the scan picks the member's row — **14403**, exactly where OLF puts
+  the pilot's pinned `bus_target_q`.
+- **Is the sharing gated at that row? YES, and the gate already exists** — the plan-B4 branch in
+  `fillDistrQBatch`: `if (g >= 0 && !psGateOff && d0 <= -2 && -2 - d0 == qrRows[qrPtr[g] +
+  relocChoose(...)]) return;`, whose own comment is "the CURRENT pilot-Q carrier's row … its DISTR_Q
+  row is inactive this scenario, exactly like OLF deactivating the new free member's DISTR_Q".
+- **And `psGateOff` is false exactly when it must be.** `pilotSelfGateBatch` sets
+  `skip = limitType == 0 ? 1 : 0` — an UNPINNED pilot skips the suppression (its q feeds those very
+  sharing rows, so suppressing would leave the system one equation short: the comment records that
+  measurement), a PINNED pilot does not. `VL-5997_0`/`VL-6112_0` are pinned (`enabled=false`), so the
+  gate FIRES and the `dq` emission at 14403/14439 stops for the scenario.
+
+So the runtime equation set at those rows is the pilot's balance alone, which is what OLF has. The
+`336 live vs 334` count read dq-carrying rows and their BASE MODE out of the structure — which holds
+the terms CANONICALLY by design — and compared that against OLF's active set. Wrong quantity. It
+also explains the forced-mode-4 result above: that probe broke a correctly-gated arrangement, which
+is why coverage FELL.
+
+**Net effect on [[#67]]: there is NO identified equation-system difference.** Everything the dumps
+can compare agrees — PV set, per-bus V-row occupant over 6237 buses, islanded sets, scheduled loss,
+step clamp, iteration cap, and now the two rotation-carrier rows too. The remaining blind spot is
+the one the next item attacks: the **649 relocated buses**, where a per-bus V-row comparison is
+invalid by construction.
+
+**THE BLIND SPOT IS CLOSED — the relocated region agrees too (2026-10-02).** The 649 relocated
+buses could not be checked by a per-bus V-row comparison, so they were checked per COUPLER instead,
+using the dump's `zi#K branch= b1= b2= dummyP= dummyQ= childSide=` lines to pair each coupler's rows
+with its child's OLF equations. All 366 zi branches, of which 37 are `childSide=0` (unrelocated):
+
+| check, over the 329 relocated couplers | result |
+|---|---|
+| child's P balance: OLF `bus_target_p[child]` ACTIVE ⟺ device `DUMMY_P` row is a power row | **0 mismatches** |
+| child's Q: OLF `distr_q[child]` ⟺ device `DUMMY_Q` row mode 1 WITH dq terms; OLF `bus_target_q[child]` ⟺ mode 1 or 4; neither ⟺ the row hosts the pilot balance via the scan | **0 mismatches** |
+| child's V row hosts the coupler's `ZERO_V` | 329 / 329 |
+| child's PHI row hosts the coupler's `ZERO_PHI` | 329 / 329 |
+
+Consistent with OLF having all 366 `zero_v` and all 366 `zero_phi` ACTIVE and all 366
+`dummy_target_p` / `dummy_target_q` INACTIVE: the device hosts the child's balances on the dummy
+rows and the coupler's zero equations on the child's own rows, which is exactly that arrangement.
+
+**So the equation-system hypothesis for [[#67]] is EXHAUSTED on this contingency.** Everything the
+two dumps can express agrees: the PV set (982), the per-bus V-row occupant over 6237 non-relocated
+buses, the islanded sets (9, equal), the scheduled loss (-1.243000000 pu to nine decimals), the step
+clamp (`MAX_VOLTAGE_CHANGE` -> `lsMode=2`), the iteration cap (30 = the reject's `it=30`), the two
+rotation-carrier rows, and now all 329 relocated couplers on P, Q, V and PHI.
+
+**What is still NOT compared, and is the only dimension left:** the per-row NUMERIC TARGETS and the
+Jacobian VALUES. Equation IDENTITY matching does not mean the two sides solve the same numbers — a
+single wrong target on one row is a different system by the standing rule, and only the AGGREGATE
+loss has been checked so far, not the per-row target vector. The device exposes
+`GpuAcNewtonSolver.readBatchTargets(handle)` (already used by `OLF_GPU_ROWMODE_DUMP_CTG`, which
+prints targets only for rows DIFFERING from base) and OLF has its own `TargetVector`. **Next:
+dump BOTH target vectors for a rejecting scenario, keyed by element, and diff per row** — the same
+same-point, keyed-by-id discipline that cracked [[#66]].
+
+### #69/#68 — BUS-1219_BBS's outer-loop cycle IS #68, and #68's premise was right (2026-10-05)
+
+`OLF_GPU_LOOP_TRACE_CTG=BUS-1219_BBS` named the cycling loop: `kind=2` = **AcHvdcAcEmulationLimits**, flipping
+every pass (`switched=1 nChanged=1`) to the 32-pass budget. A host-side trace of the loop's transitions
+(`OLF_GPU_HVDC_LOOP_TRACE=<slot>`, the fork's twin `OLF_HVDC_TRACE=1`) shows SYN_HVDC_4 going LINEAR →
+SAT_2_TO_1 (as OLF does: p2 = 2.75 > pmax 2.0) and then **SAT_2_TO_1 ↔ SAT_1_TO_2 forever**, i.e. the emulated flow
+REVERSES once the saturation injections are applied; OLF's stays at p2 = 3.1 and settles. Alone on the list the
+device converges and matches OLF to 2e-10 kV — the full list has every feeder breaker retained, so the converter
+bus is a coupler CHILD and its P balance lives on the parent's `DUMMY_P` row while its own PHI row hosts
+`ZERO_PHI`: the loop's ±2 pu saturation deltas landed on the `ZERO_PHI` row (#68's finding exactly) and forced
+the angles apart instead of injecting power.
+
+Why #68's fix "was catastrophic": the kernel read the bus ANGLE at the same index it wrote the target to
+(`ph1 = x[hvBus1Row]`), so routing the write to the `DUMMY_P` row made it read a dummy variable as an angle. The
+two roles are now separate arrays (`bus{1,2}PhiCol` read, `bus{1,2}PRow` = `GpuAcData.relocatedPRow` written),
+with the dead-parent-coupler fallback to the own row on both the kernel (`mode == 0 && relocOwn`) and the host
+freeze/status writers (`Ctl.bus1WriteRow(rowMode)`). The `GpuAcData.relocatedPRow` "UNUSED, kept as a warning"
+javadoc said the dumps' `terms=` listing was misleading; it was not.
+
+**Proof (`gpu-load-68b.log`, full busbar scope, GPU arm vs the saved CPU arm):** BUS-1219_BBS now converges on
+the device — SYN_HVDC_4 goes LINEAR → SAT_2_TO_1 once (`HVDC_LOOP s=241 outer=6 … 0 -> 2`) and stays, worst bus
+8.2e-10 kV against OLF — so **`DEVICE FAILURES on a system OLF converges: 0`**. Statuses identical
+`{CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}`, `violations: CPU=503923 GPU=503923 diff=0`, coverage
+6584 / 6667, DAP worst 9.6e-04 MW (was 1.398e-03: the HVDC targets on relocated converter rows were part of the
+tail). The 21 plan refusals are now listed with their reason: 11 `VC_REMERGE_MULTI`, 5 `VC_REMERGE_PINNED_MAIN`,
+4 `VC_REMERGE_RELOC_VROW`, 1 `ISLANDS_SLACK` (validator). Full suite 308 tests, the one failure the pre-existing
+coupler-chain first-step test.
+
+### #71 — the base main SURVIVES a middle-section loss and a second cluster forms (2026-10-05, DESIGN)
+
+The largest of the 21 plan refusals left after #70 (`PLAN:VC_REMERGE_MULTI`, ~9 contingencies: BUS-6002_BBS_2/3/4,
+BUS-6139_BBS_2/3, BUS-6218_BBS_2/3, BUS-6134_BBS_2, BUS-689_BBS_2, BUS-710_BBS_2): the lost section is the one
+NEXT to the base main, so the main keeps its own section alone and the far sections form a second cluster that
+OLF re-merges into a NEW group (elected main, DISTR_Q over the cluster only). Both groups live on ONE candidate
+table whose pilot is the base main. What the device needs per scenario — a **detached pilot** channel, one char
+per (scenario, group):
+- keys: the pilot out of every denominator (the existing inactive-member entry does it);
+- terms: the pilot's q contributions LEAVE the members' DISTR_Q rows (`fillDistrQBatch`: skip `dqJMember ==
+  pilot` — unlike an islanded member, whose elements are disabled, the detached pilot's branches are live);
+- the pilot's own row keeps its BUS_TARGET_V identity (OLF: the main's group still has its own controller), and a
+  pin on it is a LOCAL pin — mode 4 on its own row with its raw q routed to candidate 0 of the group pool
+  (`scatterAddDyn` / `ziDynDest`: `pool[off + 0]` when detached and `mode[pilotRow] == 4`, never the carrier);
+- `pilotSelfGateBatch` skip = 1 (no balance rides a carrier), `rlPilotSelfMixedGate` ignores it,
+  `updatePilotVeqBatch` never flips it (the members' pins belong to the other group now), and
+  `updateDistrQTargetsBatch` never writes `pilotQ` to the carrier for it;
+- the surviving cluster's elected main gets its identity from the killed-coupler block (`blockCovers`) or an
+  explicit ROW_V_IDENTITY, exactly as #70 does — `reHomedControls` accepts the split when the main's own cluster
+  is {main} with a single controller element and ONE other non-local cluster forms.
+Host side: a GenOutage marker (`pqRowMode = ROW_PILOT_DETACHED`, `inactiveDqMember` = the pilot's slot,
+`rlEntry` = the pilot's RL entry → `rlLocalOv` at its own target) → `setBatchDetachedPilots(slot, group)`.
+Fixture: four sections, main at an end, lose the second — `lostPilotSectionNetwork` with the loss moved.
+
+**Implemented differently, as SUBGROUP LABELS (2026-10-05):** rather than detaching the pilot, every surviving
+cluster that is not the base main's gets a per-scenario label (1, 2, …) on its dq members — dense
+`char[nS x nDqMembers]` via `setBatchDqSubgroups` + a `qr group -> first dq member` map — and the kernels pair
+within a label: `fillDistrQBatch` (key sums and a contribution of another label leaves the row),
+`updateDistrQTargetsBatch` (key sums), `relocChooseSub` for every carrier pick (the base pilot's balance rides
+label-0 members only; `RelocTables` carries the labels), `updatePilotVeqBatch` (the "no enabled controller" scan)
+and `rlPilotSelfMixedGate`. The host seeds a member's renormalized DISTR_Q target over its own label's keys and
+drops its replayed weight overrides for a split group (the kernel's dynamic keys own those rows). The base main's
+cluster needs no special treatment at all — with two controllers on its side its DISTR_Q row stays a label-0
+sharing row, with one it is the pilot alone and the existing pilot-self logic covers it. `reHomedControls` labels
+instead of refusing when every labelled member is enrolled in a candidate table whose member order the kernels'
+`qrMemberStart[g] + c - 1` mapping reproduces (`qrMemberOrderConsistent`, else `PLAN:VC_REMERGE_SUBGROUP_TABLE`).
+Fixtures `deviceSplitGroupBehindSurvivingMainMatchesCpu` (4 sections, every loss listed) and
+`deviceSplitGroupWithTwoControllersOnMainSideMatchesCpu` (5 sections) pass at 1e-12 kV with every loss batched.
+
+**Proof (`gpu-load-71.log`, full busbar scope, GPU arm vs the saved CPU arm):** `PLAN:VC_REMERGE_MULTI` is gone
+from the census (was 11 contingencies), device coverage **6595 / 6667** (was 6584), statuses identical
+`{CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}`, `violations: CPU=503923 GPU=503923 diff=0`, device failures on
+OLF-converging systems 0, and the newly batched splits agree at machine precision (BUS-6002_BBS_2 5.3e-11 kV,
+BUS-6139_BBS_2 2.4e-11, BUS-6218_BBS_3 3.2e-11, BUS-689_BBS_2 3.2e-11). Full suite 310 tests, the one failure
+the pre-existing coupler-chain first-step test. **Left: 10 plan refusals on OLF-converging systems** — 5
+`VC_REMERGE_PINNED_MAIN` (a base-pinned elected main: needs the per-scenario pilot pin treatment, i.e. the
+pinned main's balance riding a carrier of ITS subgroup with its identity kept), 4 `VC_REMERGE_RELOC_VROW` (the
+elected main's own V row hosts a LIVE coupler's ZERO_V), 1 `ISLANDS_SLACK` (#34).
+
+### #72 — pinned re-homed mains and re-homed mains under a live coupler (2026-10-05, IN PROGRESS)
+
+**PINNED_MAIN (5).** OLF's post-contingency switches (saved CPU arm, `OLF_RL_TRACE`) settle it: the pinned
+bus is PQ at its limit and a cluster with NO enabled controller keeps `BUS_TARGET_V` off (BUS-6194_BBS_1 and
+BUS-6003_BBS_1: both survivors pinned, never unpinned); a pinned LOCAL re-home can UNPIN (BUS-6157_BBS_1 unpins
+VL-6157_1 then re-pins it at MAX_Q, BUS-6194_BBS_2 unpins VL-6194_2, BUS-6229_BBS_1 stays). So:
+- local re-home of a base-pinned bus → `ROW_PINNED_V`: the row starts as the reactive balance at the pinned
+  value (`LfBus.getTargetQ()`, the frozen generation minus the load) and the entry is a LOCAL PV bus at the
+  re-homed voltage target (`rlLocalOv`), so the kernel's existing local unpin restores the identity;
+- a remote cluster whose controllers are ALL base-pinned → no identity (the killed-coupler block keeps a pinned
+  child's balance at home, mode 4) and one `ROW_PINNED_NO_UNPIN` entry per controller: an unpin would need
+  `BUS_TARGET_V` on a lost pilot's table, so the kernel rejects the scenario (`unpin-unrepresentable`, CPU
+  replay) instead of switching — never fired on rte6515; a pinned main beside an ENABLED sibling stays refused.
+Fixtures `deviceLostPilotLocalPinnedSurvivorMatchesCpu` (2 sections, survivor pinned) and
+`deviceLostPilotAllPinnedClusterMatchesCpu` (3 sections, both survivors pinned) pass at 1e-12 kV.
+
+**RELOC_VROW (4).** The elected main's own V row hosts a LIVE coupler's ZERO_V (it is a child of an alive
+coupler: BUS-6029_BBS_1/2's VL-6029_2 two couplers from the island, BUS-6014_BBS_1/2's VL-6014_3, BUS-6029_BBS_4).
+Its reactive equation lives on the parent coupler's `DUMMY_Q` row, whose pattern already holds the child's own
+dq/dV slot — so `BUS_TARGET_V` goes THERE as a **cross identity**: device row mode 6 = "identity on column
+`relocOwn[row]`" (`applyRowModeBatch`), treated as an identity by every carrier pick and target maintainer, with
+the reactive-limit kernel pinning/unpinning that relocated row (`pinIdx`, the voltage still read at the bus's
+own column) and the pinned form riding the existing stock pair (dummy row on mode 4). No new array: `relocOwn`
+is structural. Entries `ROW_CROSS_V_IDENTITY` (`vRow` = the dummy row, `qTarget` = the voltage target), or
+`ROW_PINNED_V` on the dummy row when the bus is base-pinned. Fixtures: `deviceLostPilotReHomedUnderLiveCouplerMatchesCpu`
+(3 sections, the middle uncontrolled), `deviceLostPilotRemoteClusterUnderLiveCouplerMatchesCpu` (4 sections) and
+`deviceLostPilotPinnedUnderLiveCouplerMatchesCpu`.
+
+**Two more defects the fixtures and the first proof exposed (2026-10-05):**
+- `reHomedControls`' cluster BFS walked CONTROLLED buses only, so an uncontrolled section between two controlled
+  ones split the group and re-homed a controller OLF keeps merged (the 4-section fixture with bbs1 uncontrolled,
+  bus-3: vl12_2 "re-homed" 1.4 kV off, bus-2 a singular solve; rte6515 BUS-6029_BBS_4's VL-6029_2 behind the
+  uncontrolled VL-6029_1). It walks every live bus now and collects the controlled ones.
+- a LOCALLY re-homed bus beside a SURVIVING main was not labelled, so the base pilot's "enabled controller" scan
+  (`updatePilotVeqBatch`) still counted it: BUS-6194_BBS_2 — VL-6194_2 re-homed and unpinned, the kernel read it as
+  a live controller of the base-pinned main VL-6194_0 and restored the main's identity at 1.123 where OLF has it
+  PQ at its limit (row 13634 `mode=0 target=1.123`, 4.775 kV on BUS-6194_BBS_1). A local re-home now gets its own
+  label too (keys, q terms and the pilot's scan all leave it alone). 17 fixtures green.
+
+Diagnostic full-scope run before those two (`gpu-load-73.log`): plan refusals down to **1** (`ISLANDS_SLACK`),
+statuses identical, violations 503923 = 503923, device failures 0, coverage 6604 / 6667; BUS-6014_BBS_1/2 (cross
+identity) at 3e-11 / 4e-11 kV; BUS-6029_BBS_1/2/4 at 5.7e-05 / 1.4e-05 / 2.0e-05 kV — to be read after the BFS fix
+(BUS-6029_BBS_4 was mis-split by it).
+
+**Proof (`gpu-load-75.log`, full busbar scope, GPU arm vs the saved CPU arm):** plan refusals on OLF-converging
+systems **1** (BUS-4714_BBS, `ISLANDS_SLACK`), device failures on OLF-converging systems 0, coverage
+**6604 / 6667**, statuses identical `{CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}`, `violations: CPU=503923
+GPU=503923 diff=0`, `conflictRows=0`. The pinned mains agree at machine precision (BUS-6003_BBS_1 1.4e-10,
+BUS-6157_BBS_1 3.6e-11, BUS-6194_BBS_2 2.6e-11 kV; the latter with OLF's unpin reproduced). One
+`unpin-unrepresentable` reject fired (slot 2297, an all-pinned cluster the device wanted to unpin where OLF did
+not — replayed, hence the equal statuses; the pre-unpin state differed, to be looked at). Full suite 315 tests,
+the one failure the pre-existing coupler-chain first-step test. **Left in this class:** the BUS-6029 family —
+BUS-6029_BBS_1 5.7e-05, BUS-6029_BBS_2 1.4e-05, BUS-6029_BBS_4 2.0e-05 kV (DAP ~4e-09 MW): the cross-identity
+scenarios with an uncontrolled section between the island and the elected main; OLF switches five more buses in
+BBS_1 (pins VL-6490_0, VL-5967_1, VL-6055_0, VL-6231_0/_1, unpins VL-6095_0), so the first question is whether the
+device's decision sequence is the same.
+
+**Read off (same day):** it is the same sequence, and NOT a placement defect. The device's final rows for
+BUS-6029_BBS_1 (slot 2330) carry OLF's layout exactly — VL-6490_0 / VL-6055_0 / VL-6231_0 pinned (mode 1 ← 0),
+VL-6095_0 unpinned (mode 0 ← 1), the cross identity on COUPLER_2's dummy row (`row=14427 mode=6 target=1.039`),
+VL-6029_3's sharing row live — and the worst buses are BUS-6231_BBS_1/_2 (245.000612 vs 245.000555 kV). The
+device's pinned target there is 0.57075810 where OLF pins at qLimit 0.570780403: a **reactive-capability CURVE
+limit evaluated at a slightly different generator P** (2.2e-5 pu). On the 4-contingency list the same contingency
+agrees to 2.1e-10 kV with the pinned target equal to OLF's to 1e-13 (1.1415608051 — there VL-6231 is ONE section,
+in the full list its two sections carry one generator each), so the difference is the per-generator
+distributed-slack P reconstruction the curve channel reads (`genCum`) for generators split across the sections of
+a merged zero-impedance group — the same channel as the remaining DAP tail (9.6e-4 MW), not #72. Opened as **#73**.
+
+### #73 — a pinned pilot-self PILOT re-stamped at a sub-threshold curve drift (2026-10-05, DONE)
+
+Symptom: BUS-6029_BBS_1/2/4 at 1.4e-05 … 5.7e-05 kV, the pinned target of VL-6231_0 off OLF's by 2.2e-5 pu while the
+same contingency on a 4-contingency list (VL-6231 un-split) matches to 1e-13. Suspect: `rlCurveLimitsBatch`'s p_now
+for a generator whose bus is one SECTION of a merged group — the per-generator water-fill cumulative (`dGenCum`) or
+its share fallback — versus OLF's targetP after the distributed-slack loop. Measure with `OLF_GPU_CV_PROBE=<entry>`
+(VL-6231_0's entry) on the full list against OLF's generator targetP (`OLF_VAR_DUMP`), before touching the channel.
+
+**Measured (full list, slot 2330).** The suspect was wrong: the P channel is exact. Device row targets for
+VL-6231_0's P (13721) and VL-6231_1's relocated P (14498) = 1.1469127793758390 vs OLF's 1.1469127793758054
+(3e-14); OLF's `OLF_DS_SPLIT` shows GEN-6231 and GEN-6231#0 moving identically. The pinned Q targets split:
+VL-6231_1 (member, mode 4 on the coupler dummy) 0.5707804025575266 = OLF's 0.5707804025575688; VL-6231_0 (the
+PILOT-SELF pilot, mode 0→1) 0.5707581042516531. `OLF_GPU_CV_PROBE=1340 OLF_GPU_CV_PROBE_SLOT=ctg` (new: the
+chunk-local slot the host resolves for `OLF_GPU_LOOP_TRACE_CTG`, with a host readback `[CV-HOST]` because device
+printf is not captured by surefire) gives the device's own curve limit pass by pass: 0.570780402558 at the pin
+(RL outer 35–41), then the second slack round (outer 42, mismatch 0.038224 = OLF's second DS_SPLIT) moves P by
++5.25e-5 pu and the limit to 0.570758104 (outer 47+). OLF re-freezes a pinned bus at its moved limit only past
+`maxReactivePowerMismatch` (`checkPqBusWithQLimitType`: |maxQ − q| > 1e-2 MVAr = 1e-4 pu), so it keeps the
+pin-time limit; the device's MEMBER path (`reactiveLimitsBatch`, `tol`) does the same — which is why VL-6231_1 was
+exact — but the enrolled pilot's re-stamp in `updatePilotVeqBatch` fired above 1e-12.
+
+**Fix.** `updatePilotVeqBatch` takes `tol` (the run's `REACTIVE_LIMIT_TOL`) and gates the moved-limit re-stamp
+on it. Full busbar scope: BUS-6029_BBS_1 5.68e-05 → 6.5e-11 kV, _2 1.4e-05 → 4.9e-11, _4 2.0e-05 → 3.1e-11;
+statuses `{CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}` both arms, violations 503923 = 503923, device
+failures on OLF-converging systems 0, coverage 6604/6667, DAP worst unchanged (9.564e-04 MW). Fixture
+`devicePinnedPilotSelfKeepsItsLimitUnderThresholdMatchesCpu` (two merged sections, curve on the main's generator,
+a listed section loss retains the coupler, losing a P-less reactive-support generator pins both sections and a
+second slack round drifts the curve by ~2e-8 pu): fails on the old gate (1.75e-8 kV at vl3), passes with the fix;
+the batched SA class 189/189. The split-section wording of the title was a misdiagnosis — nothing about the split
+mattered beyond VL-6231_0 being a pilot-self pilot.
+
+### #74 — the DAP tail's head: a relocated child's curve read its own PHI row (2026-10-05, DONE)
+
+The worst remaining `distributedActivePower` difference, BUS-4467_BBS at 9.564e-04 MW, carried the same bus
+signature as #73 (BUS-6231_BBS_1/2 worst, then 6171/5976/6225/6005) with a 1.85 MW second slack round. Measured
+against OLF pass by pass (`OLF_OL_TRACE` + `OLF_DS_TRACE` on the CPU arm, `OLF_GPU_LOOP_TRACE_CTG` on the device):
+the SEQUENCE is identical — first slack check 0.002820383 on both arms (stable), the same six switches, then a
+slack round — and the only number apart is that second check, OLF 0.018454123 vs device 0.018463687: 9.6e-06 pu,
+the whole 9.56e-04 MW. The paired converged dump (`OLF_VAR_DUMP` / `OLF_GPU_SA_VAR_DUMP`) puts the worst variable
+at `DUMMY_Q BUS-6231_COUPLER_1` (3.1e-06 pu) — the reactive split of the two VL-6231 sections.
+
+`[CV-HOST]` on both entries (1340 = VL-6231_0, the pilot-self pilot; 1341 = VL-6231_1, its coupler-relocated
+child) at the pin pass: 1340 maxQ 0.566570618018 = OLF's qLimit to 1e-12; **1341 maxQ 0.576013011409** — the same
+unit halves (GEN-6231 / GEN-6231#0, same P, same curve) evaluated at DIFFERENT P. After the slack round (outer 47)
+both read 0.566558432, so the per-generator water-fill path is right and only the pre-slack SHARE FALLBACK is not:
+it reconstructs p_now from `target[pRow] - baseRowTarget`, with pRow the bus's OWN `BUS_PHI` row — which for a
+relocated child hosts `ZERO_PHI` (target 0, never moved by the pre-distribution), while the bus's active balance,
+and the 0.0223 pu the security analysis pre-distributed onto it, live on its parent coupler's `DUMMY_P` row. So
+the child pinned at the BASE-P limit; the 9.4e-3 pu that put on the coupler changed the losses the next slack
+check read. OLF then keeps the pin-time limit (drift under the threshold, #73) while the device re-froze the child
+at its moved limit, leaving the 1.2e-5 pu it ended with. The curve dump (`OLF_GPU_CURVE_DUMP`) confirms both halves
+have DS slots (666/667) and identical packs; genCumValid is simply 0 until the first slack round runs.
+
+**Fix.** The host packs the slack pack's row for the bus (`GpuAcData.dsPhiRow()` via `dsBusNum`) and the kernel
+resolves it PER SCENARIO through `dsRowOf(dsPhiRow, dsRowOv, s, nds, dgBus[slot])` — the row the slack pack itself
+retargets, moved back to the child's own row when the coupler dies. Full busbar scope, GPU arm vs the saved CPU arm:
+BUS-4467_BBS 2.870e-05 → **4.087e-11 kV**; DAP worst **9.564e-04 → 1.353e-04 MW** (BUS-6115_BBS_1, 9.6e-05, left
+the top five too); statuses `{CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}` both arms; violations
+503923 = 503923; coverage 6604/6667; device failures on OLF-converging systems 0. Fixture
+`deviceRelocatedChildCurvePinnedAtPreDistributedPMatchesCpu`: a curve on the relocated child's generator, a listed
+section loss to retain the coupler, a 100 MW support generator at vl3 whose loss the SA pre-distributes (slack
+non-participating — a lost participating generator with a participating slack is `PARTICIPATING_SLACK`, a CPU
+shape), both sections pinned at the pre-distributed P (qLimit 0.606601878 against a base-P 0.604334), DEFAULT slack
+threshold so no slack round precedes the pin. The fixture fails on the old code (2.8e-3 kV at vl3) and passes with
+the fix; it exercises the HOST half (the packed row) — the loss of the pilot section (bbs0, listed too) kills the
+coupler but pins nothing, so the kernel's per-scenario `dsRowOv` resolution is reasoned, not fixture-proven:
+a surviving child whose curve must be read on its own PHI row after the coupler dies still wants a fixture that
+pins it there.
+
+**Remaining tail after this** (`OLF_GPU_SA_DAP_DUMP`): BUS-716_BBS 1.353e-04, BUS-2414_BBS_1 1.24e-05,
+BUS-4603_BBS 1.07e-05, BUS-1599_BBS_2 5.3e-06, BUS-349_BBS 4.5e-06 MW. Method that worked here, to repeat on
+BUS-716_BBS: busdiff → the worst buses name the controller; `[CV-HOST]`/`SW_PASS` on its entries against OLF's
+`RL_SWITCH` qLimit; the per-pass slack checks against `DS_PASS`.
+
+**Side observation, not pursued:** with the support generator AT its maxP (no headroom), the same fixture's
+bbs1 loss differs by 2.5e-09 kV at vl4 with no switch and no slack round on either arm, and the two arms' slack
+mismatch readings differ (OLF 6.13e-04 vs device 1.45e-04 pu) — the retain share `rho` counts a saturated
+participant that OLF's water-fill drops. Harmless here (neither arm distributes) but it is a candidate for the
+sub-1e-4 MW tail.
+
+### #75 — the DAP tail below 1.4e-4 MW is KLU's forward error read by OLF's stopping criterion (2026-10-05, MEASURED)
+
+BUS-716_BBS, the head of the tail after #74 (1.353e-04 MW), differs at the FIRST slack check: OLF `DS_PASS
+mismatch=0.057195631`, device `dsRem=0.057196984834` — 1.354e-06 pu = the gap — with no switch and no
+pre-distribution before it (`previousMismatch=0`). Both arms' first post-contingency Newton solve, traced
+(`OLF_NR_TRACE=1 OLF_NR_ITER_TRACE=1` on the CPU arm, `OLF_GPU_CONV_TRACE=2994` on the device, slot from
+`LOOP_TRACE_CTG`):
+
+| | OLF (KLU) | device, IR=0 | device, IR=4 (default) | device, IR=8 |
+|---|---|---|---|---|
+| ‖F‖₂ at entry | 35.97019031573278 | 35.97019031573512 | 35.97019031573509 | 35.97019031573524 |
+| after step 1 | **5.05632848098e-02** | 5.05848962592e-02 | **5.05632838301e-02** | 5.05632838302e-02 |
+| after step 2 (both stop) | 2.12192626685e-04 | 2.53843895e-04 | 2.12131551e-04 | 2.12131551e-04 |
+
+The two arms enter at the same residual to 14 digits and both stop after two steps (OLF's ‖F‖₂ < 1.204e-02),
+so the equations, the targets and the stopping decision are the same; the FIRST STEP is not. The device's step is
+converged under refinement — IR=4 and IR=8 agree to 1e-13 and two independent runs to 3e-14 — and its backward
+residual ratio is 1.6e-15 (`OLF_GPU_LIN_RESID=1`, slot 2994). OLF's step sits 9.8e-10 above it (2e-08 relative),
+which on a Jacobian of condition ~5e8 (the `irSteps` note) is KLU's unrefined forward error (κ·ε ≈ 5e-08). The
+loose criterion then freezes that deviation into the state the slack check reads: 1.35e-06 pu at the slack row,
+1.19e-07 kV at the worst bus. With IR=0 the device's own forward error is 4e-05 relative and the scope's DAP worst
+is 1.07 MW (the run fails), so the refinement is load-bearing and the default stays 4.
+
+**What this means.** The residual tail (BUS-716_BBS 1.35e-04, BUS-2414_BBS_1 1.2e-05, BUS-4603_BBS 1.1e-05 MW
+and the ~3600 contingencies above 1e-9 MW) is the CPU arm's linear-solve error at a two-step stopping point, not
+a device defect: the device computes the exact Newton step, OLF does not, and nothing on the device can make its
+exact step equal KLU's inexact one. The two ways to close it are both on the CPU side or in the comparison:
+refine KLU's solve in OLF (an upstream change — one IR step would take its forward error to ~1e-11), or compare
+at a criterion tight enough that both arms iterate the deviation away (the `#66` eps-squeeze already showed the
+BUS-4467 class floor; this class does collapse, by construction). Not re-measured here on purpose: the only
+confirmation left is KLU's own forward error on this matrix (dump slot 2994's it=0 system, KLU solve vs one
+refined solve), which would put a number on OLF's side instead of inferring it from κ·ε.
+
+Also corrected today: CLAUDE.md said "no state-vector scaling / line search on device"; the batch applies OLF's
+MAX_VOLTAGE_CHANGE clamp per scenario and OLF's exact stopping test, and refines cuDSS solves 4× on networks with
+zero-impedance branches.
+
+### #70 — host the surviving REMOTE cluster of a split voltage-control group (2026-10-04, IN PROGRESS)
+
+**What `VC_REMERGE_MULTI` actually refused.** `OLF_GPU_QUALIFY_TRACE` on the full busbar scope, with
+the contingency id now on the `reHome` line: **46 distinct refused re-homes**, 31 of them exactly
+"pilot section lost, two coupler-joined sections survive" (`main=VL-2341_0 cluster=[VL-2341_1,
+VL-2341_2] newMain=VL-2341_1`), the rest 3–6 sections. In **45 of 46** OLF's elected new main is
+coupler-adjacent to the island — i.e. it is the CHILD of the coupler the contingency opens, which is
+exactly where `GpuBatchChunkSolver`'s killed-coupler block already installs a voltage identity
+(`rowZi[childVRow] = 0` + the child's own target). The 46th (VL-6029) has a control-less section
+between the lost pilot and the elected main.
+
+**OLF's rule for the new group** (`LfZeroImpedanceNetwork.updateVoltageControlMergeStatus` +
+`recreateReactivePowerDistributionEquations` + `updateRemoteVoltageControlEquations`): re-elect the
+main (highest target, then controlled-bus id), rebuild `DISTR_Q` over the CLUSTER's controllers with
+keys renormalized by `updateReactiveKeys` (islanded -> 0), `BUS_TARGET_V` on the new main, the
+dependents' V targets off, `DISTR_Q` active for every enabled controller except the FIRST.
+
+**Why the device can host it without a new table** — every piece already exists:
+- the lost pilot is an INACTIVE dq member (`islandedDistrQEntries` emits one per islanded packed
+  member; the kernel's `updateDistrQTargetsBatch` drops its key from the denominator);
+- the survivors' weights renormalize through `distrQWeightOverrides` with the lost controllers'
+  generators as "gone" (the RENORMALIZE channel) — once `leftControllers` names them;
+- the new main's identity comes from the killed-coupler block (45/46), or an explicit
+  `ROW_V_IDENTITY` when the elected main is not a killed coupler's child;
+- the lost pilot's raw q and carrier override are already suppressed for a pilot-self group with an
+  RL entry (`psSkip = limitType == 0`, islanded entries keep their base limit type 0); the one hole —
+  `updateDistrQTargetsBatch` writing the DEAD pilot's `pilotQ` onto `relocChoose`'s pick when
+  `psEntry < 0` (`PS_NO_ENTRY`) — is closed by a `rowIsFrozen(pilot row)` guard mirroring
+  `updatePilotVeqBatch`.
+
+**Implemented:** `reHomedControls` accepts a non-local cluster when it is EVERY survivor of the base
+group (one surviving cluster), returning `remoteClusterBuses` (removed from `deadControlBuses`, so no
+own-Q entries) and `remoteMainTargets` (the elected main); the lost sections' controllers go to
+`leftControllers` (-> weight overrides + inactive entries). `remoteMainIdentityEntries` adds the
+explicit identity only when the killed-coupler block does not cover the main, refusing
+`VC_REMERGE_RELOC_VROW` when the main's own V row hosts a LIVE coupler's `ZERO_V` (VL-6029: row 13248
+= `zi#327.ZERO_V`) and `VC_REMERGE_PINNED_MAIN` when it is pinned. Kernel guard in
+`updateDistrQTargetsBatch`. New fixture `deviceLostPilotSectionReHomesSurvivingClusterMatchesCpu`.
+
+**Measured so far (GPU-only full busbar scope; census counts are per-attempt, doubled by the retry):**
+
+| | before | after |
+|---|---|---|
+| device coverage | 6550 / 6667 | **6585 / 6667** (+35) |
+| `PLAN:VC_REMERGE_MULTI` | 47 | 22 |
+| `RUNTIME:status=-2` (leaving the device) | 74 | **36** |
+| unit gates | 200 / 0 / 1 | **201 / 0 / 1** |
+
+37 of the 47 re-homes accepted. The 10 still refused are MIDDLE-section losses where the base main
+SURVIVES in its own cluster and a SECOND non-local cluster forms (`BUS-6002_BBS_2`: main VL-6002_0
+alive, cluster [_2.._5]) — two groups on one candidate table; refused by design for now, next step.
+
+**The both-arms proof of that state FAILED (2026-10-04, `remerge-both.log`, full busbar scope, CPU 1 thread):**
+`statuses: CPU={CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60} GPU={CONVERGED=6601, FAILED=6,
+MAX_ITERATION_REACHED=60}` — `STATUS MISMATCHES (1): [BUS-6194_BBS_1]` (CPU CONVERGED with 60 violations,
+GPU FAILED with 0); `violations: CPU=503923 GPU=504060 diff=137` (BUS-2640_BBS_1 +197, BUS-6194_BBS_1 −60,
+BUS-1359_BBS_1 −2, BUS-1869_BBS_1 +2); DAP worst **193.85 MW at BUS-2640_BBS_1**, 0.473 MW at BUS-6003_BBS_1,
+both CONVERGED on both arms. All three are newly accepted re-homes. The device's system was NOT OLF's.
+
+**Root cause — a target-override RACE, visible only in the full batch.** BUS-2640_BBS_1 in a
+3-contingency list (`OLF_GPU_SA_CTG_ONLY=BUS-2640_BBS_{1,2,3}`, so its couplers stay retained) is
+bit-identical to OLF (statuses 3/3, violations 164=164, DAP 1e-13, BUSDIFF 2.8e-11 kV). The device
+row-mode dumps of the two runs for the SAME buses differ in ONE line: the elected main VL-2640_1's V
+row (`OLF_GPU_ROWMODE_DUMP_CTG` + `_ALL`, rows mapped through `OLF_GPU_SA_EQ_DUMP`):
+
+    full list, slot 1844:  row=5956 mode=0<-1 target=0.0000000000000000
+    3 ctgs,   slot 0:      row=5638 mode=0<-1 target=1.0340000000000000
+
+Two producers wrote that row: `remoteMainIdentityEntries`' `ROW_V_IDENTITY` (1.034) and
+`islandedDistrQEntries`' renormalized DISTR_Q target seed (0.0 — VL-2640_1 is a packed member whose
+DISTR_Q row IS its own V row). `GpuBatchChunkSolver`'s seed loop skipped mode-4 rows only (its comment
+kept mode 0 because skipping it had once moved a test by 1.06e-12 kV — the race's own noise), and
+`GpuBatchOverrides.add` appended a second entry, which `applyTargetOverrideBatch` (one thread per entry)
+resolves by scheduling: 0.0 won at slot 1844, 1.034 at slot 0. A V identity at 0 drives the bus to 0 pu
+in clamped steps — 193 MW of slack, 197 violations, and a "CONVERGED" status. The killed-coupler block's
+identity (the `blockCovers=true` cases, BUS-6003_BBS_1 and BUS-6194_BBS_1) raced with the same seed on
+the child's own row.
+
+**Fixed (same day):**
+- the seed loop skips mode-0 rows too (an identity row's target belongs to the identity);
+- `GpuBatchOverrides.add` REPLACES in place — the device never receives one row twice; a conflicting
+  duplicate is counted on every run and the chunk solver warns + records `HOST:OVERRIDE_CONFLICT`
+  (`OLF_GPU_OV_DUP_TRACE=1` names the rows). A sound plan has zero;
+- the TAIL (no-island) site's local re-home loop lacked the PINNED_MAIN refusal the island site has:
+  BUS-6157_BBS_1 (VL-6157_1 baseLimitType=1), BUS-6194_BBS_2 (VL-6194_2, 2), BUS-6229_BBS_1 (VL-6229_1,
+  2) batched with an identity on a base-pinned bus and failed on the device. Now `PLAN:VC_REMERGE_PINNED_MAIN`;
+- the harness's "tried and failed" split now works by ID (`GpuBatchScopeCensus.planRefusedIds`,
+  recorded where a never-batched scenario gets `STATUS_REJECTED`): the census counts are per attempt,
+  and subtracting them printed "-20 of them tried and failed" and called 12 plan refusals device failures
+  (BUS-6002_BBS_2/3/4, BUS-6029_BBS_1/2, BUS-6134_BBS_2, BUS-6139_BBS_2/3, BUS-6218_BBS_2/3, BUS-689_BBS_2,
+  BUS-710_BBS_2 — all `iters=0 norm=NaN`, i.e. never batched; `QUALIFY_TRACE result` now says so).
+
+**The fixture defect, resolved:** OLF's `Networks.retainAndCloseNecessarySwitches` sets `retained=false`
+on EVERY node-breaker switch and re-retains only the switches some listed contingency opens or closes —
+a builder's `setRetained(true)` is inert, and with `bbs0` alone in the list `c12` collapsed `vl12_1`+`vl12_2`
+into one bus. The test now lists `bbs2`'s loss as well (so both couplers exist) and expects BOTH to batch;
+its trace reads `cluster=[vl12_1, vl12_2] … local=false`, `remoteMain bus=vl12_1 … blockCovers=true`. A
+second fixture, `deviceLostPilotSectionRootMainExplicitIdentityMatchesCpu` (bbs0 without a line, so it
+cannot root the coupler tree and vl12_1 keeps its own row), is BUS-2640_BBS_1's shape — explicit
+`ROW_V_IDENTITY` on the very row the DISTR_Q seed targets — and asserts `HOST:OVERRIDE_CONFLICT == 0`.
+Same mechanism, general lesson: with the full busbar list every FEEDER breaker is a retained LfSwitch, so
+the base coupler flows, the coupler trees and the row numbers all differ from any narrowed list — a bug
+that only shows in the full run is a slot-dependent or topology-dependent one, and the first move is to
+diff the two scopes' per-scenario row modes/targets for the same buses.
+
+**Proof after the fix (`fix70-both.log`, both arms, full busbar scope, `OLF_GPU_OV_DUP_TRACE=1`):**
+`OV_DUP chunk … conflictRows=0` in every chunk (170/229 same-value duplicates, none conflicting) — the race is
+gone by construction. BUS-2640_BBS_1: violations 251 → 54 = CPU, DAP 193.85 MW → 1.0e-13 MW; total
+`violations: CPU=503923 GPU=503863 diff=60` (all of it BUS-6194_BBS_1). Device coverage unchanged at 6585 / 6667.
+Crossing the GPU-only `QUALIFY_TRACE result` lines with OLF's statuses: of the 63 scenarios the device TRIED
+and rejected, 62 are OLF's own 65 non-convergences; **the only device failure on a system OLF converges is
+BUS-1219_BBS** (the outer-loop cycle, #69). The 19 others in the old "20 tried and failed" list never ran
+(`iters=0 norm=NaN`).
+
+**Still open after the fix — three re-homes disagree with OLF:**
+
+| contingency | after the fix | 3-ctg list |
+|---|---|---|
+| BUS-6194_BBS_1 | GPU FAILED, CPU CONVERGED (60 violations lost) | — |
+| BUS-6003_BBS_1 | DAP 0.473 MW, both CONVERGED | — |
+| BUS-2640_BBS_1 | bus worst 2.231e-06 kV (DAP 1e-13) | 2.75e-11 kV |
+
+plus the pre-existing BUS-1359_BBS_1 / BUS-1869_BBS_1 ±2 violations (DAP 1e-12) and the #69 DAP tail
+(BUS-5250_BBS 1.398e-03, BUS-5525_BBS 1.060e-03).
+
+The first hypothesis — the elected main pins during the scenario and the device drops its identity — is
+REFUTED by OLF's own switches (`OLF_RL_TRACE=1` on the saved CPU arm): BUS-6194_BBS_1 switches only VL-6189_0
+(MAX_Q), BUS-6003_BBS_1 pins VL-6490_0 and toggles VL-6229_0/_1 (MAX_Q → unpinned → MIN_Q), BUS-2640_BBS_1
+switches nothing. No re-homed main pins. What the two broken ones share instead is in OLF's BASE switches:
+`RL_SWITCH ctg=base PV->PQ bus=VL-6194_0 … MAX_Q` and `… bus=VL-6003_0 … MAX_Q` — **the lost pilot was PINNED
+in the base** (VL-2640_0 was not). Mechanism, read off the kernels: `initRlLimitTypeBatch` seeds an ENROLLED
+pilot-self pilot's limit type from its base kind (`olfKind`, there to keep a base-pinned pilot pinned), with no
+notion of the pilot being islanded this scenario; `pilotSelfGateBatch` then reads `limitType != 0` as "pinned:
+its balance rides the carrier" (`psSkip = 0`), so `fillDistrQBatch` SUPPRESSES the carrier member's own DISTR_Q
+(the `-2 - d0 == carrier` test) for a balance OLF removed with the bus — VL-6194_2's row lost its equation.
+`updateDistrQTargetsBatch` was already guarded (`!pilotFrozen`, the #70 guard); the gate and
+`rlPilotSelfMixedGate` were not. Fixed: both take the per-scenario `rlIslanded` mask — an islanded pilot reads
+as "no balance" (skip = 1) and never counts as a pinned pilot or a controlling member. New fixture
+`deviceLostBasePinnedPilotSectionMatchesCpu` (g0 capped at 5 MVar so the base pins it, then its section is
+lost). BUS-2640_BBS_1's 2.2e-6 kV (DAP 1e-13, no switches on either arm) is a different class — the
+stopping-point slack the DAP tail already carries (#67/#69), to be read with the iteration counts, not #70.
+
+**Second proof (`gpu-load-1359.log`, GPU arm against the saved CPU arm, all of the above in):** `statuses:
+CPU={CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60} GPU={CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}`,
+`violations: CPU=503923 GPU=503923 diff=0`, `conflictRows=0` everywhere, device coverage 6583 / 6667
+(BUS-6194_BBS_1 and BUS-6003_BBS_1 now `PLAN:VC_REMERGE_PINNED_MAIN`, their CPU answers match to 3e-11 /
+4e-10 kV), the only device failure on an OLF-converging system BUS-1219_BBS (#69's cycle), 21 plan refusals on
+OLF-converging systems listed by id. The full test still fails on the pre-existing DAP tail (BUS-5250_BBS
+1.398e-03 MW, the 1e-3 assertion), and two batched contingencies still disagree with OLF in the REACTIVE state
+only: **BUS-1359_BBS_1 (0.465 kV, violations −2) and BUS-1869_BBS_1 (0.338 kV, +2)**, DAP 1e-12 — both
+`split=CONTROL_DIES` with TWO surviving remote controllers on a coupler chain (`deadControl=[VL-1359_1,
+VL-1359_2]`), present in every run since before #70. Device rows agree with OLF's equation SET
+(`bus_target_q[1569]`/`[1570]` active ↔ rows 3138 / 13977 mode 4; `bus_target_v`, `distr_q` inactive), so the
+difference is in a TARGET or a term — being read off a 3-contingency run with both arms' dumps
+(`OLF_VAR_DUMP` + `OLF_GPU_ROWMODE_DUMP_CTG`).
+
+**Read off (2026-10-05): a TERM.** The 3-contingency list reproduces it (0.4648 kV on BUS-1359_BBS_2/3 = the
+survivors themselves: OLF 65.863 kV, device 66.328). OLF's converged `EQ BUS_TARGET_Q VL-1359_1 … target 0.0`
+and the device's `row=2936 mode=4 target=0.0` agree; the device's first-fill matrix (`OLF_GPU_VALS_SCAN=1
+OLF_GPU_VALS_DUMP=… _ANY=1 _NTH=2 _SCAN_SLOT=0`, columns named through the SA eq dump) shows row 2936
+(VL-1359_1's own reactive balance) with its three branch terms but **no `DUMMY_Q(BUS-1359_COUPLER_2)` column**,
+while OLF's `bus_target_q[1468] = … + -1.0 * dummy_q9042 + dummy_q9043` carries the live coupler's dummy
+(the P row 2937 does carry `+DUMMY_P(COUPLER_2)`). Cause: VL-1359_1 is a DISTR_Q controller (own Q balance
+SUPPRESSED, `b1Q = -1`) relocated onto COUPLER_1's dummy row; the zi dest builder gave COUPLER_2's bus1
+dummy-Q term a plain two-way alternate "emit at the dummy row 13045 when that row is mode 0/4" — mode 4 in
+the base (pinned/dead there) is right, but mode 0 (COUPLER_1 dead this scenario) sent the term into the
+identity row, where applyRowMode wipes it, instead of the bus's OWN row (relocOwn[13045] = 2936). The cb/sh
+raw-q families already encode this as a STOCK PAIR (`stockPairOut` / `stockPairPick`: dummy row on mode 4,
+own row on mode 0 + own mode 4, nothing while sharing); the zi family now does the same for a suppressed
+side whose alternate is a relocated home, and the pattern gets the (own row, dummyQ) slot. Fixture
+`deviceLostPilotWithRemoteSurvivorsOnCouplerChainMatchesCpu` (g1/g2 regulate bbs0 remotely, bbs0 lost, the
+survivors chained by c12) — measured against the OLD native lib first: `vl3_b expected 396.486 but was 394.741`
+(1.75 kV), `split=CONTROL_DIES deadControl=[vl12_1, vl12_2]` — the shape reproduces. With the fix: 20 targeted
+tests green, and the 3-contingency rte6515 list gives `BUSDIFF ctg=BUS-1359_BBS_1 … worst abs=5.369e-11 kV`,
+`violations: CPU=214 GPU=214` (was 0.4648 kV, 214 vs 212).
+
+**Final proof of the day (`gpu-load-final.log`, full busbar scope, GPU arm vs the saved CPU arm):** statuses
+identical `{CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}`, `violations: CPU=503923 GPU=503923 diff=0`
+with NO per-contingency violation difference left, `conflictRows=0`, device coverage 6583 / 6667, BUS-1359_BBS_1
+4.654e-09 kV and BUS-1869_BBS_1 6.320e-06 kV (were 0.465 / 0.338). Every remaining bus difference is in the
+1e-6 kV class with DAP ≤ 1.4e-03 MW (BUS-2640_BBS_1 2.2e-06, BUS-5250_BBS 1.6e-06, BUS-5525_BBS 1.2e-06 kV) —
+the stopping-point class the DAP tail is, which is the next item, not #70. The full test's only failing
+assertion is that DAP bar (BUS-5250_BBS 1.398e-03 MW > 1e-3). Unit suite 308 tests, the single failure being
+the pre-existing coupler-chain first-step test noted above. #70 is DONE for the single-cluster re-home; the
+21 plan refusals (two surviving clusters, pinned mains, relocated main rows) stay honest CPU answers.
+
+**A second race the closure exposed (same day).** With duplicates resolved deterministically to the LATER writer,
+`deviceBusLossIslandingBaseCarrierMemberMatchesCpu` failed by 0.45 kV: `OV_CONFLICT ctg=bus-b1 row=2 mode=1
+shadowed=-2.000000000 new=0.000000000 by=GpuBatchChunkSolver.java:1076`. The frozen base carrier hands the
+pilot's reactive balance to the next member's row and stamps the pilot's target there (−2.0, b4's load); the
+islanded-member seed loop then wrote that member's own renormalized DISTR_Q target (0.0) on the same row. On
+the device the pilot's write had been winning the race, so the test passed. Now the chunk solver keeps a
+per-scenario `pilotBalanceRows` set and the seed loop skips those rows; any other pre-existing override on a
+seed row is kept and counted (`HOST:DQSEED_SHADOWED`, 0 so far). 15 targeted tests green with
+`OV_DUP … dupRows=0 conflictRows=0` in every chunk. The CPU arm of the full busbar scope is now SAVED
+(`OLF_GPU_SA_CPU_ARM_MODE=save`, 787 s, `{CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}`) so every
+further proof runs the GPU arm alone against it in ~8 min (`scratchpad/gpu_load.sh`).
+
+**Pre-existing, not #70 (found by the full 306-test suite, which the 201-test gate did not run):**
+`GpuZiCouplerTreeRelocationTest.relocatedCouplerChainStepsWithOlf` fails at 15 couplers — the device's FIRST
+Newton step differs from OLF's dense one by 1.37e-6 (passed on 2026-09-28 logs). Base-LF path
+(`GpuAcNewtonSolver.solve`, maxIter 1), untouched today; to bisect separately (a first-step difference IS a
+fill/Jacobian difference on a relocated coupler chain).
+
+### #69 — the non-batched tail SPLIT: 55 are genuinely lost, and one class is an OUTER-loop cycle (2026-10-02)
+
+**The split, measured.** New `OLF_GPU_SA_STATUS_LIST=1` lists every NON-CONVERGED contingency of each
+arm BY ID (the aggregate counts only say the arms agree; the ids say WHICH contingencies OLF itself
+fails). Both-arms full busbar scope:
+
+```
+CPU non-converged: 65  {MAX_ITERATION_REACHED: 60, FAILED: 5}
+GPU non-converged: 65  {MAX_ITERATION_REACHED: 60, FAILED: 5}
+same id sets: True    status disagreements: 0
+```
+
+The arms' non-converged ID SETS are IDENTICAL with zero status disagreements — a stronger check than
+the count equality the test asserts. Intersecting those with the device's rejects:
+
+| device rejects (`status=-2`) | 84 |
+|---|---|
+| OLF ALSO fails -> the device may answer directly | **29** |
+| OLF CONVERGES -> genuinely lost to the CPU | **55** |
+
+So after [[#67]]'s retry the remaining tail is two populations, and only the 55 are a real loss.
+(`BUS-1039_BBS`, the contingency [[#67]] was diagnosed on, is in OLF's own
+`MAX_ITERATION_REACHED` set and is no longer rejected — the retry answers it. That conclusion holds.)
+
+**One of the 55 characterised, and it is an OUTER-LOOP LIMIT CYCLE.** `BUS-1219_BBS` (slot 241 via
+`OLF_GPU_ROWMODE_DUMP_CTG`), device `OLF_GPU_CONV_TRACE=241` against OLF's `OLF_STEP_TRACE`:
+
+```
+OLF : 11 steps, f=1.00000000 EVERY ONE (no clamping at all), maxDv 0.033 -> 0.0011 -> 8.1e-05,
+      quadratic, across 2 NR solves.
+device, per pass:  37.88 -> 1.45 -> 0.0118   converged
+                    6.43 -> 0.0597 -> 4.1e-05 converged
+                    5.5952083543771 -> 4.181 -> 2.767 -> 1.353 -> 2.7e-11 converged
+                    5.5952083543765 -> 4.181 -> 2.767 -> 1.353 -> 2.5e-11 converged
+                    5.5952083543765 -> ... BIT-IDENTICAL ... converged
+                    (140 convergence checks over 32 passes)
+GPU_REJECT slot=241 reason=outer-loop-budget outer=32 it=0
+```
+
+**The inner Newton CONVERGES EVERY PASS; the OUTER loop re-poses a BIT-IDENTICAL problem forever**
+and the scenario dies on the outer budget, not the inner one. Within a pass the `inf` residual falls
+by EXACTLY 1.0 per step (3.95640976953125 -> 2.95640977 -> 1.95640977 -> 0.95640977), which is
+exactly `maxDphi = 1`: a ~4-unit correction on a unit-diagonal (DUMMY) row delivered 1.0 at a time.
+Then the outer loop re-applies the same ~4-unit offset. Some outer loop is not registering its own
+effect — it reads a state the inner solve has already fixed and re-applies the same delta.
+
+**AND THE GENERALISATION WOULD HAVE BEEN WRONG — the 55 are almost all QUALIFICATION REFUSALS, not
+solver failures.** Tracing a second member, `BUS-2341_BBS_1`, exposed it: **OLF converges it in 2
+STEPS** (trivial), and the device produces `status=-2` with **NO kernel `GPU_REJECT slot=` line at
+all** and no slot from `OLF_GPU_ROWMODE_DUMP_CTG`. The reason is
+`GpuBatchedSecurityAnalysisSolver:431`: a scenario whose result row is NULL — one never batched —
+is marked `STATUS_REJECTED`. **So `RUNTIME:status=-2` CONFLATES kernel rejects with PLAN-TIME
+refusals**, and the census's `PLAN:` entries carry no contingency id (only `MAPPER:` reasons do),
+which is why the plan population was invisible.
+
+The accounting then closes EXACTLY (arithmetic, not id-level proof — the `PLAN:` trace prints no
+ids):
+
+| population | count | OLF | nature |
+|---|---|---|---|
+| `PLAN:VC_REMERGE_MULTI` | 47 | CONVERGES | device DECLINES to batch |
+| `PLAN:VC_REMERGE_PINNED_MAIN` | 3 | CONVERGES | same |
+| `PLAN:VC_REMERGE_RELOC_VROW` | 3 | CONVERGES | same |
+| `PLAN`/`VALIDATOR:ISLANDS_SLACK` | 1 | CONVERGES | same |
+| runtime reject, OUTER-LOOP CYCLE (`BUS-1219_BBS`) | 1 | CONVERGES | genuine SOLVER BUG |
+| runtime rejects, `max-iter-bad-solve` | 29 | ALSO FAILS | normal — answer directly |
+| **leaving the device** | **84** | | |
+
+54 plan + 1 solver bug = the 55 lost; + 29 answerable = 84. **So the dominant gap is NOT a solver
+bug**: it is `VC_REMERGE_MULTI`, where a coupler outage re-splits a merged generator-voltage-control
+group and the re-homed cluster is not LOCAL (`if (!local) return new ReHomed(pv, left,
+"VC_REMERGE_MULTI")` in `GpuBatchQualification`), so the device refuses the layout. Supporting it
+means laying out a RE-HOMED REMOTE group per scenario — real work, not a bug fix.
+
+**Priority follows the user's rule** ("if the CPU fails it is normal that the GPU fails and it should
+answer directly; if the CPU converges and the GPU does not, it is a bug"): the 29 cannot be answered
+directly UNTIL the 55 are fixed, because the device cannot tell the populations apart in advance —
+"device fails ⇒ report it" is only safe once a device failure implies an OLF failure. So: 47
+`VC_REMERGE_MULTI` first (the bulk), then the 7 other plan refusals, then the 1 outer-loop cycle,
+and the 29 come along for free.
+
+**Superseded caution (kept):** `outer-loop-budget` is only ~5 of the kernel rejects against 108
+`max-iter-bad-solve`, so `BUS-1219_BBS` looked like a minority class of the 55. The next step is to pick a `max-iter-bad-solve` member OF THE 55 (not of the 29 OLF also
+fails, which is the trap that made [[#67]] look like an equation bug) and trace it the same way:
+`OLF_GPU_ROWMODE_DUMP_CTG=<id>` for the slot, then `OLF_GPU_CONV_TRACE=<slot>` against
+`OLF_STEP_TRACE=1 OLF_TRACE_CTG=<id>`.
+
+**Which outer loop cycles is NOT yet identified** for the `BUS-1219_BBS` class — that needs the
+device's outer-loop driver trace, not another convergence trace.
+
+### #68 — the HVDC AC-emulation target lands on a relocated converter bus's ZERO_PHI row (2026-10-02)
+
+Found by doing what the equation-identity comparison could not: diffing the NUMBERS. Added
+`OLF_GPU_ROWMODE_DUMP_ALL=1` (the existing `OLF_GPU_ROWMODE_DUMP_CTG` prints only rows DIFFERING
+from base, so a wrong target that happens to equal the base's is invisible) at `%.17g`, and diffed
+the device's per-row target vector against OLF's `F0` section (`F0 <column> <type> <elementNum> <id>
+<residual> <f> <target>`) for `BUS-1039_BBS`: 14504 device rows vs 14486 OLF active equations, the
+18 difference being the 9 islanded buses x 2.
+
+**Result: 14407 rows compared, exactly 10 target mismatches, every one a `ZERO_PHI` on a VSC-station
+breaker — all 5 HVDC links x 2 stations, in near-equal-and-opposite PAIRS:**
+
+| breaker | OLF target | device target |
+|---|---|---|
+| `SYN_VSC_4_2` / `4_1` | 0 | -3.9271053690e-05 / +3.8489558261e-05 |
+| `SYN_VSC_1_1` / `1_2` | 0 | -1.0302481809e-05 / +1.0097462320e-05 |
+| `SYN_VSC_3_1` / `3_2` | 0 | -5.6748343971e-06 / +5.5619051620e-06 |
+| `SYN_VSC_2_1` / `2_2` | 0 | -1.0234645009e-06 / +1.0030975564e-06 |
+| `SYN_VSC_0_2` / `0_1` | 0 | -8.0468953445e-08 / +7.8867621265e-08 |
+
+A `ZERO_PHI` is `phi_parent - phi_child = 0`; its target MUST be 0. The magnitudes identify
+themselves: the CPU log's "Freezing HVDC SYN_HVDC_4 at previous active setPoint:
+0.003927105143741727 MW" / 100 = 3.9271051e-05 pu is the `SYN_VSC_4_2` value, and the +/- pairing is
+the link's two ends with its losses as the small asymmetry.
+
+**The targets are SWAPPED, verified on one coupler:**
+
+```
+row=14478 DUMMY_P(SYN_VSC_4_2_BREAKER) mode=1 terms=[hv#4.p2, zi#353.p1(+dP)]  target=0
+row=13679 BUS_PHI(VL-6215_5)           mode=1 terms=[zi#353.ZERO_PHI]          target=-3.927e-05
+```
+
+The row that actually carries the HVDC `p2` term has target 0, and the frozen setpoint sits on the
+`ZERO_PHI` row instead.
+
+**Cause.** `GpuBatchHvdcAcEmulation.buildControllers` resolves the converter buses' rows as the raw
+`BUS_PHI` VARIABLE row:
+
+```java
+Map<Integer, Integer> phiRows = …;                       // BUS_PHI variable row per bus
+int r1 = phiRows.get(hvdc.getBus1().getNum());
+int r2 = phiRows.get(hvdc.getBus2().getNum());
+```
+
+and stores them in `Ctl(… int bus1PRow, int bus2PRow …)`. That single number does DOUBLE DUTY: it is
+the row the P target is written to AND the column the angle is read from (`x[bus1PhiRow()]`). For a
+bus NOT behind a coupler those coincide, because the stable indexing makes row == paired variable
+column. **Under the coupler-tree relocation they do not:** a relocated child's P balance moves to its
+parent coupler's `DUMMY_P` row while its own `BUS_PHI` row hosts the coupler's `ZERO_PHI`. So the
+target write lands on the `ZERO_PHI` row. This is the bug class recorded in
+[[coupler-relocation-default]] — every consumer of a bus's row must ask for the RELOCATED row — and
+there is a `GpuAcRowIndexing.relocatedQRow` helper for the Q analogue but none for P. The code even
+documents a previous instance of the same family: "A converter bus whose BUS_TARGET_P is INACTIVE
+(the slack) is packed as `~phiRow` … Writing there pinned the base LF's slack angle at the freeze
+delta (BUS_TARGET_PHI residual 0.014, **base MAX_ITER**)".
+
+**THE FIX WAS IMPLEMENTED, MEASURED, AND REVERTED — it is CATASTROPHICALLY WRONG (2026-10-02).**
+The two roles were split (`Ctl` gained `bus1PhiCol`/`bus2PhiCol` for the angle read, `bus{1,2}PRow`
+kept for the target) and the target row resolved through a new `GpuAcData.relocatedPRow(phiCol)`, the
+P analogue of the reactive twin, derived from the same zero-impedance pack. It worked mechanically —
+the ten `ZERO_PHI` targets became exactly 0 — and the solve collapsed:
+
+| | baseline | HVDC target on the relocated `DUMMY_P` row |
+|---|---|---|
+| `max-iter-bad-solve` | 108 | **13194** |
+
+Reverted; the baseline re-measures at exactly 108, and the gates are 200 run / 0 failures / 1 skipped.
+
+**So the PREMISE was wrong, and the "10 mismatches" are most likely a MAPPING ARTEFACT — the third
+in this comparison.** `GpuAcData`'s own class contract says a spanning-tree edge carries
+**`ZERO_V` on the `DUMMY_P` row and `ZERO_PHI` on the `DUMMY_Q` row** — NOT on the buses' own rows.
+My diff script mapped OLF's `ZERO_PHI(branch)` onto the child's own `BUS_PHI` row because the
+equation dump's `terms=` listing shows `zi#353.ZERO_PHI` scattering there, and inferred from that
+that the row's target must be 0. The device's arrangement is evidently not that, so the nonzero
+target on the bus's own PHI row is where the device WANTS the station's P target, and OLF's
+`ZERO_PHI` lives elsewhere in the device's layout.
+
+**What this costs and what it leaves.** The HVDC observation is retracted as a defect. What survives
+is: (i) `OLF_GPU_ROWMODE_DUMP_ALL=1` at `%.17g`, which is how any future target diff gets done;
+(ii) `GpuAcData.relocatedPRow`, kept UNUSED and javadoc'd as a warning with the 108 -> 13194 number,
+so the same wiring is not attempted again; (iii) the measured fact that **14407 of 14407 compared
+rows agree on target once the mapping artefacts are removed** — i.e. the target vectors agree too.
+
+**Method lesson, now three times over in this entry.** Every "difference" this comparison produced
+turned out to be my own mapping: `bus_target_q` mapped onto a pilot's V row (5 phantom mismatches),
+the structure's canonical dq rows read as a runtime set (2 phantom rows), and now `ZERO_PHI` mapped
+onto the child's own PHI row (10 phantom mismatches). **Before believing a dump-to-dump mismatch,
+confirm the row's occupant from the device side** (`row=… TYPE(id) … terms=[…]`) AND from the
+owning class's contract — the `terms=` listing alone is not the row's equation.
+
+**CLOSED as not-a-defect.** It was never shown to cause [[#67]]'s 108 rejects, and the attempted fix
+made them 13194, so the rows are doing what the device intends.
+
+**THE JACOBIAN IS STRUCTURALLY SOUND — no rank defect of the obvious kinds (2026-10-02).** Slot 39
+of the contingency chunk IS `BUS-1039_BBS` (the `ROWMODE_DUMP` names it, and the kernel's reject
+trace lists slot 39 among the 54 distinct rejecting slots), so the device's own matrix dump was
+taken for the very contingency whose equations and targets were verified above:
+`OLF_GPU_VALS_SCAN=1 OLF_GPU_VALS_SCAN_SLOT=39 OLF_GPU_VALS_DUMP=<path> OLF_GPU_VALS_DUMP_ANY=1
+OLF_GPU_VALS_DUMP_NTH=2` (the `VALS_SCAN` master switch is required — without it `VALS_DUMP` writes
+nothing). Header: `n 14504 nnz 101690 outer 0 seq 13 slot 0 nS 3307` — `outer 0`, the pass the reject
+happens in, and `slot 0` because `SCAN_SLOT` clones the traced slot there by design.
+
+| check on the CSR at `outer 0` | result |
+|---|---|
+| non-finite values | **0** |
+| zero ROWS | **0** |
+| zero COLUMNS | **0** (the "dead columns 13171/13207" failure mode is absent) |
+| zero DIAGONAL entries | **0** |
+| row modes | 13494 power / 1001 identity / 9 own-Q |
+
+**Where the residual lives:** on coupler `DUMMY_P` rows paired with their parent bus's `BUS_PHI`
+row, in near-identical pairs — `DUMMY_P(BUS-6174_COUPLER_1)` 7.49986 against `BUS_PHI(VL-6174_0)`
+7.50028, and `DUMMY_P(BUS-5967_COUPLER_1)` / `BUS_PHI(VL-5967_0)` both exactly 6.1324. That pairing
+is just the ±1 dummy coupling (the dummy column enters one bus row with +1 and the dummy row with
+-1), so a mismatch in a coupler's flow appears equally on both. `||F||2 = 36.33`, `||F||inf = 11.02`
+at row `DUMMY_P(BUS-6139_COUPLER_3)`, 99 rows above 1.0, all of them `BUS_PHI` / `BUS_V` /
+`DUMMY_P` / `DUMMY_Q`.
+
+**NOT A COMPARISON, and deliberately not drawn as one:** OLF's `F0` section for the same contingency
+gives `||f-target||2 = 623.0`, `||f-target||inf = 401.3` (263 rows > 1.0, the largest being
+`DISTR_Q VL-1697_2` at 401.3). It is TEMPTING to read that as "OLF starts from a far worse point and
+still converges" — but the two are NOT at the same point, and this file already records why: the
+device's `outer 0` fill is taken AFTER its island freeze, pre-loss target seeding and `applyRowMode`,
+while OLF's `F0` is its raw post-contingency start. An earlier session hit exactly this (OLF
+norm2=774.03 against the device's, not comparable). To compare starting points the two must be
+sampled at the same stage, which neither dump currently does.
+
+**So after equations, targets and now the matrix, [[#67]] still has no located cause.** What is ruled
+out: a different equation set, different targets, a structurally singular or non-finite matrix, a
+factorization problem (mode 6 fixes the factorization for 39 of the 113 and none converge). What is
+NOT yet done: sampling both arms' residual AT THE SAME STAGE, which is the only way the "device
+starts better / worse" question can be answered, and the per-iteration trajectory comparison
+(`OLF_GPU_DBG_NR` against OLF's own Newton) that was the original plan for this item.
+
+**MECHANISM FOUND: the step is CLAMPED to ~18% and stays there (2026-10-02).** New
+`OLF_GPU_STEP_TRACE=1` prints the MAX_VOLTAGE_CHANGE factor actually applied, per (iteration, slot),
+plus which variable binds it — nothing printed this before, and `||dx||inf` from `LIN_RESID` is NOT a
+proxy for it (the largest step component is typically a `DUMMY_P`/`DUMMY_Q` FLOW correction, and
+those carry `varType 2`, which the clamp IGNORES: `extractVarType` maps only `BUS_PHI`->0 and
+`BUS_V`->1). Slot 39 = `BUS-1039_BBS`:
+
+```
+STEP_FACTOR it=0 slot=39 f=0.180879102 maxDv=2.21142 atVrow=5706 maxDphi=2.27604 atPhirow=7179
+STEP_FACTOR it=1 slot=39 f=0.185022873 maxDv=2.16189 atVrow=5706 maxDphi=4.18842 atPhirow=3203
+```
+
+`f = 0.4 / 2.21 = 0.181` — the V cap binds exactly, **the SAME row 5706 binds both iterations, and
+`maxDv` barely moves (2.21 -> 2.16)**. So Newton takes 18% of its step, repeatedly, and 30 clamped
+iterations cannot cover the distance. That is a mechanism for the whole 108.
+
+**And the binding row is NOT a weak row — which kills the obvious explanation.** Row 5706 is
+`BUS_V(VL-2525_0)`, a mode-1 PQ bus with 7 nonzeros, and in the dumped matrix:
+
+```
+row=5706 mode=1 x=0.997945118 target=-0.077 F=-2.24674446e-13 diag=417.021265 max|row|=417.021265
+```
+
+Its residual is ZERO and its diagonal is the LARGEST entry in the row (417). So the 2.21 pu move is
+not `F_i/J_ii` at a weak diagonal — it is the SYSTEM's answer, forced by coupling. The residual
+actually lives on the coupler `DUMMY_P` rows (11.02 pu at `DUMMY_P(BUS-6139_COUPLER_3)`), whose
+diagonal is exactly -1 for all 366 of them (the dummy-flow coefficient), so a 1100 MW coupler
+mismatch propagates into large voltage/angle corrections network-wide.
+
+**Two more explanations ruled out:**
+
+- *A weak/ill-conditioned local row:* no — diagonal 417, F = 0 (above).
+- *The device pre-distributing the contingency loss while OLF lets the slack absorb it:* no —
+  `BatchConfig.contingencyLossPreDistribution` is set from powsybl's OWN
+  `CONTINGENCY_ACTIVE_POWER_LOSS_DISTRIBUTION_DEFAULT_VALUE`, so OLF pre-distributes too and the
+  device mirrors it. (`GpuSaRunScope` even refuses the batch when the parameter is non-default.)
+- *The clamp rule or its magnitudes differing:* no — the kernel computes
+  `f = min(1, maxDv/max|dv|, maxDphi/max|dphi|)`, identical to OLF's
+  `MaxVoltageChangeStateVectorScaling`, with the run's own `maxDv = 0.4` / `maxDphi = 1` and the same
+  `maxNewtonRaphsonIterations = 30`.
+
+**ANSWERED: THE TWO ARMS TAKE THE SAME NEWTON PATH. [[#67]] IS AN ITERATION-BUDGET PROBLEM, NOT AN
+EQUATION PROBLEM (2026-10-02).** `MaxVoltageChangeStateVectorScaling` in the fork now prints its own
+`stepSize` under `OLF_STEP_TRACE=1`, scoped by `OlfTraceScope` (so `OLF_TRACE_CTG=<id>` isolates one
+contingency). Run against `OLF_GPU_STEP_TRACE=1` on the same GPU-only run — the rejected contingency
+is CPU-routed INSIDE the GPU provider, so one run produces both sides:
+
+| step | device `f` | OLF `f` |
+|---|---|---|
+| 0 | 0.180879102 | 0.180878732 |
+| 1 | 0.185022873 | 0.185022597 |
+| 2 | 0.0503344306 | 0.0503343347 |
+| 3 | 0.121389299 | 0.121389102 |
+| 4 | 0.119122665 | 0.119122490 |
+| 5 | 0.105761096 | 0.105760896 |
+
+**Over steps 0..29 the maximum RELATIVE difference is 7.098e-06 (median 1.891e-06), and the binding
+variable is the same every time** — device rows 5706 / 7178 / 7418 against OLF's 5704 / 7168 / 7408,
+the same variables under each arm's own numbering (`elem2853` IS `VL-2525_0`). By the standing rule,
+identical trajectories mean identical equation systems: that question is now closed for this
+contingency, from both ends.
+
+**What both arms actually do: they OSCILLATE.** `f` alternates ~0.19 / ~0.018 with `maxDv` swinging
+2.05 <-> 22.4 — a limit cycle under the MAX_VOLTAGE_CHANGE clamp, on both sides. The contingency is
+simply HARD: 9 islanded buses, 17 branches out, 124.3 MW of load to redistribute, and a Newton that
+cannot settle at `maxDv = 0.4`.
+
+**The ONLY difference is what each side does when the cycle outlasts the budget.** At step 30 the
+device's factor goes to 1 — it has abandoned the scenario (30 inner iterations in `outer 0`
+exhausted, `status -2`, `max-iter-bad-solve`) — while OLF is still oscillating at `f = 0.193713` and
+keeps going, because its `maxNewtonRaphsonIterations = 30` is a budget PER NR SOLVE that each
+outer-loop pass refreshes, whereas the device spends all 30 inside its first outer pass and rejects.
+
+**So the 108 are not a device defect in the equations.** The CPU fallback then solves them and the
+run's status counts match, which is why no result was ever wrong — the cost is purely that 108
+contingencies leave the device, against the no-CPU-fallback goal. The fix is therefore about BUDGET
+and the stall, not about finding a wrong equation:
+
+1. ~~Give the device the same budget semantics OLF has — 30 inner iterations PER OUTER PASS.~~
+   **DISPROVED BY ONE VARIABLE (2026-10-02).** New `OLF_GPU_MAXITER=<n>` (diagnostic) overrides the
+   inner budget; at **120, four times the budget, NOTHING changes**: coverage stays 6550 / 6667 and
+   `max-iter-bad-solve` goes 108 -> 112. More iterations converge not one extra contingency, so the
+   tail is NOT iteration-starved. (Also: the premise was already shaky — `for (int it = 0; it <=
+   maxIter && nActive > 0; it++)` lives INSIDE the per-pass function, so `it` already resets per
+   outer pass; what the reject does is set `live[s] = 0`, permanently retiring the scenario so it
+   never reaches pass 1.)
+2. **THE LIMIT CYCLE IS THE CAUSE, and what breaks OLF's is the OUTER LOOP.** Both arms oscillate on
+   the identical path; OLF escapes because its outer loops CHANGE the problem between NR solves
+   (slack distribution, PV->PQ), which is why its 31 scaled steps span at least two NR solves. The
+   device inside `outer 0` has a fixed problem and oscillates indefinitely, then retires the
+   scenario. So the fix is NOT more inner iterations but: **on inner-budget exhaustion, let the OUTER
+   pass run instead of retiring the scenario** — keep `live[s]`, stop only `active[s]`, and reject
+   only if it still stalls after the outer-loop budget. That is a different change from raising
+   `maxIter`, and it is what OLF actually does.
+   **IMPLEMENTED AND IT IS A NO-OP (2026-10-02).** `OLF_GPU_STALL_TO_OUTER=1` keeps `live[s]` at the
+   `it == maxIter` branch (only `active[s]` stops). Result: coverage 6550 / 6667, 108
+   `max-iter-bad-solve`, census BIT-IDENTICAL to baseline. The flag does reactivate the scenario —
+   `active[s] = live[s]` runs for the next phase — so the conclusion is that **the outer loops find
+   nothing to do with an UNCONVERGED state**: the next phase enters with `solvePass = false` ("re-CHECK
+   every live scenario against the SAME state: STABLE never re-solves (OLF)"), so nothing perturbs the
+   problem and the cycle is never broken. Kept behind the flag, default off, as a recorded dead end.
+
+3. **THE ANSWER, AND IT RETRACTS MY OWN DISMISSAL OF THE MODE-6 RETRY (2026-10-02).**
+
+   `OLF_GPU_CONV_TRACE=39` gives the device's full stopping decision, iteration by iteration:
+
+   ```
+   it=0 norm2=36.33  it=5 norm2=17.81  it=10 norm2=10.19  it=15 norm2=5.31
+   it=19 norm2=3.61  it=21 norm2=3.07  it=25 norm2=2.42  it=29 norm2=2.12  it=30 norm2=2.26
+   thr2 = 1.20357799913425e-02  (= 1e-4 * sqrt(14486), OLF's OWN formula, and nActive=14486
+                                  is EXACTLY OLF's active-equation count)
+   ```
+
+   It converges steadily to ~2.1 and then STALLS in a 2-cycle, **176x above threshold**. At that rate
+   it needs roughly 250 iterations — which is also why `OLF_GPU_MAXITER=120` converted nothing.
+   **OLF's own cap is 30 per NR solve, so OLF cannot have converged this contingency either.**
+
+   And it does not. The harness prints both arms' statuses, and they are IDENTICAL:
+
+   ```
+   statuses: CPU={CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}
+             GPU={CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}
+   ```
+
+   **OLF itself reports MAX_ITERATION_REACHED for 60 contingencies and FAILED for 5** — 65 not
+   converged on either arm, matching the run's own "65 contingencies not CONVERGED on both arms". So
+   for a large part of the 108, `MAX_ITERATION_REACHED` IS the correct answer, and the device can
+   report it DIRECTLY instead of paying a CPU replay to arrive at the same thing.
+
+   **Which means the mode-6 retry was working and I judged it by the wrong metric.** It moved
+   `RUNTIME:status=-2` from **113 to 70** and `DEVICE:MAX_ITERATION_REACHED` from **4 to 47** — 43
+   contingencies that stopped leaving the device. I called that a regression because COVERAGE stayed
+   at 6550 / 6667. **Coverage cannot move for these by construction:** it counts precomputed device
+   STATES, and a `MAX_ITERATION_REACHED` result carries no state. The metric that matters is how many
+   contingencies leave the device for a CPU replay, and that improved by 43.
+
+   The guard against claiming `MAX_ITERATION` for a scenario OLF actually converges is the harness's
+   STATUS-COUNT EQUALITY, not coverage — and that check was never run on the mode-6 experiment,
+   because it was a GPU-only run.
+
+   **VALIDATED ON BOTH ARMS, AND NOW ON BY DEFAULT (2026-10-02).** Full busbar scope with
+   `-Dolf.gpu.sa.robustRetry=true -Dolf.gpu.sa.robustRetryAcceptMaxIter=true`:
+
+   ```
+   GPU_ROBUST_RETRY attempted=113 recovered=39 statuses={-2=74, 1=39}
+   statuses: CPU={CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}
+             GPU={CONVERGED=6602, FAILED=5, MAX_ITERATION_REACHED=60}
+   violations: CPU=503923 GPU=503923 diff=0
+   distributedActivePower worst 1.397828e-03 MW  (unchanged)
+   CENSUS: RUNTIME:status=-2 = 74 (was 113), DEVICE:MAX_ITERATION_REACHED = 43 (was 4)
+   ```
+
+   | | before | with the retry |
+   |---|---|---|
+   | CPU replays (`status=-2`) | 113 | **74** |
+   | `DEVICE:MAX_ITERATION_REACHED` | 4 | 43 |
+   | CPU-vs-GPU status counts | match | **match** |
+   | violations | diff 0 | **diff 0** |
+   | unit gates | 200 / 0 / 1 | **200 / 0 / 1** |
+
+   So **39 of the 108 stop leaving the device**, answering with the same status OLF gives, and both
+   defaults are flipped ON. Remaining tail: 74.
+
+   **COST MEASURED, and it is NEGATIVE — the pass PAYS FOR ITSELF (2026-10-02).** The worry was that
+   switching mode evicts the single-entry context cache, so the pass costs a cuDSS analysis plus a
+   solve over the rejected scenarios on every run. Both-arms full busbar scope, retry off against
+   retry on:
+
+   | | retry OFF | retry ON | |
+   |---|---|---|---|
+   | GPU COLD | 174751 ms (26.21 ms/ctg) | **150575 ms (22.59 ms/ctg)** | **-14%** |
+   | GPU warm | 174073 ms (26.11 ms/ctg) | **147439 ms (22.11 ms/ctg)** | **-15%** |
+   | vs CPU | x4.03 / x4.05 | **x4.93 / x5.04** | |
+
+   Removing 39 CPU replays of HARD, non-converging contingencies saves far more than the extra device
+   pass costs — a CPU replay of one of these runs OLF's full outer-loop machinery to a
+   MAX_ITERATION_REACHED verdict. (Caveat: the two runs are not perfectly matched — their CPU arms
+   differ by 5%, 704487 ms against 742567 ms — but the GPU gain is 14%, the opposite sign to a
+   slowdown and larger than that noise.) So the default-on decision stands on both correctness and
+   speed; `-Dolf.gpu.sa.robustRetry=false` still turns it off.
+
+4. **Superseded lead (kept): the STOPPING CRITERION at the boundary.** OLF's 31
+   scaled steps must span AT LEAST TWO NR solves (its own cap is 30 per solve), which means **OLF's
+   first NR FINISHED** — while the device's first 30 steps, agreeing with OLF's to 7.1e-06, did NOT.
+   If OLF's criterion is met at step ~30 and the device's is not, by a hair, then the device rejects
+   exactly where OLF proceeds to its outer loop, and everything else measured (same equations, same
+   targets, same path, same clamp, more iterations useless, outer loops inert on a stalled state)
+   follows. The device iterates on `||F||2 < sqrt(convEpsPerEq^2 * nActive)` with
+   `convEpsPerEq = 1e-4` under `UNIFORM_CRITERIA`; OLF applies its configured
+   `NewtonRaphsonStoppingCriteria`. **Next: print the device's `||F||2` / `||F||inf` per iteration for
+   slot 39 against its threshold, and OLF's stopping decision for the same contingency, and compare
+   at the step-30 boundary.** This is the one place a hair's difference flips a reject into a
+   continue, and it is not yet measured.
+
+**Superseded (kept): the decisive measurement not yet made was OLF's own clamp factor.** Both
+arms have the same equations, the same targets, comparable initial residuals at the same equations
+(OLF 13.37 / 7.25 / 7.02 / 10.60 / 7.88 / 6.12 pu against the device's 11.02 / 9.79 / 7.50 / 6.70 /
+6.70 / 6.13 at the matching coupler children) and the same clamp rule — yet OLF converges inside 30
+iterations. So either OLF's factor is much closer to 1 (which would mean its STEP DIRECTION differs,
+sending us back to Jacobian VALUES, the one thing still uncompared), or OLF's factor is also ~0.18
+and its iterates still get there. **Instrument `MaxVoltageChangeStateVectorScaling` in the fork to
+print its `stepSize` per iteration, scoped by `OlfTraceScope`, and compare.** That single number
+splits the remaining hypotheses.
+
+**Still open, and the honest state of [[#67]]:** the equation systems agree everywhere the dumps can
+compare them; the targets, islanded sets, step clamp and iteration cap all
+agree; the device nonetheless cannot finish the first Newton solve on 108 contingencies; and the one
+difference found has not been shown to cause it. The 649 relocated buses remain the region a per-bus
+comparison cannot reach, and the reconciliation above (OLF 334 active vs device 336 live + 9 gated)
+is now fully explained by exactly those 2 rows — so that count is no longer an open discrepancy.
+
+**Superseded (kept): the probe the dump named.** this contingency must absorb
+`activePowerLoss = -1.243 pu` (124.3 MW of disconnected load), and the dump prints that value as
+"the reference for the device's scheduledActivePowerLoss (`OLF_GPU_LOSS_TRACE` prints that one)". A
+target that large being wrong would wreck the first solve, and TARGETS are part of the system. Run
+`OLF_GPU_LOSS_TRACE=1` and compare. The still-unchecked region is the **649 relocated buses** (a
+per-bus V-row comparison is invalid there, since a relocated child's `DISTR_Q` lives on its parent
+coupler's `DUMMY_Q` row while its own V row hosts `ZERO_V`); the aggregate is OLF 334 active
+`distr_q` against 345 device dq-carrying rows, 336 at mode 1 and 9 at mode 4, which is NOT yet
+reconciled and is the next thing to nail down after the loss.
+
+**TWO DIAGNOSTIC DEFECTS FIXED ON THE WAY — both had been silently inventing differences:**
+
+1. `OLF_GPU_SA_EQ_DUMP` passed `new int[baseState.length]` as the row modes, so EVERY row printed
+   `mode=0` (identity), including the coupler `DUMMY_Q` rows that carry the `dq` sharing terms. Any
+   comparison against it reads a system difference wherever OLF has a power row. Now passes
+   `baseActivation.rowMode()`; the dump shows modes 0/1/4.
+2. My own parse of `OLF_GPU_EQ_DUMP_CTG` matched only the SCALAR equation names
+   (`bus_target_v3 = v3`) and silently dropped every VECTORIZED one
+   (`bus_target_q[0] = ac_q_array_closed_2(...)` — the element number is in BRACKETS). That hid all
+   6886 `bus_target_p` and all 6886 `bus_target_q` equations, i.e. the entire P/Q balance side, so a
+   first "0 mismatches" result had checked only the PV classification. The dump has BOTH shapes;
+   match `([a-z_\u03c6]+?)(?:\[(\d+)\]|(\d+))\s*=`. Correct inventory for `BUS-1039_BBS`:
+   `bus_target_p` 6876 active, `bus_target_q` 5561, `bus_target_v` 982, `distr_q` 334, `zero_v` 366,
+   `zero_phi` 366, `bus_target_phi` 1.
+
+
 ## Completed 2026-07-21
 
 | # | Task | Evidence |

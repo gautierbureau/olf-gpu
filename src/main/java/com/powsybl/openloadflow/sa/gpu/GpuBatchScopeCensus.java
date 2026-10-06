@@ -46,6 +46,12 @@ public final class GpuBatchScopeCensus {
             new java.util.concurrent.atomic.AtomicInteger();
 
     private static final Map<String, LongAdder> COUNTS = new ConcurrentHashMap<>();
+    /** The contingencies the scenario PLAN refused (never attempted on the device), by id. The counters
+     *  above are per attempt — a cold and a warm run, or a robust retry, count a refusal twice — so a
+     *  harness that subtracts them from a per-contingency list gets nonsense ("-20 of them tried and
+     *  failed"). The split "refused at plan time" vs "tried on the device and failed" needs the IDS. */
+    private static final java.util.Set<String> PLAN_REFUSED_IDS = ConcurrentHashMap.newKeySet();
+    private static final Map<String, String> PLAN_REFUSAL_TAG = new ConcurrentHashMap<>();
 
     private GpuBatchScopeCensus() {
     }
@@ -53,6 +59,27 @@ public final class GpuBatchScopeCensus {
     /** Count one contingency leaving the batched path for {@code reason}. */
     public static void record(String reason) {
         COUNTS.computeIfAbsent(reason, k -> new LongAdder()).increment();
+    }
+
+    /** Name a contingency the plan refused outright — it never reached the device. */
+    public static void planRefused(String contingencyId) {
+        PLAN_REFUSED_IDS.add(contingencyId);
+    }
+
+    /** ...with the refusal's reason tag, from the qualification site that decided it. */
+    public static void planRefused(String contingencyId, String tag) {
+        PLAN_REFUSED_IDS.add(contingencyId);
+        PLAN_REFUSAL_TAG.putIfAbsent(contingencyId, tag);
+    }
+
+    /** The ids the plan refused since the last {@link #reset()}. */
+    public static java.util.Set<String> planRefusedIds() {
+        return java.util.Collections.unmodifiableSet(PLAN_REFUSED_IDS);
+    }
+
+    /** The reason tag recorded for a refused id, or "?" when only the never-batched marker was seen. */
+    public static String planRefusalTag(String contingencyId) {
+        return PLAN_REFUSAL_TAG.getOrDefault(contingencyId, "?");
     }
 
     /** The reason histogram since the last {@link #reset()}, ordered by reason. */
@@ -65,5 +92,7 @@ public final class GpuBatchScopeCensus {
     /** Clear the histogram — call before a run whose census you want to read. */
     public static void reset() {
         COUNTS.clear();
+        PLAN_REFUSED_IDS.clear();
+        PLAN_REFUSAL_TAG.clear();
     }
 }

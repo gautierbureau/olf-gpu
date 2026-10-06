@@ -84,6 +84,7 @@ final class GpuBatchChunkSolver {
                                                int[][] drOvContribByIndex, double[][] drOvCByIndex,
                                                int[][] islandedDsByIndex, int[][] islandedRlByIndex,
                                                List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
+                                               int[][] dqSubByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, double[] preDistributedByIndex,
@@ -105,7 +106,7 @@ final class GpuBatchChunkSolver {
                         baseTargets, baseRowMode, frozenRowsByIndex, frozenTargetsByIndex, genOutagesByIndex,
                         activePowerLossByIndex, hvdcElemIndex, rowCriteria, rlCurves,
                         dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
-                        islandedRlByIndex, islandedHvdcsByIndex,
+                        islandedRlByIndex, islandedHvdcsByIndex, dqSubByIndex,
                         n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                         preDistributedByIndex, distributedByIndex, varType, phases, hvdcControllers, config);
                 return;
@@ -228,6 +229,7 @@ final class GpuBatchChunkSolver {
                                                int[][] drOvContribByIndex, double[][] drOvCByIndex,
                                                int[][] islandedDsByIndex, int[][] islandedRlByIndex,
                                                List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
+                                               int[][] dqSubByIndex,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, double[] preDistributedByIndex,
@@ -245,7 +247,13 @@ final class GpuBatchChunkSolver {
 
         // Reuse a cached analyzed context when the pattern/admittances/chunk/mode match (across
         // SA runs on the same network) — the context is NOT destroyed here, it stays cached.
-        long handle = GpuBatchContextCache.acquireBatchContext(gpuData, chunkSize, GpuBatchContextCache.resolveBatchMode(), n);
+        // MODE: the run's configured batch mode, or the ROBUST single-matrix solve on the retry pass
+        // (config.robustSolveMode(), set only by BatchConfig.withRobustSolveMode) — mode 6 is mode 0's
+        // per-scenario loop with matching and global column pivoting, which is what rte6515's full
+        // busbar structure needs to factor at all. Switching mode EVICTS the single-entry context cache,
+        // so the retry pays one cuDSS analysis; that is the price of keeping the scenarios on device.
+        long handle = GpuBatchContextCache.acquireBatchContext(gpuData, chunkSize,
+                config.robustSolveMode() ? GpuBatchContextCache.MODE_ROBUST : GpuBatchContextCache.resolveBatchMode(), n);
         // PER_EQUATION_TYPE criterion: install the per-row thresholds on the (possibly cached)
         // context — or CLEAR a previous run's thresholds under UNIFORM_CRITERIA.
         GpuAcNewtonSolver.setBatchRowCriteria(handle,
@@ -485,6 +493,11 @@ final class GpuBatchChunkSolver {
                     // after this loop and composes its shares onto the participants' rows).
                     int[][] dsRowOvBySlot = new int[chunkSize][];
                     List<Integer> rlIslandedList = new ArrayList<>();
+                    List<Integer> rlNoUnpinList = new ArrayList<>();   // (scenario, entry): an unpin rejects the scenario
+                    // tasks #71: per (scenario, dq member) subgroup labels of a split group, dense, null when none
+                    int nDqMembersAll = gpuData.dqMemberBusNum() != null ? gpuData.dqMemberBusNum().length : 0;
+                    byte[] dqSubDense = new byte[chunkSize * nDqMembersAll];
+                    boolean anyDqSub = false;
                     List<Integer> rlLocalList = new ArrayList<>();     // (slot, entry): re-homed PV buses checked as LOCAL
                     List<Double> rlLocalVt = new ArrayList<>();        // their own voltage target (pu)
                     // {slot, rlEntry} pairs + {dMinQ, dMaxQ}: the reactive capability a lost generator
@@ -601,6 +614,12 @@ final class GpuBatchChunkSolver {
                                     rlIslandedList.add(controller);
                                 }
                             }
+                            if (dqSubByIndex != null && dqSubByIndex[ci] != null && nDqMembersAll > 0) {
+                                for (int p = 0; p < dqSubByIndex[ci].length; p += 2) {
+                                    dqSubDense[s * nDqMembersAll + dqSubByIndex[ci][p]] = (byte) dqSubByIndex[ci][p + 1];
+                                }
+                                anyDqSub = true;
+                            }
                             List<LfBranch> branches = contingencies.get(ci).outagedBranches();
                             List<LfShunt> shunts = contingencies.get(ci).outagedShunts();
                             List<com.powsybl.openloadflow.network.LfHvdc> hvdcs = contingencies.get(ci).outagedHvdcs();
@@ -699,6 +718,9 @@ final class GpuBatchChunkSolver {
                                     }
                                 }
                             }
+                            // Rows that host a PILOT'S relocated reactive balance this scenario (the carrier a frozen base
+                            // carrier handed it to): a DISTR_Q target seed must not land on them, see the seed loop below.
+                            gnu.trove.set.hash.TIntHashSet pilotBalanceRows = new gnu.trove.set.hash.TIntHashSet();
                             int[] frozen = frozenRowsByIndex[ci];
                             if (frozen.length > 0) {         // fragmenting outage: freeze the islanded buses' rows
                                 int[] row = baseRowMode.clone();
@@ -778,6 +800,7 @@ final class GpuBatchChunkSolver {
                                     if (baseCarrier >= 0 && newCarrier >= 0 && newCarrier != baseCarrier
                                             && row[baseCarrier] == 0 && baseRowMode[baseCarrier] != 0 && !unpinnedPilotSelf) {
                                         overrides.add(s * n + newCarrier, baseTargets[baseCarrier]);
+                                        pilotBalanceRows.add(newCarrier);
                                         if (System.getenv("OLF_GPU_SA_RESID") != null) {
                                             System.err.printf("CARRIER_MOVED ctg=%s group=%d from=%d to=%d pilotQ=%.9f%n",
                                                     contingencies.get(ci).contingencyId(), g, baseCarrier, newCarrier,
@@ -863,7 +886,15 @@ final class GpuBatchChunkSolver {
                                     // below the write it was guarding.
                                     boolean applied = childVRow >= 0 && child != null && !child.isDisabled()
                                             && child.isGeneratorVoltageControlled() && childVc.isPresent();
-                                    if (applied) {
+                                    boolean childPinned = applied
+                                            && GpuBatchQualification.basePinned(gpuData, GpuBatchQualification.rlEntryOf(gpuData, child));
+                                    if (applied && childPinned) {
+                                        // The child is PQ in the base (reactive limit): its balance comes home at
+                                        // the pinned value, no identity (the qualification refused such a child as
+                                        // VC_REMERGE_PINNED_MAIN until the entry channels below existed).
+                                        rowZi[childVRow] = 4;
+                                        overrides.add(s * n + childVRow, child.getTargetQ());
+                                    } else if (applied) {
                                         rowZi[childVRow] = 0;
                                         overrides.add(s * n + childVRow, childVc.orElseThrow().getTargetValue());
                                     }
@@ -1107,7 +1138,11 @@ final class GpuBatchChunkSolver {
                                     if (go.reHomesRlEntry()) {
                                         rlLocalList.add(s);
                                         rlLocalList.add(go.rlEntry());
-                                        rlLocalVt.add(go.qTarget());
+                                        rlLocalVt.add(go.reHomeVTarget());
+                                    }
+                                    if (go.forbidsUnpin()) {
+                                        rlNoUnpinList.add(s);
+                                        rlNoUnpinList.add(go.rlEntry());
                                     }
                                     if (go.silencesReactiveLimitEntry()) {
                                         // Nothing left to control voltage at that bus: mask its
@@ -1135,23 +1170,43 @@ final class GpuBatchChunkSolver {
                                             // Seed only where the row still HOSTS a DISTR_Q equation this
                                             // scenario. Mode 4 means it hosts its own reactive balance (an RL
                                             // pin, or a control the contingency killed and whose BUS_TARGET_Q
-                                            // the injection override owns), and updateDistrQTargetsBatch
-                                            // refuses to maintain a DISTR_Q target there -- "A DISTR_Q target
-                                            // has no business here" -- so uploading one is a write this code
-                                            // does not own. (Mode 0, the voltage identity the same kernel also
-                                            // refuses, is NOT skipped here: no measured conflict was on a
-                                            // mode-0 row, and skipping it moved deviceMultiChunkMatchesCpu's
-                                            // B3 by 1.06e-12 kV -- past its 1e-12 assertion. Guard what was
-                                            // measured.) It landed as a SECOND
-                                            // override on a row that already had one, and
-                                            // applyTargetOverrideBatch resolves two entries on one row by a
-                                            // race (one thread per entry writing target[ovIndex[k]]).
-                                            // Measured over the full busbar scope (OLF_GPU_OV_DUP_TRACE):
-                                            // 26 rows across 24 contingencies disagreed, EVERY one of them
-                                            // mode 4, all from this one site -- among them BUS-1359_BBS_1 and
-                                            // BUS-1869_BBS_1 (the +-2 violation pair) and BUS-1599_BBS_1 (the
-                                            // second-worst distributed-power difference).
-                                            if (dqMode == 4) {
+                                            // the injection override owns); mode 0 means it is an IDENTITY —
+                                            // a re-homed control's voltage target (reHomedPvEntry, the remote
+                                            // main of a split group) or a frozen/outaged row. updateDistrQ-
+                                            // TargetsBatch refuses to maintain a DISTR_Q target on either ("A
+                                            // DISTR_Q target has no business here"), so uploading one is a
+                                            // write this code does not own: it lands as a SECOND override on a
+                                            // row that already has one. Measured over the full busbar scope
+                                            // (OLF_GPU_OV_DUP_TRACE): 26 mode-4 rows across 24 contingencies
+                                            // disagreed, all from this site — BUS-1359_BBS_1 and BUS-1869_BBS_1
+                                            // (the +-2 violation pair), BUS-1599_BBS_1. Then, once the split
+                                            // re-homes batched (tasks #70), the mode-0 case: BUS-2640_BBS_1's
+                                            // elected main VL-2640_1 got its 1.034 identity on row 5956 AND
+                                            // this seed's 0.0 (its renormalized DISTR_Q target); the device
+                                            // picked 0.0 in the full 6667-contingency batch (slot 1844: V
+                                            // driven to 0, 193.85 MW of distributed power, +197 violations)
+                                            // and 1.034 in a 3-contingency batch (slot 0, bit-identical to
+                                            // OLF). The earlier "mode 0 is NOT skipped: skipping it moved
+                                            // deviceMultiChunkMatchesCpu by 1.06e-12 kV" was the race's own
+                                            // noise being guarded.
+                                            if (dqMode == 4 || dqMode == 0 || dqMode == 6) {
+                                                continue;
+                                            }
+                                            // ...nor on the row that HOSTS A PILOT'S BALANCE this scenario: a frozen base
+                                            // carrier hands the pilot's reactive balance to the next live member's row
+                                            // (the block above stamps the pilot's target there), and that member's own
+                                            // renormalized DISTR_Q target is not that row's equation any more. The two
+                                            // writes raced on the device and the pilot's won by luck — measured once the
+                                            // race was closed: deviceBusLossIslandingBaseCarrierMemberMatchesCpu, row 2
+                                            // −2.0 (b4's load) shadowed by this seed's 0.0, b2 22.49 → 22.04 kV.
+                                            if (pilotBalanceRows.contains(dqRow2)) {
+                                                continue;
+                                            }
+                                            // Any OTHER earlier override on a seed row is a producer this code does not
+                                            // know about: keep the more specific one, and count it so a composition gap
+                                            // (two seeds for one row from two paths) is measurable, never a race.
+                                            if (overrides.has(s * n + dqRow2)) {
+                                                com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("HOST:DQSEED_SHADOWED");
                                                 continue;
                                             }
                                             overrides.add(s * n + dqRow2, go.dqTargetValues()[t]);
@@ -1414,6 +1469,15 @@ final class GpuBatchChunkSolver {
                     }
                     int[] targetOverrideIndex = overrides.indexArray();
                     double[] targetOverrideValue = overrides.valueArray();
+                    if (overrides.conflictingAddCount() > 0) {
+                        // Two producers disagreed on one row's target. GpuBatchOverrides resolved it to the
+                        // later one (no row reaches the device twice), but a sound plan has NO such row:
+                        // every one so far was a write that should not exist (a DISTR_Q seed on a mode-0/4
+                        // row). Name it; OLF_GPU_OV_DUP_TRACE=1 lists the rows.
+                        LOGGER.warn("GPU batched SA: {} conflicting target overrides in chunk at {} (resolved to the later"
+                                + " writer; OLF_GPU_OV_DUP_TRACE=1 lists them)", overrides.conflictingAddCount(), chunkStart);
+                        com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("HOST:OVERRIDE_CONFLICT");
+                    }
                     if (GpuBatchOverrides.dupTrace()) {
                         // The invariant GpuBatchOverrides states in its javadoc, measured on the entries
                         // actually handed to the device: a row with two entries is written by two threads
@@ -1616,7 +1680,7 @@ final class GpuBatchChunkSolver {
                         if (config.hvdcFreezing()) {
                             hvdcStatus = GpuBatchHvdcAcEmulation.applyFreeze(chunkSize, realCount, n, hvdcControllers,
                                     baseState, x0Full, x0Full == null ? x0SeedIdx : null, x0Full == null ? x0SeedVal : null,
-                                    disabledMask, baseTargets, overrides, hvAppliedD1, hvAppliedD2);
+                                    disabledMask, baseTargets, overrides, hvAppliedD1, hvAppliedD2, rowModePerScenario);
                             targetOverrideIndex = overrides.indexArray();
                             targetOverrideValue = overrides.valueArray();
                         } else {
@@ -1667,6 +1731,10 @@ final class GpuBatchChunkSolver {
                             dsRowOvList.isEmpty() ? null : dsRowOvList.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchRlIslanded(handle,
                             rlIslandedList.isEmpty() ? null : rlIslandedList.stream().mapToInt(Integer::intValue).toArray());
+                    GpuAcNewtonSolver.setBatchRlNoUnpin(handle,
+                            rlNoUnpinList.isEmpty() ? null : rlNoUnpinList.stream().mapToInt(Integer::intValue).toArray());
+                    GpuAcNewtonSolver.setBatchDqSubgroups(handle, anyDqSub ? dqSubDense : null,
+                            anyDqSub ? GpuBatchQualification.qrMemberStart(gpuData) : null);
                     GpuAcNewtonSolver.setBatchRlLocal(handle,
                             rlLocalList.isEmpty() ? null : rlLocalList.stream().mapToInt(Integer::intValue).toArray(),
                             rlLocalList.isEmpty() ? null : rlLocalVt.stream().mapToDouble(Double::doubleValue).toArray());
@@ -1909,7 +1977,7 @@ final class GpuBatchChunkSolver {
                             overrides.restore(preHvdcOverrides);
                             GpuBatchHvdcAcEmulation.applyStatusOverrides(chunkSize, realCount, n,
                                     hvdcControllers, hvdcStatus, ctgOutOf, disabledMask, baseTargets, overrides,
-                                    hvAppliedD1, hvAppliedD2);
+                                    hvAppliedD1, hvAppliedD2, rowModePerScenario);
                             targetOverrideIndex = overrides.indexArray();
                             targetOverrideValue = overrides.valueArray();
                         }
@@ -2101,11 +2169,17 @@ final class GpuBatchChunkSolver {
                             if (!rmCtg.equals(contingencies.get(group.get(chunkStart + s)).contingencyId())) {
                                 continue;
                             }
+                            // OLF_GPU_ROWMODE_DUMP_ALL=1: EVERY row, not only the ones differing from
+                            // base. Needed to diff the device's TARGET VECTOR against OLF's F0 section
+                            // (which prints f and target per ACTIVE equation): a target that is wrong
+                            // while equal to the base's is invisible in the differing-rows view, and
+                            // equation IDENTITY matching says nothing about the numbers (tasks #67).
+                            boolean rmAll = "1".equals(System.getenv("OLF_GPU_ROWMODE_DUMP_ALL"));
                             StringBuilder sb = new StringBuilder();
                             for (int r = 0; r < n; r++) {
                                 int m = devModes[s * n + r];
-                                if (m != baseRowMode[r]) {
-                                    sb.append(String.format("  row=%d mode=%d<-%d target=%.9g%n",
+                                if (rmAll || m != baseRowMode[r]) {
+                                    sb.append(String.format("  row=%d mode=%d<-%d target=%.17g%n",
                                             r, m, baseRowMode[r], devTargets[s * n + r]));
                                 }
                             }

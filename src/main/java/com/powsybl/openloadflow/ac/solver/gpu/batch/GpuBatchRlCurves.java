@@ -107,7 +107,7 @@ public final class GpuBatchRlCurves {
                 // possible but its own P participation is the same as a local bus's) — fall through to
                 // the same per-generator curve packing below.
                 packBusCurves(bus, rlIdx, es, dsParams, baseTargets, busPRow, cvIdx, cvIn, cvPts,
-                        cvGenId, cvBusFactor, gpuData.dgGenId());
+                        cvGenId, cvBusFactor, gpuData);
                 rlIdx++;
                 continue;
             }
@@ -123,7 +123,7 @@ public final class GpuBatchRlCurves {
                         + bus.getId() + ")");
             }
             packBusCurves(bus, rlIdx, es, dsParams, baseTargets, busPRow, cvIdx, cvIn, cvPts,
-                    cvGenId, cvBusFactor, gpuData.dgGenId());
+                    cvGenId, cvBusFactor, gpuData);
             rlIdx++;
         }
         if (cvIdx.isEmpty()) {
@@ -163,6 +163,20 @@ public final class GpuBatchRlCurves {
                 cvBusFactor.stream().mapToDouble(Double::doubleValue).toArray());
     }
 
+    /** The bus's index in the distributed-slack BUS pack, or -1 when it does not participate. */
+    private static int dsBusIndexOf(GpuAcData gpuData, int busNum) {
+        int[] nums = gpuData.dsBusNum();
+        if (nums == null) {
+            return -1;
+        }
+        for (int i = 0; i < nums.length; i++) {
+            if (nums[i] == busNum) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     @SuppressWarnings("java:S107")
     /** The generator's index in the distributed-slack GENERATOR pack, or -1 when it is not in it. */
     private static int dsSlotOf(String[] dgGenId, String genId) {
@@ -180,7 +194,8 @@ public final class GpuBatchRlCurves {
     private static void packBusCurves(LfBus bus, int rlIdx, EquationSystem<AcVariableType, AcEquationType> es,
                                       GpuDsParams dsParams, double[] baseTargets, int[] busPRow,
                                       List<int[]> cvIdx, List<double[]> cvIn, List<Double> cvPts,
-                                      List<String> cvGenId, List<Double> cvBusFactor, String[] dgGenId) {
+                                      List<String> cvGenId, List<Double> cvBusFactor, GpuAcData gpuData) {
+        String[] dgGenId = gpuData.dgGenId();
         double busFactor = bus.getGenerators().stream().mapToDouble(dsParams::factor).sum();
         for (LfGenerator gen : bus.getGenerators()) {
             var curve = gen instanceof AbstractLfGenerator alg
@@ -213,6 +228,12 @@ public final class GpuBatchRlCurves {
                 cvPts.add(pt.getMaxQ());
             }
             int pRow = busPRow[bus.getNum()];             // the RELOCATED P-balance row (see build)
+            // A slack participant's row is the slack pack's own (dsPhiRow is built from the same busPRow, so
+            // this only asserts the two packs agree); the kernel resolves the per-scenario row (dsRowOv) itself.
+            int dsIdx = dsBusIndexOf(gpuData, bus.getNum());
+            if (dsIdx >= 0) {
+                pRow = gpuData.dsPhiRow()[dsIdx];
+            }
             // ...and WHICH generator this is in the distributed-slack generator pack. The kernel reads
             // that generator's own cumulative P movement (genCum) instead of splitting its bus's
             // movement by a fixed share: the share is exact only while the intra-bus split stays

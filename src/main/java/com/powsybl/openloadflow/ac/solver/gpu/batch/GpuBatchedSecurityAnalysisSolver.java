@@ -293,8 +293,12 @@ public final class GpuBatchedSecurityAnalysisSolver {
         String saEqDump = System.getenv("OLF_GPU_SA_EQ_DUMP");   // the SA extraction's row map (GpuEquationDump)
         if (saEqDump != null && !saEqDump.isEmpty()) {
             try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(saEqDump))) {
+                // The REAL base row modes, not a zero-filled placeholder. This dump is half of the
+                // row-by-row comparison against OLF_GPU_EQ_DUMP_CTG, and with all-zero modes every row
+                // read "mode=0" (identity) — including the coupler DUMMY_Q rows that carry the DISTR_Q
+                // terms — which silently invents a system difference wherever OLF has a power row.
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuEquationDump.write(w, network, equationSystem, gpuData,
-                        new int[baseState.length]);
+                        baseActivation.rowMode());
             } catch (java.io.IOException | RuntimeException e) {
                 LOGGER.warn("OLF_GPU_SA_EQ_DUMP failed: {}", e.toString());
             }
@@ -402,12 +406,12 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         GpuBatchHvdcAcEmulation.elementIndices(network, nElements), rowCriteria, rlCurves,
                         plan.dqOvContribByIndex(), plan.dqOvWByIndex(),
                         plan.drOvContribByIndex(), plan.drOvCByIndex(), plan.islandedDsByIndex(),
-                        plan.islandedRlByIndex(), plan.islandedHvdcsByIndex(),
+                        plan.islandedRlByIndex(), plan.islandedHvdcsByIndex(), plan.dqSubByIndex(),
                         n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                         preDistributedByIndex, distributedByIndex, config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
                         phases,
                         config.hvdcFreezing() || config.hvdcLimits()
-                                ? GpuBatchHvdcAcEmulation.buildControllers(network, equationSystem, nElements)
+                                ? GpuBatchHvdcAcEmulation.buildControllers(network, equationSystem, nElements, gpuData)
                                 : null,
                         config);
             }
@@ -424,6 +428,10 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         plan.islandedNumsByIndex()[i] != null ? plan.islandedNumsByIndex()[i] : new int[0],
                         preDistributedByIndex[i], distributedByIndex[i]));
             } else {
+                // Never batched: the plan refused it. Named by id for the harness, because the same
+                // STATUS_REJECTED also comes back for a scenario the device TRIED and threw away, and the
+                // census counts cannot tell the two apart per contingency.
+                com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.planRefused(id);
                 results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, GpuBatchStatus.STATUS_REJECTED, new int[0],
                         Double.NaN, Double.NaN));
             }
@@ -576,6 +584,9 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 results.add(new BatchScenarioResult(id, state, (int) st[n], st[n + 1], GpuBatchStatus.STATUS_CONVERGED, new int[0]));
                 engineConverged++;
             } else {
+                if (e < 0) {
+                    com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.planRefused(id);   // never reached the engine
+                }
                 results.add(new BatchScenarioResult(id, baseState.clone(), 0, Double.NaN, GpuBatchStatus.STATUS_REJECTED, new int[0]));
             }
         }

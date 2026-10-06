@@ -136,9 +136,35 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      *  control re-homed to this bus by a zero-impedance split (see GpuBatchQualification.reHomedControls),
      *  with {@code qTarget} then carrying the bus's own voltage target. 0 is the "default" (1). */
     public static final int ROW_V_IDENTITY = -1;
+    /** A re-homed control whose bus is PINNED at a reactive limit in the base: the row starts as its own
+     *  reactive balance (mode 4) at {@code qTarget} (the pinned generation minus the load), and its reactive-limit
+     *  entry is checked as a LOCAL PV bus at {@code deadPilotQTarget}, which here carries the VOLTAGE target —
+     *  an unpin restores the voltage identity exactly as OLF re-activates BUS_TARGET_V (tasks #70,
+     *  VC_REMERGE_PINNED_MAIN; rte6515 BUS-6157_BBS_1 unpins and re-pins at the other limit). */
+    public static final int ROW_PINNED_V = -5;
+    /** A base-pinned member of a re-homed cluster with NO enabled controller left (every controller pinned):
+     *  no row change — the stock placement already keeps its balance at the limit — but an UNPIN would need a
+     *  voltage identity the device cannot host, so the kernel rejects the scenario instead (CPU replay). */
+    public static final int ROW_PINNED_NO_UNPIN = -6;
+    /** A re-homed control whose own V row hosts a LIVE coupler's ZERO_V: the voltage identity goes on the parent
+     *  coupler's DUMMY_Q row (where the bus's reactive equation lives) as a CROSS identity on the bus's own V
+     *  column — device row mode 6 — with {@code vRow} = that dummy row and {@code qTarget} the voltage target
+     *  (tasks #70, VC_REMERGE_RELOC_VROW). */
+    public static final int ROW_CROSS_V_IDENTITY = -7;
 
     public int pqRowModeOrDefault() {
-        return pqRowMode == 0 ? 1 : pqRowMode < 0 ? 0 : pqRowMode;
+        return pqRowMode == 0 ? 1 : pqRowMode == ROW_PINNED_V ? 4 : pqRowMode == ROW_CROSS_V_IDENTITY ? 6
+                : pqRowMode < 0 ? 0 : pqRowMode;
+    }
+
+    /** The voltage target a re-homed control is checked against ({@link #ROW_V_IDENTITY}: the row target itself;
+     *  {@link #ROW_PINNED_V}: carried in deadPilotQTarget, the row target being the pinned Q). */
+    public double reHomeVTarget() {
+        return pqRowMode == ROW_PINNED_V ? deadPilotQTarget : qTarget;
+    }
+
+    public boolean forbidsUnpin() {
+        return pqRowMode == ROW_PINNED_NO_UNPIN && rlEntry >= 0;
     }
 
     public boolean seedsDqTargets() {
@@ -184,7 +210,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      *  reactive-limit entry — packed as a remote member of the base group — is checked as a LOCAL controller
      *  (pin on its own row, switch back on its own voltage) at the target {@code qTarget} carries. */
     public boolean reHomesRlEntry() {
-        return pqRowMode == ROW_V_IDENTITY && rlEntry >= 0;
+        return (pqRowMode == ROW_V_IDENTITY || pqRowMode == ROW_PINNED_V || pqRowMode == ROW_CROSS_V_IDENTITY) && rlEntry >= 0;
     }
 
     public boolean silencesReactiveLimitEntry() {

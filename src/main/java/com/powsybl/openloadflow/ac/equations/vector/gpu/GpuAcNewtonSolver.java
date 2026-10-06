@@ -414,6 +414,10 @@ public final class GpuAcNewtonSolver {
      */
     public static native void setBatchRlIslanded(long handle, int[] slotControllerPairs);
 
+    /** (scenario, reactive-limit entry) pairs whose UNPIN the device cannot host (a pinned member of a re-homed
+     *  cluster with no enabled controller): the kernel rejects the scenario instead of switching (CPU replay). */
+    public static native void setBatchRlNoUnpin(long handle, int[] slotEntryPairs);
+
     /** Re-homed voltage controls (GpuBatchQualification.reHomedControls): per (slot, entry) pair the entry is
      *  checked by the reactive-limits pass as a LOCAL controller at {@code vTargets[k]} — the bus is a plain PV
      *  bus this scenario, whatever its base packing. Null clears the context's list. */
@@ -446,7 +450,8 @@ public final class GpuAcNewtonSolver {
      *        deltas the pre-solve freeze already applied — transitions are applied incrementally
      */
     public static native void setBatchHvdcLoops(long handle, int[] elem, int[] bus1Row, int[] bus2Row,
-                                                int[] bus1Phi, int[] bus2Phi, double[] in, byte[] ctgOut, int[] status,
+                                                int[] bus1Phi, int[] bus2Phi,
+                                                double[] in, byte[] ctgOut, int[] status,
                                                 double[] appliedD1, double[] appliedD2, int limitsActive);
 
     /**
@@ -730,6 +735,11 @@ public final class GpuAcNewtonSolver {
      *  updateDistrQTargetsBatch recomputed the DISTR_Q target with the dead controller's key back in
      *  the denominator, clobbering the right target with the base one. Cleared when the chunk has none. */
     public static native void setBatchDqInactiveMembers(long handle, int[] slotMember);
+
+    /** tasks #71: per (scenario, dq member) SUBGROUP labels of a group a contingency split behind its surviving
+     *  main (dense {@code chunkSize x nDqMembers} bytes, 0 = the base pilot's group) and the qr group -> first
+     *  dq member map the kernels use to pair candidates with members. Null clears the channel. */
+    public static native void setBatchDqSubgroups(long handle, byte[] dense, int[] qrMemberStart);
 
     /** The generators an outage REMOVES, as (scenario, DS generator slot) pairs. With the identity the
      *  outaged bus's survivors take part in the per-generator slack water-fill like any others, instead

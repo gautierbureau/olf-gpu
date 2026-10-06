@@ -342,6 +342,19 @@ public final class GpuAcActivationExtractor {
                 assign(es, targetMap, r, e.getColumn(), e.getType(), e.getElementNum());
             }
         }
+        // OLF_GPU_FORCE_MODE4=<row>[,<row>…]: DIAGNOSTIC ONLY — stamp mode 4 (own-Q balance, which
+        // gates this row's DISTR_Q emissions off) on the named rows. It exists to answer ONE question
+        // without guessing: does an equation difference the dumps found actually CAUSE a scenario to
+        // stop converging? Forcing the row and re-counting the rejects answers it; reasoning about it
+        // does not. Not a fix — the right content for such a row is whatever OLF has there.
+        String force = System.getenv("OLF_GPU_FORCE_MODE4");
+        for (String tok : force == null ? new String[0] : force.split(",")) {
+            int r = Integer.parseInt(tok.trim());
+            if (r >= 0 && r < mode.length) {
+                System.err.printf("FORCE_MODE4 row=%d was=%d%n", r, mode[r]);
+                mode[r] = 4;
+            }
+        }
         return new GpuAcActivation(mode, targetMap);
     }
 

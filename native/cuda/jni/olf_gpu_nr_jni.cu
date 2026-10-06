@@ -38,6 +38,7 @@
 //
 // This library links NVIDIA cuDSS DYNAMICALLY (never bundled, same licensing posture
 // as powsybl-math-native's libmathcudss); cudart is linked statically.
+#include <execinfo.h>
 #include <jni.h>
 #include <cuda_runtime.h>
 #include <cudss.h>
@@ -2378,6 +2379,48 @@ struct DeviceBuf {
             if (p) { cudaFree(p); p = nullptr; }
             CUDA_CHECK(cudaMalloc(&p, bytes));
             cap = bytes;
+            // Every fresh allocation is ZEROED (OLF_GPU_ZERO_ALLOC=0 disables, A/B). A buffer read before it is
+            // written holds whatever the previous owner of that device memory left: zeros in a fresh process,
+            // stale content after other solves in the same one - which is how a read-before-write showed up
+            // as an in-suite-only flake (2026-10-06: devicePilotLosingItsOwnGeneratorWithPinningSurvivor 3 of
+            // 7 class runs, 2e-6 kV or a device failure, 0 of 5 with this on; the culprit was dRlActive read by
+            // the seed launch of updatePilotVeqBatch, whose comment assumed "rlActive is still 0"). Zeroing
+            // makes that assumption a guarantee instead of a property of the process's allocation history;
+            // the cost is one memset per cudaMalloc, at context creation, not per iteration.
+            static const bool zero = std::getenv("OLF_GPU_ZERO_ALLOC") == nullptr
+                                     || std::string(std::getenv("OLF_GPU_ZERO_ALLOC")) != "0";
+            if (zero) {
+                CUDA_CHECK(cudaMemset(p, 0, bytes));
+            }
+            // OLF_GPU_POISON_ALLOC=all|<k>: fill every fresh allocation, or only the k-th one of the process,
+            // with OLF_GPU_POISON_BYTE (255 by default: NaN doubles, -1 ints) to make the read loud and bisect
+            // it; OLF_GPU_ALLOC_TRACE=1 prints each allocation's index and size.
+            static long allocIndex = -1;
+            ++allocIndex;
+            static const char* poison = std::getenv("OLF_GPU_POISON_ALLOC");
+            static const int poisonByte = std::getenv("OLF_GPU_POISON_BYTE") != nullptr
+                                          ? std::atoi(std::getenv("OLF_GPU_POISON_BYTE")) : 255;
+            auto poisoned = [&]() {                          // all | <k> | <a>-<b> (inclusive)
+                if (poison == nullptr || *poison == '\0') return false;
+                std::string w(poison);
+                if (w == "all") return true;
+                size_t dash = w.find('-');
+                if (dash == std::string::npos) return std::atol(w.c_str()) == allocIndex;
+                return std::atol(w.substr(0, dash).c_str()) <= allocIndex
+                       && allocIndex <= std::atol(w.substr(dash + 1).c_str());
+            };
+            if (poisoned()) {
+                CUDA_CHECK(cudaMemset(p, poisonByte, bytes));
+            }
+            static const char* trace = std::getenv("OLF_GPU_ALLOC_TRACE");
+            if (trace != nullptr) {
+                std::fprintf(stderr, "ALLOC #%ld %zu bytes\n", allocIndex, bytes);
+                if (std::atol(trace) == allocIndex) {        // OLF_GPU_ALLOC_TRACE=<k>: host backtrace of that one
+                    void* frames[24];
+                    int nf = backtrace(frames, 24);
+                    backtrace_symbols_fd(frames, nf, 2);
+                }
+            }
         }
     }
     void alloc(size_t bytes) { ensure(bytes); }
@@ -7862,6 +7905,11 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
     ctx->dQbuf.alloc(static_cast<size_t>(n) * nScenarios * sizeof(double));
     ctx->dRlActive.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
     ctx->dRlSwitched.alloc(static_cast<size_t>(nScenarios) * sizeof(char));
+    // The seed launch of updatePilotVeqBatch / updateDistrQTargetsBatch (before the first solve) READS
+    // dRlActive and relies on "not active yet" = 0; the RL pass is what first writes it. Explicit, not
+    // left to the allocator's zeroing.
+    CUDA_CHECK(cudaMemset(ctx->dRlActive.p, 0, static_cast<size_t>(nScenarios) * sizeof(char)));
+    CUDA_CHECK(cudaMemset(ctx->dRlSwitched.p, 0, static_cast<size_t>(nScenarios) * sizeof(char)));
     // OUTSIDE the `nrl > 0` block: a run with reactive limits DISABLED has no entries at all, and that is
     // exactly when every pilot-self group needs the gate — its pilot can never pin, so it controls throughout.
     // Built inside, the gate did not exist for such a run: the pilots' raw q was emitted at their carrier rows

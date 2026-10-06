@@ -2309,6 +2309,37 @@ other switches), so the exact comparison is run separately against a 1-thread ar
 `save` mode runs the CPU arm ONLY (the GPU wall time comes from a `load` run); the 1-thread arm on this scope
 needs more than the 3 h first budgeted (exit 124 at 10800 s), re-run with 6 h.
 
+### #78 — the in-suite flake was a device read-before-write (2026-10-06, injection-scope)
+
+`devicePilotLosingItsOwnGeneratorWithPinningSurvivorMatchesCpu` (#76) failed in 3 of 7 runs of its class and
+never alone, two shapes: vlp_b 2.2e-6 kV off (two DIFFERENT wrong values across runs) or the device failing
+outright on a 4-bus batch of one (`robust-attempted=1 recovered=0`, "the batch must ENGAGE"); once a second
+fixture went with it (`deviceTwoMemberPilotControllerLosingAControllerMatchesCpu`, b2 0.8 kV off). Independent
+of the refinement default (1/3 with D-C, 2/3 without).
+
+**Method** (new switches in `DeviceBuf::ensure`): `OLF_GPU_ZERO_ALLOC` zeroes every fresh `cudaMalloc`;
+`OLF_GPU_POISON_ALLOC=all|<k>|<a>-<b>` fills the k-th allocation(s) of the process with `OLF_GPU_POISON_BYTE`
+(255: NaN doubles, −1 ints); `OLF_GPU_ALLOC_TRACE=<k>` prints every allocation's index and size and a host
+backtrace at k (resolve `+0x…` frames with `addr2line -f -C -e libolfgpu.so`, the symbol table is kept).
+Zeroing: 5 of 5 class runs clean against 3 of 5 without — a read-before-write, not rounding. Poisoning every
+allocation made the single fixture fail deterministically (235 allocations); bisecting the range took 12 runs
+and landed on allocation #131, 1 byte, inside `createBatchContext`: **`dRlActive`**, the per-scenario
+"RL-check this pass" flag. The RL pass is what first writes it (a host memcpy), but the SEED launch of
+`updatePilotVeqBatch` / `updateDistrQTargetsBatch` before the first solve reads it — the kernel's own comment
+says "at the post-seed launch too, when rlActive is still 0". It is 0 in a fresh process (first-use device
+pages) and whatever the previous owner left after other solves in the same one, which is exactly in-suite-only.
+
+**Fix**: fresh allocations are zeroed by default (`OLF_GPU_ZERO_ALLOC=0` restores the old behaviour for A/B) —
+the codebase already assumed it, so it is now guaranteed, one memset per cudaMalloc at context creation — and
+`dRlActive`/`dRlSwitched` are cleared explicitly at creation with the reason. The poison and trace switches
+stay for the next one.
+
+**Verified**: with the flag fixed, poisoning the remaining range 118–234 fails nothing (the status −1 of the
+118–234 probe was the poisoned flag's "active" reading other not-yet-written RL buffers, gone with it); the
+fixture alone AND the whole class (194 tests) pass with EVERY allocation poisoned — the loud regression check;
+the fixture suites 226/226; the network scope cold 121.3 s with zeroing on (116.2 s before, solve 70.8 vs
+69.4 s, within the run-to-run spread), identical statuses and the same FUCZ/FUDC device failures.
+
 ### #77 — network.xiidm cold GPU run, where the 207 s go (2026-10-06, injection-scope)
 
 Same scope and arms as the wall-time entry above, instrumented the rte6515 way (`OLF_SA_PROFILE=1

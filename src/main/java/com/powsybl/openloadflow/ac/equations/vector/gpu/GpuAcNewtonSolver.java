@@ -418,6 +418,11 @@ public final class GpuAcNewtonSolver {
      *  cluster with no enabled controller): the kernel rejects the scenario instead of switching (CPU replay). */
     public static native void setBatchRlNoUnpin(long handle, int[] slotEntryPairs);
 
+    /** (scenario, reactive-limit entry) pairs whose bus lost EVERY generator this scenario: no controller there
+     *  (OLF has no voltage control at the bus), so the entry is seeded FROZEN — skipped by the limit check, read
+     *  as "not enabled" by the pilot-self layout, and its reactive balance emitted through the pilot-self gate. */
+    public static native void setBatchRlGenLost(long handle, int[] slotEntryPairs);
+
     /** Re-homed voltage controls (GpuBatchQualification.reHomedControls): per (slot, entry) pair the entry is
      *  checked by the reactive-limits pass as a LOCAL controller at {@code vTargets[k]} — the bus is a plain PV
      *  bus this scenario, whatever its base packing. Null clears the context's list. */

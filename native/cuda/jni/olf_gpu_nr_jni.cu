@@ -4741,6 +4741,48 @@ static const int* psEntryPtr(Ctx* ctx) {
 // (scenario 0), so a row that changes between two traces can be charged to the kernel that ran between them.
 template <typename Ctx>
 static void psgStep(Ctx* ctx, int nS, int n, int outer, const char* tag) {
+    // OLF_GPU_ROW_TRACE=<row,row,...>: those rows' mode and target for the slot OLF_GPU_LOOP_TRACE_CTG resolved,
+    // after each kernel of the reactive-limits pass (same hook points as PSG_STEP, any scenario).
+    static const char* rowEnv = std::getenv("OLF_GPU_ROW_TRACE");
+    if (rowEnv != nullptr && ctx->loopTraceSlot >= 0 && ctx->loopTraceSlot < nS) {
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        std::string str(rowEnv);
+        size_t pos = 0;
+        while (pos <= str.size()) {
+            size_t c = str.find(',', pos);
+            if (c == std::string::npos) c = str.size();
+            if (c > pos) {
+                int r = std::atoi(str.substr(pos, c - pos).c_str());
+                if (r >= 0 && r < n) {
+                    int m = 0;
+                    double t = 0;
+                    size_t idx = (size_t) ctx->loopTraceSlot * n + r;
+                    CUDA_CHECK(cudaMemcpy(&m, static_cast<const int*>(ctx->dMode.p) + idx, sizeof(int), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(&t, static_cast<const double*>(ctx->dTarget.p) + idx, sizeof(double), cudaMemcpyDeviceToHost));
+                    std::fprintf(stderr, "ROW_TRACE outer=%d %-14s slot=%d row=%d mode=%d target=%.12f\n",
+                                 outer, tag, ctx->loopTraceSlot, r, m, t);
+                }
+            }
+            pos = c + 1;
+        }
+        // OLF_GPU_ROW_TRACE_GROUP=<g>: that pilot-self group's gate and its pilot entry's limit type, same slot
+        static const char* grpEnv = std::getenv("OLF_GPU_ROW_TRACE_GROUP");
+        if (grpEnv != nullptr && ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr && ctx->dPsPilotEntry.p != nullptr) {
+            int g = std::atoi(grpEnv);
+            if (g >= 0 && g < ctx->st->nQr) {
+                char sk = 0;
+                int pe = -1;
+                char lt = -1;
+                CUDA_CHECK(cudaMemcpy(&sk, static_cast<const char*>(ctx->dPsSkip.p) + (size_t) ctx->loopTraceSlot * ctx->st->nQr + g, 1, cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(&pe, static_cast<const int*>(ctx->dPsPilotEntry.p) + g, sizeof(int), cudaMemcpyDeviceToHost));
+                if (pe >= 0 && pe < ctx->nrl) {
+                    CUDA_CHECK(cudaMemcpy(&lt, static_cast<const char*>(ctx->dRlLimitType.p) + (size_t) ctx->loopTraceSlot * ctx->nrl + pe, 1, cudaMemcpyDeviceToHost));
+                }
+                std::fprintf(stderr, "GROUP_TRACE outer=%d %-14s slot=%d g=%d psSkip=%d pilotEntry=%d lt=%d\n",
+                             outer, tag, ctx->loopTraceSlot, g, (int) sk, pe, (int) lt);
+            }
+        }
+    }
     static const char* env = std::getenv("OLF_GPU_PSG_STEP");
     if (env == nullptr || !ctx->hasPilotSelf || !ctx->dPsPilotEntry.p || ctx->st->nQr <= 0 || ctx->st->hQrPtr.empty()) return;
     int g = std::atoi(env);
@@ -4808,11 +4850,21 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
                                      const char* rlRemote, const int* rlCmpVrow,
                                      const double* target, const double* rlMinQb, const double* rlMaxQb,
                                      const double* rlLoadQb, const char* rlBaseLt,
-                                     const int* psEntry, int nQr) {
+                                     const int* psEntry, int nQr, const char* rlGenLost) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
     int s = tid / nrl;
+    // A bus that LOST every generator this scenario (GenOutage, setBatchRlGenLost) is no controller: OLF has no
+    // voltage control there at all. Seeded FROZEN, the entry is skipped by the reactive-limit check, reads as
+    // "not enabled" to the pilot-self layout and, for a pilot that was one of its own controllers, opens the
+    // pilot-self gate so the bus's reactive balance is emitted (on the carrier, then on its own row once every
+    // survivor pins). Left at 0 it read as a live controller: the gate suppressed the balance and the outaged
+    // pilot's row, flipped to host it, stayed EMPTY (rte6515 GEN-1522: VL-1522_0 held at its 1.122 target).
+    if (rlGenLost != nullptr && rlGenLost[(size_t) s * nrl + i]) {
+        limitType[(size_t) s * nrl + i] = RL_LIMIT_FROZEN;
+        return;
+    }
     int vrow = rlVrow[i];
     // the bus's own V variable (VOLTAGE reads) and the row its pin state lives on, which the coupler-tree
     // relocation can move to the parent coupler's DUMMY_Q (see dRlQrow)
@@ -7299,6 +7351,8 @@ struct BatchSolverContext {
     int nRlIslanded = 0;
     DeviceBuf dRlNoUnpin, dRlUnpinBad;                       // (scenario, entry) unpin forbidden; per-scenario flag
     int nRlNoUnpin = 0;
+    DeviceBuf dRlGenLost;                                    // (scenario, entry): the bus lost every generator this
+    int nRlGenLost = 0;                                      // scenario — not a controller, seeded FROZEN
     DeviceBuf dRlLocalOv, dRlLocalVt;                        // re-homed PV buses: (scenario, entry) mask + own V target
     int nRlLocal = 0;
     DeviceBuf dRlIslanded;
@@ -9790,7 +9844,21 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->dTarget.as<double>(), ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(),
                         ctx->dRlLoadQ.as<double>(),
                         ctx->hasRlBaseLt ? ctx->dRlBaseLimitType.as<char>() : nullptr,
-                        psEntryPtr(ctx), ctx->st->nQr);
+                        psEntryPtr(ctx), ctx->st->nQr,
+                        ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr);
+                if (ctx->nRlGenLost > 0 && std::getenv("OLF_GPU_GENLOST_TRACE") != nullptr) {
+                    // the seeded types of the lost-generator entries, read back (device printf is not captured)
+                    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+                    std::vector<char> hm((size_t) nS * ctx->nrl), hl((size_t) nS * ctx->nrl);
+                    CUDA_CHECK(cudaMemcpy(hm.data(), ctx->dRlGenLost.p, hm.size(), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(hl.data(), ctx->dRlLimitType.p, hl.size(), cudaMemcpyDeviceToHost));
+                    for (size_t k = 0; k < hm.size(); k++) {
+                        if (hm[k]) {
+                            std::fprintf(stderr, "GENLOST_SEED slot=%d entry=%d limitType=%d nS=%d nrl=%d\n",
+                                         (int) (k / ctx->nrl), (int) (k % ctx->nrl), (int) hl[k], nS, ctx->nrl);
+                        }
+                    }
+                }
             }
         }
         // The seeded pin states must reach the ROWS before the first fill: a pinned enrolled pilot's balance
@@ -11790,15 +11858,14 @@ psgStep(ctx, nS, n, outer, "afterElect");
             // Measured with the order reversed (rte6515 busbar base, group VL-5997): the member that just
             // switched back was handed a target of 0 while the pilot's row was still flipped, its row then
             // hosted the pilot's balance against that 0, and it re-pinned every other pass until maxSwitch.
-            if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {    // all-pinned corner: pilot vEq flip/restore
-                launchPilotVeqInner();
-            }
-psgStep(ctx, nS, n, outer, "afterPilotVeq");
-            if (ctx->nRlRemote > 0 && ctx->nDqMembers > 0) {
-                // keep the survivors' DISTR_Q row targets in step with the pin states (plan-B3)
-                launchDistrQTargetsInner();
-            }
-psgStep(ctx, nS, n, outer, "afterDistrQ");
+            // A pilot that LOST its own generator (GenOutage.flipsPilotRowWhenAllPinned) is laid out here, BEFORE
+            // the pilot-self flip below: that kernel's "control lost" layout puts the pilot's row in mode 1, which
+            // for a pilot-that-is-its-own-controller is an EMPTY row (no q term is routed to it - the RL kernel's
+            // own note), so the voltage stayed exactly at the identity's value while OLF solved the pilot's
+            // BUS_TARGET_Q = 0 there. Measured on rte6515 GEN-1522: VL-1522_0 at 1.122 (the target) against OLF's
+            // 1.0811, 3.2 kV at VL-1525 and 1.98e-2 MW of distributed power. Mode 4 - the own-Q balance the
+            // member ALTERNATE dest routes the pilot's q to - is what the outage composer armed; run first, the
+            // pilot-self kernel then finds the row already off its identity and leaves it alone.
             if (ctx->nPilotFlip > 0) {                      // pilot stopped controlling AND every survivor pinned
                 pilotRowAllPinnedBatch<<<grid(ctx->nPilotFlip), BLOCK, 0, ctx->stream>>>(
                         ctx->nPilotFlip, nS, n, ctx->nrl,
@@ -11810,6 +11877,15 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
                         ctx->hasRlBaseLt ? ctx->dRlBaseLimitType.as<char>() : nullptr);
             }
 psgStep(ctx, nS, n, outer, "afterAllPinned");
+            if (ctx->hasDqQrGroups && ctx->st->nQr > 0) {    // all-pinned corner: pilot vEq flip/restore
+                launchPilotVeqInner();
+            }
+psgStep(ctx, nS, n, outer, "afterPilotVeq");
+            if (ctx->nRlRemote > 0 && ctx->nDqMembers > 0) {
+                // keep the survivors' DISTR_Q row targets in step with the pin states (plan-B3)
+                launchDistrQTargetsInner();
+            }
+psgStep(ctx, nS, n, outer, "afterDistrQ");
         }
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
@@ -14526,6 +14602,39 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     std::vector<char> zero(ctx->nScenarios, 0);
     ctx->dRlUnpinBad.upload(zero.data(), ctx->nScenarios);
     ctx->nRlNoUnpin = nPairs;
+}
+
+// (scenario, entry) pairs whose bus lost EVERY generator this scenario: seeded FROZEN by initRlLimitTypeBatch.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlGenLost(
+        JNIEnv* env, jclass, jlong handle, jintArray jPairs) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jPairs == nullptr || env->GetArrayLength(jPairs) == 0 || ctx->nrl == 0) {
+        ctx->nRlGenLost = 0;
+        return;
+    }
+    size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nrl;
+    std::vector<char> mask(len, 0);
+    int nPairs = env->GetArrayLength(jPairs) / 2;
+    jint* pairs = env->GetIntArrayElements(jPairs, nullptr);
+    for (int k = 0; k < nPairs; k++) {
+        int s = pairs[2 * k];
+        int i = pairs[2 * k + 1];
+        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nrl) {
+            mask[(size_t) s * ctx->nrl + i] = 1;
+        }
+    }
+    if (std::getenv("OLF_GPU_GENLOST_TRACE") != nullptr) {
+        for (int k = 0; k < nPairs; k++) {
+            std::fprintf(stderr, "GENLOST slot=%d entry=%d\n", pairs[2 * k], pairs[2 * k + 1]);
+        }
+    }
+    env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
+    ctx->dRlGenLost.upload(mask.data(), len);
+    ctx->nRlGenLost = nPairs;
 }
 
 extern "C" JNIEXPORT void JNICALL

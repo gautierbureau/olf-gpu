@@ -2279,9 +2279,58 @@ BUS-4467 class floor; this class does collapse, by construction). Not re-measure
 confirmation left is KLU's own forward error on this matrix (dump slot 2994's it=0 system, KLU solve vs one
 refined solve), which would put a number on OLF's side instead of inferring it from κ·ε.
 
+**The 9042-branch reference scope, same code (2026-10-06, GPU arm cold vs a 1-thread CPU arm saved the same
+morning):** 9040/9042 on device (`DEVICE:MAX_ITERATION_REACHED=2`, both OLF's own), statuses identical
+`{CONVERGED=9037, FAILED=3, MAX_ITERATION_REACHED=2}`, violations 583458 = 583458, device failures on
+OLF-converging systems 0, plan refusals 0, DAP worst 7.33e-07 MW (LINE-3760-3113) with 745 of 9037 above
+1e-9 MW — the test PASSES, GPU arm 25 s. The generator kind (1389 contingencies at every voltage) is being
+measured separately for GEN-1522, the 2026-09-22 worst there (~1e-6 MW; note the default `branch` kinds hold no
+generator contingency, and a CPU-arm save writes `cpu-busv.bin` only with `OLF_GPU_SA_BUSDIFF_CTG` set).
+
 Also corrected today: CLAUDE.md said "no state-vector scaling / line search on device"; the batch applies OLF's
 MAX_VOLTAGE_CHANGE clamp per scenario and OLF's exact stopping test, and refines cuDSS solves 4× on networks with
 zero-impedance branches.
+
+### #76 — GEN-1522: a pilot that loses its own generator kept its voltage identity (2026-10-06, DONE)
+
+Asked whether GEN-1522, the 2026-09-22 worst DAP on the rte network (~1e-6 MW then), was fixed. Measured with
+today's code on the GENERATOR kind (1389 contingencies at every voltage, CPU arm 1 thread; note the default
+`branch` kind holds no generator contingency and a CPU-arm save writes `cpu-busv.bin` only with
+`OLF_GPU_SA_BUSDIFF_CTG` set): **3.200 kV at VL-1525 and 1.98e-02 MW** — much worse than in September, with
+identical switch sets on both arms (VL-1522_1, VL-6490_0, VL-6055_0, VL-6231_0 all MAX_Q, same q and qLimit to 9
+digits) and the device's VL-1522_0 sitting at 1.122 = its target against OLF's 1.0811.
+
+**The shape** (the composer's own comment already names GEN-1522): the lost generator's bus VL-1522_0 is the
+PILOT of its group and one of its own controllers; the one survivor VL-1522_1 pins at 0.7. OLF then drops the
+pilot's BUS_TARGET_V and solves its BUS_TARGET_Q = 0 (a dead bus's own balance). The device arms the in-solve
+row flip for exactly this (`GenOutage.flipsPilotRowWhenAllPinned`, mode 4 on the pilot's row) — and three
+things in a row kept the row from ever carrying that balance, each found with a per-pass probe
+(`OLF_GPU_ROW_TRACE`, `OLF_GPU_ROW_TRACE_GROUP`, `OLF_GPU_ROW_PROBE`, `OLF_GPU_GENLOST_TRACE`, all new or
+reused today):
+1. **Kernel order.** `updatePilotVeqBatch` (the pilot-self "control lost" layout) ran before
+   `pilotRowAllPinnedBatch` and put the row in mode 1 — an EMPTY row for a pilot-that-is-its-own-controller —
+   so the outage flip found the row off its identity and did nothing. Reordered: the outage flip first.
+2. **The row was still empty in mode 4** (`ROW_PROBE`: F = 0, no Jacobian entry): the pilot's own reactive
+   terms go through the candidate table, gated by `psSkip`, and the gate was CLOSED (`GROUP_TRACE psSkip=1`).
+3. **Why the gate was closed:** the host put the dead bus's reactive-limit entry on the ISLANDED channel
+   (`silencesReactiveLimitEntry` → `rlIslandedList`, "the same channel a stranded controller uses"), and
+   `pilotSelfGateBatch` reads islanded as "the bus is gone, no balance to emit". A bus that lost its generator
+   is alive. New channel `setBatchRlGenLost` (per-scenario (slot, entry) mask → `initRlLimitTypeBatch` seeds
+   the entry `RL_LIMIT_FROZEN`): no pin, no switch back to PV, "not enabled" to the pilot-self layout, and the
+   gate OPENS so the balance is emitted — on the carrier while the survivor controls, on the pilot's own row
+   (mode 4, candidate 0 of its table) once every survivor pins. Restricted to the outaged PILOT: a dead MEMBER
+   stays on the islanded channel (its balance is already expressed by the inactive-member weights on the
+   survivors' rows; frozen, it was also emitted raw on the carrier — deviceGenOutageAtDistrQBus and
+   deviceTwoMemberPilotControllerLosingAController went 0.37 kV off).
+
+**Measured, generator kind, GPU arm cold vs the saved 1-thread CPU arm:** GEN-1522 **3.200 kV → 4.1e-09 kV**,
+DAP **1.976e-02 → 2.6e-06 MW** (6.8e-07 on one run); scope worst DAP 1.976e-02 → 2.55e-06 MW; 1389/1389 on
+device; statuses `{CONVERGED=1389}` both arms; violations 85876 = 85876. Fixture
+`devicePilotLosingItsOwnGeneratorWithPinningSurvivorMatchesCpu`: a 400 kV mesh, the pilot's own generator plus
+one remote controller capped under the post-outage need (slack non-participating, as PARTICIPATING_SLACK is a CPU
+shape). On the islanded channel the device spends its iteration budget on the empty row (MAX_ITERATION_REACHED,
+CPU fallback); with the frozen channel it batches and matches at 1e-12. Suite 207 tests, busbar scope
+(6604/6667, 503923 violations, DAP worst 1.353e-04) and branch scope (9040/9042, 583458, 7.33e-07) unchanged.
 
 ### #70 — host the surviving REMOTE cluster of a split voltage-control group (2026-10-04, IN PROGRESS)
 

@@ -754,7 +754,15 @@ public final class GpuAcOuterLoopPacks {
                     rlMaxQ.add(maxQ);
                     rlLoadQ.add(bus.getLoadTargetQ());
                     rlVtarget.add(bus.getGeneratorVoltageControl().orElseThrow().getTargetValue());
-                    rlMonitored.add(monitoringSvc != null ? (byte) 1 : (byte) 0);
+                    // bit 1: a MONITORING_VOLTAGE SVC standing by; bit 2: this bus is NOT one of its voltage control's
+                    // controller elements (a controlled pilot with no generators of its own) - the only entries the
+                    // device's degenerate-range guard may skip, because OLF's loop walks controller elements and a real
+                    // generator bus with a [0, 0] curve at its current P is still one of them (network.xiidm/FBQV).
+                    com.powsybl.openloadflow.network.VoltageControl<LfBus> mainVc =
+                            bus.getGeneratorVoltageControl().orElseThrow().getMainVoltageControl();
+                    boolean ownController = mainVc.getMergedControllerElements().contains(bus)
+                            || bus.getGeneratorVoltageControl().orElseThrow().getControllerElements().contains(bus);
+                    rlMonitored.add((byte) ((monitoringSvc != null ? 1 : 0) | (ownController ? 0 : 2)));
                     rlRemote.add((byte) 0);
                     rlCmpVrow.add(vCol[bn]);                   // local: compare row = own row
                     rlBusNum.add(bn);

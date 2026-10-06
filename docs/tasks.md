@@ -2309,6 +2309,37 @@ other switches), so the exact comparison is run separately against a 1-thread ar
 `save` mode runs the CPU arm ONLY (the GPU wall time comes from a `load` run); the 1-thread arm on this scope
 needs more than the 3 h first budgeted (exit 124 at 10800 s), re-run with 6 h.
 
+### #80 — the one contingency whose Newton sequence differed: FBQV, a dead bus OLF still checks (2026-10-06, DONE)
+
+Per-contingency match of the device against the 1-thread CPU arm (`OLF_OL_STATS=1` on both: fork `CPU_OL_STATS`,
+device `GPU_OL_STATS` from the new `readBatchOlStats`, matched by `native/cuda/ol_match.py`): **24,375 of 24,376
+converged contingencies identical in (solve passes, first-solve iterations, total iterations); one differed,
+FBQV** (CPU 5/1/5, device 6/1/6). FUCZ and FUDC (the two device failures) match the CPU's 6/1/6 exactly: their
+rejection is a post-solve check, not the sequence.
+
+**Trace** (fork `OL_CHECK` now labelled by contingency, scoped through `OlfTraceScope`; device
+`OLF_GPU_LOOP_TRACE_CTG` now also aims the switch trace, `OLF_GPU_SW_TRACE_ENTRIES=<e,…>|all` prints chosen entries
+every reactive-limit pass with slope / switch count / re-home / monitored / islanded / active read back): FBQV is
+the outage of FBQF_0's only generator. FBQF_0 was pinned MIN_Q in the base. OLF's `processLostGenerators` disables
+its voltage control but keeps its qLimitType and its place among the controller elements, so the
+reactive-limits loop runs `checkPqBus`: V 1.009793 < target 1.010221 → back to PV at the first pass, re-pinned
+MAX_Q at its now-empty [0, 0] range at the second. The device had put the entry on the ISLANDED channel
+(`GenOutage.silencesReactiveLimitEntry` → `rlIslandedList`), so it was never checked; FBQF_0 stayed pinned, and
+CQEM_0 (excess 1.0226e-4 pu on the CPU against the 1e-4 threshold, 9.64e-5 on the device) pinned one pass late.
+
+**Fix**: a LOCAL entry whose bus lost every generator but was PINNED in the base (base limit type 1..4) stays
+live — its limits already collapse with the outage. `OLF_GPU_DEADBUS_RL=island` restores the old silence. Also
+found on the way and fixed: the degenerate-range guard of the local reactive-limit path (min ≥ max → skip) now
+skips only entries that are NOT controller elements of their voltage control (`rlMonitored` bit 2, set at
+pack time; the two native readers of bit 1 are masked) — OLF walks controller elements, and a generator bus
+whose range collapses is still one.
+
+**Verified**: network.xiidm per-contingency match **24,376 / 24,376 identical**, statuses identical, violations
+6190 = 6190, DAP worst 5.56e-05 MW; rte6515 generator kind exact (1389/1389, 85,876 diff 0, DAP 1.03e-06 — it
+holds GEN-6130, the measurement behind the old silencing rule, so that rule's case is covered by the collapsed
+limits); branch kind exact (9040/9042, 583,458 diff 0); suites 226/226. No dedicated fixture yet for the
+base-pinned dead-bus shape.
+
 ### #79 — where the Newton work goes: outer loops, refinement, analyses, CPU replay (2026-10-06, injection-scope)
 
 Asked: how many symbolic analyses run; whether fewer triangular solves is a lever at all when the GPU must do

@@ -5163,7 +5163,7 @@ __global__ void initRlLimitTypeBatch(int nrl, int nScenarios, int n, const int* 
     // PQ by a per-scenario gen-loss OVERRIDE (its generator is gone) has base mode 0 and must get limitType 0 so
     // the reactive-limits switch-back leaves it PQ. Only a controller that is PQ in the BASE (an actual Q-limit
     // switch during the base loadflow) gets a pinned limit type so a relieving contingency can switch it back.
-    if (baseMode[qrow] == 1 && rlMonitored[i] == 0) {       // PQ in the base case (a real Q-limit switch —
+    if (baseMode[qrow] == 1 && (rlMonitored[i] & 1) == 0) {       // PQ in the base case (a real Q-limit switch —
         // NOT a monitoring SVC standing by: that one seeds UNPINNED so only the VoltageMonitoring
         // orchestrator may activate it, exactly like the CPU's null qLimitType)
         double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]);
@@ -6012,7 +6012,7 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                                     int noPinRow, int swLogSlot, double* swLog, int* swLogCnt, int passId,
                                     const int* psEntry, int nQr,
                                     const char* rlLocalOv, const double* rlLocalVt,
-                                    const char* rlNoUnpin, char* unpinBad) {
+                                    const char* rlNoUnpin, char* unpinBad, const char* rlMonitored) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -6234,7 +6234,13 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
     // included. Blocking both directions used to leave network.xiidm/LKPH 0.32 kV off because
     // nothing restored the row then; now something does, in the same pass OLF does it, and this
     // entry's own voltage test (a pin type guessed for an empty range) fired a pass late on LNER.
-    if (liMin >= liMax) {
+    // ...but ONLY such a bus: rlMonitored bit 2 (GpuAcOuterLoopPacks) marks an entry that is NOT one of its voltage
+    // control's controller elements, the set OLF iterates (LfNetwork.getControllerElements(GENERATOR)). A real
+    // generator bus whose capability curve collapses to [0, 0] at its current P is a controller OLF still checks:
+    // network.xiidm/FBQV, FBQF_0 pinned MIN_Q at 0 with V 1.009793 under its 1.010221 target - OLF switched it
+    // back to PV at the first reactive-limit pass, the device never tested it, and CQEM_0 then pinned a pass late
+    // (the one contingency of 24,376 whose outer-loop sequence differed from the 1-thread CPU's).
+    if (liMin >= liMax && (rlMonitored == nullptr || (rlMonitored[i] & 2) != 0)) {
         swLogPut(passSwitched[st], qBuf[qIdx] + rlLoadQ[li], liMin, liMax, x[idx], x[idx],
                  rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]));
         return;
@@ -8086,7 +8092,7 @@ BatchSolverContext* createBatchContext(const SharedStructurePtr& st, int nScenar
         ctx->dRlMonitored.upload(rlMonitored, nrl * sizeof(char));
         ctx->allPvPinnable = 1;
         for (int i = 0; i < nrl; i++) {
-            if (!rlMonitored[i] && !((rlMinQ[i] > -1e7 || rlMaxQ[i] < 1e7) && rlMinQ[i] < rlMaxQ[i])) {
+            if (!(rlMonitored[i] & 1) && !((rlMinQ[i] > -1e7 || rlMaxQ[i] < 1e7) && rlMinQ[i] < rlMaxQ[i])) {
                 ctx->allPvPinnable = 0;                      // an unlimited PV bus: the rule never fires
             }
         }
@@ -12265,7 +12271,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     psEntryPtr(ctx), ctx->st->nQr,
                     ctx->nRlLocal > 0 ? ctx->dRlLocalOv.as<char>() : nullptr,
                     ctx->nRlLocal > 0 ? ctx->dRlLocalVt.as<double>() : nullptr,
-                    ctx->nRlNoUnpin > 0 ? ctx->dRlNoUnpin.as<char>() : nullptr, ctx->nRlNoUnpin > 0 ? ctx->dRlUnpinBad.as<char>() : nullptr);
+                    ctx->nRlNoUnpin > 0 ? ctx->dRlNoUnpin.as<char>() : nullptr, ctx->nRlNoUnpin > 0 ? ctx->dRlUnpinBad.as<char>() : nullptr,
+                    ctx->dRlMonitored.p ? ctx->dRlMonitored.as<char>() : nullptr);
 psgStep(ctx, nS, n, outer, "afterRL");
             if (ctx->nRlPilotSelf > 0) {
                 // a pilot that is its own controller pinned while a member of its group is not (or
@@ -12380,7 +12387,9 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
     // trajectory did so because one of these decisions went the other way; without the list there is
     // no way to name WHICH controller, and the margin of that one decision is the whole question.
     static const char* swTraceEnv = std::getenv("OLF_GPU_SW_TRACE");
-    static const int swTraceSlot = swTraceEnv != nullptr ? std::atoi(swTraceEnv) : -1;
+    static const int swTraceSlotEnv = swTraceEnv != nullptr ? std::atoi(swTraceEnv) : -1;
+    // the contingency-id slot of OLF_GPU_LOOP_TRACE_CTG wins (chunk composition moves fixed slots)
+    const int swTraceSlot = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : swTraceSlotEnv;
     if (loopOrder[loopIdx] == LOOP_RL && (rlAuditOn || (swTraceSlot >= 0 && swTraceSlot < nS)) && ctx->nrl > 0) {
         std::vector<char> ps(static_cast<size_t>(ctx->nrl) * nS), lt2(static_cast<size_t>(ctx->nrl) * nS);
         std::vector<int> vr2(ctx->nrl);
@@ -12410,7 +12419,26 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
             std::string rec;
             for (int i2 = 0; i2 < ctx->nrl; i2++) {
                 size_t st2 = (size_t) s2 * ctx->nrl + i2;
-                if (!ps[st2]) continue;
+                // OLF_GPU_SW_TRACE_ENTRIES=<e,...>: those entries print EVERY RL pass for the traced slot, switched
+                // or not - a decision the device did NOT take is the one to compare against the CPU's.
+                static const std::vector<int> swEntries = [] {
+                    std::vector<int> v;
+                    const char* e = std::getenv("OLF_GPU_SW_TRACE_ENTRIES");
+                    if (e == nullptr) return v;
+                    std::string str(e);
+                    size_t pos = 0;
+                    while (pos <= str.size()) {
+                        size_t c = str.find(',', pos);
+                        if (c == std::string::npos) c = str.size();
+                        if (c > pos) v.push_back(std::atoi(str.substr(pos, c - pos).c_str()));
+                        pos = c + 1;
+                    }
+                    return v;
+                }();
+                static const bool swAll = std::getenv("OLF_GPU_SW_TRACE_ENTRIES") != nullptr
+                                          && std::string(std::getenv("OLF_GPU_SW_TRACE_ENTRIES")) == "all";
+                bool forced = toStderr && (swAll || std::find(swEntries.begin(), swEntries.end(), i2) != swEntries.end());
+                if (!ps[st2] && !forced) continue;
                 size_t li2 = ctx->ncv > 0 ? st2 : (size_t) i2;
                 double cmpV2 = (cv2[i2] >= 0) ? x2[(size_t) s2 * n + cv2[i2]] : 0.0;
                 double qq = qb2[(size_t) s2 * n + vr2[i2]] + lq2[i2];
@@ -12421,7 +12449,28 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
                              qq, mn2[li2], mx2[li2],
                              x2[(size_t) s2 * n + vr2[i2]], cmpV2, vt2[i2], cmpV2 - vt2[i2]);
                 if (toStderr) {
-                    std::fprintf(stderr, "%s\n", buf);
+                    // the switch-back's other gates, read back for the traced entry: the row slope (a slope-SVC
+                    // row never switches back) and the switch count against the cap
+                    double slope = 0.0;
+                    CUDA_CHECK(cudaMemcpy(&slope, ctx->dRowSlope.as<double>() + vr2[i2], sizeof(double), cudaMemcpyDeviceToHost));
+                    char sc = 0;
+                    CUDA_CHECK(cudaMemcpy(&sc, ctx->dRlSwitchCount.as<char>() + st2, 1, cudaMemcpyDeviceToHost));
+                    char lov = 0;
+                    double lvt = 0.0;
+                    if (ctx->nRlLocal > 0) {
+                        CUDA_CHECK(cudaMemcpy(&lov, ctx->dRlLocalOv.as<char>() + st2, 1, cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpy(&lvt, ctx->dRlLocalVt.as<double>() + st2, sizeof(double), cudaMemcpyDeviceToHost));
+                    }
+                    char mon = 0;
+                    CUDA_CHECK(cudaMemcpy(&mon, ctx->dRlMonitored.as<char>() + i2, 1, cudaMemcpyDeviceToHost));
+                    char isl = 0;
+                    if (ctx->nRlIslanded > 0) {
+                        CUDA_CHECK(cudaMemcpy(&isl, ctx->dRlIslanded.as<char>() + st2, 1, cudaMemcpyDeviceToHost));
+                    }
+                    char act = 0;
+                    CUDA_CHECK(cudaMemcpy(&act, ctx->dRlActive.as<char>() + s2, 1, cudaMemcpyDeviceToHost));
+                    std::fprintf(stderr, "%s slope=%.6e swCount=%d localOv=%d localVt=%.12f monitored=%d islanded=%d rlActive=%d\n", buf, slope, (int) sc,
+                                 (int) lov, lvt, (int) mon, (int) isl, (int) act);
                 }
                 if (rlAuditOn && nsw <= 12) {
                     rec += buf;
@@ -12737,7 +12786,8 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
                     psEntryPtr(ctx), ctx->st->nQr,
                     ctx->nRlLocal > 0 ? ctx->dRlLocalOv.as<char>() : nullptr,
                     ctx->nRlLocal > 0 ? ctx->dRlLocalVt.as<double>() : nullptr,
-                    ctx->nRlNoUnpin > 0 ? ctx->dRlNoUnpin.as<char>() : nullptr, ctx->nRlNoUnpin > 0 ? ctx->dRlUnpinBad.as<char>() : nullptr);
+                    ctx->nRlNoUnpin > 0 ? ctx->dRlNoUnpin.as<char>() : nullptr, ctx->nRlNoUnpin > 0 ? ctx->dRlUnpinBad.as<char>() : nullptr,
+                    ctx->dRlMonitored.p ? ctx->dRlMonitored.as<char>() : nullptr);
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         std::vector<char> aSw(nS), aPs(static_cast<size_t>(ctx->nrl) * nS);
         CUDA_CHECK(cudaMemcpy(aSw.data(), ctx->dRlSwitched.p, nS, cudaMemcpyDeviceToHost));
@@ -13747,6 +13797,27 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatc
     cudaMemcpy(host.data(), ctx->dGenCum.p, cnt * sizeof(double), cudaMemcpyDeviceToHost);
     jdoubleArray out = env->NewDoubleArray(static_cast<jsize>(cnt));
     env->SetDoubleArrayRegion(out, 0, static_cast<jsize>(cnt), host.data());
+    return out;
+}
+
+// Per scenario of the last solveBatchContext call (and its host-loop resumes): {solve passes, first pass's
+// Newton iterations, total Newton iterations}, flattened s*3. The per-contingency counterpart of
+// GPU_OL_HIST, for matching OLF's CPU_OL_STATS contingency by contingency.
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_readBatchOlStats(
+        JNIEnv* env, jclass, jlong handle) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr || ctx->olPasses.size() != static_cast<size_t>(ctx->nScenarios)) {
+        return nullptr;
+    }
+    std::vector<jint> host(static_cast<size_t>(ctx->nScenarios) * 3);
+    for (int s = 0; s < ctx->nScenarios; s++) {
+        host[s * 3] = ctx->olPasses[s];
+        host[s * 3 + 1] = ctx->olFirst[s];
+        host[s * 3 + 2] = ctx->olIters[s];
+    }
+    jintArray out = env->NewIntArray(static_cast<jsize>(host.size()));
+    env->SetIntArrayRegion(out, 0, static_cast<jsize>(host.size()), host.data());
     return out;
 }
 

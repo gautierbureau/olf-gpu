@@ -32,6 +32,12 @@ import java.util.List;
  */
 final class GpuBatchChunkSolver {
 
+    private static final boolean OL_STATS = System.getenv("OLF_OL_STATS") != null;
+
+    /** OLF_GPU_DEADBUS_RL=island: silence a base-pinned local controller that lost every generator (pre-FBQV). */
+    private static final boolean DEADBUS_RL_ISLAND = "island".equals(System.getenv("OLF_GPU_DEADBUS_RL"));
+
+
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchChunkSolver.class);
 
     private GpuBatchChunkSolver() {
@@ -1164,7 +1170,24 @@ final class GpuBatchChunkSolver {
                                         // inactive-member weights on the survivors' DISTR_Q rows, and frozen it
                                         // would also be emitted raw on the carrier (deviceGenOutageAtDistrQBus,
                                         // deviceTwoMemberPilotControllerLosingAController: 0.37 kV).
-                                        if (go.flipsPilotRowWhenAllPinned()) {
+                                        // EXCEPT a LOCAL controller the base had PINNED: OLF's processLostGenerators disables its
+                                        // voltage control but leaves its qLimitType and its place among the controller elements,
+                                        // so the reactive-limits loop still runs checkPqBus on it - the bus switches back to PV
+                                        // when its voltage asks (MIN_Q pin, V under target) and pins again at its now-empty
+                                        // range ([0, 0]: no generator left) on the next pass. Measured on network.xiidm/FBQV:
+                                        // FBQF_0 back to PV at OLF's first reactive-limit pass and pinned MAX_Q at the second;
+                                        // silenced, the device kept it pinned and CQEM_0 pinned one pass late - the only
+                                        // contingency of 24,376 whose outer-loop sequence differed from the 1-thread CPU's.
+                                        // Its limits already collapse with the outage (minQDelta/maxQDelta, the curve channel),
+                                        // so the entry is simply left live. OLF_GPU_DEADBUS_RL=island restores the silence (A/B).
+                                        boolean liveDeadLocal = !DEADBUS_RL_ISLAND
+                                                && (gpuData.rlRemote() == null || gpuData.rlRemote().length <= go.rlEntry()
+                                                        || gpuData.rlRemote()[go.rlEntry()] == 0)
+                                                && gpuData.rlBaseQLimitType() != null && gpuData.rlBaseQLimitType().length > go.rlEntry()
+                                                && gpuData.rlBaseQLimitType()[go.rlEntry()] >= 1 && gpuData.rlBaseQLimitType()[go.rlEntry()] <= 4;
+                                        if (liveDeadLocal) {
+                                            // left live: no channel
+                                        } else if (go.flipsPilotRowWhenAllPinned()) {
                                             rlGenLostList.add(s);
                                             rlGenLostList.add(go.rlEntry());
                                         } else {
@@ -1961,6 +1984,19 @@ final class GpuBatchChunkSolver {
                                     GpuAcNewtonSolver.readBatchDriverPaused(handle));
                         }
                         orchNs.merge("SecondaryVc.driverPause", System.nanoTime() - tSvc0, Long::sum);
+                    }
+                    if (OL_STATS) {
+                        // OLF_OL_STATS: the device's per-contingency Newton work, in the same shape as OLF's
+                        // CPU_OL_STATS lines, so the two arms can be matched contingency by contingency.
+                        int[] ol = GpuAcNewtonSolver.readBatchOlStats(handle);
+                        if (ol != null) {
+                            for (int s2 = 0; s2 < realCount; s2++) {
+                                int st = chunkResults[s2] == null ? Integer.MIN_VALUE : (int) chunkResults[s2][n + 2];
+                                System.err.println("GPU_OL_STATS ctg=" + contingencies.get(group.get(chunkStart + s2)).contingencyId()
+                                        + " passes=" + ol[s2 * 3] + " firstNr=" + ol[s2 * 3 + 1] + " totalNr=" + ol[s2 * 3 + 2]
+                                        + " status=" + st);
+                            }
+                        }
                     }
                     if (monInKernel) {
                         // Keep ACTIVATIONS meaningful with the loop in the driver: it is the guard

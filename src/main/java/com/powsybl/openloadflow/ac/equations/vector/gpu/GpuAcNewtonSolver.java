@@ -347,6 +347,9 @@ public final class GpuAcNewtonSolver {
      *  every solve: they describe the whole distribution only when one solve covered it. */
     public static native long readBatchSolveCount(long handle);
 
+    /** Per scenario of the last batch solve: {solve passes, first pass's Newton iterations, total}, flattened. */
+    public static native int[] readBatchOlStats(long handle);
+
     /**
      * Upload the run's limit thresholds and the branch model they are compared against, once per
      * run: a contingency cannot change a threshold, so this outlives every chunk. Returns 0 when the

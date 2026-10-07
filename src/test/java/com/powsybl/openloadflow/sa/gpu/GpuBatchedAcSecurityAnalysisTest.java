@@ -1443,6 +1443,64 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 "the outage must batch (or the test proves nothing)");
     }
 
+    /** A base-PINNED controller that loses its only generator is still checked by OLF's reactive-limits loop
+     *  (#80, network.xiidm/FBQV). g1 regulates vlb at a target between the bus's voltage with the generator in
+     *  (399.80 kV at Q = 0) and without it (399.50 kV): the base pins it MIN_Q at 0. Losing g1, OLF's
+     *  processLostGenerators disables the voltage control but keeps the qLimitType and the controller-element
+     *  place, so the first reactive-limit pass sees a MIN_Q pin under its target and switches the bus back to PV,
+     *  and the next pins it MAX_Q at its now-empty [0, 0] range. The device had put the entry on the islanded
+     *  channel and never checked it: one solve fewer than OLF, and a state that stops elsewhere.
+     *  GPU SA == CPU SA at 1e-12, and the outage must BATCH. */
+    @org.junit.jupiter.api.Test
+    void deviceBasePinnedBusLosingItsOnlyGeneratorIsStillCheckedMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = basePinnedDeadBusNetwork();
+        List<Contingency> ctgs = List.of(
+                new Contingency("g1", new com.powsybl.contingency.GeneratorContingency("g1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(false).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0_0"));
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the outage must batch (or the test proves nothing)");
+    }
+
+    private static Network basePinnedDeadBusNetwork() {
+        // A 400 kV mesh: gs at vl0 is the slack; g1 at vlb (250 MW, Q range [0, 20] MVar) regulates vlb locally at
+        // 399.646 kV, under the 399.797 kV the bus reaches at Q = 0, so the base pins it at its MIN_Q; with g1 lost
+        // vlb falls to 399.496 kV, under the target, which is what makes OLF switch the dead bus back to PV.
+        Network network = Network.create("base-pinned-dead-bus", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vlb", "vl2", "vld")) {
+            com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(vl).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            v.getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(300).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl0").newLoad().setId("ld0").setBus("vl0_b").setConnectableBus("vl0_b").setP0(200).setQ0(40).add();
+        network.getVoltageLevel("vlb").newGenerator().setId("g1").setBus("vlb_b").setConnectableBus("vlb_b")
+                .setMinP(0).setMaxP(500).setTargetP(150).setTargetV(399.646).setVoltageRegulatorOn(true).add();
+        network.getGenerator("g1").newMinMaxReactiveLimits().setMinQ(0).setMaxQ(20).add();
+        network.getVoltageLevel("vlb").newLoad().setId("ldb").setBus("vlb_b").setConnectableBus("vlb_b").setP0(50).setQ0(10).add();
+        network.getVoltageLevel("vl2").newGenerator().setId("g2").setBus("vl2_b").setConnectableBus("vl2_b")
+                .setMinP(0).setMaxP(500).setTargetP(100).setTargetV(401).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vld").newLoad().setId("ldd").setBus("vld_b").setConnectableBus("vld_b").setP0(300).setQ0(60).add();
+        java.util.function.BiConsumer<String, String[]> line = (id, ends) -> network.newLine().setId(id)
+                .setVoltageLevel1(ends[0]).setBus1(ends[0] + "_b").setConnectableBus1(ends[0] + "_b")
+                .setVoltageLevel2(ends[1]).setBus2(ends[1] + "_b").setConnectableBus2(ends[1] + "_b")
+                .setR(2).setX(12).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        line.accept("l0b", new String[] {"vl0", "vlb"});
+        line.accept("lb2", new String[] {"vlb", "vl2"});
+        line.accept("l02", new String[] {"vl0", "vl2"});
+        line.accept("lbd", new String[] {"vlb", "vld"});
+        line.accept("l0d", new String[] {"vl0", "vld"});
+        return network;
+    }
+
     private static Network pilotIsControllerSingleSurvivorNetwork() {
         // A 400 kV mesh: the pilot bus vlp carries its own generator g1 (regulating vlp) and reactive load; g2 at
         // vlc regulates vlp REMOTELY, capped at 15 MVar; gs at vl0 is the slack. The reactive keys follow the

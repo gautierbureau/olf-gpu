@@ -2328,7 +2328,7 @@ MAX_Q at its now-empty [0, 0] range at the second. The device had put the entry 
 CQEM_0 (excess 1.0226e-4 pu on the CPU against the 1e-4 threshold, 9.64e-5 on the device) pinned one pass late.
 
 **Fix**: a LOCAL entry whose bus lost every generator but was PINNED in the base (base limit type 1..4) stays
-live — its limits already collapse with the outage. `OLF_GPU_DEADBUS_RL=island` restores the old silence. Also
+live — its limits already collapse with the outage. Also
 found on the way and fixed: the degenerate-range guard of the local reactive-limit path (min ≥ max → skip) now
 skips only entries that are NOT controller elements of their voltage control (`rlMonitored` bit 2, set at
 pack time; the two native readers of bit 1 are masked) — OLF walks controller elements, and a generator bus
@@ -2337,8 +2337,10 @@ whose range collapses is still one.
 **Verified**: network.xiidm per-contingency match **24,376 / 24,376 identical**, statuses identical, violations
 6190 = 6190, DAP worst 5.56e-05 MW; rte6515 generator kind exact (1389/1389, 85,876 diff 0, DAP 1.03e-06 — it
 holds GEN-6130, the measurement behind the old silencing rule, so that rule's case is covered by the collapsed
-limits); branch kind exact (9040/9042, 583,458 diff 0); suites 226/226. No dedicated fixture yet for the
-base-pinned dead-bus shape.
+limits); branch kind exact (9040/9042, 583,458 diff 0); suites 226/226. Fixture
+`deviceBasePinnedBusLosingItsOnlyGeneratorIsStillCheckedMatchesCpu` (4-bus 400 kV mesh, g1 pinned MIN_Q at 0 in
+the base, lost): OLF switches vlb back to PV then pins it MAX_Q at 0; it passes at 1e-12 kV and FAILED with the
+old silencing (vlb 5.7e-05 kV off), checked before the old behaviour was removed.
 
 ### #79 — where the Newton work goes: outer loops, refinement, analyses, CPU replay (2026-10-06, injection-scope)
 

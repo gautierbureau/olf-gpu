@@ -34,10 +34,6 @@ final class GpuBatchChunkSolver {
 
     private static final boolean OL_STATS = System.getenv("OLF_OL_STATS") != null;
 
-    /** OLF_GPU_DEADBUS_RL=island: silence a base-pinned local controller that lost every generator (pre-FBQV). */
-    private static final boolean DEADBUS_RL_ISLAND = "island".equals(System.getenv("OLF_GPU_DEADBUS_RL"));
-
-
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchChunkSolver.class);
 
     private GpuBatchChunkSolver() {
@@ -1179,9 +1175,9 @@ final class GpuBatchChunkSolver {
                                         // silenced, the device kept it pinned and CQEM_0 pinned one pass late - the only
                                         // contingency of 24,376 whose outer-loop sequence differed from the 1-thread CPU's.
                                         // Its limits already collapse with the outage (minQDelta/maxQDelta, the curve channel),
-                                        // so the entry is simply left live. OLF_GPU_DEADBUS_RL=island restores the silence (A/B).
-                                        boolean liveDeadLocal = !DEADBUS_RL_ISLAND
-                                                && (gpuData.rlRemote() == null || gpuData.rlRemote().length <= go.rlEntry()
+                                        // so the entry is simply left live (fixture:
+                                        // deviceBasePinnedBusLosingItsOnlyGeneratorIsStillCheckedMatchesCpu).
+                                        boolean liveDeadLocal = (gpuData.rlRemote() == null || gpuData.rlRemote().length <= go.rlEntry()
                                                         || gpuData.rlRemote()[go.rlEntry()] == 0)
                                                 && gpuData.rlBaseQLimitType() != null && gpuData.rlBaseQLimitType().length > go.rlEntry()
                                                 && gpuData.rlBaseQLimitType()[go.rlEntry()] >= 1 && gpuData.rlBaseQLimitType()[go.rlEntry()] <= 4;

@@ -2309,6 +2309,26 @@ other switches), so the exact comparison is run separately against a 1-thread ar
 `save` mode runs the CPU arm ONLY (the GPU wall time comes from a `load` run); the 1-thread arm on this scope
 needs more than the 3 h first budgeted (exit 124 at 10800 s), re-run with 6 h.
 
+### #84 — why ReactiveLimits costs so much: three buses oscillating to the switch cap (2026-10-07)
+
+Read from the existing 20-thread CPU trace (`OLF_OL_TRACE=1 OLF_RL_TRACE=1`, contingency-labelled; no new run):
+170,898 unstable ReactiveLimits checks (= re-solves) over 24,296 contingencies. Causes: PV->PQ only 67.8 %, PQ->PV
+only 26.4 %, both 5.7 %; a limit update alone **12** — the re-solves are real switches, not curve refreshes.
+452,282 switches for 130,465 distinct (contingency, bus) pairs; **52,583 pairs switch 6+ times**, and three buses —
+**IZTH_0, IZTH_2, IZSV_0** — switch in 19,588 contingencies. The cycle (the base load flow shows it too): IZTH_0 and
+IZTH_2 pin MIN_Q, IZSV_0 pins MIN_Q, all three switch back PQ->PV in the same check, repeat until maxPqPvSwitch (3)
+stops them. **152,664 of the 170,898 ReactiveLimits re-solves (89 %) are passes where ONLY these three switched** —
+~65 % of all the CPU's Newton iterations, and the reason 17,480 contingencies take 10–12 solve passes; the device
+reproduces the sequence exactly, so its 104 RL passes are mostly this too. OLF is the reference, so the device cannot
+skip them: the lever is the data (a shared voltage control whose controllers all pin and then all release on the
+controlled bus's voltage?) or OLF's switch-back rule — to be confirmed by a trace of the three buses' voltage control,
+targets and voltages per check.
+
+Instrumentation written, NOT yet built or run (the user asked for no runs at this point): fork
+`ReactiveLimitsOuterLoop` prints `CPU_RL_CHECK` per check under `OLF_OL_STATS` (candidates per cause, which switched);
+device `OLF_GPU_RL_REASONS=1` tallies each checked scenario's causes from the per-entry switch codes and prints
+`GPU_RL_PASS` per RL re-solve pass (active scenarios, ms, batched iterations); `native/cuda/rl_reasons.py cpu|gpu`.
+
 ### #83 — what the outer loops cost on the device (2026-10-07)
 
 `OLF_GPU_PHASE_TIME=1` now splits the driver's time per outer pass: the FIRST solve of a call, each RE-SOLVE charged to

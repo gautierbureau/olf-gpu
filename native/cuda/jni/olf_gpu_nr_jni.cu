@@ -12549,11 +12549,21 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
                 size_t li2 = ctx->ncv > 0 ? st2 : (size_t) i2;
                 double cmpV2 = (cv2[i2] >= 0) ? x2[(size_t) s2 * n + cv2[i2]] : 0.0;
                 double qq = qb2[(size_t) s2 * n + vr2[i2]] + lq2[i2];
+                // the q the decision READ: at rlQrow when the entry's balance was relocated (a coupler-tree
+                // child reads its parent's DUMMY_Q row), not at its V row - printing the V-row value logged a
+                // relocated child as q=0 while the kernel pinned it on its real q
+                static const std::vector<int> qr2 = [&] {
+                    std::vector<int> v(ctx->nrl, -1);
+                    if (ctx->dRlQrow.p) CUDA_CHECK(cudaMemcpy(v.data(), ctx->dRlQrow.p, v.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                    return v;
+                }();
+                int qrow2 = qr2[i2] >= 0 ? qr2[i2] : vr2[i2];
+                double qRead = qb2[(size_t) s2 * n + qrow2] + lq2[i2];
                 nsw++;
-                char buf[320];
-                std::snprintf(buf, sizeof buf, "SW_PASS s=%d outer=%d entry=%d vrow=%d act=%d lt=%d q=%.15e min=%.15e max=%.15e v=%.15e cmpV=%.15e vt=%.15e margin=%.3e",
+                char buf[400];
+                std::snprintf(buf, sizeof buf, "SW_PASS s=%d outer=%d entry=%d vrow=%d act=%d lt=%d q=%.15e qRow=%d qRead=%.15e min=%.15e max=%.15e v=%.15e cmpV=%.15e vt=%.15e margin=%.3e",
                              s2, outer, i2, vr2[i2], (int) ps[st2], (int) lt2[st2],
-                             qq, mn2[li2], mx2[li2],
+                             qq, qrow2, qRead, mn2[li2], mx2[li2],
                              x2[(size_t) s2 * n + vr2[i2]], cmpV2, vt2[i2], cmpV2 - vt2[i2]);
                 if (toStderr) {
                     // the switch-back's other gates, read back for the traced entry: the row slope (a slope-SVC

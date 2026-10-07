@@ -2573,7 +2573,10 @@ never went on to a second solve: the library checked and stopped).
   the `setValuesOnly` + per-rebuild allocation, not hash lookups. Not pursued further this round.
 - `OLF_GPU_SOLVE_ALG` (0.8.0: default|general) and `OLF_GPU_FACT_ALG` (default|multiblock|general) reach every
   cuDSS config this file builds, for the sweep below.
-- **D-C is the default** (`OLF_GPU_IR_BASE` 0; 1 restores the library step). Gates: rte6515 generator kind
+- **D-C was the default until 4b2c7a4** (`OLF_GPU_IR_BASE` 0): that commit set it back to 1 on coupler systems
+  after the full busbar scope, which this measurement did not cover, lost most of its device share and turned
+  rounding-dependent with 0 (5121 / 5422 of 12918 on device against 12860 / 12858 with the step). Coupler-free
+  networks keep 0. The network.xiidm non-busbar numbers below were taken with 0. Gates: rte6515 generator kind
   1389/1389, 85,876 violations diff 0, DAP worst 1.04e-06 MW; branch kind 9040/9042, 583,458 diff 0, 7.3e-07 MW;
   the fixture suites 226/226 but for the in-suite flake below.
 - **cuDSS algorithm sweep, no gain** (network scope, D-C on, cold): solve-phase `general` 69.6 s solve /

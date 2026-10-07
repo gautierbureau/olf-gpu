@@ -2324,7 +2324,21 @@ skip them: the lever is the data (a shared voltage control whose controllers all
 controlled bus's voltage?) or OLF's switch-back rule — to be confirmed by a trace of the three buses' voltage control,
 targets and voltages per check.
 
-Instrumentation written, NOT yet built or run (the user asked for no runs at this point): fork
+**Confirmed by a trace** (`OLF_RL_BUS_TRACE=IZTH_0,IZTH_2,IZSV_0`, fork; base load flow): the three are the merged
+controllers of ONE remote voltage control on **IZUM_0** (target 1.051298218 pu). All PV, they absorb equal shares,
+−0.2476 pu each, below IZTH_0's minimum (−0.2322) and IZTH_2's (−0.2226): both pin MIN_Q. IZSV_0 alone then needs
+−0.28929 against its −0.28900 minimum: it pins. With all three pinned, IZUM_0 sits at 1.051298113 — **1.05e-7 pu under
+its target** — and OLF's switch-back (`checkPqBusWithQLimitType`: MIN_Q pinned and controlled V < target, a strict
+comparison with no tolerance) releases all three: back to the first state. Repeat until maxPqPvSwitch. The final state
+is "all pinned", 1e-7 pu short; a tolerance on that comparison would reach it in two passes instead of ~8 per
+contingency — an upstream OLF question (OLF stays the reference here), and most of the ReactiveLimits cost on both arms.
+
+**Device side** (`OLF_GPU_RL_REASONS=1`): causes per checked scenario match the CPU's (pin 114,611, unpin 45,150,
+pin+unpin 9,718, limit refresh alone 12); 82 of the 104 RL re-solve passes have ≥ 50 % of the chunk active (~2,000
+scenarios, 527 ms/pass, 43.2 s of the 46.1 s): the oscillation runs in lockstep across most contingencies, so these
+passes are full, not padding — the device's RL cost is the number of oscillation passes.
+
+Instrumentation (now built and run): fork
 `ReactiveLimitsOuterLoop` prints `CPU_RL_CHECK` per check under `OLF_OL_STATS` (candidates per cause, which switched);
 device `OLF_GPU_RL_REASONS=1` tallies each checked scenario's causes from the per-entry switch codes and prints
 `GPU_RL_PASS` per RL re-solve pass (active scenarios, ms, batched iterations); `native/cuda/rl_reasons.py cpu|gpu`.

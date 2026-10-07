@@ -121,6 +121,14 @@ inline const char* olKindName(int k) {
         default: return "?";
     }
 }
+// OLF_GPU_RL_REASONS=1: why each reactive-limits check was unstable, per checked scenario (bit 1 a pin PV->PQ, bit 2 an
+// unpin PQ->PV, bit 4 a limit refresh of a pinned entry; 0 with the scenario switched = a group re-stamp only), and
+// the entries behind it.
+long long gRlCheckScen[8] = {0}, gRlStableScen = 0, gRlEntryCodes[4] = {0};
+inline bool rlReasonsOn() {
+    static const bool on = std::getenv("OLF_GPU_RL_REASONS") != nullptr;
+    return on;
+}
 inline double olNowMs() {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -10596,7 +10604,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             }
         }
     }
-    static const bool olTime = std::getenv("OLF_GPU_PHASE_TIME") != nullptr;
+    static const bool olTime = std::getenv("OLF_GPU_PHASE_TIME") != nullptr || rlReasonsOn();
     int olPassSolved = 0;
     bool olFirstSolveDone = resume;                          // a resumed call's passes are all re-solves
     int olTriggerKind = resume ? ctx->pausedLoopKind : -1;  // the loop whose check made the next pass re-solve
@@ -10604,7 +10612,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     gOuterPasses++;
     if (olTime) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     const double olT0 = olTime ? olNowMs() : 0.0;
-    const long long olAI0 = gActiveIterSum, olWI0 = gWidthIterSum;
+    const long long olAI0 = gActiveIterSum, olWI0 = gWidthIterSum, olNI0 = gNewtonIters;
     const bool olSolving = solvePass;
     if (solvePass) {
         gSolvePasses++;
@@ -11984,6 +11992,10 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             int k = olTriggerKind >= 0 && olTriggerKind < OL_KINDS ? olTriggerKind : 0;
             gOlReSolveMs[k] += ms; gOlReSolveScen[k] += olPassSolved; gOlReSolveLaneIters[k] += ai;
             gOlReSolveWidthIters[k] += wi; gOlReSolvePasses[k]++;
+            if (rlReasonsOn() && k == LOOP_RL) {
+                std::fprintf(stderr, "GPU_RL_PASS outer=%d width=%d active=%d ms=%.1f batchIters=%lld laneIters=%lld widthIters=%lld\n",
+                             outer, nS, olPassSolved, ms, gNewtonIters - olNI0, ai, wi);
+            }
         }
     }
     // the CHECK part of the pass, charged to the loop being checked when the pass body ends (break/continue too)
@@ -12474,6 +12486,26 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
     }
     CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
     CUDA_CHECK(cudaMemcpy(rlSwitched.data(), ctx->dRlSwitched.p, nS * sizeof(char), cudaMemcpyDeviceToHost));
+    if (rlReasonsOn() && loopOrder[loopIdx] == LOOP_RL && ctx->nrl > 0 && ctx->dRlPassSwitched.p) {
+        std::vector<char> ps(static_cast<size_t>(ctx->nrl) * nS);
+        CUDA_CHECK(cudaMemcpy(ps.data(), ctx->dRlPassSwitched.p, ps.size(), cudaMemcpyDeviceToHost));
+        for (int s = 0; s < nS; s++) {
+            if (!rlActive[s]) continue;
+            int mask = 0;
+            for (int i = 0; i < ctx->nrl; i++) {
+                char c = ps[static_cast<size_t>(s) * ctx->nrl + i];
+                if (c >= 1 && c <= 3) {
+                    mask |= 1 << (c - 1);
+                    gRlEntryCodes[static_cast<int>(c)]++;
+                }
+            }
+            if (rlSwitched[s]) {
+                gRlCheckScen[mask]++;
+            } else {
+                gRlStableScen++;
+            }
+        }
+    }
     for (int s = 0; s < nS; s++) {
         if (loopRejected[s]) {                              // a device loop routed the scenario to the CPU fallback
             traceReject(s, "device-loop-routed", outer, 0);
@@ -13730,6 +13762,15 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
         for (int k = 0; k < OL_KINDS; k++) {
             if (gOlCheckPasses[k] > 0) {
                 fprintf(stderr, "GPU_OL_TIME check loop=%s passes=%lld ms=%.1f\n", olKindName(k), gOlCheckPasses[k], gOlCheckMs[k]);
+            }
+        }
+        if (rlReasonsOn()) {
+            static const char* names[8] = {"group re-stamp only", "pin", "unpin", "pin+unpin", "limit refresh",
+                                           "pin+refresh", "unpin+refresh", "pin+unpin+refresh"};
+            fprintf(stderr, "GPU_RL_REASONS stable checks=%lld | entries: pins=%lld unpins=%lld refreshes=%lld\n",
+                    gRlStableScen, gRlEntryCodes[1], gRlEntryCodes[2], gRlEntryCodes[3]);
+            for (int m = 0; m < 8; m++) {
+                if (gRlCheckScen[m] > 0) fprintf(stderr, "GPU_RL_REASONS unstable because %s: %lld\n", names[m], gRlCheckScen[m]);
             }
         }
         fprintf(stderr, "CUDSS_PHASE_TIME analysis=%lld x %.1f ms | factorization=%lld x %.1f ms | solve=%lld x %.1f ms"

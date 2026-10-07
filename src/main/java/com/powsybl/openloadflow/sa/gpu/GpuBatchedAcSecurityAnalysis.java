@@ -226,9 +226,15 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
         rs.deviceStateInjectedFor = null;
         if (targeted) {
             java.util.Set<LfBus> buses = touchedBuses(network, lfContingency, rs);
-            networkState.restore(buses, lfContingency.getDisabledNetwork().getBranchesStatus().keySet());
+            // the voltage loop over every bus is redundant when the next contingency is device-answered: its injection
+            // writes every live bus (restoreStaleVoltages covers the rest); not under the restore check, whose
+            // reference is a full restore
+            boolean lazy = lazyVoltagesEnabled() && !GpuRestoreCheck.ENABLED;
+            networkState.restore(buses, lfContingency.getDisabledNetwork().getBranchesStatus().keySet(), !lazy);
+            rs.staleVoltages = lazy ? networkState : null;
             LAST_TARGETED_RESTORE_COUNT.incrementAndGet();
         } else {
+            rs.staleVoltages = null;                         // the full restore below puts every voltage back
             super.restoreBaseState(networkState, network, lfContingency);
         }
         if (GpuRestoreCheck.ENABLED) {
@@ -239,6 +245,26 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                 check.setReference(network);                // the first restore is a full one
             }
         }
+    }
+
+    /** System property olf.gpu.sa.lazyVoltageRestore (default true): see RunState.staleVoltages. False restores
+     *  every bus voltage after each device-answered contingency, as before (A/B). */
+    private static boolean lazyVoltagesEnabled() {
+        return Boolean.parseBoolean(System.getProperty("olf.gpu.sa.lazyVoltageRestore", "true"));
+    }
+
+    /** Ends a lazy voltage restore: {@code onlyDisabled} null restores every bus voltage, otherwise only those buses
+     *  (the disabled ones of a device-answered contingency, whose voltages its injection does not write). */
+    private static void restoreStaleVoltages(RunState rs, java.util.Collection<LfBus> onlyDisabled) {
+        if (rs.staleVoltages == null) {
+            return;
+        }
+        if (onlyDisabled == null) {
+            rs.staleVoltages.restoreVoltages();
+        } else {
+            rs.staleVoltages.restoreVoltages(onlyDisabled);
+        }
+        rs.staleVoltages = null;
     }
 
     /** System property: after a contingency the device solved and whose loss distribution the replay answered,
@@ -596,6 +622,10 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
          *  when both name the contingency just simulated, only its own elements and the bus voltages changed. */
         private String lossReplayedFor;
         private String deviceStateInjectedFor;
+        /** LAZY VOLTAGE RESTORE: the last targeted restore left the bus voltages at the previous contingency's injected
+         *  state. The next device-answered contingency overwrites every live bus and puts the base back on its disabled
+         *  ones; anything else restores them all first (restoreStaleVoltages). */
+        private com.powsybl.openloadflow.network.NetworkState staleVoltages;
         /** Shunt -> its bus, for the shunts a contingency shifts (LfShunt does not know its bus). Built once. */
         private java.util.Map<com.powsybl.openloadflow.network.LfShunt, LfBus> shuntBus;
         /** Per bus num: does the realistic-voltage band apply (not fictitious, nominal V at or above the
@@ -783,6 +813,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
             return super.runSimulations(lfNetwork, toSimulate, acParameters, securityAnalysisParameters,
                     operatorStrategies, actions, limitReductions, lossDistribution);
         } finally {
+            restoreStaleVoltages(runState.get(), null);      // the network leaves the loop in its base state
             if (lossDistribution instanceof LossDistributionCheck check) {
                 check.print();
             }
@@ -1105,6 +1136,7 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                          Contingency contingency, PreContingencyNetworkResult preContingencyNetworkResult,
                                                          com.powsybl.openloadflow.network.LfNetworkParameters networkParameters,
                                                          List<LimitReduction> limitReductions) {
+        restoreStaleVoltages(runState.get(), null);         // an action simulation reads the network as it stands
         String scId = contingency.getId() + STRATEGY_KEY_SEP + operatorStrategy.getId();
         PrecomputedBatch precomputed = runState.get().precomputed;
         double[] state = precomputed.states().get(scId);
@@ -1475,6 +1507,16 @@ public class GpuBatchedAcSecurityAnalysis extends AcSecurityAnalysis {
                                                                  SecurityAnalysisParameters securityAnalysisParameters,
                                                                  PreContingencyNetworkResult preContingencyNetworkResult, boolean createResultExtension,
                                                                  List<LimitReduction> limitReductions, double preDistributedActivePower) {
+        {
+            RunState rsv = runState.get();
+            if (rsv.staleVoltages != null) {
+                PrecomputedBatch pc = rsv.precomputed;
+                boolean devicePath = pc.isReady() && !pc.exhausted().contains(contingency.getId())
+                        && pc.states().get(contingency.getId()) != null;
+                // device-answered: the injection writes every live bus, so only the disabled ones need their base back
+                restoreStaleVoltages(rsv, devicePath ? lfContingency.getDisabledNetwork().getBuses() : null);
+            }
+        }
         dumpPostContingencyEquations(context, contingency, lfContingency, network);
         // OLF_GPU_ZI_TREE_CTG=1: the zero-impedance branches OLF has OUT of its spanning tree for THIS
         // contingency, right after lfContingency.apply(). OLF's tree is history-dependent within a

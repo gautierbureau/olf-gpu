@@ -2345,6 +2345,30 @@ their defaults 0.5 / powers of two): compacting at 75 % active 118.2 s (+2.5); w
 powers of two 137.8–140.6 s (+22: every new width is a new analysed data object). The padded lanes (278,144
 lane-iterations for 234,088 useful) are cheaper to factorize than to gather out.
 
+**Round 3b (same day)** — what was left, taken down:
+- **Which variables churn** (`OLF_GPU_INJECT_DIAG=1`): no contingency ever ADDS a variable; 11,939 remove buses' V
+  and PHI (8,533 one bus, the rest 2–32), 4,061 come back to the base set (removed by the previous contingency,
+  re-added by the restore). The current sorted list is therefore always a SUBSEQUENCE of the base one, and the
+  injector's remap is now a two-pointer merge on REFERENCES (no field read of the 32k variables), with the keyed
+  walk as fallback; the diagnostic checks merge == keyed (16,000 / 16,000).
+- **Fork, incremental index part 2**: the touched record is a bounded list (an IdentityHashMap kept the 32k
+  capacity of the first full build, and every clear() cost it), and the index publishes what its last update
+  changed (generation, first changed row, removed variables). `AcNetworkVector.updateVariables`, when exactly one
+  incremental update behind, resets the removed rows and re-walks only the suffix (checked against the full walk
+  under `OLF_VARIDX_CHECK=1`).
+- **Lazy voltage restore** (`olf.gpu.sa.lazyVoltageRestore`, default true; fork `NetworkState.restore(buses,
+  branches, voltages)` and `restoreVoltages(...)`): after a device-answered contingency the targeted restore no
+  longer walks every bus to put its voltage back — the next device-answered contingency's injection writes every
+  live bus, and only its DISABLED buses get their base voltage back; a CPU replay, an exhausted contingency or an
+  action simulation restores all of them first, and so does the end of the loop. Off under the restore check
+  (whose reference is a full restore). Restore 3.6 → 1.0 s.
+
+Per-contingency host CPU 15.5 → ~10 s; **GPU-only cold 115.7 → ~109–113 s** (run-to-run spread ±2 s). Gates:
+network.xiidm 24,376 / 24,376 identical per contingency, violations 6190 = 6190; rte6515 generator and branch exact;
+GPU suites 227/227; OLF suite 1508/1508 with both index checks on. The generator kind's worst DAP moved between
+0.9e-6 and 4.3e-6 MW across runs with lazy restore on AND off — DAP comes from the precompute, before the loop, so
+this is the device's run-to-run spread, not the restore.
+
 **What is left on the host** (15.5 s CPU in the loop): the injector's remap walk over all 32k variables on every
 contingency whose variable set changed (3.6 s) and `AcNetworkVector.updateVariables` doing the same inside the
 state update (3.2 s); the base-state restore's voltage loop over every bus (2.6 s — redundant for a device-answered

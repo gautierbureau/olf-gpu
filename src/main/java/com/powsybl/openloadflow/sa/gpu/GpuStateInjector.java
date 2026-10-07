@@ -51,6 +51,17 @@ final class GpuStateInjector {
      * <p>Owned by the partition's RunState, never static: partitions run concurrently on their own
      * equation systems, and a shared cache would hand one partition another's permutation.
      */
+    /** OLF_GPU_INJECT_DIAG=1: tally which variable kinds the contingencies add or remove (printed at JVM exit). */
+    private static final boolean INJECT_DIAG = System.getenv("OLF_GPU_INJECT_DIAG") != null;
+    private static final java.util.Map<String, java.util.concurrent.atomic.LongAdder> DIAG =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static void printDiag() {
+        DIAG.entrySet().stream()
+                .sorted((a, b) -> Long.compare(b.getValue().sum(), a.getValue().sum())).limit(30)
+                .forEach(e -> System.err.println("INJECT_DIAG " + e.getValue().sum() + " " + e.getKey()));
+    }
+
     static final class Remap {
         private List<Variable<AcVariableType>> vars;         // identity of the list the permutation was built from
         private int[] baseRowOf;                             // current row -> base row, -1 = variable absent at base
@@ -62,6 +73,34 @@ final class GpuStateInjector {
          *  is not rare enough to leave on hash lookups. */
         private int[] baseRowKeyed;
         private int types;
+        /** The base variables in base-row order: the current list is always a SUBSEQUENCE of it (a contingency only
+         *  ever removes variables - a disabled bus's V and PHI - and the index sorts both lists the same way), so the
+         *  row mapping is a two-pointer merge on REFERENCES, without reading a field of any of the 32k variables. */
+        private Variable<AcVariableType>[] baseByRow;
+    }
+
+    /** Current row -> base row by merging the current sorted list into the base one on reference equality, or null
+     *  when the current list is not a subsequence of the base (then the caller falls back to the keyed walk). Rows are
+     *  list positions: the variables index assigns {@code row = position} (no separated ordering in this solver), which
+     *  is checked on the two ends. */
+    private static int[] mergeRows(List<Variable<AcVariableType>> vars, Variable<AcVariableType>[] baseByRow) {
+        int n = vars.size();
+        if (n > baseByRow.length || n == 0 || vars.get(0).getRow() != 0 || vars.get(n - 1).getRow() != n - 1) {
+            return null;
+        }
+        int[] rows = new int[n];
+        int i = 0;
+        for (int j = 0; j < n; j++) {
+            Variable<AcVariableType> v = vars.get(j);
+            while (i < baseByRow.length && baseByRow[i] != v) {
+                i++;
+            }
+            if (i == baseByRow.length) {
+                return null;
+            }
+            rows[j] = i++;
+        }
+        return rows;
     }
 
     private static int[] buildKeyedBaseRows(Map<Variable<AcVariableType>, Integer> baseVariableRows, int types) {
@@ -105,14 +144,62 @@ final class GpuStateInjector {
             }
             int[] keyed = remap.baseRowKeyed;
             int types = remap.types;
-            int[] rows = new int[vars.size()];
-            for (Variable<AcVariableType> v : vars) {
-                int key = v.getElementNum() * types + v.getType().ordinal();
-                rows[v.getRow()] = key < keyed.length ? keyed[key] : -1;
+            if (remap.baseByRow == null) {
+                @SuppressWarnings("unchecked")
+                Variable<AcVariableType>[] byRow = new Variable[baseVariableRows.size()];
+                baseVariableRows.forEach((v, row) -> byRow[row] = v);
+                remap.baseByRow = byRow;
             }
-            boolean identity = true;
-            for (int row = 0; row < rows.length && identity; row++) {
-                identity = rows[row] == row;
+            int[] rows = mergeRows(vars, remap.baseByRow);
+            boolean identity;
+            if (rows != null) {
+                identity = rows.length == remap.baseByRow.length;   // a full-length subsequence is the base itself
+            } else {                                         // not a subsequence (a variable the base lacks): keyed walk
+                rows = new int[vars.size()];
+                for (Variable<AcVariableType> v : vars) {
+                    int key = v.getElementNum() * types + v.getType().ordinal();
+                    rows[v.getRow()] = key < keyed.length ? keyed[key] : -1;
+                }
+                identity = true;
+                for (int row = 0; row < rows.length && identity; row++) {
+                    identity = rows[row] == row;
+                }
+            }
+            if (INJECT_DIAG) {                               // the merge against the keyed walk it replaces
+                int[] kr = new int[vars.size()];
+                for (Variable<AcVariableType> v : vars) {
+                    int key = v.getElementNum() * types + v.getType().ordinal();
+                    kr[v.getRow()] = key < keyed.length ? keyed[key] : -1;
+                }
+                boolean kid = true;
+                for (int row = 0; row < kr.length && kid; row++) {
+                    kid = kr[row] == row;
+                }
+                DIAG.computeIfAbsent(java.util.Arrays.equals(kr, rows) && kid == identity ? "merge == keyed" : "MERGE DIFFERS",
+                        x -> new java.util.concurrent.atomic.LongAdder()).increment();
+            }
+            if (INJECT_DIAG) {                               // which variable kinds the contingency added or removed
+                java.util.Set<Integer> present = new java.util.HashSet<>();
+                for (Variable<AcVariableType> v : vars) {
+                    present.add(v.getElementNum() * types + v.getType().ordinal());
+                    if (v.getElementNum() * types + v.getType().ordinal() >= keyed.length
+                            || keyed[v.getElementNum() * types + v.getType().ordinal()] < 0) {
+                        DIAG.computeIfAbsent("added " + v.getType(), k -> new java.util.concurrent.atomic.LongAdder()).increment();
+                    }
+                }
+                java.util.Map<String, Integer> missing = new java.util.TreeMap<>();
+                for (Variable<AcVariableType> v : baseVariableRows.keySet()) {
+                    if (!present.contains(v.getElementNum() * types + v.getType().ordinal())) {
+                        missing.merge(v.getType().toString(), 1, Integer::sum);
+                    }
+                }
+                missing.forEach((k, c) -> DIAG.computeIfAbsent("removed " + k, x -> new java.util.concurrent.atomic.LongAdder()).add(c));
+                DIAG.computeIfAbsent("rebuilds", x -> new java.util.concurrent.atomic.LongAdder()).increment();
+                DIAG.computeIfAbsent(identity ? "rebuilds: identity" : "rebuilds: shifted", x -> new java.util.concurrent.atomic.LongAdder()).increment();
+                DIAG.computeIfAbsent("rebuild shape " + missing, x -> new java.util.concurrent.atomic.LongAdder()).increment();
+                if (DIAG.get("rebuilds").sum() % 4000 == 0) {
+                    printDiag();
+                }
             }
             remap.baseRowOf = rows;
             remap.identity = identity;

@@ -5583,7 +5583,8 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
                                     const double* svcRlVt,
                                     int nDqMembers, const int* dqMemberQrGroup, const int* dqMemberRlEntry,
                                     const char* rlIslandedMask,
-                                const char* dqSub, const int* qrMemberStart, double tol) {
+                                const char* dqSub, const int* qrMemberStart, double tol,
+                                const char* rlGenLost) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nQr * nScenarios) return;
     int g = tid % nQr;
@@ -5613,6 +5614,15 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
         size_t li = cvStride ? (size_t) s * nrl + pe : (size_t) pe;
         double lim = (plt == 3 || plt == 4) && rlInitTgtQ != nullptr ? rlInitTgtQ[pe]
                    : (plt == 1 || plt == 3) ? rlMinQ[li] : rlMaxQ[li];
+        // A pilot whose bus LOST EVERY GENERATOR this scenario (seeded RL_LIMIT_FROZEN through setBatchRlGenLost)
+        // is not pinned at any limit: OLF's BUS_TARGET_Q there has no generator term at all, only the bus's
+        // load. Falling through to rlMaxQ asked the bus for its lost generator's MAXIMUM reactive output:
+        // rte6515 GEN-1251 with every busbar section in the list (VL-1251_0, the pilot of a two-section group
+        // whose other member is pinned), target 1.0 pu against OLF's 0.0, the bus driven from 0.572 to 0.94 pu
+        // for the first passes, 4.18 MW of slack read where OLF reads -0.33, and -0.384 MW distributed against 0.
+        if (plt == RL_LIMIT_FROZEN && rlGenLost != nullptr && rlGenLost[(size_t) s * nrl + pe]) {
+            lim = 0.0;
+        }
         flipTarget = lim - rlLoadQ[li];
     }
     // An ISLANDED pilot has no equation at all on the CPU: OLF removes the bus. Its row here is
@@ -5701,6 +5711,15 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
         // pilot stayed a power row beside a member that had resumed control.
         veqOff[fi] = 1;
         savedVTarget[fi] = rlVtarget[pe];
+        // ...and if this scenario's outage took the pilot bus's every generator, its balance target loses the
+        // generator's pinned output NOW, from the first fill: OLF's BUS_TARGET_Q there has no generator term.
+        // The re-stamp branch above only runs inside the reactive-limits phase, so the slack phase solved with
+        // the lost generator's pin still injected - rte6515 GEN-6003 with every busbar section in the list:
+        // VL-6003_0 kept 0.7477 pu against OLF's 0.0 through the first passes, and the first slack read was
+        // 0.049 MW off (238.816 MW distributed against OLF's 238.865).
+        if (plt == RL_LIMIT_FROZEN && rlGenLost != nullptr && rlGenLost[(size_t) s * nrl + pe]) {
+            target[pi] = flipTarget;
+        }
     } else if (!lost && pe < 0 && mode[pi] == 1 && qrPilotRlEntry != nullptr && qrPilotRlEntry[g] >= 0) {
         // The same base-lost case for a PURE-TRANSIT pilot (not one of its own controllers, so no
         // psEntry): the base carried no saved V target - the pilot's own local reactive-limit entry
@@ -10053,7 +10072,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dDqMemberRlEntry.p ? ctx->dDqMemberRlEntry.as<int>() : nullptr,
                     ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
                     ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
-                    REACTIVE_LIMIT_TOL);
+                    REACTIVE_LIMIT_TOL, ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr);
         }
     };
     auto launchDistrQTargetsInner = [&]() {

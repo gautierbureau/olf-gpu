@@ -159,9 +159,11 @@ own) then `codegen/regenerate.sh` + commit kernels (+ golden if math changed).
 - THIS repo pushes to `origin` (`gautierbureau/olf-gpu`), the user's own fork — explicit refspecs
   (`git push origin <branch>:refs/heads/<branch>`). Only on an explicit ask; the default is to
   commit locally. (This line used to read "no remote yet"; it was stale by 59 commits.)
-- The OLF fork checkout (`~/Projects/powsybl/powsybl-open-loadflow-3`): push only to
-  the `test6` remote (`gautierbureau/test6`), **never `origin`** (upstream powsybl);
-  explicit refspecs (`git push test6 <branch>:refs/heads/<branch>`).
+- The OLF fork checkout (`~/Projects/powsybl/powsybl-open-loadflow-3`, `~/olf-gpu/powsybl-open-loadflow-3`
+  on the H100 box): **`olf-local-patches` is pushed to the `gb` remote** (`gautierbureau/powsybl-open-loadflow`,
+  the user's own fork; 2026-10-07) — `git push gb olf-local-patches:refs/heads/olf-local-patches`, only on an
+  explicit ask. **Never `origin`** (upstream powsybl). `test6` was the earlier target. This repo's code calls
+  fork-only API (setValuesOnly, getSortedVariablesToFindOnly, ...), so push the fork with it.
 - powsybl-math-native (`~/Projects/powsybl/powsybl-math-native-1`, branch
   `cudss_solver_1`) holds only the cuDSS JNI bindings (libmathcudss); powsybl-core
   (`~/Projects/powsybl/powsybl-core-1`, branch `cudss_factory`) holds

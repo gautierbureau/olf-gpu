@@ -2333,6 +2333,13 @@ comparison with no tolerance) releases all three: back to the first state. Repea
 is "all pinned", 1e-7 pu short; a tolerance on that comparison would reach it in two passes instead of ~8 per
 contingency — an upstream OLF question (OLF stays the reference here), and most of the ReactiveLimits cost on both arms.
 
+**Reproduced with the OFFICIAL pypowsybl 1.16.1 (OLF 2.3.0), no fork code** (`native/pypowsybl/pp_rl_oscillation.py`,
+RTE parameters, 1 thread): OLF's own report shows it in the base load flow (two cycles from iteration 1; IZUM_0 at
+236.542075 kV against 236.542099) and in a one-contingency SA (LIRN: PQ->PV of all three at iterations 2, 5, 8 —
+"q=minQ and v=236.542081kV < targetV=236.542099kV" —, PV->PQ of IZTH_0/IZTH_2 then IZSV_0 in between, and at
+iteration 11 "3 buses blocked PQ due to the max number of switches (3)"). A stock-OLF behaviour, ready for an
+upstream issue (network + RTE parameters + this one contingency).
+
 **Device side** (`OLF_GPU_RL_REASONS=1`): causes per checked scenario match the CPU's (pin 114,611, unpin 45,150,
 pin+unpin 9,718, limit refresh alone 12); 82 of the 104 RL re-solve passes have ≥ 50 % of the chunk active (~2,000
 scenarios, 527 ms/pass, 43.2 s of the 46.1 s): the oscillation runs in lockstep across most contingencies, so these

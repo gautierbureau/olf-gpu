@@ -92,6 +92,39 @@ enum DeviceLoopKind {
     LOOP_SVD_KERNEL = 15,    // ShuntVoltageControl WITH_GENERATOR — IN-KERNEL (OLF order 10)
     LOOP_SVC_KERNEL = 16     // SecondaryVoltageControl — IN-KERNEL (OLF order 4)
 };
+// OLF_GPU_PHASE_TIME: where the outer-loop driver's time goes. Index 0..16 = the DeviceLoopKind that TRIGGERED a
+// re-solve (the loop whose check changed something), or the loop being CHECKED; the first solve of a call is apart.
+constexpr int OL_KINDS = 17;
+double gOlFirstSolveMs = 0, gOlReSolveMs[OL_KINDS] = {0}, gOlCheckMs[OL_KINDS] = {0};
+long long gOlFirstSolveScen = 0, gOlReSolveScen[OL_KINDS] = {0}, gOlReSolvePasses[OL_KINDS] = {0};
+long long gOlFirstLaneIters = 0, gOlReSolveLaneIters[OL_KINDS] = {0}, gOlFirstWidthIters = 0, gOlReSolveWidthIters[OL_KINDS] = {0};
+long long gOlCheckPasses[OL_KINDS] = {0}, gOlFirstPasses = 0;
+inline const char* olKindName(int k) {
+    switch (k) {
+        case 0: return "DistributedSlack";
+        case 1: return "FreezingHvdcACEmulation";
+        case 2: return "AcHvdcAcEmulationLimits";
+        case 3: return "MonitoringVoltage";
+        case 4: return "ReactiveLimits";
+        case 5: return "HOST:SecondaryVoltageControl";
+        case 6: return "HOST:PhaseControl";
+        case 7: return "HOST:TransformerVoltageControl";
+        case 8: return "HOST:TransformerReactivePowerControl";
+        case 9: return "HOST:ShuntVoltageControl";
+        case 10: return "TransformerVoltageControl";
+        case 11: return "ShuntVoltageControl";
+        case 12: return "PhaseControl";
+        case 13: return "TransformerReactivePowerControl";
+        case 14: return "TransformerVoltageControl(after-gen)";
+        case 15: return "ShuntVoltageControl(with-gen)";
+        case 16: return "SecondaryVoltageControl";
+        default: return "?";
+    }
+}
+inline double olNowMs() {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 // GpuBatchHvdcAcEmulation's status codes, shared with the host.
 constexpr int HV_LINEAR = 0;
 constexpr int HV_SAT_1_TO_2 = 1;
@@ -10563,8 +10596,16 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             }
         }
     }
+    static const bool olTime = std::getenv("OLF_GPU_PHASE_TIME") != nullptr;
+    int olPassSolved = 0;
+    bool olFirstSolveDone = resume;                          // a resumed call's passes are all re-solves
+    int olTriggerKind = resume ? ctx->pausedLoopKind : -1;  // the loop whose check made the next pass re-solve
     for (int outer = 0; outer < maxOuter && loopIdx < nLoops; outer++) {
     gOuterPasses++;
+    if (olTime) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    const double olT0 = olTime ? olNowMs() : 0.0;
+    const long long olAI0 = gActiveIterSum, olWI0 = gWidthIterSum;
+    const bool olSolving = solvePass;
     if (solvePass) {
         gSolvePasses++;
     }
@@ -11918,6 +11959,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync
         }
     }   // ---- end inner Newton loop ----
+    if (olTime) {
+        int nSolved = 0;
+        for (int s = 0; s < nS; s++) nSolved += wasActive[s] ? 1 : 0;
+        olPassSolved = nSolved;
+    }
     for (int s = 0; s < nS; s++) {                           // per-scenario Newton work by pass (cheap, host)
         if (wasActive[s]) {
             if (ctx->olPasses[s] == 0) ctx->olFirst[s] = res.iters[s];
@@ -11926,6 +11972,30 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
     }
     }   // ---- end if (solvePass) ----
+    if (olTime) {
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        double ms = olNowMs() - olT0;
+        long long ai = gActiveIterSum - olAI0, wi = gWidthIterSum - olWI0;
+        if (olSolving && !olFirstSolveDone) {
+            gOlFirstSolveMs += ms; gOlFirstSolveScen += olPassSolved; gOlFirstLaneIters += ai; gOlFirstWidthIters += wi;
+            gOlFirstPasses++;
+            olFirstSolveDone = true;
+        } else if (olSolving) {
+            int k = olTriggerKind >= 0 && olTriggerKind < OL_KINDS ? olTriggerKind : 0;
+            gOlReSolveMs[k] += ms; gOlReSolveScen[k] += olPassSolved; gOlReSolveLaneIters[k] += ai;
+            gOlReSolveWidthIters[k] += wi; gOlReSolvePasses[k]++;
+        }
+    }
+    // the CHECK part of the pass, charged to the loop being checked when the pass body ends (break/continue too)
+    struct OlCheckTimer {
+        bool on; double t0; int kind;
+        ~OlCheckTimer() {
+            if (on && kind >= 0 && kind < OL_KINDS) {
+                gOlCheckMs[kind] += olNowMs() - t0;
+                gOlCheckPasses[kind]++;
+            }
+        }
+    } olCheck{olTime, olTime ? olNowMs() : 0.0, -1};
 
     // ---- AcloadFlowEngine's realistic-voltage check, on this INTERMEDIATE state ----
     // OLF re-checks after every solver run once the last loop that can fix an unrealistic state has
@@ -12035,6 +12105,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitched.p, 0, nS * sizeof(char), ctx->stream));
     // Apply ONLY the current phase's outer loop this pass (sequential, like OLF) — never both at once.
     bool inDsPhase = (loopOrder[loopIdx] == LOOP_DS);
+    olCheck.kind = loopOrder[loopIdx];
+    olTriggerKind = loopOrder[loopIdx];                     // a re-solve in the next pass was triggered by this check
     if (std::getenv("OLF_GPU_BATCH_TRACE") != nullptr) {
         const char* kindName = "?";
         switch (loopOrder[loopIdx]) {
@@ -13637,6 +13709,19 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_solveBat
                     k == 15 ? "+" : "", gOlHistCount[k], gOlHistFirst[k], gOlHistTotal[k]);
         }
         fprintf(stderr, "GPU_OL_HIST notConvergedOnDevice=%lld iters=%lld\n", gOlNotConverged, gOlNotConvergedIters);
+        fprintf(stderr, "GPU_OL_TIME first-solve passes=%lld ms=%.1f scenarioSolves=%lld laneIters=%lld widthIters=%lld\n",
+                gOlFirstPasses, gOlFirstSolveMs, gOlFirstSolveScen, gOlFirstLaneIters, gOlFirstWidthIters);
+        for (int k = 0; k < OL_KINDS; k++) {
+            if (gOlReSolvePasses[k] > 0) {
+                fprintf(stderr, "GPU_OL_TIME re-solve trigger=%s passes=%lld ms=%.1f scenarioSolves=%lld laneIters=%lld widthIters=%lld\n",
+                        olKindName(k), gOlReSolvePasses[k], gOlReSolveMs[k], gOlReSolveScen[k], gOlReSolveLaneIters[k], gOlReSolveWidthIters[k]);
+            }
+        }
+        for (int k = 0; k < OL_KINDS; k++) {
+            if (gOlCheckPasses[k] > 0) {
+                fprintf(stderr, "GPU_OL_TIME check loop=%s passes=%lld ms=%.1f\n", olKindName(k), gOlCheckPasses[k], gOlCheckMs[k]);
+            }
+        }
         fprintf(stderr, "CUDSS_PHASE_TIME analysis=%lld x %.1f ms | factorization=%lld x %.1f ms | solve=%lld x %.1f ms"
                 " | factorization+solve=%lld x %.1f ms\n", cnt[0], tot[0], cnt[1], tot[1], cnt[2], tot[2], cnt[3], tot[3]);
     }

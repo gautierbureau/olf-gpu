@@ -2309,6 +2309,30 @@ other switches), so the exact comparison is run separately against a 1-thread ar
 `save` mode runs the CPU arm ONLY (the GPU wall time comes from a `load` run); the 1-thread arm on this scope
 needs more than the 3 h first budgeted (exit 124 at 10800 s), re-run with 6 h.
 
+### #83 — what the outer loops cost on the device (2026-10-07)
+
+`OLF_GPU_PHASE_TIME=1` now splits the driver's time per outer pass: the FIRST solve of a call, each RE-SOLVE charged to
+the loop whose check triggered it, and each CHECK charged to the loop checked (`GPU_OL_TIME` lines; stream synced at
+the pass boundaries, only under the switch). `native/cuda/ol_summary.py cpu|gpu <log>` prints the run's outer-loop
+summary (reportedContingencies, contingenciesTriggeringOuterLoops, totalOuterLoopIterations, by type, histogram,
+Newton split) from the per-contingency records. network.xiidm, GPU-only cold, nobody else on the card:
+
+| part | passes | time | scenario-solves | per pass |
+|---|---|---|---|---|
+| first inner solve | 11 | 8.6 s | 24,387 | 780 ms |
+| re-solves after a ReactiveLimits check | 104 | 44.1 s | 170,787 | 424 ms |
+| re-solves after a DistributedSlack check | 27 | 10.4 s | 12,252 | 386 ms |
+| re-solves after the FreezingHvdcACEmulation check | 10 | 4.2 s | 24,378 | 418 ms |
+| checks (RL 2.0, DS 0.6, HVDC freeze 0.6, AC-emulation limits 0.5) | | 3.7 s | | |
+
+Of the 75.6 s device solve, **the outer loops are ~62 s**: the same share as their Newton iterations on the CPU
+(89 %). The summaries of both arms are identical bin by bin (GPU per-type counts are batch-level, so they include
+the handful of contingencies not converged on the device). **A re-solve pass costs ~400 ms whether it solves 450
+scenarios (DS) or 2,400 (HVDC freeze)**: the cost follows the number of passes (152 solving passes over 9 chunks), not
+the number of contingencies that re-solve — a pass runs as soon as ONE scenario of its chunk needs it, and pays a
+largely fixed amount. That per-pass fixed cost is the next thing to break down (full-width kernels, batched
+iterations per pass, host syncs).
+
 ### #82 — network.xiidm profile, round 3: the host side of the per-contingency loop (2026-10-07)
 
 GPU-only cold run (`OLF_GPU_SA_GPU_ONLY=1`), 24,379 contingencies, code at 60c3cc7 (refinement step back to 1 on

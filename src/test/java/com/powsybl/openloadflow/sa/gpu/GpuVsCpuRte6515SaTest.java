@@ -1253,6 +1253,15 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         {
         }
 
+        // OLF_GPU_SA_GPU_RESULT_DUMP=<file.json>: the cold GPU arm's result, in the same powsybl JSON as a saved CPU
+        // arm's cpu.json, so the two can be compared value by value (the "violations" line below compares counts).
+        String gpuDump = System.getenv("OLF_GPU_SA_GPU_RESULT_DUMP");
+        if (gpuDump != null && !gpuDump.isEmpty()) {
+            try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(Path.of(gpuDump))) {
+                com.powsybl.security.json.SecurityAnalysisResultSerializer.write(gpuCold, w);
+            }
+            System.out.printf("  GPU_RESULT_DUMP -> %s%n", gpuDump);
+        }
         double worstDistributed = reportDistributedActivePower(cpu, gpuCold);
 
         long cpuViolations = violationCount(cpu);

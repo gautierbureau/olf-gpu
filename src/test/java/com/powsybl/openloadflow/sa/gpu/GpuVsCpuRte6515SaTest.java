@@ -715,6 +715,18 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         }
         System.out.printf("%s: %d branches → %d N-1 contingencies%n", CASE_FILE,
                 network.getBranchCount(), contingencies.size());
+        // OLF_GPU_SA_CTG_DUMP=<file.json>: write THIS list (same order, same ids, same elements) as a powsybl
+        // contingency-list JSON and stop - so another tool (the official pypowsybl, add_contingencies_from_json_file)
+        // can run exactly the scope this harness compares.
+        String ctgDump = System.getenv("OLF_GPU_SA_CTG_DUMP");
+        if (ctgDump != null && !ctgDump.isEmpty()) {
+            com.fasterxml.jackson.databind.ObjectMapper om = com.powsybl.commons.json.JsonUtil.createObjectMapper()
+                    .registerModule(new com.powsybl.contingency.json.ContingencyJsonModule());
+            om.writerWithDefaultPrettyPrinter().writeValue(Path.of(ctgDump).toFile(),
+                    new com.powsybl.contingency.list.DefaultContingencyList("harness-scope", contingencies));
+            System.out.printf("  CTG_DUMP %d contingencies -> %s%n", contingencies.size(), ctgDump);
+            return;
+        }
 
         LoadFlowParameters lfp = JsonLoadFlowParameters.read(PARAMS_FILE);
         // OLF_GPU_DBG_CONV_EPS: tighten the inner-Newton criterion on BOTH arms. The only honest way to

@@ -2309,6 +2309,31 @@ other switches), so the exact comparison is run separately against a 1-thread ar
 `save` mode runs the CPU arm ONLY (the GPU wall time comes from a `load` run); the 1-thread arm on this scope
 needs more than the 3 h first budgeted (exit 124 at 10800 s), re-run with 6 h.
 
+### #81 — the fork's CPU arm against the OFFICIAL pypowsybl (2026-10-07)
+
+Same scope as the harness (all kinds but busbar), same parameters: the harness's list exported with the new
+`OLF_GPU_SA_CTG_DUMP=<file.json>` (powsybl contingency-list JSON, then stops), run by `native/pypowsybl/pp_sa.py`
+in a venv with pypowsybl 1.16.1 (OLF 2.3.0, core 7.3.0): RTE JSON load-flow parameters, the harness's increased
+violations thresholds (0.5 kV / 0.001 both voltage sides, 0.001 flow), `threadCount`, run_ac timed alone.
+`native/pypowsybl/pp_compare.py` matches per contingency (statuses, violation-key multisets, values as SORTED
+lists per key: a voltage level with several buses carries several violations under one key — pairing them
+blindly produced fake 1.7 kV "differences", and a fake run-to-run spread between two fork arms).
+
+| scope | pypowsybl | fork (harness CPU arm) |
+|---|---|---|
+| rte6515, 14,260 contingencies, 20 threads | 58.7 s | 66.7 s |
+| network.xiidm, 24,379 contingencies, 20 threads | 470.1 s | 417.7 s |
+| rte6515, 14,260, 1 thread | 1063.5 s | (generator and branch arms only) |
+
+Results: **statuses identical, violation sets identical contingency by contingency** on all four comparisons
+(rte6515 20 threads 906,447 = 906,447; network.xiidm 20 threads 4,579 = 4,579; rte6515 1 thread vs the fork's
+1-thread generator arm 85,876 = 85,876 and branch arm 583,458 = 583,458). Values: ~0.2 % differ by 1e-9 to
+1.4e-7 (line currents in A, ~1e-10 relative), consistent with the version gap (the fork's upstream base is 3
+commits past 2.3.0, including "Fix reproducibility issue introduced by EquationTerm sorting"; core 7.4.0-SNAPSHOT
+vs 7.3.0). Two 20-thread fork arms of network.xiidm agree with each other to 1.9e-10. The wall times are single
+runs in two runtimes (pypowsybl's native image vs the surefire JVM), ±12 % either way; the fork's OLF changes do
+not move the CPU's results.
+
 ### #80 — the one contingency whose Newton sequence differed: FBQV, a dead bus OLF still checks (2026-10-06, DONE)
 
 Per-contingency match of the device against the 1-thread CPU arm (`OLF_OL_STATS=1` on both: fork `CPU_OL_STATS`,

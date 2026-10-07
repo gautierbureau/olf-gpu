@@ -2309,6 +2309,48 @@ other switches), so the exact comparison is run separately against a 1-thread ar
 `save` mode runs the CPU arm ONLY (the GPU wall time comes from a `load` run); the 1-thread arm on this scope
 needs more than the 3 h first budgeted (exit 124 at 10800 s), re-run with 6 h.
 
+### #82 — network.xiidm profile, round 3: the host side of the per-contingency loop (2026-10-07)
+
+GPU-only cold run (`OLF_GPU_SA_GPU_ONLY=1`), 24,379 contingencies, code at 60c3cc7 (refinement step back to 1 on
+coupler systems): **123.0 s**. Split (`OLF_GPU_PHASE_TIME`, `OLF_SA_PROFILE`, JFR at 10 ms — JFR samples Java only,
+so samples x 10 ms is host CPU; `scratchpad/jfr_lines.py`-style counting, not the time-to-next-sample weighting,
+which inflates frames that precede a JNI call):
+
+| part | time | what |
+|---|---|---|
+| precompute: device solve (native) | ~75 s | Nsight: GPU busy almost all of it — 69.4 s kernels + 2.2 s copies; cuDSS 52.5 s (fwd 17.9, factorize 15.9, bwd 11.5, spmv of the internal refinement step 7.2), closed-branch fill 5.4 |
+| precompute: marshal + pack | 4.6 s | inputs to the native side, states back |
+| precompute: host planning | ~4 s | qualification, override tables, the zero-impedance tree replay 1.8 s, the chunk solver's own loops |
+| per-contingency loop (OLF's SA loop) | ~20 s host CPU | state injection 13 s (8.3 s of it OLF's equation-system index rebuild: variables 6, equations 2.3), base-state restore 3.6, bus update 2.1, CPU replay of 3 contingencies 1.3, contingency apply 0.6 |
+| base load flow + setup | 2 s | |
+
+Changes (all exact, see gates):
+1. **Chunk solver**: the sticky non-tree loop scanned all 2653 zero-impedance elements per scenario against a
+   boxed set; it now walks the base out-of-tree elements, collected once, with a primitive still-out test.
+2. **Fork, `EquationSystemIndex.getSortedVariablesToFindOnly()`**: the variable side alone. Used by the injector
+   and by `AcNetworkVector.updateVariables` (which only reads variable rows and was forcing the equations-to-solve
+   rebuild on every state update). The equation side stays lazy for the next solver.
+3. **Fork, incremental variables index**: `EquationSystemIndex` records the variables whose membership changed
+   since the last update and patches the previous sorted list by binary search (≤ 256 changes, no separation),
+   re-assigning rows from the first touched position — same list, same order, same rows as the full rebuild
+   (`OLF_VARIDX_CHECK=1` recomputes and asserts after every update: no mismatch over the network.xiidm run and
+   OLF's own 1508 tests). The TreeMap walk disappeared from the profile; per-contingency host CPU 20.3 → 15.5 s.
+
+Result: **GPU-only cold 123.0 → 115.7 s.** Gates: network.xiidm against the 1-thread CPU 24,376/24,376 identical
+per contingency (passes, iterations), violations 6190 = 6190, DAP 5.56e-05 MW; rte6515 generator 1389/1389 and
+branch 9040/9042 exact (85,876 and 583,458 violations, diff 0); GPU suites 227/227; OLF suite 1508/1508.
+
+**Measured and rejected — straggler compaction policy** (`OLF_GPU_COMPACT_FRAC`, `OLF_GPU_COMPACT_TIER`, inert at
+their defaults 0.5 / powers of two): compacting at 75 % active 118.2 s (+2.5); width tiers of 256/128 instead of
+powers of two 137.8–140.6 s (+22: every new width is a new analysed data object). The padded lanes (278,144
+lane-iterations for 234,088 useful) are cheaper to factorize than to gather out.
+
+**What is left on the host** (15.5 s CPU in the loop): the injector's remap walk over all 32k variables on every
+contingency whose variable set changed (3.6 s) and `AcNetworkVector.updateVariables` doing the same inside the
+state update (3.2 s); the base-state restore's voltage loop over every bus (2.6 s — redundant for a device-answered
+contingency whose injection overwrites every voltage, but the CPU replay starts from those voltages); the bus
+update (1.7 s). The device solve is cuDSS-bound and its count is OLF's.
+
 ### #81 — the fork's CPU arm against the OFFICIAL pypowsybl (2026-10-07)
 
 Same scope as the harness (all kinds but busbar), same parameters: the harness's list exported with the new

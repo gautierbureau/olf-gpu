@@ -89,7 +89,11 @@ final class GpuStateInjector {
     static void injectState(EquationSystem<AcVariableType, AcEquationType> es,
                             Map<Variable<AcVariableType>, Integer> baseVariableRows, double[] deviceState,
                             Remap remap, int[] closedBranchNums) {
-        List<Variable<AcVariableType>> vars = es.getIndex().getSortedVariablesToFind();
+        // VARIABLES-ONLY index update: the injected state is read back through variable rows (flows, voltages) and
+        // never solved, so rebuilding the equations-to-solve list here is wasted - the contingency's apply and the
+        // restore invalidate it every time, and on network.xiidm that rebuild was ~2.3 s of the 8.3 s this call
+        // spent inside OLF's index. The equation side stays lazy for the next solver that needs it.
+        List<Variable<AcVariableType>> vars = es.getIndex().getSortedVariablesToFindOnly();
         if (remap.vars != vars) {                            // identity: the variable set changed, rebuild
             if (System.getenv("OLF_GPU_PHASE_TIME") != null) {
                 GpuBatchedAcSecurityAnalysis.PHASE_NS.computeIfAbsent("    inject: remap rebuilds (count)",

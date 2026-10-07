@@ -461,6 +461,27 @@ final class GpuBatchChunkSolver {
             long tMainSolveNs = 0;
             long tOrchestratorNs = 0;
             java.util.Map<String, Long> orchNs = new java.util.LinkedHashMap<>();
+            // The zero-impedance elements OUT of the base tree, once: a scenario with sticky non-tree couplers puts
+            // every one of them back except its still-out set, and scanning all ziBranchNums per scenario with a
+            // boxed set was 1.4 s of host time on network.xiidm (2653 elements x every such scenario).
+            int[] baseNonTreeZi;
+            {
+                int[] zIdx = gpuData.ziIdx();
+                int nz = gpuData.ziBranchNums() == null ? 0 : gpuData.ziBranchNums().length;
+                int cnt = 0;
+                for (int zb = 0; zb < nz; zb++) {
+                    if (zIdx[zb * 11 + 10] == 0) {
+                        cnt++;
+                    }
+                }
+                baseNonTreeZi = new int[cnt];
+                cnt = 0;
+                for (int zb = 0; zb < nz; zb++) {
+                    if (zIdx[zb * 11 + 10] == 0) {
+                        baseNonTreeZi[cnt++] = zb;
+                    }
+                }
+            }
             for (List<Integer> group : List.of(ctgIdxList, pairIdxList)) {
                 boolean pairPhase = group == pairIdxList;
                 int nbg = group.size();
@@ -1037,11 +1058,12 @@ final class GpuBatchChunkSolver {
                                 }
                             }
                             if (!contingencies.get(ci).stickyNonTreeZi().isEmpty()) {
-                                java.util.Set<Integer> stillOut = contingencies.get(ci).stickyNonTreeZi().stream()
-                                        .map(LfBranch::getNum).collect(java.util.stream.Collectors.toSet());
-                                for (int zb = 0; zb < gpuData.ziBranchNums().length; zb++) {
-                                    if (gpuData.ziIdx()[zb * 11 + 10] != 0 || stillOut.contains(gpuData.ziBranchNums()[zb])) {
-                                        continue;            // in the base tree already, or still out
+                                int[] stillOut = contingencies.get(ci).stickyNonTreeZi().stream()
+                                        .mapToInt(LfBranch::getNum).sorted().toArray();
+                                int[] ziNums = gpuData.ziBranchNums();
+                                for (int zb : baseNonTreeZi) {
+                                    if (java.util.Arrays.binarySearch(stillOut, ziNums[zb]) >= 0) {
+                                        continue;            // still out (the base-tree ones are not in baseNonTreeZi)
                                     }
                                     ziTreeSlotElemValList.add(s);
                                     ziTreeSlotElemValList.add(zb);

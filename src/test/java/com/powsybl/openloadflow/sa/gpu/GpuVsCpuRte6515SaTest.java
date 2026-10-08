@@ -855,8 +855,11 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         // Non-zero increased-violations thresholds to avoid ulp-level flicker
         SecurityAnalysisParameters sap = new SecurityAnalysisParameters();
         sap.setLoadFlowParameters(lfp);
-        sap.setIncreasedViolationsParameters(new SecurityAnalysisParameters.IncreasedViolationsParameters(
-                0.5, 0.001, 0.5, 0.001, 0.001));
+        // (constructor order: lowV abs, lowV prop, highV abs, highV prop, FLOW prop - the flow threshold is 0.1 %).
+        // OLF_GPU_SA_DEFAULT_INCREASED=1: powsybl's defaults instead (flow 10 %), as pypowsybl uses them.
+        sap.setIncreasedViolationsParameters("1".equals(System.getenv("OLF_GPU_SA_DEFAULT_INCREASED"))
+                ? new SecurityAnalysisParameters.IncreasedViolationsParameters()
+                : new SecurityAnalysisParameters.IncreasedViolationsParameters(0.5, 0.001, 0.5, 0.001, 0.001));
 
         // CPU arm: 8 threads (production-realistic) on a BUS-BREAKER case, ONE thread on a
         // NODE-BREAKER one. OLF partitions the contingency list across threads and each partition
@@ -929,9 +932,12 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 ? java.util.Set.of()
                 : java.util.Arrays.stream(System.getenv("OLF_GPU_SA_BUSDIFF_CTG").split(","))
                         .map(String::trim).filter(x -> !x.isEmpty()).collect(Collectors.toSet());
-        boolean busDiff = System.getenv("OLF_GPU_SA_CTG_ONLY") != null
+        // OLF_GPU_SA_BUSDIFF=0 turns it off even with CTG_ONLY: a timing run on an id-selected list must not
+        // pay one BusResult per bus per contingency on both arms (1000 rte6515 branches, cold GPU arm: 34.1 s with it, 9.8 s without).
+        boolean busDiff = !"0".equals(System.getenv("OLF_GPU_SA_BUSDIFF"))
+                && (System.getenv("OLF_GPU_SA_CTG_ONLY") != null
                 || !busDiffCtgs.isEmpty()
-                || "1".equals(System.getenv("OLF_GPU_SA_BUSDIFF"));
+                || "1".equals(System.getenv("OLF_GPU_SA_BUSDIFF")));
         // OLF_GPU_SA_MON_BRANCH=<id>[,<id>]: monitor these branches and print BOTH arms' flows. A
         // one-sided violation says only that the other arm is on the other side of the limit — it does
         // NOT say by how much, and "the margin is small" is a statement about the CPU's distance to its

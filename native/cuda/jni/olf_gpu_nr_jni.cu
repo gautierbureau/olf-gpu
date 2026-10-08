@@ -10469,7 +10469,45 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         // The seeded pin states must reach the ROWS before the first fill: a pinned enrolled pilot's balance
         // goes on the carrier's target (its DISTR_Q target otherwise), and a group that lost control in the
         // base has its pilot row flipped already. Both kernels are idempotent; the RL pass runs them again.
-        launchPilotVeqInner(true);                           // seed: the curve limits do not exist yet
+        // Every scenario takes the seed stamps: updateDistrQTargetsBatch returns on !rlActive[s], and rlActive is
+        // only written by the outer-loop passes - at seed time it still held the context's zeros (or the previous
+        // chunk's last pass), so the carrier stamp below never ran before the FIRST solve. A pilot-self pilot that
+        // lost every generator with two live survivors then solved its carrier row against the plan's renormalized
+        // DISTR_Q seed (0.5 x its -0.6 balance = -0.3) instead of its balance: measured as 0.258 kV at b2 on
+        // devicePilotControllerLosingItsOwnGeneratorMatchesCpu (OLF's BUS_TARGET_Q of the pilot 0.3 pu off at the
+        // device state), and rte6515's 50 refused pilot outages. One survivor hid it: its seed degenerates to the
+        // pilot's own target. The passes upload their own rlActive before they run.
+        {
+            std::vector<char> allOn(nS, 1);
+            CUDA_CHECK(cudaMemcpyAsync(ctx->dRlActive.p, allOn.data(), nS, cudaMemcpyHostToDevice, ctx->stream));
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        }
+        // The dynamic reactive limits BEFORE the seed stamps, on the cold path too. They were first computed in the
+        // reactive-limit pass, after the first solve, so the stamps read the arrays unfilled: a gen-lost pilot's
+        // carrier target came out 0 - 0 instead of 0 - loadQ, and a survivor's sharing target summed a pinned
+        // peer's (limit - loadQ) as 0 - 0 - measured on devicePilotControllerLosingItsOwnGeneratorMatchesCpu
+        // as rows 2 and 4 both at target 0 during the solve (OLF: -0.6 and -0.3). The warm path already ran
+        // this before seeding; here it runs after initRlLimitTypeBatch has set the scenario's limit types.
+        if (useDynRlLimits) {                            // curve limits at the CURRENT (seeded) targets,
+            rlCurveLimitsBatch<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, ctx->ncv, n, ctx->cvExtrapolate,
+                    ctx->dCvIdx.as<int>(), ctx->dCvIn.as<double>(), ctx->dCvPts.as<double>(),
+                    ctx->dRlMinQ.as<double>(), ctx->dRlMaxQ.as<double>(), ctx->dRlLoadQ.as<double>(),
+                    ctx->dTarget.as<double>(),
+                    nRlQOv, nRlQOv > 0 ? dRlQOvSlotEntry.as<int>() : nullptr,
+                    nRlQOv > 0 ? dRlQOvMinMax.as<double>() : nullptr,
+                    nCvOv > 0 ? dCvOvPtr.as<int>() : nullptr,
+                    nCvOv > 0 ? dCvOvEntry.as<int>() : nullptr,
+                    nCvOv > 0 ? dCvOvVal.as<double>() : nullptr,
+                    ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
+                    ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr, ctx->ngen,
+                    ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr,
+                    ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->nds,
+                    ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
+                    ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
+                    ctx->dRlLoadQDyn.as<double>(), cvProbeEntry, cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot);
+            launchForcedTargetQLimits(ctx, nS, n);
+        }
+        launchPilotVeqInner(true);                           // seed: with the limits above
         launchDistrQTargetsInner();
         if (ctx->nds > 0) {                                  // slack-retained share: 0 until frozen at the first pass
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsRetain.p, 0, nS * sizeof(double), ctx->stream));

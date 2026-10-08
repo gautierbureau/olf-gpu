@@ -1783,8 +1783,8 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
      *  group's PILOT is b1 and b1 is ALSO one of its three controllers — the shape ExtractionColumns
      *  deliberately keeps out of the Q-relocation table, because while it controls it has no reactive
      *  balance of its own to relocate. Losing g1 makes b1 stop controlling while b2 and b3 still hold
-     *  its voltage, so b1 ACQUIRES a Q balance mid-scenario with no table entry to carry it. b1 also
-     *  carries reactive load, which is the half of the gate that makes that balance non-trivial. */
+     *  its voltage, so b1 ACQUIRES a Q balance mid-scenario, which rides the new free member's row. b1 also
+     *  carries reactive load, which is what makes that balance (and its share in b3's target) non-trivial. */
     @org.junit.jupiter.api.Test
     void devicePilotControllerLosingItsOwnGeneratorMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
@@ -1794,12 +1794,16 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 new Contingency("g1", new com.powsybl.contingency.GeneratorContingency("g1")));
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true);
-        // TWO survivors: the free role moves to b2 and OLF deactivates ITS DISTR_Q to put the pilot's
-        // reactive balance there, which the device has no relocation entry to express — so the
-        // scenario is EXPECTED on the CPU. Verified wrong when forced onto the device: b2 lands
-        // 0.149 kV out, and OLF's own residual at that state is 0.200 pu on exactly one equation,
-        // BUS_TARGET_Q of the pilot (OLF_GPU_SA_RESID).
-        assertGpuMatchesCpuNoEngage(network, ctgs, 1e-11, lfp);
+        // TWO survivors: the free role moves to b2, which hosts the pilot's reactive balance (its own DISTR_Q
+        // suppressed) while b3 keeps a DISTR_Q renormalized over {b2, b3} whose target still carries the pilot's
+        // targetQ (-0.6: OLF sums every merged controller's target, keys alone renormalize). The device solved
+        // b2's row at 0.5 x -0.6 then at 0 - 0 (OLF's BUS_TARGET_Q of the pilot 0.3 then 0.6 pu off at the
+        // device state, OLF_GPU_SA_RESID): the seed-time carrier stamp was gated off by rlActive, and the
+        // dynamic limit arrays it reads were first filled in the reactive-limit pass, after the first solve.
+        // Exact at 1e-11 since, and the outage must BATCH.
+        assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "the outage must batch (or the test proves nothing)");
     }
 
     /** The SINGLE-survivor variant of the shape above, with the survivor driven past its reactive limit:

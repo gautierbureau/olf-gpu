@@ -350,18 +350,17 @@ final class GpuBatchInjectionOutages {
                                 .findFirst().map(m -> m == bus).orElse(false);
                         boolean pilotIsController = members.contains(vc.getControlledBus());
                         // Losing the FREE member moves the free role, and with it the row OLF puts the
-                        // pilot's reactive balance on. Where the pilot is NOT one of its controllers
-                        // the group has a relocation table and the mode scan re-picks the carrier, so
-                        // any number of survivors is fine (measured: rte6515 GEN-5958, 3 members and 2
-                        // survivors, 3.8e-11; reproducer deviceRemoteGroupLosingFreeMemberMatchesCpu).
-                        // Where the pilot IS one of its controllers there is no table, and the pilot's
-                        // newly acquired reactive balance has nowhere to go — unless exactly ONE
-                        // controller survives, in which case its DISTR_Q row renormalizes to qPct = 1,
-                        // which IS that balance. With two or more survivors the two systems genuinely
-                        // differ, so the scenario routes to the CPU: see
-                        // devicePilotControllerLosingItsOwnGeneratorMatchesCpu (0.149 kV, and OLF's own
-                        // residual at that state is 0.200 pu on the pilot's BUS_TARGET_Q).
-                        return survivors > 0 && !(pilotIsController && isFree && survivors > 1);
+                        // pilot's reactive balance on; the mode scan re-picks the carrier, so any number of
+                        // survivors is fine (measured: rte6515 GEN-5958, 3 members and 2 survivors,
+                        // 3.8e-11; reproducer deviceRemoteGroupLosingFreeMemberMatchesCpu). That holds for a
+                        // pilot that IS one of its controllers too: its gen-lost entry opens the pilot-self
+                        // gate, its raw q lands on the carrier with its own balance as target and the
+                        // carrier's DISTR_Q is suppressed. Two or more survivors used to route to the CPU
+                        // on a 0.149 kV measurement, which was the seed-time stamps reading the dynamic
+                        // limit arrays before anything had filled them on the cold path (carrier target
+                        // 0 - 0, a pinned peer's target 0 - 0): devicePilotControllerLosingItsOwnGenerator
+                        // MatchesCpu is exact at 1e-11 since, and rte6515's 50 such outages batch.
+                        return survivors > 0;
                     })
                     .orElse(false);
             // The group's control DIES with this bus (no controller anywhere keeps a VOLTAGE

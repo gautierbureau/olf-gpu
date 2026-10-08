@@ -172,19 +172,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
     }
 
     /**
-     * The reactive-limit entries of the controllers still holding this bus's voltage. If they ALL pin,
-     * the reactive-limit machinery repossesses their rows for their own pinned balances — including the
-     * row that was carrying THIS bus's Q balance, which then goes unenforced (measured on rte6515
-     * GEN-1522: q = 0.601 pu where OLF has 0, distrQResid -0.601, every equation still converging).
-     * The device cannot know at plan time whether they will pin, so the chunk solver checks after the
-     * solve and replays such a scenario on the CPU.
-     */
-    public boolean needsPilotPinCheck() {
-        return inactiveDqMember >= 0 && pilotGroupSurvivorRlEntries.length > 0;
-    }
-
-    /**
-     * The RUNTIME half of {@link #needsPilotPinCheck()}: the pilot's own BUS_V row and the reactive
+     * The pilot's own BUS_V row and the reactive
      * balance it must carry once every surviving controller has pinned. While the group still holds
      * the pilot's voltage, setup correctly leaves this row a mode-0 BUS_TARGET_V identity and the
      * balance rides a survivor's row. When the last survivor pins, that row takes its own pinned

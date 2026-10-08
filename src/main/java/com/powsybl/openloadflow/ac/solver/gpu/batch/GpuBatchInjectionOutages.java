@@ -313,12 +313,13 @@ final class GpuBatchInjectionOutages {
             // the CPU, as does a Q-carrying load loss here.
             // Admit exactly the shape the degeneration argument covers, and no more:
             //  (a) another controller survives, so the group still holds this bus's voltage;
-            //  (b) the survivors must not ALL pin — but that is a RUNTIME property, so it is checked
-            //      after the solve instead (needsPilotPinCheck) and such a scenario is replayed on the
-            //      CPU. The Q probe named it: when the surviving controller pins, the reactive-limit
-            //      machinery repossesses its row for its own pinned balance, and the row carrying THIS
-            //      bus's q = targetQ goes with it (GEN-1522: q 0.601 vs OLF's 0, distrQResid -0.601,
-            //      every equation still converging). Where the survivors keep headroom the degeneration
+            //  (b) the survivors MAY all pin: a pinned survivor's row takes its own balance (mode 4), and
+            //      a pinned pilot's too, so nothing is evicted - a runtime reject used to replay such a
+            //      scenario on the CPU (DISTR_Q_PILOT_ALL_PINNED), for the case where the outaged bus
+            //      IS the pilot and its balance rode a survivor's row (GEN-1522: q 0.601 vs OLF's 0);
+            //      that case flips the pilot's own row in the solve since (flipsPilotRowWhenAllPinned),
+            //      and the member case was measured exact without the reject (runtime-pin fixture,
+            //      rte6515 GEN-6231#0). Where the survivors keep headroom the degeneration
             //      holds exactly — GEN-1523 at overMaxBy -0.149 and GEN-5958 at -0.900 both land at
             //      ~4e-11 kV;
             //  (c) the pilot carries no reactive load. Lifting this leaves GEN-1264 at 0.134 kV and

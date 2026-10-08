@@ -186,15 +186,6 @@ final class GpuBatchChunkSolver {
         return lt != null && entry >= 0 && entry < lt.length && lt[entry] >= 1 && lt[entry] <= 4;
     }
 
-    private static boolean allBasePinned(GpuAcData gpuData, int[] entries) {
-        for (int e : entries) {
-            if (!basePinned(gpuData, e)) {
-                return false;
-            }
-        }
-        return entries.length > 0;
-    }
-
     private static boolean seedsDqTargetRow(GenOutage[] gos, int row) {
         for (GenOutage go : gos == null ? new GenOutage[0] : gos) {
             if (go.seedsDqTargets() && contains(go.dqTargetRows(), row)) {
@@ -564,7 +555,6 @@ final class GpuBatchChunkSolver {
                     List<Double> frozenSeedValue = new ArrayList<>();
                     // slot -> the RL entries of the controllers still holding a deactivated pilot's
                     // voltage. All pinned = its Q balance lost its row; the CPU replays that scenario.
-                    java.util.Map<Integer, int[]> pilotPinCheck = new java.util.HashMap<>();
                     // Pilot-row flip entries: the scenarios that used to be REJECTED by that check are
                     // FIXED in the solve instead. Per chunk, like every other list here — the scenario
                     // index is a chunk SLOT.
@@ -1309,15 +1299,6 @@ final class GpuBatchChunkSolver {
                                         for (int rl : go.pilotGroupSurvivorRlEntries()) {
                                             pfRlPool.add(rl);
                                         }
-                                    } else if (go.needsPilotPinCheck()) {
-                                        // No pilot row to move the balance onto (the outaged bus is not
-                                        // the pilot): still a runtime reject.
-                                        // ...unless every survivor was ALREADY pinned in the base: each of their rows,
-                                        // the pilot's included, hosts its own balance from the start, so nothing is
-                                        // evicted when the scenario ends with them pinned.
-                                        if (!allBasePinned(gpuData, go.pilotGroupSurvivorRlEntries())) {
-                                            pilotPinCheck.put(s, go.pilotGroupSurvivorRlEntries());
-                                        }
                                     }
                                     if (go.shrinksReactiveLimits()) {
                                         // The bus KEEPS voltage control, so its reactive-limit entry is
@@ -1792,7 +1773,6 @@ final class GpuBatchChunkSolver {
                     boolean svcActive = phases.secondaryVc() != null && !phases.secondaryVc().ctls().isEmpty();
                     boolean monActive = phases.monitoring() != null && !phases.monitoring().isEmpty();
                     int[] rlStateOut = (!pairPhase && !pairIdxList.isEmpty() || dbgPairRl || svcActive || monActive
-                            || !pilotPinCheck.isEmpty()
                             || System.getenv("OLF_GPU_RL_TRACE") != null) && nrl > 0 ? new int[chunkSize * nrl] : null;
                     // DISTR_Q weight overrides: per-chunk context state (orchestrator re-solves keep
                     // the slot assignment); cleared when the chunk has none.
@@ -2430,31 +2410,6 @@ final class GpuBatchChunkSolver {
                             }
                             System.err.printf("GPU_RL_FINAL ctg=%s pinnedTotal=%d%s%n",
                                     contingencies.get(group.get(chunkStart + s)).contingencyId(), pinned, ids);
-                        }
-                    }
-                    // A deactivated pilot keeps its Q balance on a SURVIVING controller's row. If every
-                    // one of those controllers pinned, the reactive-limit machinery took their rows for
-                    // their own pinned balances and the pilot's balance is no longer enforced anywhere —
-                    // the solve still converges, on an equation system missing a row. Whether they pin is
-                    // a runtime outcome, so it is caught here and the CPU replays the scenario.
-                    if (!pilotPinCheck.isEmpty() && rlStateOut != null) {
-                        for (var e : pilotPinCheck.entrySet()) {
-                            int s = e.getKey();
-                            if (s >= realCount || chunkResults[s] == null) {
-                                continue;
-                            }
-                            boolean allPinned = true;
-                            for (int entry : e.getValue()) {
-                                if ((rlStateOut[s * nrl + entry] & 7) == 0) {
-                                    allPinned = false;
-                                    break;
-                                }
-                            }
-                            if (allPinned) {
-                                chunkResults[s][n + 2] = GpuBatchStatus.STATUS_REJECTED;
-                                com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus
-                                        .record("RUNTIME:DISTR_Q_PILOT_ALL_PINNED");
-                            }
                         }
                     }
                     if (!pairPhase && (hasDs || dsSlackOnly)

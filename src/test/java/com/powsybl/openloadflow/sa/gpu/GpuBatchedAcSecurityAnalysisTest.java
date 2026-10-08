@@ -1492,6 +1492,57 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 "both outages must run on the DEVICE");
     }
 
+    /** The same merged control with NOTHING pinned in the base: equal keys give each section half the group's
+     *  reactive power (~2 MVAr each), within their +-3 MVAr limits. Losing either section leaves the whole
+     *  share (~4 MVAr) to the survivor, which pins at MAX_Q AT RUNTIME - the shape of rte6515's GEN-6231#0
+     *  (VL-6231_1 PV in the base, rejected as DISTR_Q_PILOT_ALL_PINNED). */
+    @org.junit.jupiter.api.Test
+    void deviceMergedControlSurvivorPinsAtRuntimeAfterLosingOneSectionMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = Network.create("merged-gen-vc-sa", "code");
+        com.powsybl.iidm.network.Bus[] b = new com.powsybl.iidm.network.Bus[4];
+        for (int i = 0; i < 4; i++) {
+            com.powsybl.iidm.network.VoltageLevel vl = network.newSubstation().setId("s" + i).setCountry(com.powsybl.iidm.network.Country.FR).add()
+                    .newVoltageLevel().setId("b" + i + "_vl").setNominalV(225).setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            b[i] = vl.getBusBreakerView().newBus().setId("b" + i).add();
+        }
+        java.util.function.BiConsumer<Integer, double[]> gen = (i, pv) -> b[i].getVoltageLevel().newGenerator()
+                .setId("g" + i).setBus("b" + i).setConnectableBus("b" + i)
+                .setMinP(0).setMaxP(2 * pv[0]).setTargetP(pv[0]).setTargetV(pv[1]).setVoltageRegulatorOn(true).add();
+        gen.accept(0, new double[] {60, 230});
+        gen.accept(1, new double[] {30, 228});
+        gen.accept(2, new double[] {30, 228});
+        network.getGenerator("g0").newMinMaxReactiveLimits().setMinQ(-150).setMaxQ(150).add();   // the slack unit stays PV
+        for (int i = 1; i <= 2; i++) {                     // above a half share (~2 MVAr), below the whole (~4)
+            network.getGenerator("g" + i).newMinMaxReactiveLimits().setMinQ(-3).setMaxQ(3).add();
+        }
+        for (int i = 1; i <= 2; i++) {                     // EQUAL keys (not range-proportional): b2's half of the
+            network.getGenerator("g" + i).newExtension(com.powsybl.iidm.network.extensions.CoordinatedReactiveControlAdder.class)
+                    .withQPercent(50).add();               // group's ~1.1 pu is far over its 0.05 limit, b1's is not
+        }
+        b[3].getVoltageLevel().newLoad().setId("ld3").setBus("b3").setConnectableBus("b3").setP0(110).setQ0(45).add();
+        java.util.function.BiConsumer<String, double[]> line = (id, ends) -> network.newLine().setId(id)
+                .setBus1("b" + (int) ends[0]).setConnectableBus1("b" + (int) ends[0])
+                .setBus2("b" + (int) ends[1]).setConnectableBus2("b" + (int) ends[1])
+                .setR(ends[2]).setX(ends[3]).add();
+        line.accept("l03", new double[] {0, 3, 1, 10});
+        line.accept("l13", new double[] {1, 3, 1, 12});
+        line.accept("l23", new double[] {2, 3, 1, 14});
+        line.accept("l12", new double[] {1, 2, 0, 0});     // zero impedance: merges the controls of g1 and g2
+        List<Contingency> ctgs = List.of(
+                new Contingency("g1", new com.powsybl.contingency.GeneratorContingency("g1")),
+                new Contingency("g2", new com.powsybl.contingency.GeneratorContingency("g2")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(false).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("b0_vl"));
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "both outages must run on the DEVICE");
+    }
+
     /** Curve-limit EXTRAPOLATION (extrapolateReactiveLimits — ON in the RTE production params;
      *  was a whole-run CPU gate on any curve network): the curve stops at P = 41 MW just above
      *  B2-G's base 40 MW, so the post-outage DS raise pushes P OUTSIDE the range and the limit

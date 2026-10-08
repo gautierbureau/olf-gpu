@@ -680,6 +680,14 @@ public final class GpuAcNewtonSolver {
     public static native void setBatchRlCurves(long handle, int[] cvIdx, double[] cvIn, double[] cvPts,
                                                int extrapolate);
 
+    /** Install (or clear, with nulls) the forceTargetQInReactiveLimits channel on a batch context: the Q
+     *  targets of generators OLF clamps into their curve limits at their current P (see GpuBatchForcedTargetQ). */
+    public static native void setBatchForcedTargetQ(long handle, int[] fqIdx, double[] fqIn, double[] fqPts,
+                                                    int extrapolate);
+
+    /** Per-chunk loss pre-distribution moves of the forced-target-Q generators ([nS * nfq] pu), or null. */
+    public static native void setBatchForcedTargetQPre(long handle, double[] fqPre);
+
     /** Remote-member RL entries (plan-B1): per-entry remote kinds + compare rows (PILOT v column for
      *  remote group members — both RL switch conditions test the pilot's V against the GROUP target).
      *  {@code dqMemberQrGroup} (plan-B4) links each group member to its pilot's relocation candidate

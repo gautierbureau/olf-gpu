@@ -28,7 +28,8 @@
       "minNominalVoltageRealisticVoltageCheck": 180,
       
       "disableInconsistentVoltageControls" : true,
-      "extrapolateReactiveLimits" : true
+      "extrapolateReactiveLimits" : true,
+      "forceTargetQInReactiveLimits" : true
     }
   }
 }

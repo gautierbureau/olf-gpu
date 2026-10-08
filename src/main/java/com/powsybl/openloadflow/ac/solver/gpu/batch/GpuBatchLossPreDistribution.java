@@ -49,6 +49,8 @@ final class GpuBatchLossPreDistribution {
      * slack band: measured 1.07 MW of branch-flow difference against the CPU on rte6515, enough to
      * flip apparent-power violations.
      *
+     * @param genMovesOut when not null ({@code double[ngen]}), receives each generator's own move - what the
+     *        forced-target-Q channel clamps at (GpuBatchForcedTargetQ); left at zero when nothing moves
      * @return {@code double[nds + 1]}: the participant shares (target/anchor deltas per DS row)
      *         followed by the slack bus's own absorbed share, or {@code null} when nothing can move
      *         (no participants, zero mismatch).
@@ -56,7 +58,7 @@ final class GpuBatchLossPreDistribution {
     static double[] distribute(GpuAcData gpuData, double mismatch,
                                int ovBus, double ovFactorDelta, double ovBaseDelta,
                                double ovMaxDelta, double ovMinDelta, boolean[] islanded,
-                               int[] lostGenSlots) {
+                               int[] lostGenSlots, double[] genMovesOut) {
         int nds = gpuData.dsPhiRow().length;
         if (nds == 0 || mismatch == 0) {
             return null;
@@ -198,6 +200,9 @@ final class GpuBatchLossPreDistribution {
                     }
                 }
                 rem -= done;
+            }
+            if (genMovesOut != null) {
+                System.arraycopy(genCum, 0, genMovesOut, 0, ngen);
             }
             for (int i = 0; i < nds; i++) {
                 if (islanded != null && islanded[i]) {

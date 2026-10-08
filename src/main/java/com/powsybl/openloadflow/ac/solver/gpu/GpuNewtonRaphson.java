@@ -21,6 +21,7 @@ import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContinuousPhase;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchIncrementalFlowControl;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchIncrementalShuntVc;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchIncrementalTvc;
+import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchForcedTargetQ;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOuterLoopTables;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchVoltageMonitoring;
 import com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchRlCurves;
@@ -966,7 +967,14 @@ public class GpuNewtonRaphson extends AbstractAcSolver {
                         ? GpuBatchRlCurves.build(network, equationSystem, cachedData, driverDsParams(), true, target,
                                 acLoadFlowParameters.getNetworkParameters().isExtrapolateReactiveLimits())
                         : null;
-                GpuBatchOuterLoopTables.install(context.handle.get(), cachedData, rlCurves,
+                // forceTargetQInReactiveLimits: the base load flow's slack moves P too, and OLF re-clamps.
+                var lfNetworkParameters = acLoadFlowParameters.getNetworkParameters();
+                GpuBatchForcedTargetQ.Channel forcedTargetQ = driverRlLoop() != null && dsLoop != null
+                        ? GpuBatchForcedTargetQ.build(network, equationSystem, cachedData, driverDsParams(),
+                                lfNetworkParameters.isForceTargetQInReactiveLimits() && lfNetworkParameters.isReactiveLimits(),
+                                true, target, activation.rowMode(), lfNetworkParameters.isExtrapolateReactiveLimits())
+                        : null;
+                GpuBatchOuterLoopTables.install(context.handle.get(), cachedData, rlCurves, forcedTargetQ,
                         acLoadFlowParameters.isVoltageRemoteControlRobustMode(),
                         acLoadFlowParameters.getMinRealisticVoltage(), acLoadFlowParameters.getMaxRealisticVoltage(),
                         acLoadFlowParameters.getMinNominalVoltageRealisticVoltageCheck(),

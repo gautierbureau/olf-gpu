@@ -31,6 +31,8 @@ package com.powsybl.openloadflow.ac.solver.gpu.batch;
  *   <li>{@code dsRejectResidual}: a slackDistributionFailureBehavior other than LEAVE_ON_SLACK_BUS
  *       makes a saturated distribution REJECT the scenario (CPU fallback replays it with the real
  *       behavior) instead of silently leaving the residual at the slack.</li>
+ *   <li>{@code forceTargetQ}: OLF's forceTargetQInReactiveLimits with reactive limits on - curve generators'
+ *       target Q follows their P (GpuBatchForcedTargetQ).</li>
  *   <li>{@code outerLoopMode}: {@link OuterLoopMode#DEVICE} (CUDA-kernel outer loops folded into the
  *       device solve) or {@link OuterLoopMode#JAVA} (device inner solve only, OLF's Java outer loops
  *       make the decisions per scenario via {@link GpuHybridBatchOuterLoopEngine}).</li>
@@ -50,7 +52,7 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
                           boolean hvdcFreezing, boolean hvdcLimits,
                           boolean secondaryVoltageControl, double minPlausibleTargetV, double maxPlausibleTargetV,
                           boolean voltageMonitoring, boolean continuousPhaseControl, boolean contingencyLossPreDistribution,
-                          boolean rlCurveExtrapolate,
+                          boolean rlCurveExtrapolate, boolean forceTargetQ,
                           PerEqCriteria perEqCriteria,
                           double genVcMinNominalV,
                           boolean rlRobustMode, double minRealisticVoltage, double maxRealisticVoltage,
@@ -67,7 +69,7 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
      *  outer-loop mode. This is what every non-provider entry point (tests, direct callers) uses. */
     public static final BatchConfig DEVICE_DEFAULTS = new BatchConfig(0, 0, 0, false, 0, 0, false, OuterLoopMode.DEVICE,
             com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams.DEFAULT, false, 3, false, 3, false, false, false, false, false, false, false,
-            false, 0.8, 1.2, false, false, false, false, null, -1,
+            false, 0.8, 1.2, false, false, false, false, false, null, -1,
             true, com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MIN_REALISTIC_VOLTAGE,
             com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MAX_REALISTIC_VOLTAGE,
             com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MIN_NOMINAL_VOLTAGE_REALISTIC_VOLTAGE_CHECK, -1,
@@ -89,7 +91,7 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
                 incrementalShuntControl, incShuntMaxSectionShift, simpleShuntControl, incrementalRpcControl,
                 incrementalPhaseControl, simpleTransformerControl, tvcUseInitialTapPosition, hvdcFreezing,
                 hvdcLimits, secondaryVoltageControl, minPlausibleTargetV, maxPlausibleTargetV, voltageMonitoring,
-                continuousPhaseControl, contingencyLossPreDistribution, rlCurveExtrapolate, perEqCriteria,
+                continuousPhaseControl, contingencyLossPreDistribution, rlCurveExtrapolate, forceTargetQ, perEqCriteria,
                 genVcMinNominalV, rlRobustMode, minRealisticVoltage, maxRealisticVoltage,
                 minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, true);
     }

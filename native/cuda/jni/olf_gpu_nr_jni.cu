@@ -5308,6 +5308,74 @@ static const int cvProbeSlot = std::getenv("OLF_GPU_CV_PROBE_SLOT") == nullptr |
 
 __host__ __device__ inline int dsRowOf(const int* dsPhiRow, const int* dsRowOv, int s, int nds, int i);
 
+// OLF LfGeneratorImpl.getTargetQ under forceTargetQInReactiveLimits: the IIDM target Q, clamped into the
+// generator's curve limits at target P p (below minQ -> minQ, above maxQ -> maxQ).
+__device__ double fqClamped(double pPu, double raw, const double* pts, int npts, int extrapolate) {
+    double mn = rlCurveEval(pPu * 100.0, pts, npts, 0, extrapolate) / 100.0;
+    double mx = rlCurveEval(pPu * 100.0, pts, npts, 1, extrapolate) / 100.0;
+    return raw < mn ? mn : (raw > mx ? mx : raw);
+}
+
+// Whether entry e takes part in scenario s: its generator is still there, its bus is not islanded, and its Q row
+// still is the bus's Q balance (a frozen or repurposed row keeps whatever the scenario put there).
+__device__ bool fqEntryLive(int s, int e, int n, int nds, const int* fqIdx, int nLost, const int* lost,
+                            const char* dsIslanded, const int* mode) {
+    int slot = fqIdx[e * 6 + 1];
+    for (int k = 0; k < nLost; k++) {
+        if (lost[2 * k] == s && lost[2 * k + 1] == slot) return false;
+    }
+    if (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + fqIdx[e * 6 + 4]]) return false;
+    return mode[(size_t) s * n + fqIdx[e * 6]] == fqIdx[e * 6 + 5];
+}
+
+// Solve start: each scenario's Q targets carry the clamp at the BASE P (the base load flow's targets); a scenario
+// whose loss pre-distribution moved the generator starts from the clamp at the moved P, as OLF re-reads it when
+// the pre-distribution invalidates the bus's generation target (AbstractLfBus.invalidateGenerationTargetP).
+// One thread per scenario, entries in order: two generators on one bus add to one row deterministically.
+__global__ void forcedTargetQInitBatch(int nfq, int nS, int n, int nds, int extrapolate, const int* fqIdx,
+                                       const double* fqIn, const double* fqPts, const double* fqPre,
+                                       int nLost, const int* lost, const char* dsIslanded, const int* mode,
+                                       double* target, double* applied) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nS) return;
+    for (int e = 0; e < nfq; e++) {
+        double base = fqIn[e * 5 + 2];
+        applied[(size_t) s * nfq + e] = base;
+        if (!fqEntryLive(s, e, n, nds, fqIdx, nLost, lost, dsIslanded, mode)) continue;
+        double p = fqIn[e * 5] + (fqPre != nullptr ? fqPre[(size_t) s * nfq + e] : 0.0);
+        double q = fqClamped(p, fqIn[e * 5 + 1], fqPts + fqIdx[e * 6 + 2] * 3, fqIdx[e * 6 + 3], extrapolate);
+        target[(size_t) s * n + fqIdx[e * 6]] += q - base;
+        applied[(size_t) s * nfq + e] = q;
+    }
+}
+
+// After a distributed-slack pass: the generator's P is its pre-distributed P plus its own water-fill move
+// (genCum), or - when the per-generator water-fill did not run - its share of its bus's row movement; its Q
+// target follows the clamp at that P.
+__global__ void forcedTargetQBatch(int nfq, int nS, int n, int nds, int ngen, int extrapolate, const int* fqIdx,
+                                   const double* fqIn, const double* fqPts, const double* fqPre,
+                                   const double* genCum, const char* genCumValid, const int* dsPhiRow,
+                                   const int* dsRowOv, int nLost, const int* lost, const char* dsIslanded,
+                                   const int* mode, const char* rlActive, double* target, double* applied) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nS || !rlActive[s]) return;
+    for (int e = 0; e < nfq; e++) {
+        if (!fqEntryLive(s, e, n, nds, fqIdx, nLost, lost, dsIslanded, mode)) continue;
+        int slot = fqIdx[e * 6 + 1];
+        double p;
+        if (genCum != nullptr && genCumValid != nullptr && genCumValid[s] && slot >= 0) {
+            p = fqIn[e * 5] + (fqPre != nullptr ? fqPre[(size_t) s * nfq + e] : 0.0) + genCum[(size_t) s * ngen + slot];
+        } else {
+            int pRow = dsRowOf(dsPhiRow, dsRowOv, s, nds, fqIdx[e * 6 + 4]);
+            p = fqIn[e * 5] + fqIn[e * 5 + 3] * (target[(size_t) s * n + pRow] - fqIn[e * 5 + 4]);
+        }
+        double q = fqClamped(p, fqIn[e * 5 + 1], fqPts + fqIdx[e * 6 + 2] * 3, fqIdx[e * 6 + 3], extrapolate);
+        size_t a = (size_t) s * nfq + e;
+        target[(size_t) s * n + fqIdx[e * 6]] += q - applied[a];
+        applied[a] = q;
+    }
+}
+
 __global__ void rlCurveLimitsBatch(int nrl, int nScenarios, int ncv, int n, int cvExtrapolate,
                                    const int* cvIdx, const double* cvIn, const double* cvPts,
                                    const double* rlMinQ, const double* rlMaxQ, const double* rlLoadQ,
@@ -7438,6 +7506,15 @@ struct BatchSolverContext {
     int ncv = 0;
     int cvExtrapolate = 0;                                 // OLF extrapolateReactiveLimits for curve gens
     DeviceBuf dCvIdx, dCvIn, dCvPts, dRlMinQDyn, dRlMaxQDyn;
+    // forceTargetQInReactiveLimits (GpuBatchForcedTargetQ): generators whose IIDM target Q OLF clamps into their
+    // curve limits at their CURRENT target P, on a bus whose Q balance carries it. fqIdx stride 6 {qRow, dsGenSlot,
+    // ptsOff, npts, dsBusIdx, baseQRowMode}; fqIn stride 5 {basePpu, rawTargetQPu, baseClampedPu, share,
+    // baseRowTargetP}; dFqApplied [nS * nfq] = the clamped value the scenario's Q target carries now; dFqPre
+    // [nS * nfq] = each generator's loss pre-distribution move (pu), absent when no scenario pre-distributes.
+    int nfq = 0;
+    int fqExtrapolate = 0;
+    bool fqHasPre = false;
+    DeviceBuf dFqIdx, dFqIn, dFqPts, dFqApplied, dFqPre;
     // DISTR_Q weight overrides (setBatchDqWeightOverrides): a gen outage at a remote-VC controller
     // bus renormalizes the group's qPct keys per scenario — {s, contrib} pairs + the new weight.
     int nDqOv = 0;
@@ -10323,6 +10400,14 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         static_cast<size_t>(ctx->ngen) * nS * sizeof(double), ctx->stream));
                 CUDA_CHECK(cudaMemsetAsync(ctx->dGenCumValid.p, 0, (size_t) nS * sizeof(char), ctx->stream));
             }
+            if (ctx->nfq > 0) {                              // forced target Q: the clamp at each scenario's start P
+                forcedTargetQInitBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nfq, nS, n, ctx->nds, ctx->fqExtrapolate,
+                        ctx->dFqIdx.as<int>(), ctx->dFqIn.as<double>(), ctx->dFqPts.as<double>(),
+                        ctx->fqHasPre ? ctx->dFqPre.as<double>() : nullptr,
+                        ctx->nDsLostGen, ctx->nDsLostGen > 0 ? ctx->dDsLostGen.as<int>() : nullptr,
+                        ctx->nDsIslanded > 0 ? ctx->dDsIslanded.as<char>() : nullptr, ctx->dMode.as<int>(),
+                        ctx->dTarget.as<double>(), ctx->dFqApplied.as<double>());
+            }
         }
         if (ctx->nmon > 0) {                                 // per-SOLVE state, like the RL limit types:
             std::vector<double> nan(static_cast<size_t>(ctx->nmon) * nS, std::nan(""));   // nothing has
@@ -12339,6 +12424,17 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dDsRetainApplied.as<double>(),
                     ctx->dDsGateLast.p ? ctx->dDsGateLast.as<double>() : nullptr,
                     dsDebugTraceSlot());
+            if (ctx->nfq > 0) {                              // forced target Q follows the generators' new P
+                forcedTargetQBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nfq, nS, n, ctx->nds, ctx->ngen,
+                        ctx->fqExtrapolate, ctx->dFqIdx.as<int>(), ctx->dFqIn.as<double>(), ctx->dFqPts.as<double>(),
+                        ctx->fqHasPre ? ctx->dFqPre.as<double>() : nullptr,
+                        ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
+                        ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr,
+                        ctx->dDsPhiRow.as<int>(), ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr,
+                        ctx->nDsLostGen, ctx->nDsLostGen > 0 ? ctx->dDsLostGen.as<int>() : nullptr,
+                        ctx->nDsIslanded > 0 ? ctx->dDsIslanded.as<char>() : nullptr, ctx->dMode.as<int>(),
+                        ctx->dRlActive.as<char>(), ctx->dTarget.as<double>(), ctx->dFqApplied.as<double>());
+            }
         }
     } else {                                               // reactive-limits outer loop: switch PV->PQ over Q limit
         if (loopKind == LOOP_RL && ctx->nrl > 0 && !skipRlPhase) {                  // skipRlPhase: a monitoring interleave solve — the
@@ -14136,6 +14232,56 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     env->ReleaseDoubleArrayElements(jCvPts, cvPts, JNI_ABORT);
     ctx->ncv = ncv;
     ctx->cvExtrapolate = extrapolate;
+}
+
+// forceTargetQInReactiveLimits channel (GpuBatchForcedTargetQ): fqIdx stride 6 {qRow, dsGenSlot, ptsOff, npts,
+// dsBusIdx, baseQRowMode}; fqIn stride 5 {basePpu, rawTargetQPu, baseClampedPu, share, baseRowTargetP}; fqPts
+// stride 3 {p_MW, minQ_MW, maxQ_MW} sorted by p. Null clears the channel (a cached context reused by a run
+// without it).
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchForcedTargetQ(
+        JNIEnv* env, jclass, jlong handle, jintArray jIdx, jdoubleArray jIn, jdoubleArray jPts, jint extrapolate) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    ctx->fqHasPre = false;
+    if (jIdx == nullptr || jIn == nullptr || jPts == nullptr || env->GetArrayLength(jIdx) == 0) {
+        ctx->nfq = 0;
+        return;
+    }
+    int nfq = env->GetArrayLength(jIdx) / 6;
+    jint* idx = env->GetIntArrayElements(jIdx, nullptr);
+    jdouble* in = env->GetDoubleArrayElements(jIn, nullptr);
+    jdouble* pts = env->GetDoubleArrayElements(jPts, nullptr);
+    ctx->dFqIdx.upload(idx, static_cast<size_t>(nfq) * 6 * sizeof(int));
+    ctx->dFqIn.upload(in, static_cast<size_t>(nfq) * 5 * sizeof(double));
+    ctx->dFqPts.upload(pts, static_cast<size_t>(env->GetArrayLength(jPts)) * sizeof(double));
+    ctx->dFqApplied.alloc(static_cast<size_t>(ctx->nScenarios) * nfq * sizeof(double));
+    env->ReleaseIntArrayElements(jIdx, idx, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jIn, in, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jPts, pts, JNI_ABORT);
+    ctx->nfq = nfq;
+    ctx->fqExtrapolate = extrapolate;
+}
+
+// Per-chunk loss pre-distribution moves of the forced generators ([nS * nfq], pu), or null when no scenario of the
+// chunk pre-distributes. Set before each solve that carries contingencies.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchForcedTargetQPre(
+        JNIEnv* env, jclass, jlong handle, jdoubleArray jPre) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jPre == nullptr || ctx->nfq == 0) {
+        ctx->fqHasPre = false;
+        return;
+    }
+    jdouble* pre = env->GetDoubleArrayElements(jPre, nullptr);
+    ctx->dFqPre.upload(pre, static_cast<size_t>(env->GetArrayLength(jPre)) * sizeof(double));
+    env->ReleaseDoubleArrayElements(jPre, pre, JNI_ABORT);
+    ctx->fqHasPre = true;
 }
 
 // Remote-member RL entries (plan-B1): install (or clear) the per-entry remote kinds + compare rows

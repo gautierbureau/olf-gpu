@@ -333,6 +333,7 @@ final class GpuSaRunScope {
                 cfgSecondaryVc, olfGuardParams.getMinPlausibleTargetVoltage(), olfGuardParams.getMaxPlausibleTargetVoltage(),
                 cfgVoltageMonitoring, cfgContinuousPhase, defaultLossDist && dsActive,
                 olfGuardParams.isExtrapolateReactiveLimits(),
+                olfGuardParams.isForceTargetQInReactiveLimits() && lfGuardParams.isUseReactiveLimits(),
                 olfParams.getNewtonRaphsonStoppingCriteriaType()
                         == com.powsybl.openloadflow.ac.solver.NewtonRaphsonStoppingCriteriaType.PER_EQUATION_TYPE_CRITERIA
                         ? new BatchConfig.PerEqCriteria(olfParams.getNewtonRaphsonConvEpsPerEq(),

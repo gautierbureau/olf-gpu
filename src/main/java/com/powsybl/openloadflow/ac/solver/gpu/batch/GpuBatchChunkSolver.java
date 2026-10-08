@@ -82,6 +82,7 @@ final class GpuBatchChunkSolver {
                                                GenOutage[][] genOutagesByIndex, double[] activePowerLossByIndex,
                                                java.util.Map<com.powsybl.openloadflow.network.LfHvdc, Integer> hvdcElemIndex,
                                                double[][] rowCriteria, GpuBatchRlCurves.Channel rlCurves,
+                                               GpuBatchForcedTargetQ.Channel forcedTargetQ,
                                                int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
                                                int[][] drOvContribByIndex, double[][] drOvCByIndex,
                                                int[][] islandedDsByIndex, int[][] islandedRlByIndex,
@@ -106,7 +107,7 @@ final class GpuBatchChunkSolver {
             try {
                 solveQualifiedInChunksAt(chunkSize, remaining, contingencies, elementMapper, gpuData, baseState,
                         baseTargets, baseRowMode, frozenRowsByIndex, frozenTargetsByIndex, genOutagesByIndex,
-                        activePowerLossByIndex, hvdcElemIndex, rowCriteria, rlCurves,
+                        activePowerLossByIndex, hvdcElemIndex, rowCriteria, rlCurves, forcedTargetQ,
                         dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
                         islandedRlByIndex, islandedHvdcsByIndex, dqSubByIndex,
                         n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
@@ -227,6 +228,7 @@ final class GpuBatchChunkSolver {
                                                GenOutage[][] genOutagesByIndex, double[] activePowerLossByIndex,
                                                java.util.Map<com.powsybl.openloadflow.network.LfHvdc, Integer> hvdcElemIndex,
                                                double[][] rowCriteria, GpuBatchRlCurves.Channel rlCurves,
+                                               GpuBatchForcedTargetQ.Channel forcedTargetQ,
                                                int[][] dqOvContribByIndex, double[][] dqOvWByIndex,
                                                int[][] drOvContribByIndex, double[][] drOvCByIndex,
                                                int[][] islandedDsByIndex, int[][] islandedRlByIndex,
@@ -261,7 +263,7 @@ final class GpuBatchChunkSolver {
         GpuAcNewtonSolver.setBatchRowCriteria(handle,
                 rowCriteria != null ? rowCriteria[0] : null, rowCriteria != null ? rowCriteria[1] : null);
         // The run-constant outer-loop tables, shared with the base load flow's batch-of-one.
-        GpuBatchOuterLoopTables.install(handle, gpuData, rlCurves,
+        GpuBatchOuterLoopTables.install(handle, gpuData, rlCurves, forcedTargetQ,
                 config.rlRobustMode(), config.minRealisticVoltage(), config.maxRealisticVoltage(),
                 config.minNominalVoltageRealisticVoltageCheck(), config.realisticFixingLoop());
 
@@ -580,6 +582,8 @@ final class GpuBatchChunkSolver {
                         java.util.Arrays.fill(dsOvMinDelta, 0);
                     }
                     double[] preLossBySlot = new double[chunkSize];   // scheduled active power loss per slot (plain phase)
+                    // each slot's per-generator loss pre-distribution moves, for the forced-target-Q clamp
+                    double[][] fqMovesBySlot = forcedTargetQ != null ? new double[chunkSize][] : null;
                     // ...and what the pre-distribution put on the PARTICIPANTS alone (the slack keeps the
                     // rest). PRELOSS_AFTER has to compare the device's final participant total against
                     // THIS, not against the whole mismatch: with a participating slack the two differ by
@@ -1434,7 +1438,8 @@ final class GpuBatchChunkSolver {
                                     dsOvBaseDelta.length > 0 ? dsOvBaseDelta[s] : 0,
                                     dsOvMaxDelta.length > 0 ? dsOvMaxDelta[s] : 0,
                                     dsOvMinDelta.length > 0 ? dsOvMinDelta[s] : 0, islandedDs,
-                                    lostSlotsOf(dsLostGenList, s));
+                                    lostSlotsOf(dsLostGenList, s),
+                                    fqMovesBySlot != null ? (fqMovesBySlot[s] = new double[gpuData.dgBus().length]) : null);
                             // OLF_GPU_SEED_DUMP=<file>: the per-bus SHARE the host-side loss
                             // pre-distribution seeds, against OLF's own pre-distribution section in
                             // OLF_DS_SPLIT. The two totals can agree while the SPLIT does not, and the
@@ -1902,6 +1907,9 @@ final class GpuBatchChunkSolver {
                         }
                         ov1.entrySet().stream().limit(60).forEach(e -> System.err.printf(
                                 "ROW_PROBE ov row=%d value=%.9f base=%.9f%n", e.getKey(), e.getValue(), baseTargets[e.getKey()]));
+                    }
+                    if (forcedTargetQ != null) {                 // where each slot's pre-distribution put the clamping gens
+                        GpuAcNewtonSolver.setBatchForcedTargetQPre(handle, forcedTargetQ.preMoves(fqMovesBySlot));
                     }
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,

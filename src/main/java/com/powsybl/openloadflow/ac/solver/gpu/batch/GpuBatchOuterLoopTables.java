@@ -70,6 +70,7 @@ public final class GpuBatchOuterLoopTables {
     }
 
     public static void install(long handle, GpuAcData gpuData, GpuBatchRlCurves.Channel rlCurves,
+                               GpuBatchForcedTargetQ.Channel forcedTargetQ,
                                boolean rlRobustMode, double minRealisticVoltage, double maxRealisticVoltage,
                                double minNominalVoltageRealisticVoltageCheck, int realisticFixingLoop) {
         // AcloadFlowEngine's realistic-voltage check, applied to the states INSIDE the driver's sweep.
@@ -89,6 +90,8 @@ public final class GpuBatchOuterLoopTables {
                 rlCurves != null ? rlCurves.cvIn() : null,
                 rlCurves != null ? rlCurves.cvPts() : null,
                 rlCurves != null && rlCurves.extrapolate() ? 1 : 0);
+        // forceTargetQInReactiveLimits: the clamped generators' Q targets follow their P (or the channel is cleared).
+        GpuBatchForcedTargetQ.install(handle, forcedTargetQ);
         // Voltage-dependent SVC reactive limits: install the quadratic coefficients (zero on
         // SVC-less entries — the kernel's limit(v) then degenerates to the packed static limit).
         GpuAcNewtonSolver.setBatchRlSvcLimits(handle,

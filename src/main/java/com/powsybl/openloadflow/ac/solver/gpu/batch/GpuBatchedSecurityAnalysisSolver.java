@@ -341,6 +341,11 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 ? GpuBatchRlCurves.build(network, equationSystem, gpuData, config.dsParams(), distributedSlack, baseTargets,
                         config.rlCurveExtrapolate())
                 : null;
+        // forceTargetQInReactiveLimits: the curve generators whose clamped Q target follows their P (null = none).
+        GpuBatchForcedTargetQ.Channel forcedTargetQ = reactiveLimits
+                ? GpuBatchForcedTargetQ.build(network, equationSystem, gpuData, config.dsParams(), config.forceTargetQ(),
+                        distributedSlack, baseTargets, baseActivation.rowMode(), config.rlCurveExtrapolate())
+                : null;
         int[] curvePRows = rlCurves != null
                 ? java.util.stream.IntStream.range(0, rlCurves.cvIdx().length / 5)
                         .map(g -> rlCurves.cvIdx()[g * 5 + 1]).toArray()
@@ -403,7 +408,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                 GpuBatchChunkSolver.solveQualifiedInChunks(batchedIndices, contingencies, elementMapper, gpuData, baseState,
                         baseTargets, baseActivation.rowMode(), plan.frozenRowsByIndex(), plan.frozenTargetsByIndex(), plan.genOutagesByIndex(),
                         plan.activePowerLossByIndex(),
-                        GpuBatchHvdcAcEmulation.elementIndices(network, nElements), rowCriteria, rlCurves,
+                        GpuBatchHvdcAcEmulation.elementIndices(network, nElements), rowCriteria, rlCurves, forcedTargetQ,
                         plan.dqOvContribByIndex(), plan.dqOvWByIndex(),
                         plan.drOvContribByIndex(), plan.drOvCByIndex(), plan.islandedDsByIndex(),
                         plan.islandedRlByIndex(), plan.islandedHvdcsByIndex(), plan.dqSubByIndex(),

@@ -34,12 +34,14 @@ import java.util.List;
  * ({@code forcedTargetQInitBatch}, {@code forcedTargetQBatch}) move that row by the clamp's change.
  *
  * <p>Only generators that can move: a curve (fixed min/max limits clamp to the same value at every P) and a
- * distributed-slack participant (no one else moves its P). Only on a bus WITHOUT generator voltage control, whose
- * Q balance row carries the generation target: on a voltage-controlled bus the target enters the bus's reactive
- * LIMITS instead (AbstractLfBus.getLimitQ), which this channel does not move - that shape throws, and the caller
- * keeps the run on the CPU.
+ * distributed-slack participant (no one else moves its P). On a bus WITHOUT generator voltage control the target
+ * sits in the bus's Q balance row (Q-row entry, moved by the kernels above); on a bus WITH local voltage control it
+ * enters the bus's reactive LIMITS instead (AbstractLfBus.getLimitQ, min and max alike: limit entry, moved by
+ * {@code forcedTargetQLimitsBatch} after every rebuild of the dynamic limits). A remote-control member or a
+ * reactive-power-controlled bus throws, and the caller keeps the run on the CPU.
  *
- * <p>Layout (setBatchForcedTargetQ): fqIdx stride 6 {qRow, dsGenSlot, ptsOff, npts, dsBusIdx, baseQRowMode};
+ * <p>Layout (setBatchForcedTargetQ): fqIdx stride 7 {qRow, dsGenSlot, ptsOff, npts, dsBusIdx, baseQRowMode, rlIdx}
+ * (qRow -1 for a limit entry, rlIdx -1 for a Q-row entry);
  * fqIn stride 5 {basePpu, rawTargetQPu, baseClampedPu, share, baseRowTargetP}; fqPts stride 3 {p_MW, minQ_MW,
  * maxQ_MW} sorted by p.
  *
@@ -106,16 +108,30 @@ public final class GpuBatchForcedTargetQ {
                 if (curve == null || slot < 0 || dsParams.factor(gen) <= 0) {
                     continue;                                // its clamp cannot move: the base target stays exact
                 }
-                if (bus.isGeneratorVoltageControlEnabled()
-                        || gen.getGeneratorControlType() == LfGenerator.GeneratorControlType.REMOTE_REACTIVE_POWER) {
+                if (gen.getGeneratorControlType() == LfGenerator.GeneratorControlType.REMOTE_REACTIVE_POWER) {
                     throw new PowsyblException("GPU AC solver: forced target Q of generator " + gen.getId()
-                            + " on a voltage- or reactive-power-controlled bus is not supported");
+                            + " on a reactive-power-controlled bus is not supported");
                 }
-                boolean qActive = es.getEquation(bus.getNum(), AcEquationType.BUS_TARGET_Q)
-                        .map(eq -> eq.isActive()).orElse(false);
-                int qRow = busRows[1][bus.getNum()];
-                if (!qActive || qRow < 0) {
-                    continue;                                // no Q balance row carries its target
+                int qRow = -1;
+                int rlIdx = -1;
+                if (bus.isGeneratorVoltageControlEnabled() || bus.isGenerationTargetQFrozen()) {
+                    // its target enters the bus's reactive LIMITS (AbstractLfBus.getLimitQ), in min and max alike.
+                    // A bus the reactive-limit loop switched to PQ belongs here too: OLF FREEZES its generation
+                    // target (invalidateGenerationTargetP skips it), and the clamp only reaches it through the
+                    // limit the bus re-freezes at when the limit moves (RL_REFREEZE) - moving its Q row instead put
+                    // the device 0.86 kV off at B3 in deviceForcedTargetQOnVoltageControlledBusMovesItsLimits.
+                    rlIdx = localRlEntryOf(gpuData, bus);
+                    if (rlIdx < 0) {
+                        throw new PowsyblException("GPU AC solver: forced target Q of generator " + gen.getId()
+                                + " on a bus without a local reactive-limit entry is not supported");
+                    }
+                } else {
+                    boolean qActive = es.getEquation(bus.getNum(), AcEquationType.BUS_TARGET_Q)
+                            .map(eq -> eq.isActive()).orElse(false);
+                    qRow = busRows[1][bus.getNum()];
+                    if (!qActive || qRow < 0) {
+                        continue;                            // no Q balance row carries its target
+                    }
                 }
                 int dsIdx = dsBusIndexOf(gpuData, bus.getNum());
                 if (dsIdx < 0) {
@@ -131,7 +147,7 @@ public final class GpuBatchForcedTargetQ {
                     pts.add(pt.getMaxQ());
                 }
                 int pRow = gpuData.dsPhiRow()[dsIdx];
-                idx.add(new int[] {qRow, slot, ptsOff, points.size(), dsIdx, baseRowMode[qRow]});
+                idx.add(new int[] {qRow, slot, ptsOff, points.size(), dsIdx, qRow >= 0 ? baseRowMode[qRow] : 0, rlIdx});
                 in.add(new double[] {gen.getTargetP(), gen.getRawTargetQ(), gen.getTargetQ(),
                     dsParams.factor(gen) / busFactor, baseTargets[pRow]});
                 slots.add(slot);
@@ -153,6 +169,23 @@ public final class GpuBatchForcedTargetQ {
                 channel != null ? channel.fqIn() : null,
                 channel != null ? channel.fqPts() : null,
                 channel != null && channel.extrapolate() ? 1 : 0);
+    }
+
+    /** The bus's reactive-limit entry when it is a LOCAL one (the bus controls its own voltage, not a remote-group
+     *  member or pilot), -1 otherwise. */
+    private static int localRlEntryOf(GpuAcData gpuData, LfBus bus) {
+        boolean local = bus.getGeneratorVoltageControl()
+                .map(vc -> vc.getControlledBus() == bus && vc.getControllerElements().size() == 1).orElse(false);
+        int[] busNums = gpuData.rlBusNum();
+        if (!local || busNums == null) {
+            return -1;
+        }
+        for (int i = 0; i < busNums.length; i++) {
+            if (busNums[i] == bus.getNum() && (gpuData.rlRemote() == null || gpuData.rlRemote()[i] == 0)) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private static int dsBusIndexOf(GpuAcData gpuData, int busNum) {

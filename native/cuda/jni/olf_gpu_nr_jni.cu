@@ -5351,22 +5351,40 @@ __device__ double fqClamped(double pPu, double raw, const double* pts, int npts,
     return raw < mn ? mn : (raw > mx ? mx : raw);
 }
 
-// Whether entry e takes part in scenario s: its generator is still there, its bus is not islanded, and its Q row
-// still is the bus's Q balance (a frozen or repurposed row keeps whatever the scenario put there).
+// Whether entry e takes part in scenario s: its generator is still there, its bus is not islanded, and - for a
+// Q-row entry - its Q row still is the bus's Q balance (a frozen or repurposed row keeps what the scenario put there).
 __device__ bool fqEntryLive(int s, int e, int n, int nds, const int* fqIdx, int nLost, const int* lost,
                             const char* dsIslanded, const int* mode) {
-    int slot = fqIdx[e * 6 + 1];
+    int slot = fqIdx[e * 7 + 1];
     for (int k = 0; k < nLost; k++) {
         if (lost[2 * k] == s && lost[2 * k + 1] == slot) return false;
     }
-    if (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + fqIdx[e * 6 + 4]]) return false;
-    return mode[(size_t) s * n + fqIdx[e * 6]] == fqIdx[e * 6 + 5];
+    if (dsIslanded != nullptr && dsIslanded[(size_t) s * nds + fqIdx[e * 7 + 4]]) return false;
+    return fqIdx[e * 7] < 0 || mode[(size_t) s * n + fqIdx[e * 7]] == fqIdx[e * 7 + 5];
+}
+
+// The generator's target P now: its base P plus its own water-fill move (genCum), or - when the per-generator
+// water-fill has not run - its share of its bus's row movement. genCum ALREADY carries the loss pre-distribution:
+// like OLF's ActivePowerDistribution (which redistributes previousMismatch + the new mismatch from the INITIAL
+// targets), the device re-derives the whole distribution every pass - measured on the B8-G fixture: pre 0.0909,
+// genCum 0.0947 = 0.0909 + the pass's own 0.0038. Adding the pre-distribution again put B3's max limit at -0.2718
+// against OLF's re-freeze at -0.2173 (0.84 kV at B3). Before the first pass the init kernel uses base + pre.
+__device__ double fqPNow(int s, int e, int n, int nds, int ngen, int nfq, const int* fqIdx, const double* fqIn,
+                         const double* fqPre, const double* genCum, const char* genCumValid, const int* dsPhiRow,
+                         const int* dsRowOv, const double* target) {
+    int slot = fqIdx[e * 7 + 1];
+    if (genCum != nullptr && genCumValid != nullptr && genCumValid[s] && slot >= 0) {
+        return fqIn[e * 5] + genCum[(size_t) s * ngen + slot];
+    }
+    int pRow = dsRowOf(dsPhiRow, dsRowOv, s, nds, fqIdx[e * 7 + 4]);
+    return fqIn[e * 5] + fqIn[e * 5 + 3] * (target[(size_t) s * n + pRow] - fqIn[e * 5 + 4]);
 }
 
 // Solve start: each scenario's Q targets carry the clamp at the BASE P (the base load flow's targets); a scenario
 // whose loss pre-distribution moved the generator starts from the clamp at the moved P, as OLF re-reads it when
 // the pre-distribution invalidates the bus's generation target (AbstractLfBus.invalidateGenerationTargetP).
 // One thread per scenario, entries in order: two generators on one bus add to one row deterministically.
+// Q-row entries only (qRow >= 0); limit entries are recomputed with the dynamic limits.
 __global__ void forcedTargetQInitBatch(int nfq, int nS, int n, int nds, int extrapolate, const int* fqIdx,
                                        const double* fqIn, const double* fqPts, const double* fqPre,
                                        int nLost, const int* lost, const char* dsIslanded, const int* mode,
@@ -5376,17 +5394,15 @@ __global__ void forcedTargetQInitBatch(int nfq, int nS, int n, int nds, int extr
     for (int e = 0; e < nfq; e++) {
         double base = fqIn[e * 5 + 2];
         applied[(size_t) s * nfq + e] = base;
-        if (!fqEntryLive(s, e, n, nds, fqIdx, nLost, lost, dsIslanded, mode)) continue;
+        if (fqIdx[e * 7] < 0 || !fqEntryLive(s, e, n, nds, fqIdx, nLost, lost, dsIslanded, mode)) continue;
         double p = fqIn[e * 5] + (fqPre != nullptr ? fqPre[(size_t) s * nfq + e] : 0.0);
-        double q = fqClamped(p, fqIn[e * 5 + 1], fqPts + fqIdx[e * 6 + 2] * 3, fqIdx[e * 6 + 3], extrapolate);
-        target[(size_t) s * n + fqIdx[e * 6]] += q - base;
+        double q = fqClamped(p, fqIn[e * 5 + 1], fqPts + fqIdx[e * 7 + 2] * 3, fqIdx[e * 7 + 3], extrapolate);
+        target[(size_t) s * n + fqIdx[e * 7]] += q - base;
         applied[(size_t) s * nfq + e] = q;
     }
 }
 
-// After a distributed-slack pass: the generator's P is its pre-distributed P plus its own water-fill move
-// (genCum), or - when the per-generator water-fill did not run - its share of its bus's row movement; its Q
-// target follows the clamp at that P.
+// After a distributed-slack pass: the Q target of a Q-row entry follows the clamp at the generator's new P.
 __global__ void forcedTargetQBatch(int nfq, int nS, int n, int nds, int ngen, int extrapolate, const int* fqIdx,
                                    const double* fqIn, const double* fqPts, const double* fqPre,
                                    const double* genCum, const char* genCumValid, const int* dsPhiRow,
@@ -5395,19 +5411,35 @@ __global__ void forcedTargetQBatch(int nfq, int nS, int n, int nds, int ngen, in
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nS || !rlActive[s]) return;
     for (int e = 0; e < nfq; e++) {
-        if (!fqEntryLive(s, e, n, nds, fqIdx, nLost, lost, dsIslanded, mode)) continue;
-        int slot = fqIdx[e * 6 + 1];
-        double p;
-        if (genCum != nullptr && genCumValid != nullptr && genCumValid[s] && slot >= 0) {
-            p = fqIn[e * 5] + (fqPre != nullptr ? fqPre[(size_t) s * nfq + e] : 0.0) + genCum[(size_t) s * ngen + slot];
-        } else {
-            int pRow = dsRowOf(dsPhiRow, dsRowOv, s, nds, fqIdx[e * 6 + 4]);
-            p = fqIn[e * 5] + fqIn[e * 5 + 3] * (target[(size_t) s * n + pRow] - fqIn[e * 5 + 4]);
-        }
-        double q = fqClamped(p, fqIn[e * 5 + 1], fqPts + fqIdx[e * 6 + 2] * 3, fqIdx[e * 6 + 3], extrapolate);
+        if (fqIdx[e * 7] < 0 || !fqEntryLive(s, e, n, nds, fqIdx, nLost, lost, dsIslanded, mode)) continue;
+        double p = fqPNow(s, e, n, nds, ngen, nfq, fqIdx, fqIn, fqPre, genCum, genCumValid, dsPhiRow, dsRowOv, target);
+        double q = fqClamped(p, fqIn[e * 5 + 1], fqPts + fqIdx[e * 7 + 2] * 3, fqIdx[e * 7 + 3], extrapolate);
         size_t a = (size_t) s * nfq + e;
-        target[(size_t) s * n + fqIdx[e * 6]] += q - applied[a];
+        target[(size_t) s * n + fqIdx[e * 7]] += q - applied[a];
         applied[a] = q;
+    }
+}
+
+// A non-controlling generator on a VOLTAGE-CONTROLLED bus: AbstractLfBus.getLimitQ counts its (clamped) target Q
+// in BOTH the bus's min and max limits, re-read at the current P on every reactive-limit check. Runs right after
+// rlCurveLimitsBatch rebuilt the dynamic limits from their static values (which carry the BASE clamp), so it adds
+// the clamp's move since the base. Limit entries only (rlIdx >= 0).
+__global__ void forcedTargetQLimitsBatch(int nfq, int nS, int n, int nds, int ngen, int nrl, int extrapolate,
+                                         const int* fqIdx, const double* fqIn, const double* fqPts,
+                                         const double* fqPre, const double* genCum, const char* genCumValid,
+                                         const int* dsPhiRow, const int* dsRowOv, int nLost, const int* lost,
+                                         const char* dsIslanded, const int* mode, const double* target,
+                                         double* minQDyn, double* maxQDyn) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nS) return;
+    for (int e = 0; e < nfq; e++) {
+        int rl = fqIdx[e * 7 + 6];
+        if (rl < 0 || !fqEntryLive(s, e, n, nds, fqIdx, nLost, lost, dsIslanded, mode)) continue;
+        double p = fqPNow(s, e, n, nds, ngen, nfq, fqIdx, fqIn, fqPre, genCum, genCumValid, dsPhiRow, dsRowOv, target);
+        double d = fqClamped(p, fqIn[e * 5 + 1], fqPts + fqIdx[e * 7 + 2] * 3, fqIdx[e * 7 + 3], extrapolate)
+                - fqIn[e * 5 + 2];
+        minQDyn[(size_t) s * nrl + rl] += d;
+        maxQDyn[(size_t) s * nrl + rl] += d;
     }
 }
 
@@ -7542,11 +7574,12 @@ struct BatchSolverContext {
     int cvExtrapolate = 0;                                 // OLF extrapolateReactiveLimits for curve gens
     DeviceBuf dCvIdx, dCvIn, dCvPts, dRlMinQDyn, dRlMaxQDyn;
     // forceTargetQInReactiveLimits (GpuBatchForcedTargetQ): generators whose IIDM target Q OLF clamps into their
-    // curve limits at their CURRENT target P, on a bus whose Q balance carries it. fqIdx stride 6 {qRow, dsGenSlot,
-    // ptsOff, npts, dsBusIdx, baseQRowMode}; fqIn stride 5 {basePpu, rawTargetQPu, baseClampedPu, share,
+    // curve limits at their CURRENT target P - on a bus whose Q balance carries it (qRow), or in a voltage-controlled
+    // bus's reactive limits (rlIdx). fqIdx stride 7 {qRow, dsGenSlot, ptsOff, npts, dsBusIdx, baseQRowMode, rlIdx}; fqIn stride 5 {basePpu, rawTargetQPu, baseClampedPu, share,
     // baseRowTargetP}; dFqApplied [nS * nfq] = the clamped value the scenario's Q target carries now; dFqPre
     // [nS * nfq] = each generator's loss pre-distribution move (pu), absent when no scenario pre-distributes.
     int nfq = 0;
+    int nfqLim = 0;                                        // of which limit entries (voltage-controlled bus)
     int fqExtrapolate = 0;
     bool fqHasPre = false;
     DeviceBuf dFqIdx, dFqIn, dFqPts, dFqApplied, dFqPre;
@@ -9952,6 +9985,20 @@ static SvcTables svcTables(BatchSolverContext* ctx) {
 // ======================== END SECONDARY VOLTAGE CONTROL KERNELS ========================
 
 
+// forceTargetQInReactiveLimits on voltage-controlled buses: after every rebuild of the dynamic reactive limits.
+static void launchForcedTargetQLimits(BatchSolverContext* ctx, int nS, int n) {
+    if (ctx->nfqLim <= 0) return;
+    forcedTargetQLimitsBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nfq, nS, n, ctx->nds, ctx->ngen, ctx->nrl,
+            ctx->fqExtrapolate, ctx->dFqIdx.as<int>(), ctx->dFqIn.as<double>(), ctx->dFqPts.as<double>(),
+            ctx->fqHasPre ? ctx->dFqPre.as<double>() : nullptr,
+            ctx->ngen > 0 ? ctx->dGenCum.as<double>() : nullptr,
+            ctx->ngen > 0 ? ctx->dGenCumValid.as<char>() : nullptr,
+            ctx->nds > 0 ? ctx->dDsPhiRow.as<int>() : nullptr, ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr,
+            ctx->nDsLostGen, ctx->nDsLostGen > 0 ? ctx->dDsLostGen.as<int>() : nullptr,
+            ctx->nDsIslanded > 0 ? ctx->dDsIslanded.as<char>() : nullptr, ctx->dMode.as<int>(),
+            ctx->dTarget.as<double>(), ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>());
+}
+
 BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const double* target,
                               const int* rowMode, const int* rowModeSlots, int nRowModeSlots,
                               const int* baseRowMode, const char* disabled,
@@ -10190,7 +10237,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         dCvOvEntry.upload(entry.data(), entry.size() * sizeof(int));
         dCvOvVal.upload(val.data(), val.size() * sizeof(double));
     }
-    bool useDynRlLimits = ctx->nrl > 0 && (ctx->ncv > 0 || nRlQOv > 0);
+    bool useDynRlLimits = ctx->nrl > 0 && (ctx->ncv > 0 || nRlQOv > 0 || ctx->nfqLim > 0);
     if (useDynRlLimits && (!ctx->dRlMinQDyn.p || !ctx->dRlLoadQDyn.p)) {   // curves allocate these on their own
                                                             // table upload; a Q override alone must too, and a
                                                             // guard that names only ONE of them silently leaves
@@ -10375,6 +10422,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
                         ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
                         ctx->dRlLoadQDyn.as<double>(), cvProbeEntry, cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot);
+                launchForcedTargetQLimits(ctx, nS, n);
             }
             seedRlModeFromState<<<grid(ctx->nrl * nS), BLOCK, 0, ctx->stream>>>(ctx->nrl, nS, n,
                     ctx->dRlVrow.as<int>(), ctx->dRlQrow.p ? ctx->dRlQrow.as<int>() : nullptr,
@@ -12495,6 +12543,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
                         ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
                         ctx->dRlLoadQDyn.as<double>(), cvProbeEntry, cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot);
+                launchForcedTargetQLimits(ctx, nS, n);
                 // Host-side readback of the probed entry's dynamic limits (device printf is not reliably
                 // captured by the test runner): the limit the RL pass that follows will pin at.
                 int cvHostSlot = cvProbeSlotByCtg ? ctx->loopTraceSlot : cvProbeSlot;
@@ -13044,6 +13093,7 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
                     ctx->ngen > 0 ? ctx->dgBus.as<int>() : nullptr,
                     ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>(),
                     ctx->dRlLoadQDyn.as<double>(), -1, 0);
+            launchForcedTargetQLimits(ctx, nS, n);
         }
         CUDA_CHECK(cudaMemsetAsync(ctx->dRlPassSwitched.p, 0, static_cast<size_t>(ctx->nrl) * nS, ctx->stream));
         CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitched.p, 0, nS, ctx->stream));
@@ -14274,8 +14324,8 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->cvExtrapolate = extrapolate;
 }
 
-// forceTargetQInReactiveLimits channel (GpuBatchForcedTargetQ): fqIdx stride 6 {qRow, dsGenSlot, ptsOff, npts,
-// dsBusIdx, baseQRowMode}; fqIn stride 5 {basePpu, rawTargetQPu, baseClampedPu, share, baseRowTargetP}; fqPts
+// forceTargetQInReactiveLimits channel (GpuBatchForcedTargetQ): fqIdx stride 7 {qRow, dsGenSlot, ptsOff, npts,
+// dsBusIdx, baseQRowMode, rlIdx}; fqIn stride 5 {basePpu, rawTargetQPu, baseClampedPu, share, baseRowTargetP}; fqPts
 // stride 3 {p_MW, minQ_MW, maxQ_MW} sorted by p. Null clears the channel (a cached context reused by a run
 // without it).
 extern "C" JNIEXPORT void JNICALL
@@ -14288,13 +14338,18 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->fqHasPre = false;
     if (jIdx == nullptr || jIn == nullptr || jPts == nullptr || env->GetArrayLength(jIdx) == 0) {
         ctx->nfq = 0;
+        ctx->nfqLim = 0;
         return;
     }
-    int nfq = env->GetArrayLength(jIdx) / 6;
+    int nfq = env->GetArrayLength(jIdx) / 7;
     jint* idx = env->GetIntArrayElements(jIdx, nullptr);
+    int nfqLim = 0;
+    for (int e = 0; e < nfq; e++) {
+        nfqLim += idx[e * 7 + 6] >= 0 ? 1 : 0;
+    }
     jdouble* in = env->GetDoubleArrayElements(jIn, nullptr);
     jdouble* pts = env->GetDoubleArrayElements(jPts, nullptr);
-    ctx->dFqIdx.upload(idx, static_cast<size_t>(nfq) * 6 * sizeof(int));
+    ctx->dFqIdx.upload(idx, static_cast<size_t>(nfq) * 7 * sizeof(int));
     ctx->dFqIn.upload(in, static_cast<size_t>(nfq) * 5 * sizeof(double));
     ctx->dFqPts.upload(pts, static_cast<size_t>(env->GetArrayLength(jPts)) * sizeof(double));
     ctx->dFqApplied.alloc(static_cast<size_t>(ctx->nScenarios) * nfq * sizeof(double));
@@ -14302,6 +14357,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     env->ReleaseDoubleArrayElements(jIn, in, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jPts, pts, JNI_ABORT);
     ctx->nfq = nfq;
+    ctx->nfqLim = nfqLim;
     ctx->fqExtrapolate = extrapolate;
 }
 

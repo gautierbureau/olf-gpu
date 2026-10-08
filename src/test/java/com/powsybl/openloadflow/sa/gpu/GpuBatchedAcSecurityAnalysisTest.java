@@ -916,6 +916,49 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
     }
 
+    /** A generator outage whose loss is PRE-distributed, followed by a slack round that FIRES (slackBusPMaxMismatch
+     *  1e-4), with the curve generator B2-G pinned at its limit.
+     *
+     *  <p>OPEN, measured 2026-10-08: at the default convEps the device ends 1.5e-5 kV off at B2 (B3-G outage); at
+     *  convEps 1e-12 both arms agree to 1e-11, so the curve is evaluated at the right P (the suspicion that the curve
+     *  channel misses the pre-distribution move is NOT confirmed - genCum carries it). Without the curve (fixed min/max
+     *  limits) the same case is still 1.6e-7 kV off. A gap above machine precision means the two arms are not solving
+     *  the same equation system at some solve: find the first pass whose targets, row modes or limits differ (OLF_DS_TRACE
+     *  / OLF_RL_TRACE against the device's per-pass state). The assert is not loosened. */
+    @org.junit.jupiter.api.Disabled("OPEN: pre-distribution + slack round: the arms solve different systems at some pass "
+            + "(1.6e-7 kV, 1.5e-5 kV with a pinned curve generator, at default tolerance)")
+    @org.junit.jupiter.api.Test
+    void deviceCurveLimitsAtPreDistributedPlusSlackRoundMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        com.powsybl.iidm.network.Generator g2 = network.getGenerator("B2-G");
+        g2.newReactiveCapabilityCurve()
+                .beginPoint().setP(0).setMinQ(-40).setMaxQ(55).endPoint()
+                .beginPoint().setP(40).setMinQ(-40).setMaxQ(50).endPoint()
+                .beginPoint().setP(140).setMinQ(-40).setMaxQ(34).endPoint()
+                .add();
+        com.powsybl.iidm.network.Generator g1 = network.getGenerator("B1-G");
+        g1.newMinMaxReactiveLimits().setMinQ(-990).setMaxQ(990).add();
+        // real active power on two more units (off the slack unit, so the case stays balanced): losing either
+        // pre-distributes 30 / 20 MW, a share of which lands on B2-G's sloped curve segment
+        network.getGenerator("B3-G").setTargetP(30).setMinP(0).setMaxP(100);
+        network.getGenerator("B6-G").setTargetP(20).setMinP(0).setMaxP(100);
+        g1.setTargetP(g1.getTargetP() - 50);
+        // the slack unit sits out (a participating slack plus a lost participant is a CPU shape: PARTICIPATING_SLACK)
+        g1.newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                .withParticipate(false).withParticipationFactor(1.0).add();
+        List<Contingency> ctgs = List.of(
+                new Contingency("B3-G", new com.powsybl.contingency.GeneratorContingency("B3-G")),
+                new Contingency("B6-G", new com.powsybl.contingency.GeneratorContingency("B6-G")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp).setSlackBusPMaxMismatch(1e-4);
+        assertGpuMatchesCpu(network, ctgs, 1e-11, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "both generator outages must run on the DEVICE");
+    }
+
     /** A generator outage whose loss pre-distribution SATURATES one generator on a multi-generator bus.
      *  OLF distributes the contingency's scheduled loss over the participating GENERATORS, clamping each
      *  at its own limit and renormalizing over the survivors. The device's host-side seed has to be the
@@ -1227,6 +1270,83 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-11, params.apply(true));
         assertEquals(3, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
                 "every contingency must run on the DEVICE");
+    }
+
+    /** forceTargetQInReactiveLimits on a voltage-controlled bus, through its LIMITS: B3-G controls B3 and B3-G2 sits
+     *  on the same bus with its regulator OFF, so AbstractLfBus.getLimitQ counts B3-G2's target Q - its IIDM 40 MVAr
+     *  clamped into its own curve at its CURRENT P - in B3's min and max limits. The base load flow pins B3 at that
+     *  max and FREEZES its generation target; losing B8-G (30 MW) pre-distributes onto B3's two units, both curves
+     *  fall, and OLF re-freezes B3 at the moved limit (RL_REFREEZE -0.1368 -> -0.2173 pu). Without the limit entries
+     *  the device is 0.86 kV off at B3; routing a frozen bus's clamp to its Q row instead is just as far off; adding
+     *  the loss pre-distribution on top of genCum (which already carries it) is 0.84 kV off the other way. The
+     *  CPU-only check proves the flag moves the answer. */
+    @org.junit.jupiter.api.Test
+    void deviceForcedTargetQOnVoltageControlledBusMovesItsLimits() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        com.powsybl.iidm.network.Generator g3 = network.getGenerator("B3-G");
+        g3.setTargetP(40).setMinP(0).setMaxP(200);
+        com.powsybl.iidm.network.Generator g3b = network.getVoltageLevel("VL3").newGenerator()
+                .setId("B3-G2")
+                .setBus("B3").setConnectableBus("B3")
+                .setTargetP(60).setMinP(0).setMaxP(200)
+                .setTargetQ(40).setVoltageRegulatorOn(false)
+                .add();
+        // 35 MVAr lower than the fixture B3-G2 normally pins against, to make room for B3-G2's +34 MVAr clamped
+        // target: B3's max limit stays where it pins (-5 - 35 + 24 = -16 MVAr at the base P)
+        g3.newReactiveCapabilityCurve()
+                .beginPoint().setP(0).setMinQ(-80).setMaxQ(-30).endPoint()
+                .beginPoint().setP(200).setMinQ(-80).setMaxQ(-80).endPoint()
+                .add();
+        g3b.newReactiveCapabilityCurve()
+                .beginPoint().setP(0).setMinQ(-60).setMaxQ(60).endPoint()
+                .beginPoint().setP(200).setMinQ(-60).setMaxQ(-60).endPoint()
+                .add();
+        com.powsybl.iidm.network.Generator g1 = network.getGenerator("B1-G");
+        g1.newMinMaxReactiveLimits().setMinQ(-990).setMaxQ(990).add();
+        // two more units with real power: losing one pre-distributes it onto B3's generators, RAISING B3-G2's P,
+        // which lowers its clamped target and so B3's max limit - B3 stays pinned, at a lower value
+        network.getGenerator("B6-G").setTargetP(20).setMinP(0).setMaxP(100);
+        network.getGenerator("B8-G").setTargetP(30).setMinP(0).setMaxP(100);
+        g1.setTargetP(g1.getTargetP() - 150);
+        java.util.Set<String> sitOut = java.util.Set.of("B1-G", "B2-G");
+        for (com.powsybl.iidm.network.Generator g : network.getGenerators()) {
+            g.newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                    .withParticipate(!sitOut.contains(g.getId())).withParticipationFactor(1.0).add();
+        }
+        List<Contingency> ctgs = List.of(
+                new Contingency("B8-G", new com.powsybl.contingency.GeneratorContingency("B8-G")),
+                new Contingency("B6-G", new com.powsybl.contingency.GeneratorContingency("B6-G")));
+        java.util.function.Function<Boolean, com.powsybl.loadflow.LoadFlowParameters> params = force -> {
+            com.powsybl.loadflow.LoadFlowParameters p = new com.powsybl.loadflow.LoadFlowParameters()
+                    .setDistributedSlack(true).setUseReactiveLimits(true)
+                    .setBalanceType(com.powsybl.loadflow.LoadFlowParameters.BalanceType.PROPORTIONAL_TO_GENERATION_PARTICIPATION_FACTOR);
+            com.powsybl.openloadflow.OpenLoadFlowParameters.create(p).setForceTargetQInReactiveLimits(force);
+            return p;
+        };
+        java.util.Set<String> vls = network.getVoltageLevelStream().map(vl -> vl.getId())
+                .collect(java.util.stream.Collectors.toSet());
+        List<com.powsybl.security.monitor.StateMonitor> mon = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), vls, java.util.Set.of()));
+        SecurityAnalysisResult[] cpu = new SecurityAnalysisResult[2];
+        for (int f = 0; f < 2; f++) {
+            com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+            sap.setLoadFlowParameters(params.apply(f == 1));
+            cpu[f] = runSecurityAnalysis(network, ctgs, mon, sap);
+        }
+        double maxShift = 0;
+        for (int i = 0; i < ctgs.size(); i++) {
+            var off = cpu[0].getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+            var on = cpu[1].getPostContingencyResults().get(i).getNetworkResult().getBusResults();
+            for (int b = 0; b < off.size(); b++) {
+                maxShift = Math.max(maxShift, Math.abs(off.get(b).getV() - on.get(b).getV()));
+            }
+        }
+        assertTrue(maxShift > 1e-3, "the flag must change the CPU answer (max bus shift " + maxShift + " kV)");
+        assertGpuMatchesCpu(network, ctgs, 1e-11, params.apply(true));
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "both contingencies must run on the DEVICE");
     }
 
     /** Curve-limit EXTRAPOLATION (extrapolateReactiveLimits — ON in the RTE production params;

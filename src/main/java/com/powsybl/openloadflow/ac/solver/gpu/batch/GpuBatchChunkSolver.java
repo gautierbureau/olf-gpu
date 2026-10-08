@@ -179,6 +179,22 @@ final class GpuBatchChunkSolver {
     }
 
     /** Does this scenario's plan already carry a renormalized DISTR_Q target for {@code row}? */
+    /** The base load flow PINNED this reactive-limit entry (MIN_Q / MAX_Q / a realistic-V freeze): its row
+     *  hosts its own reactive balance from the start. */
+    private static boolean basePinned(GpuAcData gpuData, int entry) {
+        byte[] lt = gpuData.rlBaseQLimitType();
+        return lt != null && entry >= 0 && entry < lt.length && lt[entry] >= 1 && lt[entry] <= 4;
+    }
+
+    private static boolean allBasePinned(GpuAcData gpuData, int[] entries) {
+        for (int e : entries) {
+            if (!basePinned(gpuData, e)) {
+                return false;
+            }
+        }
+        return entries.length > 0;
+    }
+
     private static boolean seedsDqTargetRow(GenOutage[] gos, int row) {
         for (GenOutage go : gos == null ? new GenOutage[0] : gos) {
             if (go.seedsDqTargets() && contains(go.dqTargetRows(), row)) {
@@ -1209,7 +1225,16 @@ final class GpuBatchChunkSolver {
                                                 && gpuData.rlBaseQLimitType()[go.rlEntry()] >= 1 && gpuData.rlBaseQLimitType()[go.rlEntry()] <= 4;
                                         if (liveDeadLocal) {
                                             // left live: no channel
-                                        } else if (go.flipsPilotRowWhenAllPinned()) {
+                                        } else if (go.flipsPilotRowWhenAllPinned() || basePinned(gpuData, go.rlEntry())) {
+                                            // ...and a MEMBER the base PINNED: its reactive balance already sits on
+                                            // its own mode-4 row (its pin row), and OLF recomputes that balance's
+                                            // target over the generators left - none - the moment the last one goes
+                                            // (setGeneratorVoltageControlEnabledAndRecomputeTargetQ). Frozen gen-lost,
+                                            // the seed stamps 0 - loadQ there and the check never touches it again;
+                                            // islanded, the row kept the pinned LIMIT as its target: measured on the
+                                            // merged-control fixture as 0.36 kV at b1 (row 7 at 0.05 against OLF's 0),
+                                            // and the shape of rte6515's VL-5997 / VL-6003 / VL-6194 / VL-6229
+                                            // relocated pins.
                                             rlGenLostList.add(s);
                                             rlGenLostList.add(go.rlEntry());
                                         } else {
@@ -1287,7 +1312,12 @@ final class GpuBatchChunkSolver {
                                     } else if (go.needsPilotPinCheck()) {
                                         // No pilot row to move the balance onto (the outaged bus is not
                                         // the pilot): still a runtime reject.
-                                        pilotPinCheck.put(s, go.pilotGroupSurvivorRlEntries());
+                                        // ...unless every survivor was ALREADY pinned in the base: each of their rows,
+                                        // the pilot's included, hosts its own balance from the start, so nothing is
+                                        // evicted when the scenario ends with them pinned.
+                                        if (!allBasePinned(gpuData, go.pilotGroupSurvivorRlEntries())) {
+                                            pilotPinCheck.put(s, go.pilotGroupSurvivorRlEntries());
+                                        }
                                     }
                                     if (go.shrinksReactiveLimits()) {
                                         // The bus KEEPS voltage control, so its reactive-limit entry is

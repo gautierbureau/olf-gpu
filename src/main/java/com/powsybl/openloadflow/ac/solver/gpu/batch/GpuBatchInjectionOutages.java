@@ -798,6 +798,18 @@ final class GpuBatchInjectionOutages {
         // a DISTR_Q bus keeps its Q on its own group row and is never relocated (ExtractionColumns).
         int qTargetRow = busRows[2][busNum] >= 0 && busRows[1][busNum] >= 0 && busRows[1][busNum] != vRow
                 ? busRows[1][busNum] : -1;
+        // A relocated DISTR_Q member the BASE PINNED has no static Q row (its balance rides the group's rows)
+        // but a mode-4 ALTERNATE row - its coupler's DUMMY_Q - that hosts its own balance from the start, with
+        // the pinned limit as target. That is the row the override belongs on: OLF recomputes the target over the
+        // generators left the moment the last one goes, and nothing on the device rewrites a base-set target
+        // otherwise. Written at the bus's own V row (the coupler's ZERO_V, target 0) the override was a no-op:
+        // measured on the merged-control fixture as 0.36 kV at b1, row 7 ending at 0.05 against OLF's 0.
+        if (qTargetRow < 0 && busRows[2][busNum] >= 0 && busRows.length > 3 && busRows[3][busNum] >= 0
+                && busRows[3][busNum] != vRow && allGensLost && rlEntry >= 0
+                && gpuData.rlBaseQLimitType() != null && rlEntry < gpuData.rlBaseQLimitType().length
+                && gpuData.rlBaseQLimitType()[rlEntry] >= 1 && gpuData.rlBaseQLimitType()[rlEntry] <= 4) {
+            qTargetRow = busRows[3][busNum];
+        }
         return new GenOutage(pRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
                 dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum,
                 lostLoadP - lostP, loadQDelta, inactiveDqMember, pilotSurvivorRlEntries,

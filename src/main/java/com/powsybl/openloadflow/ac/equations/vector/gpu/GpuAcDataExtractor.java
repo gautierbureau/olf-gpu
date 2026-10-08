@@ -100,8 +100,10 @@ public final class GpuAcDataExtractor {
      * system — the distributed-slack loop then read the surplus as a mismatch and undid the whole
      * loss pre-distribution. rte6515 has no couplers, so it never showed it.
      *
-     * @return {@code {pRow, qRow, ziParentEdge}} — the third names the coupler hosting each bus's power
-     *         equations, or -1 when the bus was not relocated.
+     * @return {@code {pRow, qRow, ziParentEdge, qRowAlt}} — the third names the coupler hosting each bus's power
+     *         equations, or -1 when the bus was not relocated; the fourth is the ALTERNATE reactive row, where a
+     *         reactive-limit pin puts the bus's own balance (mode 4): a relocated child's is its coupler's DUMMY_Q
+     *         row, -1 or a negative group code otherwise.
      */
     public static int[][] busPowerRows(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es) {
         ExtractionColumns columns = ExtractionColumns.of(network, es);
@@ -113,7 +115,7 @@ public final class GpuAcDataExtractor {
                         columns.pRow()[b.getNum()], columns.qRow()[b.getNum()]);
             }
         }
-        return new int[][] {columns.pRow(), columns.qRow(), columns.ziParentEdge()};
+        return new int[][] {columns.pRow(), columns.qRow(), columns.ziParentEdge(), columns.qRowAlt()};
     }
 
     public static GpuAcData extract(LfNetwork network, EquationSystem<AcVariableType, AcEquationType> es,

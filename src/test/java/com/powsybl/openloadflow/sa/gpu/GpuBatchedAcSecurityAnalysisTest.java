@@ -1349,6 +1349,51 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 "both contingencies must run on the DEVICE");
     }
 
+    /** Losing the only generator of one section of a zero-impedance-MERGED voltage control. b1 and b2 are joined by
+     *  a zero-impedance line, so OLF merges g1's and g2's controls: one stays MAIN, the other becomes DEPENDENT and
+     *  the group shares its reactive power through DISTR_Q. Losing either generator leaves the other controlling the
+     *  merged group. The plan used to ask the section's OWN control, which for the DEPENDENT one is a one-member
+     *  group with no survivor, and refused the outage as DISTR_Q_LAST_CONTROLLER - 285 of rte6515's full-list
+     *  generator outages (busbar retained switches put most generators alone on a coupled section). */
+    @org.junit.jupiter.api.Test
+    void deviceMergedControlLosingOneSectionsGeneratorMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = Network.create("merged-gen-vc-sa", "code");
+        com.powsybl.iidm.network.Bus[] b = new com.powsybl.iidm.network.Bus[4];
+        for (int i = 0; i < 4; i++) {
+            com.powsybl.iidm.network.VoltageLevel vl = network.newSubstation().setId("s" + i).setCountry(com.powsybl.iidm.network.Country.FR).add()
+                    .newVoltageLevel().setId("b" + i + "_vl").setNominalV(225).setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            b[i] = vl.getBusBreakerView().newBus().setId("b" + i).add();
+        }
+        java.util.function.BiConsumer<Integer, double[]> gen = (i, pv) -> b[i].getVoltageLevel().newGenerator()
+                .setId("g" + i).setBus("b" + i).setConnectableBus("b" + i)
+                .setMinP(0).setMaxP(2 * pv[0]).setTargetP(pv[0]).setTargetV(pv[1]).setVoltageRegulatorOn(true).add();
+        gen.accept(0, new double[] {60, 230});
+        gen.accept(1, new double[] {30, 228});
+        gen.accept(2, new double[] {30, 228});
+        b[3].getVoltageLevel().newLoad().setId("ld3").setBus("b3").setConnectableBus("b3").setP0(110).setQ0(40).add();
+        java.util.function.BiConsumer<String, double[]> line = (id, ends) -> network.newLine().setId(id)
+                .setBus1("b" + (int) ends[0]).setConnectableBus1("b" + (int) ends[0])
+                .setBus2("b" + (int) ends[1]).setConnectableBus2("b" + (int) ends[1])
+                .setR(ends[2]).setX(ends[3]).add();
+        line.accept("l03", new double[] {0, 3, 1, 10});
+        line.accept("l13", new double[] {1, 3, 1, 12});
+        line.accept("l23", new double[] {2, 3, 1, 14});
+        line.accept("l12", new double[] {1, 2, 0, 0});     // zero impedance: merges the controls of g1 and g2
+        List<Contingency> ctgs = List.of(
+                new Contingency("g1", new com.powsybl.contingency.GeneratorContingency("g1")),
+                new Contingency("g2", new com.powsybl.contingency.GeneratorContingency("g2")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(false).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("b0_vl"));
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "both generator outages must run on the DEVICE - one of them loses a DEPENDENT control's section");
+    }
+
     /** Curve-limit EXTRAPOLATION (extrapolateReactiveLimits — ON in the RTE production params;
      *  was a whole-run CPU gate on any curve network): the curve stops at P = 41 MW just above
      *  B2-G's base 40 MW, so the post-outage DS raise pushes P OUTSIDE the range and the limit

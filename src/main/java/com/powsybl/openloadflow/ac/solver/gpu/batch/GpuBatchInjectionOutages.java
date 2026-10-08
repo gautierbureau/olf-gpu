@@ -272,6 +272,15 @@ final class GpuBatchInjectionOutages {
         return out;
     }
 
+    /** The bus's generator voltage control as the GROUP sees it: the MAIN control of a zero-impedance merge.
+     *  A section's own control is DEPENDENT there, and asking it reads a one-member group (its own controller)
+     *  with no survivors - which refused 285 of rte6515's full-list generator outages as DISTR_Q_LAST_CONTROLLER
+     *  (OLF_GPU_GENOUT_SHAPE: members=1 alive=0). See the merged-voltage-control note on GpuAcRowIndexing.mainGenVc. */
+    private static java.util.Optional<com.powsybl.openloadflow.network.GeneratorVoltageControl> mainVcOf(LfBus bus) {
+        return java.util.Optional.ofNullable(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcOuterLoopPacks.mainGenVc(bus));
+    }
+
     private static GenOutage computeBusGenOutage(EquationSystem<AcVariableType, AcEquationType> es, GpuAcData gpuData,
                                                  double dsSum, boolean slackParticipates,
                                                  com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams, LfBus bus,
@@ -324,7 +333,7 @@ final class GpuBatchInjectionOutages {
             //      same group, where both buses carry reactive load (-0.092 and -0.060).
             // With qPct renormalized to 1 on the survivors, DISTR_Q (qPct_k·Σq − q_k) on this bus's own
             // row degenerates to q = targetQ: precisely the reactive balance OLF re-activates here.
-            vcSurvives = !keepsController && bus.getGeneratorVoltageControl()
+            vcSurvives = !keepsController && mainVcOf(bus)
                     .map(vc -> {
                         List<LfBus> members = vc.getMergedControllerElements();
                         long survivors = members.stream()
@@ -362,7 +371,7 @@ final class GpuBatchInjectionOutages {
             // mode scan skip the row, so the pilot's balance falls back to the pilot's own row and
             // updatePilotVeqBatch drops the voltage identity. Needs a pilot that is NOT one of its own
             // controllers — that shape has no relocation table for the fallback to land in.
-            boolean controlDies = !keepsController && bus.getGeneratorVoltageControl()
+            boolean controlDies = !keepsController && mainVcOf(bus)
                     .map(vc -> vc.getMergedControllerElements().stream()
                                     .noneMatch(cb -> cb.getGenerators().stream()
                                             .anyMatch(g -> !lostHere.contains(g)
@@ -372,7 +381,7 @@ final class GpuBatchInjectionOutages {
                     .orElse(false);
             if (controlDies && lostLoads.isEmpty()) {
                 deadRemoteMember = true;
-                LfBus pilot = bus.getGeneratorVoltageControl().orElseThrow().getControlledBus();
+                LfBus pilot = mainVcOf(bus).orElseThrow().getControlledBus();
                 var pilotV = es.getVariableSet().getVariable(pilot.getNum(), AcVariableType.BUS_V);
                 if (pilotV == null || pilotV.getRow() < 0) {
                     return reject("DEAD_CONTROL_PILOT_NO_V_ROW", bus);
@@ -405,7 +414,7 @@ final class GpuBatchInjectionOutages {
                 // If you come back to lift either, diff BUSES (OLF_GPU_SA_BUSDIFF=1). Violation parity
                 // is a threshold test: of the 8 wrong generator cases it caught exactly ONE.
                 if (System.getenv("OLF_GPU_GENOUT_SHAPE") != null) {
-                    var vcO = bus.getGeneratorVoltageControl();
+                    var vcO = mainVcOf(bus);
                     LfBus pilot = vcO.map(vc -> vc.getControlledBus()).orElse(null);
                     long alive = vcO.map(vc -> vc.getMergedControllerElements().stream()
                             .filter(cb -> cb.getGenerators().stream().anyMatch(g -> !lostHere.contains(g)
@@ -750,7 +759,7 @@ final class GpuBatchInjectionOutages {
         int[] pilotSurvivorRlEntries = new int[0];
         if (vcSurvives) {
             java.util.List<Integer> entries = new ArrayList<>();
-            for (LfBus cb : bus.getGeneratorVoltageControl().orElseThrow().getMergedControllerElements()) {
+            for (LfBus cb : mainVcOf(bus).orElseThrow().getMergedControllerElements()) {
                 if (cb == bus || cb.getGenerators().stream().noneMatch(g -> !lostSet.contains(g)
                         && g.getGeneratorControlType() == LfGenerator.GeneratorControlType.VOLTAGE)) {
                     continue;
@@ -771,7 +780,7 @@ final class GpuBatchInjectionOutages {
         int pinnedPilotVRow = -1;
         double pinnedPilotQTarget = 0;
         if (vcSurvives && pilotSurvivorRlEntries.length > 0
-                && bus.getGeneratorVoltageControl().orElseThrow().getControlledBus() == bus) {
+                && mainVcOf(bus).orElseThrow().getControlledBus() == bus) {
             var pilotV = es.getVariableSet().getVariable(bus.getNum(), AcVariableType.BUS_V);
             if (pilotV != null && pilotV.getRow() >= 0) {
                 pinnedPilotVRow = pilotV.getRow();

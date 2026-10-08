@@ -5449,7 +5449,7 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                                          int nTqOv, const int* tqOvKey, const double* tqOvVal,
                                          const int* mTgtPtr, const int* mTgtPeer,
                                          const int* psEntry, int psMask, const int* relocOwn,
-                                const char* dqSub, const int* qrMemberStart) {
+                                const char* dqSub, const int* qrMemberStart, const char* rlGenLost) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nMembers * nScenarios) return;
     int k = tid % nMembers;
@@ -5519,6 +5519,15 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                 // nearer limit here; rlInitTgtQ is not in this kernel's tables.
                 size_t pli = cvStride ? (size_t) s * nrl + pe : (size_t) pe;
                 double lim = (plt == 1 || plt == 3) ? rlMinQ[pli] : rlMaxQ[pli];
+                // A pilot whose bus LOST EVERY GENERATOR (RL_LIMIT_FROZEN via setBatchRlGenLost) is pinned at no
+                // limit: OLF's BUS_TARGET_Q there has no generation term. Falling through to rlMaxQ asked the dead
+                // bus for its lost generator's maximum - rte6515 GEN-676 with every busbar section in the list:
+                // the carrier's target 0.957 (1.0 - 0.043) against OLF's -0.043, VL-676_1 supplying the 100 MVAr,
+                // pinned, unpinned, and 1.133 MW distributed where OLF distributes nothing. Same rule as
+                // updatePilotVeqBatch's flip target.
+                if (plt == RL_LIMIT_FROZEN && rlGenLost != nullptr && rlGenLost[(size_t) s * nrl + pe]) {
+                    lim = 0.0;
+                }
                 target[(size_t) s * n + mrow] = lim - rlLoadQ[pli];
                 return;
             }
@@ -10142,7 +10151,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         psEntryPtr(ctx), psMaskEnv(),
                         std::getenv("OLF_GPU_NO_TGT_STOCK") == nullptr && ctx->st->dRelocOwn.p != nullptr
                                 ? ctx->st->dRelocOwn.as<int>() : nullptr,
-                    ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr);
+                    ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
+                    ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr);
         }
     };
     std::vector<char> rlActive(nS), rlSwitched(nS), wasActive(nS);
@@ -11810,7 +11820,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         {
             static const char* rowProbeEnv = std::getenv("OLF_GPU_ROW_PROBE");
             static int rowProbe = rowProbeEnv != nullptr ? std::atoi(rowProbeEnv) : -1;
-            if (rowProbe >= 0 && rowProbe < n) {
+            // With OLF_GPU_LOOP_TRACE_CTG set, only the traced contingency's slot in the chunk that holds it: every
+            // chunk has a slot of that number, so printing them all mixed other contingencies' rows into the trace
+            // (rte6515 GEN-676: slot 275 of every chunk read as GEN-676's row, base weights and all).
+            const bool probeCtg = std::getenv("OLF_GPU_LOOP_TRACE_CTG") != nullptr;
+            if (rowProbe >= 0 && rowProbe < n && (!probeCtg || ctx->loopTraceSlot >= 0)) {
                 CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
                 std::vector<int> hrp(n + 1);
                 CUDA_CHECK(cudaMemcpy(hrp.data(), ctx->st->dRowPtr.p, (size_t) (n + 1) * sizeof(int), cudaMemcpyDeviceToHost));
@@ -11819,7 +11833,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 std::vector<int> hci(k1 - k0);
                 CUDA_CHECK(cudaMemcpy(hci.data(), ctx->st->dColIdx.as<int>() + k0, (size_t) (k1 - k0) * sizeof(int), cudaMemcpyDeviceToHost));
                 std::vector<int> hmode(nS);
-                for (int s2 = 0; s2 < nS; s2++) {
+                for (int s2 = probeCtg ? ctx->loopTraceSlot : 0; s2 < (probeCtg ? ctx->loopTraceSlot + 1 : nS); s2++) {
                     double fv = 0;
                     double xv = 0;
                     int mv = 0;

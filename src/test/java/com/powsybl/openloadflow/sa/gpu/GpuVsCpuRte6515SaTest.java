@@ -397,7 +397,22 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
         String only = System.getenv("OLF_GPU_SA_CTG_ONLY");
         if (only != null) {
             java.util.Set<String> want = java.util.Set.of(only.split(","));
-            all.removeIf(c -> !want.contains(c.getId()));
+            // OLF_GPU_SA_CTG_ONLY_KEEP_TOPO=1: the dropped contingencies' elements go into ONE extra contingency,
+            // so OLF retains the same switches and the selected ones solve the full scope's network.
+            List<com.powsybl.contingency.ContingencyElement> dropped = new ArrayList<>();
+            boolean keepTopo = "1".equals(System.getenv("OLF_GPU_SA_CTG_ONLY_KEEP_TOPO"));
+            all.removeIf(c -> {
+                if (want.contains(c.getId())) {
+                    return false;
+                }
+                if (keepTopo) {
+                    dropped.addAll(c.getElements());
+                }
+                return true;
+            });
+            if (!dropped.isEmpty()) {
+                all.add(new Contingency("KEEP_TOPO", dropped));
+            }
             System.out.printf("  DIAGNOSTIC: %d contingencies selected by id%n", all.size());
             all.forEach(c -> describeContingency(network, c.getId()));
             return all;

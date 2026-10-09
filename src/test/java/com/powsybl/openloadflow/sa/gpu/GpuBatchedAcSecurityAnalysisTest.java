@@ -4754,6 +4754,79 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
     }
 
+    /** Three busbar sections in a chain, bbs0 - c01 - bbs1 - c12 - bbs2, the AC-emulation converter cs1 on bbs2 and
+     *  each end section fed by its own line. bbs0 roots the coupler tree, so bbs2 is c12's child and its P balance
+     *  lives on c12's DUMMY_P row; losing bbs1 kills c12 and brings that balance home. The link's terms stayed on
+     *  the dead coupler's identity row: once the freeze loop released the link, the converter bus carried no HVDC
+     *  flow at all (network.xiidm busbar ADNO: 5.05 pu gone from one converter of two parallel links, 696 MW put
+     *  on the distributed slack). */
+    private static Network converterOnChildSectionNetwork() {
+        Network network = Network.create("converter-child-section", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String b : List.of("a", "b", "h")) {
+            s.newVoltageLevel().setId("vl_" + b).setNominalV(400).setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER)
+                    .add().getBusBreakerView().newBus().setId(b).add();
+        }
+        com.powsybl.iidm.network.VoltageLevel vlc = s.newVoltageLevel().setId("vlc").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.NODE_BREAKER).add();
+        for (int k = 0; k < 3; k++) {
+            vlc.getNodeBreakerView().newBusbarSection().setId("bbs" + k).setNode(k).add();
+        }
+        vlc.getNodeBreakerView().newBreaker().setId("c01").setNode1(0).setNode2(1).setRetained(true).setOpen(false).add();
+        vlc.getNodeBreakerView().newBreaker().setId("c12").setNode1(1).setNode2(2).setRetained(true).setOpen(false).add();
+        int[][] feeders = {{10, 0}, {11, 1}, {12, 2}, {13, 2}};   // la on bbs0, ld1 on bbs1, lb and cs1 on bbs2
+        for (int[] f : feeders) {
+            vlc.getNodeBreakerView().newDisconnector().setId("d" + f[0]).setNode1(f[1]).setNode2(f[0] + 50).setOpen(false).add();
+            vlc.getNodeBreakerView().newBreaker().setId("b" + f[0]).setNode1(f[0] + 50).setNode2(f[0]).setOpen(false).add();
+        }
+        network.newLine().setId("la").setVoltageLevel1("vlc").setNode1(10).setVoltageLevel2("vl_a").setBus2("a").setConnectableBus2("a")
+                .setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        vlc.newLoad().setId("ld1").setNode(11).setP0(20).setQ0(5).add();
+        network.newLine().setId("lb").setVoltageLevel1("vlc").setNode1(12).setVoltageLevel2("vl_b").setBus2("b").setConnectableBus2("b")
+                .setR(0.4).setX(12).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        java.util.function.BiConsumer<String[], double[]> line = (ids, rx) -> network.newLine().setId(ids[0])
+                .setVoltageLevel1("vl_" + ids[1]).setBus1(ids[1]).setConnectableBus1(ids[1])
+                .setVoltageLevel2("vl_" + ids[2]).setBus2(ids[2]).setConnectableBus2(ids[2])
+                .setR(rx[0]).setX(rx[1]).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        line.accept(new String[] {"lab", "a", "b"}, new double[] {0.4, 10});
+        line.accept(new String[] {"lah", "a", "h"}, new double[] {0.4, 15});
+        line.accept(new String[] {"lbh", "b", "h"}, new double[] {0.4, 15});
+        network.getVoltageLevel("vl_a").newGenerator().setId("ga").setBus("a").setConnectableBus("a")
+                .setMinP(0).setMaxP(1000).setTargetP(200).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl_b").newGenerator().setId("gb").setBus("b").setConnectableBus("b")
+                .setMinP(0).setMaxP(1000).setTargetP(100).setTargetV(402).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl_b").newLoad().setId("ldb").setBus("b").setConnectableBus("b").setP0(180).setQ0(40).add();
+        network.getVoltageLevel("vl_h").newLoad().setId("ldh").setBus("h").setConnectableBus("h").setP0(100).setQ0(30).add();
+        // PQ converters: the lost flow must show in the voltage magnitudes the comparison reads
+        vlc.newVscConverterStation().setId("cs1").setNode(13).setVoltageRegulatorOn(false).setVoltageSetpoint(400)
+                .setReactivePowerSetpoint(0).setLossFactor(1.1f).add();
+        network.getVoltageLevel("vl_h").newVscConverterStation().setId("cs2").setBus("h").setConnectableBus("h")
+                .setVoltageRegulatorOn(false).setVoltageSetpoint(400).setReactivePowerSetpoint(0).setLossFactor(1.1f).add();
+        network.newHvdcLine().setId("hvdc").setConverterStationId1("cs1").setConverterStationId2("cs2")
+                .setNominalV(400).setR(1).setActivePowerSetpoint(60)
+                .setConvertersMode(com.powsybl.iidm.network.HvdcLine.ConvertersMode.SIDE_1_RECTIFIER_SIDE_2_INVERTER)
+                .setMaxP(500).add()
+                .newExtension(com.powsybl.iidm.network.extensions.HvdcAngleDroopActivePowerControlAdder.class)
+                .withDroop(20).withP0(60).withEnabled(true).add();
+        return network;
+    }
+
+    @org.junit.jupiter.api.Test
+    void deviceConverterOnKilledCouplerChildMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        List<Contingency> ctgs = List.of(new Contingency("bus-1", new com.powsybl.contingency.BusbarSectionContingency("bbs1")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setHvdcAcEmulation(true).setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl_a"));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(converterOnChildSectionNetwork(), ctgs, 1e-12, lfp, true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** g1 - b1 == l12 / l12_BIS == b2 - g2, with converter buses b1h / b2h hung off b1 / b2 by short
      *  lines; hvdc12 (droop 1, P0 0) and hvdc12_BIS (droop 1, P0 1 MW) both run b1h -> b2h. */
     private static Network doubledHvdcCorridorNetwork() {

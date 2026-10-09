@@ -1095,6 +1095,54 @@ void buildShDynDest(int nsh, const int* shIdx, const int* relocOwn, const CsrPat
     }
 }
 
+// HVDC analogue of the stock placement. An AC-emulation converter bus that is a coupler-tree child keeps its P
+// balance on the parent coupler's DUMMY_P row; a scenario that opens that coupler turns the dummy row into an
+// identity and the balance goes back to the bus's own row, and the link's p1/p2 terms must follow it there like
+// every branch and shunt term does. Left on the dummy row they were wiped with the identity, and once the freeze
+// loop released the link the converter bus carried no HVDC flow (network.xiidm busbar ADNO).
+void collectHvAltPattern(int nhv, const int* hvIdx, const int* relocOwn, std::vector<std::pair<int, int>>& pat) {
+    if (relocOwn == nullptr) {
+        return;
+    }
+    for (int e = 0; e < nhv; e++) {
+        const int* ix = hvIdx + static_cast<size_t>(e) * 4;
+        for (int k = 0; k < HVDC_NOUT; k++) {
+            RC rc = resolveHv(HVDC_SCATTER[k], ix);
+            if (HVDC_SCATTER[k].role == 1 && rc.row >= 0 && rc.col >= 0 && relocOwn[rc.row] >= 0) {
+                pat.emplace_back(relocOwn[rc.row], rc.col);
+            }
+        }
+    }
+}
+
+void buildHvDynDest(int nhv, const int* hvIdx, const int* relocOwn, const CsrPattern& pos,
+                    std::vector<int>& altDest, std::vector<int>& selRow) {
+    altDest.assign(static_cast<size_t>(nhv) * HVDC_NOUT, -1);
+    selRow.assign(static_cast<size_t>(nhv) * HVDC_NOUT, -1);
+    if (relocOwn == nullptr) {
+        return;
+    }
+    for (int e = 0; e < nhv; e++) {
+        const int* ix = hvIdx + static_cast<size_t>(e) * 4;
+        for (int k = 0; k < HVDC_NOUT; k++) {
+            const HvdcScatter& sc = HVDC_SCATTER[k];
+            RC rc = resolveHv(sc, ix);
+            if (rc.row < 0 || relocOwn[rc.row] < 0) {
+                continue;
+            }
+            int own = relocOwn[rc.row];
+            size_t o = static_cast<size_t>(e) * HVDC_NOUT + k;
+            if (sc.role == 1 && rc.col >= 0) {
+                altDest[o] = pos.at(own, rc.col);
+                selRow[o] = stockSelRow(rc.row, -1, relocOwn);   // divert only while the dummy row is an identity
+            } else if (sc.role == 0) {
+                altDest[o] = -2 - own;
+                selRow[o] = stockSelRow(rc.row, -1, relocOwn);
+            }
+        }
+    }
+}
+
 // Open-branch analogue of shAltRow / collectShAltPattern / buildShDynDest: the ALTERNATE Q row
 // of each side's bus travels in a SEPARATE obQAlt array (nob*2) rather than inside obIdx —
 // the connected side's half-open charging q follows a pinned remote member's mode-4 row or a
@@ -1429,7 +1477,8 @@ __global__ void fillShunt(int ne, const double* in, const int* ix, const int* de
 }
 
 __global__ void fillHvdc(int ne, const double* in, const int* ix, const int* dest,
-                         const double* x, double* vals, double* F) {
+                         const double* x, double* vals, double* F,
+                         const int* altDest, const int* selRow, const int* mode, int dynReloc) {
     int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= ne) return;
     const double* p = in + e * 5;                            // p0 k lf1 lf2 r
@@ -1437,7 +1486,12 @@ __global__ void fillHvdc(int ne, const double* in, const int* ix, const int* des
     double ph1 = x[q[2]], ph2 = x[q[3]];
     double o[HVDC_NOUT];
     evalHvdc(p[0], p[1], p[2], p[3], p[4], ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3, o + 4, o + 5);
-    scatterAdd(HVDC_NOUT, dest + e * HVDC_NOUT, o, vals, F);
+    if (dynReloc) {
+        scatterAddDyn(HVDC_NOUT, dest + e * HVDC_NOUT, altDest + e * HVDC_NOUT, selRow + e * HVDC_NOUT, mode, o, vals, F,
+                      RelocTables{}, e * HVDC_NOUT);
+    } else {
+        scatterAdd(HVDC_NOUT, dest + e * HVDC_NOUT, o, vals, F);
+    }
 }
 
 // DISTR_Q (remote generator voltage control) reactive-distribution rows: one thread per weighted
@@ -3316,6 +3370,9 @@ SharedStructure* buildStructure(int n,
         collectShAltPattern(nsh, shIdx, relocOwn, pat, st->nQr, st->hQrPtr.data(), st->hQrRows.data());
     }
     collectPattern(nhv, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pat);
+    if (dynReloc) {
+        collectHvAltPattern(nhv, hvIdx, relocOwn, pat);
+    }
     collectFamilyPattern(rowMap, cbIdx, obIdx, shIdx, ndq, dqElem, dqSide, dqKind, dqRow,
                          ndr, drRow, drCol, ndb, dbRow, dbCol, nzi, ziIdx, dynReloc ? relocOwn : nullptr, pat);
     if (dynReloc) {
@@ -3655,6 +3712,14 @@ SharedStructure* buildStructure(int n,
         st->sh.dynReloc = true;
     }
     setupFamily(st->hv, nhv, hvIn, 5, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pos);
+    if (dynReloc && nhv) {                                   // a converter bus under a coupler the scenario opens
+        std::vector<int> hvAltDest;
+        std::vector<int> hvSelRow;
+        buildHvDynDest(nhv, hvIdx, relocOwn, pos, hvAltDest, hvSelRow);
+        st->hv.altDest.upload(hvAltDest.data(), hvAltDest.size() * sizeof(int));
+        st->hv.selRow.upload(hvSelRow.data(), hvSelRow.size() * sizeof(int));
+        st->hv.dynReloc = true;
+    }
 
     // ---- DISTR_Q destinations: per contribution {F-row, dq/dv1, dq/dv2, dq/dph1, dq/dph2, dq/dr1}
     //      (-2-row encodes an F row, >=0 a J slot, -1 skip) ----
@@ -3882,7 +3947,7 @@ Result solveContext(SolverContext* ctx, const double* x0, const double* target, 
         if (ctx->st->ob.ne) fillOpenBranch<<<grid(ctx->st->ob.ne), BLOCK, 0, ctx->stream>>>(ctx->st->ob.ne, ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->st->ob.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->ob.altDest.as<int>(), ctx->st->ob.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ob.dynReloc ? 1 : 0, withPilotSelf(relocOf(ctx->st->ob, ctx->st.get()), ctx));
         if (ctx->st->sh.ne) fillShunt<<<grid(ctx->st->sh.ne), BLOCK, 0, ctx->stream>>>(ctx->st->sh.ne, ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->sh.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->sh.altDest.as<int>(), ctx->st->sh.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->sh.dynReloc ? 1 : 0, withPilotSelf(relocOf(ctx->st->sh, ctx->st.get()), ctx));
         if (ctx->st->nvdl) fillVdlBatch<<<grid(ctx->st->nvdl), BLOCK, 0, ctx->stream>>>(ctx->st->nvdl, 1, ctx->st->n, ctx->st->nnz, ctx->st->dVdlIn.as<double>(), ctx->st->dVdlIdx.as<int>(), ctx->st->dVdlDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
-        if (ctx->st->hv.ne) fillHvdc<<<grid(ctx->st->hv.ne), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
+        if (ctx->st->hv.ne) fillHvdc<<<grid(ctx->st->hv.ne), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->hv.altDest.as<int>(), ctx->st->hv.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->hv.dynReloc ? 1 : 0);
         if (ctx->ndq) fillDistrQ<<<grid(ctx->ndq), BLOCK, 0, ctx->stream>>>(ctx->ndq, ctx->st->dDqElem.as<int>(), ctx->st->dDqSide.as<int>(), ctx->st->dDqKind.as<int>(), ctx->st->dDqWeight.as<double>(), ctx->st->dDqDest.as<int>(), ctx->st->dDqAlt.as<int>(), ctx->st->dDqSel.as<int>(), ctx->st->dDqZiRow.as<int>(), ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->st->sh.in.as<double>(), ctx->st->sh.ix.as<int>(), ctx->st->ob.in.as<double>(), ctx->st->ob.ix.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dMode.as<int>());
         if (ctx->nzi) fillZeroImp<<<grid(ctx->nzi), BLOCK, 0, ctx->stream>>>(ctx->nzi, ctx->st->dZiIn.as<double>(), ctx->st->dZiIdx.as<int>(), ctx->st->dZiDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->dZiAltDest.as<int>(), ctx->st->dZiSelRow.as<int>(), ctx->dMode.as<int>(), ctx->st->ziDyn ? 1 : 0, withPilotSelf(ziRelocOf(ctx->st.get()), ctx));
         if (ctx->ndr) fillDistrRho<<<grid(ctx->ndr), BLOCK, 0, ctx->stream>>>(ctx->ndr, ctx->st->dDrCol.as<int>(), ctx->st->dDrCoef.as<double>(), ctx->st->dDrDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->st->drQr ? ctx->st->dDrQrGroup.as<int>() : nullptr, ctx->dMode.as<int>(), ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>());
@@ -4366,7 +4431,8 @@ __global__ void fillShuntBatch(int ne, int nScenarios, int n, int nnz, int nElem
 __global__ void fillHvdcBatch(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                               const double* in, const int* ix, const int* dest,
                               const double* x, double* vals, double* F,
-                              const char* disabled, const char* active) {
+                              const char* disabled, const char* active,
+                              const int* altDest, const int* selRow, const int* mode, int dynReloc) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ne * nScenarios) return;
     int e = tid % ne;
@@ -4378,7 +4444,12 @@ __global__ void fillHvdcBatch(int ne, int nScenarios, int n, int nnz, int nEleme
     double ph1 = xs[q[2]], ph2 = xs[q[3]];
     double o[HVDC_NOUT];
     evalHvdc(p[0], p[1], p[2], p[3], p[4], ph1, ph2, 0, o + 0, o + 1, o + 2, o + 3, o + 4, o + 5);
-    scatterAdd(HVDC_NOUT, dest + e * HVDC_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+    if (dynReloc) {
+        scatterAddDyn(HVDC_NOUT, dest + e * HVDC_NOUT, altDest + e * HVDC_NOUT, selRow + e * HVDC_NOUT,
+                      mode + (size_t) s * n, o, vals + (size_t) s * nnz, F + (size_t) s * n, RelocTables{}, e * HVDC_NOUT);
+    } else {
+        scatterAdd(HVDC_NOUT, dest + e * HVDC_NOUT, o, vals + (size_t) s * nnz, F + (size_t) s * n);
+    }
 }
 
 // Batched DISTR_Q fill: one thread per (contribution, scenario). Mirrors the single-solve fillDistrQ but
@@ -4583,7 +4654,8 @@ __global__ void fillShuntBatchF(int ne, int nScenarios, int n, int nnz, int nEle
 __global__ void fillHvdcBatchF(int ne, int nScenarios, int n, int nnz, int nElements, int elemOffset,
                                const double* in, const int* ix, const int* dest,
                                const double* x, double* F,
-                               const char* disabled, const char* active) {
+                               const char* disabled, const char* active,
+                               const int* altDest, const int* selRow, const int* mode, int dynReloc) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= ne * nScenarios) return;
     int e = tid % ne;
@@ -4596,7 +4668,12 @@ __global__ void fillHvdcBatchF(int ne, int nScenarios, int n, int nnz, int nElem
     double o[2];
     evalHvdcF(p[0], p[1], p[2], p[3], p[4], ph1, ph2, 0, o + 0, o + 1);
     const int pos[2] = {0, 3};
-    scatterAddF(2, dest + e * HVDC_NOUT, pos, o, F + (size_t) s * n);
+    if (dynReloc) {
+        scatterAddFDyn(2, dest + e * HVDC_NOUT, altDest + e * HVDC_NOUT, selRow + e * HVDC_NOUT,
+                       pos, mode + (size_t) s * n, o, F + (size_t) s * n, RelocTables{}, e * HVDC_NOUT);
+    } else {
+        scatterAddF(2, dest + e * HVDC_NOUT, pos, o, F + (size_t) s * n);
+    }
 }
 
 // A DISTR_Q controller that stops controlling in ONE scenario (its bus lost its last voltage
@@ -10984,9 +11061,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
         if (ctx->st->hv.ne) {
             if (fOnly) {
-                fillHvdcBatchF<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+                fillHvdcBatchF<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->st->hv.altDest.as<int>(), ctx->st->hv.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->hv.dynReloc ? 1 : 0);
             } else {
-                fillHvdcBatch<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+                fillHvdcBatch<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->st->hv.altDest.as<int>(), ctx->st->hv.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->hv.dynReloc ? 1 : 0);
             }
         }
     int dqTraceRow = gpuDqTraceRow();
@@ -14130,7 +14207,7 @@ std::vector<double> solveBatchSensitivities(BatchSolverContext* ctx, const doubl
         fillVdlBatch<<<grid(ctx->st->nvdl * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nvdl, nS, n, nnz, ctx->st->dVdlIn.as<double>(), ctx->st->dVdlIdx.as<int>(), ctx->st->dVdlDest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>());
     }
     if (ctx->st->hv.ne) {
-        fillHvdcBatch<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>());
+        fillHvdcBatch<<<grid(ctx->st->hv.ne * nS), BLOCK, 0, ctx->stream>>>(ctx->st->hv.ne, nS, n, nnz, ctx->nElements, ctx->hvOffset, ctx->st->hv.in.as<double>(), ctx->st->hv.ix.as<int>(), ctx->st->hv.dest.as<int>(), ctx->dX.as<double>(), ctx->dVals.as<double>(), ctx->dF.as<double>(), ctx->dDisabled.as<char>(), ctx->dActive.as<char>(), ctx->st->hv.altDest.as<int>(), ctx->st->hv.selRow.as<int>(), ctx->dMode.as<int>(), ctx->st->hv.dynReloc ? 1 : 0);
     }
     int dqTraceRow = gpuDqTraceRow();
     if (ctx->hasPilotSelf && ctx->dPsSkip.p != nullptr && ctx->st->nQr > 0) {

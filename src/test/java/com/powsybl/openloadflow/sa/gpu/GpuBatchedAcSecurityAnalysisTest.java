@@ -2327,6 +2327,98 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         }
     }
 
+    /** {@code sections} busbar sections joined by retained couplers, each REMOTELY regulated by its own generator
+     *  behind a line in its own voltage level (OLF merges the controls across the couplers; bbs0 has the highest
+     *  target, so its control is the MAIN). Losing bbs0 islands the main's pilot together with its generator, and
+     *  OLF re-merges the survivors: they regulate their OWN sections again (network.xiidm busbar GOOD, CKTZ,
+     *  CXUJ, FUDD - generators behind transformers regulating the sections). With the device's "control dies"
+     *  reading the lone survivor vg1 came out 408.48 kV against OLF's 405.87 (lg1 -296.6 vs -120.9 MVAr). */
+    private static Network remoteMergedSectionsNetwork(int sections) {
+        Network network = Network.create("remote-merged-" + sections, "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        java.util.function.Function<String, com.powsybl.iidm.network.VoltageLevel> bbVl = id -> {
+            com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(id).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            v.getBusBreakerView().newBus().setId(id + "_b").add();
+            return v;
+        };
+        bbVl.apply("vl0");
+        bbVl.apply("vl3");
+        com.powsybl.iidm.network.VoltageLevel vl12 = s.newVoltageLevel().setId("vl12").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.NODE_BREAKER).add();
+        for (int k = 0; k < sections; k++) {
+            vl12.getNodeBreakerView().newBusbarSection().setId("bbs" + k).setNode(k).add();
+            if (k > 0) {
+                vl12.getNodeBreakerView().newBreaker().setId("c" + (k - 1) + k).setNode1(k - 1).setNode2(k)
+                        .setRetained(true).setOpen(false).add();
+            }
+        }
+        int node = 100;
+        for (int k = 0; k < sections; k++) {
+            com.powsybl.iidm.network.VoltageLevel vg = bbVl.apply("vg" + k);
+            vg.newGenerator().setId("g" + k).setBus("vg" + k + "_b").setConnectableBus("vg" + k + "_b")
+                    .setMinP(0).setMaxP(500).setTargetP(60).setTargetQ(0).setTargetV(k == 0 ? 406 : 404)
+                    .setVoltageRegulatorOn(true)
+                    .setRegulatingTerminal(vl12.getNodeBreakerView().getBusbarSection("bbs" + k).getTerminal()).add();
+            network.getGenerator("g" + k).newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(300).add();
+            String[] feeders = {"lg" + k, "l" + k};
+            for (int f = 0; f < feeders.length; f++) {
+                int n = node++;
+                vl12.getNodeBreakerView().newDisconnector().setId("d" + feeders[f]).setNode1(k).setNode2(n + 50).setOpen(false).add();
+                vl12.getNodeBreakerView().newBreaker().setId("b" + feeders[f]).setNode1(n + 50).setNode2(n).setOpen(false).add();
+                String far = f == 0 ? "vg" + k : (k % 2 == 0 ? "vl0" : "vl3");
+                network.newLine().setId(feeders[f]).setVoltageLevel1("vl12").setNode1(n)
+                        .setVoltageLevel2(far).setBus2(far + "_b").setConnectableBus2(far + "_b")
+                        .setR(0.4).setX(f == 0 ? 6 : 10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+            }
+        }
+        network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(500).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl0").newLoad().setId("lds").setBus("vl0_b").setConnectableBus("vl0_b").setP0(500).setQ0(100).add();
+        network.getVoltageLevel("vl3").newLoad().setId("ld3").setBus("vl3_b").setConnectableBus("vl3_b").setP0(60.0 * sections).setQ0(80).add();
+        network.newLine().setId("l03").setVoltageLevel1("vl0").setBus1("vl0_b").setConnectableBus1("vl0_b")
+                .setVoltageLevel2("vl3").setBus2("vl3_b").setConnectableBus2("vl3_b").setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        return network;
+    }
+
+    private void assertRemoteMergedSectionsMatchCpu(int sections, java.util.Set<String> refused) {
+        List<Contingency> ctgs = new java.util.ArrayList<>();
+        for (int k = 0; k < sections; k++) {
+            ctgs.add(new Contingency("bus-" + k, new com.powsybl.contingency.BusbarSectionContingency("bbs" + k)));
+        }
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)       // the slack away from the lost sections
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0"));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(remoteMergedSectionsNetwork(sections), ctgs, 1e-9, lfp, true);
+        // A section whose loss re-homes survivors onto a REMOTELY controlled cluster is the CPU's until the free
+        // controller's row can host the new pilot's reactive balance; every other section stays on the device.
+        assertEquals(refused, GpuBatchScopeCensus.planRefusedIds());
+        refused.forEach(id -> assertEquals("PLAN:VC_REMERGE_REMOTE_CONTROLLER", GpuBatchScopeCensus.planRefusalTag(id)));
+        assertEquals(sections - refused.size(), GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
+                "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
+    /** The main's pilot section islanded with its generator, ONE remote survivor re-homed onto its own section
+     *  (network.xiidm GOOD: GOMV_1 -> GOPN_1): refused to the CPU, the rest on the device. */
+    @org.junit.jupiter.api.Test
+    void deviceMergedRemoteControlSurvivorReHomesOntoItsOwnSectionMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertRemoteMergedSectionsMatchCpu(2, java.util.Set.of("bus-0"));
+    }
+
+    /** Three sections: losing bbs0 re-homes TWO remote survivors onto one control (network.xiidm CXUJ: CXSS_2/_4 ->
+     *  CXYW_1), losing the middle bbs1 cuts bbs2 off the main and re-homes vg2 onto it - both refused; losing bbs2
+     *  only renormalizes the main's group and stays on the device. */
+    @org.junit.jupiter.api.Test
+    void deviceMergedRemoteControlTwoSurvivorsReHomeMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertRemoteMergedSectionsMatchCpu(3, java.util.Set.of("bus-0", "bus-1"));
+    }
+
     /** Two sections with the SURVIVOR's generator pinned in the base: losing the main re-homes a LOCAL control to
      *  a bus OLF has PQ at its limit — the device starts the row as the reactive balance at the pinned value and
      *  checks the entry as a local PV bus at the re-homed target, so an unpin restores the identity (rte6515

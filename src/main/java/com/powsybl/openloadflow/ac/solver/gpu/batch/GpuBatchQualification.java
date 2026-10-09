@@ -658,6 +658,23 @@ final class GpuBatchQualification {
                             contingencyId, main.getControlledBus().getId(), cluster.stream().map(LfBus::getId).toList(),
                             newMain.getControlledBus().getId(), newMain.getTargetValue(), local);
                 }
+                if (!local && cluster.stream().map(controlOf::get).flatMap(vc -> vc.getControllerElements().stream())
+                        .anyMatch(ce -> !cluster.contains(ce))) {
+                    // The re-merged group is REMOTE: a generator behind its own line or transformer regulates the
+                    // cluster. OLF puts BUS_TARGET_V on the elected main, keeps that bus's reactive balance and frees
+                    // the controller's Q - so the new pilot's reactive balance needs a row, the free controller's,
+                    // and the device's pattern only has those terms for the BASE pilot. The killed coupler's child
+                    // gets the voltage identity on its V row while its reactive balance (on the coupler's DUMMY_Q
+                    // row in the base) is left with no row; the survivor kept either a fixed reactive balance (the
+                    // "control dies" flip) or a degenerate sharing row. network.xiidm busbar GOOD (GOPN_0 islanded,
+                    // GOMV_1 re-homed onto GOPN_1): 0.886 kV, 0.4545 MW, OLF pins GOMV_1 at MAX_Q the device never
+                    // checks; CKTZ, CXUJ, FUDD the same shape. CPU until the free controller's row can host it.
+                    if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                        System.err.printf("QUALIFY_TRACE reHome ctg=%s main=%s cluster=%s REMOTE controllers -> CPU%n",
+                                contingencyId, main.getControlledBus().getId(), cluster.stream().map(LfBus::getId).toList());
+                    }
+                    return new ReHomed(pv, left, "VC_REMERGE_REMOTE_CONTROLLER", remoteMains, remoteCluster, subgroupOf);
+                }
                 if (!local) {
                     // A cluster of SEVERAL controls (or one with a remote controller) is a NEW remote group:
                     // OLF re-elects its main, rebuilds DISTR_Q over the cluster's controllers with keys

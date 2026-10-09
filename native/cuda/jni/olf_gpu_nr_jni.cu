@@ -10878,6 +10878,30 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             }
         }
     }
+    // OLF_GPU_SLOT_DUMP=<prefix>: the traced scenario's (OLF_GPU_LOOP_TRACE_CTG) row targets, initial state and row
+    // modes as the driver starts - after every host override and every device seed - one file per solve
+    // (<prefix>.<k>), "<row> <target> <x> <mode>" with every double exact. Two runs of one scenario that should be
+    // identical are diffed row by row: the rows that differ name the writer.
+    if (!resume && ctx->loopTraceSlot >= 0 && ctx->loopTraceSlot < nS) {
+        static const char* slotDump = std::getenv("OLF_GPU_SLOT_DUMP");
+        static int slotDumps = 0;
+        if (slotDump != nullptr) {
+            const size_t off = static_cast<size_t>(ctx->loopTraceSlot) * n;
+            std::vector<double> ht(n), hx(n);
+            std::vector<int> hm(n);
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            CUDA_CHECK(cudaMemcpy(ht.data(), ctx->dTarget.as<double>() + off, n * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(hx.data(), ctx->dX.as<double>() + off, n * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(hm.data(), ctx->dMode.as<int>() + off, n * sizeof(int), cudaMemcpyDeviceToHost));
+            std::string path = std::string(slotDump) + "." + std::to_string(slotDumps++);
+            if (FILE* f = std::fopen(path.c_str(), "w")) {
+                for (int r = 0; r < n; r++) {
+                    std::fprintf(f, "%d %.17g %.17g %d\n", r, ht[r], hx[r], hm[r]);
+                }
+                std::fclose(f);
+            }
+        }
+    }
     static const bool olTime = std::getenv("OLF_GPU_PHASE_TIME") != nullptr || rlReasonsOn();
     int olPassSolved = 0;
     bool olFirstSolveDone = resume;                          // a resumed call's passes are all re-solves
@@ -12332,6 +12356,26 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 rmqTraceRow);
     }
     CUDA_CHECK(cudaMemsetAsync(ctx->dRlSwitched.p, 0, nS * sizeof(char), ctx->stream));
+    if (outer == 0 && !resume && ctx->loopTraceSlot >= 0 && ctx->loopTraceSlot < nS) {
+        // OLF_GPU_SLOT_DUMP, second point: the traced scenario's state and bus balances (qBuf) at the FIRST
+        // outer-loop check, i.e. after the first solve - "<prefix>.<k>.pass0", "<row> <x> <qBuf>".
+        static const char* slotDump0 = std::getenv("OLF_GPU_SLOT_DUMP");
+        static int slotDumps0 = 0;
+        if (slotDump0 != nullptr) {
+            const size_t off = static_cast<size_t>(ctx->loopTraceSlot) * n;
+            std::vector<double> hx(n), hq(n);
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            CUDA_CHECK(cudaMemcpy(hx.data(), ctx->dX.as<double>() + off, n * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(hq.data(), ctx->dQbuf.as<double>() + off, n * sizeof(double), cudaMemcpyDeviceToHost));
+            std::string path = std::string(slotDump0) + "." + std::to_string(slotDumps0++) + ".pass0";
+            if (FILE* f = std::fopen(path.c_str(), "w")) {
+                for (int r = 0; r < n; r++) {
+                    std::fprintf(f, "%d %.17g %.17g\n", r, hx[r], hq[r]);
+                }
+                std::fclose(f);
+            }
+        }
+    }
     // Apply ONLY the current phase's outer loop this pass (sequential, like OLF) — never both at once.
     bool inDsPhase = (loopOrder[loopIdx] == LOOP_DS);
     olCheck.kind = loopOrder[loopIdx];

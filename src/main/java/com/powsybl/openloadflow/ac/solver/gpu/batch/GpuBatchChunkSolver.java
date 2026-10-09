@@ -1972,6 +1972,32 @@ final class GpuBatchChunkSolver {
                             }
                         }
                     }
+                    if (System.getenv("OLF_GPU_DUMMY_CENSUS") != null) {
+                        // OLF_GPU_DUMMY_CENSUS=1: a scenario whose final state carries a coupler flow beyond any physical
+                        // value (|dummy| > 1e3 pu, 100 GW) solved a SINGULAR system - a loop of zero-impedance couplers
+                        // whose circulating flow no equation determines. The equations then differ from OLF's, and the
+                        // rounding of that flow moves the answer from one run to the next (network.xiidm busbar HFU).
+                        int nz = gpuData.ziBranchNums() == null ? 0 : gpuData.ziBranchNums().length;
+                        for (int s = 0; s < realCount; s++) {
+                            double worst = 0;
+                            int worstZe = -1;
+                            for (int z = 0; z < nz; z++) {
+                                for (int k = 4; k <= 5; k++) {
+                                    int r = gpuData.ziIdx()[z * 11 + k];
+                                    if (r >= 0 && r < n && Math.abs(chunkResults[s][r]) > worst) {
+                                        worst = Math.abs(chunkResults[s][r]);
+                                        worstZe = z;
+                                    }
+                                }
+                            }
+                            if (worst > 1e3) {
+                                System.err.printf("DUMMY_CENSUS ctg=%s status=%d worst=%.3e coupler=#%d%n",
+                                        contingencies.get(group.get(chunkStart + s)).contingencyId(),
+                                        chunkResults[s].length > n + 2 ? (int) chunkResults[s][n + 2] : 0, worst,
+                                        gpuData.ziBranchNums()[worstZe]);
+                            }
+                        }
+                    }
                     tMainSolveNs += System.nanoTime() - tSolve0;
                     if (svcAsDriverPause) {
                         long tSvc0 = System.nanoTime();

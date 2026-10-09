@@ -57,6 +57,9 @@ final class GpuBatchPrecomputer {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GpuBatchPrecomputer.class);
 
+    /** Run counter of OLF_GPU_BASE_STATE_DUMP (cold, warm, ...). */
+    private static final java.util.concurrent.atomic.AtomicInteger BASE_DUMPS = new java.util.concurrent.atomic.AtomicInteger();
+
     /** Serializes device access across partition-worker threads (the batch precompute queues here). */
     private static final Object GPU_DEVICE_LOCK = new Object();
 
@@ -103,6 +106,51 @@ final class GpuBatchPrecomputer {
             // After the converged base load flow the engine's state vector holds the base operating point.
             EquationSystem<AcVariableType, AcEquationType> es = context.getEquationSystem();
             double[] baseState = es.getStateVector().get().clone();
+            // OLF_GPU_BASE_STATE_DUMP=<prefix>: the state every scenario starts from, one file per security analysis
+            // (<prefix>.<k>, k counting the runs of this JVM), "<row> <value>" with every double exact.
+            String baseDump = System.getenv("OLF_GPU_BASE_STATE_DUMP");
+            if (baseDump != null) {
+                java.nio.file.Path out = java.nio.file.Path.of(baseDump + "." + BASE_DUMPS.getAndIncrement());
+                String[] what = new String[baseState.length];
+                // the state vector against the NETWORK's bus values (what the base result reports): a captured
+                // vector that is not the base load flow's final state shows up here
+                double worstV = 0;
+                double worstPhi = 0;
+                String worstVBus = "-";
+                for (var v : es.getVariableSet().getVariables()) {
+                    if (v.getRow() < 0 || v.getType().getElementType() != com.powsybl.openloadflow.network.ElementType.BUS) {
+                        continue;
+                    }
+                    var bus = net.getBus(v.getElementNum());
+                    if (v.getType() == com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_V
+                            && Math.abs(baseState[v.getRow()] - bus.getV()) > worstV) {
+                        worstV = Math.abs(baseState[v.getRow()] - bus.getV());
+                        worstVBus = bus.getId();
+                    } else if (v.getType() == com.powsybl.openloadflow.ac.equations.AcVariableType.BUS_PHI) {
+                        worstPhi = Math.max(worstPhi, Math.abs(baseState[v.getRow()] - bus.getAngle()));
+                    }
+                }
+                System.err.printf("BASE_STATE_DUMP %s: state vs network worst |dV|=%.3e (%s) |dPhi|=%.3e%n",
+                        out, worstV, worstVBus, worstPhi);
+                for (var v : es.getVariableSet().getVariables()) {
+                    if (v.getRow() >= 0 && v.getRow() < what.length) {
+                        var et = v.getType().getElementType();
+                        what[v.getRow()] = v.getType() + " "
+                                + (et == com.powsybl.openloadflow.network.ElementType.BUS ? net.getBus(v.getElementNum()).getId()
+                                : et == com.powsybl.openloadflow.network.ElementType.BRANCH ? net.getBranch(v.getElementNum()).getId()
+                                        + " " + java.util.Optional.ofNullable(net.getBranch(v.getElementNum()).getBus1()).map(com.powsybl.openloadflow.network.LfBus::getId).orElse("-")
+                                        + "-" + java.util.Optional.ofNullable(net.getBranch(v.getElementNum()).getBus2()).map(com.powsybl.openloadflow.network.LfBus::getId).orElse("-")
+                                : "#" + v.getElementNum());
+                    }
+                }
+                try (java.io.PrintWriter w = new java.io.PrintWriter(java.nio.file.Files.newBufferedWriter(out))) {
+                    for (int r = 0; r < baseState.length; r++) {
+                        w.println(r + " " + Double.toString(baseState[r]) + " " + what[r]);
+                    }
+                } catch (java.io.IOException e) {
+                    throw new java.io.UncheckedIOException(e);
+                }
+            }
             var target = context.getTargetVector();
 
             List<BatchContingency> batch = new ArrayList<>();

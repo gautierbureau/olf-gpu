@@ -644,6 +644,44 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
      * 124.5 MW off, assessment L10). {@code OLF_GPU_SA_DAP_DUMP=<file>} writes both values per contingency with
      * {@code Double.toString}, so a change on either arm diffs exactly. Returns the worst difference (MW).
      */
+    /** The GPU arm against ITSELF after every contingency: the cold and the warm run solve the identical problem
+     *  with the identical binary and the identical chunks, so whatever differs between them is the device's own
+     *  run-to-run spread, and a CPU-vs-GPU gap of that size says nothing about the equations. Statuses and the
+     *  distributed active power; OLF_GPU_SA_SELF_DUMP=<file> writes every contingency's cold and warm values. */
+    private static void reportGpuSelfSpread(SecurityAnalysisResult cold, SecurityAnalysisResult warm) throws java.io.IOException {
+        Map<String, PostContingencyResult> w = new TreeMap<>();
+        warm.getPostContingencyResults().forEach(p -> w.put(p.getContingency().getId(), p));
+        long identical = 0;
+        long statusDiff = 0;
+        List<Map.Entry<String, Double>> moved = new ArrayList<>();
+        String dump = System.getenv("OLF_GPU_SA_SELF_DUMP");
+        try (java.io.PrintWriter out = dump != null ? new java.io.PrintWriter(Files.newBufferedWriter(Path.of(dump))) : null) {
+            for (PostContingencyResult c : cold.getPostContingencyResults()) {
+                PostContingencyResult x = w.get(c.getContingency().getId());
+                if (x == null) {
+                    continue;
+                }
+                if (c.getStatus() != x.getStatus()) {
+                    statusDiff++;
+                }
+                double d = Math.abs(c.getDistributedActivePower() - x.getDistributedActivePower());
+                if (d == 0 && c.getStatus() == x.getStatus()) {
+                    identical++;
+                } else {
+                    moved.add(Map.entry(c.getContingency().getId(), d));
+                }
+                if (out != null) {
+                    out.println(c.getContingency().getId() + "\t" + c.getStatus() + "\t" + x.getStatus() + "\t"
+                            + Double.toString(c.getDistributedActivePower()) + "\t" + Double.toString(x.getDistributedActivePower()));
+                }
+            }
+        }
+        moved.sort(Map.Entry.<String, Double>comparingByValue().reversed());
+        System.out.printf("  POST GPU-vs-GPU (cold vs warm, same chunks): %d identical, %d moved, %d status changes | worst %.6e MW %s%n",
+                identical, moved.size(), statusDiff, moved.isEmpty() ? 0.0 : moved.get(0).getValue(),
+                moved.stream().limit(8).map(e -> e.getKey() + "=" + String.format("%.3e", e.getValue())).toList());
+    }
+
     private static double reportDistributedActivePower(SecurityAnalysisResult cpu, SecurityAnalysisResult gpu) throws java.io.IOException {
         double baseDiff = Math.abs(cpu.getPreContingencyResult().getDistributedActivePower()
                 - gpu.getPreContingencyResult().getDistributedActivePower());
@@ -1152,6 +1190,7 @@ class GpuVsCpuRte6515SaTest extends AbstractOpenSecurityAnalysisTest {
                 }
                 Map<String, Long> censusWarm = GpuBatchScopeCensus.snapshot();
                 System.out.printf("  GPU CENSUS (warm): %s%n", censusWarm);
+                reportGpuSelfSpread(gpuCold, gpuWarm);
             }
         } finally {
             securityAnalysisProvider = new OpenSecurityAnalysisProvider(new SparseMatrixFactory(),

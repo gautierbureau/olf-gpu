@@ -2360,10 +2360,24 @@ static void scanValsFinite(Ctx* ctx, int nS, int n, int nnz, int outer) {
     }
 }
 
+// The zero-diagonal repair is for a factorization that cannot pivot. The robust mode (6) matches and pivots, which
+// puts a nonzero on every diagonal by itself, so it factors the raw Jacobian; a borrowed row there only adds the
+// cancellation the repair is prone to. A ZERO row that borrows a balance row which keeps its own diagonal forms,
+// with that donor, a 2x2 principal block that is singular (the ZERO row has nothing on the donor's diagonal column).
+// network.xiidm busbar ADNO re-couples three loop couplers of a hub, and two of their ZERO_V rows borrowed the hub's
+// P balance: the pivoted factorization of that repaired matrix failed as badly as the unpivoted one (ratio 5e21),
+// while the raw matrix converged to the CPU's answer.
+struct SolverContext;
+struct BatchSolverContext;
+static bool repairsZeroDiagonals(const SolverContext*) {
+    return true;
+}
+static bool repairsZeroDiagonals(const BatchSolverContext* ctx);
+
 template <typename Ctx>
 static void hazRepairValues(Ctx* ctx, int nS, double* vals) {
     auto* st = ctx->st.get();
-    if (st->nHaz == 0) return;
+    if (st->nHaz == 0 || !repairsZeroDiagonals(ctx)) return;
     if (ctx->hazCap < nS) {
         ctx->dHazSnap.alloc((size_t) nS * st->hazTot * sizeof(double));
         ctx->dHazBSnap.alloc((size_t) nS * st->nHaz * sizeof(double));
@@ -2385,7 +2399,7 @@ static void hazRepairValues(Ctx* ctx, int nS, double* vals) {
 template <typename Ctx>
 static void hazRepairRightHandSide(Ctx* ctx, int nS, double* B, int sOff = 0) {
     auto* st = ctx->st.get();
-    if (st->nHaz == 0 || ctx->hazCap < sOff + nS) return;
+    if (st->nHaz == 0 || ctx->hazCap < sOff + nS || !repairsZeroDiagonals(ctx)) return;
     int n = st->n;
     double* bsnap = ctx->dHazBSnap.template as<double>() + (size_t) sOff * st->nHaz;
     hazSnapshotB<<<((st->nHaz * nS + BLOCK - 1) / BLOCK), BLOCK, 0, ctx->stream>>>(st->nHaz, nS, n, st->dHazRow.template as<int>(), B, bsnap);
@@ -8039,6 +8053,10 @@ struct BatchSolverContext {
         if (matUbCX) cudssMatrixDestroy(matUbCX);
     }
 };
+
+static bool repairsZeroDiagonals(const BatchSolverContext* ctx) {
+    return ctx->mode != 6;
+}
 
 // OLF_GPU_STEP_TRACE=1: the MAX_VOLTAGE_CHANGE clamp factor actually applied, per (iteration, slot).
 // The decisive number for "why does this scenario need more than its iteration budget": a factor near

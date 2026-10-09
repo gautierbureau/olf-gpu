@@ -1891,6 +1891,23 @@ final class GpuBatchChunkSolver {
                         }
                         GpuAcNewtonSolver.setBatchLoopTraceSlot(handle, traceSlot);
                     }
+                    // OLF_GPU_CHUNK_DUMP=<file>: every chunk's members in slot order, appended one line per chunk
+                    // ("<pairPhase> <chunkStart> <chunkSize> <id> <id> ..."). A scenario whose answer moves with
+                    // its chunk mates can only be reproduced in the chunk it was solved in.
+                    String chunkDump = System.getenv("OLF_GPU_CHUNK_DUMP");
+                    if (chunkDump != null) {
+                        StringBuilder line = new StringBuilder().append(pairPhase).append(' ').append(chunkStart)
+                                .append(' ').append(chunkSize);
+                        for (int s = 0; s < realCount; s++) {
+                            line.append(' ').append(contingencies.get(group.get(chunkStart + s)).contingencyId());
+                        }
+                        try {
+                            java.nio.file.Files.writeString(java.nio.file.Path.of(chunkDump), line.append('\n'),
+                                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+                        } catch (java.io.IOException e) {
+                            throw new java.io.UncheckedIOException(e);
+                        }
+                    }
                     if (System.getenv("OLF_GPU_ROW_PROBE") != null && realCount > 1) {
                         // OLF_GPU_ROW_PROBE=<row>[,<row>]: slot 1's row mode and target next to the base's,
                         // and every row whose mode slot 1 changed - what the scenario solves differently.

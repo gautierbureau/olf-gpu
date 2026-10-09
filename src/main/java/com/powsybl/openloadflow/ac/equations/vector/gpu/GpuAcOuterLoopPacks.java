@@ -296,7 +296,9 @@ public final class GpuAcOuterLoopPacks {
                         w.add(1.0);
                         continue;
                     }
-                    if (br.isZeroImpedance(LoadFlowModel.AC) && br.isSpanningTreeEdge(LoadFlowModel.AC)) {
+                    // every coupler, not just the base tree's: a coupler out of it is pinned at dummyQ = 0 and adds
+                    // nothing, and one a contingency brings into OLF's tree carries this member's reactive flow
+                    if (br.isZeroImpedance(LoadFlowModel.AC)) {
                         int dqCol = columns.dummyQCol()[br.getNum()];
                         if (dqCol >= 0) {
                             out.add(new int[] {row, dqCol, side, 3});
@@ -1185,12 +1187,16 @@ public final class GpuAcOuterLoopPacks {
                             continue;
                         }
                         if (brj.isZeroImpedance(LoadFlowModel.AC)) {
-                            // a zero-impedance coupler: only a spanning-tree edge carries reactive flow, as the
-                            // linear DUMMY_Q variable (+1 if the controller is bus1, −1 if bus2) — exactly the
-                            // term createReactiveTerms adds. Non-tree edges contribute nothing (matches OLF).
-                            if (!brj.isSpanningTreeEdge(LoadFlowModel.AC)) {
-                                continue;
-                            }
+                            // a zero-impedance coupler: its reactive flow is the linear DUMMY_Q variable (+1 if the
+                            // controller is bus1, −1 if bus2) — the term createReactiveTerms adds for a spanning-tree
+                            // edge. EVERY coupler is packed, not just the base tree's: OLF re-elects its tree per
+                            // contingency, and a coupler out of the BASE tree that a contingency brings into it
+                            // carries flow there. The kernel drops the term in every scenario where the coupler's
+                            // dummy row is an identity (out of the tree, or opened), which is exactly the base tree's
+                            // own filter. Packing only the base tree left that flow out of every member's DISTR_Q:
+                            // network.xiidm busbar HFU re-trees HFT_1's couplers HHQ/HHS/HHO, and the reactive flow
+                            // circulating HFT_3 -> HFT_1 -> HFT_2 was in no equation at all (1.25e12 pu after the
+                            // first solve, its rounding moving the slack by +-0.058 MW from one run to the next).
                             int dqCol = dummyQCol[brj.getNum()];
                             if (dqCol < 0) {
                                 throw new PowsyblException("GPU AC solver: DISTR_Q controller " + gj.getId()

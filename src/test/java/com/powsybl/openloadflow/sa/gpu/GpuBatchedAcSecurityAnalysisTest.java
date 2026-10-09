@@ -2419,6 +2419,85 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertRemoteMergedSectionsMatchCpu(3, java.util.Set.of("bus-0", "bus-1"));
     }
 
+    /** Two coupler STARS over the same three controlled sections (network.xiidm VL HFT): hubs bbs0 and bbs1 carry no
+     *  injection, each leaf bbs2..bbs4 has its own generator regulating it (equal targets, so OLF merges the three
+     *  controls) and a line to the meshed network. OLF's spanning tree takes one star (plus the edge that reaches the
+     *  other hub); losing that hub's section makes OLF re-elect the tree through the OTHER star - couplers out of the
+     *  BASE tree start carrying the leaves' flows. */
+    private static Network doubleStarSectionsNetwork() {
+        Network network = Network.create("double-star", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vl3")) {
+            s.newVoltageLevel().setId(vl).setNominalV(400).setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER)
+                    .add().getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        com.powsybl.iidm.network.VoltageLevel vl12 = s.newVoltageLevel().setId("vl12").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.NODE_BREAKER).add();
+        for (int k = 0; k < 5; k++) {
+            vl12.getNodeBreakerView().newBusbarSection().setId("bbs" + k).setNode(k).add();
+        }
+        for (int hub = 0; hub < 2; hub++) {
+            for (int leaf = 2; leaf < 5; leaf++) {
+                vl12.getNodeBreakerView().newBreaker().setId("c" + hub + leaf).setNode1(hub).setNode2(leaf)
+                        .setRetained(true).setOpen(false).add();
+            }
+        }
+        int node = 100;
+        for (int hub = 0; hub < 2; hub++) {                  // a small load on each hub (network.xiidm HFT_0: a shunt)
+            int hNode = node++;
+            vl12.getNodeBreakerView().newDisconnector().setId("dh" + hub).setNode1(hub).setNode2(hNode + 50).setOpen(false).add();
+            vl12.getNodeBreakerView().newBreaker().setId("bh" + hub).setNode1(hNode + 50).setNode2(hNode).setOpen(false).add();
+            vl12.newLoad().setId("lh" + hub).setNode(hNode).setP0(5).setQ0(2).add();
+        }
+        for (int k = 2; k < 5; k++) {
+            int gNode = node++;
+            int lNode = node++;
+            for (int[] pair : new int[][] {{gNode, 0}, {lNode, 1}}) {
+                vl12.getNodeBreakerView().newDisconnector().setId("d" + k + "_" + pair[1]).setNode1(k).setNode2(pair[0] + 50).setOpen(false).add();
+                vl12.getNodeBreakerView().newBreaker().setId("b" + k + "_" + pair[1]).setNode1(pair[0] + 50).setNode2(pair[0]).setOpen(false).add();
+            }
+            vl12.newGenerator().setId("g" + k).setNode(gNode)
+                    .setMinP(0).setMaxP(500).setTargetP(60 + 10 * k).setTargetQ(0).setTargetV(405).setVoltageRegulatorOn(true).add();
+            // g4's ceiling binds under OLF's equal reactive shares: which generator pins depends on the SHARING,
+            // the one thing a free circulating coupler flow leaves undetermined
+            network.getGenerator("g" + k).newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(k == 4 ? 25 : 300).add();
+            String ext = k % 2 == 0 ? "vl0" : "vl3";
+            network.newLine().setId("l" + k).setVoltageLevel1("vl12").setNode1(lNode)
+                    .setVoltageLevel2(ext).setBus2(ext + "_b").setConnectableBus2(ext + "_b")
+                    .setR(0.4).setX(8 + k).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        }
+        network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(400).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl0").newLoad().setId("lds").setBus("vl0_b").setConnectableBus("vl0_b").setP0(400).setQ0(100).add();
+        network.getVoltageLevel("vl3").newLoad().setId("ld3").setBus("vl3_b").setConnectableBus("vl3_b").setP0(210).setQ0(160).add();
+        network.newLine().setId("l03").setVoltageLevel1("vl0").setBus1("vl0_b").setConnectableBus1("vl0_b")
+                .setVoltageLevel2("vl3").setBus2("vl3_b").setConnectableBus2("vl3_b").setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        return network;
+    }
+
+    /** Losing either hub re-elects OLF's coupler tree through the other star. The device packed the merged controls'
+     *  reactive coupler terms for the BASE tree only and put a voltage identity on every child of an opened coupler:
+     *  the re-coupled star's reactive flow was in no equation (network.xiidm busbar HFU: 1.25e12 pu circulating, the
+     *  answer moving with run-to-run noise; HFUS/HFUT: linear solve failed in every run). Every section on the device,
+     *  bus voltages to 1e-9 kV. */
+    @org.junit.jupiter.api.Test
+    void deviceDoubleStarSectionsReTreeMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        List<Contingency> ctgs = new java.util.ArrayList<>();
+        for (int k = 0; k < 5; k++) {
+            ctgs.add(new Contingency("bus-" + k, new com.powsybl.contingency.BusbarSectionContingency("bbs" + k)));
+        }
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0"));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(doubleStarSectionsNetwork(), ctgs, 1e-9, lfp, true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(5, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** Two sections with the SURVIVOR's generator pinned in the base: losing the main re-homes a LOCAL control to
      *  a bus OLF has PQ at its limit — the device starts the row as the reactive balance at the pinned value and
      *  checks the entry as a local PV bus at the re-homed target, so an unpin restores the identity (rte6515

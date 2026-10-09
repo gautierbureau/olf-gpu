@@ -227,6 +227,65 @@ final class GpuBatchChunkSolver {
     }
 
     @SuppressWarnings({"java:S107", "java:S3776"})
+    /**
+     * Whether the CHILD of an opened coupler keeps a voltage target of its own. OLF re-elects the voltage-control
+     * MAIN of every zero-impedance network a contingency splits (LfZeroImpedanceNetwork.updateVoltageControlMergeStatus:
+     * the highest target, then the first controlled-bus id): that bus alone keeps BUS_TARGET_V, every other section
+     * of the network follows it through the couplers' ZERO_V. A child left ALONE is its own main. A child the
+     * contingency leaves coupled to other live sections - OLF's re-elected tree re-couples it through a coupler that
+     * was out of the base tree - is a DEPENDENT unless it wins that election, and its row keeps the reactive
+     * equation the opened coupler's DUMMY_Q row hands back.
+     *
+     * <p>The voltage identity used to go on every child. network.xiidm busbar HFU opens HFT_0's three tree couplers
+     * (HHI, HHK, HHW) while HHO/HHQ/HHS, out of the base tree, re-couple HFT_2/3/4: identities on HFT_3 and HFT_4 on
+     * top of the ZERO_V links over-determined the voltages and left the couplers' reactive flows FREE - 1e11 pu after
+     * the first solve, the rounding of which moved the slack mismatch by +-0.058 MW from one run to the next
+     * (1.041 MW distributed in one run where OLF distributes nothing).
+     */
+    static boolean holdsClusterVoltage(String contingencyId, LfBus child, List<LfBranch> outagedZi,
+                                       java.util.Map<Integer, Integer> ziElemByNum, int[] ziIdx, int[] frozenRows) {
+        java.util.Set<Integer> frozen = new java.util.HashSet<>();
+        for (int r : frozenRows) {
+            frozen.add(r);
+        }
+        java.util.Set<LfBranch> opened = new java.util.HashSet<>(outagedZi);
+        List<LfBus> cluster = new ArrayList<>(List.of(child));
+        java.util.Set<LfBus> seen = new java.util.HashSet<>(cluster);
+        for (int k = 0; k < cluster.size(); k++) {
+            LfBus b = cluster.get(k);
+            for (LfBranch br : b.getBranches()) {
+                Integer ze = ziElemByNum.get(br.getNum());
+                if (ze == null || opened.contains(br) || br.isDisabled()) {
+                    continue;
+                }
+                boolean fromBus1 = br.getBus1() == b;
+                LfBus other = fromBus1 ? br.getBus2() : br.getBus1();
+                int otherVRow = ziIdx[ze * 11 + (fromBus1 ? 7 : 6)];
+                if (other == null || other.isDisabled() || frozen.contains(otherVRow) || !seen.add(other)) {
+                    continue;
+                }
+                cluster.add(other);
+            }
+        }
+        if (cluster.size() == 1) {
+            return true;
+        }
+        if (System.getenv("OLF_GPU_ZITREE_TRACE") != null) {
+            System.err.println("ZITREE_CLUSTER ctg=" + contingencyId + " child=" + child.getId() + " cluster=" + cluster.stream()
+                    .map(bb -> bb.getId() + bb.getGeneratorVoltageControl().filter(vc -> vc.getControlledBus() == bb)
+                            .map(vc -> "(vt=" + vc.getTargetValue() + "," + vc.getMergeStatus() + ",enabled=" + bb.isGeneratorVoltageControlEnabled() + ")")
+                            .orElse(""))
+                    .toList());
+        }
+        return cluster.stream()
+                .map(bb -> bb.getGeneratorVoltageControl().filter(vc -> vc.getControlledBus() == bb).orElse(null))
+                .filter(java.util.Objects::nonNull)
+                .min(java.util.Comparator.<GeneratorVoltageControl>comparingDouble(vc -> -vc.getTargetValue())
+                        .thenComparing(vc -> vc.getControlledBus().getId()))
+                .map(vc -> vc.getControlledBus() == child)
+                .orElse(true);
+    }
+
     private static void solveQualifiedInChunksAt(int chunkCap,
                                                List<Integer> batchedIndices, List<BatchContingency> contingencies,
                                                GpuBatchElementMapper elementMapper, GpuAcData gpuData,
@@ -919,7 +978,10 @@ final class GpuBatchChunkSolver {
                                     // comment already said the freeze must not be overwritten -- it just sat
                                     // below the write it was guarding.
                                     boolean applied = childVRow >= 0 && child != null && !child.isDisabled()
-                                            && child.isGeneratorVoltageControlled() && childVc.isPresent();
+                                            && child.isGeneratorVoltageControlled() && childVc.isPresent()
+                                            && holdsClusterVoltage(contingencies.get(ci).contingencyId(), child,
+                                                    contingencies.get(ci).outagedZiBranches(), ziElemByNumAll, gpuData.ziIdx(),
+                                                    frozenForCtg);
                                     boolean childPinned = applied
                                             && GpuBatchQualification.basePinned(gpuData, GpuBatchQualification.rlEntryOf(gpuData, child));
                                     if (applied && childPinned) {

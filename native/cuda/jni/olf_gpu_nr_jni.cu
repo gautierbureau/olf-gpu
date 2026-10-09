@@ -7199,9 +7199,9 @@ __global__ void irScoreBatch(int n, int nS, const double* r, const double* b, co
     score[s] = mb > 0.0 ? (isfinite(mr) ? mr / mb : 1e300) : 0.0;
 }
 
-__global__ void subBatch(int total, const double* d, double* x) {        // x -= d (undo a refinement step)
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
-    if (t < total) x[t] -= d[t];
+__global__ void axpyLaneMaskBatch(int n, int total, double sign, const double* d, const char* lane, double* x) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;   // x += sign * d on the lanes whose mask is set
+    if (t < total && lane[t / n]) x[t] += sign * d[t];
 }
 
 __global__ void negateIntoBatch(int total, const double* F, double* b) {  // b = -F over all scenarios
@@ -7910,7 +7910,7 @@ struct BatchSolverContext {
     // The host pointer + size arrays must outlive the matrix objects, so they live here.
     cudssMatrix_t matABatch = nullptr, matBBatch = nullptr, matXBatch = nullptr;
     cudssMatrix_t matRBatch = nullptr, matDeltaBatch = nullptr;   // adaptive refinement: residual and correction
-    DeviceBuf dR, dDelta, dRPtrs, dDeltaPtrs, dIrScore;
+    DeviceBuf dR, dDelta, dRPtrs, dDeltaPtrs, dIrScore, dIrLane;   // dIrLane: per-lane refinement mask (refineLanes)
     std::vector<void*> rPtrs, deltaPtrs;
     std::vector<void*> valPtrs, rowStartPtrs, rowEndPtrs, colPtrs, bPtrs, xPtrs;   // host: arrays of device pointers
     DeviceBuf dValPtrs, dRowStartPtrs, dRowEndPtrs, dColPtrs, dBPtrs, dXPtrs;       // device copies (cuDSS 0.8 wants device arrays)
@@ -9999,6 +9999,64 @@ static void launchForcedTargetQLimits(BatchSolverContext* ctx, int nS, int n) {
             ctx->dTarget.as<double>(), ctx->dRlMinQDyn.as<double>(), ctx->dRlMaxQDyn.as<double>());
 }
 
+// Adaptive iterative refinement (see adaptiveIr), decided PER LANE. Each lane refines (r = b - J dx, J d = r,
+// dx += d) while ITS OWN backward residual ratio is above tol and still falling, and undoes a step that did not
+// lower it - what the same scenario does in a batch of one. The batched solve still runs over every lane; a lane
+// that is done just does not take the correction. It used to be decided on the WORST lane and applied to all of
+// them, so a scenario's dx depended on which matrices shared its batch: network.xiidm busbar JZDQ's first pass
+// differed by 1.2e-8 pu between a 700- and a 175-wide chunk of the same full topology, and the outer loops carried
+// that over the 1 MW slack-balance threshold - 0.125 MW off the CPU in one chunk, 1.7e-8 MW in another.
+template <typename SolveFn>
+static void refineLanes(BatchSolverContext* ctx, int lanes, int n, int nnz, const double* vals, double* dx,
+                        const double* b, double* r, const double* delta, const char* active, SolveFn solve) {
+    static const int irMax = irMaxSteps();
+    static const int irBase = irBaseSteps();
+    static const double tol = irTol();
+    std::vector<double> prev(lanes), sc(lanes);
+    std::vector<char> lane(lanes), undo(lanes);
+    auto scores = [&](std::vector<double>& out) {
+        residualBatch<<<grid(n * lanes), BLOCK, 0, ctx->stream>>>(n, lanes, nnz, ctx->st->dRowPtr.as<int>(),
+                ctx->st->dColIdx.as<int>(), vals, dx, b, r);
+        irScoreBatch<<<grid(lanes), BLOCK, 0, ctx->stream>>>(n, lanes, r, b, active, ctx->dIrScore.as<double>());
+        CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+        CUDA_CHECK(cudaMemcpy(out.data(), ctx->dIrScore.as<double>(), lanes * sizeof(double), cudaMemcpyDeviceToHost));
+        gIrChecks++;
+    };
+    scores(prev);
+    int nLane = 0;
+    for (int s = 0; s < lanes; s++) {
+        lane[s] = prev[s] > tol;
+        nLane += lane[s];
+    }
+    ctx->dIrLane.ensure(static_cast<size_t>(lanes));
+    for (int step = irBase; step < irMax && nLane > 0; step++) {
+        CUDA_CHECK(cudaMemcpy(ctx->dIrLane.p, lane.data(), lanes, cudaMemcpyHostToDevice));
+        solve();                                              // delta = J^-1 r on every lane
+        axpyLaneMaskBatch<<<grid(n * lanes), BLOCK, 0, ctx->stream>>>(n, n * lanes, 1.0, delta, ctx->dIrLane.as<char>(), dx);
+        gIrExtraSteps++;
+        scores(sc);
+        int nUndo = 0;
+        nLane = 0;
+        for (int s = 0; s < lanes; s++) {
+            undo[s] = 0;
+            if (!lane[s]) continue;
+            if (!(sc[s] < prev[s])) {                         // no progress on this lane: undo its step, it is done
+                undo[s] = 1;
+                lane[s] = 0;
+                nUndo++;
+            } else {
+                prev[s] = sc[s];
+                lane[s] = sc[s] > tol;
+                nLane += lane[s];
+            }
+        }
+        if (nUndo > 0) {
+            CUDA_CHECK(cudaMemcpy(ctx->dIrLane.p, undo.data(), lanes, cudaMemcpyHostToDevice));
+            axpyLaneMaskBatch<<<grid(n * lanes), BLOCK, 0, ctx->stream>>>(n, n * lanes, -1.0, delta, ctx->dIrLane.as<char>(), dx);
+        }
+    }
+}
+
 BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const double* target,
                               const int* rowMode, const int* rowModeSlots, int nRowModeSlots,
                               const int* baseRowMode, const char* disabled,
@@ -11691,33 +11749,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matXBatch, ctx->matBBatch)); }
         if (adaptiveIr() && ctx->st->nzi > 0 && ctx->dR.p != nullptr) {
             // adaptive refinement (see adaptiveIr): refine while an active lane's backward residual is above tol
-            static const int irMax = irMaxSteps();
-            static const int irBase = irBaseSteps();
-            static const double tol = irTol();
-            std::vector<double> sc(nS);
-            auto worstRatio = [&]() {
-                residualBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(), ctx->st->dColIdx.as<int>(),
-                        ctx->dVals.as<double>(), ctx->dDx.as<double>(), ctx->dB.as<double>(), ctx->dR.as<double>());
-                irScoreBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dR.as<double>(), ctx->dB.as<double>(), ctx->dActive.as<char>(), ctx->dIrScore.as<double>());
-                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-                CUDA_CHECK(cudaMemcpy(sc.data(), ctx->dIrScore.as<double>(), nS * sizeof(double), cudaMemcpyDeviceToHost));
-                gIrChecks++;
-                double worst = 0.0;
-                for (int s2 = 0; s2 < nS; s2++) worst = std::max(worst, sc[s2]);
-                return worst;
-            };
-            double worst = worstRatio();
-            for (int step = irBase; step < irMax && worst > tol; step++) {
-                { AnalysisTimer at_(__LINE__, 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_SOLVE, ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matDeltaBatch, ctx->matRBatch)); }
-                axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDelta.as<double>(), ctx->dDx.as<double>());
-                gIrExtraSteps++;
-                double next = worstRatio();
-                if (!(next < worst)) {                                // no progress on the worst lane: undo and stop (the
-                    subBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDelta.as<double>(), ctx->dDx.as<double>());   // step is noise)
-                    break;
-                }
-                worst = next;
-            }
+            refineLanes(ctx, nS, n, nnz, ctx->dVals.as<double>(), ctx->dDx.as<double>(), ctx->dB.as<double>(),
+                    ctx->dR.as<double>(), ctx->dDelta.as<double>(), ctx->dActive.as<char>(), [&]() {
+                AnalysisTimer at_(__LINE__, 'S');
+                CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_SOLVE, ctx->ds.config, ctx->ds.data, ctx->matABatch, ctx->matDeltaBatch, ctx->matRBatch));
+            });
         }
         if (ctx->clampStep) {
             maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dVarType.as<int>(), ctx->dActive.as<char>(), ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>());
@@ -11907,33 +11943,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE, ctx->dsC.config, compactData, ctx->matUbC, ctx->matUbCX, ctx->matUbCB)); }
             if (adaptiveIr() && ctx->st->nzi > 0 && ctx->dRC.p != nullptr && ctx->dIrScore.p != nullptr && ctx->dIrScore.cap >= static_cast<size_t>(w) * sizeof(double)) {
                 // adaptive refinement on the compacted lanes (all w are real or a duplicate of a real one)
-                static const int irMax = irMaxSteps();
-                static const int irBase = irBaseSteps();
-                static const double tol = irTol();
-                std::vector<double> sc(w);
-                auto worstRatio = [&]() {
-                    residualBatch<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n, w, nnz, ctx->st->dRowPtr.as<int>(), ctx->st->dColIdx.as<int>(),
-                            ctx->dValsC.as<double>(), ctx->dDxC.as<double>(), ctx->dBC.as<double>(), ctx->dRC.as<double>());
-                    irScoreBatch<<<grid(w), BLOCK, 0, ctx->stream>>>(n, w, ctx->dRC.as<double>(), ctx->dBC.as<double>(), nullptr, ctx->dIrScore.as<double>());
-                    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-                    CUDA_CHECK(cudaMemcpy(sc.data(), ctx->dIrScore.as<double>(), w * sizeof(double), cudaMemcpyDeviceToHost));
-                    gIrChecks++;
-                    double worst = 0.0;
-                    for (int s2 = 0; s2 < w; s2++) worst = std::max(worst, sc[s2]);
-                    return worst;
-                };
-                double worst = worstRatio();
-                for (int step = irBase; step < irMax && worst > tol; step++) {
-                    { AnalysisTimer at_(__LINE__, 'S'); CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_SOLVE, ctx->dsC.config, compactData, ctx->matUbC, ctx->matUbCDelta, ctx->matUbCR)); }
-                    axpy1Batch<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n * w, ctx->dDeltaC.as<double>(), ctx->dDxC.as<double>());
-                    gIrExtraSteps++;
-                    double next = worstRatio();
-                    if (!(next < worst)) {                                // no progress on the worst lane: undo and stop (the
-                        subBatch<<<grid(n * w), BLOCK, 0, ctx->stream>>>(n * w, ctx->dDeltaC.as<double>(), ctx->dDxC.as<double>());   // step is noise)
-                        break;
-                    }
-                    worst = next;
-                }
+                refineLanes(ctx, w, n, nnz, ctx->dValsC.as<double>(), ctx->dDxC.as<double>(), ctx->dBC.as<double>(),
+                        ctx->dRC.as<double>(), ctx->dDeltaC.as<double>(), nullptr, [&]() {
+                    AnalysisTimer at_(__LINE__, 'S');
+                    CUDSS_CHECK(cudssExecute(ctx->dsC.handle, CUDSS_PHASE_SOLVE, ctx->dsC.config, compactData, ctx->matUbC, ctx->matUbCDelta, ctx->matUbCR));
+                });
             }
             CUDA_CHECK(cudaMemsetAsync(ctx->dDx.p, 0, static_cast<size_t>(n) * nS * sizeof(double), ctx->stream));
             scatterScenarios<<<grid(n * nReal), BLOCK, 0, ctx->stream>>>(n, nReal, ctx->dMapC.as<int>(), ctx->dDxC.as<double>(), ctx->dDx.as<double>());
@@ -11941,33 +11955,11 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             { AnalysisTimer at_(__LINE__, ((ubPhase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((ubPhase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, ubPhase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
             if (adaptiveIr() && ctx->st->nzi > 0 && ctx->dR.p != nullptr && ctx->matUbR != nullptr && ctx->dIrScore.p != nullptr) {
                 // adaptive refinement on the full-width UBATCH solve (see adaptiveIr)
-                static const int irMax = irMaxSteps();
-                static const int irBase = irBaseSteps();
-                static const double tol = irTol();
-                std::vector<double> sc(nS);
-                auto worstRatio = [&]() {
-                    residualBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(), ctx->st->dColIdx.as<int>(),
-                            ctx->dVals.as<double>(), ctx->dDx.as<double>(), ctx->dB.as<double>(), ctx->dR.as<double>());
-                    irScoreBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dR.as<double>(), ctx->dB.as<double>(), ctx->dActive.as<char>(), ctx->dIrScore.as<double>());
-                    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-                    CUDA_CHECK(cudaMemcpy(sc.data(), ctx->dIrScore.as<double>(), nS * sizeof(double), cudaMemcpyDeviceToHost));
-                    gIrChecks++;
-                    double worst = 0.0;
-                    for (int s2 = 0; s2 < nS; s2++) worst = std::max(worst, sc[s2]);
-                    return worst;
-                };
-                double worst = worstRatio();
-                for (int step = irBase; step < irMax && worst > tol; step++) {
-                    { AnalysisTimer at_(__LINE__, 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_SOLVE, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbDelta, ctx->matUbR)); }
-                    axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDelta.as<double>(), ctx->dDx.as<double>());
-                    gIrExtraSteps++;
-                    double next = worstRatio();
-                    if (!(next < worst)) {                                // no progress on the worst lane: undo and stop (the
-                        subBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDelta.as<double>(), ctx->dDx.as<double>());   // step is noise)
-                        break;
-                    }
-                    worst = next;
-                }
+                refineLanes(ctx, nS, n, nnz, ctx->dVals.as<double>(), ctx->dDx.as<double>(), ctx->dB.as<double>(),
+                        ctx->dR.as<double>(), ctx->dDelta.as<double>(), ctx->dActive.as<char>(), [&]() {
+                    AnalysisTimer at_(__LINE__, 'S');
+                    CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_SOLVE, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbDelta, ctx->matUbR));
+                });
             }
         }
         // OLF_GPU_DX_DUMP=<path>: the FIRST solve's first Newton step, written out whole — the

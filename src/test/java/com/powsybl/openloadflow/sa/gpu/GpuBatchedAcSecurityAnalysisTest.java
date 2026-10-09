@@ -2239,6 +2239,94 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertSplitGroupMatchesCpu(4);
     }
 
+    /** A chain of {@code couplers} zero-impedance couplers with a voltage-controlling generator on every bus (OLF
+     *  merges their controls), the shape whose unpivoted factorization needs iterative refinement; every third chain
+     *  bus is also tied to the load bus b0 by an impedant line, so each tie's loss is a different scenario of the
+     *  same structure. */
+    private static Network couplerChainSaNetwork(int couplers) {
+        Network network = Network.create("zi-chain-sa-" + couplers, "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        java.util.function.Function<String, com.powsybl.iidm.network.Bus> bus = id -> {
+            com.powsybl.iidm.network.VoltageLevel vl = s.newVoltageLevel().setId("vl_" + id).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            return vl.getBusBreakerView().newBus().setId(id).add();
+        };
+        java.util.function.BiFunction<com.powsybl.iidm.network.Bus, String, com.powsybl.iidm.network.Generator> gen = (b, id) ->
+                b.getVoltageLevel().newGenerator().setId(id).setBus(b.getId()).setConnectableBus(b.getId())
+                        .setMinP(0).setMaxP(500).setTargetP(20).setTargetV(404).setVoltageRegulatorOn(true).add();
+        com.powsybl.iidm.network.Bus b0 = bus.apply("b0");
+        b0.getVoltageLevel().newLoad().setId("ld0").setBus("b0").setConnectableBus("b0").setP0(20.0 * couplers).setQ0(10.0 * couplers).add();
+        com.powsybl.iidm.network.Bus prev = bus.apply("b1");
+        gen.apply(prev, "g1");
+        java.util.function.BiConsumer<String[], double[]> line = (ids, rx) -> network.newLine().setId(ids[0])
+                .setVoltageLevel1("vl_" + ids[1]).setBus1(ids[1]).setConnectableBus1(ids[1])
+                .setVoltageLevel2("vl_" + ids[2]).setBus2(ids[2]).setConnectableBus2(ids[2])
+                .setR(rx[0]).setX(rx[1]).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        line.accept(new String[] {"t1", "b0", "b1"}, new double[] {0.4, 10});
+        for (int i = 2; i <= couplers + 1; i++) {
+            com.powsybl.iidm.network.Bus b = bus.apply("b" + i);
+            gen.apply(b, "g" + i);
+            line.accept(new String[] {"c" + i, prev.getId(), b.getId()}, new double[] {0, 0});
+            if (i % 4 == 1) {
+                line.accept(new String[] {"t" + i, "b0", b.getId()}, new double[] {0.4, 10 + i});
+            }
+            prev = b;
+        }
+        return network;
+    }
+
+    /** A scenario's answer must not depend on which scenarios share its chunk. The adaptive iterative refinement of
+     *  coupler systems used to refine EVERY lane while the worst one was above tolerance, so a lane took a different
+     *  number of steps in a batch than alone (network.xiidm busbar JZDQ: 0.125 MW off the CPU in a 700-wide chunk,
+     *  1.7e-8 MW in another). Every tie of a coupler chain solved as one chunk and one by one must give the same bus
+     *  voltages to 1e-11 kV - the worst-lane rule put t17 1.8e-9 kV apart; what is left is the fill kernels'
+     *  atomicAdd order, a few ulps (<= 1.3e-13 kV) that also differ from one run to the next. */
+    @org.junit.jupiter.api.Test
+    void deviceScenarioDoesNotDependOnItsChunkMates() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = couplerChainSaNetwork(40);
+        List<String> ties = network.getLineStream().map(l -> l.getId()).filter(id -> id.startsWith("t")).sorted().toList();
+        List<Contingency> ctgs = new java.util.ArrayList<>(ties.stream()
+                .map(id -> new Contingency(id, new com.powsybl.contingency.BranchContingency(id))).toList());
+        for (int k = 0; k + 1 < ties.size(); k++) {       // two adjacent ties out: a longer segment hangs on couplers alone
+            ctgs.add(new Contingency(ties.get(k) + "+" + ties.get(k + 1), new com.powsybl.contingency.BranchContingency(ties.get(k)),
+                    new com.powsybl.contingency.BranchContingency(ties.get(k + 1))));
+        }
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
+        com.powsybl.security.SecurityAnalysisParameters sap = new com.powsybl.security.SecurityAnalysisParameters();
+        sap.setLoadFlowParameters(lfp);
+        java.util.Set<String> allVls = network.getVoltageLevelStream().map(vl -> vl.getId())
+                .collect(java.util.stream.Collectors.toSet());
+        List<com.powsybl.security.monitor.StateMonitor> monitors = List.of(new com.powsybl.security.monitor.StateMonitor(
+                com.powsybl.contingency.ContingencyContext.all(), java.util.Set.of(), allVls, java.util.Set.of()));
+        String maxBatch = com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchContextCache.MAX_BATCH_PROPERTY;
+        securityAnalysisProvider = new GpuSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        try {
+            SecurityAnalysisResult together = runSecurityAnalysis(network, ctgs, monitors, sap);
+            long engagedTogether = GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get();
+            System.setProperty(maxBatch, "1");
+            SecurityAnalysisResult alone = runSecurityAnalysis(network, ctgs, monitors, sap);
+            assertEquals(ctgs.size(), engagedTogether, "every tie outage on the device");
+            assertEquals(engagedTogether, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "the same scenarios on the device");
+            for (int i = 0; i < ctgs.size(); i++) {
+                var t = together.getPostContingencyResults().get(i);
+                var a = alone.getPostContingencyResults().get(i);
+                assertEquals(a.getStatus(), t.getStatus());
+                var tb = t.getNetworkResult().getBusResults();
+                var ab = a.getNetworkResult().getBusResults();
+                assertEquals(ab.size(), tb.size());
+                for (int b = 0; b < ab.size(); b++) {
+                    assertEquals(ab.get(b).getV(), tb.get(b).getV(), 1e-11,
+                            "bus " + ab.get(b).getBusId() + " for " + t.getContingency().getId() + ": chunk of " + ctgs.size() + " vs alone");
+                }
+            }
+        } finally {
+            System.clearProperty(maxBatch);
+            securityAnalysisProvider = new OpenSecurityAnalysisProvider(commonTestConfig.matrixFactory(), new EvenShiloachGraphDecrementalConnectivityFactory<>());
+        }
+    }
+
     /** Two sections with the SURVIVOR's generator pinned in the base: losing the main re-homes a LOCAL control to
      *  a bus OLF has PQ at its limit — the device starts the row as the reactive balance at the pinned value and
      *  checks the entry as a local PV bus at the re-homed target, so an unpin restores the identity (rte6515

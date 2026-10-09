@@ -12293,7 +12293,15 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             { AnalysisTimer at_(__LINE__, 'F'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
                     ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB)); }
             double* xS = ctx->dX.as<double>() + (size_t) s * n;
-            axpy1One<<<grid(n), BLOCK, 0, ctx->stream>>>(n, dxS, xS);
+            if (ctx->clampStep) {                            // OLF's MAX_VOLTAGE_CHANGE scaling, like every other mode:
+                // unclamped, the robust mode took full Newton steps and its base load flow on network.xiidm's
+                // busbar scope settled 0.32 kV away from OLF's
+                maxVoltageChangeFactorBatch<<<1, BLOCK, 0, ctx->stream>>>(n, dxS, ctx->dVarType.as<int>(), nullptr,
+                        ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>() + s);
+                axpy1BatchScaled<<<grid(n), BLOCK, 0, ctx->stream>>>(n, n, dxS, ctx->dStepFactor.as<double>() + s, xS);
+            } else {
+                axpy1One<<<grid(n), BLOCK, 0, ctx->stream>>>(n, dxS, xS);
+            }
         }
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync
         }

@@ -4827,6 +4827,32 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** The robust single-matrix mode (6) takes OLF's MAX_VOLTAGE_CHANGE step like every other mode. Its per-scenario
+     *  loop applied the full Newton step, so a scenario retried in that mode followed another trajectory and stopped
+     *  at another point inside the tolerance. The limits are tight enough to clamp the first steps of every outage;
+     *  the whole run, base load flow included, is solved in mode 6. */
+    @Test
+    void robustModeClampsTheStepLikeOlf() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        List<Contingency> ctgs = network.getLineStream().limit(6)
+                .map(l -> new Contingency(l.getId(), new BranchContingency(l.getId()))).toList();
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setStateVectorScalingMode(com.powsybl.openloadflow.ac.solver.StateVectorScalingMode.MAX_VOLTAGE_CHANGE)
+                .setMaxVoltageChangeStateVectorScalingMaxDv(0.01)
+                .setMaxVoltageChangeStateVectorScalingMaxDphi(0.01)
+                .setMaxNewtonRaphsonIterations(100);              // the clamped base needs ~30 steps from flat angles
+        System.setProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY, String.valueOf(GpuBatchContextCache.MODE_ROBUST));
+        try {
+            assertGpuMatchesCpu(network, ctgs, 1e-12, lfp);
+            assertEquals(ctgs.size(), GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get());
+        } finally {
+            System.clearProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY);
+        }
+    }
+
     /** g1 - b1 == l12 / l12_BIS == b2 - g2, with converter buses b1h / b2h hung off b1 / b2 by short
      *  lines; hvdc12 (droop 1, P0 0) and hvdc12_BIS (droop 1, P0 1 MW) both run b1h -> b2h. */
     private static Network doubledHvdcCorridorNetwork() {

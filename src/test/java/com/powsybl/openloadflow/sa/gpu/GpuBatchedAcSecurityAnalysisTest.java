@@ -4875,6 +4875,48 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** A load lost at the SLACK bus, which has no P balance row: its scheduled P moves only what the distributed-slack
+     *  check reads. Here the slack b4 is also the remote control's pilot, so its reactive balance moves too. */
+    @Test
+    void deviceLoadLossAtSlackPilotMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        List<Contingency> ctgs = List.of(new Contingency("l4b", new com.powsybl.contingency.LoadContingency("l4b")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl4"));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(remotePilotInjectionsNetwork(), ctgs, 1e-12, lfp, true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
+    /** A load lost at a generator slack bus whose generator takes part in the distribution (IEEE 14, a load added at
+     *  B1): the slack keeps its retained share of a mismatch measured against its moved target. */
+    @Test
+    void deviceLoadLossAtParticipatingSlackMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getVoltageLevel("VL1").newLoad()
+                .setId("L1x")
+                .setBus("B1")
+                .setConnectableBus("B1")
+                .setP0(20)
+                .setQ0(10)
+                .add();
+        List<Contingency> ctgs = List.of(new Contingency("L1x", new com.powsybl.contingency.LoadContingency("L1x")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("VL1"));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp, true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** The robust single-matrix mode (6) takes OLF's MAX_VOLTAGE_CHANGE step like every other mode. Its per-scenario
      *  loop applied the full Newton step, so a scenario retried in that mode followed another trajectory and stopped
      *  at another point inside the tolerance. The limits are tight enough to clamp the first steps of every outage;

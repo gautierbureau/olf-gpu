@@ -42,7 +42,10 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                         /** The relocation group whose carrier hosts this bus's Q BALANCE (the bus is the pilot of a
                          *  remote voltage control, its own V row holding the voltage target), -1 = none; and how much
                          *  the outage moves that balance's target ({@code pilotQDelta}, pu: the lost reactive load). */
-                        int pilotQGroup, double pilotQDelta) {
+                        int pilotQGroup, double pilotQDelta,
+                        /** The bus is the SLACK: it has no P balance row, and {@code pStep} moves the slack's scheduled P,
+                         *  which only the distributed-slack check reads (the per-scenario slack shift). */
+                        boolean onSlack) {
 
     /** Where to write this bus's Q target: the relocated Q-balance row, else the BUS_V row. */
     public int qTargetRowOrV() {
@@ -73,7 +76,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                 loadQDelta, inactiveDqMember, pilotGroupSurvivorRlEntries,
                 rows.stream().mapToInt(Integer::intValue).toArray(), values.stream().mapToDouble(Double::doubleValue).toArray(),
                 pqRowMode, deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget, dqTargetQOvMember,
-                dqTargetQOvValue, qTargetRow, pilotQGroup, pilotQDelta);
+                dqTargetQOvValue, qTargetRow, pilotQGroup, pilotQDelta, onSlack);
     }
     // lostGenIds / lostFactorSum exist for the reactive-capability CURVE channel, which evaluates each
     // generator's curve at its OWN post-distribution active power, reconstructed from the bus's row

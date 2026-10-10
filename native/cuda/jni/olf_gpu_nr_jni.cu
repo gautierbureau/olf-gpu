@@ -10157,9 +10157,14 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         dRlVtOvVal.upload(rlVtOvVal, (size_t) nRlVtOv * sizeof(double));
     }
     DeviceBuf dDsAnchorShift, dDsSlackShift;
-    bool hasDsAnchor = (dsAnchorShift != nullptr && dsSlackShift != nullptr && ctx->nds > 0);
+    bool hasDsAnchor = (dsAnchorShift != nullptr && ctx->nds > 0);
     if (hasDsAnchor) {
         dDsAnchorShift.upload(dsAnchorShift, static_cast<size_t>(nS) * ctx->nds * sizeof(double));
+    }
+    // The slack's own target move, independent of the participants' anchors: a strategy pair's parent share,
+    // and also a contingency's load lost at the slack (a plain scenario, no anchor shift).
+    bool hasDsSlackShift = (dsSlackShift != nullptr && ctx->nds > 0);
+    if (hasDsSlackShift) {
         dDsSlackShift.upload(dsSlackShift, static_cast<size_t>(nS) * sizeof(double));
     }
 
@@ -12616,7 +12621,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dDsRetain.as<double>(),
                     hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvBaseDelta.as<double>(),
                     hasDsAnchor ? dDsAnchorShift.as<double>() : nullptr,
-                    hasDsAnchor ? dDsSlackShift.as<double>() : nullptr,
+                    hasDsSlackShift ? dDsSlackShift.as<double>() : nullptr,
                     ctx->dsMode, ctx->dsMode == 1 ? ctx->dDsMarginUp.as<double>() : nullptr,
                     ctx->dsMode == 1 ? ctx->dDsMarginDown.as<double>() : nullptr,
                     ctx->dsSlackMarginUp, ctx->dsSlackMarginDown,
@@ -12629,7 +12634,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr,
                     ctx->dDsFactor.as<double>(), ctx->dDsBaseTargetP.as<double>(),
                     hasDsAnchor ? dDsAnchorShift.as<double>() : nullptr,
-                    hasDsAnchor ? dDsSlackShift.as<double>() : nullptr,
+                    hasDsSlackShift ? dDsSlackShift.as<double>() : nullptr,
                     ctx->dDsMaxDelta.as<double>(), ctx->dDsMinDelta.as<double>(), ctx->dDsRetain.as<double>(),
                     ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
                     hasDsOverride ? dDsOvBus.as<int>() : nullptr, dDsOvFactorDelta.as<double>(),

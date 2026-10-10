@@ -187,7 +187,7 @@ final class GpuBatchInjectionOutages {
                 }
             }
             out.add(new GenOutage(-1, 0, -1, 0, false, false, -1, 0, 0, 0, 0, -1, 0, 0, false,
-                    java.util.Set.of(), 0, 0, 0, im, new int[0], rows, values, 0, -1, 0, -1, 0, -1, 0, -1, -1, 0));
+                    java.util.Set.of(), 0, 0, 0, im, new int[0], rows, values, 0, -1, 0, -1, 0, -1, 0, -1, -1, 0, false));
         }
         return out;
     }
@@ -300,7 +300,14 @@ final class GpuBatchInjectionOutages {
                                                  com.powsybl.openloadflow.ac.equations.vector.gpu.GpuDsParams dsParams, LfBus bus,
                                                  List<LfGenerator> lost, List<LoadLoss> lostLoads, int[][] busRows) {
         int busNum = bus.getNum();
-        if (es.getEquation(busNum, AcEquationType.BUS_TARGET_PHI).isPresent()) {     // slack/reference: P is free
+        // The slack (reference) bus solves without a P balance: OLF drops its BUS_TARGET_P, and its scheduled P is read
+        // only by the distributed-slack check (the slack's mismatch = its P minus that target). A LOAD lost there moves
+        // that target and nothing else on the P side, which the device carries per scenario in the slack shift its
+        // distributed-slack kernels already add to the slack target. A generator lost there changes the slack's own
+        // participation, and a slack-only distribution reports what it absorbed through that same accumulator: both
+        // stay on the CPU.
+        boolean slackBus = es.getEquation(busNum, AcEquationType.BUS_TARGET_PHI).isPresent();
+        if (slackBus && (!lost.isEmpty() || (gpuData.dsPhiRow().length == 0 && gpuData.dsSlackPhiRow() >= 0))) {
             return reject("SLACK_BUS", bus);
         }
         // DISTR_Q controller bus (remote/distributed VC): the qPct weights are BAKED into the
@@ -489,9 +496,9 @@ final class GpuBatchInjectionOutages {
         // 0, so the absolute override was a no-op and the lost injection stayed in the balance — and it
         // also made the dsPhiRow lookup below miss, dropping the anchor shift. network.xiidm's loads:
         // 4183 of 7494 wrong totals, worst 148 MW, 12640 of 13338 buses off by up to 1.03 kV.
-        int pRow = busRows[0][busNum];
+        int pRow = slackBus ? -1 : busRows[0][busNum];       // the slack's row is its angle reference
         int vRow = es.getVariableSet().getVariable(busNum, AcVariableType.BUS_V).getRow();
-        if (pRow < 0 || vRow < 0) {
+        if ((pRow < 0 && !slackBus) || vRow < 0) {
             return reject("NO_P_OR_V_ROW", bus);
         }
         // Is this bus a distributed-slack participant? Matters for BOTH shapes: lost generators
@@ -852,6 +859,6 @@ final class GpuBatchInjectionOutages {
                 lostLoadP - lostP, loadQDelta, inactiveDqMember, pilotSurvivorRlEntries,
                 dqTargetRows, dqTargetValues, deadRemoteMember ? 4 : 1,
                 deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget,
-                dqTargetQOvMember, dqTargetQOvValue, qTargetRow, pilotQGroup, pilotQDelta);
+                dqTargetQOvMember, dqTargetQOvValue, qTargetRow, pilotQGroup, pilotQDelta, slackBus);
     }
 }

@@ -620,6 +620,7 @@ final class GpuBatchChunkSolver {
                     List<Integer> dqTqOvKey = new ArrayList<>();     // slot*nDqMembers + member
                     List<Double> dqTqOvVal = new ArrayList<>();
                     java.util.Map<Integer, Double> pilotQDeltas = new java.util.LinkedHashMap<>();   // slot*nQr + group
+                    double[] outageSlackShift = null;    // per slot: the move of the slack's scheduled P by a load lost there
                     List<Integer> pfSlot = new ArrayList<>();
                     List<Integer> pfRow = new ArrayList<>();
                     List<Double> pfQTarget = new ArrayList<>();
@@ -1298,6 +1299,12 @@ final class GpuBatchChunkSolver {
                                     if (go.deactivatesDqMember()) {
                                         dqInactList.add(s);
                                         dqInactList.add(go.inactiveDqMember());
+                                    }
+                                    if (go.onSlack()) {
+                                        if (outageSlackShift == null) {
+                                            outageSlackShift = new double[chunkSize];
+                                        }
+                                        outageSlackShift[s] += go.pStep();
                                     }
                                     if (go.pilotQGroup() >= 0) {
                                         pilotQDeltas.merge(s * (gpuData.qrPtr().length - 1) + go.pilotQGroup(),
@@ -2007,6 +2014,14 @@ final class GpuBatchChunkSolver {
                     }
                     if (forcedTargetQ != null) {                 // where each slot's pre-distribution put the clamping gens
                         GpuAcNewtonSolver.setBatchForcedTargetQPre(handle, forcedTargetQ.preMoves(fqMovesBySlot));
+                    }
+                    if (outageSlackShift != null && hasDs) {     // on top of whatever the pre-distribution or the pair's
+                        if (dsSlackShift == null) {               // parent put there: both are slack-target moves
+                            dsSlackShift = new double[chunkSize];
+                        }
+                        for (int s = 0; s < chunkSize; s++) {
+                            dsSlackShift[s] += outageSlackShift[s];
+                        }
                     }
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,

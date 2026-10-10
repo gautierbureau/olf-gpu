@@ -316,7 +316,8 @@ public final class GpuBatchedSecurityAnalysisSolver {
         // In the fixed-iter benchmark mode (tol <= 0) islanding routes to the CPU path.
         boolean handleIslanding = tol > 0;
         List<GpuBatchContingencyValidator.Qualification> qualifications =
-                GpuBatchContingencyValidator.qualify(network, contingencies, elementMapper, handleIslanding);
+                GpuBatchContingencyValidator.qualify(network, contingencies, elementMapper, handleIslanding,
+                        config.slackRelocation());
         // Outaging a DISTR_RHO controller transformer reforms the ratio-distribution 1/count coefficients,
         // which the fixed batch pattern cannot represent — route those to the CPU (the DISTR_Q pass IS
         // batched, so DISTR_RHO is the only family that needs a contributor-outage rejection).
@@ -411,7 +412,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
                         GpuBatchHvdcAcEmulation.elementIndices(network, nElements), rowCriteria, rlCurves, forcedTargetQ,
                         plan.dqOvContribByIndex(), plan.dqOvWByIndex(),
                         plan.drOvContribByIndex(), plan.drOvCByIndex(), plan.islandedDsByIndex(),
-                        plan.islandedRlByIndex(), plan.islandedHvdcsByIndex(), plan.dqSubByIndex(),
+                        plan.islandedRlByIndex(), plan.islandedHvdcsByIndex(), plan.dqSubByIndex(), plan.slackRelocations(),
                         n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                         preDistributedByIndex, distributedByIndex, config.lsMode() == 2 ? GpuAcActivationExtractor.extractVarType(equationSystem, n) : null,
                         phases,
@@ -494,7 +495,7 @@ public final class GpuBatchedSecurityAnalysisSolver {
         List<Integer> qualifiedInputIndex = new ArrayList<>();
         if (!branchOnly.isEmpty()) {
             List<GpuBatchContingencyValidator.Qualification> quals =
-                    GpuBatchContingencyValidator.qualify(network, branchOnly, mapper, false);
+                    GpuBatchContingencyValidator.qualify(network, branchOnly, mapper, false, null);
             for (int j = 0; j < quals.size(); j++) {
                 if (quals.get(j).qualified()) {
                     engineIndexOfInput[branchOnlyInputIndex.get(j)] = qualified.size();

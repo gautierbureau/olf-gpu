@@ -442,6 +442,10 @@ public final class GpuAcNewtonSolver {
      *  Nulls clear. */
     public static native void setBatchPilotQDeltas(long handle, int[] keys, double[] deltas);
 
+    /** Per slot, the row the distributed-slack kernels read the slack's balance on: the angle row of the bus OLF
+     *  re-picks as the slack when a contingency isolates the base one, -1 = the base slack row. Null clears. */
+    public static native void setBatchDsSlackRows(long handle, int[] rows);
+
     /** Pilot-row flip entries: one per (scenario, pilot) where the outage made the pilot stop being one
      *  of its OWN controllers. While the survivors hold its voltage the pilot keeps BUS_TARGET_V and its
      *  acquired reactive balance rides one of THEIR rows; when every survivor pins, those rows take their

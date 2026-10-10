@@ -1151,7 +1151,19 @@ final class GpuBatchQualification {
                          *  not a target), so masking the element is the whole of it. */
                         List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
                         /** Per scenario, {dq member, subgroup label} pairs of a split group (tasks #71), else null. */
-                        int[][] dqSubByIndex) {
+                        int[][] dqSubByIndex,
+                        /** Per scenario, the slack OLF re-picks when the outage isolates the base one. */
+                        SlackRelocations slackRelocations) {
+    }
+
+    /** Per contingency index: the angle row of the bus OLF makes the slack when the outage isolates the base one
+     *  (-1 = the base slack stays), which becomes the reference identity, and how far that bus's anchor target sits
+     *  from the base slack's (the distributed-slack check reads the new slack's balance against it). */
+    record SlackRelocations(int[] rowByIndex, double[] shiftByIndex) {
+
+        int row(int index) {
+            return rowByIndex[index];
+        }
     }
 
     /**
@@ -1198,6 +1210,9 @@ final class GpuBatchQualification {
         // the bus's own BUS_PHI/BUS_V columns. One O(buses+branches) pass for the whole plan.
         int[][] busRows = null;
         int[][] dqSubByIndex = new int[contingencies.size()][];
+        int[] relocatedSlackRow = new int[contingencies.size()];
+        java.util.Arrays.fill(relocatedSlackRow, -1);
+        double[] relocatedSlackShift = new double[contingencies.size()];
         int islandingCount = 0;
         for (int i = 0; i < qualifications.size(); i++) {
             GpuBatchContingencyValidator.Qualification q = qualifications.get(i);
@@ -1212,6 +1227,37 @@ final class GpuBatchQualification {
                 continue;
             }
             BatchContingency c = contingencies.get(i);
+            LfBus newSlack = q.relocatedSlack();
+            if (newSlack != null) {
+                // OLF moved the slack to newSlack (the base one is in the island): the new slack's P balance leaves
+                // the system and its angle becomes the reference. The device follows when that balance sits on the
+                // bus's own angle row (not relocated onto a coupler) and neither slack takes part in the
+                // distribution (the retained share would move with it): the angle row turns into the reference
+                // identity, and the distributed-slack check reads that row's injection against the new slack's
+                // target.
+                if (busRows == null) {
+                    busRows = com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcDataExtractor
+                            .busPowerRows(newSlack.getNetwork(), es);
+                }
+                var phiVar = es.getVariableSet().getVariable(newSlack.getNum(), AcVariableType.BUS_PHI);
+                int phiRow = phiVar == null ? -1 : phiVar.getRow();
+                LfBus baseSlack = newSlack.getNetwork().getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
+                boolean ds = gpuData.dsSlackPhiRow() >= 0;
+                boolean participates = ds && (dsParams.busFactor(baseSlack) != 0 || dsParams.busFactor(newSlack) != 0);
+                boolean slackOnly = ds && gpuData.dsPhiRow().length == 0;
+                // the slack's balance is read from the injection buffer, which carries no AC-emulation HVDC term
+                boolean emulatedHvdc = newSlack.getHvdcs().stream().anyMatch(com.powsybl.openloadflow.network.LfHvdc::isAcEmulation);
+                boolean balanceActive = es.getEquation(newSlack.getNum(), AcEquationType.BUS_TARGET_P)
+                        .map(com.powsybl.openloadflow.equations.Equation::isActive).orElse(false);
+                if (phiRow < 0 || !balanceActive || busRows[0][newSlack.getNum()] != phiRow
+                        || participates || slackOnly || emulatedHvdc) {
+                    refuse(c, "PLAN:SLACK_RELOCATION_SHAPE");
+                    continue;
+                }
+                relocatedSlackRow[i] = phiRow;
+                relocatedSlackShift[i] = ds ? newSlack.getTargetP() - gpuData.dsSlackTargetP() : 0;
+                com.powsybl.openloadflow.sa.gpu.GpuBatchScopeCensus.record("PLAN:SLACK_RELOCATED");
+            }
             java.util.Set<Integer> outagedZiNums = c.outagedZiBranches().stream()
                     .map(LfBranch::getNum).collect(java.util.stream.Collectors.toSet());
             // SIDE-OPEN scope (conservative): a branch that carries a VARIABLE (BRANCH_RHO1 /
@@ -1573,6 +1619,13 @@ final class GpuBatchQualification {
                                 + " lostGens=" + goneForKeys.stream().map(g -> g.getId()).toList());
                     }
                 }
+                if (relocatedSlackRow[i] >= 0 && gos != null) {
+                    int reference = relocatedSlackRow[i];
+                    if (java.util.Arrays.stream(gos).anyMatch(go -> go.pRow() == reference)) {
+                        refuse(c, "PLAN:SLACK_RELOCATION_SHAPE");   // an injection lost AT the new slack: unmeasured
+                        continue;
+                    }
+                }
                 genOutagesByIndex[i] = gos;
                 activePowerLossByIndex[i] = scheduledActivePowerLoss(c, q.islandedBuses());
                 traceScheduledLoss(c, q.islandedBuses(), activePowerLossByIndex[i]);
@@ -1822,6 +1875,7 @@ final class GpuBatchQualification {
         return new ScenarioPlan(batchedIndices, frozenRowsByIndex, islandedNumsByIndex,
                 frozenTargetsByIndex, genOutagesByIndex, islandingCount, activePowerLossByIndex,
                 dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
-                islandedRlByIndex, islandedHvdcsByIndex, dqSubByIndex);
+                islandedRlByIndex, islandedHvdcsByIndex, dqSubByIndex,
+                new SlackRelocations(relocatedSlackRow, relocatedSlackShift));
     }
 }

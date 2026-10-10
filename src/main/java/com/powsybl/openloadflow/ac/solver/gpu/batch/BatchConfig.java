@@ -57,7 +57,25 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
                           double genVcMinNominalV,
                           boolean rlRobustMode, double minRealisticVoltage, double maxRealisticVoltage,
                           double minNominalVoltageRealisticVoltageCheck, int realisticFixingLoop,
-                          boolean robustSolveMode) {
+                          boolean robustSolveMode, SlackRelocation slackRelocation) {
+
+    /** How OLF re-picks the slack when a contingency isolates it (PropagatedContingency: every bus outside the
+     *  largest connected component becomes ineligible, LfSynchronousNetworkImpl re-runs the RUN's slack-bus
+     *  selector over the rest). The selector is the run's own instance (the network wrapper OLF hands the
+     *  network), so the device's pick is OLF's. Null when the device cannot follow a relocation: more than one
+     *  slack bus, or a reference bus that is not the first slack. */
+    public record SlackRelocation(com.powsybl.openloadflow.network.SlackBusSelector selector, int maxSlackBusCount) {
+
+        /** The bus OLF makes the slack once only {@code eligible} may hold it, or null when the selector does not
+         *  pick exactly one (OLF then falls back to its own default selector, which is not followed here). */
+        public com.powsybl.openloadflow.network.LfBus select(com.powsybl.openloadflow.network.LfNetwork network,
+                                                             java.util.Set<com.powsybl.openloadflow.network.LfBus> eligible) {
+            java.util.List<com.powsybl.openloadflow.network.LfBus> selectable = network.getSynchronousNetworks().getFirst()
+                    .getBuses().stream().filter(eligible::contains).toList();
+            java.util.List<com.powsybl.openloadflow.network.LfBus> picked = selector.select(selectable, maxSlackBusCount).getBuses();
+            return picked.size() == 1 ? picked.get(0) : null;
+        }
+    }
 
     /** PER_EQUATION_TYPE stopping thresholds (OLF PerEquationTypeStoppingCriteria ctor order;
      *  p/q in MW/MVAr, the rest pu/rad); null = UNIFORM_CRITERIA. */
@@ -73,7 +91,7 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
             true, com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MIN_REALISTIC_VOLTAGE,
             com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MAX_REALISTIC_VOLTAGE,
             com.powsybl.openloadflow.ac.AcLoadFlowParameters.DEFAULT_MIN_NOMINAL_VOLTAGE_REALISTIC_VOLTAGE_CHECK, -1,
-            false);
+            false, null);
 
     /**
      * This config with the ROBUST single-matrix solve (mode 6) selected, for the SECOND device pass over
@@ -93,7 +111,7 @@ public record BatchConfig(int lsMode, double maxDv, double maxDphi, boolean tran
                 hvdcLimits, secondaryVoltageControl, minPlausibleTargetV, maxPlausibleTargetV, voltageMonitoring,
                 continuousPhaseControl, contingencyLossPreDistribution, rlCurveExtrapolate, forceTargetQ, perEqCriteria,
                 genVcMinNominalV, rlRobustMode, minRealisticVoltage, maxRealisticVoltage,
-                minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, true);
+                minNominalVoltageRealisticVoltageCheck, realisticFixingLoop, true, slackRelocation);
     }
 
     int dsRejectResidualFlag() {

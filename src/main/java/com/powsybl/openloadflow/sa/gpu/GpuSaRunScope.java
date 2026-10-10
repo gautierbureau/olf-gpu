@@ -347,9 +347,21 @@ final class GpuSaRunScope {
                 acParameters.getMinRealisticVoltage(), acParameters.getMaxRealisticVoltage(),
                 acParameters.getMinNominalVoltageRealisticVoltageCheck(),
                 com.powsybl.openloadflow.ac.solver.gpu.batch.GpuBatchOuterLoopTables.realisticFixingLoop(acParameters),
-                false);                                      // the robust retry pass derives its own config
+                false,                                       // the robust retry pass derives its own config
+                slackRelocation(acParameters));
         return new Scope(batchDisabled, unsupportedOuterLoops, distributedSlack, reactiveLimits,
                 slackDistTol, reactiveLimitTol, convEpsPerEq, batchConfig);
+    }
+
+    /** The run's slack re-pick for contingencies that isolate the slack, when the device can follow it: one slack
+     *  bus, and the reference bus being that slack (what the security analysis configures). */
+    private static BatchConfig.SlackRelocation slackRelocation(AcLoadFlowParameters acParameters) {
+        var np = acParameters.getNetworkParameters();
+        if (np.getMaxSlackBusCount() != 1
+                || !(np.getReferenceBusSelector() instanceof com.powsybl.openloadflow.network.ReferenceBusFirstSlackSelector)) {
+            return null;
+        }
+        return new BatchConfig.SlackRelocation(np.getSlackBusSelector(), 1);
     }
 
     /** The outer-loop mode for this run, from the {@code olf.gpu.sa.outerLoopMode} system property

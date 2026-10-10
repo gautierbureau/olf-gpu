@@ -50,7 +50,7 @@ class GpuBatchContingencyValidatorTest {
         LfNetwork network = eurostag();
         GpuBatchElementMapper mapper = new GpuBatchElementMapper(network);
         List<Qualification> q = GpuBatchContingencyValidator.qualify(network,
-                List.of(contingency(network, "NHV1_NHV2_1")), mapper, false);
+                List.of(contingency(network, "NHV1_NHV2_1")), mapper, false, null);
 
         assertEquals(1, q.size());
         assertTrue(q.get(0).qualified(), "removing one of two parallel lines keeps the network connected");
@@ -63,7 +63,7 @@ class GpuBatchContingencyValidatorTest {
         // NGEN_NHV1 is the only path to the generator bus NGEN — a bridge. With islanding handling OFF
         // (fixed-iter mode) it is rejected to the CPU path.
         List<Qualification> q = GpuBatchContingencyValidator.qualify(network,
-                List.of(contingency(network, "NGEN_NHV1")), mapper, false);
+                List.of(contingency(network, "NGEN_NHV1")), mapper, false, null);
 
         assertEquals(1, q.size());
         assertFalse(q.get(0).qualified(), "removing a bridge transformer islands a bus");
@@ -79,7 +79,7 @@ class GpuBatchContingencyValidatorTest {
                 contingency(network, "NGEN_NHV1"),       // bridge → reject
                 contingency(network, "NHV1_NHV2_2"),     // meshed → qualify
                 contingency(network, "NHV2_NLOAD")),     // bridge → reject
-                mapper, false);
+                mapper, false, null);
 
         assertEquals(4, q.size());
         assertTrue(q.get(0).qualified());
@@ -92,7 +92,7 @@ class GpuBatchContingencyValidatorTest {
         // The connectivity must be fully restored after qualification (temporary changes undone):
         // re-qualifying yields the same verdicts.
         List<Qualification> again = GpuBatchContingencyValidator.qualify(network,
-                List.of(contingency(network, "NHV1_NHV2_1")), mapper, false);
+                List.of(contingency(network, "NHV1_NHV2_1")), mapper, false, null);
         assertTrue(again.get(0).qualified(), "connectivity must be restored after each qualification");
     }
 
@@ -104,7 +104,7 @@ class GpuBatchContingencyValidatorTest {
         // (full-loadflow mode) the outage QUALIFIES and carries its islanded bus(es), to be frozen
         // per scenario rather than routed to the CPU.
         List<Qualification> q = GpuBatchContingencyValidator.qualify(network,
-                List.of(contingency(network, "NHV2_NLOAD")), mapper, true);
+                List.of(contingency(network, "NHV2_NLOAD")), mapper, true, null);
 
         assertEquals(1, q.size());
         assertTrue(q.get(0).qualified(), "with islanding handling on, a fragmenting outage is batched on-GPU");

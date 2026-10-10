@@ -145,7 +145,7 @@ class GpuHybridBatchValidationTest {
         // it, an outage that islands buses leaves the slack unbalanceable and OLF's distributed-slack loop
         // oscillates forever (measured: LINE-26-4231, 4.72 pu stranded, dragged the loop to the 40-round cap).
         List<GpuBatchContingencyValidator.Qualification> quals =
-                GpuBatchContingencyValidator.qualify(network, allCtgs, mapper, false);
+                GpuBatchContingencyValidator.qualify(network, allCtgs, mapper, false, null);
         List<BatchContingency> ctgs = new ArrayList<>();
         int nRoutedCpu = 0;
         for (GpuBatchContingencyValidator.Qualification q : quals) {

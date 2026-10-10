@@ -4949,6 +4949,59 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** IEEE 14 with a 135 kV HUB H: one line to B1 and six to dead-end buses (two carrying 5 MW), so H is the most
+     *  meshed bus and OLF's slack (the importer's slack terminal removed). Losing the line to B1 isolates the hub's
+     *  star. */
+    private static Network isolatedSlackHubNetwork() {
+        Network network = IeeeCdfNetworkFactory.create14();
+        network.getVoltageLevels().forEach(vl -> vl.removeExtension(com.powsybl.iidm.network.extensions.SlackTerminal.class));
+        com.powsybl.iidm.network.VoltageLevel vl1 = network.getVoltageLevel("VL1");
+        com.powsybl.iidm.network.VoltageLevel vlh = vl1.getSubstation().orElseThrow().newVoltageLevel()
+                .setId("VLH")
+                .setNominalV(vl1.getNominalV())
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER)
+                .add();
+        vlh.getBusBreakerView().newBus().setId("H").add();
+        network.newLine()
+                .setId("lH")
+                .setVoltageLevel1("VL1").setBus1("B1").setConnectableBus1("B1")
+                .setVoltageLevel2("VLH").setBus2("H").setConnectableBus2("H")
+                .setR(0.5).setX(5)
+                .add();
+        for (int k = 1; k <= 6; k++) {
+            vlh.getBusBreakerView().newBus().setId("L" + k).add();
+            network.newLine()
+                    .setId("lL" + k)
+                    .setVoltageLevel1("VLH").setBus1("H").setConnectableBus1("H")
+                    .setVoltageLevel2("VLH").setBus2("L" + k).setConnectableBus2("L" + k)
+                    .setR(0.5).setX(5)
+                    .add();
+        }
+        for (int k = 1; k <= 2; k++) {
+            vlh.newLoad().setId("dL" + k).setBus("L" + k).setConnectableBus("L" + k).setP0(5).setQ0(2).add();
+        }
+        return network;
+    }
+
+    /** An outage that isolates the slack: OLF re-picks one in the main component with the run's own selector, its
+     *  angle becomes the reference and the distributed slack reads its balance. Batched beside a plain outage. */
+    @Test
+    void deviceIsolatedSlackRelocatesLikeOlf() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = isolatedSlackHubNetwork();
+        String plain = network.getLineStream().map(l -> l.getId()).filter(id -> !id.startsWith("l")).findFirst().orElseThrow();
+        List<Contingency> ctgs = List.of(
+                new Contingency("lH", new BranchContingency("lH")),
+                new Contingency(plain, new BranchContingency(plain)));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-12, new com.powsybl.loadflow.LoadFlowParameters(), true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertTrue(GpuBatchScopeCensus.snapshot().containsKey("PLAN:SLACK_RELOCATED"),
+                "the outage must take the relocation path: census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** The robust single-matrix mode (6) takes OLF's MAX_VOLTAGE_CHANGE step like every other mode. Its per-scenario
      *  loop applied the full Newton step, so a scenario retried in that mode followed another trajectory and stopped
      *  at another point inside the tolerance. The limits are tight enough to clamp the first steps of every outage;

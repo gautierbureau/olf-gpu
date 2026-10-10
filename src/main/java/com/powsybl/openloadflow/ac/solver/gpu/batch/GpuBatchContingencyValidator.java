@@ -61,14 +61,12 @@ public final class GpuBatchContingencyValidator {
      * sub-block stays non-singular and the main component solves correctly.
      */
     public record Qualification(BatchContingency contingency,
-                                boolean qualified, Disqualification reason, List<LfBus> islandedBuses) {
+                                boolean qualified, Disqualification reason, List<LfBus> islandedBuses,
+                                /** the bus OLF re-picks as the slack because the outage isolates the base one, else null */
+                                LfBus relocatedSlack) {
 
         static Qualification ok(BatchContingency c) {
-            return new Qualification(c, true, null, List.of());
-        }
-
-        static Qualification okIslanding(BatchContingency c, List<LfBus> islandedBuses) {
-            return new Qualification(c, true, null, List.copyOf(islandedBuses));
+            return new Qualification(c, true, null, List.of(), null);
         }
 
         static Qualification rejected(BatchContingency c, Disqualification reason) {
@@ -81,7 +79,7 @@ public final class GpuBatchContingencyValidator {
                 System.err.println("QUALIFY_TRACE rejected " + c.contingencyId() + " reason=" + reason
                         + (detail.isEmpty() ? "" : " (" + detail + ")"));
             }
-            return new Qualification(c, false, reason, List.of());
+            return new Qualification(c, false, reason, List.of(), null);
         }
     }
 
@@ -97,12 +95,14 @@ public final class GpuBatchContingencyValidator {
      * @param handleIslanding  when true (full-loadflow mode), a fragmenting outage is QUALIFIED and
      *                         carries its islanded-bus set (frozen per scenario); when false
      *                         (fixed-iter benchmark mode) it is rejected to CPU
+     * @param relocation       how OLF re-picks a slack the outage isolates (null: such an outage goes to the CPU)
      * @return one {@link Qualification} per input contingency, in order
      */
     public static List<Qualification> qualify(LfNetwork network,
                                               List<BatchContingency> contingencies,
                                               GpuBatchElementMapper elementMapper,
-                                              boolean handleIslanding) {
+                                              boolean handleIslanding,
+                                              BatchConfig.SlackRelocation relocation) {
         Objects.requireNonNull(network);
         Objects.requireNonNull(contingencies);
         Objects.requireNonNull(elementMapper);
@@ -112,7 +112,7 @@ public final class GpuBatchContingencyValidator {
                 .flatMap(sn -> sn.getSlackBuses().stream())
                 .collect(Collectors.toSet());
         return contingencies.stream()
-                .map(c -> qualifyOne(network, connectivity, slackBuses, c, elementMapper, handleIslanding))
+                .map(c -> qualifyOne(network, connectivity, slackBuses, c, elementMapper, handleIslanding, relocation))
                 .toList();
     }
 
@@ -120,7 +120,8 @@ public final class GpuBatchContingencyValidator {
                                            Set<LfBus> slackBuses,
                                            BatchContingency contingency,
                                            GpuBatchElementMapper elementMapper,
-                                           boolean handleIslanding) {
+                                           boolean handleIslanding,
+                                           BatchConfig.SlackRelocation relocation) {
         List<LfBranch> branches = contingency.outagedBranches();
 
         // The GPU disabled mask can only mask branches the element pack contains — the SIDE-OPENED
@@ -163,31 +164,40 @@ public final class GpuBatchContingencyValidator {
             // When the outage isolates the slack itself, CPU does NOT keep the slack's component as the
             // main one: PropagatedContingency RELOCATES the slack ("leads to an isolated slack bus:
             // relocate slack bus inside main component"), excluding every bus outside the largest
-            // connected component from slack eligibility and re-picking a slack there. The batched pack
-            // anchors its targets and the distributed-slack participation on the BASE slack row, so a
-            // relocated slack is not representable as a per-scenario mask — route it to CPU. Detecting it
-            // here is what stops the dead-stub case from being silently mis-solved: anchoring on the
-            // isolated slack reports the LIVE side as removed (measured: {BBS2, BBS3}), which would
+            // connected component from slack eligibility and re-picking a slack there with the run's own
+            // selector. The device follows that pick (BatchConfig.SlackRelocation): the new slack's angle row
+            // becomes the reference and the distributed-slack check reads its balance. Anchoring on the
+            // isolated slack instead reports the LIVE side as removed (measured: {BBS2, BBS3}), which would
             // freeze the whole energized network instead of the stub.
             LfBus slack = network.getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
+            LfBus anchor = slack;
+            LfBus relocatedSlack = null;
             // Component 0 IS the largest one (GraphConnectivity numbering, and what getLargestConnectedComponent
             // returns), and asking for the slack's number looks only through the small components split off by
             // the outage, where getLargestConnectedComponent() copies every bus of the network into a new set.
             if (connectivity.getComponentNumber(slack) != 0) {
-                // Isolating the slack necessarily FRAGMENTS the network, so in fixed-iter mode (islanding
-                // handling off) that is the reason to report — it is the mode's primary rejection and what
-                // its contract documents. Only when islanding IS handled does the distinction matter: there
-                // a fragmenting outage would normally qualify with frozen islanded buses, and it is
-                // specifically the relocated slack that disqualifies it.
-                Disqualification reason = handleIslanding
-                        ? Disqualification.ISLANDS_SLACK : Disqualification.FRAGMENTS_NETWORK;
-                LOGGER.debug("Contingency {} rejected ({}): outage isolates the slack bus (CPU relocates the slack)",
-                        contingency.contingencyId(), reason);
-                return Qualification.rejected(contingency, reason);
+                // OLF relocates only when the slack's component is SMALLER than the largest one
+                // (PropagatedContingency.isSlackBusIsolated: a tie keeps the slack's component as the main one,
+                // a shape left to the CPU here).
+                boolean isolated = connectivity.getLargestConnectedComponent().size()
+                        != connectivity.getConnectedComponent(slack).size();
+                relocatedSlack = isolated && handleIslanding && relocation != null
+                        ? relocation.select(network, connectivity.getLargestConnectedComponent()) : null;
+                if (relocatedSlack == null) {
+                    // Isolating the slack necessarily FRAGMENTS the network, so in fixed-iter mode (islanding
+                    // handling off) that is the reason to report — it is the mode's primary rejection and what
+                    // its contract documents.
+                    Disqualification reason = handleIslanding
+                            ? Disqualification.ISLANDS_SLACK : Disqualification.FRAGMENTS_NETWORK;
+                    LOGGER.debug("Contingency {} rejected ({}): outage isolates the slack bus (CPU relocates the slack)",
+                            contingency.contingencyId(), reason);
+                    return Qualification.rejected(contingency, reason);
+                }
+                anchor = relocatedSlack;
             }
             // The main component must be ANCHORED on the slack before querying, exactly as
             // PropagatedContingency does (setMainComponentVertex + getVerticesRemovedFromMainComponent).
-            connectivity.setMainComponentVertex(slack);
+            connectivity.setMainComponentVertex(anchor);
             Set<LfBus> islanded = connectivity.getVerticesRemovedFromMainComponent();
             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
                 // What this pass CUT and what it FOUND. The CPU derives its lost buses from the same
@@ -217,14 +227,14 @@ public final class GpuBatchContingencyValidator {
             // The main component must keep a slack/reference: if the outage islands the slack itself,
             // the remaining system has no on-GPU reference — route that one to the CPU path.
             for (LfBus b : islanded) {
-                if (slackBuses.contains(b)) {
+                if (slackBuses.contains(b) && relocatedSlack == null) {
                     LOGGER.debug("Contingency {} rejected: outage islands the slack bus", contingency.contingencyId());
                     return Qualification.rejected(contingency, Disqualification.ISLANDS_SLACK);
                 }
             }
             LOGGER.debug("Contingency {} qualified with {} islanded bus(es) (frozen per scenario)",
                     contingency.contingencyId(), islanded.size());
-            return Qualification.okIslanding(contingency, List.copyOf(islanded));
+            return new Qualification(contingency, true, null, List.copyOf(islanded), relocatedSlack);
         } finally {
             connectivity.undoTemporaryChanges();
         }

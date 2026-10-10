@@ -6751,11 +6751,12 @@ static int dsDebugTraceSlot() {
     return (e != nullptr ? std::atoi(e) : 0) + 1;
 }
 
-__global__ void slackOnlyDsCheck(int nScenarios, int n, int slackPhiRow, double slackTargetP,
+__global__ void slackOnlyDsCheck(int nScenarios, int n, int slackPhiRowBase, const int* slackRowOv, double slackTargetP,
                                  double slackDistTol, const double* qBuf, const char* rlActive,
                                  double* absorbed, char* switched) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios || !rlActive[s]) return;
+    int slackPhiRow = slackRowOv != nullptr && slackRowOv[s] >= 0 ? slackRowOv[s] : slackPhiRowBase;   // relocated slack
     double m = qBuf[(size_t) s * n + slackPhiRow] - slackTargetP - absorbed[s];
     if (fabs(m) > slackDistTol) {
         absorbed[s] += m;
@@ -6776,7 +6777,7 @@ __host__ __device__ inline int dsRowOf(const int* dsPhiRow, const int* dsRowOv, 
     return dsPhiRow[i];
 }
 
-__global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiRow, double slackTargetP,
+__global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiRowBase, const int* slackRowOv, double slackTargetP,
                                    double oneMinusFactorSum, const int* dsPhiRow, const int* dsRowOv,
                                    const double* dsBaseTargetP,
                                    const double* target, const double* qBuf, const char* rlActive,
@@ -6789,6 +6790,7 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     if (!rlActive[s]) return;
+    int slackPhiRow = slackRowOv != nullptr && slackRowOv[s] >= 0 ? slackRowOv[s] : slackPhiRowBase;   // relocated slack
     double absorbed = 0.0;
     double fsActive = 0.0;                                   // Σ f over the participants still in the main component
     int ov = dsOvBus != nullptr ? dsOvBus[s] : -1;
@@ -6855,7 +6857,7 @@ __global__ void computeSlackRetain(int nScenarios, int n, int nds, int slackPhiR
 // redistributed only AFTER the next re-solve) would drift — the loss change between re-solves converges to a
 // different in-tolerance point than OLF.
 __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slackDistTol, double residueEps,
-                                              int slackPhiRow, double slackTargetP, const int* dsPhiRow, const int* dsRowOv,
+                                              int slackPhiRowBase, const int* slackRowOv, double slackTargetP, const int* dsPhiRow, const int* dsRowOv,
                                               const double* dsFactor, const double* dsBaseTargetP, const double* dsAnchorShift, const double* dsSlackShift,
                                               const double* dsMaxDelta, const double* dsMinDelta, const double* dsRetain,
                                               const double* qBuf, const char* rlActive,
@@ -6874,6 +6876,7 @@ __global__ void distributeSlackBatch(int nds, int nScenarios, int n, double slac
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= nScenarios) return;
     if (!rlActive[s]) return;
+    int slackPhiRow = slackRowOv != nullptr && slackRowOv[s] >= 0 ? slackRowOv[s] : slackPhiRowBase;   // relocated slack
     // The participating buses share the mismatch in EXCESS of the slack's retained share (rem); only distribute
     // past the slackBusPMaxMismatch outer gate, exactly like OLF's DistributedSlackOuterLoop.check.
     double slackTgt = slackTargetP + (dsSlackShift != nullptr ? dsSlackShift[s] : 0.0);
@@ -7916,6 +7919,8 @@ struct BatchSolverContext {
     int nDqTqOv = 0;                                       // per-scenario member targetQ overrides
     DeviceBuf dDqTqOvKey;
     DeviceBuf dDqTqOvVal;
+    int hasDsSlackRowOv = 0;                               // per-slot slack row (a relocated slack), device rows
+    DeviceBuf dDsSlackRowOv;                               // -1 = the base slack row
     int nQrPqDelta = 0;                                    // per-scenario moves of a pilot's captured Q target
     DeviceBuf dQrPqDeltaKey;                               // slot * nQr + group
     DeviceBuf dQrPqDeltaVal;
@@ -12618,14 +12623,16 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         }
     } else if (inDsPhase) {                                // distributed-slack outer loop: spread the slack mismatch
         if (ctx->dsSlackOnly) {
-            slackOnlyDsCheck<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->dsSlackPhiRow, ctx->dsSlackTargetP,
+            slackOnlyDsCheck<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->dsSlackPhiRow,
+                    ctx->hasDsSlackRowOv ? ctx->dDsSlackRowOv.as<int>() : nullptr, ctx->dsSlackTargetP,
                     SLACK_DIST_TOL, ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
                     ctx->dDsSlackAbsorbed.as<double>(), ctx->dRlSwitched.as<char>());
         }
         if (ctx->nds > 0) {
             // Recompute the slack's retained share from the CURRENT total imbalance every pass (NOT frozen at
             // pass 0) so a participating slack tracks the loss change during redistribution.
-            computeSlackRetain<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->nds, ctx->dsSlackPhiRow, ctx->dsSlackTargetP,
+            computeSlackRetain<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, ctx->nds, ctx->dsSlackPhiRow,
+                    ctx->hasDsSlackRowOv ? ctx->dDsSlackRowOv.as<int>() : nullptr, ctx->dsSlackTargetP,
                     1.0 - ctx->dsFactorSum, ctx->dDsPhiRow.as<int>(),
                     ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr, ctx->dDsBaseTargetP.as<double>(),
                     ctx->dTarget.as<double>(), ctx->dQbuf.as<double>(), ctx->dRlActive.as<char>(),
@@ -12641,7 +12648,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             if (!ctx->dDsResidual.p) ctx->dDsResidual.alloc(nS * sizeof(char));
             CUDA_CHECK(cudaMemsetAsync(ctx->dDsResidual.p, 0, nS * sizeof(char), ctx->stream));
             distributeSlackBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(ctx->nds, nS, n, SLACK_DIST_TOL, P_RESIDUE_EPS,
-                    ctx->dsSlackPhiRow, ctx->dsSlackTargetP, ctx->dDsPhiRow.as<int>(),
+                    ctx->dsSlackPhiRow, ctx->hasDsSlackRowOv ? ctx->dDsSlackRowOv.as<int>() : nullptr, ctx->dsSlackTargetP, ctx->dDsPhiRow.as<int>(),
                     ctx->nDsRowOv > 0 ? ctx->dDsRowOv.as<int>() : nullptr,
                     ctx->dDsFactor.as<double>(), ctx->dDsBaseTargetP.as<double>(),
                     hasDsAnchor ? dDsAnchorShift.as<double>() : nullptr,
@@ -15927,6 +15934,29 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->nQrPqDelta = ne;
     env->ReleaseIntArrayElements(jKeys, keys, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jVals, vals, JNI_ABORT);
+}
+
+// Per slot, the row the distributed-slack kernels read the slack on (host row, -1 = the base slack row): a
+// contingency that isolates the base slack makes OLF re-pick one, whose angle row becomes the reference. Null clears.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchDsSlackRows(
+        JNIEnv* env, jclass, jlong handle, jintArray jRows) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jRows == nullptr || env->GetArrayLength(jRows) == 0) {
+        ctx->hasDsSlackRowOv = 0;
+        return;
+    }
+    int ne = env->GetArrayLength(jRows);
+    std::vector<int> rows(ne);
+    env->GetIntArrayRegion(jRows, 0, ne, rows.data());
+    for (int& r : rows) {
+        r = r >= 0 ? ctx->st->rowMap[r] : -1;
+    }
+    ctx->dDsSlackRowOv.upload(rows.data(), static_cast<size_t>(ne) * sizeof(int));
+    ctx->hasDsSlackRowOv = 1;
 }
 
 // Pilot-row flip entries (see pilotRowAllPinnedBatch): one per (scenario, pilot) where the outage

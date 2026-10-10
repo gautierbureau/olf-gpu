@@ -88,6 +88,7 @@ final class GpuBatchChunkSolver {
                                                int[][] islandedDsByIndex, int[][] islandedRlByIndex,
                                                List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
                                                int[][] dqSubByIndex,
+                                               GpuBatchQualification.SlackRelocations slackRelocations,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, double[] preDistributedByIndex,
@@ -109,7 +110,7 @@ final class GpuBatchChunkSolver {
                         baseTargets, baseRowMode, frozenRowsByIndex, frozenTargetsByIndex, genOutagesByIndex,
                         activePowerLossByIndex, hvdcElemIndex, rowCriteria, rlCurves, forcedTargetQ,
                         dqOvContribByIndex, dqOvWByIndex, drOvContribByIndex, drOvCByIndex, islandedDsByIndex,
-                        islandedRlByIndex, islandedHvdcsByIndex, dqSubByIndex,
+                        islandedRlByIndex, islandedHvdcsByIndex, dqSubByIndex, slackRelocations,
                         n, nElements, parameters, tol, reactiveLimitTol, slackDistTol, convEpsPerEq, resultsByIndex,
                         preDistributedByIndex, distributedByIndex, varType, phases, hvdcControllers, config);
                 return;
@@ -300,6 +301,7 @@ final class GpuBatchChunkSolver {
                                                int[][] islandedDsByIndex, int[][] islandedRlByIndex,
                                                List<com.powsybl.openloadflow.network.LfHvdc>[] islandedHvdcsByIndex,
                                                int[][] dqSubByIndex,
+                                               GpuBatchQualification.SlackRelocations slackRelocations,
                                                int n, int nElements, NewtonRaphsonParameters parameters,
                                                double tol, double reactiveLimitTol, double slackDistTol,
                                                double convEpsPerEq, double[][] resultsByIndex, double[] preDistributedByIndex,
@@ -621,6 +623,7 @@ final class GpuBatchChunkSolver {
                     List<Double> dqTqOvVal = new ArrayList<>();
                     java.util.Map<Integer, Double> pilotQDeltas = new java.util.LinkedHashMap<>();   // slot*nQr + group
                     double[] outageSlackShift = null;    // per slot: the move of the slack's scheduled P by a load lost there
+                    int[] dsSlackRows = null;            // per slot: the row the distributed slack reads the slack on (-1 = base)
                     List<Integer> pfSlot = new ArrayList<>();
                     List<Integer> pfRow = new ArrayList<>();
                     List<Double> pfQTarget = new ArrayList<>();
@@ -904,6 +907,25 @@ final class GpuBatchChunkSolver {
                                     }
                                 }
                                 rowModePerScenario[s] = row;
+                            }
+                            // The outage isolates the base slack and OLF re-picked one in the main component: its P
+                            // balance leaves the system and its angle becomes the reference (BUS_TARGET_PHI, target 0).
+                            // The state starts from the base angles, as OLF's does - the first step shifts them all.
+                            int reference = slackRelocations.row(ci);
+                            if (reference >= 0) {
+                                int[] row = rowModePerScenario[s] == baseRowMode ? baseRowMode.clone() : rowModePerScenario[s];
+                                row[reference] = 0;
+                                rowModePerScenario[s] = row;
+                                overrides.add(s * n + reference, 0.0);
+                                if (dsSlackRows == null) {
+                                    dsSlackRows = new int[chunkSize];
+                                    java.util.Arrays.fill(dsSlackRows, -1);
+                                }
+                                dsSlackRows[s] = reference;
+                                if (outageSlackShift == null) {
+                                    outageSlackShift = new double[chunkSize];
+                                }
+                                outageSlackShift[s] += slackRelocations.shiftByIndex()[ci];
                             }
                             for (LfBranch ziOut : contingencies.get(ci).outagedZiBranches()) {
                                 Integer ze = ziElemByNumAll.get(ziOut.getNum());
@@ -1892,6 +1914,7 @@ final class GpuBatchChunkSolver {
                     GpuAcNewtonSolver.setBatchDqMemberTargetQOverrides(handle,
                             dqTqOvKey.isEmpty() ? null : dqTqOvKey.stream().mapToInt(Integer::intValue).toArray(),
                             dqTqOvKey.isEmpty() ? null : dqTqOvVal.stream().mapToDouble(Double::doubleValue).toArray());
+                    GpuAcNewtonSolver.setBatchDsSlackRows(handle, dsSlackRows);
                     GpuAcNewtonSolver.setBatchPilotQDeltas(handle,
                             pilotQDeltas.isEmpty() ? null : pilotQDeltas.keySet().stream().mapToInt(Integer::intValue).toArray(),
                             pilotQDeltas.isEmpty() ? null : pilotQDeltas.values().stream().mapToDouble(Double::doubleValue).toArray());

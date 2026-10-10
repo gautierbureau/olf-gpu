@@ -187,7 +187,7 @@ final class GpuBatchInjectionOutages {
                 }
             }
             out.add(new GenOutage(-1, 0, -1, 0, false, false, -1, 0, 0, 0, 0, -1, 0, 0, false,
-                    java.util.Set.of(), 0, 0, 0, im, new int[0], rows, values, 0, -1, 0, -1, 0, -1, 0, -1));
+                    java.util.Set.of(), 0, 0, 0, im, new int[0], rows, values, 0, -1, 0, -1, 0, -1, 0, -1, -1, 0));
         }
         return out;
     }
@@ -251,6 +251,20 @@ final class GpuBatchInjectionOutages {
                 return reject("MULTI_DS_BUS", e.getKey());
             }
             out[k++] = go;
+        }
+        // A pilot whose balance target moves while the SAME contingency changes a control (a member to PQ, a member
+        // deactivated, the group's control killed or its pilot row flipped): the move rides the carrier the fill
+        // picks, and how it composes with a re-picked carrier or a pilot row that becomes a balance has not been
+        // measured. Route it.
+        boolean movesPilotQ = false;
+        boolean changesControl = false;
+        for (GenOutage go : out) {
+            movesPilotQ |= go.pilotQGroup() >= 0;
+            changesControl |= go.toPq() || go.deactivatesDqMember() || go.killsPilotVoltageIdentity()
+                    || go.flipsPilotRowWhenAllPinned();
+        }
+        if (movesPilotQ && changesControl) {
+            return reject("PILOT_Q_WITH_CONTROL_CHANGE", null);
         }
         // Two buses of the SAME remote group deactivated by one contingency: each bus's seeded
         // DISTR_Q targets renormalize over its own loss alone, so neither accounts for the other and
@@ -546,6 +560,29 @@ final class GpuBatchInjectionOutages {
         // equation, so it must keep shedding the lost Q. Suppressing it there moves
         // devicePinnedBusLosingReactiveLoadMatchesCpu's B4 by 1.0e-08 kV.
         boolean qOverride = toPq || (!busPv && !remotelyControlled);
+        // ...but a remotely controlled bus still HAS a reactive balance - OLF keeps its BUS_TARGET_Q, generation
+        // minus load like any PQ bus - and the extraction moved it onto the relocation group's CARRIER (qRowAlt =
+        // -2-g: the free member's row), whose target the device captures from the BASE targets at solve start
+        // (capturePilotQBatch) and hands to whichever member carries the balance later. Losing reactive load (or a
+        // fixed-Q generator) at the pilot moves that target, and neither channel could say so: measured on the
+        // remote-control fixture, a 20 MVar load lost at the pilot stayed in its balance and every controller bus
+        // ended 3.7e-2 kV off OLF. The group and the move travel to the carrier's first-solve target and to the
+        // device's captured value (setBatchPilotQDeltas).
+        int pilotQGroup = -1;
+        double pilotQDelta = 0;
+        boolean purePilot = remotelyControlled
+                && mainVcOf(bus).map(vc -> !vc.getMergedControllerElements().contains(bus)).orElse(false);
+        if (purePilot) {                                     // a pilot among its controllers has no balance of its
+            double lostGenQ = lost.stream().mapToDouble(LfGenerator::getTargetQ).sum();   // own (DISTR_Q member)
+            if (lostLoadQ != 0 || lostGenQ != 0) {
+                int alt = busRows.length > 3 ? busRows[3][busNum] : -1;
+                if (alt > -2) {                              // the balance is not on a carrier: no channel for it
+                    return reject("PILOT_Q_NOT_RELOCATED", bus);
+                }
+                pilotQGroup = -2 - alt;
+                pilotQDelta = lostLoadQ - lostGenQ;          // targetQ = generation - load
+            }
+        }
         double qTarget = 0;
         if (qOverride) {
             // A bus the BASE loadflow pinned at a reactive limit has its generation target Q FROZEN at
@@ -815,6 +852,6 @@ final class GpuBatchInjectionOutages {
                 lostLoadP - lostP, loadQDelta, inactiveDqMember, pilotSurvivorRlEntries,
                 dqTargetRows, dqTargetValues, deadRemoteMember ? 4 : 1,
                 deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget,
-                dqTargetQOvMember, dqTargetQOvValue, qTargetRow);
+                dqTargetQOvMember, dqTargetQOvValue, qTargetRow, pilotQGroup, pilotQDelta);
     }
 }

@@ -5751,6 +5751,30 @@ __global__ void capturePilotQBatch(int nQr, int nScenarios, int n, const int* qr
     pilotQ[(size_t) s * nQr + g] = targetBase[row];          // the BASE carrier's BASE target (n, untiled)
 }
 
+// A scenario's outage that moves the PILOT's own reactive balance (a reactive load or a fixed-Q generator lost at
+// the pilot, GpuBatchInjectionOutages): the captured value moves with it, and so does the target of the row that
+// carries the balance at the first fill - whichever the scenario's modes pick, by the fill's own rule - because
+// updateDistrQTargetsBatch stamps the captured value only inside the outer-loop passes. An identity there (the
+// pilot's own row still holding its voltage target) carries no balance and keeps its target. One entry per
+// (scenario, group): the host merges them.
+__global__ void applyPilotQDeltasBatch(int nDelta, const int* key, const double* val, int nQr, int n,
+                                       const int* qrPtr, const int* qrRows, const int* mode,
+                                       const char* dqSub, int nDqMembers, const int* qrMemberStart,
+                                       double* pilotQ, double* target) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= nDelta) return;
+    int s = key[k] / nQr;
+    int g = key[k] % nQr;
+    pilotQ[key[k]] += val[k];
+    int c = relocChooseSub(g, qrPtr, qrRows, mode + (size_t) s * n,
+            dqSub != nullptr ? dqSub + (size_t) s * nDqMembers : nullptr, qrMemberStart);
+    int row = qrRows[qrPtr[g] + c];
+    int m = mode[(size_t) s * n + row];
+    if (m != 0 && m != 6) {
+        target[(size_t) s * n + row] += val[k];
+    }
+}
+
 // DEVICE all-pinned corner (plan-B4 follow-up): when the LAST live member of a remote gen-VC
 // relocation group pins (the mode-scan finds no candidate with mode not in {0, 4} and falls back
 // to candidate 0 = the pilot's own row), OLF deactivates the pilot's V equation — control lost.
@@ -7892,6 +7916,9 @@ struct BatchSolverContext {
     int nDqTqOv = 0;                                       // per-scenario member targetQ overrides
     DeviceBuf dDqTqOvKey;
     DeviceBuf dDqTqOvVal;
+    int nQrPqDelta = 0;                                    // per-scenario moves of a pilot's captured Q target
+    DeviceBuf dQrPqDeltaKey;                               // slot * nQr + group
+    DeviceBuf dQrPqDeltaVal;
     int nPilotFlip = 0;                                    // pilot-row flip entries (all-survivors-pinned)
     DeviceBuf dPfSlot;
     DeviceBuf dPfRow;
@@ -10424,6 +10451,14 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             capturePilotQBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nQr, nS, n,
                     ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), dBaseMode.as<int>(),
                     ctx->dTargetBase.as<double>(), ctx->dQrPilotQ.as<double>());
+            if (ctx->nQrPqDelta > 0) {
+                applyPilotQDeltasBatch<<<grid(ctx->nQrPqDelta), BLOCK, 0, ctx->stream>>>(ctx->nQrPqDelta,
+                        ctx->dQrPqDeltaKey.as<int>(), ctx->dQrPqDeltaVal.as<double>(), ctx->st->nQr, n,
+                        ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), ctx->dMode.as<int>(),
+                        ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->nDqMembers,
+                        ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
+                        ctx->dQrPilotQ.as<double>(), ctx->dTarget.as<double>());
+            }
             if (!ctx->dQrPilotRlEntry.p) {
                 // Per group, the pilot's own LOCAL reactive-limit entry: a pilot whose group lost control
                 // in the BASE (every member pinned there) enters the pack as a local entry with an empty
@@ -15851,6 +15886,29 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->dDqTqOvKey.upload(keys, static_cast<size_t>(ne) * sizeof(int));
     ctx->dDqTqOvVal.upload(vals, static_cast<size_t>(ne) * sizeof(double));
     ctx->nDqTqOv = ne;
+    env->ReleaseIntArrayElements(jKeys, keys, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(jVals, vals, JNI_ABORT);
+}
+
+// Per-scenario moves of a pilot's captured reactive target (applyPilotQDeltasBatch): {key, delta} with key
+// slot * nQr + group, one entry per key. Nulls clear.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchPilotQDeltas(
+        JNIEnv* env, jclass, jlong handle, jintArray jKeys, jdoubleArray jVals) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jKeys == nullptr || env->GetArrayLength(jKeys) == 0) {
+        ctx->nQrPqDelta = 0;
+        return;
+    }
+    int ne = env->GetArrayLength(jKeys);
+    jint* keys = env->GetIntArrayElements(jKeys, nullptr);
+    jdouble* vals = env->GetDoubleArrayElements(jVals, nullptr);
+    ctx->dQrPqDeltaKey.upload(keys, static_cast<size_t>(ne) * sizeof(int));
+    ctx->dQrPqDeltaVal.upload(vals, static_cast<size_t>(ne) * sizeof(double));
+    ctx->nQrPqDelta = ne;
     env->ReleaseIntArrayElements(jKeys, keys, JNI_ABORT);
     env->ReleaseDoubleArrayElements(jVals, vals, JNI_ABORT);
 }

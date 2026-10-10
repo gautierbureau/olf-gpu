@@ -437,6 +437,11 @@ public final class GpuAcNewtonSolver {
      *  a host-side row seed alone is put straight back. Nulls clear. */
     public static native void setBatchDqMemberTargetQOverrides(long handle, int[] keys, double[] values);
 
+    /** Per-scenario moves of a remote-control pilot's own reactive target ({key = slot * nQr + group, delta pu}, one
+     *  entry per key): added to the value captured from the base carrier and to the first fill's carrier target.
+     *  Nulls clear. */
+    public static native void setBatchPilotQDeltas(long handle, int[] keys, double[] deltas);
+
     /** Pilot-row flip entries: one per (scenario, pilot) where the outage made the pilot stop being one
      *  of its OWN controllers. While the survivors hold its voltage the pilot keeps BUS_TARGET_V and its
      *  acquired reactive balance rides one of THEIR rows; when every survivor pins, those rows take their

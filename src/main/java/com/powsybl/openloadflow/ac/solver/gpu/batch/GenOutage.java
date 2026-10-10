@@ -38,7 +38,11 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                          *  bus's own BUS_V column onto the parent coupler's DUMMY_Q column; -1 = it is {@code vRow}.
                          *  The two part company only under a coupler: {@code vRow} stays the BUS_V row because that
                          *  is what the PV->PQ mode flip rewrites, while the Q TARGET has to follow the balance. */
-                        int qTargetRow) {
+                        int qTargetRow,
+                        /** The relocation group whose carrier hosts this bus's Q BALANCE (the bus is the pilot of a
+                         *  remote voltage control, its own V row holding the voltage target), -1 = none; and how much
+                         *  the outage moves that balance's target ({@code pilotQDelta}, pu: the lost reactive load). */
+                        int pilotQGroup, double pilotQDelta) {
 
     /** Where to write this bus's Q target: the relocated Q-balance row, else the BUS_V row. */
     public int qTargetRowOrV() {
@@ -69,7 +73,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                 loadQDelta, inactiveDqMember, pilotGroupSurvivorRlEntries,
                 rows.stream().mapToInt(Integer::intValue).toArray(), values.stream().mapToDouble(Double::doubleValue).toArray(),
                 pqRowMode, deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget, dqTargetQOvMember,
-                dqTargetQOvValue, qTargetRow);
+                dqTargetQOvValue, qTargetRow, pilotQGroup, pilotQDelta);
     }
     // lostGenIds / lostFactorSum exist for the reactive-capability CURVE channel, which evaluates each
     // generator's curve at its OWN post-distribution active power, reconstructed from the bus's row

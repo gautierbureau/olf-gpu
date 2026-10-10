@@ -934,7 +934,7 @@ final class GpuBatchQualification {
     private static GenOutage reHomedPvEntry(int vRow, double vTarget, int rlEntry) {
         return new GenOutage(-1, 0, vRow, vTarget, true, true,
                 -1, 0, 0, 0, 0, rlEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
-                new int[0], new double[0], GenOutage.ROW_V_IDENTITY, -1, 0, -1, 0, -1, 0, -1);
+                new int[0], new double[0], GenOutage.ROW_V_IDENTITY, -1, 0, -1, 0, -1, 0, -1, -1, 0);
     }
 
     /** A re-homed control whose bus the BASE pinned: its own row starts as its reactive balance at the pinned
@@ -943,7 +943,7 @@ final class GpuBatchQualification {
     private static GenOutage reHomedPinnedPvEntry(int vRow, double qTarget, double vTarget, int rlEntry) {
         return new GenOutage(-1, 0, vRow, qTarget, true, true,
                 -1, 0, 0, 0, 0, rlEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
-                new int[0], new double[0], GenOutage.ROW_PINNED_V, -1, vTarget, -1, 0, -1, 0, -1);
+                new int[0], new double[0], GenOutage.ROW_PINNED_V, -1, vTarget, -1, 0, -1, 0, -1, -1, 0);
     }
 
     /** A re-homed control whose own V row hosts a LIVE coupler's ZERO_V (tasks #70, VC_REMERGE_RELOC_VROW): its
@@ -953,14 +953,14 @@ final class GpuBatchQualification {
         return pinned ? reHomedPinnedPvEntry(dummyQRow, qTarget, vTarget, rlEntry)
                 : new GenOutage(-1, 0, dummyQRow, vTarget, true, true,
                 -1, 0, 0, 0, 0, rlEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
-                new int[0], new double[0], GenOutage.ROW_CROSS_V_IDENTITY, -1, 0, -1, 0, -1, 0, -1);
+                new int[0], new double[0], GenOutage.ROW_CROSS_V_IDENTITY, -1, 0, -1, 0, -1, 0, -1, -1, 0);
     }
 
     /** A base-pinned member of a re-homed cluster with no enabled controller: no row change, unpin forbidden. */
     private static GenOutage noUnpinEntry(int rlEntry) {
         return new GenOutage(-1, 0, -1, 0, false, false,
                 -1, 0, 0, 0, 0, rlEntry, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
-                new int[0], new double[0], GenOutage.ROW_PINNED_NO_UNPIN, -1, 0, -1, 0, -1, 0, -1);
+                new int[0], new double[0], GenOutage.ROW_PINNED_NO_UNPIN, -1, 0, -1, 0, -1, 0, -1, -1, 0);
     }
 
     static boolean basePinned(GpuAcData gpuData, int rlEntry) {
@@ -1409,7 +1409,7 @@ final class GpuBatchQualification {
                             }
                             live.add(new GenOutage(-1, 0, qFlipRow, sb.getTargetQ(), true, true,
                                     -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
-                                    new int[0], new double[0], deadControlRowMode(gpuData, sb), -1, 0, -1, 0, -1, 0, -1));
+                                    new int[0], new double[0], deadControlRowMode(gpuData, sb), -1, 0, -1, 0, -1, 0, -1, -1, 0));
                         }
                         if (live == null) {
                             if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
@@ -1636,7 +1636,7 @@ final class GpuBatchQualification {
                         vcOff.add(new GenOutage(-1, 0, relocQRow(vVar.getRow(), relocRows, outagedZiNums),
                                 sb.getTargetQ(), true, true,
                                 -1, 0, 0, 0, 0, -1, 0, 0, false, java.util.Set.of(), 0, 0, 0, -1, new int[0],
-                                new int[0], new double[0], deadControlRowMode(gpuData, sb), -1, 0, -1, 0, -1, 0, -1));
+                                new int[0], new double[0], deadControlRowMode(gpuData, sb), -1, 0, -1, 0, -1, 0, -1, -1, 0));
                     }
                     if (vcOff == null) {
                         if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {

@@ -4827,6 +4827,54 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** OLF's g1/g2/g3 -> b4 remote voltage control with what a contingency can take from the PILOT b4: a second load
+     *  (l4b, 30 MW / 20 MVar) and a fixed-Q generator (g4q, 10 MW / 15 MVar, outside the slack distribution - a lost
+     *  participant beside a participating slack is another shape). The slack is b1, so b4 is the pilot only. */
+    private static Network remotePilotInjectionsNetwork() {
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createWithGeneratorRemoteControl();
+        network.getVoltageLevel("vl4").newLoad()
+                .setId("l4b")
+                .setBus("b4")
+                .setConnectableBus("b4")
+                .setP0(30)
+                .setQ0(20)
+                .add();
+        network.getVoltageLevel("vl4").newGenerator()
+                .setId("g4q")
+                .setBus("b4")
+                .setConnectableBus("b4")
+                .setMinP(0)
+                .setMaxP(50)
+                .setTargetP(10)
+                .setTargetQ(15)
+                .setVoltageRegulatorOn(false)
+                .add();
+        network.getGenerator("g4q").newExtension(com.powsybl.iidm.network.extensions.ActivePowerControlAdder.class)
+                .withParticipate(false)
+                .add();
+        return network;
+    }
+
+    /** The pilot of a remote voltage control keeps its own reactive balance, which rides the free member's row with a
+     *  target the device captured from the BASE: a reactive load or a fixed-Q generator lost at the pilot stayed in
+     *  that balance (the lost 20 MVar load: every controller bus 3.7e-2 kV off OLF). */
+    @Test
+    void deviceInjectionLossAtRemotePilotMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        List<Contingency> ctgs = List.of(
+                new Contingency("l4b", new com.powsybl.contingency.LoadContingency("l4b")),
+                new Contingency("g4q", new com.powsybl.contingency.GeneratorContingency("g4q")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl1"));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(remotePilotInjectionsNetwork(), ctgs, 1e-12, lfp, true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(2, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** The robust single-matrix mode (6) takes OLF's MAX_VOLTAGE_CHANGE step like every other mode. Its per-scenario
      *  loop applied the full Newton step, so a scenario retried in that mode followed another trajectory and stopped
      *  at another point inside the tolerance. The limits are tight enough to clamp the first steps of every outage;

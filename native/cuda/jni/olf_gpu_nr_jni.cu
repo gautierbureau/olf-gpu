@@ -9327,6 +9327,17 @@ __device__ inline void tvdLayoutGroup(const TvdTables& T, int s, int n, int nEle
             T.saved[sk] = nan("");
         }
     }
+    // The scenario's own move of the controlled bus's reactive balance: an injection lost there is written host-side
+    // as that bus's Q target while the control is OFF, and saved above on the way ON. The carrier hosts the same
+    // balance while ON, so it takes the same move on top of the captured BASE target - without it the lost injection
+    // stayed in the balance the tap was decided on (a 5 MVar load at the controlled bus: 6.0e-3 kV).
+    if (anyCont) {
+        for (int k = T.deltaPtr[g]; k < T.deltaPtr[g + 1]; k++) {
+            if (T.deltaRow[k] != T.grpVRow[g] || T.deltaModeOff[k] != 1) continue;
+            double sv = T.saved[(size_t) s * T.nDelta + k];
+            if (!isnan(sv)) pilotQ += sv - T.deltaTargetOff[k];
+        }
+    }
     bool carrier = false;
     for (int m = T.grpPtr[g]; m < T.grpPtr[g + 1]; m++) {
         if (disabled[(size_t) s * nElements + T.memElem[m]]) continue;   // outaged: base identity as uploaded

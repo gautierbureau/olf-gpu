@@ -4917,6 +4917,38 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** A load lost at a TRANSFORMER-controlled bus (T2wT regulates BUS_3, AFTER_GENERATOR): while the control is on,
+     *  the bus's reactive balance rides the transformer's ratio row, whose target the layout took from the base. */
+    @Test
+    void deviceLoadLossAtTransformerControlledBusMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = com.powsybl.openloadflow.network.VoltageControlNetworkFactory.createNetworkWithT2wt();
+        com.powsybl.iidm.network.TwoWindingsTransformer t2wt = network.getTwoWindingsTransformer("T2wT");
+        t2wt.getRatioTapChanger()
+                .setTargetDeadband(0)
+                .setRegulating(true)
+                .setTapPosition(0)
+                .setRegulationTerminal(t2wt.getTerminal2())
+                .setTargetV(34.0);
+        network.getLoad("LOAD_3").getTerminal().getVoltageLevel().newLoad()
+                .setId("LOAD_3b")
+                .setBus("BUS_3")
+                .setConnectableBus("BUS_3")
+                .setP0(3)
+                .setQ0(5)
+                .add();
+        List<Contingency> ctgs = List.of(new Contingency("LOAD_3b", new com.powsybl.contingency.LoadContingency("LOAD_3b")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setTransformerVoltageControlOn(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setTransformerVoltageControlMode(com.powsybl.openloadflow.OpenLoadFlowParameters.TransformerVoltageControlMode.AFTER_GENERATOR_VOLTAGE_CONTROL);
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp, true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** The robust single-matrix mode (6) takes OLF's MAX_VOLTAGE_CHANGE step like every other mode. Its per-scenario
      *  loop applied the full Newton step, so a scenario retried in that mode followed another trajectory and stopped
      *  at another point inside the tolerance. The limits are tight enough to clamp the first steps of every outage;

@@ -2160,6 +2160,12 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
 
     /** @param noControl sections whose generator does NOT regulate voltage (a plain PQ section in the chain). */
     private static Network splitGroupNetwork(int sections, java.util.Set<Integer> pinnedGens, java.util.Set<Integer> noControl) {
+        return splitGroupNetwork(sections, pinnedGens, noControl, java.util.Set.of());
+    }
+
+    /** @param noLine sections without their line to the external network: joined to the rest by couplers only. */
+    private static Network splitGroupNetwork(int sections, java.util.Set<Integer> pinnedGens, java.util.Set<Integer> noControl,
+                                             java.util.Set<Integer> noLine) {
         Network network = Network.create("split-group-" + sections, "code");
         com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
         for (String vl : List.of("vl0", "vl3", "vl4")) {
@@ -2181,7 +2187,7 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         for (int k = 0; k < sections; k++) {
             int gNode = node++;
             int lNode = node++;
-            for (int[] pair : new int[][] {{gNode, 0}, {lNode, 1}}) {
+            for (int[] pair : noLine.contains(k) ? new int[][] {{gNode, 0}} : new int[][] {{gNode, 0}, {lNode, 1}}) {
                 vl12.getNodeBreakerView().newDisconnector().setId("d" + k + "_" + pair[1]).setNode1(k).setNode2(pair[0] + 50).setOpen(false).add();
                 vl12.getNodeBreakerView().newBreaker().setId("b" + k + "_" + pair[1]).setNode1(pair[0] + 50).setNode2(pair[0]).setOpen(false).add();
             }
@@ -2189,6 +2195,9 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                     .setMinP(0).setMaxP(500).setTargetP(80).setTargetQ(0).setTargetV(k == 0 ? 406 : 405)
                     .setVoltageRegulatorOn(!noControl.contains(k)).add();
             network.getGenerator("g" + k).newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(pinnedGens.contains(k) ? 5 : 300).add();
+            if (noLine.contains(k)) {
+                continue;
+            }
             String ext = externals[k % 3];
             network.newLine().setId("l" + k).setVoltageLevel1("vl12").setNode1(lNode)
                     .setVoltageLevel2(ext).setBus2(ext + "_b").setConnectableBus2(ext + "_b")
@@ -2218,12 +2227,17 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     private void assertSplitGroupMatchesCpu(int sections, java.util.Set<Integer> pinnedGens, java.util.Set<Integer> noControl) {
+        assertSplitGroupMatchesCpu(sections, pinnedGens, noControl, java.util.Set.of());
+    }
+
+    private void assertSplitGroupMatchesCpu(int sections, java.util.Set<Integer> pinnedGens, java.util.Set<Integer> noControl,
+                                            java.util.Set<Integer> noLine) {
         List<Contingency> ctgs = new java.util.ArrayList<>();
         for (int k = 0; k < sections; k++) {
             ctgs.add(new Contingency("bus-" + k, new com.powsybl.contingency.BusbarSectionContingency("bbs" + k)));
         }
         GpuBatchScopeCensus.reset();
-        assertMergedPilotLossMatchesCpu(splitGroupNetwork(sections, pinnedGens, noControl), ctgs, sections);
+        assertMergedPilotLossMatchesCpu(splitGroupNetwork(sections, pinnedGens, noControl, noLine), ctgs, sections);
         assertEquals(0L, GpuBatchScopeCensus.snapshot().getOrDefault("HOST:OVERRIDE_CONFLICT", 0L).longValue(),
                 "a sound plan writes every row's target once");
     }
@@ -2527,6 +2541,16 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
         assertSplitGroupMatchesCpu(3, java.util.Set.of(), java.util.Set.of(1));
+    }
+
+    /** The same re-home with bbs2 joined by couplers only (no line): its reactive balance is all coupler flows, so no
+     *  dq/dV term of its own reserves the cross identity's slot on c12's DUMMY_Q row (network.xiidm AJSL and six more:
+     *  the row came out empty, a coupler flow was left free, linear-solve failure at the first step). */
+    @org.junit.jupiter.api.Test
+    void deviceLostPilotReHomedOnCouplerOnlySectionMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertSplitGroupMatchesCpu(3, java.util.Set.of(), java.util.Set.of(1), java.util.Set.of(2));
     }
 
     /** Four sections with the second uncontrolled: losing the main leaves a REMOTE cluster {bbs2, bbs3} whose elected

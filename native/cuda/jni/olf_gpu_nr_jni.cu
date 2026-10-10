@@ -2867,6 +2867,19 @@ void collectFamilyPattern(const std::vector<int>& rowMap,
             pat.emplace_back(zpRow, z[8]);
             pat.emplace_back(zpRow, z[9]);
         }
+        // The CROSS-identity slot (row mode 6, applyRowModeBatch): a re-homed voltage control on a relocated child
+        // puts its BUS_TARGET_V on the coupler's DUMMY_Q row, at the child's V column. The child's own dq/dV terms
+        // reserve that slot - unless the child has none, a section joined to the rest by couplers only, whose
+        // reactive balance is all dummy flows. The row then came out EMPTY and the dummy flow of another coupler
+        // was left free (network.xiidm AJSL: DUMMY_Q AJUU's row held columns {25131, 25135}, the child AJSK_8's V
+        // column 2816 nowhere; linear-solve ratio 2.7e12 at the first step). A duplicate pair where the slot
+        // already exists changes nothing.
+        if (relocOwn != nullptr && z[5] >= 0) {
+            int dqRow = rowMap[z[5]];
+            if (dqRow >= 0 && relocOwn[dqRow] >= 0) {
+                pat.emplace_back(dqRow, relocOwn[dqRow]);
+            }
+        }
     }
 }
 

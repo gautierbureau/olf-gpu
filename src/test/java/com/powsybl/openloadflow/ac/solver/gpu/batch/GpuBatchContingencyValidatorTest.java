@@ -33,7 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * @author Gautier Bureau {@literal <gautier.bureau at rte-france.com>}
  */
-class GpuBatchContingencyValidatorTest {
+class GpuBatchContingencyValidatorTest extends com.powsybl.openloadflow.network.AbstractLoadFlowNetworkFactory {
 
     private LfNetwork eurostag() {
         Network iidm = EurostagFactory.fix(EurostagTutorialExample1Factory.create());
@@ -94,6 +94,56 @@ class GpuBatchContingencyValidatorTest {
         List<Qualification> again = GpuBatchContingencyValidator.qualify(network,
                 List.of(contingency(network, "NHV1_NHV2_1")), mapper, false, null);
         assertTrue(again.get(0).qualified(), "connectivity must be restored after each qualification");
+    }
+
+    /** The slack s hangs on the rest by one line l0; the rest is the hub m, its coupler c1 to n and the leaves a, c. */
+    private static Network slackOnAStub() {
+        Network network = Network.create("slack-on-a-stub", "code");
+        com.powsybl.iidm.network.Bus s = createBus(network, "x", "s");
+        createGenerator(s, "gs", 3, 1.0);
+        com.powsybl.iidm.network.Bus m = createBus(network, "y", "m");
+        createLoad(m, "lm", 0.5, 0.2);
+        com.powsybl.iidm.network.Bus n = createBus(network, "y", "n");
+        createLoad(n, "ln", 0.5, 0.2);
+        com.powsybl.iidm.network.Bus a = createBus(network, "y", "a");
+        createLoad(a, "la", 0.5, 0.2);
+        com.powsybl.iidm.network.Bus c = createBus(network, "y", "c");
+        createLoad(c, "lc", 0.5, 0.2);
+        createLine(network, s, m, "l0", 0.1);
+        createLine(network, m, n, "c1", 0.0, 0.0);
+        createLine(network, m, a, "lA", 0.1);
+        createLine(network, n, c, "lC", 0.1);
+        return network;
+    }
+
+    private static java.util.Set<String> lostWhenCut(LfNetwork network, String branchId) {
+        var connectivity = network.getConnectivity();
+        connectivity.startTemporaryChanges();
+        try {
+            connectivity.removeEdge(network.getBranchById(branchId));
+            return connectivity.getVerticesRemovedFromMainComponent().stream()
+                    .map(com.powsybl.openloadflow.network.LfBus::getId).collect(java.util.stream.Collectors.toSet());
+        } finally {
+            connectivity.undoTemporaryChanges();
+        }
+    }
+
+    /** Qualifying an outage that isolates the slack anchors the islanding query on the relocated slack, as OLF
+     *  does. OLF's anchor goes with its network state; the validator's must go too: setMainComponentVertex also
+     *  sets the connectivity's DEFAULT main-component vertex, which every later query without an anchor of its
+     *  own starts from - OLF's toLfContingency for the contingencies the CPU replays, and the tree replay. Left on
+     *  the relocated slack, a later contingency losing that bus reads the whole network as lost. */
+    @Test
+    void slackRelocationLeavesTheConnectivityAnchorWhereItFoundIt() {
+        LfNetwork network = Networks.load(slackOnAStub(), new FirstSlackBusSelector()).get(0);
+        java.util.Set<String> otherSide = java.util.Set.of("m_vl_0", "n_vl_0", "a_vl_0", "c_vl_0");
+        assertEquals(otherSide, lostWhenCut(network, "l0"), "before: the main component is the slack's");
+        GpuBatchElementMapper mapper = new GpuBatchElementMapper(network);
+        List<Qualification> q = GpuBatchContingencyValidator.qualify(network, List.of(contingency(network, "l0")), mapper, true,
+                new BatchConfig.SlackRelocation(new FirstSlackBusSelector(), 1));
+        assertTrue(q.get(0).qualified(), "the slack is relocated inside the largest component");
+        assertEquals("m_vl_0", q.get(0).relocatedSlack().getId());
+        assertEquals(otherSide, lostWhenCut(network, "l0"), "after: the main component is still the slack's");
     }
 
     @Test

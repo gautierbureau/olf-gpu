@@ -156,6 +156,7 @@ public final class GpuBatchContingencyValidator {
         if (closed.isEmpty()) {
             return Qualification.ok(contingency);
         }
+        LfBus slack = network.getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
         connectivity.startTemporaryChanges();
         try {
             for (LfBranch branch : closed) {
@@ -169,7 +170,6 @@ public final class GpuBatchContingencyValidator {
             // becomes the reference and the distributed-slack check reads its balance. Anchoring on the
             // isolated slack instead reports the LIVE side as removed (measured: {BBS2, BBS3}), which would
             // freeze the whole energized network instead of the stub.
-            LfBus slack = network.getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
             LfBus anchor = slack;
             LfBus relocatedSlack = null;
             // Component 0 IS the largest one (GraphConnectivity numbering, and what getLargestConnectedComponent
@@ -237,6 +237,13 @@ public final class GpuBatchContingencyValidator {
             return new Qualification(contingency, true, null, List.copyOf(islanded), relocatedSlack);
         } finally {
             connectivity.undoTemporaryChanges();
+            // The anchor goes back with the temporary changes: setMainComponentVertex also sets the connectivity's
+            // DEFAULT main-component vertex, the one every later query without an anchor of its own starts from
+            // (OLF's own toLfContingency for the contingencies the CPU replays, the tree replay), and OLF restores
+            // it only with the slack, through its NetworkState. Left on the relocated slack, a later contingency
+            // losing that bus reads the whole network as lost (the replay's version of this leak decoupled all 366
+            // of rte6515's couplers in one random busbar scenario per run - GpuZiTreeReplay).
+            connectivity.setMainComponentVertex(slack);
         }
     }
 }

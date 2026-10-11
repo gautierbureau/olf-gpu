@@ -162,25 +162,36 @@ final class GpuZiTreeReplay {
     }
 
     /**
-     * OLF's findBusesAndBranchesImpactedBecauseOfConnectivityLoss without its one side effect: where the
+     * OLF's findBusesAndBranchesImpactedBecauseOfConnectivityLoss without its side effects: where the
      * slack is isolated, OLF writes the excluded slack buses onto the network (restored by its
      * NetworkState, which this replay has no use for) and re-anchors the main component on the relocated
      * slack. The relocated slack lies in the largest component by construction, so anchoring on any bus
      * of it yields the same lost buses.
+     *
+     * <p>The anchor is PUT BACK afterwards. {@code setMainComponentVertex} also sets the connectivity's
+     * DEFAULT main-component vertex, the one every later query without an anchor of its own starts from
+     * (this replay's, and OLF's own toLfContingency for the contingencies the CPU replays), and OLF only
+     * restores it with the slack, through its NetworkState. Left on the first bus of a hash-ordered set,
+     * a different bus each run, the next contingency in the list that lost THAT bus read the whole
+     * network as lost: every coupler disabled, the replay's tree empty, and the device solved it with all
+     * 366 of rte6515's couplers decoupled - one random busbar section per full run failing its linear solve
+     * at a ratio of 3.06e+06 (BUS-5243, BUS-506, BUS-747, BUS-528, BUS-608 on successive runs).
      */
     private static PropagatedContingency.ContingencyConnectivityLossImpact connectivityLoss(
             LfNetwork network, String contingencyId, Map<LfBranch, DisabledBranchStatus> branchesToOpen,
             boolean relocateSlackBus) {
         GraphConnectivity<LfBus, LfBranch> connectivity = network.getConnectivity();
+        LfBus slack = network.getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
+        boolean reAnchored = false;
         connectivity.startTemporaryChanges();
         try {
             branchesToOpen.keySet().stream()
                     .filter(LfBranch::isConnectedAtBothSides)
                     .forEach(connectivity::removeEdge);
-            LfBus slack = network.getSynchronousNetworks().getFirst().getSlackBuses().getFirst();
             if (connectivity.getComponentNumber(slack) != 0
                     && connectivity.getLargestConnectedComponent().size() != connectivity.getConnectedComponent(slack).size()) {
                 connectivity.setMainComponentVertex(connectivity.getLargestConnectedComponent().iterator().next());
+                reAnchored = true;
             }
             int created = connectivity.getNbConnectedComponents() - 1;
             Set<LfBus> busesToLost = connectivity.getVerticesRemovedFromMainComponent();
@@ -188,6 +199,9 @@ final class GpuZiTreeReplay {
                     PropagatedContingency.getHvdcsWithoutPower(network, busesToLost, connectivity));
         } finally {
             connectivity.undoTemporaryChanges();
+            if (reAnchored) {
+                connectivity.setMainComponentVertex(slack);  // the default OLF keeps between contingencies
+            }
         }
     }
 }

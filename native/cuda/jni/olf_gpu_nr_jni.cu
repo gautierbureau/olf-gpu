@@ -2420,6 +2420,45 @@ static inline void traceReject(int slot, const char* reason, int outer, int it) 
 
 // A linear solve whose residual ratio ||J.dx-B|| / ||F|| exceeds this did NOT solve the system: the
 // factorization is wrong (unpivoted LU on a structure that needs pivoting), not merely inaccurate.
+/** One scenario's linear system AS SOLVED, written whole: the row-repaired Jacobian (CSR triplets), the mismatch F it
+ *  was built at, the repaired right-hand side B, the step dx the factorization returned and each row's mode. Read by
+ *  the KLU re-solve probe and the structural-matching script (OLF_GPU_DX_DUMP / OLF_GPU_DX_DUMP_ON_REJECT). */
+template <typename Ctx>
+static void dumpSlotSystem(Ctx* ctx, int n, int nnz, int slot, const char* path) {
+    CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+    std::vector<double> hv(nnz);
+    std::vector<double> hd(n);
+    std::vector<double> hff(n);
+    std::vector<int> hrp(n + 1);
+    std::vector<int> hci(nnz);
+    std::vector<int> hmode(n);
+    std::vector<double> hb(n);                               // the RHS as SOLVED (row-repaired, see hazRepairRhs)
+    CUDA_CHECK(cudaMemcpy(hb.data(), ctx->dB.template as<double>() + (size_t) slot * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hv.data(), ctx->dVals.template as<double>() + (size_t) slot * nnz, (size_t) nnz * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hd.data(), ctx->dDx.template as<double>() + (size_t) slot * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hff.data(), ctx->dF.template as<double>() + (size_t) slot * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hrp.data(), ctx->st->dRowPtr.p, (size_t) (n + 1) * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hci.data(), ctx->st->dColIdx.p, (size_t) nnz * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hmode.data(), ctx->dMode.template as<int>() + (size_t) slot * n, (size_t) n * sizeof(int), cudaMemcpyDeviceToHost));
+    FILE* f = std::fopen(path, "w");
+    if (f == nullptr) {
+        std::fprintf(stderr, "OLF_GPU_DX_DUMP cannot open %s\n", path);
+        return;
+    }
+    std::fprintf(f, "N %d %d\n", n, nnz);
+    for (int i = 0; i < n; i++) {
+        std::fprintf(f, "F %d %.17e\n", i, hff[i]);
+        std::fprintf(f, "DX %d %.17e\n", i, hd[i]);
+        std::fprintf(f, "B %d %.17e\n", i, hb[i]);
+        std::fprintf(f, "MODE %d %d\n", i, hmode[i]);
+        for (int k = hrp[i]; k < hrp[i + 1]; k++) {
+            std::fprintf(f, "J %d %d %.17e\n", i, hci[k], hv[k]);
+        }
+    }
+    std::fclose(f);
+    std::fprintf(stderr, "OLF_GPU_DX_DUMP wrote %s (n=%d nnz=%d slot=%d)\n", path, n, nnz, slot);
+}
+
 static const double LIN_SOLVE_FAIL_RATIO = 1e-2;
 
 // Per-scenario score of the linear solve just done: max|J.dx-B| under both sign conventions and
@@ -12110,36 +12149,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             static const int dxOuter = std::getenv("OLF_GPU_DX_DUMP_OUTER") != nullptr ? std::atoi(std::getenv("OLF_GPU_DX_DUMP_OUTER")) : -1;
             if (dxPath != nullptr && !dumped && it == 0 && dumpSlot >= 0 && (dxOuter < 0 || outer == dxOuter)) {
                 dumped = true;
-                CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
-                std::vector<double> hv(nnz);
-                std::vector<double> hd(n);
-                std::vector<double> hff(n);
-                std::vector<int> hrp(n + 1);
-                std::vector<int> hci(nnz);
-                std::vector<int> hmode(n);
-                std::vector<double> hb(n);                   // the RHS as SOLVED (row-repaired, see hazRepairRhs)
-                CUDA_CHECK(cudaMemcpy(hb.data(), ctx->dB.as<double>() + (size_t) dumpSlot * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(hv.data(), ctx->dVals.as<double>() + (size_t) dumpSlot * nnz, (size_t) nnz * sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(hd.data(), ctx->dDx.as<double>() + (size_t) dumpSlot * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(hff.data(), ctx->dF.as<double>() + (size_t) dumpSlot * n, (size_t) n * sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(hrp.data(), ctx->st->dRowPtr.p, (size_t) (n + 1) * sizeof(int), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(hci.data(), ctx->st->dColIdx.p, (size_t) nnz * sizeof(int), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(hmode.data(), ctx->dMode.as<int>() + (size_t) dumpSlot * n, (size_t) n * sizeof(int), cudaMemcpyDeviceToHost));
-                FILE* f = std::fopen(dxPath, "w");
-                if (f != nullptr) {
-                    std::fprintf(f, "N %d %d\n", n, nnz);
-                    for (int i = 0; i < n; i++) {
-                        std::fprintf(f, "F %d %.17e\n", i, hff[i]);
-                        std::fprintf(f, "DX %d %.17e\n", i, hd[i]);
-                        std::fprintf(f, "B %d %.17e\n", i, hb[i]);
-                        std::fprintf(f, "MODE %d %d\n", i, hmode[i]);
-                        for (int k = hrp[i]; k < hrp[i + 1]; k++) {
-                            std::fprintf(f, "J %d %d %.17e\n", i, hci[k], hv[k]);
-                        }
-                    }
-                    std::fclose(f);
-                    std::fprintf(stderr, "OLF_GPU_DX_DUMP wrote %s (n=%d nnz=%d slot=%d)\n", dxPath, n, nnz, dumpSlot);
-                }
+                dumpSlotSystem(ctx, n, nnz, dumpSlot, dxPath);
             }
         }
         // OLF_GPU_ROW_PROBE=<row>: that row in EVERY scenario at EVERY iteration - its residual,
@@ -12266,6 +12276,17 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     if (std::getenv("OLF_GPU_REJECT_TRACE") != nullptr) {
                         std::fprintf(stderr, "GPU_REJECT slot=%d reason=linear-solve ratio=%.3e ||J.dx-B||inf=%.3e ||F||inf=%.3e\n",
                                      s, ratio, hsc[3 * s], hsc[3 * s + 1]);
+                    }
+                    // OLF_GPU_DX_DUMP_ON_REJECT=<dir>: the rejected slot's system as the guard scored it, for a reject
+                    // that only shows in a full run (the rte6515 busbar flap: one -3 per run on a different section
+                    // each time, the identical ratio 3.06e+06 every time, never reproduced alone). The dump happens
+                    // AFTER the verdict, so it cannot perturb what it catches.
+                    static const char* rejectDumpDir = std::getenv("OLF_GPU_DX_DUMP_ON_REJECT");
+                    static int rejectDumps = 0;
+                    if (rejectDumpDir != nullptr && rejectDumps < 8) {
+                        std::string p = std::string(rejectDumpDir) + "/reject-" + std::to_string(rejectDumps++)
+                                + "-slot" + std::to_string(s) + ".dump";
+                        dumpSlotSystem(ctx, n, nnz, s, p.c_str());
                     }
                     traceReject(s, "linear-solve", outer, it);
                     res.status[s] = -3;                      // STATUS_LINEAR_SOLVE_FAILED: the one reject a pivoted retry can fix

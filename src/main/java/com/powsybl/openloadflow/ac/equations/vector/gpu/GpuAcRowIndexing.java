@@ -639,6 +639,11 @@ final class GpuAcRowIndexing {
                     tree++;
                     if (childBusOfEdge[br.getNum()] >= 0) {
                         relocated++;
+                    } else {                                 // why each stock coupler stayed stock: both ends' flags
+                        System.err.println("ZITREE_STOCK coupler=" + br.getId()
+                                + " dummyCols=" + (dummyPCol[br.getNum()] >= 0 && dummyQCol[br.getNum()] >= 0)
+                                + " " + ziTreeTraceBus(br.getBus1(), es, parentEdgeOfBus, hostsAnotherReactiveRow, qRow, vCol)
+                                + " " + ziTreeTraceBus(br.getBus2(), es, parentEdgeOfBus, hostsAnotherReactiveRow, qRow, vCol));
                     }
                 }
             }
@@ -646,6 +651,18 @@ final class GpuAcRowIndexing {
                     + " stock=" + (tree - relocated));
         }
         return new int[][] {parentEdgeOfBus, childBusOfEdge};
+    }
+
+    /** OLF_GPU_ZITREE_TRACE: one coupler end's placement flags, the inputs of {@link #ziTreeRelocation}'s decisions. */
+    private static String ziTreeTraceBus(LfBus bus, EquationSystem<AcVariableType, AcEquationType> es, int[] parentEdgeOfBus,
+                                         boolean[] hostsAnotherReactiveRow, int[] qRow, int[] vCol) {
+        int bn = bus.getNum();
+        return bus.getId() + "{" + (parentEdgeOfBus[bn] >= 0 ? "child" : "root")
+                + (hostsPhiIdentity(bus, es) ? ",phiId" : "")
+                + (hostsVoltageIdentity(bus, es) ? ",vId" : "")
+                + (hostsAnotherReactiveRow[bn] ? ",hostsOtherQ" : "")
+                + (qRow[bn] == vCol[bn] ? ",ownQ" : isRemoteGenVcControllerElement(bus) ? ",remoteCtl" : ",qElsewhere")
+                + (hasImpedantBranch(bus) ? ",imp" : ",noImp") + "}";
     }
 
     /**

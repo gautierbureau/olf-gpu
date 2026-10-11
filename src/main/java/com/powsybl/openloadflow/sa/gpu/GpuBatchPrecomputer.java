@@ -176,6 +176,9 @@ final class GpuBatchPrecomputer {
                 // The tree OLF SOLVES this contingency on: the one it reached it with, re-elected by this
                 // contingency's own disabled couplers (opened, or sitting on a lost bus).
                 List<LfBranch> ziNonTree = ziTree.applyAndRevert(pc);
+                if (System.getenv("OLF_GPU_ZITREE_TRACE") != null && ziNonTree.size() > 40) {
+                    System.err.println("ZITREE_REPLAY_WIDE ctg=" + pc.getContingency().getId() + " nonTree=" + ziNonTree.size());
+                }
                 if (System.getenv("OLF_GPU_ZI_TREE_REPLAY") != null) {
                     System.err.println("ZI_TREE_REPLAY ctg=" + pc.getContingency().getId() + " nonTree="
                             + ziNonTree.stream().map(LfBranch::getId).sorted().toList());

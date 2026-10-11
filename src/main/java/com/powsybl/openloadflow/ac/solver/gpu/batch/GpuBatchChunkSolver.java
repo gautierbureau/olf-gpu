@@ -1074,6 +1074,10 @@ final class GpuBatchChunkSolver {
                             // rows (target 0) and the one it replaced takes the ZERO_V/ZERO_PHI coupling
                             // back. The split is physically equivalent either way - this is about solving
                             // the system OLF solves, from the state OLF solves it at.
+                            if (System.getenv("OLF_GPU_ZITREE_TRACE") != null && contingencies.get(ci).stickyNonTreeZi().size() > 40) {
+                                System.err.println("ZITREE_LEAVE_WIDE slot=" + s + " ctg=" + contingencies.get(ci).contingencyId()
+                                        + " nonTree=" + contingencies.get(ci).stickyNonTreeZi().size());
+                            }
                             for (LfBranch nonTree : contingencies.get(ci).stickyNonTreeZi()) {
                                 // The contingency's OWN opened couplers are out of the tree too (the replay
                                 // reports the tree OLF solves on), but the opening path above already owns

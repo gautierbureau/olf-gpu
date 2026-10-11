@@ -10336,6 +10336,14 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     const int RL_MAX_SWITCH = rlMaxSwitch > 0 ? rlMaxSwitch : 3;   // per-bus PV→PQ count cap (OLF maxPqPvSwitch)
     static const char* swLogEnv = std::getenv("OLF_GPU_SW_LOG");
     const int swLogSlot = swLogEnv == nullptr ? -1 : (std::string(swLogEnv) == "all" ? -2 : std::atoi(swLogEnv));
+    // OLF_GPU_ITER_LOG=1: EVERY scenario's stopping decision at every Newton iteration (ITER_LOG), the score of
+    // every step's linear solve (LIN_LOG, and LIN_WORST where it is poor) and its record at the end of every outer
+    // pass (PASS_LOG: loop, re-solve, switch, iterations, status, DS gate), printed once when the driver returns.
+    // Built from the norms the host already reads each iteration, the pass-0 guard's two scoring kernels run on
+    // every step (one 3*nS copy) and ONE copy of the DS gate records per pass - none of the whole-vector copies
+    // the slot traces make: a run-to-run divergence of one scenario among hundreds is found by diffing two logs.
+    static const bool iterLog = std::getenv("OLF_GPU_ITER_LOG") != nullptr;
+    std::vector<std::string> iterLogLines;
     // Outer-loop convergence tolerances (pu) — passed in so the device uses the SAME criteria as the CPU
     // loadflow that built the base case (maxReactivePowerMismatch / slackBusPMaxMismatch, per-unitized), NOT
     // hardcoded constants. With matching parameters and the same equations the GPU outer-loop fixed point
@@ -11680,6 +11688,12 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 if (forceFirstStep && it == 0) {
                     converged = false;
                 }
+                if (iterLog) {
+                    char line[192];
+                    std::snprintf(line, sizeof line, "ITER_LOG outer=%d s=%d it=%d norm2=%.17e thr2=%.17e conv=%d",
+                                  outer, s, it, std::sqrt(ssq), thr2Of(s), converged ? 1 : 0);
+                    iterLogLines.emplace_back(line);
+                }
                 // OLF_GPU_CONV_TRACE=<slot>|all: the stopping DECISION itself - the 2-norm, the
                 // threshold it is held against and the active row count behind that threshold. Two
                 // arms that agree on every residual and still stop one Newton step apart differ
@@ -11965,6 +11979,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         if (!compactSolve) {
             gWidthIterSum += nS;                             // full-width factorization this iteration
         }
+        int iterLogWidth = nS;                               // OLF_GPU_ITER_LOG: the width this iteration factorized
         if (compactSolve) {
             if (ctx->compactCap == 0) {                       // lazy first-engage setup
                 ctx->compactCap = compactTier > 0
@@ -12013,6 +12028,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 cmap.push_back(cmap[0]);
             }
             gWidthIterSum += w;                              // compacted width actually factorized
+            iterLogWidth = -w;
             gCompactIters++;
             CUDA_CHECK(cudaMemcpyAsync(ctx->dMapC.p, cmap.data(), w * sizeof(int), cudaMemcpyHostToDevice, ctx->stream));
             gatherScenarios<<<grid(nnz * w), BLOCK, 0, ctx->stream>>>(nnz, w, ctx->dMapC.as<int>(), ctx->dVals.as<double>(), ctx->dValsC.as<double>());
@@ -12090,7 +12106,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             // (the host sets loopTraceSlot to -1 for the chunks that do not hold it); slot 0 of the
             // first solve otherwise, as before.
             const int dumpSlot = ctx->loopTraceSlot >= 0 ? ctx->loopTraceSlot : (std::getenv("OLF_GPU_LOOP_TRACE_CTG") != nullptr ? -1 : 0);
-            if (dxPath != nullptr && !dumped && it == 0 && dumpSlot >= 0) {
+            // OLF_GPU_DX_DUMP_OUTER=<k>: the first step of outer pass k instead of the first solve's
+            static const int dxOuter = std::getenv("OLF_GPU_DX_DUMP_OUTER") != nullptr ? std::atoi(std::getenv("OLF_GPU_DX_DUMP_OUTER")) : -1;
+            if (dxPath != nullptr && !dumped && it == 0 && dumpSlot >= 0 && (dxOuter < 0 || outer == dxOuter)) {
                 dumped = true;
                 CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
                 std::vector<double> hv(nnz);
@@ -12258,12 +12276,83 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                 }
             }
         }
+        // OLF_GPU_ITER_LOG: every step's linear solve scored like the pass-0 guard above, on every pass
+        std::vector<double> iterLogLin;
+        if (iterLog && !deviceFixedIter) {
+            if (!ctx->dLinRp.p) {
+                ctx->dLinRp.alloc((size_t) n * nS * sizeof(double));
+                ctx->dLinRm.alloc((size_t) n * nS * sizeof(double));
+                ctx->dLinSc.alloc((size_t) 3 * nS * sizeof(double));
+            }
+            linResidRowBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, nnz, ctx->st->dRowPtr.as<int>(),
+                    ctx->st->dColIdx.as<int>(), ctx->dVals.as<double>(), ctx->dDx.as<double>(),
+                    ctx->dB.as<double>(), ctx->dLinRp.as<double>(), ctx->dLinRm.as<double>());
+            linResidScoreBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(n, nS, ctx->dLinRp.as<double>(), ctx->dLinRm.as<double>(),
+                    ctx->dF.as<double>(), ctx->dLinSc.as<double>());
+            iterLogLin.resize((size_t) 3 * nS);
+            CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
+            CUDA_CHECK(cudaMemcpy(iterLogLin.data(), ctx->dLinSc.p, (size_t) 3 * nS * sizeof(double), cudaMemcpyDeviceToHost));
+        }
         if (ctx->clampStep) {
             maxVoltageChangeFactorBatch<<<nS, BLOCK, 0, ctx->stream>>>(n, ctx->dDx.as<double>(), ctx->dVarType.as<int>(), ctx->dActive.as<char>(), ctx->maxDv, ctx->maxDphi, ctx->dStepFactor.as<double>());
             traceStepFactor(ctx, nS, it, active);
             axpy1BatchScaled<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, n * nS, ctx->dDx.as<double>(), ctx->dStepFactor.as<double>(), ctx->dX.as<double>());
         } else {
             axpy1Batch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n * nS, ctx->dDx.as<double>(), ctx->dX.as<double>());
+        }
+        if (!iterLogLin.empty()) {
+            std::vector<double> fac(nS, 1.0);
+            if (ctx->clampStep) {
+                CUDA_CHECK(cudaMemcpy(fac.data(), ctx->dStepFactor.p, nS * sizeof(double), cudaMemcpyDeviceToHost));
+            }
+            for (int s = 0; s < nS; s++) {
+                if (!active[s]) continue;
+                char line[256];
+                std::snprintf(line, sizeof line, "LIN_LOG outer=%d s=%d it=%d ratio=%.6e resid=%.6e fmax=%.6e factor=%.9f width=%d",
+                              outer, s, it, iterLogLin[3 * s + 2], iterLogLin[3 * s], iterLogLin[3 * s + 1], fac[s], iterLogWidth);
+                iterLogLines.emplace_back(line);
+                if (!(iterLogLin[3 * s + 2] <= 1e-4)) {
+                    // WHERE a poor solve leaves its residual: the worst row under the sign convention the ratio
+                    // used, its row mode, and whether it is a zero-diagonal hazard row (with this lane's donor)
+                    std::vector<double> rp(n), rm(n);
+                    std::vector<int> md(n);
+                    CUDA_CHECK(cudaMemcpy(rp.data(), ctx->dLinRp.as<double>() + (size_t) s * n, n * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(rm.data(), ctx->dLinRm.as<double>() + (size_t) s * n, n * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(md.data(), ctx->dMode.as<int>() + (size_t) s * n, n * sizeof(int), cudaMemcpyDeviceToHost));
+                    double mp = 0.0;
+                    double mm = 0.0;
+                    for (int i = 0; i < n; i++) {
+                        mp = std::max(mp, std::fabs(rp[i]));
+                        mm = std::max(mm, std::fabs(rm[i]));
+                    }
+                    const std::vector<double>& r = mp <= mm ? rp : rm;   // the sign convention the score took
+                    std::vector<int> ord(n);
+                    for (int i = 0; i < n; i++) ord[i] = i;
+                    std::partial_sort(ord.begin(), ord.begin() + std::min(n, 4), ord.end(),
+                                      [&](int a, int b) { return std::fabs(r[a]) > std::fabs(r[b]); });
+                    const auto& hz = ctx->st->hHazRow;
+                    std::vector<int> choice;
+                    if (!hz.empty() && ctx->dHazChoice.p && ctx->hazCap >= nS) {
+                        choice.resize(hz.size());
+                        CUDA_CHECK(cudaMemcpy(choice.data(), ctx->dHazChoice.as<int>() + (size_t) s * hz.size(),
+                                              hz.size() * sizeof(int), cudaMemcpyDeviceToHost));
+                    }
+                    std::string worst = "LIN_WORST outer=" + std::to_string(outer) + " s=" + std::to_string(s)
+                            + " it=" + std::to_string(it);
+                    for (int k = 0; k < std::min(n, 4); k++) {
+                        int row = ord[k];
+                        int hi = -1;
+                        for (size_t h = 0; h < hz.size(); h++) {
+                            if (hz[h] == row) hi = static_cast<int>(h);
+                        }
+                        char b[128];
+                        std::snprintf(b, sizeof b, " [row=%d r=%.3e mode=%d haz=%d donor=%d]", row, r[row], md[row], hi,
+                                      hi >= 0 && !choice.empty() ? choice[hi] : -9);
+                        worst += b;
+                    }
+                    iterLogLines.emplace_back(worst);
+                }
+            }
         }
         if (!deviceFixedIter) CUDA_CHECK(cudaStreamSynchronize(ctx->stream));   // fixed-iter: no per-iter host sync (final readback syncs)
         } else {
@@ -13166,6 +13255,22 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
                      gate[0], (int) gate[1], res.iters[loopTraceSlot],
                      gate[2], gate[3], gate[4], gate[5], gate[6], gate[7]);
     }
+    if (iterLog) {
+        std::vector<double> gates;
+        if (ctx->dDsGateLast.p) {
+            gates.resize(static_cast<size_t>(nS) * 8);
+            CUDA_CHECK(cudaMemcpy(gates.data(), ctx->dDsGateLast.p, gates.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        }
+        for (int s = 0; s < nS; s++) {
+            char line[256];
+            std::snprintf(line, sizeof line, "PASS_LOG outer=%d loopIdx=%d kind=%d solved=%d s=%d live=%d switched=%d iters=%d"
+                          " status=%d dsRem=%.17e dsFire=%d dsPlaced=%.17e",
+                          outer, loopIdx, loopOrder[loopIdx], solvePass ? 1 : 0, s, (int) live[s], (int) rlSwitched[s],
+                          res.iters[s], res.status[s], gates.empty() ? 0.0 : gates[8 * s],
+                          gates.empty() ? 0 : (int) gates[8 * s + 1], gates.empty() ? 0.0 : gates[8 * s + 7]);
+            iterLogLines.emplace_back(line);
+        }
+    }
     if (nChanged > 0) {                                     // this outer loop is still unstable
         for (int s = 0; s < nS; s++) {
             if (rlSwitched[s] && ++prodIters[s] >= RL_MAX_OUTER) {
@@ -13195,6 +13300,13 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
         solvePass = false;                                  // ...against the SAME state: STABLE never re-solves (OLF)
     }
     }   // ---- end sequential outer-loop driver ----
+
+    if (iterLog) {
+        for (const std::string& line : iterLogLines) {
+            std::fprintf(stderr, "%s\n", line.c_str());
+        }
+        std::fprintf(stderr, "ITER_LOG_END nS=%d lines=%zu\n", nS, iterLogLines.size());
+    }
 
     if (ctx->dSwLog.p && (swLogSlot == -2 || (swLogSlot >= 0 && swLogSlot < nS))) {
         int cnt = 0;

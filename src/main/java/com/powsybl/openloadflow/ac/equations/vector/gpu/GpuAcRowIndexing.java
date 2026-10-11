@@ -533,8 +533,47 @@ final class GpuAcRowIndexing {
             treeEdges.computeIfAbsent(br.getBus1().getNum(), k -> new java.util.ArrayList<>()).add(br);
             treeEdges.computeIfAbsent(br.getBus2().getNum(), k -> new java.util.ArrayList<>()).add(br);
         }
-        boolean[] seen = new boolean[nBuses];
+        // A child's own rows must be FREE for the pairing: its V row takes its coupler's ZERO_V once its reactive
+        // equation moves to the parent's DUMMY_Q, so a bus whose V row hosts ANOTHER bus's reactive balance (a
+        // group's free controller carries the pilot's) or whose reactive equation is relocated elsewhere (a
+        // transformer- or shunt-controlled bus) keeps its rows, and the numeric repair covers it as before.
+        boolean[] hostsAnotherReactiveRow = new boolean[nBuses];
+        for (int other = 0; other < nBuses; other++) {
+            if (qRow[other] < 0) {
+                continue;
+            }
+            for (int bn = 0; bn < nBuses; bn++) {
+                if (bn != other && qRow[other] == vCol[bn]) {
+                    hostsAnotherReactiveRow[bn] = true;
+                }
+            }
+        }
+        // ROOT ORDER: a bus that cannot be a CHILD roots its tree when it can (an impedant branch gives its P row a
+        // diagonal), the reference bus first: its PHI row holds BUS_TARGET_PHI, so a coupler's ZERO_PHI cannot take
+        // it at all (made a child, it is a double row assignment and the whole extraction is refused). Then a bus
+        // whose V row is an identity, hosts another bus's reactive balance, or does not hold its own. Rooted
+        // anywhere else the tree is CUT at such a bus: the coupler between it and its parent keeps the stock
+        // placement, two zero diagonals the numeric repair fills from a live balance row, and that borrowed pair is
+        // an exactly singular 2x2 block an unpivoted factorization cannot eliminate in either order (network.xiidm
+        // CKYD: the PV section CKYD_2 cut CLDK off a CKYD_0 root, and every inaccurate batched solve of a
+        // 258-section window had its worst residual on CLDK's or its neighbours' rows).
+        java.util.List<LfBus> rootOrder = new java.util.ArrayList<>();
         for (LfBus bus : network.getBuses()) {
+            if (treeEdges.containsKey(bus.getNum()) && hasImpedantBranch(bus) && hostsPhiIdentity(bus, es)) {
+                rootOrder.add(bus);
+            }
+        }
+        for (LfBus bus : network.getBuses()) {
+            int bn = bus.getNum();
+            if (treeEdges.containsKey(bn) && hasImpedantBranch(bus) && !hostsPhiIdentity(bus, es)
+                    && (hostsVoltageIdentity(bus, es) || hostsAnotherReactiveRow[bn]
+                        || !(qRow[bn] == vCol[bn] || isRemoteGenVcControllerElement(bus)))) {
+                rootOrder.add(bus);
+            }
+        }
+        rootOrder.addAll(network.getBuses());
+        boolean[] seen = new boolean[nBuses];
+        for (LfBus bus : rootOrder) {
             int rootNum = bus.getNum();
             if (seen[rootNum] || !treeEdges.containsKey(rootNum) || !hasImpedantBranch(bus)) {
                 continue;                                    // the root's own P row needs a real dP/dPHI diagonal
@@ -551,9 +590,9 @@ final class GpuAcRowIndexing {
                     LfBus other = br.getBus1() == b ? br.getBus2() : br.getBus1();
                     int otherNum = other.getNum();
                     if (seen[otherNum] || phiCol[otherNum] < 0 || vCol[otherNum] < 0
-                            || hostsVoltageIdentity(other, es)) {
-                        continue;                            // a pilot's V row is an identity: ZERO_V cannot take it
-                    }
+                            || hostsVoltageIdentity(other, es) || hostsPhiIdentity(other, es)) {
+                        continue;                            // a pilot's V row is an identity: ZERO_V cannot take it;
+                    }                                        // nor ZERO_PHI the reference bus's PHI row
                     seen[otherNum] = true;
                     parentEdgeOfBus[otherNum] = br.getNum();
                     childBusOfEdge[br.getNum()] = otherNum;
@@ -568,21 +607,6 @@ final class GpuAcRowIndexing {
                 for (int child : childrenOfThisTree) {        // short tree: the numeric repair handles it exactly
                     childBusOfEdge[parentEdgeOfBus[child]] = -1;
                     parentEdgeOfBus[child] = -1;
-                }
-            }
-        }
-        // A child's own rows must be FREE for the pairing: its V row takes its coupler's ZERO_V once its reactive
-        // equation moves to the parent's DUMMY_Q, so a bus whose V row hosts ANOTHER bus's reactive balance (a
-        // group's free controller carries the pilot's) or whose reactive equation is relocated elsewhere (a
-        // transformer- or shunt-controlled bus) keeps its rows, and the numeric repair covers it as before.
-        boolean[] hostsAnotherReactiveRow = new boolean[nBuses];
-        for (int other = 0; other < nBuses; other++) {
-            if (qRow[other] < 0) {
-                continue;
-            }
-            for (int bn = 0; bn < nBuses; bn++) {
-                if (bn != other && qRow[other] == vCol[bn]) {
-                    hostsAnotherReactiveRow[bn] = true;
                 }
             }
         }
@@ -606,6 +630,21 @@ final class GpuAcRowIndexing {
                 childBusOfEdge[parent] = -1;
             }
         }
+        if (System.getenv("OLF_GPU_ZITREE_TRACE") != null) {
+            int tree = 0;
+            int relocated = 0;
+            for (LfBranch br : network.getBranches()) {
+                if (br.isZeroImpedance(LoadFlowModel.AC) && br.isSpanningTreeEdge(LoadFlowModel.AC)
+                        && br.getBus1() != null && br.getBus2() != null) {
+                    tree++;
+                    if (childBusOfEdge[br.getNum()] >= 0) {
+                        relocated++;
+                    }
+                }
+            }
+            System.err.println("ZITREE_SUMMARY treeCouplers=" + tree + " relocated=" + relocated
+                    + " stock=" + (tree - relocated));
+        }
         return new int[][] {parentEdgeOfBus, childBusOfEdge};
     }
 
@@ -627,6 +666,11 @@ final class GpuAcRowIndexing {
                 || identityOwner(bus.getGeneratorVoltageControl().orElse(null), bus)
                 || identityOwner(bus.getTransformerVoltageControl().orElse(null), bus)
                 || identityOwner(bus.getShuntVoltageControl().orElse(null), bus);
+    }
+
+    /** True when this bus's {@code PHI} row holds the reference angle ({@code BUS_TARGET_PHI}). */
+    private static boolean hostsPhiIdentity(LfBus bus, EquationSystem<AcVariableType, AcEquationType> es) {
+        return row(es, bus.getNum(), AcEquationType.BUS_TARGET_PHI) >= 0;
     }
 
     private static boolean identityOwner(VoltageControl<?> vc, LfBus bus) {

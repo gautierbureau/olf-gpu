@@ -21,12 +21,18 @@ import com.powsybl.openloadflow.equations.JacobianMatrix;
 import com.powsybl.openloadflow.equations.StateVector;
 import com.powsybl.openloadflow.network.AbstractLoadFlowNetworkFactory;
 import com.powsybl.openloadflow.network.FirstSlackBusSelector;
+import com.powsybl.openloadflow.network.LfBranch;
+import com.powsybl.openloadflow.network.LfBus;
 import com.powsybl.openloadflow.network.LfNetwork;
 import com.powsybl.openloadflow.network.LfNetworkParameters;
+import com.powsybl.openloadflow.network.LoadFlowModel;
 import com.powsybl.openloadflow.network.impl.Networks;
 import com.powsybl.openloadflow.network.util.UniformValueVoltageInitializer;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -66,6 +72,51 @@ class GpuZiCouplerTreeRelocationTest extends AbstractLoadFlowNetworkFactory {
             prev = b;
         }
         return network;
+    }
+
+    /** Five sections chained by couplers, s0..s4 in that bus order, every one tied to the external bus by a line
+     *  and only s2 regulating: s2's V row holds the tree's BUS_TARGET_V, so s2 cannot be a child. */
+    private static Network chainRegulatedInTheMiddle() {
+        Network network = Network.create("zi-chain-regulated-middle", "code");
+        Bus ext = createBus(network, "x", "ext");
+        createGenerator(ext, "gs", 5, 1.0);
+        createLoad(ext, "lx", 2, 0.5);
+        Bus prev = null;
+        for (int k = 0; k < 5; k++) {
+            Bus s = createBus(network, "s", "s" + k);
+            if (k == 2) {
+                createGenerator(s, "g2", 1, 1.02);
+            } else {
+                createLoad(s, "ld" + k, 0.5, 0.2);
+            }
+            createLine(network, ext, s, "l" + k, 0.1);
+            if (prev != null) {
+                createLine(network, prev, s, "c" + (k - 1) + k, 0.0, 0.0);
+            }
+            prev = s;
+        }
+        return network;
+    }
+
+    /** The tree is rooted at the section that cannot be a child. Rooted at the first bus instead (s0), the walk
+     *  stopped at s2 and left c12 in the stock placement: two zero diagonals the numeric repair fills from s1's
+     *  live balance rows, an exactly singular 2x2 block for an unpivoted factorization (network.xiidm CKYD: every
+     *  inaccurate batched solve of a 258-section window had its worst residual there). */
+    @Test
+    void couplerTreeIsRootedAtItsRegulatedSection() {
+        LfNetwork network = Networks.load(chainRegulatedInTheMiddle(),
+                new LfNetworkParameters().setSlackBusSelector(new FirstSlackBusSelector())).get(0);
+        EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(network).create();
+        AcSolverUtil.initStateVector(network, es, new UniformValueVoltageInitializer());
+        ExtractionColumns columns = ExtractionColumns.of(network, es);
+        List<String> stock = network.getBranches().stream()
+                .filter(b -> b.isZeroImpedance(LoadFlowModel.AC) && b.isSpanningTreeEdge(LoadFlowModel.AC))
+                .filter(b -> columns.ziChildBus()[b.getNum()] < 0)
+                .map(LfBranch::getId)
+                .toList();
+        assertEquals(List.of(), stock, "every coupler of the tree is relocated");
+        LfBus regulated = network.getBuses().stream().filter(b -> b.getId().startsWith("s2")).findFirst().orElseThrow();
+        assertEquals(-1, columns.ziParentEdge()[regulated.getNum()], "the regulated section is the root");
     }
 
     /** Relocated, a chain the repair cannot hold (7 and 15 couplers) steps exactly with OLF. */

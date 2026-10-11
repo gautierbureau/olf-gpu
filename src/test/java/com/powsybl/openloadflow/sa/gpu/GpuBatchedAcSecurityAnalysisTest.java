@@ -2242,6 +2242,17 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 "a sound plan writes every row's target once");
     }
 
+    /** Five sections, only the middle one (bbs2) regulating: its V row holds the tree's voltage identity, so the
+     *  coupler tree is rooted there and every coupler is relocated (GpuAcRowIndexing#ziTreeRelocation). Rooted at
+     *  bbs0 by bus order instead, c12 kept the stock placement and the numeric repair borrowed a live balance row
+     *  for its two zero diagonals. Every section's loss on the device, against OLF. */
+    @org.junit.jupiter.api.Test
+    void deviceCouplerTreeRootedAtItsRegulatedSectionMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        assertSplitGroupMatchesCpu(5, java.util.Set.of(), java.util.Set.of(0, 1, 3, 4));
+    }
+
     /** Four sections, the main at the end: losing bbs1 leaves the main alone on one side and a second cluster
      *  {bbs2, bbs3} that OLF re-merges into a NEW group on the other — two groups on one candidate table (tasks
      *  #71, rte6515 BUS-6002_BBS_2 and ten more). Every section's loss is listed (couplers retained), so the same

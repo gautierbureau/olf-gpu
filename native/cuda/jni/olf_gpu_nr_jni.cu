@@ -1702,8 +1702,9 @@ __global__ void linResidRow(int n, const int* rowPtr, const int* colIdx, const d
 // factorized: a row whose diagonal is exactly zero borrows a row that carries its diagonal column,
 //     row_r += s_r * row_d          (values AND right-hand side)
 // which leaves J dx = -F with the same solution (the combination matrix is nonsingular: P rows
-// borrow with +1, Q rows and dummy rows with -1; on a spanning tree the borrowing closes only in
-// 4-cycles P -> ZERO_PHI -> Q -> ZERO_V -> P, whose determinant 1 - (+1)(-1)(-1)(-1) is 2). Candidates are structural — a dummy row's two endpoint rows (and the pilot-Q relocation
+// borrow with +1 and the DUMMY_P row with -1, Q rows with -1 and the DUMMY_Q row with +1; on a
+// spanning tree the borrowing closes only in 2-cycles P <-> ZERO_PHI and Q <-> ZERO_V, whose
+// determinant 1 - s_h*s_d is 2). Candidates are structural — a dummy row's two endpoint rows (and the pilot-Q relocation
 // candidates when an endpoint's Q rides there), an endpoint row's incident couplers' dummy rows —
 // and the choice is numeric, so a coupler switched off or a section pinned to identity this scenario
 // simply is not a donor (an identity row has nothing but its own 1). Every right-hand side handed to
@@ -2678,13 +2679,22 @@ struct Result {
 // stay the dummy COLUMNS, because the kernel reads the dummy values through them.
 inline int ziSpan(const int* z) { return z[10] & 1; }
 inline int ziDeadSide(const int* z) { return (z[10] >> 1) & 3; }
+// STOCK placement (no child): ZERO_V on the DUMMY_Q row and ZERO_PHI on the DUMMY_P row - CROSSWISE. Neither
+// equation holds a dummy, so either way both rows are zero-diagonal hazards the numeric repair fills from a
+// donor row carrying that dummy: a Q row for DUMMY_Q, a P row for DUMMY_P. The repaired row is then
+// row_h + s*row_d, and the 2x2 principal block of (row_d, row_h') on (donor diagonal, dummy) is singular
+// unless row_h has an entry of its own in the donor's diagonal column: ZERO_V (v_a - rho*v_b) has one in a
+// Q row's V diagonal, ZERO_PHI (phi_a - phi_b) in a P row's PHI diagonal. The other way round (ZERO_V on the
+// DUMMY_P row, repaired from a P row) the block is {[955.8, 1], [-955.8, -1]} exactly - measured on
+// network.xiidm's cut trees, 35 such pairs in one dump, and the unpivoted uniform-batch factorization lost
+// them (rte6515: 37 stock couplers in every scenario's matrix). Crosswise, det = -+1 on every such block.
 inline int ziZeroVRow(const int* z) {
     int d = ziDeadSide(z);
-    return d == 0 ? z[4] : (d == 1 ? z[6] : z[7]);           // the stub's own v row
+    return d == 0 ? z[5] : (d == 1 ? z[6] : z[7]);           // the child's own v row
 }
 inline int ziZeroPhiRow(const int* z) {
     int d = ziDeadSide(z);
-    return d == 0 ? z[5] : (d == 1 ? z[8] : z[9]);           // the stub's own phi row
+    return d == 0 ? z[4] : (d == 1 ? z[8] : z[9]);           // the child's own phi row
 }
 
 std::vector<int> buildRowMap(int n, int ncb, const int* cbIdx, int nob, const int* obIdx,
@@ -3509,13 +3519,15 @@ SharedStructure* buildStructure(int n,
                 if (parV >= 0) addDonor(slotOf(rowMap[parV], -1), zV);
                 continue;
             }
-            // ZERO_V sits on the DUMMY_P row (its diagonal column is dummy-P, carried by the endpoint
-            // P rows); ZERO_PHI on the DUMMY_Q row (dummy-Q, carried by the endpoint Q rows). The first
-            // cut had these two swapped, so no dummy row ever found a donor: invisible at 28 couplers
-            // (cuDSS still coped, with IR=2), fatal at rte6515's full 366 (the base solve's linear
-            // residual was 1e9 and Newton never moved).
-            int dP = rowMap[ziZeroVRow(z)];                  // hosts ZERO_V, diagonal column = dummy-P
-            int dQ = rowMap[ziZeroPhiRow(z)];                // hosts ZERO_PHI, diagonal column = dummy-Q
+            // The DUMMY_P row (diagonal column dummy-P, carried by the endpoint P rows) hosts ZERO_PHI and the
+            // DUMMY_Q row (dummy-Q, carried by the Q rows) hosts ZERO_V - see ziZeroVRow: crosswise, so that
+            // each repaired row keeps an entry of its own in its donor's diagonal column and the repaired 2x2
+            // block is not singular. The donors are keyed by the DUMMY column, whatever equation the row hosts:
+            // a first cut had them matched to the equations instead, so no dummy row ever found a donor -
+            // invisible at 28 couplers (cuDSS still coped, with IR=2), fatal at rte6515's full 366 (the base
+            // solve's linear residual was 1e9 and Newton never moved).
+            int dP = rowMap[z[4]];                           // the DUMMY_P row: hosts ZERO_PHI
+            int dQ = rowMap[z[5]];                           // the DUMMY_Q row: hosts ZERO_V
             int pa = z[0] >= 0 ? rowMap[z[0]] : -1;
             int pb = z[2] >= 0 ? rowMap[z[2]] : -1;
             int qaRow = z[1] >= 0 ? z[1] : z[6];             // suppressed Q balance: the V slot hosts DISTR_Q
@@ -3531,8 +3543,16 @@ SharedStructure* buildStructure(int n,
             int phB = z[9] >= 0 ? rowMap[z[9]] : -1;
             int vA = z[6] >= 0 ? rowMap[z[6]] : -1;
             int vB = z[7] >= 0 ? rowMap[z[7]] : -1;
+            // Signs: with the crosswise placement the borrowing closes in 2-cycles only - P(a) <-> ZERO_PHI on
+            // the DUMMY_P row, Q(a) <-> ZERO_V on the DUMMY_Q row (a coupler's dummy row can borrow from and
+            // lend to its two endpoint rows alone, and a tree allows no longer cycle) - and det(I + C) on a
+            // 2-cycle is 1 - s_h*s_d: the two signs must differ. P rows +1 and the DUMMY_P row -1; Q rows -1
+            // and the DUMMY_Q row +1. (The former placement closed 4-cycles P -> ZERO_PHI -> Q -> ZERO_V -> P,
+            // whose determinant is 1 - the product of the four signs, and all-bus-rows-+1 gave det 0 there -
+            // a singular, CONSISTENT system cuDSS solved to 1e-11 with the wrong answer: rte6515 500 busbars,
+            // 175 contingencies above 1e-9 kV where the tree-only borrowing had 3.)
             int sP = slotOf(dP, -1);
-            int sQ = slotOf(dQ, -1);
+            int sQ = slotOf(dQ, 1);
             addDonor(sP, pa);
             addDonor(sP, pb);
             addDonor(sQ, qa);
@@ -3548,19 +3568,14 @@ SharedStructure* buildStructure(int n,
                     for (int c = st->hQrPtr[g]; c < st->hQrPtr[g + 1]; c++) addDonor(sQ, st->hQrRows[c]);
                 }
             }
-            // Signs: the borrowing closes in 4-cycles P(a) -> ZERO_PHI -> Q(a) -> ZERO_V -> P(a) (a tree
-            // allows no other cycle), and det(I + C) on such a cycle is 1 - (product of the four
-            // signs): P rows +1, Q rows -1, dummy rows -1 gives det 2. All-bus-rows-+1 gave det 0 - a
-            // singular, CONSISTENT system cuDSS solved to 1e-11 with the wrong answer (rte6515 500
-            // busbars: 175 contingencies above 1e-9 kV where the tree-only borrowing had 3).
-            if (pa >= 0) addDonor(slotOf(pa, 1), dQ);       // phi_a is carried by ZERO_PHI
-            if (pb >= 0) addDonor(slotOf(pb, 1), dQ);
-            if (qa >= 0) addDonor(slotOf(qa, -1), dP);      // v_a is carried by ZERO_V
-            if (qb >= 0) addDonor(slotOf(qb, -1), dP);
-            if (phA >= 0 && phA != pa) addDonor(slotOf(phA, 1), dQ);
-            if (phB >= 0 && phB != pb) addDonor(slotOf(phB, 1), dQ);
-            if (vA >= 0 && vA != qa) addDonor(slotOf(vA, -1), dP);
-            if (vB >= 0 && vB != qb) addDonor(slotOf(vB, -1), dP);
+            if (pa >= 0) addDonor(slotOf(pa, 1), dP);       // phi_a is carried by ZERO_PHI, on the DUMMY_P row
+            if (pb >= 0) addDonor(slotOf(pb, 1), dP);
+            if (qa >= 0) addDonor(slotOf(qa, -1), dQ);      // v_a is carried by ZERO_V, on the DUMMY_Q row
+            if (qb >= 0) addDonor(slotOf(qb, -1), dQ);
+            if (phA >= 0 && phA != pa) addDonor(slotOf(phA, 1), dP);
+            if (phB >= 0 && phB != pb) addDonor(slotOf(phB, 1), dP);
+            if (vA >= 0 && vA != qa) addDonor(slotOf(vA, -1), dQ);
+            if (vB >= 0 && vB != qb) addDonor(slotOf(vB, -1), dQ);
         }
         if (!hazRows.empty()) {
             // DONOR ORDER decides LU stability without pivoting. The kernel takes the FIRST candidate

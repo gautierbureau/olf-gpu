@@ -123,8 +123,9 @@ public final class GpuEquationDump {
             add(terms, zi[o + 3], tag + ".q2(-dQ)");
             if ((zi[o + 10] & 1) != 0) {
                 int childSide = (zi[o + 10] >> 1) & 3;
-                int zv = childSide == 0 ? zi[o + 4] : (childSide == 1 ? zi[o + 6] : zi[o + 7]);
-                int zp = childSide == 0 ? zi[o + 5] : (childSide == 1 ? zi[o + 8] : zi[o + 9]);
+                // stock: crosswise, ZERO_V on the DUMMY_Q row and ZERO_PHI on the DUMMY_P row (native ziZeroVRow)
+                int zv = childSide == 0 ? zi[o + 5] : (childSide == 1 ? zi[o + 6] : zi[o + 7]);
+                int zp = childSide == 0 ? zi[o + 4] : (childSide == 1 ? zi[o + 8] : zi[o + 9]);
                 add(terms, zv, tag + ".ZERO_V");
                 add(terms, zp, tag + ".ZERO_PHI");
             }

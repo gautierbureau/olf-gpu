@@ -98,6 +98,89 @@ class GpuZiCouplerTreeRelocationTest extends AbstractLoadFlowNetworkFactory {
         return network;
     }
 
+    /** A two-section plant, the shape of 36 of rte6515's 37 stock couplers: a generator on each section, one merged
+     *  control whose main visible controlled bus is s0 (the higher target), so s0's V row holds the identity, and
+     *  s0 has NO impedant branch - it reaches the grid through the coupler alone - so its P row has no diagonal of
+     *  its own. s0 can be neither a root (no dP/dphi) nor a child (the identity), so c01 keeps the STOCK placement
+     *  and the numeric row repair, chained: s0's P row borrows ZERO_PHI, which borrows a P row. */
+    private static Network twoSectionPlantGeneratorOnTheStub() {
+        Network network = Network.create("zi-two-section-plant", "code");
+        Bus ext = createBus(network, "x", "ext");
+        createGenerator(ext, "gs", 5, 1.0);
+        createLoad(ext, "lx", 3, 0.5);
+        Bus s0 = createBus(network, "s", "s0");
+        createGenerator(s0, "g0", 1, 1.03);
+        Bus s1 = createBus(network, "s", "s1");
+        createGenerator(s1, "g1", 1, 1.02);
+        createLoad(s1, "ld1", 0.5, 0.2);
+        createLine(network, ext, s1, "l1", 0.1);
+        createLine(network, s0, s1, "c01", 0.0, 0.0);
+        return network;
+    }
+
+    /** A zero-impedance phase shifter (x = 0, a fixed 5 degree tap) between two load sections that each reach the
+     *  external bus by a line: its ZERO_PHI target is the phase shift, not 0, so it tells the equation apart from
+     *  ZERO_V (target 0) in whatever rows the two sit on. */
+    private static Network zeroImpedancePhaseShifter() {
+        Network network = Network.create("zi-phase-shifter", "code");
+        Bus ext = createBus(network, "s", "ext");
+        createGenerator(ext, "gs", 5, 1.0);
+        createLoad(ext, "lx", 2, 0.5);
+        Bus s0 = createBus(network, "s", "s0");
+        createLoad(s0, "ld0", 1, 0.3);
+        Bus s1 = createBus(network, "s", "s1");
+        createLoad(s1, "ld1", 1, 0.3);
+        createLine(network, ext, s0, "l0", 0.1);
+        createLine(network, ext, s1, "l1", 0.1);
+        createTransformer(network, "s", s0, s1, "ps01", 0.0, 1.0).newPhaseTapChanger()
+                .setTapPosition(0)
+                .setRegulating(false)
+                .setRegulationMode(com.powsybl.iidm.network.PhaseTapChanger.RegulationMode.CURRENT_LIMITER)
+                .setRegulationValue(100)
+                .setRegulationTerminal(network.getTwoWindingsTransformer("ps01").getTerminal2())
+                .beginStep().setAlpha(5.0).setRho(1.0).setR(0).setX(0).setG(0).setB(0).endStep()
+                .add();
+        return network;
+    }
+
+    /** The device's step is OLF's with the ZERO_PHI target where the ZERO_PHI equation sits, relocated or stock:
+     *  the target map (GpuAcActivationExtractor) and the native placement (ziZeroVRow / ziZeroPhiRow) name the same
+     *  dummy row for each zero equation. With the two crossed, a phase-shifting coupler's step is wrong by the
+     *  shift on both of its sections. */
+    @Test
+    void zeroImpedancePhaseShifterStepsWithOlf() {
+        assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");
+        LfNetwork network = Networks.load(zeroImpedancePhaseShifter(),
+                new LfNetworkParameters().setSlackBusSelector(new FirstSlackBusSelector())).get(0);
+        LfBranch ps = network.getBranchById("ps01");
+        assertTrue(ps.isZeroImpedance(LoadFlowModel.AC) && ps.isSpanningTreeEdge(LoadFlowModel.AC), "a zero-impedance tree edge");
+        assertTrue(Math.abs(LfBranch.getA(ps)) > 1e-3, "with a phase shift: the ZERO_PHI target is not 0");
+        assertFirstStepIsOlfs(zeroImpedancePhaseShifter(), "zero-impedance phase shifter, relocated");
+        System.setProperty("olf.gpu.ziTreeRelocation", "false");
+        try {
+            assertFirstStepIsOlfs(zeroImpedancePhaseShifter(), "zero-impedance phase shifter, stock");
+        } finally {
+            System.clearProperty("olf.gpu.ziTreeRelocation");
+        }
+    }
+
+    /** The plant's coupler stays stock (the fixture is what it claims to be): s0 is a stub with the identity, so
+     *  the relocation has no child for c01 and the step test below runs on the repaired stock placement. */
+    @Test
+    void twoSectionPlantKeepsItsCouplerStock() {
+        LfNetwork network = Networks.load(twoSectionPlantGeneratorOnTheStub(),
+                new LfNetworkParameters().setSlackBusSelector(new FirstSlackBusSelector())).get(0);
+        EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(network).create();
+        AcSolverUtil.initStateVector(network, es, new UniformValueVoltageInitializer());
+        ExtractionColumns columns = ExtractionColumns.of(network, es);
+        LfBranch c01 = network.getBranchById("c01");
+        LfBus s0 = network.getBusById("s0_vl_0");
+        assertTrue(c01.isZeroImpedance(LoadFlowModel.AC) && c01.isSpanningTreeEdge(LoadFlowModel.AC));
+        assertTrue(s0.getBranches().stream().allMatch(b -> b.isZeroImpedance(LoadFlowModel.AC)), "s0 is a stub");
+        assertTrue(s0.isGeneratorVoltageControlled(), "s0 holds the plant's voltage identity");
+        assertEquals(-1, columns.ziChildBus()[c01.getNum()], "c01 is stock: neither section can be its child");
+    }
+
     /** The tree is rooted at the section that cannot be a child. Rooted at the first bus instead (s0), the walk
      *  stopped at s2 and left c12 in the stock placement: two zero diagonals the numeric repair fills from s1's
      *  live balance rows, an exactly singular 2x2 block for an unpivoted factorization (network.xiidm CKYD: every
@@ -131,9 +214,40 @@ class GpuZiCouplerTreeRelocationTest extends AbstractLoadFlowNetworkFactory {
         }
     }
 
+    /** STOCK everywhere (relocation off), the same chains step exactly with OLF too: the numeric row repair holds
+     *  them once each zero equation sits on the dummy row whose donors carry its own columns (ZERO_V on the
+     *  DUMMY_Q row, ZERO_PHI on the DUMMY_P row - crosswise, native ziZeroVRow). With the placement the other way
+     *  round, every repaired pair was an exactly singular 2x2 block and the unpivoted factorization lost the chain
+     *  from 7 couplers on (1.6e+04 measured, against OLF's step). */
+    @Test
+    void stockCouplerChainStepsWithOlf() {
+        assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");
+        System.setProperty("olf.gpu.ziTreeRelocation", "false");
+        try {
+            assertChainStepsMatchOlf();
+        } finally {
+            System.clearProperty("olf.gpu.ziTreeRelocation");
+        }
+    }
+
+    /** The two-section plant's coupler is stock even with the relocation on (neither section can be its child),
+     *  and the device's first step is OLF's all the same: its repaired blocks are not singular. */
+    @Test
+    void twoSectionPlantFirstStepIsOlfs() {
+        assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU native lib not available");
+        assertFirstStepIsOlfs(twoSectionPlantGeneratorOnTheStub(), "two-section plant");
+    }
+
     private static void assertChainStepsMatchOlf() {
         for (int couplers : new int[] {3, 7, 15}) {
-            LfNetwork network = Networks.load(chain(couplers),
+            assertFirstStepIsOlfs(chain(couplers), "coupler chain of " + couplers);
+        }
+    }
+
+    /** The device's FIRST Newton step from the flat start against OLF's own (KLU on the same system), at 1e-12. */
+    private static void assertFirstStepIsOlfs(Network iidm, String what) {
+        {
+            LfNetwork network = Networks.load(iidm,
                     new LfNetworkParameters().setSlackBusSelector(new FirstSlackBusSelector())).get(0);
             EquationSystem<AcVariableType, AcEquationType> es = new AcEquationSystemCreator(network).create();
             AcSolverUtil.initStateVector(network, es, new UniformValueVoltageInitializer());
@@ -164,11 +278,11 @@ class GpuZiCouplerTreeRelocationTest extends AbstractLoadFlowNetworkFactory {
                     double[] f0 = eq.getArray();
                     for (int c = 0; c < f0.length; c++) {
                         var e = es.getIndex().getEquationAtColumn(c);
-                        System.err.println("F0_TRACE chain=" + couplers + " col=" + c + " " + e.getType() + " elem=" + e.getElementNum()
+                        System.err.println("F0_TRACE " + what + " col=" + c + " " + e.getType() + " elem=" + e.getElementNum()
                                 + " f0=" + f0[c]);
                     }
                     try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(java.nio.file.Path.of(
-                            System.getenv("OLF_GPU_F0_TRACE") + ".chain" + couplers + ".eq"))) {
+                            System.getenv("OLF_GPU_F0_TRACE") + "." + what.replace(' ', '_') + ".eq"))) {
                         GpuEquationDump.write(w, network, es, d, activation.rowMode());
                     } catch (java.io.IOException ex) {
                         throw new java.io.UncheckedIOException(ex);
@@ -183,7 +297,7 @@ class GpuZiCouplerTreeRelocationTest extends AbstractLoadFlowNetworkFactory {
             for (int i = 0; i < n; i++) {
                 worst = Math.max(worst, Math.abs(gpu[i] - cpu[i]));
             }
-            assertTrue(worst < 1e-12, "coupler chain of " + couplers + ": the device's first step must be OLF's,"
+            assertTrue(worst < 1e-12, what + ": the device's first step must be OLF's,"
                     + " worst difference " + worst);
         }
     }

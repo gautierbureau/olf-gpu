@@ -291,8 +291,12 @@ public final class GpuAcActivationExtractor {
             AcVariableType powerRowVar = switch (e.getType()) {
                 case DISTR_RHO -> AcVariableType.BRANCH_RHO1; // controller's BRANCH_RHO1 row
                 case DISTR_SHUNT_B -> AcVariableType.SHUNT_B; // controller's SHUNT_B row
-                case ZERO_V -> AcVariableType.DUMMY_P;       // zero-imp v1−rho·v2 sits on the DUMMY_P row
-                case ZERO_PHI -> AcVariableType.DUMMY_Q;     // zero-imp phi1−phi2 sits on the DUMMY_Q row
+                // STOCK placement, crosswise (native ziZeroVRow / ziZeroPhiRow): zero-imp v1−rho·v2 sits on the
+                // DUMMY_Q row and phi1−phi2 on the DUMMY_P row, so that each row's numeric repair from a donor
+                // that carries its dummy column (a Q row, a P row) keeps an entry of its own in the donor's
+                // diagonal column. The target travels with the equation: ZERO_PHI's is the branch's phase shift.
+                case ZERO_V -> AcVariableType.DUMMY_Q;
+                case ZERO_PHI -> AcVariableType.DUMMY_P;
                 default -> null;
             };
             if (powerRowVar != null) {

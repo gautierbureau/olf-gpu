@@ -782,6 +782,15 @@ static bool hasRelocatable(int ncb, const int* cbIdx, int nsh, const int* shIdx)
 // it must divert on mode 0 ONLY, not on mode 4: a relocated child that is RL-PINNED carries mode 4 on that
 // same dummy row, where its own Q balance legitimately lives. Encoded as -2-row in selRow, which the picks
 // decode as "divert only while this row is an identity".
+// The DEPENDENT-PILOT group of the bus owning an output's home row (see depPick), or -1.
+inline int depGroupOf(int frozenRow, int altRow, const int* relocOwn, const int* depGroupOfRow) {
+    if (depGroupOfRow == nullptr) {
+        return -1;
+    }
+    int own = altRow >= 0 ? altRow : frozenRow;
+    return own >= 0 ? depGroupOfRow[own] : -1;
+}
+
 inline int stockAltRow(int frozenRow, int alt, const int* relocOwn) {
     return alt < 0 && frozenRow >= 0 && relocOwn != nullptr && relocOwn[frozenRow] >= 0
             ? relocOwn[frozenRow] : alt;
@@ -891,7 +900,7 @@ void buildCbPhaseDest(int ncb, const int* cbIdx, const int* cbPcSide, const std:
 // Union the alternate Q rows into the CSR pattern: for each closed-branch role-1 Q output emit an
 // extra (altRow, col) entry so buildDest can resolve a slot there. Deduped by the caller's unique().
 void collectCbAltPattern(int ncb, const int* cbIdx, const int* relocOwn, std::vector<std::pair<int, int>>& pat,
-                         int nQr, const int* qrPtr, const int* qrRows) {
+                         int nQr, const int* qrPtr, const int* qrRows, const int* depGroupOfRow) {
     for (int e = 0; e < ncb; e++) {
         const int* ix = cbIdx + static_cast<size_t>(e) * 12;
         for (int k = 0; k < CB_NOUT; k++) {
@@ -905,6 +914,12 @@ void collectCbAltPattern(int ncb, const int* cbIdx, const int* relocOwn, std::ve
             int stockSel = stockSelRow(rc.row, origAlt, relocOwn);
             if (rc.col < 0) {
                 continue;
+            }
+            int dg = depGroupOf(rc.row, altRow, relocOwn, depGroupOfRow);
+            if (dg >= 0) {                                   // DEPENDENT pilot: every candidate row of ITS group
+                for (int c = qrPtr[dg]; c < qrPtr[dg + 1]; c++) {
+                    pat.emplace_back(qrRows[c], rc.col);
+                }
             }
             if (stockPairOut(rc.row, origAlt, relocOwn)) {   // STOCK PAIR (see stockPairPick): both rows
                 pat.emplace_back(relocOwn[origAlt], rc.col);
@@ -930,11 +945,13 @@ void collectCbAltPattern(int ncb, const int* cbIdx, const int* relocOwn, std::ve
 void buildCbDynDest(int ncb, const int* cbIdx, const int* relocOwn, const CsrPattern& pos,
                     std::vector<int>& altDest, std::vector<int>& selRow,
                     int nQr, const int* qrPtr, const int* qrRows,
-                    std::vector<int>& relocGroup, std::vector<int>& relocOff, std::vector<int>& relocPool) {
+                    std::vector<int>& relocGroup, std::vector<int>& relocOff, std::vector<int>& relocPool,
+                    const int* depGroupOfRow, std::vector<char>& relocDep) {
     altDest.assign(static_cast<size_t>(ncb) * CB_NOUT, -1);
     selRow.assign(static_cast<size_t>(ncb) * CB_NOUT, -1);
     relocGroup.assign(static_cast<size_t>(ncb) * CB_NOUT, -1);
     relocOff.assign(static_cast<size_t>(ncb) * CB_NOUT, -1);
+    relocDep.assign(static_cast<size_t>(ncb) * CB_NOUT, 0);
     for (int e = 0; e < ncb; e++) {
         const int* ix = cbIdx + static_cast<size_t>(e) * 12;
         for (int k = 0; k < CB_NOUT; k++) {
@@ -976,6 +993,24 @@ void buildCbDynDest(int ncb, const int* cbIdx, const int* relocOwn, const CsrPat
                 }
                 continue;
             }
+            int dg = depGroupOf(rc.row, altRow, relocOwn, depGroupOfRow);
+            if (dg >= 0) {                                   // DEPENDENT pilot (depPick): the group's pool, plus the
+                if ((s.role == 1 && rc.col >= 0) || s.role == 0) {   // two-way home row of a relocated child
+                    relocGroup[o] = dg;
+                    relocOff[o] = static_cast<int>(relocPool.size());
+                    for (int c = qrPtr[dg]; c < qrPtr[dg + 1]; c++) {
+                        relocPool.push_back(s.role == 1 ? pos.at(qrRows[c], rc.col) : -2 - qrRows[c]);
+                    }
+                    relocDep[o] = 1;
+                    if (altRow >= 0 && altRow != rc.row) {
+                        altDest[o] = s.role == 1 ? pos.at(altRow, rc.col) : -2 - altRow;
+                        selRow[o] = stockSel <= -2 ? stockSel : rc.row;
+                    } else {
+                        selRow[o] = rc.row;                  // a root: the frozen row IS its own
+                    }
+                }
+                continue;
+            }
             if (altRow < 0 || altRow == rc.row) {
                 continue;                                    // not a relocatable output
             }
@@ -1000,7 +1035,7 @@ inline int shAltRow(const ShScatter& s, const int* ix) {
 }
 
 void collectShAltPattern(int nsh, const int* shIdx, const int* relocOwn, std::vector<std::pair<int, int>>& pat,
-                         int nQr, const int* qrPtr, const int* qrRows) {
+                         int nQr, const int* qrPtr, const int* qrRows, const int* depGroupOfRow) {
     for (int e = 0; e < nsh; e++) {
         const int* ix = shIdx + static_cast<size_t>(e) * 5;
         for (int k = 0; k < SH_NOUT; k++) {
@@ -1014,6 +1049,12 @@ void collectShAltPattern(int nsh, const int* shIdx, const int* relocOwn, std::ve
             int stockSel = stockSelRow(rc.row, origAlt, relocOwn);
             if (rc.col < 0) {
                 continue;
+            }
+            int dg = depGroupOf(rc.row, altRow, relocOwn, depGroupOfRow);
+            if (dg >= 0) {                                   // DEPENDENT pilot: every candidate row of ITS group
+                for (int c = qrPtr[dg]; c < qrPtr[dg + 1]; c++) {
+                    pat.emplace_back(qrRows[c], rc.col);
+                }
             }
             if (stockPairOut(rc.row, origAlt, relocOwn)) {   // STOCK PAIR (see stockPairPick): both rows
                 pat.emplace_back(relocOwn[origAlt], rc.col);
@@ -1035,11 +1076,13 @@ void collectShAltPattern(int nsh, const int* shIdx, const int* relocOwn, std::ve
 void buildShDynDest(int nsh, const int* shIdx, const int* relocOwn, const CsrPattern& pos,
                     std::vector<int>& altDest, std::vector<int>& selRow,
                     int nQr, const int* qrPtr, const int* qrRows,
-                    std::vector<int>& relocGroup, std::vector<int>& relocOff, std::vector<int>& relocPool) {
+                    std::vector<int>& relocGroup, std::vector<int>& relocOff, std::vector<int>& relocPool,
+                    const int* depGroupOfRow, std::vector<char>& relocDep) {
     altDest.assign(static_cast<size_t>(nsh) * SH_NOUT, -1);
     selRow.assign(static_cast<size_t>(nsh) * SH_NOUT, -1);
     relocGroup.assign(static_cast<size_t>(nsh) * SH_NOUT, -1);
     relocOff.assign(static_cast<size_t>(nsh) * SH_NOUT, -1);
+    relocDep.assign(static_cast<size_t>(nsh) * SH_NOUT, 0);
     for (int e = 0; e < nsh; e++) {
         const int* ix = shIdx + static_cast<size_t>(e) * 5;
         for (int k = 0; k < SH_NOUT; k++) {
@@ -1077,6 +1120,24 @@ void buildShDynDest(int nsh, const int* shIdx, const int* relocOwn, const CsrPat
                     relocOff[o] = static_cast<int>(relocPool.size());
                     for (int c = qrPtr[g]; c < qrPtr[g + 1]; c++) {
                         relocPool.push_back(-2 - qrRows[c]);
+                    }
+                }
+                continue;
+            }
+            int dg = depGroupOf(rc.row, altRow, relocOwn, depGroupOfRow);
+            if (dg >= 0) {                                   // DEPENDENT pilot (depPick): the group's pool, plus the
+                if ((s.role == 1 && rc.col >= 0) || s.role == 0) {   // two-way home row of a relocated child
+                    relocGroup[o] = dg;
+                    relocOff[o] = static_cast<int>(relocPool.size());
+                    for (int c = qrPtr[dg]; c < qrPtr[dg + 1]; c++) {
+                        relocPool.push_back(s.role == 1 ? pos.at(qrRows[c], rc.col) : -2 - qrRows[c]);
+                    }
+                    relocDep[o] = 1;
+                    if (altRow >= 0 && altRow != rc.row) {
+                        altDest[o] = s.role == 1 ? pos.at(altRow, rc.col) : -2 - altRow;
+                        selRow[o] = stockSel <= -2 ? stockSel : rc.row;
+                    } else {
+                        selRow[o] = rc.row;                  // a root: the frozen row IS its own
                     }
                 }
                 continue;
@@ -1152,7 +1213,7 @@ inline int obAltRow(const ObScatter& s, const int* qAlt, int e) {
 }
 
 void collectObAltPattern(int nob, const int* obIdx, const int* obQAlt, const int* relocOwn, std::vector<std::pair<int, int>>& pat,
-                         int nQr, const int* qrPtr, const int* qrRows) {
+                         int nQr, const int* qrPtr, const int* qrRows, const int* depGroupOfRow) {
     for (int e = 0; e < nob; e++) {
         const int* ix = obIdx + static_cast<size_t>(e) * 6;
         for (int k = 0; k < OB_NOUT; k++) {
@@ -1166,6 +1227,12 @@ void collectObAltPattern(int nob, const int* obIdx, const int* obQAlt, const int
             int stockSel = stockSelRow(rc.row, origAlt, relocOwn);
             if (rc.col < 0) {
                 continue;
+            }
+            int dg = depGroupOf(rc.row, altRow, relocOwn, depGroupOfRow);
+            if (dg >= 0) {                                   // DEPENDENT pilot: every candidate row of ITS group
+                for (int c = qrPtr[dg]; c < qrPtr[dg + 1]; c++) {
+                    pat.emplace_back(qrRows[c], rc.col);
+                }
             }
             if (stockPairOut(rc.row, origAlt, relocOwn)) {   // STOCK PAIR (see stockPairPick): both rows
                 pat.emplace_back(relocOwn[origAlt], rc.col);
@@ -1187,11 +1254,13 @@ void collectObAltPattern(int nob, const int* obIdx, const int* obQAlt, const int
 void buildObDynDest(int nob, const int* obIdx, const int* obQAlt, const int* relocOwn, const CsrPattern& pos,
                     std::vector<int>& altDest, std::vector<int>& selRow,
                     int nQr, const int* qrPtr, const int* qrRows,
-                    std::vector<int>& relocGroup, std::vector<int>& relocOff, std::vector<int>& relocPool) {
+                    std::vector<int>& relocGroup, std::vector<int>& relocOff, std::vector<int>& relocPool,
+                    const int* depGroupOfRow, std::vector<char>& relocDep) {
     altDest.assign(static_cast<size_t>(nob) * OB_NOUT, -1);
     selRow.assign(static_cast<size_t>(nob) * OB_NOUT, -1);
     relocGroup.assign(static_cast<size_t>(nob) * OB_NOUT, -1);
     relocOff.assign(static_cast<size_t>(nob) * OB_NOUT, -1);
+    relocDep.assign(static_cast<size_t>(nob) * OB_NOUT, 0);
     for (int e = 0; e < nob; e++) {
         const int* ix = obIdx + static_cast<size_t>(e) * 6;
         for (int k = 0; k < OB_NOUT; k++) {
@@ -1229,6 +1298,24 @@ void buildObDynDest(int nob, const int* obIdx, const int* obQAlt, const int* rel
                     relocOff[o] = static_cast<int>(relocPool.size());
                     for (int c = qrPtr[g]; c < qrPtr[g + 1]; c++) {
                         relocPool.push_back(-2 - qrRows[c]);
+                    }
+                }
+                continue;
+            }
+            int dg = depGroupOf(rc.row, altRow, relocOwn, depGroupOfRow);
+            if (dg >= 0) {                                   // DEPENDENT pilot (depPick): the group's pool, plus the
+                if ((s.role == 1 && rc.col >= 0) || s.role == 0) {   // two-way home row of a relocated child
+                    relocGroup[o] = dg;
+                    relocOff[o] = static_cast<int>(relocPool.size());
+                    for (int c = qrPtr[dg]; c < qrPtr[dg + 1]; c++) {
+                        relocPool.push_back(s.role == 1 ? pos.at(qrRows[c], rc.col) : -2 - qrRows[c]);
+                    }
+                    relocDep[o] = 1;
+                    if (altRow >= 0 && altRow != rc.row) {
+                        altDest[o] = s.role == 1 ? pos.at(altRow, rc.col) : -2 - altRow;
+                        selRow[o] = stockSel <= -2 ? stockSel : rc.row;
+                    } else {
+                        selRow[o] = rc.row;                  // a root: the frozen row IS its own
                     }
                 }
                 continue;
@@ -1292,6 +1379,7 @@ struct RelocTables {
     const char* dqSub = nullptr;
     const int* qrMemberStart = nullptr;                      // qr group -> its first dq member (candidate 1)
     int nDqMembers = 0;
+    const char* dep = nullptr;                               // per output: dependent-pilot routing (see depPick)
 };
 
 // GROUP pilot-Q relocation (plan-A6): candidates = [fallback row, member rows in merged order];
@@ -1357,12 +1445,36 @@ __device__ inline bool isEnrolledPilot(const int* psEntry, int nQr, int i) {
     return false;
 }
 
+// DEPENDENT-PILOT routing (ExtractionColumns: a merged remote group's dependent controlled bus has a candidate
+// group of its own, the same member rows as its base group's). The bus keeps its two-way reactive row - its
+// parent coupler's dummy row while that coupler lives, its own row once the coupler is dead - UNLESS its own
+// row has become the voltage identity (OLF re-elected it the main of the survivors): then its balance rides the
+// first free member row of its group, exactly as the base pilot's does, and so does a cross identity on the
+// dummy row (mode 6, the main under a live coupler). A root (no relocation) reads its own row the same way.
+__device__ inline int depPick(int slot, int frozen, int altDest, int selRow, const int* mode, RelocTables rt) {
+    int fr = selRow <= -2 ? -2 - selRow : selRow;
+    int mf = mode[fr];
+    if (selRow <= -2) {                                      // a relocated child: fr is the parent's dummy row
+        if (mf == 1 || mf == 4) return frozen;               // the coupler lives (or the pin sits there)
+        if (mf == 0) {                                       // the coupler is dead: home, unless home is the identity
+            int mo = mode[rt.relocOwn[fr]];
+            if (mo != 0 && mo != 6) return altDest;
+        }
+    } else if (mf != 0 && mf != 6) {                         // a root: its own row, unless that is the identity
+        return frozen;
+    }
+    return rt.pool[rt.off[slot] + relocChooseSub(rt.group[slot], rt.qrPtr, rt.qrRows, mode, rt.dqSub, rt.qrMemberStart)];
+}
+
 // zi q-slot dynamic pick (F/J slots {0..3} per element): group -> mode-scan candidate slot,
 // two-way -> alt when the select row is identity/pinned this scenario, else the frozen dest.
 __device__ inline int ziDynDest(int frozen, int slot, const int* alt, const int* sel,
                                 const int* mode, RelocTables rt) {
     int rg = rt.group != nullptr ? rt.group[slot] : -1;
     if (rg >= 0) {
+        if (rt.dep != nullptr && rt.dep[slot]) {
+            return depPick(slot, frozen, alt[slot], sel[slot], mode, rt);
+        }
         if (rt.off[slot] < 0) {                              // STOCK PAIR: group slot holds the dummy ROW
             return stockPairPick(mode[rg], rt.pool, -rt.off[slot] - 1, frozen, mode, rt.relocOwn, rg);
         }
@@ -1384,7 +1496,9 @@ __device__ void scatterAddDyn(int nout, const int* dest, const int* altDest, con
     for (int k = 0; k < nout; k++) {
         int d;
         int rg = rt.group != nullptr ? rt.group[eOff + k] : -1;
-        if (rg >= 0 && rt.off[eOff + k] < 0) {               // STOCK PAIR: group slot holds the dummy ROW
+        if (rg >= 0 && rt.dep != nullptr && rt.dep[eOff + k]) {
+            d = depPick(eOff + k, dest[k], altDest[k], selRow[k], mode, rt);
+        } else if (rg >= 0 && rt.off[eOff + k] < 0) {        // STOCK PAIR: group slot holds the dummy ROW
             d = stockPairPick(mode[rg], rt.pool, -rt.off[eOff + k] - 1, dest[k], mode, rt.relocOwn, rg);
         } else if (rg >= 0 && rt.psSkip != nullptr && rt.psSkip[rg]) {
             continue;                                        // pilot-self group, pilot unpinned: no raw q
@@ -2635,6 +2749,7 @@ struct Family {
     DeviceBuf in, ix, dest;
     DeviceBuf altDest, selRow;                               // Dynamic Q-relocation (cb only); empty when disabled
     DeviceBuf relocGroup, relocOff, relocPool;               // GROUP relocation (plan-A6): per-output group id +
+    DeviceBuf relocDep;                                      // per output: 1 = dependent-pilot routing (depPick)
     bool dynReloc = false;                                   // slot-pool offset; pool = one slot per candidate
     DeviceBuf pcDest, pcSel;                                 // Continuous phase control (cb only): P-flow row at a1
     bool phaseCtl = false;                                   // pcDest/pcSel populated (mode-3 gated emission)
@@ -2979,6 +3094,10 @@ struct SharedStructure {
     int nQr = 0;                                             // pilot-Q relocation GROUPS (plan-A6): candidate
     std::vector<int> hQrPtr, hQrRows;                        // tables [fallback row, member rows...] per group
     DeviceBuf dQrPtr, dQrRows;                               // (rows in DEVICE row space, rowMap applied)
+    std::vector<int> hQrDepBase, hQrBaseTargetRow;          // DEPENDENT pilots (a merged remote group's dependent
+    std::vector<int> hDepGroupOfRow;                         // controlled bus): per group its base group (-1 = a base
+    DeviceBuf dQrDepBase, dQrBaseTargetRow;                  // group) and the base row of its reactive target; per
+    DeviceBuf dZiRelocDep;                                   // DEVICE row the dependent group of its owner bus
     DeviceBuf dRowPtr, dColIdx, dDiagPos;                    // device CSR pattern + guaranteed-diagonal slots
     int nHaz = 0, hazTot = 0;                                // zero-diagonal repair: hazard rows and their
     std::vector<int> hHazRow;                                // donor candidates (see hazRepairVals)
@@ -3057,7 +3176,7 @@ static void buildDistrQDest(SharedStructure* st, const CsrPattern& pos, const st
 
 static void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const std::vector<int>& rowMap,
                              int nzi, const double* ziIn, const int* ziIdx, const int* ziQAlt,
-                             const int* relocOwn) {
+                             const int* relocOwn, const int* depGroupOfRow) {
     st->nzi = nzi;
     if (nzi > 0) {
         std::vector<int> ziDest(static_cast<size_t>(nzi) * 14, -1);
@@ -3074,6 +3193,7 @@ static void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const s
         std::vector<int> ziGrp(static_cast<size_t>(nzi) * 8, -1);
         std::vector<int> ziOff(static_cast<size_t>(nzi) * 8, -1);
         std::vector<int> ziPool;
+        std::vector<char> ziDep(static_cast<size_t>(nzi) * 8, 0);
         bool anyDyn = false;
         for (int e = 0; e < nzi; e++) {
             const int* z = ziIdx + static_cast<size_t>(e) * 11;
@@ -3138,6 +3258,32 @@ static void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const s
                     ziPool.push_back(pos.at(own, z[5]));
                     ziPool.push_back(pos.at(altRow, z[5]));
                     anyDyn = true;
+                } else if (depGroupOf(frozenQ[side], stockAltRow(frozenQ[side], altRow, relocOwn), relocOwn, depGroupOfRow) >= 0) {
+                    // DEPENDENT pilot (depPick): the group's pool for this +-dummyQ, plus the two-way home row
+                    int own = stockAltRow(frozenQ[side], altRow, relocOwn);
+                    int dg = depGroupOf(frozenQ[side], own, relocOwn, depGroupOfRow);
+                    ziGrp[fSlot] = dg;
+                    ziOff[fSlot] = static_cast<int>(ziPool.size());
+                    for (int c = st->hQrPtr[dg]; c < st->hQrPtr[dg + 1]; c++) {
+                        ziPool.push_back(-2 - st->hQrRows[c]);
+                    }
+                    ziGrp[jSlot] = dg;
+                    ziOff[jSlot] = static_cast<int>(ziPool.size());
+                    for (int c = st->hQrPtr[dg]; c < st->hQrPtr[dg + 1]; c++) {
+                        ziPool.push_back(pos.at(st->hQrRows[c], z[5]));
+                    }
+                    ziDep[fSlot] = 1;
+                    ziDep[jSlot] = 1;
+                    if (own >= 0 && own != frozenQ[side]) {
+                        ziAlt[fSlot] = -2 - own;
+                        ziAlt[jSlot] = pos.at(own, z[5]);
+                        ziSel[fSlot] = -2 - frozenQ[side];
+                        ziSel[jSlot] = -2 - frozenQ[side];
+                    } else {
+                        ziSel[fSlot] = frozenQ[side];
+                        ziSel[jSlot] = frozenQ[side];
+                    }
+                    anyDyn = true;
                 } else if (altRow >= 0 && altRow != frozenQ[side]) {
                     ziAlt[fSlot] = -2 - altRow;
                     ziAlt[jSlot] = pos.at(altRow, z[5]);
@@ -3192,6 +3338,7 @@ static void buildZeroImpDest(SharedStructure* st, const CsrPattern& pos, const s
                 st->dZiRelocGroup.upload(ziGrp.data(), ziGrp.size() * sizeof(int));
                 st->dZiRelocOff.upload(ziOff.data(), ziOff.size() * sizeof(int));
                 st->dZiRelocPool.upload(ziPool.data(), ziPool.size() * sizeof(int));
+                st->dZiRelocDep.upload(ziDep.data(), ziDep.size());
             }
             st->ziDyn = true;
         }
@@ -3277,6 +3424,7 @@ static RelocTables relocOf(Family& f, SharedStructure* st) {
         rt.group = f.relocGroup.as<int>();
         rt.off = f.relocOff.as<int>();
         rt.pool = f.relocPool.as<int>();
+        rt.dep = f.relocDep.p != nullptr ? f.relocDep.as<char>() : nullptr;
         rt.qrPtr = st->dQrPtr.as<int>();
         rt.qrRows = st->dQrRows.as<int>();
         rt.relocOwn = st->dRelocOwn.p != nullptr ? st->dRelocOwn.as<int>() : nullptr;
@@ -3307,6 +3455,7 @@ static RelocTables ziRelocOf(SharedStructure* st) {
         rt.group = st->dZiRelocGroup.as<int>();
         rt.off = st->dZiRelocOff.as<int>();
         rt.pool = st->dZiRelocPool.as<int>();
+        rt.dep = st->dZiRelocDep.p != nullptr ? st->dZiRelocDep.as<char>() : nullptr;
         rt.qrPtr = st->dQrPtr.as<int>();
         rt.qrRows = st->dQrRows.as<int>();
         rt.relocOwn = st->dRelocOwn.p != nullptr ? st->dRelocOwn.as<int>() : nullptr;
@@ -3327,7 +3476,8 @@ SharedStructure* buildStructure(int n,
                                 const int* cbPcSide,
                                 int nvdl, const double* vdlIn, const int* vdlIdx,
                                 int nQr, const int* qrPtr, const int* qrRowsIn,
-                                const int* obQAltIn, const int* ziQAltIn) {
+                                const int* obQAltIn, const int* ziQAltIn,
+                                const int* qrDepBaseIn, const int* qrBaseTargetRowIn, const int* depGroupOfRowIn) {
     auto st = std::make_unique<SharedStructure>();
     st->n = n;
     st->nElements = ncb + nob + nsh + nhv;
@@ -3388,7 +3538,25 @@ SharedStructure* buildStructure(int n,
         }
         st->dQrPtr.upload(st->hQrPtr.data(), st->hQrPtr.size() * sizeof(int));
         st->dQrRows.upload(st->hQrRows.data(), st->hQrRows.size() * sizeof(int));
+        st->hQrDepBase.assign(qrDepBaseIn, qrDepBaseIn + nQr);
+        st->hQrBaseTargetRow.assign(qrBaseTargetRowIn, qrBaseTargetRowIn + nQr);
+        for (int& r : st->hQrBaseTargetRow) {
+            if (r >= 0) {
+                r = rowMap[r];
+            }
+        }
+        st->dQrDepBase.upload(st->hQrDepBase.data(), st->hQrDepBase.size() * sizeof(int));
+        st->dQrBaseTargetRow.upload(st->hQrBaseTargetRow.data(), st->hQrBaseTargetRow.size() * sizeof(int));
     }
+    st->hDepGroupOfRow.assign(n, -1);
+    bool anyDep = false;
+    for (int r = 0; r < n; r++) {
+        if (depGroupOfRowIn[r] >= 0) {
+            st->hDepGroupOfRow[rowMap[r]] = depGroupOfRowIn[r];
+            anyDep = true;
+        }
+    }
+    const int* depGroupOfRow = anyDep ? st->hDepGroupOfRow.data() : nullptr;
     std::vector<int> cbIdxM = mapRows(cbIdx, ncb, 12, {0, 1, 2, 3, 10, 11});
     std::vector<int> obIdxM = mapRows(obIdx, nob, 6, {0, 1, 2, 3});
     std::vector<int> obQAltM = mapRows(obQAltIn, nob, 2, {0, 1});   // negative encodings pass through
@@ -3407,11 +3575,11 @@ SharedStructure* buildStructure(int n,
     // ---- fixed CSR pattern (rows = permuted equations, cols = variables) ----
     std::vector<std::pair<int, int>> pat;
     collectPattern(ncb, cbIdx, 12, CB_SCATTER, CB_NOUT, resolveCb, pat);
-    bool dynReloc = anyRelocOwn || hasRelocatable(ncb, cbIdx, nsh, shIdx)
+    bool dynReloc = anyRelocOwn || anyDep || hasRelocatable(ncb, cbIdx, nsh, shIdx)
             || hasAltEntries(obQAlt, nob * 2) || hasAltEntries(ziQAlt, nzi * 2);
     if (dynReloc) {
         collectCbAltPattern(ncb, cbIdx, relocOwn, pat, st->nQr,        // union the alternate Q rows into the pattern
-                st->hQrPtr.data(), st->hQrRows.data());      // (+ every GROUP candidate's slots, plan-A6)
+                st->hQrPtr.data(), st->hQrRows.data(), depGroupOfRow);      // (+ every GROUP candidate's slots, plan-A6)
     }
     bool phaseCtl = false;
     for (int e = 0; e < ncb; e++) {
@@ -3422,11 +3590,11 @@ SharedStructure* buildStructure(int n,
     }
     collectPattern(nob, obIdx, 6, OB_SCATTER, OB_NOUT, resolveOb, pat);
     if (dynReloc) {
-        collectObAltPattern(nob, obIdx, obQAlt, relocOwn, pat, st->nQr, st->hQrPtr.data(), st->hQrRows.data());
+        collectObAltPattern(nob, obIdx, obQAlt, relocOwn, pat, st->nQr, st->hQrPtr.data(), st->hQrRows.data(), depGroupOfRow);
     }
     collectPattern(nsh, shIdx, 5, SH_SCATTER, SH_NOUT, resolveSh, pat);
     if (dynReloc) {
-        collectShAltPattern(nsh, shIdx, relocOwn, pat, st->nQr, st->hQrPtr.data(), st->hQrRows.data());
+        collectShAltPattern(nsh, shIdx, relocOwn, pat, st->nQr, st->hQrPtr.data(), st->hQrRows.data(), depGroupOfRow);
     }
     collectPattern(nhv, hvIdx, 4, HVDC_SCATTER, HVDC_NOUT, resolveHv, pat);
     if (dynReloc) {
@@ -3448,6 +3616,23 @@ SharedStructure* buildStructure(int n,
             for (int side = 0; side < 2; side++) {
                 if (qrows[side] >= 0 && relocOwn[qrows[side]] >= 0) {
                     pat.emplace_back(relocOwn[qrows[side]], z[5]);
+                }
+            }
+        }
+    }
+    if (depGroupOfRow != nullptr) {                       // DEPENDENT pilots: their +-dummyQ on every candidate row
+        for (int e = 0; e < nzi; e++) {
+            const int* z = ziIdx + static_cast<size_t>(e) * 11;
+            int qrows[2] = {z[1] >= 0 ? rowMap[z[1]] : -1, z[3] >= 0 ? rowMap[z[3]] : -1};
+            for (int side = 0; side < 2; side++) {
+                int fr = qrows[side];
+                int own = fr >= 0 && relocOwn != nullptr && relocOwn[fr] >= 0 ? relocOwn[fr] : fr;
+                int dg = own >= 0 ? depGroupOfRow[own] : -1;
+                if (dg < 0) {
+                    continue;
+                }
+                for (int c = st->hQrPtr[dg]; c < st->hQrPtr[dg + 1]; c++) {
+                    pat.emplace_back(st->hQrRows[c], z[5]);
                 }
             }
         }
@@ -3698,14 +3883,16 @@ SharedStructure* buildStructure(int n,
         std::vector<int> relocGroup;
         std::vector<int> relocOff;
         std::vector<int> relocPool;
+        std::vector<char> relocDep;
         buildCbDynDest(ncb, cbIdx, relocOwn, pos, altDest, selRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
-                relocGroup, relocOff, relocPool);
+                relocGroup, relocOff, relocPool, depGroupOfRow, relocDep);
         st->cb.altDest.upload(altDest.data(), altDest.size() * sizeof(int));
         st->cb.selRow.upload(selRow.data(), selRow.size() * sizeof(int));
         if (!relocPool.empty()) {
             st->cb.relocGroup.upload(relocGroup.data(), relocGroup.size() * sizeof(int));
             st->cb.relocOff.upload(relocOff.data(), relocOff.size() * sizeof(int));
             st->cb.relocPool.upload(relocPool.data(), relocPool.size() * sizeof(int));
+            st->cb.relocDep.upload(relocDep.data(), relocDep.size());
             static int cbRoles[CB_NOUT];
             for (int k = 0; k < CB_NOUT; k++) {
                 cbRoles[k] = CB_SCATTER[k].role;
@@ -3730,14 +3917,16 @@ SharedStructure* buildStructure(int n,
         std::vector<int> obRelocGroup;
         std::vector<int> obRelocOff;
         std::vector<int> obRelocPool;
+        std::vector<char> obRelocDep;
         buildObDynDest(nob, obIdx, obQAlt, relocOwn, pos, obAltDest, obSelRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
-                obRelocGroup, obRelocOff, obRelocPool);
+                obRelocGroup, obRelocOff, obRelocPool, depGroupOfRow, obRelocDep);
         st->ob.altDest.upload(obAltDest.data(), obAltDest.size() * sizeof(int));
         st->ob.selRow.upload(obSelRow.data(), obSelRow.size() * sizeof(int));
         if (!obRelocPool.empty()) {
             st->ob.relocGroup.upload(obRelocGroup.data(), obRelocGroup.size() * sizeof(int));
             st->ob.relocOff.upload(obRelocOff.data(), obRelocOff.size() * sizeof(int));
             st->ob.relocPool.upload(obRelocPool.data(), obRelocPool.size() * sizeof(int));
+            st->ob.relocDep.upload(obRelocDep.data(), obRelocDep.size());
             static int obRoles[OB_NOUT];
             for (int k = 0; k < OB_NOUT; k++) {
                 obRoles[k] = OB_SCATTER[k].role;
@@ -3754,14 +3943,16 @@ SharedStructure* buildStructure(int n,
         std::vector<int> shRelocGroup;
         std::vector<int> shRelocOff;
         std::vector<int> shRelocPool;
+        std::vector<char> shRelocDep;
         buildShDynDest(nsh, shIdx, relocOwn, pos, shAltDest, shSelRow, st->nQr, st->hQrPtr.data(), st->hQrRows.data(),
-                shRelocGroup, shRelocOff, shRelocPool);
+                shRelocGroup, shRelocOff, shRelocPool, depGroupOfRow, shRelocDep);
         st->sh.altDest.upload(shAltDest.data(), shAltDest.size() * sizeof(int));
         st->sh.selRow.upload(shSelRow.data(), shSelRow.size() * sizeof(int));
         if (!shRelocPool.empty()) {
             st->sh.relocGroup.upload(shRelocGroup.data(), shRelocGroup.size() * sizeof(int));
             st->sh.relocOff.upload(shRelocOff.data(), shRelocOff.size() * sizeof(int));
             st->sh.relocPool.upload(shRelocPool.data(), shRelocPool.size() * sizeof(int));
+            st->sh.relocDep.upload(shRelocDep.data(), shRelocDep.size());
             static int shRoles[SH_NOUT];
             for (int k = 0; k < SH_NOUT; k++) {
                 shRoles[k] = SH_SCATTER[k].role;
@@ -3786,7 +3977,7 @@ SharedStructure* buildStructure(int n,
     buildDistrQDest(st.get(), pos, rowMap, ndq, dqElem, dqSide, dqKind, dqWeight, dqRow, cbIdx, obIdx, shIdx, relocOwn);
 
     // ---- zero-impedance destinations: per branch the 8 dummy couplings + (tree) the 6 ZERO_V/ZERO_PHI ----
-    buildZeroImpDest(st.get(), pos, rowMap, nzi, ziIn, ziIdx, ziQAlt, relocOwn);
+    buildZeroImpDest(st.get(), pos, rowMap, nzi, ziIn, ziIdx, ziQAlt, relocOwn, depGroupOfRow);
 
     // ---- DISTR_RHO destinations: per contribution {F row, J slot (row, r1 col)} ----
     buildDistrRhoDest(st.get(), pos, rowMap, ndr, drRow, drCol, drCoef);
@@ -4513,7 +4704,9 @@ __device__ void scatterAddFDyn(int nres, const int* dest, const int* altDest, co
         int idx = pos[k];
         int d;
         int rg = rt.group != nullptr ? rt.group[eOff + idx] : -1;
-        if (rg >= 0 && rt.off[eOff + idx] < 0) {             // STOCK PAIR: group slot holds the dummy ROW
+        if (rg >= 0 && rt.dep != nullptr && rt.dep[eOff + idx]) {
+            d = depPick(eOff + idx, dest[idx], altDest[idx], selRow[idx], mode, rt);
+        } else if (rg >= 0 && rt.off[eOff + idx] < 0) {      // STOCK PAIR: group slot holds the dummy ROW
             d = stockPairPick(mode[rg], rt.pool, -rt.off[eOff + idx] - 1, dest[idx], mode, rt.relocOwn, rg);
         } else if (rg >= 0 && rt.psSkip != nullptr && rt.psSkip[rg]) {
             continue;                                        // pilot-self group, pilot unpinned: no raw q
@@ -5668,7 +5861,8 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
                                          int nTqOv, const int* tqOvKey, const double* tqOvVal,
                                          const int* mTgtPtr, const int* mTgtPeer,
                                          const int* psEntry, int psMask, const int* relocOwn,
-                                const char* dqSub, const int* qrMemberStart, const char* rlGenLost) {
+                                const char* dqSub, const int* qrMemberStart, const char* rlGenLost,
+                                const int* qrDepBase, const char* veqOff) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nMembers * nScenarios) return;
     int k = tid % nMembers;
@@ -5725,6 +5919,24 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
         // survivor's sharing equation with a stale number. updatePilotVeqBatch already exits on the same
         // test; this is its counterpart on the target side.
         bool pilotFrozen = rowIsFrozen(nFrozen, frozenSlotRow, s, qrRows[qrPtr[qg]]);
+        if (pilotFrozen && qrDepBase != nullptr) {
+            // The base pilot is lost to an island and OLF re-merged the survivors under a DEPENDENT pilot (a merged
+            // controlled bus of the base group): the member row carrying that pilot's balance - its group picks on
+            // the same modes as this one, so the same row - takes the dependent pilot's captured target.
+            for (int g2 = 0; g2 < nQr; g2++) {
+                if (qrDepBase[g2] != qg) continue;
+                int pr = qrRows[qrPtr[g2]];
+                if (relocOwn != nullptr && relocOwn[pr] >= 0 && mode[(size_t) s * n + pr] == 0) pr = relocOwn[pr];
+                int pm = mode[(size_t) s * n + pr];
+                if (pm != 0 && pm != 6 && !(veqOff != nullptr && veqOff[(size_t) s * nQr + g2])) continue;
+                int c2 = qrRows[qrPtr[g2] + relocChooseSub(g2, qrPtr, qrRows, mode + (size_t) s * n,
+                        dqSub != nullptr ? dqSub + (size_t) s * nMembers : nullptr, qrMemberStart)];
+                if (c2 == mrow) {
+                    target[(size_t) s * n + mrow] = pilotQ[(size_t) s * nQr + g2];
+                    return;
+                }
+            }
+        }
         if (mrow == carrier && !pilotFrozen) {
             int pe = psEntry != nullptr ? psEntry[qg] : -1;  // the group's own pilot, when it is one of its controllers
             if (pe < 0) {
@@ -5809,12 +6021,15 @@ __global__ void updateDistrQTargetsBatch(int nMembers, int nScenarios, int n, in
 // whichever member row currently carries the relocated pilot Q. Runs BEFORE the RL mode seeding so
 // a warm-continuation pin cannot overwrite the value first.
 __global__ void capturePilotQBatch(int nQr, int nScenarios, int n, const int* qrPtr, const int* qrRows,
-                                   const int* baseMode, const double* targetBase, double* pilotQ) {
+                                   const int* baseMode, const double* targetBase, double* pilotQ,
+                                   const int* qrBaseTargetRow) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nQr * nScenarios) return;
     int g = tid % nQr;
     int s = tid / nQr;
-    int row = qrRows[qrPtr[g] + relocChoose(g, qrPtr, qrRows, baseMode)];
+    // a DEPENDENT pilot's target sits on its own base reactive row, not on a carrier
+    int row = qrBaseTargetRow != nullptr && qrBaseTargetRow[g] >= 0 ? qrBaseTargetRow[g]
+            : qrRows[qrPtr[g] + relocChoose(g, qrPtr, qrRows, baseMode)];
     pilotQ[(size_t) s * nQr + g] = targetBase[row];          // the BASE carrier's BASE target (n, untiled)
 }
 
@@ -5877,7 +6092,7 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
                                     int nDqMembers, const int* dqMemberQrGroup, const int* dqMemberRlEntry,
                                     const char* rlIslandedMask,
                                 const char* dqSub, const int* qrMemberStart, double tol,
-                                const char* rlGenLost) {
+                                const char* rlGenLost, const int* qrDepBase, const int* relocOwn) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nQr * nScenarios) return;
     int g = tid % nQr;
@@ -5893,6 +6108,17 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
     // enrolment: which group-keyed kernel breaks the middle-section DistrQ-target tests).
     if ((psMask & 2) && psEntry != nullptr && psEntry[g] >= 0) return;
     int pilotRow = qrRows[qrPtr[g]];
+    // A DEPENDENT pilot (qrDepBase): its identity sits on its own V row once its parent coupler is dead (the dummy
+    // row an identity) and on the dummy row as a cross identity while the coupler lives; the group is live only
+    // while that identity is there, or while this kernel holds it flipped.
+    const bool dependent = qrDepBase != nullptr && qrDepBase[g] >= 0;
+    if (dependent) {
+        if (relocOwn != nullptr && relocOwn[pilotRow] >= 0 && mode[(size_t) s * n + pilotRow] == 0) {
+            pilotRow = relocOwn[pilotRow];
+        }
+        int pm = mode[(size_t) s * n + pilotRow];
+        if (pm != 0 && pm != 6 && !veqOff[(size_t) s * nQr + g]) return;
+    }
     // PILOT-SELF group (the pilot is merged controller #0, so its OWN row is also candidate 1): "control
     // lost" is OLF's "no enabled controller" — every OTHER member pinned/off AND the pilot itself pinned.
     // The candidate scan must skip the pilot's row: once flipped to a power row it reads as a live member
@@ -5984,7 +6210,7 @@ __global__ void updatePilotVeqBatch(int nQr, int nScenarios, int n,
         veqOff[fi] = 1;
         switched[s] = act ? 1 : switched[s];                 // only the RL phase drives the outer loop's stability
     } else if (layoutNow && !lost && veqOff[fi]) {
-        mode[pi] = 0;
+        mode[pi] = dependent && relocOwn != nullptr && relocOwn[pilotRow] >= 0 ? 6 : 0;   // a cross identity stays cross
         target[pi] = savedVTarget[fi];
         veqOff[fi] = 0;
         switched[s] = act ? 1 : switched[s];
@@ -6324,7 +6550,8 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
                                     int noPinRow, int swLogSlot, double* swLog, int* swLogCnt, int passId,
                                     const int* psEntry, int nQr,
                                     const char* rlLocalOv, const double* rlLocalVt,
-                                    const char* rlNoUnpin, char* unpinBad, const char* rlMonitored) {
+                                    const char* rlNoUnpin, char* unpinBad, const char* rlMonitored,
+                                    const int* rlCmpOv) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nrl * nScenarios) return;
     int i = tid % nrl;
@@ -6461,7 +6688,8 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
             // robust criteria. That WRITES the state vector every other entry is still reading here,
             // so it runs as its own pass (rlRobustVResetBatch) once this one has finished.
         } else {                                            // pinned — switch-back tests the PILOT
-            double v = x[(size_t) s * n + rlCmpVrow[i]];
+            // a controller re-homed onto a NEW pilot this scenario reads that pilot's voltage (rlCmpOv)
+            double v = x[(size_t) s * n + (rlCmpOv != nullptr && rlCmpOv[rst] >= 0 ? rlCmpOv[rst] : rlCmpVrow[i])];
             double vt = rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]);
             bool minPin = limitType[rst] == 1 || limitType[rst] == 3;   // LfBus.QLimitType.isMinLimit()
             // OLF's checkPqBusWithQLimitType PROPOSES the unpin whenever the pilot's voltage asks for
@@ -6501,7 +6729,8 @@ __global__ void reactiveLimitsBatch(const double* svcRlVt, int nrl, int nScenari
         }
         {
             double qRec = qBuf[qidx] + rlLoadQ[rli];
-            double cmpRec = rlCmpVrow != nullptr && rlCmpVrow[i] >= 0 ? x[(size_t) s * n + rlCmpVrow[i]] : x[ridx];
+            int cmpR = rlCmpOv != nullptr && rlCmpOv[rst] >= 0 ? rlCmpOv[rst] : (rlCmpVrow != nullptr ? rlCmpVrow[i] : -1);
+            double cmpRec = cmpR >= 0 ? x[(size_t) s * n + cmpR] : x[ridx];
             swLogPut(passSwitched[rst], qRec, rliMin, rliMax, x[ridx], cmpRec,
                      rlTargetOf(nRlVtOv, rlVtOvSlotIdx, rlVtOvVal, svcRlVt, nrl, s, i, rlVtarget[i]));
         }
@@ -8001,6 +8230,8 @@ struct BatchSolverContext {
     int nRlGenLost = 0;                                      // scenario — not a controller, seeded FROZEN
     DeviceBuf dRlLocalOv, dRlLocalVt;                        // re-homed PV buses: (scenario, entry) mask + own V target
     int nRlLocal = 0;
+    DeviceBuf dRlCmpOv;                                      // remote controllers re-homed onto a NEW pilot: (scenario,
+    int nRlCmp = 0;                                          // entry) -> the new pilot's V row, -1 = the base pilot's
     DeviceBuf dRlIslanded;
     int nDqTqOv = 0;                                       // per-scenario member targetQ overrides
     DeviceBuf dDqTqOvKey;
@@ -10504,7 +10735,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->dDqMemberRlEntry.p ? ctx->dDqMemberRlEntry.as<int>() : nullptr,
                     ctx->nRlIslanded > 0 ? ctx->dRlIslanded.as<char>() : nullptr,
                     ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
-                    REACTIVE_LIMIT_TOL, ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr);
+                    REACTIVE_LIMIT_TOL, ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr,
+                    ctx->st->dQrDepBase.p ? ctx->st->dQrDepBase.as<int>() : nullptr,
+                    ctx->st->dRelocOwn.p ? ctx->st->dRelocOwn.as<int>() : nullptr);
         }
     };
     auto launchDistrQTargetsInner = [&]() {
@@ -10534,7 +10767,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                         std::getenv("OLF_GPU_NO_TGT_STOCK") == nullptr && ctx->st->dRelocOwn.p != nullptr
                                 ? ctx->st->dRelocOwn.as<int>() : nullptr,
                     ctx->hasDqSub ? ctx->dDqSub.as<char>() : nullptr, ctx->hasDqSub ? ctx->dQrMemberStart.as<int>() : nullptr,
-                    ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr);
+                    ctx->nRlGenLost > 0 ? ctx->dRlGenLost.as<char>() : nullptr,
+                    ctx->st->dQrDepBase.p ? ctx->st->dQrDepBase.as<int>() : nullptr,
+                    ctx->dQrVeqOff.p ? ctx->dQrVeqOff.as<char>() : nullptr);
         }
     };
     std::vector<char> rlActive(nS), rlSwitched(nS), wasActive(nS);
@@ -10567,7 +10802,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     static_cast<size_t>(ctx->st->nQr) * nS * sizeof(char), ctx->stream));
             capturePilotQBatch<<<grid(ctx->st->nQr * nS), BLOCK, 0, ctx->stream>>>(ctx->st->nQr, nS, n,
                     ctx->st->dQrPtr.as<int>(), ctx->st->dQrRows.as<int>(), dBaseMode.as<int>(),
-                    ctx->dTargetBase.as<double>(), ctx->dQrPilotQ.as<double>());
+                    ctx->dTargetBase.as<double>(), ctx->dQrPilotQ.as<double>(),
+                    ctx->st->dQrBaseTargetRow.p ? ctx->st->dQrBaseTargetRow.as<int>() : nullptr);
             if (ctx->nQrPqDelta > 0) {
                 applyPilotQDeltasBatch<<<grid(ctx->nQrPqDelta), BLOCK, 0, ctx->stream>>>(ctx->nQrPqDelta,
                         ctx->dQrPqDeltaKey.as<int>(), ctx->dQrPqDeltaVal.as<double>(), ctx->st->nQr, n,
@@ -12917,7 +13153,8 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
                     ctx->nRlLocal > 0 ? ctx->dRlLocalOv.as<char>() : nullptr,
                     ctx->nRlLocal > 0 ? ctx->dRlLocalVt.as<double>() : nullptr,
                     ctx->nRlNoUnpin > 0 ? ctx->dRlNoUnpin.as<char>() : nullptr, ctx->nRlNoUnpin > 0 ? ctx->dRlUnpinBad.as<char>() : nullptr,
-                    ctx->dRlMonitored.p ? ctx->dRlMonitored.as<char>() : nullptr);
+                    ctx->dRlMonitored.p ? ctx->dRlMonitored.as<char>() : nullptr,
+                    ctx->nRlCmp > 0 ? ctx->dRlCmpOv.as<int>() : nullptr);
 psgStep(ctx, nS, n, outer, "afterRL");
             if (ctx->nRlPilotSelf > 0) {
                 // a pilot that is its own controller pinned while a member of its group is not (or
@@ -13486,7 +13723,8 @@ psgStep(ctx, nS, n, outer, "afterDistrQ");
                     ctx->nRlLocal > 0 ? ctx->dRlLocalOv.as<char>() : nullptr,
                     ctx->nRlLocal > 0 ? ctx->dRlLocalVt.as<double>() : nullptr,
                     ctx->nRlNoUnpin > 0 ? ctx->dRlNoUnpin.as<char>() : nullptr, ctx->nRlNoUnpin > 0 ? ctx->dRlUnpinBad.as<char>() : nullptr,
-                    ctx->dRlMonitored.p ? ctx->dRlMonitored.as<char>() : nullptr);
+                    ctx->dRlMonitored.p ? ctx->dRlMonitored.as<char>() : nullptr,
+                    ctx->nRlCmp > 0 ? ctx->dRlCmpOv.as<int>() : nullptr);
         CUDA_CHECK(cudaStreamSynchronize(ctx->stream));
         std::vector<char> aSw(nS), aPs(static_cast<size_t>(ctx->nrl) * nS);
         CUDA_CHECK(cudaMemcpy(aSw.data(), ctx->dRlSwitched.p, nS, cudaMemcpyDeviceToHost));
@@ -13633,7 +13871,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
         jintArray jdrRow, jintArray jdrCol, jdoubleArray jdrCoef,
         jintArray jdbRow, jintArray jdbCol, jdoubleArray jdbCoef, jintArray jcbPcSide,
         jdoubleArray jvdlIn, jintArray jvdlIdx, jintArray jqrPtr, jintArray jqrRows,
-        jintArray jobQAlt, jintArray jziQAlt) {
+        jintArray jobQAlt, jintArray jziQAlt, jintArray jqrDepBase, jintArray jqrBaseTargetRow, jintArray jdepGroupOfRow) {
     jdouble* cbIn = env->GetDoubleArrayElements(jcbIn, nullptr);
     jint* cbIdx = env->GetIntArrayElements(jcbIdx, nullptr);
     jdouble* obIn = env->GetDoubleArrayElements(jobIn, nullptr);
@@ -13664,6 +13902,9 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
     jint* vdlIdx = env->GetIntArrayElements(jvdlIdx, nullptr);
     jint* obQAlt = env->GetIntArrayElements(jobQAlt, nullptr);
     jint* ziQAlt = env->GetIntArrayElements(jziQAlt, nullptr);
+    jint* qrDepBase = env->GetIntArrayElements(jqrDepBase, nullptr);
+    jint* qrBaseTargetRow = env->GetIntArrayElements(jqrBaseTargetRow, nullptr);
+    jint* depGroupOfRow = env->GetIntArrayElements(jdepGroupOfRow, nullptr);
 
     int ncb = env->GetArrayLength(jcbIdx) / 12;             // cbIdx stride 12 (…a1col r1col qAlt1 qAlt2)
     int nob = env->GetArrayLength(jobIdx) / 6;
@@ -13735,7 +13976,7 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
                                                    ndr, drRow, drCol, drCoef,
                                                    ndb, dbRow, dbCol, dbCoef, cbPcSide,
                                                    nvdl, vdlIn, vdlIdx, nQr, qrPtr, qrRows,
-                                                   obQAlt, ziQAlt));
+                                                   obQAlt, ziQAlt, qrDepBase, qrBaseTargetRow, depGroupOfRow));
     } catch (const std::exception& e) {
         error = e.what();
     } catch (...) {
@@ -13770,6 +14011,9 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_createSt
     env->ReleaseIntArrayElements(jvdlIdx, vdlIdx, JNI_ABORT);
     env->ReleaseIntArrayElements(jobQAlt, obQAlt, JNI_ABORT);
     env->ReleaseIntArrayElements(jziQAlt, ziQAlt, JNI_ABORT);
+    env->ReleaseIntArrayElements(jqrDepBase, qrDepBase, JNI_ABORT);
+    env->ReleaseIntArrayElements(jqrBaseTargetRow, qrBaseTargetRow, JNI_ABORT);
+    env->ReleaseIntArrayElements(jdepGroupOfRow, depGroupOfRow, JNI_ABORT);
 
     if (!error.empty()) {
         env->ThrowNew(env->FindClass("java/lang/RuntimeException"),
@@ -14998,6 +15242,11 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
                     genVc[mqg[i]] = 1;                       // this qr group is a remote gen-VC group
                 }
             }
+            for (int g = 0; g < ctx->st->nQr; g++) {         // a DEPENDENT pilot's group is as generator-controlled
+                if (g < static_cast<int>(ctx->st->hQrDepBase.size()) && ctx->st->hQrDepBase[g] >= 0) {   // as its base
+                    genVc[g] = genVc[ctx->st->hQrDepBase[g]];
+                }
+            }
             ctx->dDqMemberQrGroup.upload(mqg, static_cast<size_t>(nm) * sizeof(int));
             if (ctx->hasDqQrGroups) {
                 ctx->dQrGenVc.upload(genVc.data(), genVc.size() * sizeof(char));
@@ -16077,6 +16326,38 @@ Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatch
     ctx->dRlLocalOv.upload(mask.data(), len);
     ctx->dRlLocalVt.upload(vt.data(), len * sizeof(double));
     ctx->nRlLocal = nPairs;
+}
+
+// Remote controllers OLF re-merges onto a NEW pilot after a zero-impedance split: per (scenario, entry) the V row
+// the reactive-limit switch-back compares against the (per-scenario) group target - the new pilot's, not the base
+// pilot's whose row is frozen with its island. Null or empty clears the context's list.
+extern "C" JNIEXPORT void JNICALL
+Java_com_powsybl_openloadflow_ac_equations_vector_gpu_GpuAcNewtonSolver_setBatchRlCmpOverrides(
+        JNIEnv* env, jclass, jlong handle, jintArray jPairs, jintArray jCmp) {
+    auto* ctx = reinterpret_cast<BatchSolverContext*>(handle);
+    if (ctx == nullptr) {
+        return;
+    }
+    if (jPairs == nullptr || jCmp == nullptr || env->GetArrayLength(jPairs) == 0 || ctx->nrl == 0) {
+        ctx->nRlCmp = 0;
+        return;
+    }
+    size_t len = static_cast<size_t>(ctx->nScenarios) * ctx->nrl;
+    std::vector<int> cmp(len, -1);
+    int nPairs = env->GetArrayLength(jPairs) / 2;
+    jint* pairs = env->GetIntArrayElements(jPairs, nullptr);
+    jint* rows = env->GetIntArrayElements(jCmp, nullptr);
+    for (int k = 0; k < nPairs; k++) {
+        int s = pairs[2 * k];
+        int i = pairs[2 * k + 1];
+        if (s >= 0 && s < ctx->nScenarios && i >= 0 && i < ctx->nrl) {
+            cmp[(size_t) s * ctx->nrl + i] = rows[k];
+        }
+    }
+    env->ReleaseIntArrayElements(jPairs, pairs, JNI_ABORT);
+    env->ReleaseIntArrayElements(jCmp, rows, JNI_ABORT);
+    ctx->dRlCmpOv.upload(cmp.data(), len * sizeof(int));
+    ctx->nRlCmp = nPairs;
 }
 
 // Per-scenario member targetQ overrides for the DISTR_Q target kernel: {key, value} where key is

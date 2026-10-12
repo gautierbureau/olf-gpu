@@ -2407,6 +2407,10 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
     }
 
     private void assertRemoteMergedSectionsMatchCpu(int sections, java.util.Set<String> refused) {
+        assertRemoteMergedSectionsMatchCpu(sections, refused, "PLAN:VC_REMERGE_REMOTE_SUBGROUP");
+    }
+
+    private void assertRemoteMergedSectionsMatchCpu(int sections, java.util.Set<String> refused, String refusalTag) {
         List<Contingency> ctgs = new java.util.ArrayList<>();
         for (int k = 0; k < sections; k++) {
             ctgs.add(new Contingency("bus-" + k, new com.powsybl.contingency.BusbarSectionContingency("bbs" + k)));
@@ -2417,31 +2421,78 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
                 .setSlackBusesIds(List.of("vl0"));
         GpuBatchScopeCensus.reset();
         assertGpuMatchesCpu(remoteMergedSectionsNetwork(sections), ctgs, 1e-9, lfp, true);
-        // A section whose loss re-homes survivors onto a REMOTELY controlled cluster is the CPU's until the free
-        // controller's row can host the new pilot's reactive balance; every other section stays on the device.
+        // A section whose loss re-homes the survivors onto a REMOTELY controlled cluster is hosted on the device
+        // once the base pilot is lost (the new pilot's balance rides the first free controller through its
+        // dependent-pilot pool); a cluster splitting off BEHIND a surviving main is still the CPU's, tagged.
         assertEquals(refused, GpuBatchScopeCensus.planRefusedIds());
-        refused.forEach(id -> assertEquals("PLAN:VC_REMERGE_REMOTE_CONTROLLER", GpuBatchScopeCensus.planRefusalTag(id)));
+        refused.forEach(id -> assertEquals(refusalTag, GpuBatchScopeCensus.planRefusalTag(id)));
         assertEquals(sections - refused.size(), GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(),
                 "census=" + GpuBatchScopeCensus.snapshot());
     }
 
     /** The main's pilot section islanded with its generator, ONE remote survivor re-homed onto its own section
-     *  (network.xiidm GOOD: GOMV_1 -> GOPN_1): refused to the CPU, the rest on the device. */
+     *  (network.xiidm GOOD: GOMV_1 -> GOPN_1): on the device, at 1e-9 kV. The surviving section's identity goes on
+     *  its own row (the killed coupler's child), its reactive balance on the free controller's row through its
+     *  dependent-pilot pool, and the controller's limit check reads the new pilot. With the "control dies" flip
+     *  the device used to hold vg1 at 404.07 kV against OLF's 405.87 (bbs1's balance enforced nowhere). */
     @org.junit.jupiter.api.Test
     void deviceMergedRemoteControlSurvivorReHomesOntoItsOwnSectionMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        assertRemoteMergedSectionsMatchCpu(2, java.util.Set.of("bus-0"));
+        assertRemoteMergedSectionsMatchCpu(2, java.util.Set.of());
     }
 
     /** Three sections: losing bbs0 re-homes TWO remote survivors onto one control (network.xiidm CXUJ: CXSS_2/_4 ->
-     *  CXYW_1), losing the middle bbs1 cuts bbs2 off the main and re-homes vg2 onto it - both refused; losing bbs2
-     *  only renormalizes the main's group and stays on the device. */
+     *  CXYW_1) - on the device, the new pilot's balance on the first free controller, the other's row a sharing row
+     *  renormalized over the two; losing the middle bbs1 cuts bbs2 off a SURVIVING main and re-homes vg2 onto it -
+     *  a second group on the one table, still the CPU's (VC_REMERGE_REMOTE_SUBGROUP); losing bbs2 only renormalizes
+     *  the main's group and stays on the device. */
     @org.junit.jupiter.api.Test
     void deviceMergedRemoteControlTwoSurvivorsReHomeMatchesCpu() {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
-        assertRemoteMergedSectionsMatchCpu(3, java.util.Set.of("bus-0", "bus-1"));
+        assertRemoteMergedSectionsMatchCpu(3, java.util.Set.of("bus-1"));
+    }
+
+    /** The re-homed controller PINS: the same two sections, g0 given a wide reactive range so the merged group's
+     *  keys (OLF: proportional to the ranges) leave g1 about a tenth of the base duty, and g1 capped at 80 MVAr -
+     *  above that base share, below the ~121 MVAr holding its section alone at 404 kV takes once bbs0 and g0 are
+     *  gone. OLF re-merges g1 onto bbs1, pins it at MAX_Q at the first reactive-limit
+     *  pass and drops BUS_TARGET_V on bbs1 (no enabled controller): bbs1 solves its own reactive balance and g1
+     *  holds its limit (network.xiidm GOOD, GOMV_1 pinned at MAX_Q). On the device the re-pointed limit check
+     *  reads bbs1's voltage, the pin lands on g1's own row, and the dependent-pilot group flips bbs1's identity to
+     *  its balance on its own row. GPU SA == CPU SA at 1e-9 kV, batched. */
+    @org.junit.jupiter.api.Test
+    void deviceMergedRemoteControlReHomedControllerPinsMatchesCpu() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = remoteMergedSectionsNetwork(2);
+        network.getGenerator("g0").newMinMaxReactiveLimits().setMinQ(-3000).setMaxQ(3000).add();
+        network.getGenerator("g1").newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(80).add();
+        // the BASE must leave g1 free, or the pin under test is inherited rather than decided in the scenario
+        Network base = remoteMergedSectionsNetwork(2);
+        base.getGenerator("g0").newMinMaxReactiveLimits().setMinQ(-3000).setMaxQ(3000).add();
+        base.getGenerator("g1").newMinMaxReactiveLimits().setMinQ(-300).setMaxQ(80).add();
+        com.powsybl.loadflow.LoadFlowParameters baseLfp = new com.powsybl.loadflow.LoadFlowParameters();
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(baseLfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0"));
+        assertTrue(new com.powsybl.loadflow.LoadFlow.Runner(new com.powsybl.openloadflow.OpenLoadFlowProvider(commonTestConfig.matrixFactory()))
+                .run(base, baseLfp).isFullyConverged());
+        double baseQ1 = -base.getGenerator("g1").getTerminal().getQ();
+        assertTrue(baseQ1 > 0 && baseQ1 < 79.0, "base: g1 must be free (q = " + baseQ1 + " MVAr against an 80 MVAr cap)");
+        List<Contingency> ctgs = List.of(new Contingency("bus-0", new com.powsybl.contingency.BusbarSectionContingency("bbs0")));
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters();
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0"));
+        // the pin must happen on the CPU, or the test proves nothing about the pinned path
+        double vBbs1 = cpuPostContingencyV(network, ctgs, lfp, "vl12");
+        assertTrue(Math.abs(vBbs1 - 404.0) > 0.05, "CPU: bbs1 must leave its 404 kV target once g1 pins, got " + vBbs1);
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-9, lfp, true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
     /** Two coupler STARS over the same three controlled sections (network.xiidm VL HFT): hubs bbs0 and bbs1 carry no

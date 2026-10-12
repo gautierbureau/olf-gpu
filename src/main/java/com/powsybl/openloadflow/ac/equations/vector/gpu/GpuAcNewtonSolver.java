@@ -67,6 +67,20 @@ public final class GpuAcNewtonSolver {
      * @param hvIdx HVDC AC emulation, {@code nhv*4}: (Prow1 Prow2 ph1col ph2col)
      * @return an opaque native handle; release it with {@link #destroyStructure}
      */
+    /** No dependent-pilot group for any candidate group (the raw-row entry points have no merged controls). */
+    private static int[] noDepGroups(int[] qrPtr) {
+        int[] a = new int[Math.max(0, qrPtr.length - 1)];
+        java.util.Arrays.fill(a, -1);
+        return a;
+    }
+
+    /** No dependent-pilot group for any device row. */
+    private static int[] noDepRows(int n) {
+        int[] a = new int[n];
+        java.util.Arrays.fill(a, -1);
+        return a;
+    }
+
     private static int[] noQAlt(int ne) {
         int[] a = new int[ne * 2];
         java.util.Arrays.fill(a, -1);
@@ -87,7 +101,8 @@ public final class GpuAcNewtonSolver {
                                               int[] drRow, int[] drCol, double[] drCoef,
                                               int[] dbRow, int[] dbCol, double[] dbCoef, int[] cbPcSide,
                                               double[] vdlIn, int[] vdlIdx, int[] qrPtr, int[] qrRows,
-                                              int[] obQAlt, int[] ziQAlt);
+                                              int[] obQAlt, int[] ziQAlt,
+                                              int[] qrDepBase, int[] qrBaseTargetRow, int[] depGroupOfRow);
 
     /**
      * Release a structure handle from {@link #createStructure} (idempotent for handle 0). Contexts
@@ -200,7 +215,8 @@ public final class GpuAcNewtonSolver {
                                  int[] obQAlt, int[] ziQAlt) {
         long structure = createStructure(x0.length, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
                 dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
-                noPcSide(cbIdx.length / 12), new double[0], new int[0], qrPtr, qrRows, obQAlt, ziQAlt);
+                noPcSide(cbIdx.length / 12), new double[0], new int[0], qrPtr, qrRows, obQAlt, ziQAlt,
+                noDepGroups(qrPtr), noDepGroups(qrPtr), noDepRows(x0.length));
         try {
             long handle = createContext(structure);
             try {
@@ -430,6 +446,11 @@ public final class GpuAcNewtonSolver {
      *  checked by the reactive-limits pass as a LOCAL controller at {@code vTargets[k]} — the bus is a plain PV
      *  bus this scenario, whatever its base packing. Null clears the context's list. */
     public static native void setBatchRlLocal(long handle, int[] slotEntryPairs, double[] vTargets);
+    /** Remote controllers OLF re-merges onto a NEW pilot after a zero-impedance split (GpuBatchQualification
+     *  .reHomedControls): per (slot, entry) pair the V row the entry's reactive-limit check compares against the
+     *  group target instead of the base pilot's. The target itself rides the per-scenario V-target overrides of
+     *  the solve. Null clears the context's list. */
+    public static native void setBatchRlCmpOverrides(long handle, int[] slotEntryPairs, int[] cmpVRows);
 
     /** Per-scenario member targetQ overrides for the DISTR_Q target kernel, as {@code key = slot *
      *  nDqMembers + memberIndex} with the member's post-contingency targetQ. Needed because that kernel
@@ -841,7 +862,7 @@ public final class GpuAcNewtonSolver {
         long structure = createStructure(n, cbIn, cbIdx, obIn, obIdx, shIn, shIdx, hvIn, hvIdx,
                 dqElem, dqSide, dqWeight, dqRow, dqKind, ziIn, ziIdx, drRow, drCol, drCoef, dbRow, dbCol, dbCoef,
                 noPcSide(cbIdx.length / 12), new double[0], new int[0], new int[] {0}, new int[0],
-                noQAlt(obIdx.length / 6), noQAlt(ziIdx.length / 11));
+                noQAlt(obIdx.length / 6), noQAlt(ziIdx.length / 11), new int[0], new int[0], noDepRows(n));
         try {
             long handle = createBatchContext(structure, nScenarios, mode,
                     rlVrow, rlMinQ, rlMaxQ, rlLoadQ, rlVtarget, new byte[rlVrow.length], new double[x0Base.length],

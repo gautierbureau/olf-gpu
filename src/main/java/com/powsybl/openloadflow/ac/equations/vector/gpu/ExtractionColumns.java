@@ -33,6 +33,17 @@ import java.util.List;
 record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] branchAlphaCol,
                          int[] dummyPCol, int[] dummyQCol, int[] shuntBCol, int[] qRow, int[] qRowAlt,
                          int[] qrPtr, int[] qrRows, int[] qrGroupOfPilot, int[] ziDeadEnd,
+                         /** Per candidate group: the BASE group a DEPENDENT pilot's group belongs to, -1 for a base
+                          *  group. A merged remote group's dependent controlled bus becomes the pilot of OLF's re-merged
+                          *  group when a contingency cuts it from the main: its reactive balance then rides a member row
+                          *  of the same table, which this group's pool reserves (see the dependent-pilot rule in the
+                          *  native pick functions). */
+                         int[] qrDepBase,
+                         /** Per candidate group: the row holding the pilot's reactive target in the BASE structure for a
+                          *  dependent pilot (its relocated reactive row), -1 for a base group (the base carrier's). */
+                         int[] qrBaseTargetRow,
+                         /** Per DEVICE row: the dependent-pilot group of the bus whose own V row this is, -1 elsewhere. */
+                         int[] depGroupOfRow,
                          /** Each bus's P-balance ROW: its own BUS_PHI column, or its parent coupler's DUMMY_P under
                           *  the coupler-tree relocation (GpuAcRowIndexing#ziTreeRelocation). */
                          int[] pRow,
@@ -83,6 +94,10 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         // (exactly OLF's free-role rule), falling back to the pilot's own row when control is off.
         List<Integer> qrPtr = new ArrayList<>();
         List<Integer> qrRows = new ArrayList<>();
+        List<Integer> qrDepBase = new ArrayList<>();
+        List<Integer> qrBaseTargetRow = new ArrayList<>();
+        int[] depGroupOfRow = new int[es.getIndex().getSortedVariablesToFind().size()];
+        java.util.Arrays.fill(depGroupOfRow, -1);
         for (LfBus bus : network.getBuses()) {
             var tvc = bus.getTransformerVoltageControl()
                     .filter(c -> c.getMergeStatus() == VoltageControl.MergeStatus.MAIN)
@@ -108,6 +123,8 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             qrRows.add(vCol[bus.getNum()]);                  // candidate 0 = the FALLBACK (control off)
             qrRows.addAll(memberRows);
             qRowAlt[bus.getNum()] = -2 - g;
+            qrDepBase.add(-1);
+            qrBaseTargetRow.add(-1);
         }
         // Remote gen-VC pilot-Q relocation (plan-B4): the pilot's reactive balance rides on the
         // FREE member's BUS_V row — "first controller-enabled", which an RL pin of the free member
@@ -157,6 +174,31 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
             qrRows.addAll(memberRows);
             qRowAlt[bus.getNum()] = -2 - g;
             qrPilotBuses.add(bus.getNum());
+            qrDepBase.add(-1);
+            qrBaseTargetRow.add(-1);
+            // DEPENDENT PILOTS. OLF merges the controls of one zero-impedance network into this MAIN; a contingency
+            // that cuts a dependent controlled bus from the main re-merges the survivors and elects a new main among
+            // them (LfZeroImpedanceNetwork.updateVoltageControlMergeStatus), whose BUS_TARGET_V comes back and whose
+            // reactive balance must ride a FREE controller's row - the same member rows as this table, with that
+            // bus's own reactive terms in the pattern. Each such bus gets a group of its own: candidate 0 its own
+            // reactive row (the fallback when the re-merged control is lost), then the base members in merged order,
+            // so its carrier pick coincides with the base group's on the same modes. A dependent bus that is itself
+            // one of the controllers has no balance of its own to host (pilot-self) and is left out.
+            for (var dvc : gvc.getMergedDependentVoltageControls()) {
+                LfBus dep = dvc.getControlledBus();
+                int dn = dep.getNum();
+                if (vCol[dn] < 0 || gvc.getMergedControllerElements().contains(dep) || depGroupOfRow[vCol[dn]] >= 0) {
+                    continue;
+                }
+                int dg = qrPtr.size();
+                qrPtr.add(qrRows.size());
+                int depQRow = GpuAcRowIndexing.relocatedQRow(dn, ziTreeEdges[0], dummyQCol, vCol);
+                qrRows.add(depQRow);
+                qrRows.addAll(memberRows);
+                qrDepBase.add(g);
+                qrBaseTargetRow.add(depQRow);
+                depGroupOfRow[vCol[dn]] = dg;
+            }
             if (pilotSelf && System.getenv("OLF_GPU_RL_TRACE") != null) {
                 System.err.println("PILOTSELF_ENROL group=" + g + " pilot=" + bus.getId()
                         + " members=" + gvc.getMergedControllerElements().size()
@@ -323,6 +365,7 @@ record ExtractionColumns(int[] phiCol, int[] vCol, int[] branchRhoCol, int[] bra
         }
         return new ExtractionColumns(phiCol, vCol, branchRhoCol, branchAlphaCol, dummyPCol, dummyQCol, shuntBCol, qRow, qRowAlt,
                 GpuAcArrays.toIntArray(qrPtr), GpuAcArrays.toIntArray(qrRows), qrGroupOfPilot, ziDeadEnd,
+                GpuAcArrays.toIntArray(qrDepBase), GpuAcArrays.toIntArray(qrBaseTargetRow), depGroupOfRow,
                 pRow, ziParentEdge, ziChildBus);
     }
 

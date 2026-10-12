@@ -119,7 +119,7 @@ public final class GpuAcStructures {
                         data.drRow(), data.drCol(), data.drCoef(),
                         data.dbRow(), data.dbCol(), data.dbCoef(), data.cbPcSide(),
                         data.vdlIn(), data.vdlIdx(), data.qrPtr(), data.qrRows(),
-                        data.obQAlt(), data.ziQAlt()), n);
+                        data.obQAlt(), data.ziQAlt(), data.qrDepBase(), data.qrBaseTargetRow(), data.depGroupOfRow()), n);
                 CACHE.put(data, structure);
                 BUILDS.incrementAndGet();
                 return structure.handle;

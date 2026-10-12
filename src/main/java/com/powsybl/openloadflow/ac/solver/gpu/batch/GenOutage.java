@@ -45,7 +45,11 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                         int pilotQGroup, double pilotQDelta,
                         /** The bus is the SLACK: it has no P balance row, and {@code pStep} moves the slack's scheduled P,
                          *  which only the distributed-slack check reads (the per-scenario slack shift). */
-                        boolean onSlack) {
+                        boolean onSlack,
+                        /** ROW_REMOTE_REHOME: the V row of the pilot this remote controller regulates this scenario (OLF's
+                         *  re-merged control after a zero-impedance split), read by its reactive-limit check instead of the
+                         *  base group's pilot; -1 for every other kind. */
+                        int reHomePilotVRow) {
 
     /** Where to write this bus's Q target: the relocated Q-balance row, else the BUS_V row. */
     public int qTargetRowOrV() {
@@ -76,7 +80,7 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
                 loadQDelta, inactiveDqMember, pilotGroupSurvivorRlEntries,
                 rows.stream().mapToInt(Integer::intValue).toArray(), values.stream().mapToDouble(Double::doubleValue).toArray(),
                 pqRowMode, deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget, dqTargetQOvMember,
-                dqTargetQOvValue, qTargetRow, pilotQGroup, pilotQDelta, onSlack);
+                dqTargetQOvValue, qTargetRow, pilotQGroup, pilotQDelta, onSlack, reHomePilotVRow);
     }
     // lostGenIds / lostFactorSum exist for the reactive-capability CURVE channel, which evaluates each
     // generator's curve at its OWN post-distribution active power, reconstructed from the bus's row
@@ -158,6 +162,10 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      *  column — device row mode 6 — with {@code vRow} = that dummy row and {@code qTarget} the voltage target
      *  (tasks #70, VC_REMERGE_RELOC_VROW). */
     public static final int ROW_CROSS_V_IDENTITY = -7;
+    /** A remote controller re-homed onto a NEW pilot: no row of its own changes (its row stays the sharing row
+     *  of the base table, which the dependent-pilot pool uses as the new pilot's carrier), but its reactive-limit
+     *  check compares the new pilot's voltage ({@link #reHomePilotVRow}) against the new pilot's target. */
+    public static final int ROW_REMOTE_REHOME = -8;
 
     public int pqRowModeOrDefault() {
         return pqRowMode == 0 ? 1 : pqRowMode == ROW_PINNED_V ? 4 : pqRowMode == ROW_CROSS_V_IDENTITY ? 6
@@ -206,6 +214,11 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
      *  (pin on its own row, switch back on its own voltage) at the target {@code qTarget} carries. */
     public boolean reHomesRlEntry() {
         return (pqRowMode == ROW_V_IDENTITY || pqRowMode == ROW_PINNED_V || pqRowMode == ROW_CROSS_V_IDENTITY) && rlEntry >= 0;
+    }
+
+    /** A remote controller re-pointed at a new pilot this scenario (no row change of its own). */
+    public boolean reHomesRemoteController() {
+        return pqRowMode == ROW_REMOTE_REHOME && rlEntry >= 0 && reHomePilotVRow >= 0;
     }
 
     public boolean silencesReactiveLimitEntry() {

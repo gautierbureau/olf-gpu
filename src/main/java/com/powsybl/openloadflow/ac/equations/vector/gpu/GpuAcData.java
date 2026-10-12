@@ -95,7 +95,11 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                         int[] dsBusNum, String[] dgGenId,
                         int[] baseOpenCbElements, int[] baseOpenZiElements, int[] baseOpenZiBranchNums,
                         int[] ziBranchNums, double[] vdlIn, int[] vdlIdx, int[] qrPtr, int[] qrRows,
-                        int[] obQAlt, int[] ziQAlt, byte[] rlBaseQLimitType) {
+                        int[] obQAlt, int[] ziQAlt, byte[] rlBaseQLimitType,
+                        /** Dependent-pilot candidate groups (ExtractionColumns): per group its base group or -1, per
+                         *  group the base row of the pilot's reactive target or -1, per device row the dependent group
+                         *  of the bus owning that V row or -1. Structure inputs: they build relocation pools. */
+                        int[] qrDepBase, int[] qrBaseTargetRow, int[] depGroupOfRow) {
 
     /**
      * Content equality over every array — true means a cached solver context built from
@@ -142,7 +146,10 @@ public record GpuAcData(double[] cbIn, int[] cbIdx, int[] cbPcSide, double[] obI
                 && java.util.Arrays.equals(cbPcSide, other.cbPcSide)
                 && java.util.Arrays.equals(obQAlt, other.obQAlt) && java.util.Arrays.equals(ziQAlt, other.ziQAlt)
                 // the candidate tables build the group relocation pools (buildCbDynDest & co.)
-                && java.util.Arrays.equals(qrPtr, other.qrPtr) && java.util.Arrays.equals(qrRows, other.qrRows);
+                && java.util.Arrays.equals(qrPtr, other.qrPtr) && java.util.Arrays.equals(qrRows, other.qrRows)
+                && java.util.Arrays.equals(qrDepBase, other.qrDepBase)
+                && java.util.Arrays.equals(qrBaseTargetRow, other.qrBaseTargetRow)
+                && java.util.Arrays.equals(depGroupOfRow, other.depGroupOfRow);
     }
 
     /**

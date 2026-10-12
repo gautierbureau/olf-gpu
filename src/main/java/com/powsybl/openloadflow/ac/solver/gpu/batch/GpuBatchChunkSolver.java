@@ -593,6 +593,10 @@ final class GpuBatchChunkSolver {
                     byte[] dqSubDense = new byte[chunkSize * nDqMembersAll];
                     boolean anyDqSub = false;
                     List<Integer> rlLocalList = new ArrayList<>();     // (slot, entry): re-homed PV buses checked as LOCAL
+                    List<Integer> rlCmpList = new ArrayList<>();       // (slot, entry): remote controllers re-homed onto a NEW pilot
+                    List<Integer> rlCmpRows = new ArrayList<>();       // ...the new pilot's V row their limit check reads
+                    List<Integer> rlVtOvIdx = new ArrayList<>();       // (slot, entry): per-scenario reactive-limit V target
+                    List<Double> rlVtOvVal = new ArrayList<>();
                     List<Double> rlLocalVt = new ArrayList<>();        // their own voltage target (pu)
                     // {slot, rlEntry} pairs + {dMinQ, dMaxQ}: the reactive capability a lost generator
                     // takes with it, at a bus that still controls voltage.
@@ -1265,6 +1269,21 @@ final class GpuBatchChunkSolver {
                                         rlLocalList.add(go.rlEntry());
                                         rlLocalVt.add(go.reHomeVTarget());
                                     }
+                                    if (go.reHomesRemoteController()) {
+                                        // OLF's re-merged control: this remote member's reactive-limit check reads the
+                                        // NEW pilot's voltage against the new pilot's target; its row stays the base
+                                        // table's sharing row, which the dependent pilot's pool uses as the carrier.
+                                        if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                                            System.err.printf("QUALIFY_TRACE reHomeRemoteCtl slot=%d entry=%d of %d cmpRow=%d vt=%.6f%n",
+                                                    s, go.rlEntry(), gpuData.rlVrow().length, go.reHomePilotVRow(), go.qTarget());
+                                        }
+                                        rlCmpList.add(s);
+                                        rlCmpList.add(go.rlEntry());
+                                        rlCmpRows.add(go.reHomePilotVRow());
+                                        rlVtOvIdx.add(s);
+                                        rlVtOvIdx.add(go.rlEntry());
+                                        rlVtOvVal.add(go.qTarget());
+                                    }
                                     if (go.forbidsUnpin()) {
                                         rlNoUnpinList.add(s);
                                         rlNoUnpinList.add(go.rlEntry());
@@ -1915,6 +1934,9 @@ final class GpuBatchChunkSolver {
                     GpuAcNewtonSolver.setBatchRlLocal(handle,
                             rlLocalList.isEmpty() ? null : rlLocalList.stream().mapToInt(Integer::intValue).toArray(),
                             rlLocalList.isEmpty() ? null : rlLocalVt.stream().mapToDouble(Double::doubleValue).toArray());
+                    GpuAcNewtonSolver.setBatchRlCmpOverrides(handle,
+                            rlCmpList.isEmpty() ? null : rlCmpList.stream().mapToInt(Integer::intValue).toArray(),
+                            rlCmpList.isEmpty() ? null : rlCmpRows.stream().mapToInt(Integer::intValue).toArray());
                     GpuAcNewtonSolver.setBatchDqMemberTargetQOverrides(handle,
                             dqTqOvKey.isEmpty() ? null : dqTqOvKey.stream().mapToInt(Integer::intValue).toArray(),
                             dqTqOvKey.isEmpty() ? null : dqTqOvVal.stream().mapToDouble(Double::doubleValue).toArray());
@@ -2053,7 +2075,8 @@ final class GpuBatchChunkSolver {
                     double[][] chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                             rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
                             dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
-                            null, null,
+                            rlVtOvIdx.isEmpty() ? null : rlVtOvIdx.stream().mapToInt(Integer::intValue).toArray(),
+                            rlVtOvIdx.isEmpty() ? null : rlVtOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                             rlQOvSlot.stream().mapToInt(Integer::intValue).toArray(),
                             rlQOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                             cvOvSlot.stream().mapToInt(Integer::intValue).toArray(),
@@ -2141,7 +2164,7 @@ final class GpuBatchChunkSolver {
                             chunkResults = GpuAcNewtonSolver.solveBatchContext(handle, baseState, baseTargets,
                                     rowModePerScenario, baseRowMode, disabledMask, targetOverrideIndex, targetOverrideValue,
                                     dsOvBus, dsOvFactorDelta, dsOvBaseDelta, dsOvMaxDelta, dsOvMinDelta, dsAnchorShift, dsSlackShift,
-                                    dec.rlVtSlotIdx(), dec.rlVtValues(),
+                                    concatInts(rlVtOvIdx, dec.rlVtSlotIdx()), concatDoubles(rlVtOvVal, dec.rlVtValues()),
                                     rlQOvSlot.stream().mapToInt(Integer::intValue).toArray(),
                                     rlQOvVal.stream().mapToDouble(Double::doubleValue).toArray(),
                                     cvOvSlot.stream().mapToInt(Integer::intValue).toArray(),
@@ -2665,5 +2688,50 @@ final class GpuBatchChunkSolver {
             }
             distributedByIndex[idx] = participants + retain[s];
         }
+    }
+
+    /** The per-scenario reactive-limit V-target overrides of the chunk plus a decision's own, as one array. */
+    private static int[] concatInts(List<Integer> ours, int[] theirs) {
+        if (ours.isEmpty()) {
+            return theirs;
+        }
+        int[] a = ours.stream().mapToInt(Integer::intValue).toArray();
+        if (theirs == null || theirs.length == 0) {
+            return a;
+        }
+        int[] out = java.util.Arrays.copyOf(a, a.length + theirs.length);
+        System.arraycopy(theirs, 0, out, a.length, theirs.length);
+        return out;
+    }
+
+    private static double[] concatDoubles(List<Double> ours, double[] theirs) {
+        if (ours.isEmpty()) {
+            return theirs;
+        }
+        double[] a = ours.stream().mapToDouble(Double::doubleValue).toArray();
+        if (theirs == null || theirs.length == 0) {
+            return a;
+        }
+        double[] out = java.util.Arrays.copyOf(a, a.length + theirs.length);
+        System.arraycopy(theirs, 0, out, a.length, theirs.length);
+        return out;
+    }
+
+    /** The status of a result row: the full row's, or the tail's when the state went to the sink. */
+    static int rowStatus(double[] row, int n) {
+        return row.length == 3 ? (int) row[2] : (int) row[n + 2];
+    }
+
+    /** The full result row (state + tail), read back from the sink when the state was sunk. */
+    static double[] fullRow(double[] row, int n, java.util.Map<String, double[]> sink, String contingencyId) {
+        if (row.length != 3) {
+            return row;
+        }
+        double[] state = sink.get(contingencyId);
+        double[] full = java.util.Arrays.copyOf(state, n + 3);
+        full[n] = row[0];
+        full[n + 1] = row[1];
+        full[n + 2] = row[2];
+        return full;
     }
 }

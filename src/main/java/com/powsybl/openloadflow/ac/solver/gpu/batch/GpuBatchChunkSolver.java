@@ -187,9 +187,34 @@ final class GpuBatchChunkSolver {
         return lt != null && entry >= 0 && entry < lt.length && lt[entry] >= 1 && lt[entry] <= 4;
     }
 
-    private static boolean seedsDqTargetRow(GenOutage[] gos, int row) {
+    /** Does the plan write a TARGET at {@code row} for this scenario? Then the structural DEFAULT targets of the
+     *  coupler-opening and tree-replay paths (the child's base balances brought home) yield to it. Every row a
+     *  GenOutage entry writes: its P balance row, its Q target row (own V row, or the relocated one) on a flip or a
+     *  Q override, its seeded DISTR_Q targets and a killed pilot's identity row. */
+    static boolean planSeedsRow(GenOutage[] gos, int row) {
         for (GenOutage go : gos == null ? new GenOutage[0] : gos) {
-            if (go.seedsDqTargets() && contains(go.dqTargetRows(), row)) {
+            if (go.pRow() == row
+                    || (go.toPq() || go.qOverride()) && go.qTargetRowOrV() == row
+                    || go.toPq() && go.vRow() == row
+                    || go.seedsDqTargets() && contains(go.dqTargetRows(), row)
+                    || go.killsPilotVoltageIdentity() && go.deadPilotVRow() == row) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Does the plan change the MODE of {@code row} this scenario - a flip to a reactive balance (the bus lost its
+     *  last controller), a re-homed identity of its own, a killed pilot's identity? Only then does the opening path
+     *  leave the killed coupler's child WITHOUT the voltage identity it holds for its cluster. A plan entry that only
+     *  writes a target there - a merged group's DISTR_Q seed brought home onto the child's own row, exactly the
+     *  elected main of a re-homed cluster - must not: measured on rte6515 BUS-6066_BBS_1 / BUS-2341_BBS_1 /
+     *  BUS-6002_BBS_1 when the seed gated the identity, 6.7 / 2.3 / 0.03 kV and 1.27 / 1.21 MW against OLF,
+     *  and BUS-246_BBS_2 singular. */
+    static boolean planFlipsRow(GenOutage[] gos, int row) {
+        for (GenOutage go : gos == null ? new GenOutage[0] : gos) {
+            if (go.toPq() && go.vRow() == row
+                    || go.killsPilotVoltageIdentity() && go.deadPilotVRow() == row) {
                 return true;
             }
         }
@@ -931,6 +956,10 @@ final class GpuBatchChunkSolver {
                                 }
                                 outageSlackShift[s] += slackRelocations.shiftByIndex()[ci];
                             }
+                            // This scenario's plan entries, with the rows of every bus whose balances the structure
+                            // moves HOME here (a relocated child whose coupler opens or leaves the tree) rewritten:
+                            // the plan wrote them at the base's relocated rows, which turn into identities below.
+                            GenOutage[] slotGos = genOutagesByIndex[ci];
                             for (LfBranch ziOut : contingencies.get(ci).outagedZiBranches()) {
                                 Integer ze = ziElemByNumAll.get(ziOut.getNum());
                                 // OLF_GPU_ZITREE_TRACE: does this scenario OPEN a coupler the tree relocation
@@ -1005,7 +1034,14 @@ final class GpuBatchChunkSolver {
                                     // carried both 1.000 (the freeze) and 1.123 (this identity). The guard's own
                                     // comment already said the freeze must not be overwritten -- it just sat
                                     // below the write it was guarding.
-                                    boolean applied = childVRow >= 0 && child != null && !child.isDisabled()
+                                    // ...and not when the PLAN flips this row itself (an injection lost on the child while
+                                    // its coupler opens - the section survives its own loss, both sides energized - has its
+                                    // P target and its reactive flip moved home by rowsHome below), while the default
+                                    // targets yield to any plan entry writing the row.
+                                    slotGos = GpuBatchInjectionOutages.rowsHome(slotGos, dpRow, childPhiRow, dqRow, childVRow);
+                                    boolean planHasV = planSeedsRow(slotGos, childVRow);     // a target: the defaults yield
+                                    boolean planHasPhi = planSeedsRow(slotGos, childPhiRow);
+                                    boolean applied = !planFlipsRow(slotGos, childVRow) && childVRow >= 0 && child != null && !child.isDisabled()
                                             && child.isGeneratorVoltageControlled() && childVc.isPresent()
                                             && holdsClusterVoltage(contingencies.get(ci).contingencyId(), child,
                                                     contingencies.get(ci).outagedZiBranches(), ziElemByNumAll, gpuData.ziIdx(),
@@ -1023,7 +1059,9 @@ final class GpuBatchChunkSolver {
                                         overrides.add(s * n + childVRow, childVc.orElseThrow().getTargetValue());
                                     }
                                     if (childPhiRow >= 0 && dpRow >= 0) {
-                                        overrides.add(s * n + childPhiRow, baseTargets[dpRow]);
+                                        if (!planHasPhi) {
+                                            overrides.add(s * n + childPhiRow, baseTargets[dpRow]);
+                                        }
                                         // The DS participant on that bus has to follow its equation. Its
                                         // structural row is this coupler's DUMMY_P, now an identity.
                                         for (int i = 0; i < nds; i++) {
@@ -1054,8 +1092,7 @@ final class GpuBatchChunkSolver {
                                     // 13.33 MVAr on l2 and 0.32 kV on every bus behind it. Yielding here (rather
                                     // than letting the plan's entry overwrite) keeps every scenario whose plan
                                     // seeds no target for the row bit-identical.
-                                    if (!applied && childVRow >= 0 && dqRow >= 0
-                                            && !seedsDqTargetRow(genOutagesByIndex[ci], childVRow)) {
+                                    if (!applied && !planHasV && childVRow >= 0 && dqRow >= 0) {
                                         overrides.add(s * n + childVRow, baseTargets[dqRow]);
                                     }
                                     if (System.getenv("OLF_GPU_ZITREE_TRACE") != null) {
@@ -1140,8 +1177,11 @@ final class GpuBatchChunkSolver {
                                 if (childFrozen) {
                                     continue;
                                 }
+                                slotGos = GpuBatchInjectionOutages.rowsHome(slotGos, dpRow, childPhiRow, dqRow, childVRow);
                                 if (childPhiRow >= 0 && dpRow >= 0) {
-                                    overrides.put(s * n + childPhiRow, baseTargets[dpRow]);
+                                    if (!planSeedsRow(slotGos, childPhiRow)) {   // the plan's own target wins
+                                        overrides.put(s * n + childPhiRow, baseTargets[dpRow]);
+                                    }
                                     for (int i = 0; i < nds; i++) {   // the DS participant follows its equation
                                         if (gpuData.dsPhiRow()[i] != dpRow) {
                                             continue;
@@ -1156,8 +1196,7 @@ final class GpuBatchChunkSolver {
                                         dsRowOvBySlot[s][i] = childPhiRow;
                                     }
                                 }
-                                if (childVRow >= 0 && dqRow >= 0
-                                        && !seedsDqTargetRow(genOutagesByIndex[ci], childVRow)) {
+                                if (childVRow >= 0 && dqRow >= 0 && !planSeedsRow(slotGos, childVRow)) {
                                     overrides.put(s * n + childVRow, baseTargets[dqRow]);
                                 }
                             }
@@ -1210,7 +1249,7 @@ final class GpuBatchChunkSolver {
                                 shOvGbList.add(sh.dg());
                                 shOvGbList.add(sh.db());
                             }
-                            GenOutage[] gos = genOutagesByIndex[ci];
+                            GenOutage[] gos = slotGos;
                             if (gos != null) {               // generator loss(es): per-BUS target overrides (merged by bus;
                                 for (GenOutage go : gos) {   // at most one DS-participant bus per contingency by construction)
                                     if (go.pRow() >= 0) {    // pRow < 0: a row-mode-only entry (a voltage

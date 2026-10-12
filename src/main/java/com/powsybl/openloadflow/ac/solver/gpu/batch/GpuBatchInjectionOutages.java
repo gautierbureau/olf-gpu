@@ -286,6 +286,42 @@ final class GpuBatchInjectionOutages {
         return out;
     }
 
+    /** The entries whose balance rows the scenario's structure moves HOME: a bus whose balances the coupler-tree
+     *  relocation put on a coupler's DUMMY rows gets them back on its own rows when that coupler opens or leaves the
+     *  tree (the chunk solver pins the dummies to identities and the kernel's stock-placement fallback brings the
+     *  equations home), so a target the plan wrote at the relocated row would land on an identity and be lost.
+     *  Measured on network.xiidm DBIG: a section loss that opens the coupler DBIS while both sides stay energized and
+     *  takes a 20 MW load off the child DBIE_1 - the override sat on the DUMMY_P row, the load stayed in the balance,
+     *  20.47 MW of distributed active power and 0.374 kV against the CPU, while the root-side twin DBIF (the same load
+     *  size on DBIE_0, the tree's root) matched at 2e-10 kV. The DS participant index ({@code dsBus}) keeps naming
+     *  the structural row: the chunk solver re-points that participant's row the same way. {@code toQ} equal to the
+     *  entry's own V row becomes "no relocated Q row" (-1), the entry's Q target then goes to {@code vRow}. */
+    static GenOutage[] rowsHome(GenOutage[] gos, int fromP, int toP, int fromQ, int toQ) {
+        if (gos == null || gos.length == 0) {
+            return gos;
+        }
+        GenOutage[] out = null;
+        for (int k = 0; k < gos.length; k++) {
+            GenOutage go = gos[k];
+            boolean p = fromP >= 0 && toP >= 0 && go.pRow() == fromP;
+            boolean q = fromQ >= 0 && toQ >= 0 && go.qTargetRow() == fromQ;
+            if (!p && !q) {
+                continue;
+            }
+            if (out == null) {
+                out = gos.clone();
+            }
+            int newP = p ? toP : go.pRow();
+            int newQ = q ? (toQ == go.vRow() ? -1 : toQ) : go.qTargetRow();
+            out[k] = go.withBalanceRows(newP, newQ);
+            if (System.getenv("OLF_GPU_QUALIFY_TRACE") != null) {
+                System.err.printf("QUALIFY_TRACE injection rows home: pRow %d -> %d, qTargetRow %d -> %d%n",
+                        go.pRow(), newP, go.qTargetRow(), newQ);
+            }
+        }
+        return out == null ? gos : out;
+    }
+
     /** The bus's generator voltage control as the GROUP sees it: the MAIN control of a zero-impedance merge.
      *  A section's own control is DEPENDENT there, and asking it reads a one-member group (its own controller)
      *  with no survivors - which refused 285 of rte6515's full-list generator outages as DISTR_Q_LAST_CONTROLLER

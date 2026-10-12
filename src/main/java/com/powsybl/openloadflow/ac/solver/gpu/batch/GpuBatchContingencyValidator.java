@@ -209,13 +209,6 @@ public final class GpuBatchContingencyValidator {
                                 + "," + (b.getBus2() == null ? "-" : b.getBus2().getId()) + ")").toList(),
                         islanded.stream().map(LfBus::getId).toList());
             }
-            for (LfBranch zi : contingency.outagedZiBranches()) {
-                if (!islanded.contains(zi.getBus1()) && !islanded.contains(zi.getBus2())) {
-                    LOGGER.debug("Contingency {} rejected: switch outage {} leaves both sides energized "
-                            + "(zero-impedance spanning tree would change)", contingency.contingencyId(), zi.getId());
-                    return Qualification.rejected(contingency, Disqualification.NOT_IN_GPU_MODEL, "zi both-sides-energized " + zi.getId());
-                }
-            }
             if (islanded.isEmpty()) {
                 return Qualification.ok(contingency);
             }

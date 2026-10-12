@@ -4964,6 +4964,97 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertEquals(1, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** Three coupled sections (bbs0-bbs1-bbs2, coupler breakers c01 and c12) of one node-breaker level, every section
+     *  PQ: a load behind its own breaker at the section node, and a line to the meshed external network behind a
+     *  DISCONNECTOR to a hub node whose only other switch is the line's breaker. OLF's tripping of a section
+     *  (NodeBreakerTraverser) then stops at that disconnector WITHOUT opening it (every other edge at the section node
+     *  is a breaker), disconnects the load's terminal (an end node) and retains-and-opens the coupler breakers: the
+     *  section's bus SURVIVES its own loss through its line, with the coupler(s) open and the load gone.
+     *  network.xiidm's DBIF/DBIG (level DBIE, coupler DBIS, loads DBJC/DBJA behind the breakers DBIY/DBIM, lines
+     *  behind the disconnectors DBII/DBIK) are exactly this. bbs2 also carries a feeder of the GPAX kind: a breaker
+     *  to a hub node, then a disconnector to the line, so the breaker is retained and opened while the hub bus stays
+     *  energized from the line's far end. */
+    private static Network liveSectionChainNetwork() {
+        Network network = Network.create("live-section-chain", "code");
+        com.powsybl.iidm.network.Substation s = network.newSubstation().setId("s").add();
+        for (String vl : List.of("vl0", "vl3", "vl4")) {
+            com.powsybl.iidm.network.VoltageLevel v = s.newVoltageLevel().setId(vl).setNominalV(400)
+                    .setTopologyKind(com.powsybl.iidm.network.TopologyKind.BUS_BREAKER).add();
+            v.getBusBreakerView().newBus().setId(vl + "_b").add();
+        }
+        com.powsybl.iidm.network.VoltageLevel vl12 = s.newVoltageLevel().setId("vl12").setNominalV(400)
+                .setTopologyKind(com.powsybl.iidm.network.TopologyKind.NODE_BREAKER).add();
+        String[] externals = {"vl0", "vl3", "vl4"};
+        for (int k = 0; k < 3; k++) {
+            vl12.getNodeBreakerView().newBusbarSection().setId("bbs" + k).setNode(k).add();
+            if (k > 0) {
+                vl12.getNodeBreakerView().newBreaker().setId("c" + (k - 1) + k).setNode1(k - 1).setNode2(k).setOpen(false).add();
+            }
+            int hub = 10 + k;
+            int lineNode = 20 + k;
+            int loadNode = 30 + k;
+            vl12.getNodeBreakerView().newDisconnector().setId("d" + k).setNode1(k).setNode2(hub).setOpen(false).add();
+            vl12.getNodeBreakerView().newBreaker().setId("bh" + k).setNode1(hub).setNode2(lineNode).setOpen(false).add();
+            network.newLine().setId("l" + k).setVoltageLevel1("vl12").setNode1(lineNode)
+                    .setVoltageLevel2(externals[k]).setBus2(externals[k] + "_b").setConnectableBus2(externals[k] + "_b")
+                    .setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+            vl12.getNodeBreakerView().newBreaker().setId("bl" + k).setNode1(k).setNode2(loadNode).setOpen(false).add();
+            vl12.newLoad().setId("ld" + k).setNode(loadNode).setP0(40 + 10 * k).setQ0(10 + 5 * k).add();
+        }
+        // the GPAX kind on bbs2: breaker, hub, disconnector, line
+        vl12.getNodeBreakerView().newBreaker().setId("bf").setNode1(2).setNode2(40).setOpen(false).add();
+        vl12.getNodeBreakerView().newDisconnector().setId("df").setNode1(40).setNode2(41).setOpen(false).add();
+        network.newLine().setId("lf").setVoltageLevel1("vl12").setNode1(41)
+                .setVoltageLevel2("vl3").setBus2("vl3_b").setConnectableBus2("vl3_b")
+                .setR(0.4).setX(12).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        network.getVoltageLevel("vl0").newGenerator().setId("gs").setBus("vl0_b").setConnectableBus("vl0_b")
+                .setMinP(0).setMaxP(2000).setTargetP(500).setTargetV(400).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl0").newLoad().setId("lds").setBus("vl0_b").setConnectableBus("vl0_b").setP0(300).setQ0(100).add();
+        network.getVoltageLevel("vl3").newGenerator().setId("g3").setBus("vl3_b").setConnectableBus("vl3_b")
+                .setMinP(0).setMaxP(1000).setTargetP(150).setTargetV(402).setVoltageRegulatorOn(true).add();
+        network.getVoltageLevel("vl3").newLoad().setId("ld3").setBus("vl3_b").setConnectableBus("vl3_b").setP0(150).setQ0(50).add();
+        network.getVoltageLevel("vl4").newLoad().setId("ld4").setBus("vl4_b").setConnectableBus("vl4_b").setP0(150).setQ0(50).add();
+        network.newLine().setId("l34").setVoltageLevel1("vl3").setBus1("vl3_b").setConnectableBus1("vl3_b")
+                .setVoltageLevel2("vl4").setBus2("vl4_b").setConnectableBus2("vl4_b").setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        network.newLine().setId("l04").setVoltageLevel1("vl0").setBus1("vl0_b").setConnectableBus1("vl0_b")
+                .setVoltageLevel2("vl4").setBus2("vl4_b").setConnectableBus2("vl4_b").setR(0.4).setX(10).setG1(0).setB1(0).setG2(0).setB2(0).add();
+        return network;
+    }
+
+    /** A section loss that leaves BOTH sides of the opened coupler energized: the section's bus survives through its
+     *  line, its load is lost, the coupler(s) open. The device solves it (no refusal) and matches OLF, on the root
+     *  section and on the relocated children alike - a child's lost load must be taken off the child's OWN rows,
+     *  where the opening put its balances back, not off the coupler's rows it had in the base. */
+    @Test
+    void deviceSectionLossLeavingBothCouplerSidesEnergizedMatchesCpu() {
+        assumeTrue(GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        Network network = liveSectionChainNetwork();
+        List<Contingency> ctgs = new java.util.ArrayList<>();
+        for (int k = 0; k < 3; k++) {
+            ctgs.add(new Contingency("bus-" + k, new com.powsybl.contingency.BusbarSectionContingency("bbs" + k)));
+        }
+        // the fixture's shape, from OLF's own propagation: each section loss opens its coupler(s) and loses its load,
+        // and nothing else - no line, no bus
+        var pcs = com.powsybl.openloadflow.network.impl.PropagatedContingency.createList(network, ctgs,
+                new com.powsybl.openloadflow.network.LfTopoConfig(),
+                new com.powsybl.openloadflow.network.impl.PropagatedContingencyCreationParameters());
+        assertEquals(java.util.Set.of("c01"), pcs.get(0).getBranchIdsToOpen().keySet());
+        assertEquals(java.util.Set.of("c01", "c12"), pcs.get(1).getBranchIdsToOpen().keySet());
+        assertEquals(java.util.Set.of("c12", "bf"), pcs.get(2).getBranchIdsToOpen().keySet());
+        for (int k = 0; k < 3; k++) {
+            assertEquals(java.util.Set.of("ld" + k), pcs.get(k).getLoadIdsToLose().keySet(), "bus-" + k);
+        }
+        com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
+                .setDistributedSlack(true).setUseReactiveLimits(true);
+        com.powsybl.openloadflow.OpenLoadFlowParameters.create(lfp)
+                .setSlackBusSelectionMode(com.powsybl.openloadflow.network.SlackBusSelectionMode.NAME)
+                .setSlackBusesIds(List.of("vl0"));
+        GpuBatchScopeCensus.reset();
+        assertGpuMatchesCpu(network, ctgs, 1e-12, lfp, true);
+        assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
+        assertEquals(3, GpuBatchedAcSecurityAnalysis.LAST_GPU_PRECOMPUTED_COUNT.get(), "census=" + GpuBatchScopeCensus.snapshot());
+    }
+
     /** OLF's g1/g2/g3 -> b4 remote voltage control with what a contingency can take from the PILOT b4: a second load
      *  (l4b, 30 MW / 20 MVar) and a fixed-Q generator (g4q, 10 MW / 15 MVar, outside the slack distribution - a lost
      *  participant beside a participating slack is another shape). The slack is b1, so b4 is the pilot only. */

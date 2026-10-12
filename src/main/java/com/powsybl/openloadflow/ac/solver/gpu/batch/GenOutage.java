@@ -57,6 +57,21 @@ public record GenOutage(int pRow, double pTarget, int vRow, double qTarget, bool
     }
 
 
+    /** This entry with its P balance row and its Q target row moved: the rows the coupler-tree relocation put a
+     *  bus's balances on belong to a coupler, and a scenario that OPENS that coupler puts the balances back on the
+     *  bus's own rows (the chunk solver's opening path); the targets this entry writes must land there too.
+     *  {@code qTargetRow} is -1 when the Q target goes to {@code vRow} itself. */
+    public GenOutage withBalanceRows(int newPRow, int newQTargetRow) {
+        if (newPRow == pRow && newQTargetRow == qTargetRow) {
+            return this;
+        }
+        return new GenOutage(newPRow, pTarget, vRow, qTarget, toPq, qOverride, dsBus, dsFactorDelta, dsBaseDelta,
+                dsMaxDelta, dsMinDelta, rlEntry, minQDelta, maxQDelta, allGensLost, lostGenIds, lostFactorSum, pStep,
+                loadQDelta, inactiveDqMember, pilotGroupSurvivorRlEntries, dqTargetRows, dqTargetValues,
+                pqRowMode, deadPilotVRow, deadPilotQTarget, pinnedPilotVRow, pinnedPilotQTarget, dqTargetQOvMember,
+                dqTargetQOvValue, newQTargetRow, pilotQGroup, pilotQDelta, onSlack, reHomePilotVRow);
+    }
+
     /** This entry without the DISTR_Q row targets that fall on a FROZEN (islanded) row: such a row is an identity
      *  held at a flat value, and a second override on it (a survivor's renormalized target written onto an islanded
      *  member's own row) won over the flat one and drove the dead bus's V to 0 in clamped steps. */

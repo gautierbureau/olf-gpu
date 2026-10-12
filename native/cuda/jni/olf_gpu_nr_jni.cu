@@ -11481,13 +11481,48 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     //      solveBatchSensitivities — one host round trip per round — done here against the factors the
     //      driver already holds, with no host copy of the states. Single controller per controlled bus
     //      (the JNI upload refuses shared buses, which stay on the host orchestrator). ----
+    // One unit-right-hand-side sensitivity solve on every scenario's CURRENT Jacobian (dVals, filled for all
+    // scenarios by the caller; dB = the right-hand sides, dDx = the solutions), for the in-kernel outer loops.
+    // The UBATCH modes (3/4/5) solve the whole batch in one call on the factors they hold - the analysis once per
+    // context, the factorization with the first controller's solve. The robust mode (6) holds ONE matrix object
+    // repointed per scenario and keeps no factors from one scenario to the next, so it factors and solves scenario
+    // by scenario - a refactorization per (scenario, controller), affordable at the robust retry's chunk sizes and
+    // the price of the loops running there at all: they used to report themselves STABLE in mode 6, so a scenario
+    // retried in it (or a base load flow that fell into it) with a transformer, shunt, flow or secondary voltage
+    // control out of its deadband got a wrong answer and nothing flagged it.
+    auto sensitivitySolve = [&](bool& first) {
+        if (ctx->mode == 6) {
+            for (int s2 = 0; s2 < nS; s2++) {
+                CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matA, ctx->dVals.as<double>() + (size_t) s2 * ctx->nnz));
+                CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matB, ctx->dB.as<double>() + (size_t) s2 * n));
+                CUDSS_CHECK(cudssMatrixSetValues(ctx->ds.matX, ctx->dDx.as<double>() + (size_t) s2 * n));
+                if (!ctx->analyzed) {
+                    gAnalysesMain++;
+                    { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB)); }
+                    ctx->analyzed = true;
+                }
+                { AnalysisTimer at_(__LINE__, 'G'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_SOLVE,
+                        ctx->ds.config, ctx->ds.data, ctx->ds.matA, ctx->ds.matX, ctx->ds.matB)); }
+            }
+            first = false;
+            return;
+        }
+        if (!ctx->analyzed) {
+            gAnalysesMain++;
+            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
+            ctx->analyzed = true;
+        }
+        int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
+        first = false;
+        { AnalysisTimer at_(__LINE__, ((phase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((phase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
+    };
     std::vector<char> loopRejected(nS, 0);                   // a device loop routed the scenario to the CPU this pass
     auto tvcStep = [&]() {
         int nTvc = ctx->nTvc;
         if (nTvc <= 0) return;
-        if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5) {
+        if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5 && ctx->mode != 6) {
             static bool warned = false;
-            if (!warned) { std::fprintf(stderr, "in-kernel TVC needs a UBATCH mode (3/4/5); mode %d runs it as stable\n", ctx->mode); warned = true; }
+            if (!warned) { std::fprintf(stderr, "in-kernel TVC needs a UBATCH (3/4/5) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
             return;
         }
         size_t nst = static_cast<size_t>(nS) * nTvc;
@@ -11511,11 +11546,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         std::vector<char> ones(nS, 1);
         CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
         fillActiveBatch(false);
-        if (!ctx->analyzed) {
-            gAnalysesMain++;
-            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
-            ctx->analyzed = true;
-        }
         CUDA_CHECK(cudaMemsetAsync(ctx->dTvcSensi.p, 0, nst * sizeof(double), ctx->stream));
         bool first = true;
         for (int c = 0; c < nTvc; c++) {
@@ -11524,9 +11554,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             if (row < 0) continue;                           // rho row not an active equation: stays insensitive
             setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
             hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
-            int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
-            first = false;
-            { AnalysisTimer at_(__LINE__, ((phase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((phase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
+            sensitivitySolve(first);
             tvcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nTvc, ctx->dTvcVRow.as<int>(),
                     ctx->dDx.as<double>(), ctx->dTvcSensi.as<double>());
         }
@@ -11579,9 +11607,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     auto shcStep = [&]() {
         int nShc = ctx->nShc;
         if (nShc <= 0) return;
-        if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5) {
+        if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5 && ctx->mode != 6) {
             static bool warned = false;
-            if (!warned) { std::fprintf(stderr, "in-kernel shunt VC needs a UBATCH mode (3/4/5); mode %d runs it as stable\n", ctx->mode); warned = true; }
+            if (!warned) { std::fprintf(stderr, "in-kernel shunt VC needs a UBATCH (3/4/5) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
             return;
         }
         int nG = ctx->nShcGroups;
@@ -11610,11 +11638,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         std::vector<char> ones(nS, 1);
         CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
         fillActiveBatch(false);
-        if (!ctx->analyzed) {
-            gAnalysesMain++;
-            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
-            ctx->analyzed = true;
-        }
         CUDA_CHECK(cudaMemsetAsync(ctx->dShcSensi.p, 0, static_cast<size_t>(nS) * nShc * sizeof(double), ctx->stream));
         bool first = true;
         for (int c = 0; c < nShc; c++) {
@@ -11623,9 +11646,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             if (row < 0) continue;
             setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
             hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
-            int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
-            first = false;
-            { AnalysisTimer at_(__LINE__, ((phase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((phase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
+            sensitivitySolve(first);
             shcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nShc, ctx->dShcVRow.as<int>(),
                     ctx->dDx.as<double>(), ctx->dShcSensi.as<double>());
         }
@@ -11660,9 +11681,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
     auto flcStep = [&](int kindMask) {
         int nF = ctx->nFlc;
         if (nF <= 0) return;
-        if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5) {
+        if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5 && ctx->mode != 6) {
             static bool warned = false;
-            if (!warned) { std::fprintf(stderr, "in-kernel flow control needs a UBATCH mode (3/4/5); mode %d runs it as stable\n", ctx->mode); warned = true; }
+            if (!warned) { std::fprintf(stderr, "in-kernel flow control needs a UBATCH (3/4/5) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
             return;
         }
         size_t nst = static_cast<size_t>(nS) * nF;
@@ -11682,11 +11703,6 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         std::vector<char> ones(nS, 1);
         CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
         fillActiveBatch(false);
-        if (!ctx->analyzed) {
-            gAnalysesMain++;
-            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
-            ctx->analyzed = true;
-        }
         CUDA_CHECK(cudaMemsetAsync(ctx->dFlcSensi.p, 0, nst * sizeof(double), ctx->stream));
         bool first = true;
         for (int c = 0; c < nF; c++) {
@@ -11695,9 +11711,7 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
             if (row < 0) continue;
             setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
             hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
-            int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
-            first = false;
-            { AnalysisTimer at_(__LINE__, ((phase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((phase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
+            sensitivitySolve(first);
             flcGatherSensiBatch<<<grid(nS), BLOCK, 0, ctx->stream>>>(nS, n, c, nF, ctx->cbOffset,
                     ctx->dFlcKind.as<int>(), ctx->dFlcSide.as<int>(), ctx->dFlcCtlPack.as<int>(),
                     ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(), ctx->nR1Ov, ctx->dR1OvSlotElem.as<int>(), ctx->dR1OvVal.as<double>(),
@@ -11797,9 +11811,9 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         // the sweep" from "the phase body did". That probe is how the residual below was pinned down.
         static const bool svcInert = std::getenv("OLF_GPU_SVC_INERT") != nullptr;
         if (svcInert) return;
-        if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5) {
+        if (ctx->mode != 3 && ctx->mode != 4 && ctx->mode != 5 && ctx->mode != 6) {
             static bool warned = false;
-            if (!warned) { std::fprintf(stderr, "in-kernel SecondaryVc needs a UBATCH mode (3/4/5); mode %d runs it as stable\n", ctx->mode); warned = true; }
+            if (!warned) { std::fprintf(stderr, "in-kernel SecondaryVc needs a UBATCH (3/4/5) or robust (6) mode; mode %d runs it as stable\n", ctx->mode); warned = true; }
             return;
         }
         CUDA_CHECK(cudaMemsetAsync(ctx->dSvcNeed.p, 0, nS, ctx->stream));
@@ -11817,20 +11831,13 @@ BatchResult solveBatchContext(BatchSolverContext* ctx, const double* x0, const d
         std::vector<char> ones(nS, 1);
         CUDA_CHECK(cudaMemcpy(ctx->dActive.p, ones.data(), nS, cudaMemcpyHostToDevice));
         fillActiveBatch(false);
-        if (!ctx->analyzed) {
-            gAnalysesMain++;
-            { AnalysisTimer at_(__LINE__); CUDSS_CHECK(cudssExecute(ctx->ds.handle, CUDSS_PHASE_ANALYSIS, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
-            ctx->analyzed = true;
-        }
         bool first = true;
         for (int i = 0; i < nC; i++) {
             int row = ctx->st->rowMap[ctx->hSvcCtldVRow[i]];
             if (row < 0) continue;                           // controlled bus not a live identity: insensitive
             setUnitRhsBatch<<<grid(n * nS), BLOCK, 0, ctx->stream>>>(n, nS, row, ctx->dB.as<double>());
             hazRepairRightHandSide(ctx, nS, ctx->dB.as<double>());
-            int phase = CUDSS_PHASE_SOLVE | (first ? CUDSS_PHASE_FACTORIZATION : 0);
-            first = false;
-            { AnalysisTimer at_(__LINE__, ((phase) & (CUDSS_PHASE_FACTORIZATION | CUDSS_PHASE_REFACTORIZATION)) ? 'G' : ((phase) & CUDSS_PHASE_ANALYSIS) ? 'A' : 'S'); CUDSS_CHECK(cudssExecute(ctx->ds.handle, phase, ctx->ds.config, ctx->ds.data, ctx->matUb, ctx->matUbX, ctx->matUbB)); }
+            sensitivitySolve(first);
             svcGatherBatch<<<grid(nC * nS), BLOCK, 0, ctx->stream>>>(svcTables(ctx), nS, n, i,
                     ctx->nElements, ctx->cbOffset, ctx->shOffset,
                     ctx->st->cb.in.as<double>(), ctx->st->cb.ix.as<int>(),

@@ -4266,6 +4266,32 @@ class GpuBatchedAcSecurityAnalysisTest extends AbstractOpenSecurityAnalysisTest 
         assertEquals(java.util.Set.of(), GpuBatchScopeCensus.planRefusedIds(), "census=" + GpuBatchScopeCensus.snapshot());
     }
 
+    /** The robust solve mode (6: one matrix object repointed per scenario, cuDSS pivoting on the raw matrix - the
+     *  retry of a rejected scenario, or a base load flow that fell into it) runs the in-kernel transformer, shunt
+     *  and secondary voltage control loops like the UBATCH modes do, solving their sensitivities scenario by
+     *  scenario on its own factors. They used to report themselves STABLE there, so the same fixtures under mode 6
+     *  ended at the pre-loop state: BUS_2 0.6 kV, b2 0.3 kV and B2 0.2 kV off OLF. Mode 3's results are unchanged. */
+    @org.junit.jupiter.api.Test
+    void deviceRobustModeRunsTheInKernelLoops() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                com.powsybl.openloadflow.ac.equations.vector.gpu.GpuAcNewtonSolver.isAvailable(), "GPU lib required");
+        String before = System.getProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY);
+        System.setProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY, Integer.toString(GpuBatchContextCache.MODE_ROBUST));
+        try {
+            deviceIncrementalTvcTapMovesInKernel();
+            deviceIncrementalSharedTvcMatchesCpu();
+            deviceIncrementalShuntVoltageControlMatchesCpu();
+            deviceSecondaryVoltageControlMatchesCpu();
+            deviceSecondaryVoltageControlRemoteMatchesCpu();
+        } finally {
+            if (before == null) {
+                System.clearProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY);
+            } else {
+                System.setProperty(GpuBatchContextCache.BATCH_MODE_PROPERTY, before);
+            }
+        }
+    }
+
     private static com.powsybl.loadflow.LoadFlowParameters remotePinParameters() {
         com.powsybl.loadflow.LoadFlowParameters lfp = new com.powsybl.loadflow.LoadFlowParameters()
                 .setDistributedSlack(true).setUseReactiveLimits(true);
